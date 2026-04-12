@@ -11,6 +11,7 @@ Default market is India. Use `-m us` for US stocks.
 | `technical <SYMBOL>` | `t` | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts, AI interpretation |
 | `compare <SYMBOLS...>` | `c` | Side-by-side comparison across 16 metrics with AI verdict |
 | `history <SYMBOL> -p <PERIOD>` | | Price history with braille line chart, volume bars, SMA overlay. Periods: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `max` |
+| `deep <SYMBOL>` | | Everything about a stock in one command — fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights, AI analysis |
 
 ## Market Intelligence
 
@@ -90,6 +91,13 @@ Default market is India. Use `-m us` for US stocks.
 | `sim status` | Live P&L on simulated trades |
 | `sim settle` | End-of-day settlement |
 | `sim history` | Cumulative performance + confidence rating |
+
+## Daemon Workers
+
+| Command | Description |
+|---------|-------------|
+| `daemon intraday [CAPITAL]` | Continuous intraday worker (9AM–3:30PM IST). Scans, enters, monitors every 60s, trails stops, books T1 at 50%, squares off at 3:15, settles EOD. Risk: 1%/trade, 3% daily kill switch |
+| `daemon longterm` | Daily post-market analysis: score 30 stocks, check portfolio, alerts, tax harvest, AI memo |
 
 ## AI Reports
 

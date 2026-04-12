@@ -4,16 +4,17 @@
 
 ```
 src/
-  main.rs          CLI definition (clap) — 45+ subcommands
-  commands.rs      All command implementations (~3500 lines)
+  main.rs          CLI definition (clap) — 50+ subcommands
+  commands.rs      All command implementations (~4000 lines)
+  daemon.rs        Continuous market workers (phases, position tracking, risk manager)
   api.rs           Yahoo Finance client (cookie/crumb auth, quotes, charts, search)
   angel.rs         Angel One SmartAPI (login, TOTP, orders, holdings, positions)
-  ai.rs            Ollama integration (prompts, stock analysis, reports)
-  technical.rs     25+ indicators (SMA, EMA, RSI, MACD, BB, ATR, VWAP, OBV, Fibonacci, pivot points, VaR, Sharpe, correlation)
-  backtest.rs      Backtesting engine (6 strategies, trade execution, equity curves)
+  ai.rs            Ollama integration (6 prompt types, think-tag stripping, model config)
+  technical.rs     30+ indicators (SMA, EMA, RSI, MACD, BB, ATR, VWAP, OBV, A/D, Fibonacci, pivots, VaR, Sharpe, Sortino, Calmar, correlation, gap detection)
+  backtest.rs      Backtesting engine (6 strategies, trade simulation, equity curves)
   intraday.rs      Intraday bot (9 strategies, regime detection, Kelly sizing, sector heat)
-  longterm.rs      Long-term bot (6-pillar scoring, moat analysis, Monte Carlo)
-  simulator.rs     Paper trading (session tracking, daily P&L, cumulative stats)
+  longterm.rs      Long-term bot (6-pillar scoring, moat analysis, Monte Carlo, DRIP)
+  simulator.rs     Paper trading (sessions, daily P&L, cumulative stats, confidence rating)
   insights.rs      Rule-based investment insight generation
   charts.rs        Braille line charts, dual overlays, volume bars, bar charts, gauges
   display.rs       Currency-aware formatting (₹/$/£), sparklines, colors

@@ -115,3 +115,63 @@ stockwise sim history          # Performance over time
 | HIGH | >65% day win rate + >55% trade win rate + profitable |
 | MODERATE | >50% day win rate + profitable |
 | LOW | Below moderate threshold |
+
+---
+
+## Daemon Mode
+
+Persistent background workers that run the bots continuously.
+
+### Intraday Daemon
+
+```bash
+stockwise daemon intraday 25000    # Run all day with ₹25K
+```
+
+Lifecycle:
+```
+9:00 AM   Pre-market scan (sectors, gaps)
+9:15 AM   Enter top 5 positions (9 strategies, Kelly sizing)
+9:15–3:00 Monitor every 60 seconds:
+          - T1 hit → book 50%, move stop to breakeven
+          - T2 hit → close fully
+          - Stop hit → exit, record loss
+          - Trailing stop updates (1.5% trail)
+          - Wind-down (2 PM+): tighten stops to 0.5%
+3:15 PM   Square off all remaining positions
+3:30 PM   Settle → save to sim_history.json → AI EOD report
+```
+
+Risk controls:
+- 1% max risk per trade
+- 3% daily loss kill switch (closes everything)
+- Max 5 concurrent positions
+- No new entries after 2 PM
+- Forced square-off at 3:15 PM
+
+Results are saved to simulation history — check with `stockwise sim history`.
+
+### Long-Term Daemon
+
+```bash
+stockwise daemon longterm
+```
+
+Runs 5 steps:
+1. Score 30 stocks on 6 pillars + Monte Carlo
+2. Check portfolio value, snapshot wealth tracker
+3. Check all price alerts
+4. Scan for tax-loss harvest opportunities
+5. Generate AI investment memo via Ollama
+
+Run daily after market close, or weekly for deep analysis.
+
+### Deep Dive
+
+One command for everything about a single stock:
+
+```bash
+stockwise deep RELIANCE
+```
+
+Shows: company info, price action, valuation (P/E, PEG, P/B, EV/EBITDA), profitability, financial health, dividends, analyst ratings, 1Y chart, all technicals (RSI + gauge, SMA, MACD, Bollinger, ATR, VWAP), support/resistance, Fibonacci, risk (vol, Sharpe, drawdown, VaR), OBV trend, open gaps, insights, verdict, and AI analysis.
