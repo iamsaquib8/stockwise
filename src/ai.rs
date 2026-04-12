@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const OLLAMA_URL: &str = "http://localhost:11434";
-const DEFAULT_MODEL: &str = "gemma3:12b";
+const DEFAULT_MODEL: &str = "qwen3:14b";
 
 #[derive(Serialize)]
 struct OllamaRequest {
@@ -13,7 +13,7 @@ struct OllamaRequest {
 
 #[derive(Deserialize)]
 struct OllamaResponse {
-    response: String,
+    response: Option<String>,
 }
 
 pub struct AiClient {
@@ -48,18 +48,36 @@ impl AiClient {
             stream: false,
         };
 
-        let resp: OllamaResponse = self
+        let raw: String = self
             .client
             .post(format!("{}/api/generate", OLLAMA_URL))
             .json(&req)
             .send()
             .await
             .context("Failed to connect to Ollama. Is it running? (ollama serve)")?
-            .json()
+            .text()
             .await
-            .context("Failed to parse Ollama response")?;
+            .context("Failed to read Ollama response")?;
 
-        Ok(resp.response.trim().to_string())
+        // Parse — Ollama may return multiple JSON lines in non-streaming mode on some versions
+        let response_text = if let Ok(resp) = serde_json::from_str::<OllamaResponse>(&raw) {
+            resp.response.unwrap_or_default()
+        } else {
+            // Try parsing as newline-delimited JSON (streaming fallback)
+            let mut combined = String::new();
+            for line in raw.lines() {
+                if let Ok(obj) = serde_json::from_str::<OllamaResponse>(line) {
+                    if let Some(r) = obj.response {
+                        combined.push_str(&r);
+                    }
+                }
+            }
+            combined
+        };
+
+        // Strip qwen3 <think>...</think> tags
+        let cleaned = strip_think_tags(&response_text);
+        Ok(cleaned.trim().to_string())
     }
 
     pub async fn analyze_stock(&self, data: &StockData) -> Result<String> {
@@ -216,6 +234,22 @@ Be direct and specific with recommendations."#,
 }
 
 /// Structured stock data for AI prompts
+/// Strip <think>...</think> tags from qwen3-style thinking models
+fn strip_think_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    // Remove <think>...</think> blocks (can be multiline)
+    while let Some(start) = result.find("<think>") {
+        if let Some(end) = result.find("</think>") {
+            result = format!("{}{}", &result[..start], &result[end + 8..]);
+        } else {
+            // Unclosed think tag — remove from <think> to end
+            result = result[..start].to_string();
+            break;
+        }
+    }
+    result
+}
+
 pub struct StockData {
     pub symbol: String,
     pub name: String,
