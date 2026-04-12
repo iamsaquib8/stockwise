@@ -8,6 +8,7 @@ mod display;
 mod insights;
 mod ai;
 mod angel;
+mod daemon;
 mod intraday;
 mod longterm;
 mod market;
@@ -175,6 +176,14 @@ enum Commands {
     /// Everything about a stock in one command
     Deep { symbol: String },
 
+    /// Run continuous market daemon (intraday worker or longterm daily)
+    Daemon {
+        /// Mode: intraday, longterm
+        mode: String,
+        /// Capital for intraday (default 25000)
+        amount: Option<f64>,
+    },
+
     /// Paper trading simulator — test bot without real money
     Sim {
         /// Action: start, status, settle, history, reset
@@ -314,6 +323,7 @@ async fn main() {
         }
         Commands::Forecast { symbol, days } => commands::cmd_forecast(&symbol, days, m).await,
         Commands::Deep { symbol } => commands::cmd_deep(&symbol, m).await,
+        Commands::Daemon { mode, amount } => commands::cmd_daemon(&mode, amount, m).await,
         Commands::Intraday { amount, target } => commands::cmd_intraday(amount, target, m).await,
         Commands::Sim { action, amount, target } => commands::cmd_sim(&action, amount, target, m).await,
         Commands::Report { what } => commands::cmd_report(&what, m).await,
