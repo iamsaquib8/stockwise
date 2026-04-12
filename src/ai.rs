@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 const OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "qwen3:14b";
+const AI_CACHE_PREFIX: &str = "stockwise:ai:";
+const AI_CACHE_TTL_SECS: i64 = 3600; // 1 hour for AI responses
 
 #[derive(Serialize)]
 struct OllamaRequest {
@@ -16,12 +20,37 @@ struct OllamaResponse {
     response: Option<String>,
 }
 
+fn hash_prompt(model: &str, prompt: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    model.hash(&mut hasher);
+    prompt.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
 pub struct AiClient {
     client: reqwest::Client,
     model: String,
+    redis: Option<redis::aio::MultiplexedConnection>,
 }
 
 impl AiClient {
+    pub async fn connect() -> Self {
+        let model = std::env::var("STOCKWISE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let redis = match redis::Client::open("redis://127.0.0.1:6379/") {
+            Ok(c) => c.get_multiplexed_tokio_connection().await.ok(),
+            Err(_) => None,
+        };
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap(),
+            model,
+            redis,
+        }
+    }
+
+    // Sync constructor for backward compat (no Redis)
     pub fn new() -> Self {
         let model = std::env::var("STOCKWISE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         Self {
@@ -30,6 +59,7 @@ impl AiClient {
                 .build()
                 .unwrap(),
             model,
+            redis: None,
         }
     }
 
@@ -41,7 +71,32 @@ impl AiClient {
             .is_ok()
     }
 
-    pub async fn generate(&self, prompt: &str) -> Result<String> {
+    async fn cache_get(&mut self, key: &str) -> Option<String> {
+        if let Some(ref mut conn) = self.redis {
+            redis::cmd("GET").arg(key).query_async::<Option<String>>(conn).await.ok().flatten()
+        } else {
+            None
+        }
+    }
+
+    async fn cache_set(&mut self, key: &str, value: &str) {
+        if let Some(ref mut conn) = self.redis {
+            let _: Result<(), _> = redis::cmd("SETEX")
+                .arg(key)
+                .arg(AI_CACHE_TTL_SECS)
+                .arg(value)
+                .query_async(conn)
+                .await;
+        }
+    }
+
+    pub async fn generate(&mut self, prompt: &str) -> Result<String> {
+        // Check Redis cache first
+        let cache_key = format!("{}{}", AI_CACHE_PREFIX, hash_prompt(&self.model, prompt));
+        if let Some(cached) = self.cache_get(&cache_key).await {
+            return Ok(cached);
+        }
+
         let req = OllamaRequest {
             model: self.model.clone(),
             prompt: prompt.to_string(),
@@ -59,11 +114,9 @@ impl AiClient {
             .await
             .context("Failed to read Ollama response")?;
 
-        // Parse — Ollama may return multiple JSON lines in non-streaming mode on some versions
         let response_text = if let Ok(resp) = serde_json::from_str::<OllamaResponse>(&raw) {
             resp.response.unwrap_or_default()
         } else {
-            // Try parsing as newline-delimited JSON (streaming fallback)
             let mut combined = String::new();
             for line in raw.lines() {
                 if let Ok(obj) = serde_json::from_str::<OllamaResponse>(line) {
@@ -77,10 +130,17 @@ impl AiClient {
 
         // Strip qwen3 <think>...</think> tags
         let cleaned = strip_think_tags(&response_text);
-        Ok(cleaned.trim().to_string())
+        let result = cleaned.trim().to_string();
+
+        // Cache to Redis (1 hour TTL)
+        if !result.is_empty() {
+            self.cache_set(&cache_key, &result).await;
+        }
+
+        Ok(result)
     }
 
-    pub async fn analyze_stock(&self, data: &StockData) -> Result<String> {
+    pub async fn analyze_stock(&mut self, data: &StockData) -> Result<String> {
         let prompt = format!(
 r#"You are a stock market analyst. Analyze this stock and give a concise investment opinion.
 
@@ -118,7 +178,7 @@ Be direct and specific. No disclaimers."#,
         self.generate(&prompt).await
     }
 
-    pub async fn generate_intraday_report(&self, report_data: &str) -> Result<String> {
+    pub async fn generate_intraday_report(&mut self, report_data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are an expert intraday trader. Based on this scan data, write a concise morning trading brief.
 
@@ -137,7 +197,7 @@ Be specific with price levels. Write like a professional trading desk note."#,
         self.generate(&prompt).await
     }
 
-    pub async fn generate_longterm_report(&self, report_data: &str) -> Result<String> {
+    pub async fn generate_longterm_report(&mut self, report_data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are a long-term investment advisor. Based on this analysis, write an investment memo.
 
@@ -157,7 +217,7 @@ Write like a fund manager's note to clients. Be specific and actionable."#,
     }
 
     /// Quick 2-3 sentence insight for any data context (fast, for inline use)
-    pub async fn quick_insight(&self, context: &str) -> Result<String> {
+    pub async fn quick_insight(&mut self, context: &str) -> Result<String> {
         let prompt = format!(
             "You are a stock analyst. Given this data, give a 2-3 sentence actionable insight. Be specific with numbers. No disclaimers.\n\n{}",
             context
@@ -166,7 +226,7 @@ Write like a fund manager's note to clients. Be specific and actionable."#,
     }
 
     /// Technical analysis interpretation
-    pub async fn interpret_technicals(&self, data: &str) -> Result<String> {
+    pub async fn interpret_technicals(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are a technical analyst. Interpret these indicators together and give a clear trade signal.
 
@@ -181,7 +241,7 @@ Be direct."#, data);
     }
 
     /// Compare two or more stocks
-    pub async fn compare_stocks(&self, data: &str) -> Result<String> {
+    pub async fn compare_stocks(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are an investment analyst. Compare these stocks and pick a winner.
 
@@ -192,7 +252,7 @@ In 3-4 sentences: Which stock is the best investment right now and why? Be speci
     }
 
     /// Backtest interpretation
-    pub async fn interpret_backtest(&self, data: &str) -> Result<String> {
+    pub async fn interpret_backtest(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are a quantitative analyst. Interpret these backtest results.
 
@@ -203,7 +263,7 @@ In 3-4 sentences: Is this strategy viable? What market conditions would it work 
     }
 
     /// Screen results analysis
-    pub async fn analyze_screen(&self, data: &str) -> Result<String> {
+    pub async fn analyze_screen(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are a stock screener analyst. Analyze these screened stocks.
 
@@ -213,7 +273,7 @@ In 3-4 sentences: Which 2-3 stocks stand out most? Any value traps to avoid? Wha
         self.generate(&prompt).await
     }
 
-    pub async fn generate_portfolio_report(&self, report_data: &str) -> Result<String> {
+    pub async fn generate_portfolio_report(&mut self, report_data: &str) -> Result<String> {
         let prompt = format!(
 r#"You are a portfolio analyst. Review this portfolio and give actionable advice.
 

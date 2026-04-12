@@ -227,7 +227,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
     println!("{}", "─".repeat(60).dimmed());
 
     // AI-powered analysis (if Ollama available)
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
         print_section("Ollama AI Analysis");
         let stock_data = crate::ai::StockData::from_quote(q);
@@ -483,7 +483,7 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result
     }
 
     // AI technical interpretation
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
         let rsi_val: String = technical::rsi(&closes, 14).map_or("N/A".into(), |r| format!("{:.0}", r));
         let macd_val: String = technical::macd(&closes).map_or("N/A".into(), |(_,_,h)| if h > 0.0 { "bullish".into() } else { "bearish".into() });
@@ -645,7 +645,7 @@ pub async fn cmd_compare(symbols: &[String], market: Market) -> Result<()> {
     }
 
     // AI comparison verdict
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
         let mut data = String::new();
         for q in &quotes {
@@ -1288,13 +1288,13 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market) -> Result<()> 
         print_kv("Daily VaR (99%)", &format!("{:.2}%", var99 * 100.0).red().to_string());
     }
 
-    print_section("1Y Price Chart");
+    print_section(&format!("Price Chart ({})", period));
     let color = if *closes.last().unwrap() >= closes[0] { "green" } else { "red" };
     for line in charts::line_chart(&closes, 50, 8, color, "") {
         println!("{}", line);
     }
 
-    println!("\n  {}", "Risk metrics based on 1Y daily data. Past performance ≠ future results.".dimmed().italic());
+    println!("\n  {}", "Risk metrics based on historical data. Past performance ≠ future results.".dimmed().italic());
     println!();
     Ok(())
 }
@@ -1498,7 +1498,7 @@ pub async fn cmd_screen(category: &str, market: Market) -> Result<()> {
     println!("\n  {} {} stocks matched", "→".cyan(), filtered.len());
 
     // AI screen analysis
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await && !filtered.is_empty() {
         let mut data = format!("Screen: {}\n", category);
         for q in filtered.iter().take(8) {
@@ -1719,7 +1719,7 @@ pub async fn cmd_intraday(amount: f64, target_pct: f64, market: Market) -> Resul
 // ── AI-Powered Reports ──
 
 pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if !ai.is_available().await {
         println!("  {} Ollama is not running. Start it with: {}", "✗".red(), "ollama serve".cyan());
         println!("  {} Reports need a local AI model. Set model: {}", "→".dimmed(), "STOCKWISE_MODEL=gemma3:4b".cyan());
@@ -1886,7 +1886,7 @@ pub async fn cmd_backtest(symbol: &str, strategy: &str, period: &str, market: Ma
         }
     }
     // AI backtest interpretation
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
         let data = format!("Strategy: {}, Period: {}, Return: {:.2}%, Buy&Hold: {:.2}%, Win rate: {:.0}%, Trades: {}, Max DD: {:.1}%, Sharpe: {}",
             strategy, period, result.total_return, result.buy_hold_return, result.win_rate, result.trades.len(), result.max_drawdown,
@@ -3187,7 +3187,7 @@ pub async fn cmd_gaps(symbol: &str, period: &str, market: Market) -> Result<()> 
     print_header(&format!("Gap Analysis: {}", resolved));
 
     if gaps.is_empty() {
-        println!("  {}", "No price gaps detected in the last 3 months.".dimmed());
+        println!("  {}", "No price gaps detected in this period.".dimmed());
         println!();
         return Ok(());
     }
@@ -3822,7 +3822,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
 
     if closes.len() >= 20 {
         // Chart
-        print_section("1Y Price Chart");
+        print_section(&format!("Price Chart ({})", period));
         let color = if *closes.last().unwrap() >= closes[0] { "green" } else { "red" };
         for line in charts::line_chart(&closes, 55, 8, color, "") { println!("{}", line); }
 
@@ -3922,7 +3922,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
     println!("{}", "─".repeat(60).dimmed());
 
     // ── 4. AI Analysis ──
-    let ai = crate::ai::AiClient::new();
+    let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
         print_section("AI Analysis (Ollama)");
         let stock_data = crate::ai::StockData::from_quote(q);
@@ -4157,7 +4157,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                             println!("  {} Saved to simulation history.", "✓".green());
 
                             // AI report if available
-                            let ai = crate::ai::AiClient::new();
+                            let mut ai = crate::ai::AiClient::connect().await;
                             if ai.is_available().await {
                                 println!("  {} Generating AI EOD report...", "⟳".yellow());
                                 let mut data = format!("Intraday results: P&L={}{:.0}, {} wins {} losses\n", csym, total_pnl, wins, losses);
@@ -4263,7 +4263,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
 
             // 5. AI report
             println!("  [5/5] Generating AI report...");
-            let ai = crate::ai::AiClient::new();
+            let mut ai = crate::ai::AiClient::connect().await;
             if ai.is_available().await {
                 let mut data = String::new();
                 for s in scores.iter().take(10) {
@@ -4694,7 +4694,7 @@ pub async fn cmd_patterns(symbol: &str, period: &str, market: Market) -> Result<
     }
 
     if found.is_empty() {
-        println!("  {}", "No significant patterns detected in last month.".dimmed());
+        println!("  {}", "No significant patterns detected in this period.".dimmed());
     } else {
         let timestamps = chart.timestamp.unwrap_or_default();
         println!("  {:<14} {:<22} {}", "Date".bold(), "Pattern".bold(), "Signal".bold());
