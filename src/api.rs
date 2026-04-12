@@ -7,41 +7,85 @@ use std::time::{Duration, Instant};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 const MAX_RETRIES: u32 = 3;
-const MIN_REQUEST_INTERVAL_MS: u64 = 200; // 5 requests/second max
+const MIN_REQUEST_INTERVAL_MS: u64 = 200;
+const REDIS_KEY_PREFIX: &str = "stockwise:";
 
-// ── Response Cache ──
+// ── Hybrid Cache: Redis (primary) + In-Memory (fallback) ──
 
 struct CacheEntry {
     data: String,
     expires: Instant,
 }
 
-struct ResponseCache {
-    entries: HashMap<String, CacheEntry>,
+struct HybridCache {
+    redis: Option<redis::aio::MultiplexedConnection>,
+    memory: HashMap<String, CacheEntry>,
 }
 
-impl ResponseCache {
-    fn new() -> Self {
-        Self { entries: HashMap::new() }
+impl HybridCache {
+    async fn new() -> Self {
+        let redis = match redis::Client::open("redis://127.0.0.1:6379/") {
+            Ok(client) => match client.get_multiplexed_tokio_connection().await {
+                Ok(conn) => {
+                    eprintln!("  {} Redis cache connected", colored::Colorize::green("●"));
+                    Some(conn)
+                }
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        Self {
+            redis,
+            memory: HashMap::new(),
+        }
     }
 
-    fn get(&self, key: &str) -> Option<&str> {
-        self.entries.get(key).and_then(|e| {
+    fn has_redis(&self) -> bool {
+        self.redis.is_some()
+    }
+
+    async fn get(&mut self, key: &str) -> Option<String> {
+        let redis_key = format!("{}{}", REDIS_KEY_PREFIX, key);
+
+        // Try Redis first
+        if let Some(ref mut conn) = self.redis {
+            if let Ok(val) = redis::cmd("GET").arg(&redis_key).query_async::<Option<String>>(conn).await {
+                if let Some(v) = val {
+                    return Some(v);
+                }
+            }
+        }
+
+        // Fallback to memory
+        self.memory.get(key).and_then(|e| {
             if Instant::now() < e.expires {
-                Some(e.data.as_str())
+                Some(e.data.clone())
             } else {
                 None
             }
         })
     }
 
-    fn set(&mut self, key: String, data: String, ttl: Duration) {
-        // Evict expired entries periodically
-        if self.entries.len() > 200 {
-            let now = Instant::now();
-            self.entries.retain(|_, v| now < v.expires);
+    async fn set(&mut self, key: String, data: String, ttl: Duration) {
+        let ttl_secs = ttl.as_secs() as i64;
+        let redis_key = format!("{}{}", REDIS_KEY_PREFIX, key);
+
+        // Write to Redis
+        if let Some(ref mut conn) = self.redis {
+            let _: Result<(), _> = redis::cmd("SETEX")
+                .arg(&redis_key)
+                .arg(ttl_secs.max(1))
+                .arg(&data)
+                .query_async(conn)
+                .await;
         }
-        self.entries.insert(key, CacheEntry {
+
+        // Also write to memory (fast path for same-session reads)
+        if self.memory.len() > 200 {
+            let now = Instant::now();
+            self.memory.retain(|_, v| now < v.expires);
+        }
+        self.memory.insert(key, CacheEntry {
             data,
             expires: Instant::now() + ttl,
         });
@@ -227,7 +271,7 @@ pub struct YahooClient {
     crumb: String,
     cookie: String,
     last_request: Mutex<Instant>,
-    cache: Mutex<ResponseCache>,
+    cache: tokio::sync::Mutex<HybridCache>,
 }
 
 impl YahooClient {
@@ -286,32 +330,34 @@ impl YahooClient {
             }
         }
 
+        let cache = HybridCache::new().await;
+
         Ok(Self {
             client,
             crumb,
             cookie: cookie_str,
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
-            cache: Mutex::new(ResponseCache::new()),
+            cache: tokio::sync::Mutex::new(cache),
         })
     }
 
-    /// Rate-limited GET with retry and caching
+    /// Rate-limited GET with retry and caching (Redis + in-memory)
     async fn fetch(&self, url: &str, cache_ttl: Duration) -> Result<String> {
-        // Check cache first
+        // Check cache first (Redis → memory)
         {
-            let cache = self.cache.lock().unwrap();
-            if let Some(cached) = cache.get(url) {
-                return Ok(cached.to_string());
+            let mut cache = self.cache.lock().await;
+            if let Some(cached) = cache.get(url).await {
+                return Ok(cached);
             }
         }
 
-        // Rate limit: wait if too soon after last request
+        // Rate limit
         {
             let mut last = self.last_request.lock().unwrap();
             let elapsed = last.elapsed();
             let min_interval = Duration::from_millis(MIN_REQUEST_INTERVAL_MS);
             if elapsed < min_interval {
-                drop(last); // release lock before sleeping
+                drop(last);
                 tokio::time::sleep(min_interval - elapsed).await;
                 let mut last = self.last_request.lock().unwrap();
                 *last = Instant::now();
@@ -334,9 +380,9 @@ impl YahooClient {
                     let status = resp.status();
                     if status.is_success() {
                         let body = resp.text().await.context("Failed to read response body")?;
-                        // Cache the response
-                        let mut cache = self.cache.lock().unwrap();
-                        cache.set(url.to_string(), body.clone(), cache_ttl);
+                        // Cache to Redis + memory
+                        let mut cache = self.cache.lock().await;
+                        cache.set(url.to_string(), body.clone(), cache_ttl).await;
                         return Ok(body);
                     } else if status.as_u16() == 429 {
                         // Rate limited — back off aggressively

@@ -15,6 +15,7 @@ tabled = "0.18"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
+redis = { version = "0.27", features = ["tokio-comp"] }
 
 [profile.release]
 opt-level = 3
