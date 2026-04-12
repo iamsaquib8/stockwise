@@ -3711,3 +3711,215 @@ pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, mar
     }
     Ok(())
 }
+
+// ── Deep Dive: Everything about a stock ──
+
+pub async fn cmd_deep(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let cur_ref = &resolved;
+
+    // ── 1. Quote + Fundamentals ──
+    let quotes = client.get_quote(&[cur_ref.as_str()]).await?;
+    let q = quotes.first().context("Symbol not found")?;
+    let cur = q.currency.as_deref();
+    let csym = market::currency_symbol(cur);
+    let name = q.long_name.as_deref().or(q.short_name.as_deref()).unwrap_or("Unknown");
+    let price = q.regular_market_price.unwrap_or(0.0);
+    let change = q.regular_market_change.unwrap_or(0.0);
+    let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
+
+    print_header(&format!("DEEP DIVE: {} — {}", resolved, name));
+    println!("  {}  {}\n", format_price(price, cur).bold(), format_change(change, change_pct));
+
+    // Overview
+    print_section("Company");
+    if let Some(s) = &q.sector { print_kv("Sector", s); }
+    if let Some(i) = &q.industry { print_kv("Industry", i); }
+    if let Some(e) = &q.exchange { print_kv("Exchange", e); }
+    print_kv("Market Cap", &q.market_cap.map_or("N/A".into(), |v| format_large_number(v, cur)));
+
+    // Price
+    print_section("Price Action");
+    print_kv("Open", &format_price(q.regular_market_open.unwrap_or(0.0), cur));
+    print_kv("Day Range", &format!("{} — {}", format_price(q.regular_market_day_low.unwrap_or(0.0), cur), format_price(q.regular_market_day_high.unwrap_or(0.0), cur)));
+    print_kv("52-Week Range", &format!("{} — {}", format_price(q.fifty_two_week_low.unwrap_or(0.0), cur), format_price(q.fifty_two_week_high.unwrap_or(0.0), cur)));
+    print_kv("Volume", &format_volume(q.regular_market_volume.unwrap_or(0)));
+    print_kv("Avg Vol (3M)", &format_volume(q.average_daily_volume_3_month.unwrap_or(0)));
+
+    // Valuation
+    print_section("Valuation");
+    print_kv("P/E (TTM)", &format_optional_f64(q.trailing_pe, "x"));
+    print_kv("P/E (Forward)", &format_optional_f64(q.forward_pe, "x"));
+    print_kv("P/B", &format_optional_f64(q.price_to_book, "x"));
+    print_kv("EV/Revenue", &format_optional_f64(q.enterprise_to_revenue, "x"));
+    print_kv("EV/EBITDA", &format_optional_f64(q.enterprise_to_ebitda, "x"));
+    if let Some(pe) = q.trailing_pe {
+        if let Some(g) = q.earnings_quarterly_growth {
+            if g > 0.01 { print_kv("PEG Ratio", &format!("{:.2}", pe / (g * 100.0))); }
+        }
+    }
+
+    // Profitability
+    print_section("Profitability & Growth");
+    print_kv("EPS (TTM)", &format_optional_f64(q.eps_trailing_twelve_months, ""));
+    print_kv("EPS (Forward)", &format_optional_f64(q.eps_forward, ""));
+    print_kv("Profit Margin", &format_optional_pct(q.profit_margins));
+    print_kv("Return on Equity", &format_optional_pct(q.return_on_equity));
+    print_kv("Revenue Growth", &format_optional_pct(q.revenue_growth));
+    print_kv("Earnings Growth (Q)", &format_optional_pct(q.earnings_quarterly_growth));
+
+    // Financial Health
+    print_section("Financial Health");
+    print_kv("Debt/Equity", &format_optional_f64(q.debt_to_equity, ""));
+    print_kv("Current Ratio", &format_optional_f64(q.current_ratio, "x"));
+    print_kv("Book Value", &format_optional_f64(q.book_value, ""));
+    print_kv("Beta", &format_optional_f64(q.beta, ""));
+
+    // Dividends
+    if let Some(dy) = q.trailing_annual_dividend_yield {
+        if dy > 0.0 {
+            print_section("Dividend");
+            print_kv("Yield", &format!("{:.2}%", dy * 100.0));
+            let annual = dy * price;
+            print_kv("Annual/Share", &format!("{}{:.2}", csym, annual));
+            print_kv("Income on {}1L", &format!("{}{:.0}/year", csym, 100000.0 * dy));
+        }
+    }
+
+    // Analyst
+    print_section("Analyst Ratings");
+    if let Some(rec) = q.recommendation_mean {
+        print_kv("Consensus", &sentiment_label(rec));
+        print_kv("Score", &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)));
+    }
+    if let Some(target) = q.target_mean_price {
+        let upside = q.regular_market_price.map(|p| ((target - p) / p) * 100.0).unwrap_or(0.0);
+        let u = if upside >= 0.0 { format!("+{:.1}%", upside).green().to_string() } else { format!("{:.1}%", upside).red().to_string() };
+        print_kv("Price Target", &format!("{}{:.2} ({})", csym, target, u));
+    }
+    if let Some(n) = q.number_of_analyst_opinions { print_kv("# Analysts", &n.to_string()); }
+
+    // ── 2. Technical Indicators ──
+    let chart = client.get_chart(&resolved, "1y", "1d").await?;
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let volumes: Vec<u64> = chart.indicators.quote.first().and_then(|qi| qi.volume.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+
+    if closes.len() >= 20 {
+        // Chart
+        print_section("1Y Price Chart");
+        let color = if *closes.last().unwrap() >= closes[0] { "green" } else { "red" };
+        for line in charts::line_chart(&closes, 55, 8, color, "") { println!("{}", line); }
+
+        // Key technicals
+        print_section("Technical Indicators");
+        if let Some(rsi) = technical::rsi(&closes, 14) {
+            let r = if rsi >= 70.0 { format!("{:.1}", rsi).red().to_string() } else if rsi <= 30.0 { format!("{:.1}", rsi).green().to_string() } else { format!("{:.1}", rsi).to_string() };
+            print_kv("RSI (14)", &r);
+            println!("{}", charts::rsi_gauge(rsi));
+        }
+        for period in [20, 50, 200] {
+            if let Some(ma) = technical::sma(&closes, period) {
+                let sig = if price > ma { "▲ Above".green().to_string() } else { "▼ Below".red().to_string() };
+                print_kv(&format!("SMA {}", period), &format!("{}{:.2}  {}", csym, ma, sig));
+            }
+        }
+        if let Some((_, _, hist)) = technical::macd(&closes) {
+            let h = if hist > 0.0 { format!("{:.2} Bullish", hist).green().to_string() } else { format!("{:.2} Bearish", hist).red().to_string() };
+            print_kv("MACD Histogram", &h);
+        }
+        if let Some((upper, middle, lower)) = technical::bollinger_bands(&closes, 20) {
+            print_kv("Bollinger", &format!("{}{:.2} / {}{:.2} / {}{:.2}", csym, lower, csym, middle, csym, upper));
+        }
+        if let Some(atr) = technical::atr(&highs, &lows, &closes, 14) {
+            print_kv("ATR (14)", &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / price) * 100.0));
+        }
+        if let Some(vwap) = technical::vwap(&highs, &lows, &closes, &volumes) {
+            let sig = if price > vwap { "Above".green().to_string() } else { "Below".red().to_string() };
+            print_kv("VWAP", &format!("{}{:.2} ({})", csym, vwap, sig));
+        }
+
+        // Support/Resistance
+        let n = highs.len();
+        if n > 1 {
+            let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(highs[n-1], lows[n-1], closes[n-1]);
+            print_section("Support & Resistance");
+            print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
+            print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
+            print_kv("Pivot", &format!("{}{:.2}", csym, pivot).bold().to_string());
+            print_kv("S1", &format!("{}{:.2}", csym, s1).green().to_string());
+            print_kv("S2", &format!("{}{:.2}", csym, s2).green().to_string());
+        }
+
+        // Fibonacci
+        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, 60.min(n)) {
+            let fibs = technical::fibonacci_levels(sh, sl);
+            print_section("Fibonacci (3M swing)");
+            for (name, val) in [("23.6%", fibs[0]), ("38.2%", fibs[1]), ("50.0%", fibs[2]), ("61.8%", fibs[3])] {
+                let marker = if (price - val).abs() / price < 0.01 { " ← HERE".yellow().bold().to_string() } else { String::new() };
+                print_kv(name, &format!("{}{:.2}{}", csym, val, marker));
+            }
+        }
+
+        // Risk
+        print_section("Risk Profile");
+        if let Some(vol) = technical::annualized_volatility(&closes) {
+            print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
+        }
+        if let Some(sharpe) = technical::sharpe_ratio(&closes, 0.05) {
+            print_kv("Sharpe Ratio", &format!("{:.2}", sharpe));
+        }
+        if let Some((mdd, _, _)) = technical::max_drawdown(&closes) {
+            print_kv("Max Drawdown", &format!("-{:.1}%", mdd * 100.0).red().to_string());
+        }
+        if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
+            print_kv("Daily VaR (95%)", &format!("{:.2}%", var95 * 100.0));
+        }
+
+        // Volume
+        let obv = technical::obv(&closes, &volumes);
+        if obv.len() > 20 {
+            let obv_trend = if obv.last() > obv.get(obv.len().saturating_sub(20)) { "Accumulation".green().to_string() } else { "Distribution".red().to_string() };
+            print_kv("OBV Trend", &obv_trend);
+        }
+
+        // Gaps
+        let opens: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+        let gaps = technical::detect_gaps(&opens, &highs, &lows, &closes);
+        let unfilled: Vec<_> = gaps.iter().filter(|g| !g.filled).collect();
+        if !unfilled.is_empty() {
+            print_section(&format!("Open Gaps ({})", unfilled.len()));
+            for g in unfilled.iter().rev().take(3) {
+                let dir = match g.gap_type { technical::GapType::Up => "UP".green().to_string(), technical::GapType::Down => "DN".red().to_string() };
+                println!("  {} {}{:.2} — {}{:.2}", dir, csym, g.gap_low, csym, g.gap_high);
+            }
+        }
+    }
+
+    // ── 3. Rule-based insights ──
+    print_section("Insights");
+    for insight in insights::generate_insights(q) {
+        println!("  {} {}", "→".cyan(), insight);
+    }
+    println!();
+    println!("{}", "─".repeat(60).dimmed());
+    println!("{}", insights::overall_verdict(q));
+    println!("{}", "─".repeat(60).dimmed());
+
+    // ── 4. AI Analysis ──
+    let ai = crate::ai::AiClient::new();
+    if ai.is_available().await {
+        print_section("AI Analysis (Ollama)");
+        let stock_data = crate::ai::StockData::from_quote(q);
+        match ai.analyze_stock(&stock_data).await {
+            Ok(analysis) => { for line in analysis.lines() { println!("  {}", line); } }
+            Err(_) => { println!("  {}", "AI unavailable.".dimmed()); }
+        }
+    }
+
+    println!("\n  {}", "Not financial advice. Do your own research.".dimmed().italic());
+    println!();
+    Ok(())
+}

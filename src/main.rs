@@ -172,6 +172,9 @@ enum Commands {
     #[command(alias = "bot")]
     Intraday { amount: f64, target: f64 },
 
+    /// Everything about a stock in one command
+    Deep { symbol: String },
+
     /// Paper trading simulator — test bot without real money
     Sim {
         /// Action: start, status, settle, history, reset
@@ -310,6 +313,7 @@ async fn main() {
             commands::cmd_sip(&symbol, amount, &period, m).await
         }
         Commands::Forecast { symbol, days } => commands::cmd_forecast(&symbol, days, m).await,
+        Commands::Deep { symbol } => commands::cmd_deep(&symbol, m).await,
         Commands::Intraday { amount, target } => commands::cmd_intraday(amount, target, m).await,
         Commands::Sim { action, amount, target } => commands::cmd_sim(&action, amount, target, m).await,
         Commands::Report { what } => commands::cmd_report(&what, m).await,
