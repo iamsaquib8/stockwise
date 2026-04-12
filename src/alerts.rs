@@ -87,3 +87,88 @@ impl AlertStore {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_alert() {
+        let mut store = AlertStore::default();
+        store.add("RELIANCE.NS", AlertCondition::Above, 1500.0);
+        assert_eq!(store.alerts.len(), 1);
+        assert_eq!(store.alerts[0].symbol, "RELIANCE.NS");
+        assert_eq!(store.alerts[0].target, 1500.0);
+    }
+
+    #[test]
+    fn test_check_above_triggered() {
+        let mut store = AlertStore::default();
+        store.add("TEST.NS", AlertCondition::Above, 100.0);
+        let triggered = store.check("TEST.NS", 105.0);
+        assert_eq!(triggered.len(), 1);
+    }
+
+    #[test]
+    fn test_check_above_not_triggered() {
+        let mut store = AlertStore::default();
+        store.add("TEST.NS", AlertCondition::Above, 100.0);
+        let triggered = store.check("TEST.NS", 95.0);
+        assert_eq!(triggered.len(), 0);
+    }
+
+    #[test]
+    fn test_check_below_triggered() {
+        let mut store = AlertStore::default();
+        store.add("TEST.NS", AlertCondition::Below, 100.0);
+        let triggered = store.check("TEST.NS", 95.0);
+        assert_eq!(triggered.len(), 1);
+    }
+
+    #[test]
+    fn test_check_wrong_symbol() {
+        let mut store = AlertStore::default();
+        store.add("TEST.NS", AlertCondition::Above, 100.0);
+        let triggered = store.check("OTHER.NS", 200.0);
+        assert_eq!(triggered.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_by_index() {
+        let mut store = AlertStore::default();
+        store.add("A.NS", AlertCondition::Above, 100.0);
+        store.add("B.NS", AlertCondition::Below, 50.0);
+        assert!(store.remove_by_index(0));
+        assert_eq!(store.alerts.len(), 1);
+        assert_eq!(store.alerts[0].symbol, "B.NS");
+    }
+
+    #[test]
+    fn test_remove_invalid_index() {
+        let mut store = AlertStore::default();
+        store.add("A.NS", AlertCondition::Above, 100.0);
+        assert!(!store.remove_by_index(5));
+        assert_eq!(store.alerts.len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_alerts_same_symbol() {
+        let mut store = AlertStore::default();
+        store.add("TEST.NS", AlertCondition::Above, 110.0);
+        store.add("TEST.NS", AlertCondition::Below, 90.0);
+        // Price at 85 triggers below only
+        let triggered = store.check("TEST.NS", 85.0);
+        assert_eq!(triggered.len(), 1);
+        assert_eq!(triggered[0].condition, AlertCondition::Below);
+        // Price at 115 triggers above only
+        let triggered = store.check("TEST.NS", 115.0);
+        assert_eq!(triggered.len(), 1);
+        assert_eq!(triggered[0].condition, AlertCondition::Above);
+    }
+
+    #[test]
+    fn test_condition_display() {
+        assert_eq!(format!("{}", AlertCondition::Above), "above");
+        assert_eq!(format!("{}", AlertCondition::Below), "below");
+    }
+}

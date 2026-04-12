@@ -183,6 +183,27 @@ enum Commands {
     /// Everything about a stock in one command
     Deep { symbol: String },
 
+    /// Sector rotation — which sectors to overweight/underweight
+    Rotation,
+    /// Quality vs Growth matrix — categorize stocks into quadrants
+    Matrix,
+    /// Earnings momentum — accelerating vs decelerating earnings
+    Surprise,
+    /// Dividend dashboard for portfolio + watchlist
+    Divcal,
+    /// Portfolio correlation dashboard — find redundant holdings
+    Pcorr,
+    /// Returns across all timeframes (1W to 5Y)
+    Returns { symbol: String },
+    /// Market heatmap — visual overview of all stocks
+    Heatmap,
+    /// Candlestick pattern detection
+    Patterns { symbol: String },
+    /// Compare two sectors head-to-head
+    Sectorcmp { sector1: String, sector2: String },
+    /// What-if: if you invested X on a past date
+    Whatif { symbol: String, amount: f64, date: String },
+
     /// Run continuous market daemon (intraday worker or longterm daily)
     Daemon {
         /// Mode: intraday, longterm
@@ -331,6 +352,16 @@ async fn main() {
         }
         Commands::Forecast { symbol, days } => commands::cmd_forecast(&symbol, days, m).await,
         Commands::Deep { symbol } => commands::cmd_deep(&symbol, m).await,
+        Commands::Rotation => commands::cmd_rotation(m).await,
+        Commands::Matrix => commands::cmd_matrix(m).await,
+        Commands::Surprise => commands::cmd_surprise(m).await,
+        Commands::Divcal => commands::cmd_divcal(m).await,
+        Commands::Pcorr => commands::cmd_pcorr(m).await,
+        Commands::Returns { symbol } => commands::cmd_returns(&symbol, m).await,
+        Commands::Heatmap => commands::cmd_heatmap(m).await,
+        Commands::Patterns { symbol } => commands::cmd_patterns(&symbol, m).await,
+        Commands::Sectorcmp { sector1, sector2 } => commands::cmd_sectorcmp(&sector1, &sector2, m).await,
+        Commands::Whatif { symbol, amount, date } => commands::cmd_whatif(&symbol, amount, &date, m).await,
         Commands::Daemon { mode, amount } => commands::cmd_daemon(&mode, amount, m).await,
         Commands::Intraday { amount, target } => commands::cmd_intraday(amount, target, m).await,
         Commands::Sim { action, amount, target } => commands::cmd_sim(&action, amount, target, m).await,

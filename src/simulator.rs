@@ -147,3 +147,97 @@ pub struct SimStats {
     pub max_win_streak: u32,
     pub max_loss_streak: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_trade(sym: &str, pnl: f64) -> SimTrade {
+        SimTrade {
+            symbol: sym.into(), direction: "BUY".into(), entry_price: 100.0,
+            target1: 102.0, target2: 104.0, stop_loss: 98.0, qty: 10,
+            capital: 1000.0, score: 70.0, confidence: "HIGH".into(), strategies: vec!["RSI".into()],
+            exit_price: Some(100.0 + pnl / 10.0), pnl: Some(pnl), pnl_pct: Some(pnl / 10.0),
+            hit_target: Some(pnl > 0.0), hit_stop: Some(pnl < -15.0),
+        }
+    }
+
+    fn make_session(date: &str, pnl: f64, wins: u32, losses: u32) -> SimSession {
+        SimSession {
+            date: date.into(), market: "IN".into(), capital: 25000.0, target_pct: 2.0,
+            trades: vec![make_trade("TEST.NS", pnl)],
+            total_pnl: Some(pnl), total_pnl_pct: Some(pnl / 250.0), win_count: Some(wins), loss_count: Some(losses), settled: true,
+        }
+    }
+
+    #[test]
+    fn test_empty_stats() {
+        let h = SimHistory::default();
+        let s = h.stats();
+        assert_eq!(s.total_days, 0);
+        assert_eq!(s.total_pnl, 0.0);
+    }
+
+    #[test]
+    fn test_single_winning_day() {
+        let mut h = SimHistory::default();
+        h.sessions.push(make_session("2026-04-01", 500.0, 3, 1));
+        let s = h.stats();
+        assert_eq!(s.total_days, 1);
+        assert_eq!(s.winning_days, 1);
+        assert_eq!(s.total_pnl, 500.0);
+        assert_eq!(s.day_win_rate, 100.0);
+    }
+
+    #[test]
+    fn test_mixed_days() {
+        let mut h = SimHistory::default();
+        h.sessions.push(make_session("2026-04-01", 500.0, 3, 1));
+        h.sessions.push(make_session("2026-04-02", -200.0, 1, 3));
+        h.sessions.push(make_session("2026-04-03", 300.0, 2, 2));
+        let s = h.stats();
+        assert_eq!(s.total_days, 3);
+        assert_eq!(s.winning_days, 2);
+        assert!((s.total_pnl - 600.0).abs() < 0.01);
+        assert!(s.day_win_rate > 60.0);
+    }
+
+    #[test]
+    fn test_win_streak() {
+        let mut h = SimHistory::default();
+        h.sessions.push(make_session("2026-04-01", 100.0, 1, 0));
+        h.sessions.push(make_session("2026-04-02", 200.0, 1, 0));
+        h.sessions.push(make_session("2026-04-03", 300.0, 1, 0));
+        h.sessions.push(make_session("2026-04-04", -50.0, 0, 1));
+        let s = h.stats();
+        assert_eq!(s.max_win_streak, 3);
+        assert_eq!(s.max_loss_streak, 1);
+    }
+
+    #[test]
+    fn test_unsettled_sessions_excluded() {
+        let mut h = SimHistory::default();
+        h.sessions.push(SimSession { date: "2026-04-01".into(), market: "IN".into(), capital: 25000.0, target_pct: 2.0, trades: vec![], total_pnl: None, total_pnl_pct: None, win_count: None, loss_count: None, settled: false });
+        let s = h.stats();
+        assert_eq!(s.total_days, 0); // unsettled shouldn't count
+    }
+
+    #[test]
+    fn test_avg_daily_pnl() {
+        let mut h = SimHistory::default();
+        h.sessions.push(make_session("2026-04-01", 300.0, 2, 1));
+        h.sessions.push(make_session("2026-04-02", 100.0, 1, 2));
+        let s = h.stats();
+        assert!((s.avg_daily_pnl - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sharpe_calculation() {
+        let mut h = SimHistory::default();
+        for i in 0..20 {
+            h.sessions.push(make_session(&format!("2026-04-{:02}", i + 1), if i % 3 == 0 { -100.0 } else { 200.0 }, 1, 0));
+        }
+        let s = h.stats();
+        assert!(s.sharpe.is_some());
+    }
+}

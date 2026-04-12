@@ -242,3 +242,116 @@ pub fn plans_to_positions(plans: &[crate::intraday::TradePlan]) -> Vec<LivePosit
         score: p.signal.score,
     }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_position(entry: f64, t1: f64, t2: f64, stop: f64) -> LivePosition {
+        LivePosition {
+            symbol: "TEST.NS".into(), direction: "BUY".into(),
+            entry_price: entry, current_price: entry, target1: t1, target2: t2,
+            stop_loss: stop, trailing_stop: entry - 5.0, qty: 10, t1_booked: false,
+            remaining_qty: 10, pnl: 0.0, pnl_pct: 0.0, status: PositionStatus::Open,
+            strategies: vec!["RSI".into()], score: 75.0,
+        }
+    }
+
+    #[test]
+    fn test_stop_loss_hit() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 96.0, Phase::Active);
+        assert_eq!(pos.status, PositionStatus::StopHit);
+    }
+
+    #[test]
+    fn test_target1_partial_book() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 103.5, Phase::Active);
+        assert_eq!(pos.status, PositionStatus::T1Hit);
+        assert!(pos.t1_booked);
+        assert_eq!(pos.remaining_qty, 5); // 50% booked
+        assert_eq!(pos.stop_loss, 100.0); // moved to breakeven
+    }
+
+    #[test]
+    fn test_target2_full_close() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 107.0, Phase::Active);
+        assert_eq!(pos.status, PositionStatus::T2Hit);
+    }
+
+    #[test]
+    fn test_trailing_stop_moves_up() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        let initial_trail = pos.trailing_stop;
+        update_position(&mut pos, 102.0, Phase::Active);
+        assert!(pos.trailing_stop > initial_trail, "Trailing stop should move up");
+    }
+
+    #[test]
+    fn test_trailing_stop_doesnt_move_down() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 102.0, Phase::Active);
+        let trail_after_up = pos.trailing_stop;
+        update_position(&mut pos, 101.0, Phase::Active);
+        assert_eq!(pos.trailing_stop, trail_after_up, "Trailing stop should not move down");
+    }
+
+    #[test]
+    fn test_square_off_phase() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 101.0, Phase::SquareOff);
+        assert_eq!(pos.status, PositionStatus::SquaredOff);
+    }
+
+    #[test]
+    fn test_pnl_calculation() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 105.0, Phase::Active);
+        assert!((pos.pnl - 50.0).abs() < 0.01); // 10 shares * 5.0
+        assert!((pos.pnl_pct - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_risk_state_daily_limit() {
+        let mut risk = RiskState::new(25000.0);
+        assert!(!risk.killed);
+        assert!(risk.can_enter(0));
+        // 3% of 25000 = 750
+        let breached = risk.check_daily_limit(-800.0);
+        assert!(breached);
+        assert!(risk.killed);
+        assert!(!risk.can_enter(0));
+    }
+
+    #[test]
+    fn test_risk_position_limit() {
+        let risk = RiskState::new(25000.0);
+        assert!(risk.can_enter(4));  // 4 < 5 max
+        assert!(!risk.can_enter(5)); // 5 = max, can't enter
+    }
+
+    #[test]
+    fn test_risk_record_exit() {
+        let mut risk = RiskState::new(25000.0);
+        risk.record_exit(200.0);
+        risk.record_exit(-100.0);
+        assert!((risk.realized_pnl - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_closed_position_not_updated() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        pos.status = PositionStatus::T2Hit;
+        update_position(&mut pos, 50.0, Phase::Active); // should be ignored
+        assert_eq!(pos.status, PositionStatus::T2Hit); // still T2Hit, not StopHit
+    }
+
+    #[test]
+    fn test_wind_down_tightens_stop() {
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 102.0, Phase::WindDown);
+        assert!(pos.stop_loss > 97.0, "Wind-down should tighten stop");
+    }
+}
