@@ -1178,36 +1178,187 @@ pub async fn cmd_sectors(market: Market) -> Result<()> {
 
 // ── 4. News ──
 
+// ── Multi-source news helpers ──────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct NewsItem {
+    title: String,
+    publisher: String,
+    timestamp: Option<i64>, // unix seconds
+    source_tag: &'static str, // e.g. "Yahoo", "Google News"
+}
+
+/// Strip CDATA wrappers and XML entities from an RSS field
+fn rss_clean(s: &str) -> String {
+    let s = s.trim();
+    let s = s.strip_prefix("<![CDATA[").and_then(|s| s.strip_suffix("]]>")).unwrap_or(s);
+    s.replace("&amp;", "&")
+     .replace("&lt;", "<")
+     .replace("&gt;", ">")
+     .replace("&quot;", "\"")
+     .replace("&apos;", "'")
+     .trim()
+     .to_string()
+}
+
+/// Extract text between two markers (first occurrence)
+fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = s.find(open)? + open.len();
+    let end = s[start..].find(close)?;
+    Some(&s[start..start + end])
+}
+
+/// Parse RSS XML into NewsItems
+fn parse_rss(xml: &str, source_tag: &'static str) -> Vec<NewsItem> {
+    xml.split("<item>").skip(1).filter_map(|chunk| {
+        let end = chunk.find("</item>").unwrap_or(chunk.len());
+        let item = &chunk[..end];
+
+        // Title: try CDATA first, then plain
+        let title_raw = between(item, "<title><![CDATA[", "]]></title>")
+            .or_else(|| between(item, "<title>", "</title>"))?;
+        let title = rss_clean(title_raw);
+        if title.is_empty() { return None; }
+
+        // Publisher from <source ...>Name</source> or hardcode source_tag
+        let publisher = between(item, "<source", "</source>")
+            .and_then(|s| between(s, ">", "\n").or_else(|| Some(s.trim())))
+            .map(|s| rss_clean(s))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| source_tag.to_string());
+
+        // Timestamp from <pubDate>
+        let timestamp = between(item, "<pubDate>", "</pubDate>")
+            .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
+            .map(|d| d.timestamp());
+
+        Some(NewsItem { title, publisher, timestamp, source_tag })
+    }).collect()
+}
+
+/// Fetch Yahoo Finance RSS for a symbol
+async fn fetch_yahoo_rss(client: &YahooClient, symbol: &str) -> Vec<NewsItem> {
+    let url = format!(
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s={}&region=US&lang=en-US",
+        symbol
+    );
+    match client.raw_get_text(&url).await {
+        Ok(xml) => parse_rss(&xml, "Yahoo RSS"),
+        Err(_) => vec![],
+    }
+}
+
+/// Fetch Google News RSS for a query
+async fn fetch_google_news_rss(client: &YahooClient, query: &str) -> Vec<NewsItem> {
+    let encoded = query.replace(' ', "+");
+    let url = format!(
+        "https://news.google.com/rss/search?q={}&hl=en&gl=US&ceid=US:en",
+        encoded
+    );
+    match client.raw_get_text(&url).await {
+        Ok(xml) => parse_rss(&xml, "Google News"),
+        Err(_) => vec![],
+    }
+}
+
+/// Fetch Yahoo Finance search API news (JSON)
+async fn fetch_yahoo_json_news(client: &YahooClient, query: &str, count: usize) -> Vec<NewsItem> {
+    let url = format!(
+        "https://query2.finance.yahoo.com/v1/finance/search?q={}&quotesCount=0&newsCount={}",
+        query, count
+    );
+    let resp = match client.raw_get(&url).await {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    resp.get("news").and_then(|n| n.as_array()).map(|arr| {
+        arr.iter().filter_map(|item| {
+            let title = item.get("title").and_then(|t| t.as_str())?.to_string();
+            let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("Yahoo Finance").to_string();
+            let timestamp = item.get("providerPublishTime").and_then(|t| t.as_i64());
+            Some(NewsItem { title, publisher, timestamp, source_tag: "Yahoo Finance" })
+        }).collect()
+    }).unwrap_or_default()
+}
+
+/// Deduplicate news items: remove near-duplicate titles, sort newest first
+fn collate_news(mut items: Vec<NewsItem>) -> Vec<NewsItem> {
+    // Sort newest first (None timestamps go to the end)
+    items.sort_by(|a, b| b.timestamp.unwrap_or(0).cmp(&a.timestamp.unwrap_or(0)));
+
+    // Dedup: fingerprint as owned Strings so there are no borrow issues
+    let mut seen: Vec<Vec<String>> = Vec::new();
+    let mut result = Vec::new();
+
+    for item in items {
+        let words: Vec<String> = item.title.split_whitespace()
+            .filter(|w| w.len() > 3)
+            .map(|w| w.to_lowercase())
+            .collect();
+        let is_dup = seen.iter().any(|existing| {
+            if existing.is_empty() || words.is_empty() { return false; }
+            let matches = words.iter().filter(|w| existing.contains(w)).count();
+            matches as f64 / words.len().min(existing.len()) as f64 > 0.6
+        });
+        if !is_dup {
+            seen.push(words);
+            result.push(item);
+        }
+    }
+    result
+}
+
+fn print_news_items(items: &[NewsItem], limit: usize) {
+    if items.is_empty() {
+        println!("  {}", "No recent news found.".dimmed());
+        return;
+    }
+    let source_colors: &[(&str, &str)] = &[
+        ("Yahoo Finance", "cyan"),
+        ("Yahoo RSS", "blue"),
+        ("Google News", "green"),
+    ];
+    for item in items.iter().take(limit) {
+        let ts = item.timestamp
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        let tag = source_colors.iter()
+            .find(|(s, _)| *s == item.source_tag)
+            .map(|(_, c)| match *c {
+                "cyan" => format!("[{}]", item.source_tag).cyan().to_string(),
+                "blue" => format!("[{}]", item.source_tag).blue().to_string(),
+                "green" => format!("[{}]", item.source_tag).green().to_string(),
+                _ => format!("[{}]", item.source_tag),
+            })
+            .unwrap_or_else(|| format!("[{}]", item.source_tag));
+        println!();
+        println!("  {} {}", "●".cyan(), item.title.bold());
+        println!("    {} {} · {} · {}", "└".dimmed(), item.publisher.dimmed(), ts.dimmed(), tag);
+    }
+}
+
+// ───────────────────────────────────────────────────────────────
+
 pub async fn cmd_news(symbol: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
 
-    let search_url = format!(
-        "https://query2.finance.yahoo.com/v1/finance/search?q={}&quotesCount=0&newsCount=10",
-        resolved
+    // Fetch from 3 sources concurrently
+    let company_query = resolved.split('.').next().unwrap_or(&resolved);
+    let google_query = format!("{} stock", company_query);
+
+    let (yahoo_json, yahoo_rss, google) = tokio::join!(
+        fetch_yahoo_json_news(&client, &resolved, 10),
+        fetch_yahoo_rss(&client, &resolved),
+        fetch_google_news_rss(&client, &google_query),
     );
-    let resp: serde_json::Value = client.raw_get(&search_url).await.context("Failed to fetch news")?;
 
-    print_header(&format!("News: {}", resolved));
+    let mut all: Vec<NewsItem> = [yahoo_json, yahoo_rss, google].concat();
+    let collated = collate_news(all);
 
-    if let Some(news) = resp.get("news").and_then(|n| n.as_array()) {
-        if news.is_empty() {
-            println!("  {}", "No recent news found.".dimmed());
-        }
-        for item in news.iter().take(10) {
-            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("No title");
-            let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("Unknown");
-            let timestamp = item.get("providerPublishTime").and_then(|t| t.as_i64())
-                .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default();
-            println!();
-            println!("  {} {}", "●".cyan(), title.bold());
-            println!("    {} {} · {}", "└".dimmed(), publisher.dimmed(), timestamp.dimmed());
-        }
-    } else {
-        println!("  {}", "No news data available.".dimmed());
-    }
+    print_header(&format!("News: {} — {} sources", resolved, 3));
+    print_news_items(&collated, 15);
     println!();
     Ok(())
 }
@@ -2177,6 +2328,31 @@ pub async fn cmd_sentiment() -> Result<()> {
         }
     }
 
+    // News sentiment from multiple sources
+    let (yahoo_news, google_news) = tokio::join!(
+        fetch_yahoo_json_news(&client, "stock market today", 10),
+        fetch_google_news_rss(&client, "US India stock market today"),
+    );
+    let all_news: Vec<NewsItem> = [yahoo_news, google_news].concat();
+    let collated_news = collate_news(all_news);
+
+    // Simple keyword-based sentiment scoring
+    let bullish_words = ["rally", "surge", "gain", "rise", "high", "bull", "growth", "record", "up", "buy", "strong", "positive"];
+    let bearish_words = ["fall", "drop", "crash", "decline", "fear", "bear", "loss", "low", "sell", "weak", "negative", "recession"];
+    let mut news_bull = 0i32;
+    let mut news_bear = 0i32;
+    for item in &collated_news {
+        let t = item.title.to_lowercase();
+        for w in &bullish_words { if t.contains(w) { news_bull += 1; } }
+        for w in &bearish_words { if t.contains(w) { news_bear += 1; } }
+    }
+    if news_bull + news_bear > 0 {
+        let news_score = ((news_bull as f64 / (news_bull + news_bear) as f64) * 100.0).clamp(0.0, 100.0);
+        score = (score * 0.7 + news_score * 0.3).clamp(0.0, 100.0);
+        let label = if news_score > 55.0 { "bullish" } else if news_score < 45.0 { "bearish" } else { "neutral" };
+        factors.push(format!("News sentiment: {} ({} positive / {} negative headlines)", label, news_bull, news_bear));
+    }
+
     let (label, color) = match score {
         s if s >= 80.0 => ("EXTREME GREED", "green"),
         s if s >= 60.0 => ("GREED", "green"),
@@ -2201,6 +2377,11 @@ pub async fn cmd_sentiment() -> Result<()> {
 
     print_section("Contributing Factors");
     for f in &factors { println!("  {} {}", "→".cyan(), f); }
+
+    if !collated_news.is_empty() {
+        print_section("Top Market Headlines");
+        print_news_items(&collated_news, 5);
+    }
     println!();
     Ok(())
 }
@@ -3386,22 +3567,24 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
         print_kv("Target Price", &format!("{}{:.2} ({:+.1}%)", market::currency_symbol(q.currency.as_deref()), target, upside));
     }
 
-    // Fetch insider-related news
-    let search_url = format!("https://query2.finance.yahoo.com/v1/finance/search?q={} insider&quotesCount=0&newsCount=8", resolved);
-    if let Ok(resp) = client.raw_get(&search_url).await {
-        if let Some(news) = resp.get("news").and_then(|n| n.as_array()) {
-            if !news.is_empty() {
-                print_section("Recent Insider News");
-                for item in news.iter().take(5) {
-                    let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
-                    let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("");
-                    if !title.is_empty() {
-                        println!("  {} {}", "●".cyan(), title.bold());
-                        println!("    {} {}", "└".dimmed(), publisher.dimmed());
-                    }
-                }
-            }
-        }
+    // Fetch insider-related news from multiple sources concurrently
+    let base = resolved.split('.').next().unwrap_or(&resolved).to_string();
+    let yahoo_insider_q = format!("{} insider", resolved);
+    let insider_query = format!("{} insider buying selling", base);
+    let analyst_query = format!("{} analyst rating upgrade downgrade", base);
+
+    let (yahoo_insider, google_insider, google_analyst) = tokio::join!(
+        fetch_yahoo_json_news(&client, &yahoo_insider_q, 8),
+        fetch_google_news_rss(&client, &insider_query),
+        fetch_google_news_rss(&client, &analyst_query),
+    );
+
+    let all_insider: Vec<NewsItem> = [yahoo_insider, google_insider, google_analyst].concat();
+    let collated = collate_news(all_insider);
+
+    if !collated.is_empty() {
+        print_section("Recent Insider & Analyst News");
+        print_news_items(&collated, 8);
     }
     println!();
     Ok(())
@@ -3411,26 +3594,18 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
 
 pub async fn cmd_ipo() -> Result<()> {
     let client = YahooClient::new().await?;
-    let search_url = "https://query2.finance.yahoo.com/v1/finance/search?q=IPO&quotesCount=0&newsCount=15";
-    let resp = client.raw_get(search_url).await.context("Failed to fetch IPO news")?;
 
-    print_header("IPO Calendar & News");
+    let (yahoo_ipo, google_ipo, google_listing) = tokio::join!(
+        fetch_yahoo_json_news(&client, "IPO initial public offering", 12),
+        fetch_google_news_rss(&client, "IPO stock market listing 2025"),
+        fetch_google_news_rss(&client, "new IPO listing NSE BSE 2025"),
+    );
 
-    if let Some(news) = resp.get("news").and_then(|n| n.as_array()) {
-        if news.is_empty() { println!("  {}", "No IPO news found.".dimmed()); }
-        for item in news.iter().take(12) {
-            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
-            let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("");
-            let ts = item.get("providerPublishTime").and_then(|t| t.as_i64())
-                .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-                .map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
-            if !title.is_empty() {
-                println!();
-                println!("  {} {}", "●".cyan(), title.bold());
-                println!("    {} {} · {}", "└".dimmed(), publisher.dimmed(), ts.dimmed());
-            }
-        }
-    }
+    let all: Vec<NewsItem> = [yahoo_ipo, google_ipo, google_listing].concat();
+    let collated = collate_news(all);
+
+    print_header("IPO Calendar & News — 3 sources");
+    print_news_items(&collated, 15);
     println!();
     Ok(())
 }

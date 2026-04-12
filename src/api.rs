@@ -462,6 +462,11 @@ impl YahooClient {
         Ok(resp)
     }
 
+    /// Fetch raw text (for RSS/XML endpoints)
+    pub async fn raw_get_text(&self, url: &str) -> Result<String> {
+        self.fetch(url, Duration::from_secs(300)).await
+    }
+
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         let url = format!(
             "https://query2.finance.yahoo.com/v1/finance/search?q={}&quotesCount=10&newsCount=0",
