@@ -61,10 +61,17 @@ enum Commands {
     Compare { symbols: Vec<String> },
 
     /// View historical price data with charts
+    /// View historical price data with charts
     History {
         symbol: String,
-        #[arg(short, long, default_value = "3mo")]
+        /// Period: 1d, 5d, 1w, 1mo, 3mo, 6mo, 1y, 2y, 5y, max
+        #[arg(short, long, default_value = "1mo")]
         period: String,
+    },
+
+    /// Multi-timeframe charts (1W, 1M, 3M, 1Y at once)
+    Chart {
+        symbol: String,
     },
 
     // ── Portfolio & Tracking ──
@@ -295,6 +302,7 @@ async fn main() {
         Commands::Technical { symbol } => commands::cmd_technical(&symbol, m).await,
         Commands::Compare { symbols } => commands::cmd_compare(&symbols, m).await,
         Commands::History { symbol, period } => commands::cmd_history(&symbol, &period, m).await,
+        Commands::Chart { symbol } => commands::cmd_chart(&symbol, m).await,
         Commands::Portfolio { action, symbol, shares, cost } => {
             commands::cmd_portfolio(&action, symbol.as_deref(), shares, cost, m).await
         }

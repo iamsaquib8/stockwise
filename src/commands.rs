@@ -658,16 +658,17 @@ pub async fn cmd_history(symbol: &str, period: &str, market: Market) -> Result<(
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
 
-    let interval = match period {
-        "1d" | "5d" => "5m",
-        "1mo" => "1d",
-        "3mo" | "6mo" => "1d",
-        "1y" | "2y" => "1wk",
-        "5y" | "10y" | "max" => "1mo",
-        _ => "1d",
+    let (api_range, interval) = match period {
+        "1d" => ("1d", "5m"),
+        "5d" | "1w" => ("5d", "15m"),
+        "1mo" => ("1mo", "1d"),
+        "3mo" | "6mo" => (period, "1d"),
+        "1y" | "2y" => (period, "1wk"),
+        "5y" | "10y" | "max" => (period, "1mo"),
+        _ => (period, "1d"),
     };
 
-    let chart = client.get_chart(&resolved, period, interval).await?;
+    let chart = client.get_chart(&resolved, api_range, interval).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
@@ -4280,5 +4281,71 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             println!();
         }
     }
+    Ok(())
+}
+
+// ── Multi-timeframe Chart ──
+
+pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+
+    // Fetch quote for current price
+    let quotes = client.get_quote(&[resolved.as_str()]).await?;
+    let q = quotes.first().context("Symbol not found")?;
+    let cur = q.currency.as_deref();
+    let csym = market::currency_symbol(cur);
+    let price = q.regular_market_price.unwrap_or(0.0);
+    let name = q.short_name.as_deref().or(q.long_name.as_deref()).unwrap_or("Unknown");
+
+    print_header(&format!("{} — {}  {}", resolved, name, format_price(price, cur).bold()));
+
+    let timeframes: [(&str, &str, &str); 4] = [
+        ("5d", "15m", "1 Week"),
+        ("1mo", "1d", "1 Month"),
+        ("3mo", "1d", "3 Months"),
+        ("1y", "1wk", "1 Year"),
+    ];
+
+    for (range, interval, label) in &timeframes {
+        let chart = match client.get_chart(&resolved, range, interval).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let closes: Vec<f64> = chart.indicators.quote.first()
+            .and_then(|qi| qi.close.as_ref())
+            .map(|c| c.iter().filter_map(|v| *v).collect())
+            .unwrap_or_default();
+
+        if closes.len() < 3 { continue; }
+
+        let first = closes[0];
+        let last = *closes.last().unwrap();
+        let change = ((last / first) - 1.0) * 100.0;
+        let min = closes.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = closes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let vol = technical::annualized_volatility(&closes);
+
+        let change_str = if change >= 0.0 {
+            format!("{:+.2}%", change).green().bold().to_string()
+        } else {
+            format!("{:+.2}%", change).red().bold().to_string()
+        };
+
+        let color = if last >= first { "green" } else { "red" };
+        println!();
+        for line in charts::line_chart(&closes, 55, 6, color, &format!("{} ({})", label, change_str)) {
+            println!("{}", line);
+        }
+        println!(
+            "  {} {}{:.2}  {} {}{:.2}  {} {}",
+            "Low:".dimmed(), csym, min,
+            "High:".dimmed(), csym, max,
+            "Vol:".dimmed(), vol.map_or("—".into(), |v| format!("{:.0}%", v * 100.0)),
+        );
+    }
+
+    println!();
     Ok(())
 }
