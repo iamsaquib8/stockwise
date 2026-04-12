@@ -221,4 +221,112 @@ mod tests {
         let result = sparkline(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         assert_eq!(result.chars().count(), 5);
     }
+
+    #[test]
+    fn test_sparkline_single_value() {
+        let result = sparkline(&[42.0]);
+        assert_eq!(result.chars().count(), 1);
+    }
+
+    #[test]
+    fn test_format_large_number_usd_k() {
+        let result = format_large_number(5_000.0, Some("USD"));
+        assert!(result.contains("K"));
+    }
+
+    #[test]
+    fn test_format_large_number_usd_small() {
+        let result = format_large_number(500.0, Some("USD"));
+        assert!(result.contains("$"));
+        assert!(result.contains("500.00"));
+    }
+
+    #[test]
+    fn test_format_large_number_inr_lakh() {
+        let result = format_large_number(500_000.0, Some("INR"));
+        assert!(result.contains("L")); // lakhs
+    }
+
+    #[test]
+    fn test_format_large_number_inr_k() {
+        let result = format_large_number(5_000.0, Some("INR"));
+        assert!(result.contains("K"));
+    }
+
+    #[test]
+    fn test_format_optional_f64_none() {
+        let result = format_optional_f64(None, "x");
+        assert!(result.contains("N/A"));
+    }
+
+    #[test]
+    fn test_rating_bar_zero() {
+        let result = rating_bar(0.0, 100.0);
+        // Should be all empty blocks
+        assert!(result.contains("░"));
+    }
+
+    #[test]
+    fn test_rating_bar_full() {
+        let result = rating_bar(100.0, 100.0);
+        // Should be all filled blocks
+        assert!(result.contains("█"));
+    }
+
+    #[test]
+    fn test_sentiment_label_strong_buy() {
+        let label = sentiment_label(1.0);
+        assert!(label.contains("Strong Buy") || label.to_lowercase().contains("strong buy"));
+    }
+
+    #[test]
+    fn test_sentiment_label_buy() {
+        let label = sentiment_label(2.0);
+        assert!(label.contains("Buy") || label.to_lowercase().contains("buy"));
+    }
+
+    #[test]
+    fn test_sentiment_label_hold() {
+        let label = sentiment_label(3.0);
+        assert!(label.contains("Hold") || label.to_lowercase().contains("hold"));
+    }
+
+    #[test]
+    fn test_sentiment_label_sell() {
+        let label = sentiment_label(4.0);
+        assert!(label.contains("Sell") || label.to_lowercase().contains("sell"));
+    }
+
+    #[test]
+    fn test_sentiment_label_strong_sell() {
+        let label = sentiment_label(5.0);
+        assert!(label.contains("Strong Sell") || label.to_lowercase().contains("strong sell"));
+    }
+
+    #[test]
+    fn test_format_change_positive() {
+        let result = format_change(10.0, 1.5);
+        assert!(result.contains("▲"));
+        assert!(result.contains("10.00"));
+        assert!(result.contains("1.50%"));
+    }
+
+    #[test]
+    fn test_format_change_negative() {
+        let result = format_change(-5.0, -0.5);
+        assert!(result.contains("▼"));
+        assert!(result.contains("5.00"));
+    }
+
+    #[test]
+    fn test_format_optional_pct_some_positive() {
+        let result = format_optional_pct(Some(0.15));
+        assert!(result.contains("15.00%"));
+    }
+
+    #[test]
+    fn test_format_optional_pct_none() {
+        let result = format_optional_pct(None);
+        assert!(result.contains("N/A"));
+    }
 }

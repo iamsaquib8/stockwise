@@ -53,3 +53,60 @@ impl WealthHistory {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_snapshot_creates_entry() {
+        let mut wh = WealthHistory::default();
+        wh.add_snapshot(100000.0, 90000.0, 5);
+        assert_eq!(wh.snapshots.len(), 1);
+        assert_eq!(wh.snapshots[0].total_value, 100000.0);
+        assert_eq!(wh.snapshots[0].total_cost, 90000.0);
+        assert_eq!(wh.snapshots[0].holdings_count, 5);
+    }
+
+    #[test]
+    fn test_add_snapshot_deduplicates_same_date() {
+        let mut wh = WealthHistory::default();
+        wh.add_snapshot(100000.0, 90000.0, 5);
+        wh.add_snapshot(105000.0, 90000.0, 5); // same calendar date
+        // Should replace, not append
+        assert_eq!(wh.snapshots.len(), 1);
+        assert_eq!(wh.snapshots[0].total_value, 105000.0);
+    }
+
+    #[test]
+    fn test_add_snapshot_preserves_different_dates() {
+        let mut wh = WealthHistory::default();
+        wh.snapshots.push(Snapshot {
+            date: "2026-01-01".into(),
+            total_value: 100000.0,
+            total_cost: 90000.0,
+            holdings_count: 3,
+        });
+        wh.snapshots.push(Snapshot {
+            date: "2026-01-02".into(),
+            total_value: 101000.0,
+            total_cost: 90000.0,
+            holdings_count: 3,
+        });
+        assert_eq!(wh.snapshots.len(), 2);
+    }
+
+    #[test]
+    fn test_snapshot_has_today_date() {
+        let mut wh = WealthHistory::default();
+        wh.add_snapshot(50000.0, 45000.0, 2);
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(wh.snapshots[0].date, today);
+    }
+
+    #[test]
+    fn test_default_is_empty() {
+        let wh = WealthHistory::default();
+        assert!(wh.snapshots.is_empty());
+    }
+}

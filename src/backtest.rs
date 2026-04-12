@@ -338,4 +338,55 @@ mod tests {
         assert!((trades[0].exit_price - 110.0).abs() < f64::EPSILON);
         assert!(trades[0].pnl_pct > 0.0);
     }
+
+    #[test]
+    fn test_vwap_strategy() {
+        let prices = sine_prices(200);
+        let vols: Vec<u64> = (0..200).map(|i| 1000 + i as u64 * 10).collect();
+        let result = run_backtest("vwap", &prices, &prices, &prices, &vols);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_rsi_strategy() {
+        let prices = sine_prices(200);
+        let result = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 200]);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.win_rate >= 0.0 && r.win_rate <= 100.0);
+        assert!(r.equity_curve[0] == 100.0);
+    }
+
+    #[test]
+    fn test_backtest_result_fields() {
+        let prices = sine_prices(200);
+        let r = run_backtest("bb", &prices, &prices, &prices, &vec![1000u64; 200]).unwrap();
+        assert!(!r.strategy.is_empty());
+        assert!(r.max_drawdown >= 0.0);
+    }
+
+    #[test]
+    fn test_execute_trades_no_signals() {
+        let closes = vec![100.0, 102.0, 105.0];
+        let signals = vec![Signal::Hold, Signal::Hold, Signal::Hold];
+        let trades = execute_trades(&closes, &signals);
+        assert!(trades.is_empty());
+    }
+
+    #[test]
+    fn test_execute_trades_multiple_pairs() {
+        let closes = vec![100.0, 105.0, 110.0, 108.0, 112.0, 115.0];
+        let signals = vec![Signal::Buy, Signal::Hold, Signal::Sell, Signal::Buy, Signal::Hold, Signal::Hold];
+        let trades = execute_trades(&closes, &signals);
+        // First pair closed at index 2, second remains open at end
+        assert_eq!(trades.len(), 2);
+        assert!(trades[0].pnl_pct > 0.0); // bought at 100, sold at 110
+    }
+
+    #[test]
+    fn test_buy_hold_rising_prices() {
+        let prices = rising_prices(100);
+        let r = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 100]).unwrap();
+        assert!(r.buy_hold_return > 0.0);
+    }
 }

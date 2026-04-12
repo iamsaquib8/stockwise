@@ -135,4 +135,53 @@ mod tests {
         assert!(!is_inr(Some("USD")));
         assert!(!is_inr(None));
     }
+
+    #[test]
+    fn test_resolve_symbol_us_lowercase() {
+        assert_eq!(resolve_symbol("tsla", Market::Us), "TSLA");
+    }
+
+    #[test]
+    fn test_resolve_symbol_india_bo_suffix() {
+        // .BO suffix preserved
+        assert_eq!(resolve_symbol("RELIANCE.BO", Market::In), "RELIANCE.BO");
+    }
+
+    #[test]
+    fn test_resolve_symbol_india_lowercase_with_ns() {
+        // If already has .NS, don't double-append
+        assert_eq!(resolve_symbol("tcs.ns", Market::In), "TCS.NS");
+    }
+
+    #[test]
+    fn test_resolve_symbol_us_already_upper() {
+        assert_eq!(resolve_symbol("AAPL", Market::Us), "AAPL");
+    }
+
+    #[test]
+    fn test_currency_symbol_gbp() {
+        // Non-INR currencies all return $
+        assert_eq!(currency_symbol(Some("GBP")), "$");
+    }
+
+    #[test]
+    fn test_popular_lists_non_empty() {
+        assert!(!US_POPULAR.is_empty());
+        assert!(!INDIA_POPULAR.is_empty());
+    }
+
+    #[test]
+    fn test_india_popular_has_ns_suffix() {
+        // All India popular symbols should have .NS suffix
+        for sym in INDIA_POPULAR {
+            assert!(sym.ends_with(".NS"), "{} missing .NS suffix", sym);
+        }
+    }
+
+    #[test]
+    fn test_screener_categories_non_empty() {
+        assert!(!SCREENER_CATEGORIES.is_empty());
+        assert!(SCREENER_CATEGORIES.contains(&"undervalued"));
+        assert!(SCREENER_CATEGORIES.contains(&"dividend"));
+    }
 }

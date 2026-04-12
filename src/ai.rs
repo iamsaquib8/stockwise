@@ -293,7 +293,6 @@ Be direct and specific with recommendations."#,
     }
 }
 
-/// Structured stock data for AI prompts
 /// Strip <think>...</think> tags from qwen3-style thinking models
 fn strip_think_tags(text: &str) -> String {
     let mut result = text.to_string();
@@ -310,6 +309,7 @@ fn strip_think_tags(text: &str) -> String {
     result
 }
 
+/// Structured stock data for AI prompts
 pub struct StockData {
     pub symbol: String,
     pub name: String,
@@ -355,5 +355,141 @@ impl StockData {
             sector: q.sector.clone().unwrap_or_default(),
             industry: q.industry.clone().unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Quote;
+
+    #[test]
+    fn test_strip_think_tags_basic() {
+        let input = "<think>reasoning here</think>actual answer";
+        assert_eq!(strip_think_tags(input), "actual answer");
+    }
+
+    #[test]
+    fn test_strip_think_tags_multiline() {
+        let input = "<think>\nline 1\nline 2\n</think>\nreal output";
+        assert_eq!(strip_think_tags(input), "\nreal output");
+    }
+
+    #[test]
+    fn test_strip_think_tags_none() {
+        let input = "normal response without tags";
+        assert_eq!(strip_think_tags(input), "normal response without tags");
+    }
+
+    #[test]
+    fn test_strip_think_tags_unclosed() {
+        let input = "before<think>incomplete";
+        assert_eq!(strip_think_tags(input), "before");
+    }
+
+    #[test]
+    fn test_strip_think_tags_empty_input() {
+        assert_eq!(strip_think_tags(""), "");
+    }
+
+    #[test]
+    fn test_strip_multiple_think_blocks() {
+        let input = "<think>first</think>middle<think>second</think>end";
+        assert_eq!(strip_think_tags(input), "middleend");
+    }
+
+    #[test]
+    fn test_strip_think_tags_empty_block() {
+        let input = "<think></think>clean";
+        assert_eq!(strip_think_tags(input), "clean");
+    }
+
+    #[test]
+    fn test_hash_prompt_deterministic() {
+        let h1 = hash_prompt("qwen3:14b", "analyze RELIANCE");
+        let h2 = hash_prompt("qwen3:14b", "analyze RELIANCE");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_prompt_different_prompts() {
+        let h1 = hash_prompt("qwen3:14b", "prompt A");
+        let h2 = hash_prompt("qwen3:14b", "prompt B");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_prompt_different_models() {
+        let h1 = hash_prompt("model1", "same prompt");
+        let h2 = hash_prompt("model2", "same prompt");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_prompt_hex_format() {
+        let h = hash_prompt("model", "prompt");
+        // Should be non-empty hex string
+        assert!(!h.is_empty());
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_stock_data_from_quote() {
+        let q = Quote {
+            symbol: Some("TEST.NS".into()),
+            short_name: Some("Test Corp".into()),
+            regular_market_price: Some(100.0),
+            regular_market_change_percent: Some(1.5),
+            trailing_pe: Some(20.0),
+            forward_pe: Some(18.0),
+            price_to_book: Some(3.0),
+            fifty_two_week_low: Some(80.0),
+            fifty_two_week_high: Some(120.0),
+            market_cap: Some(1_000_000_000.0),
+            eps_trailing_twelve_months: Some(5.0),
+            eps_forward: Some(5.5),
+            trailing_annual_dividend_yield: Some(0.02),
+            fifty_day_average: Some(95.0),
+            two_hundred_day_average: Some(90.0),
+            beta: Some(1.2),
+            sector: Some("Technology".into()),
+            industry: Some("Software".into()),
+            ..Default::default()
+        };
+        let sd = StockData::from_quote(&q);
+        assert_eq!(sd.symbol, "TEST.NS");
+        assert_eq!(sd.name, "Test Corp");
+        assert_eq!(sd.price, 100.0);
+        assert_eq!(sd.change_pct, 1.5);
+        assert_eq!(sd.pe, Some(20.0));
+        assert_eq!(sd.forward_pe, Some(18.0));
+        assert_eq!(sd.sector, "Technology");
+        assert_eq!(sd.industry, "Software");
+        assert!(sd.rsi.is_none()); // RSI set separately
+    }
+
+    #[test]
+    fn test_stock_data_from_quote_fallback_name() {
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            short_name: None,
+            long_name: Some("Tata Consultancy Services".into()),
+            regular_market_price: Some(3500.0),
+            ..Default::default()
+        };
+        let sd = StockData::from_quote(&q);
+        assert_eq!(sd.name, "Tata Consultancy Services");
+    }
+
+    #[test]
+    fn test_stock_data_from_quote_missing_fields() {
+        let q = Quote {
+            symbol: Some("UNKNOWN.NS".into()),
+            ..Default::default()
+        };
+        let sd = StockData::from_quote(&q);
+        assert_eq!(sd.price, 0.0);
+        assert_eq!(sd.pe, None);
+        assert_eq!(sd.sector, "");
     }
 }

@@ -691,6 +691,198 @@ pub async fn scan_intraday(client: &YahooClient, market: market::Market) -> Resu
     Ok(signals)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Quote;
+
+    fn make_signal(score: f64, confidence: Confidence, atr_pct: f64) -> IntradaySignal {
+        IntradaySignal {
+            symbol: "TEST.NS".into(),
+            name: "Test Corp".into(),
+            price: 100.0,
+            currency: None,
+            change_pct: 0.5,
+            volume_ratio: 1.2,
+            regime: MarketRegime::Uptrend,
+            confidence,
+            direction: Direction::Long,
+            score,
+            strategies: vec![],
+            rsi: Some(50.0),
+            vwap: None,
+            above_vwap: false,
+            macd_histogram: None,
+            bb_position: None,
+            atr_pct: Some(atr_pct),
+            obv_trend: OBVTrend::Flat,
+            gap_detected: false,
+            near_support: false,
+            near_resistance: false,
+            pivot: None,
+            support1: None,
+            resistance1: None,
+        }
+    }
+
+    #[test]
+    fn test_direction_display() {
+        assert_eq!(format!("{}", Direction::Long), "BUY");
+        assert_eq!(format!("{}", Direction::Short), "SELL");
+    }
+
+    #[test]
+    fn test_market_regime_display() {
+        assert_eq!(format!("{}", MarketRegime::StrongUptrend), "Strong Uptrend");
+        assert_eq!(format!("{}", MarketRegime::Uptrend), "Uptrend");
+        assert_eq!(format!("{}", MarketRegime::Ranging), "Ranging");
+        assert_eq!(format!("{}", MarketRegime::Downtrend), "Downtrend");
+        assert_eq!(format!("{}", MarketRegime::StrongDowntrend), "Strong Downtrend");
+    }
+
+    #[test]
+    fn test_confidence_display() {
+        assert_eq!(format!("{}", Confidence::High), "HIGH");
+        assert_eq!(format!("{}", Confidence::Medium), "MEDIUM");
+        assert_eq!(format!("{}", Confidence::Low), "LOW");
+    }
+
+    #[test]
+    fn test_obv_trend_display() {
+        assert_eq!(format!("{}", OBVTrend::Rising), "Accumulation");
+        assert_eq!(format!("{}", OBVTrend::Falling), "Distribution");
+        assert_eq!(format!("{}", OBVTrend::Flat), "Neutral");
+    }
+
+    #[test]
+    fn test_kelly_fraction_positive() {
+        let kf = kelly_fraction(0.6, 2.0);
+        assert!(kf > 0.0);
+        assert!(kf <= 0.25);
+    }
+
+    #[test]
+    fn test_kelly_fraction_clamped_at_max() {
+        // Even perfect win rate capped at 0.25
+        let kf = kelly_fraction(1.0, 10.0);
+        assert_eq!(kf, 0.25);
+    }
+
+    #[test]
+    fn test_kelly_fraction_clamped_at_zero() {
+        // Bad edge: 30% win rate, 1:1 R:R → kelly is negative → clamp to 0
+        let kf = kelly_fraction(0.3, 1.0);
+        assert_eq!(kf, 0.0);
+    }
+
+    #[test]
+    fn test_kelly_fraction_half_applied() {
+        // kelly(0.6, 2.0) = 0.6 - 0.4/2 = 0.4 → half = 0.2
+        let kf = kelly_fraction(0.6, 2.0);
+        assert!((kf - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_detect_regime_insufficient_data() {
+        let closes = vec![100.0; 10];
+        assert_eq!(detect_regime(&closes), MarketRegime::Ranging);
+    }
+
+    #[test]
+    fn test_detect_regime_uptrend() {
+        // Steadily rising prices — price > sma10 > sma20
+        let closes: Vec<f64> = (0..30).map(|i| 100.0 + i as f64 * 2.0).collect();
+        let regime = detect_regime(&closes);
+        assert!(regime == MarketRegime::StrongUptrend || regime == MarketRegime::Uptrend);
+    }
+
+    #[test]
+    fn test_detect_regime_downtrend() {
+        // Steadily falling prices
+        let closes: Vec<f64> = (0..30).map(|i| 200.0 - i as f64 * 3.0).collect();
+        let regime = detect_regime(&closes);
+        assert!(regime == MarketRegime::Downtrend || regime == MarketRegime::StrongDowntrend);
+    }
+
+    #[test]
+    fn test_detect_regime_ranging() {
+        // Flat/sideways prices
+        let closes = vec![100.0; 30];
+        let regime = detect_regime(&closes);
+        assert_eq!(regime, MarketRegime::Ranging);
+    }
+
+    #[test]
+    fn test_generate_trade_plans_empty() {
+        let plans = generate_trade_plans(&[], 25000.0, 2.0, 1.0);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn test_generate_trade_plans_low_score_filtered() {
+        let signal = make_signal(30.0, Confidence::Low, 2.0); // score below 50
+        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn test_generate_trade_plans_low_confidence_filtered() {
+        let signal = make_signal(80.0, Confidence::Low, 2.0); // Low confidence filtered
+        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn test_generate_trade_plans_low_atr_filtered() {
+        let signal = make_signal(80.0, Confidence::High, 0.2); // ATR too small
+        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn test_generate_trade_plans_valid_signal() {
+        let signal = make_signal(75.0, Confidence::High, 2.5);
+        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        // Should generate a plan
+        assert!(!plans.is_empty());
+        let plan = &plans[0];
+        assert!(plan.qty > 0);
+        assert!(plan.target1 > plan.entry);
+        assert!(plan.stop_loss < plan.entry);
+        assert!(plan.risk_reward > 0.0);
+    }
+
+    #[test]
+    fn test_generate_trade_plans_sorted_by_quality() {
+        let s1 = make_signal(60.0, Confidence::Medium, 2.5);
+        let mut s2 = make_signal(85.0, Confidence::High, 3.0);
+        s2.symbol = "BETTER.NS".into();
+        let plans = generate_trade_plans(&[s1, s2], 50000.0, 2.0, 1.0);
+        if plans.len() >= 2 {
+            // First plan should have higher score
+            let q0 = plans[0].signal.score * plans[0].risk_reward;
+            let q1 = plans[1].signal.score * plans[1].risk_reward;
+            assert!(q0 >= q1);
+        }
+    }
+
+    #[test]
+    fn test_sector_heat_struct() {
+        let sh = SectorHeat { name: "IT".into(), change_pct: 1.5, hot: true };
+        assert!(sh.hot);
+        assert_eq!(sh.name, "IT");
+    }
+
+    #[test]
+    fn test_clone_signal() {
+        let s = make_signal(70.0, Confidence::Medium, 2.0);
+        let c = s.clone_signal();
+        assert_eq!(c.symbol, s.symbol);
+        assert_eq!(c.price, s.price);
+        assert_eq!(c.score, s.score);
+    }
+}
+
 // Helper to clone signal without implementing Clone on the whole struct
 impl IntradaySignal {
     pub fn clone_signal(&self) -> IntradaySignal {

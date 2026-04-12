@@ -608,4 +608,124 @@ mod tests {
         let flat = vec![100.0; 50];
         assert_eq!(annualized_volatility(&flat), Some(0.0));
     }
+
+    #[test]
+    fn test_vwap_basic() {
+        let highs = vec![110.0, 112.0, 115.0];
+        let lows = vec![90.0, 92.0, 95.0];
+        let closes = vec![100.0, 102.0, 105.0];
+        let volumes = vec![1000u64, 1200, 1500];
+        let result = vwap(&highs, &lows, &closes, &volumes);
+        assert!(result.is_some());
+        let v = result.unwrap();
+        assert!(v > 90.0 && v < 120.0);
+    }
+
+    #[test]
+    fn test_vwap_zero_volume() {
+        let highs = vec![110.0];
+        let lows = vec![90.0];
+        let closes = vec![100.0];
+        let volumes = vec![0u64];
+        let result = vwap(&highs, &lows, &closes, &volumes);
+        assert!(result.is_none()); // zero total volume → None
+    }
+
+    #[test]
+    fn test_rsi_signal() {
+        assert!(rsi_signal(25.0).to_lowercase().contains("oversold"));
+        assert!(rsi_signal(75.0).to_lowercase().contains("overbought"));
+        assert_eq!(rsi_signal(50.0), "Neutral");
+    }
+
+    #[test]
+    fn test_macd_signal() {
+        let bull = macd_signal(1.0);
+        let bear = macd_signal(-1.0);
+        assert!(bull.to_lowercase().contains("bullish"));
+        assert!(bear.to_lowercase().contains("bearish"));
+    }
+
+    #[test]
+    fn test_sortino_ratio() {
+        // Use a volatile series so there are downside returns
+        let prices: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.3).sin() * 10.0).collect();
+        let s = sortino_ratio(&prices, 0.0);
+        // May be None if no downside deviation, so just verify it doesn't panic
+        if let Some(s_val) = s {
+            assert!(s_val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_calmar_ratio() {
+        let prices = vec![100.0, 110.0, 120.0, 100.0, 130.0];
+        let cr = calmar_ratio(&prices);
+        // Could be None if max_drawdown is 0 or prices too short
+        if let Some(c) = cr {
+            assert!(c.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_find_swing_points() {
+        let highs: Vec<f64> = (0..30).map(|i| 100.0 + (i as f64 * 0.3).sin() * 10.0).collect();
+        let lows: Vec<f64> = highs.iter().map(|h| h - 5.0).collect();
+        let result = find_swing_points(&highs, &lows, 5);
+        assert!(result.is_some());
+        let (swing_high, swing_low) = result.unwrap();
+        assert!(swing_high >= swing_low);
+    }
+
+    #[test]
+    fn test_ad_line_basic() {
+        let highs = vec![110.0, 115.0, 112.0];
+        let lows = vec![90.0, 92.0, 95.0];
+        let closes = vec![105.0, 112.0, 108.0];
+        let volumes = vec![1000u64, 1200, 900];
+        let result = ad_line(&highs, &lows, &closes, &volumes);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_atr_basic() {
+        let highs = vec![110.0, 112.0, 115.0, 113.0, 116.0];
+        let lows = vec![90.0, 92.0, 95.0, 93.0, 96.0];
+        let closes = vec![100.0, 102.0, 105.0, 103.0, 106.0];
+        let result = atr(&highs, &lows, &closes, 3);
+        assert!(result.is_some());
+        assert!(result.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_chandelier_exit() {
+        let highs = vec![110.0, 115.0, 112.0, 118.0, 120.0];
+        let result = chandelier_exit(&highs, 2.0, 3.0);
+        if let Some(exit) = result {
+            assert!(exit > 0.0);
+            assert!(exit <= *highs.iter().fold(&f64::NEG_INFINITY, |a, b| if b > a { b } else { a }));
+        }
+    }
+
+    #[test]
+    fn test_sma_insufficient_data() {
+        assert_eq!(sma(&[1.0, 2.0], 5), None);
+    }
+
+    #[test]
+    fn test_fibonacci_levels_range() {
+        let levels = fibonacci_levels(200.0, 100.0);
+        for level in &levels {
+            assert!(*level >= 100.0 && *level <= 200.0);
+        }
+    }
+
+    #[test]
+    fn test_max_drawdown_no_drawdown() {
+        let prices = vec![100.0, 110.0, 120.0, 130.0];
+        let result = max_drawdown(&prices);
+        if let Some((dd, _, _)) = result {
+            assert_eq!(dd, 0.0); // monotonically increasing, no drawdown
+        }
+    }
 }

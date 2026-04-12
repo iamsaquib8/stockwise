@@ -267,6 +267,7 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
 }
 
 /// Generate an overall verdict
+#[allow(dead_code)]
 pub fn overall_verdict(q: &Quote) -> String {
     let mut score: i32 = 0;
     let mut factors = 0;
@@ -368,5 +369,153 @@ pub fn overall_verdict(q: &Quote) -> String {
         .yellow()
         .bold()
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Quote;
+
+    fn base_quote() -> Quote {
+        Quote {
+            symbol: Some("TEST.NS".into()),
+            regular_market_price: Some(100.0),
+            fifty_day_average: Some(90.0),
+            two_hundred_day_average: Some(85.0),
+            trailing_pe: Some(18.0),
+            profit_margins: Some(0.20),
+            earnings_quarterly_growth: Some(0.15),
+            recommendation_mean: Some(1.8),
+            debt_to_equity: Some(30.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_generate_insights_non_empty() {
+        let q = base_quote();
+        let insights = generate_insights(&q);
+        assert!(!insights.is_empty());
+    }
+
+    #[test]
+    fn test_generate_insights_pe_low() {
+        let mut q = Quote::default();
+        q.trailing_pe = Some(8.0); // very low PE
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.contains("P/E") || joined.contains("undervalued"));
+    }
+
+    #[test]
+    fn test_generate_insights_pe_reasonable() {
+        let mut q = Quote::default();
+        q.trailing_pe = Some(15.0);
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.contains("reasonable") || joined.contains("P/E"));
+    }
+
+    #[test]
+    fn test_generate_insights_pe_high() {
+        let mut q = Quote::default();
+        q.trailing_pe = Some(50.0); // very high PE
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.contains("P/E") || joined.contains("high") || joined.contains("aggressive"));
+    }
+
+    #[test]
+    fn test_generate_insights_uptrend() {
+        let mut q = Quote::default();
+        q.regular_market_price = Some(120.0);
+        q.fifty_day_average = Some(100.0);
+        q.two_hundred_day_average = Some(90.0);
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.to_lowercase().contains("uptrend") || joined.contains("above"));
+    }
+
+    #[test]
+    fn test_generate_insights_downtrend() {
+        let mut q = Quote::default();
+        q.regular_market_price = Some(80.0);
+        q.fifty_day_average = Some(90.0);
+        q.two_hundred_day_average = Some(95.0);
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.to_lowercase().contains("downtrend") || joined.contains("below"));
+    }
+
+    #[test]
+    fn test_generate_insights_high_dividend() {
+        let mut q = Quote::default();
+        q.trailing_annual_dividend_yield = Some(0.07); // 7%
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.contains("dividend") || joined.contains("yield"));
+    }
+
+    #[test]
+    fn test_generate_insights_no_data() {
+        let q = Quote::default();
+        let insights = generate_insights(&q);
+        // Should return at least the "limited data" fallback
+        assert!(!insights.is_empty());
+        assert!(insights[0].to_lowercase().contains("limited") || insights[0].contains("data"));
+    }
+
+    #[test]
+    fn test_generate_insights_high_beta() {
+        let mut q = Quote::default();
+        q.beta = Some(2.0);
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.contains("beta") || joined.contains("volatile"));
+    }
+
+    #[test]
+    fn test_generate_insights_strong_earnings_growth() {
+        let mut q = Quote::default();
+        q.earnings_quarterly_growth = Some(0.30); // 30%
+        let insights = generate_insights(&q);
+        let joined = insights.join(" ");
+        assert!(joined.contains("earnings") || joined.contains("growth"));
+    }
+
+    #[test]
+    fn test_overall_verdict_bullish() {
+        let q = base_quote(); // all positive signals
+        let verdict = overall_verdict(&q);
+        assert!(verdict.to_lowercase().contains("bullish") || verdict.contains("BULLISH"));
+    }
+
+    #[test]
+    fn test_overall_verdict_bearish() {
+        let mut q = Quote::default();
+        q.trailing_pe = Some(-5.0); // negative PE (unprofitable)
+        q.regular_market_price = Some(80.0);
+        q.fifty_day_average = Some(90.0);
+        q.two_hundred_day_average = Some(95.0); // price below both MAs
+        q.earnings_quarterly_growth = Some(-0.20); // declining earnings
+        q.profit_margins = Some(-0.05); // negative margin
+        let verdict = overall_verdict(&q);
+        assert!(verdict.to_lowercase().contains("bearish") || verdict.contains("BEARISH"));
+    }
+
+    #[test]
+    fn test_overall_verdict_insufficient_data() {
+        let q = Quote::default();
+        let verdict = overall_verdict(&q);
+        assert!(verdict.to_lowercase().contains("insufficient") || verdict.contains("data"));
+    }
+
+    #[test]
+    fn test_overall_verdict_contains_score() {
+        let q = base_quote();
+        let verdict = overall_verdict(&q);
+        // Verdict includes score like "3/5"
+        assert!(verdict.contains('/'));
     }
 }
