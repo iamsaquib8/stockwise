@@ -2896,3 +2896,461 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
         }
     }
 }
+
+// ══════════════════════════════════════════════════════════
+// ADVANCED STOCK FEATURES
+// ══════════════════════════════════════════════════════════
+
+// ── 1. Support & Resistance ──
+
+pub async fn cmd_support(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let chart = client.get_chart(&resolved, "3mo", "1d").await?;
+    let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
+    let csym = market::currency_symbol(cur);
+
+    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    if closes.len() < 5 { println!("{}", "Not enough data.".red()); return Ok(()); }
+
+    let current = *closes.last().unwrap();
+    let last_high = *highs.last().unwrap();
+    let last_low = *lows.last().unwrap();
+    let last_close = *closes.last().unwrap();
+
+    let (pivot, r1, r2, r3, s1, s2, s3) = technical::pivot_points(last_high, last_low, last_close);
+
+    print_header(&format!("Support & Resistance: {}", resolved));
+    println!("  Current Price: {}\n", format_price(current, cur).bold());
+
+    print_section("Classic Pivot Points");
+    print_kv("R3 (Resistance)", &format!("{}{:.2}", csym, r3).red().to_string());
+    print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
+    print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
+    print_kv("Pivot", &format!("{}{:.2}", csym, pivot).bold().to_string());
+    print_kv("S1", &format!("{}{:.2}", csym, s1).green().to_string());
+    print_kv("S2", &format!("{}{:.2}", csym, s2).green().to_string());
+    print_kv("S3 (Support)", &format!("{}{:.2}", csym, s3).green().to_string());
+
+    // Fibonacci levels
+    if let Some((swing_high, swing_low)) = technical::find_swing_points(&highs, &lows, 60.min(highs.len())) {
+        let fibs = technical::fibonacci_levels(swing_high, swing_low);
+        print_section("Fibonacci Retracement");
+        print_kv("Swing High", &format!("{}{:.2}", csym, swing_high));
+        print_kv("23.6%", &format!("{}{:.2}", csym, fibs[0]));
+        print_kv("38.2%", &format!("{}{:.2}", csym, fibs[1]));
+        print_kv("50.0%", &format!("{}{:.2}", csym, fibs[2]).bold().to_string());
+        print_kv("61.8%", &format!("{}{:.2}", csym, fibs[3]));
+        print_kv("78.6%", &format!("{}{:.2}", csym, fibs[4]));
+        print_kv("Swing Low", &format!("{}{:.2}", csym, swing_low));
+    }
+
+    // Price position
+    print_section("Current Position");
+    if current > r1 { println!("  {} Above R1 — bullish, next target R2 ({}{:.2})", "▲".green(), csym, r2); }
+    else if current > pivot { println!("  {} Above pivot — mildly bullish, resistance at R1 ({}{:.2})", "▲".green(), csym, r1); }
+    else if current > s1 { println!("  {} Below pivot — mildly bearish, support at S1 ({}{:.2})", "▼".yellow(), csym, s1); }
+    else { println!("  {} Below S1 — bearish, next support S2 ({}{:.2})", "▼".red(), csym, s2); }
+    println!();
+    Ok(())
+}
+
+// ── 2. Volume Profile ──
+
+pub async fn cmd_volume(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let chart = client.get_chart(&resolved, "3mo", "1d").await?;
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let volumes: Vec<u64> = chart.indicators.quote.first().and_then(|q| q.volume.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let n = closes.len().min(volumes.len());
+    if n < 10 { println!("{}", "Not enough data.".red()); return Ok(()); }
+
+    print_header(&format!("Volume Analysis: {}", resolved));
+
+    // OBV
+    let obv = technical::obv(&closes, &volumes);
+    if obv.len() > 20 {
+        let recent_obv: Vec<f64> = obv[obv.len() - 60.min(obv.len())..].to_vec();
+        for line in charts::line_chart(&recent_obv, 50, 6, "cyan", "On-Balance Volume (OBV)") { println!("{}", line); }
+        let obv_trend = if obv.last() > obv.get(obv.len().saturating_sub(20)) { "Rising — accumulation".green().to_string() } else { "Falling — distribution".red().to_string() };
+        print_kv("OBV Trend", &obv_trend);
+    }
+
+    // A/D Line
+    let ad = technical::ad_line(&highs, &lows, &closes, &volumes);
+    if ad.len() > 20 {
+        let recent_ad: Vec<f64> = ad[ad.len() - 60.min(ad.len())..].to_vec();
+        println!();
+        for line in charts::line_chart(&recent_ad, 50, 6, "yellow", "Accumulation/Distribution") { println!("{}", line); }
+    }
+
+    // Volume stats
+    print_section("Volume Statistics");
+    let avg_vol_20: u64 = volumes[n.saturating_sub(20)..].iter().sum::<u64>() / 20.min(n) as u64;
+    let today_vol = *volumes.last().unwrap();
+    let ratio = today_vol as f64 / avg_vol_20.max(1) as f64;
+    print_kv("Today's Volume", &format_volume(today_vol));
+    print_kv("20-Day Avg Volume", &format_volume(avg_vol_20));
+    let ratio_str = if ratio > 1.5 { format!("{:.2}x (HIGH)", ratio).green().bold().to_string() } else if ratio > 1.0 { format!("{:.2}x (above avg)", ratio).to_string() } else { format!("{:.2}x (below avg)", ratio).red().to_string() };
+    print_kv("Volume Ratio", &ratio_str);
+
+    // Volume bars
+    let recent_vols: Vec<u64> = volumes[n.saturating_sub(40)..].to_vec();
+    println!();
+    println!("  {}", "Volume (40 days)".bold());
+    for line in charts::volume_bars(&recent_vols, 40, 4) { println!("{}", line); }
+    println!();
+    Ok(())
+}
+
+// ── 3. Gaps ──
+
+pub async fn cmd_gaps(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let chart = client.get_chart(&resolved, "3mo", "1d").await?;
+    let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
+    let csym = market::currency_symbol(cur);
+    let opens: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+
+    let gaps = technical::detect_gaps(&opens, &highs, &lows, &closes);
+    let timestamps = chart.timestamp.unwrap_or_default();
+
+    print_header(&format!("Gap Analysis: {}", resolved));
+
+    if gaps.is_empty() {
+        println!("  {}", "No price gaps detected in the last 3 months.".dimmed());
+        println!();
+        return Ok(());
+    }
+
+    let unfilled: Vec<&technical::Gap> = gaps.iter().filter(|g| !g.filled).collect();
+    let filled: Vec<&technical::Gap> = gaps.iter().filter(|g| g.filled).collect();
+
+    println!("  Found {} gaps ({} unfilled, {} filled)\n", gaps.len(), unfilled.len(), filled.len());
+
+    if !unfilled.is_empty() {
+        print_section("Open (Unfilled) Gaps");
+        for g in &unfilled {
+            let date = timestamps.get(g.index).and_then(|&t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+            let dir = match g.gap_type { technical::GapType::Up => "GAP UP".green().bold().to_string(), technical::GapType::Down => "GAP DOWN".red().bold().to_string() };
+            println!("  {} {} — {}{:.2} to {}{:.2} ({})", date.dimmed(), dir, csym, g.gap_low, csym, g.gap_high, format!("{}{:.2} range", csym, g.gap_high - g.gap_low).dimmed());
+        }
+    }
+
+    if !filled.is_empty() {
+        print_section(&format!("Filled Gaps ({})", filled.len()));
+        for g in filled.iter().rev().take(5) {
+            let date = timestamps.get(g.index).and_then(|&t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+            let dir = match g.gap_type { technical::GapType::Up => "UP", technical::GapType::Down => "DN" };
+            println!("  {} {} {}{:.2}–{}{:.2} {}", date.dimmed(), dir, csym, g.gap_low, csym, g.gap_high, "FILLED".dimmed());
+        }
+    }
+    println!();
+    Ok(())
+}
+
+// ── 4. Stoploss Calculator ──
+
+pub async fn cmd_stoploss(symbol: &str, entry: Option<f64>, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let chart = client.get_chart(&resolved, "1mo", "1d").await?;
+    let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
+    let csym = market::currency_symbol(cur);
+
+    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    if closes.len() < 14 { println!("{}", "Not enough data.".red()); return Ok(()); }
+
+    let current = *closes.last().unwrap();
+    let entry_price = entry.unwrap_or(current);
+    let atr = technical::atr(&highs, &lows, &closes, 14).unwrap_or(0.0);
+
+    print_header(&format!("Stop-Loss Calculator: {}", resolved));
+    print_kv("Entry Price", &format!("{}{:.2}", csym, entry_price));
+    print_kv("Current Price", &format!("{}{:.2}", csym, current));
+    print_kv("ATR (14)", &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / current) * 100.0));
+
+    let (cons, moderate, aggressive) = technical::atr_stop_loss(entry_price, atr);
+    print_section("ATR-Based Stop Loss");
+    print_kv("Conservative (3x ATR)", &format!("{}{:.2} ({:.2}% risk)", csym, cons, ((entry_price - cons) / entry_price) * 100.0).green().to_string());
+    print_kv("Moderate (2x ATR)", &format!("{}{:.2} ({:.2}% risk)", csym, moderate, ((entry_price - moderate) / entry_price) * 100.0).yellow().to_string());
+    print_kv("Aggressive (1.5x ATR)", &format!("{}{:.2} ({:.2}% risk)", csym, aggressive, ((entry_price - aggressive) / entry_price) * 100.0).red().to_string());
+
+    // Percentage-based
+    print_section("Percentage-Based");
+    for pct in [2.0, 3.0, 5.0, 8.0] {
+        let stop = entry_price * (1.0 - pct / 100.0);
+        print_kv(&format!("{}% Stop", pct), &format!("{}{:.2}", csym, stop));
+    }
+
+    // Chandelier exit
+    if let Some(chandelier) = technical::chandelier_exit(&highs, atr, 3.0) {
+        print_section("Chandelier Exit (3x ATR)");
+        print_kv("Trailing Stop", &format!("{}{:.2}", csym, chandelier));
+    }
+
+    // Target prices (reward ratios)
+    print_section("Target Prices (from entry)");
+    let risk = entry_price - moderate;
+    for rr in [1.5, 2.0, 3.0] {
+        let target = entry_price + risk * rr;
+        print_kv(&format!("R:R 1:{:.1}", rr), &format!("{}{:.2} (+{:.2}%)", csym, target, ((target - entry_price) / entry_price) * 100.0).green().to_string());
+    }
+    println!();
+    Ok(())
+}
+
+// ── 5. Peers Comparison ──
+
+pub async fn cmd_peers(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let quotes = client.get_quote(&[&resolved]).await?;
+    let q = quotes.first().context("Symbol not found")?;
+    let sector = q.sector.as_deref().unwrap_or("Unknown");
+
+    // Get all popular stocks and filter by same sector
+    let all_symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let all_refs: Vec<&str> = all_symbols.to_vec();
+    let all_quotes = client.get_quote(&all_refs).await?;
+    let mut peers: Vec<&crate::api::Quote> = all_quotes.iter().filter(|p| p.sector.as_deref() == Some(sector) && p.symbol.as_deref() != Some(&resolved)).collect();
+    peers.sort_by(|a, b| b.market_cap.unwrap_or(0.0).partial_cmp(&a.market_cap.unwrap_or(0.0)).unwrap());
+
+    print_header(&format!("Peer Comparison: {} ({})", resolved, sector));
+
+    // Include the target stock first
+    let mut all_peers = vec![q];
+    all_peers.extend(peers.iter().take(8).copied());
+
+    println!("  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}", "Symbol".bold(), "Price".bold(), "P/E".bold(), "P/B".bold(), "Chg%".bold(), "Mkt Cap".bold());
+    println!("  {}", "─".repeat(62).dimmed());
+
+    for p in &all_peers {
+        let sym = p.symbol.as_deref().unwrap_or("???");
+        let cur = p.currency.as_deref();
+        let is_target = sym == resolved;
+        let name = if is_target { format!("{} ←", sym).cyan().bold().to_string() } else { sym.cyan().to_string() };
+        let pct = p.regular_market_change_percent.unwrap_or(0.0);
+        let pct_str = if pct >= 0.0 { format!("+{:.2}%", pct).green().to_string() } else { format!("{:.2}%", pct).red().to_string() };
+        println!("  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}", name,
+            format_price(p.regular_market_price.unwrap_or(0.0), cur),
+            p.trailing_pe.map_or("—".into(), |v| format!("{:.1}", v)),
+            p.price_to_book.map_or("—".into(), |v| format!("{:.1}", v)),
+            pct_str,
+            p.market_cap.map_or("—".into(), |v| format_large_number(v, cur)));
+    }
+    if peers.is_empty() { println!("\n  {}", "No peers found in the same sector.".dimmed()); }
+    println!();
+    Ok(())
+}
+
+// ── 6. Dividends ──
+
+pub async fn cmd_dividends(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let quotes = client.get_quote(&[&resolved]).await?;
+    let q = quotes.first().context("Symbol not found")?;
+    let cur = q.currency.as_deref();
+    let csym = market::currency_symbol(cur);
+
+    print_header(&format!("Dividend Analysis: {}", resolved));
+    let price = q.regular_market_price.unwrap_or(0.0);
+    print_kv("Price", &format_price(price, cur));
+
+    let div_yield = q.trailing_annual_dividend_yield.unwrap_or(0.0);
+    let div_rate = q.trailing_annual_dividend_yield.unwrap_or(0.0) * price;
+    if div_yield > 0.0 {
+        print_kv("Annual Dividend", &format!("{}{:.2}/share", csym, div_rate));
+        print_kv("Dividend Yield", &format!("{:.2}%", div_yield * 100.0).green().to_string());
+
+        // Dividend income projection
+        print_section("Income Projection");
+        for investment in [100000.0, 500000.0, 1000000.0] {
+            let shares = (investment / price).floor();
+            let annual_income = shares * div_rate;
+            let monthly = annual_income / 12.0;
+            print_kv(&format!("{}{:.0} invested", csym, investment), &format!("{}{:.0}/year ({}{:.0}/month)", csym, annual_income, csym, monthly));
+        }
+
+        // DRIP projection (dividend reinvestment)
+        print_section("DRIP Growth (10 years)");
+        let mut shares = 1000.0 / price * price; // normalized to 1000 units of currency
+        let initial_shares = shares;
+        for year in 1..=10 {
+            let div_income = shares * div_rate;
+            let new_shares = div_income / price;
+            shares += new_shares;
+            if year == 1 || year == 5 || year == 10 {
+                let growth = ((shares / initial_shares) - 1.0) * 100.0;
+                print_kv(&format!("Year {}", year), &format!("{:.2} shares (+{:.1}% from DRIP)", shares, growth));
+            }
+        }
+    } else {
+        println!("  {}", "This stock does not pay dividends.".dimmed());
+    }
+    println!();
+    Ok(())
+}
+
+// ── 7. Insider Activity (via Yahoo search news) ──
+
+pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let quotes = client.get_quote(&[&resolved]).await?;
+    let q = quotes.first().context("Symbol not found")?;
+    let name = q.short_name.as_deref().or(q.long_name.as_deref()).unwrap_or("Unknown");
+
+    // Yahoo doesn't have a free insider endpoint, but we can show key holder metrics
+    print_header(&format!("Insider & Institutional: {}", resolved));
+    print_kv("Company", name);
+    print_kv("Price", &format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref()));
+
+    // Show what we have from the quote
+    if let Some(rec) = q.recommendation_mean { print_kv("Analyst Consensus", &sentiment_label(rec)); }
+    if let Some(n) = q.number_of_analyst_opinions { print_kv("# Analysts", &n.to_string()); }
+    if let Some(target) = q.target_mean_price {
+        let upside = q.regular_market_price.map(|p| ((target - p) / p) * 100.0).unwrap_or(0.0);
+        print_kv("Target Price", &format!("{}{:.2} ({:+.1}%)", market::currency_symbol(q.currency.as_deref()), target, upside));
+    }
+
+    // Fetch insider-related news
+    let search_url = format!("https://query2.finance.yahoo.com/v1/finance/search?q={} insider&quotesCount=0&newsCount=8", resolved);
+    if let Ok(resp) = client.raw_get(&search_url).await {
+        if let Some(news) = resp.get("news").and_then(|n| n.as_array()) {
+            if !news.is_empty() {
+                print_section("Recent Insider News");
+                for item in news.iter().take(5) {
+                    let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                    let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("");
+                    if !title.is_empty() {
+                        println!("  {} {}", "●".cyan(), title.bold());
+                        println!("    {} {}", "└".dimmed(), publisher.dimmed());
+                    }
+                }
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+// ── 8. IPO Calendar ──
+
+pub async fn cmd_ipo() -> Result<()> {
+    let client = YahooClient::new().await?;
+    let search_url = "https://query2.finance.yahoo.com/v1/finance/search?q=IPO&quotesCount=0&newsCount=15";
+    let resp = client.raw_get(search_url).await.context("Failed to fetch IPO news")?;
+
+    print_header("IPO Calendar & News");
+
+    if let Some(news) = resp.get("news").and_then(|n| n.as_array()) {
+        if news.is_empty() { println!("  {}", "No IPO news found.".dimmed()); }
+        for item in news.iter().take(12) {
+            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
+            let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("");
+            let ts = item.get("providerPublishTime").and_then(|t| t.as_i64())
+                .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+                .map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+            if !title.is_empty() {
+                println!();
+                println!("  {} {}", "●".cyan(), title.bold());
+                println!("    {} {} · {}", "└".dimmed(), publisher.dimmed(), ts.dimmed());
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+// ── 9. Options Overview (Put/Call data from quote) ──
+
+pub async fn cmd_options(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let quotes = client.get_quote(&[&resolved]).await?;
+    let q = quotes.first().context("Symbol not found")?;
+    let cur = q.currency.as_deref();
+    let csym = market::currency_symbol(cur);
+    let price = q.regular_market_price.unwrap_or(0.0);
+
+    print_header(&format!("Options Overview: {}", resolved));
+    print_kv("Spot Price", &format_price(price, cur));
+
+    // Use beta and volatility as implied vol proxy
+    if let Some(beta) = q.beta { print_kv("Beta", &format!("{:.2}", beta)); }
+
+    // Fetch 1mo data for realized vol
+    let chart = client.get_chart(&resolved, "1mo", "1d").await?;
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    if let Some(vol) = technical::annualized_volatility(&closes) {
+        print_kv("Realized Vol (1M)", &format!("{:.1}%", vol * 100.0));
+        // Estimate option prices using simplified Black-Scholes-ish approach
+        let daily_move = vol / (252.0_f64).sqrt();
+        print_section("Expected Moves");
+        for days in [1, 5, 10, 30] {
+            let move_pct = daily_move * (days as f64).sqrt() * price;
+            print_kv(&format!("{}-day move", days), &format!("+/- {}{:.2} ({:.2}%)", csym, move_pct, (move_pct / price) * 100.0));
+        }
+
+        print_section("Suggested Strike Prices");
+        let otm_pct = [2.0, 5.0, 10.0];
+        println!("  {:<10} {:>14} {:>14}", "Distance".bold(), "Call Strike".bold(), "Put Strike".bold());
+        println!("  {}", "─".repeat(40).dimmed());
+        for pct in otm_pct {
+            let call = price * (1.0 + pct / 100.0);
+            let put = price * (1.0 - pct / 100.0);
+            println!("  {:<10} {:>14} {:>14}", format!("{}% OTM", pct), format!("{}{:.2}", csym, call).green(), format!("{}{:.2}", csym, put).red());
+        }
+    }
+    println!("\n  {}", "For full options chain, check your broker platform.".dimmed().italic());
+    println!();
+    Ok(())
+}
+
+// ── 10. Fibonacci Levels (standalone) ──
+
+pub async fn cmd_fibs(symbol: &str, market: Market) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    let client = YahooClient::new().await?;
+    let chart = client.get_chart(&resolved, "6mo", "1d").await?;
+    let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
+    let csym = market::currency_symbol(cur);
+    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    if closes.len() < 20 { println!("{}", "Not enough data.".red()); return Ok(()); }
+
+    let current = *closes.last().unwrap();
+
+    // Find swing points from different lookbacks
+    print_header(&format!("Fibonacci Retracement: {}", resolved));
+    println!("  Current: {}\n", format_price(current, cur).bold());
+
+    for (lookback, label) in [(30, "1 Month"), (60, "3 Month"), (120, "6 Month")] {
+        let lb = lookback.min(highs.len());
+        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, lb) {
+            let fibs = technical::fibonacci_levels(sh, sl);
+            print_section(&format!("{} Swing ({}{:.2} → {}{:.2})", label, csym, sh, csym, sl));
+            let levels = [("0.0% (High)", sh), ("23.6%", fibs[0]), ("38.2%", fibs[1]), ("50.0%", fibs[2]), ("61.8%", fibs[3]), ("78.6%", fibs[4]), ("100% (Low)", sl)];
+            for (name, val) in &levels {
+                let marker = if (current - val).abs() / current < 0.01 { " ← YOU ARE HERE".yellow().bold().to_string() } else { String::new() };
+                print_kv(name, &format!("{}{:.2}{}", csym, val, marker));
+            }
+        }
+    }
+    println!();
+    Ok(())
+}

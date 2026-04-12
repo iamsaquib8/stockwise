@@ -199,6 +199,43 @@ enum Commands {
         country: String,
     },
 
+    // ── Advanced Stock Features ──
+    /// Support & resistance levels (pivot points + Fibonacci)
+    Support { symbol: String },
+
+    /// Volume profile analysis (OBV, A/D line, volume stats)
+    #[command(alias = "vol")]
+    Volume { symbol: String },
+
+    /// Detect price gaps (unfilled/filled)
+    Gaps { symbol: String },
+
+    /// Stop-loss calculator (ATR-based, percentage, Chandelier exit)
+    Stoploss {
+        symbol: String,
+        /// Entry price (defaults to current price)
+        #[arg(short, long)]
+        entry: Option<f64>,
+    },
+
+    /// Compare against industry peers automatically
+    Peers { symbol: String },
+
+    /// Dividend analysis with income projection and DRIP growth
+    Dividends { symbol: String },
+
+    /// Insider activity and analyst consensus
+    Insider { symbol: String },
+
+    /// IPO calendar and news
+    Ipo,
+
+    /// Options overview (expected moves, strike suggestions)
+    Options { symbol: String },
+
+    /// Fibonacci retracement levels across multiple timeframes
+    Fibs { symbol: String },
+
     /// Angel One trading: setup, buy, sell, holdings, orders
     Trade {
         /// Action: setup, config, holdings, positions, buy, sell, limit, orders
@@ -261,6 +298,16 @@ async fn main() {
         Commands::Import { source, file } => commands::cmd_import(&source, &file, m).await,
         Commands::Longterm { amount } => commands::cmd_longterm(amount, m).await,
         Commands::Tax { country } => commands::cmd_tax(&country, m).await,
+        Commands::Support { symbol } => commands::cmd_support(&symbol, m).await,
+        Commands::Volume { symbol } => commands::cmd_volume(&symbol, m).await,
+        Commands::Gaps { symbol } => commands::cmd_gaps(&symbol, m).await,
+        Commands::Stoploss { symbol, entry } => commands::cmd_stoploss(&symbol, entry, m).await,
+        Commands::Peers { symbol } => commands::cmd_peers(&symbol, m).await,
+        Commands::Dividends { symbol } => commands::cmd_dividends(&symbol, m).await,
+        Commands::Insider { symbol } => commands::cmd_insider(&symbol, m).await,
+        Commands::Ipo => commands::cmd_ipo().await,
+        Commands::Options { symbol } => commands::cmd_options(&symbol, m).await,
+        Commands::Fibs { symbol } => commands::cmd_fibs(&symbol, m).await,
         Commands::Trade { action, symbol, qty, price } => {
             commands::cmd_trade(&action, symbol.as_deref(), qty, price, m).await
         }

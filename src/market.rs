@@ -102,3 +102,37 @@ pub const SCREENER_CATEGORIES: &[&str] = &[
     "momentum",
     "bluechip",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_symbol_us() {
+        assert_eq!(resolve_symbol("aapl", Market::Us), "AAPL");
+        assert_eq!(resolve_symbol("MSFT", Market::Us), "MSFT");
+    }
+
+    #[test]
+    fn test_resolve_symbol_india() {
+        assert_eq!(resolve_symbol("reliance", Market::In), "RELIANCE.NS");
+        assert_eq!(resolve_symbol("TCS", Market::In), "TCS.NS");
+        // Already suffixed
+        assert_eq!(resolve_symbol("RELIANCE.NS", Market::In), "RELIANCE.NS");
+        assert_eq!(resolve_symbol("RELIANCE.BO", Market::In), "RELIANCE.BO");
+    }
+
+    #[test]
+    fn test_currency_symbol() {
+        assert_eq!(currency_symbol(Some("INR")), "\u{20B9}");
+        assert_eq!(currency_symbol(Some("USD")), "$");
+        assert_eq!(currency_symbol(None), "$");
+    }
+
+    #[test]
+    fn test_is_inr() {
+        assert!(is_inr(Some("INR")));
+        assert!(!is_inr(Some("USD")));
+        assert!(!is_inr(None));
+    }
+}

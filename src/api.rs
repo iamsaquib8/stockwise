@@ -169,6 +169,8 @@ impl YahooClient {
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .cookie_store(true)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("Failed to build HTTP client")?;
 
