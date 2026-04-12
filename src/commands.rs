@@ -2348,70 +2348,97 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
     let sym_refs: Vec<&str> = symbols.to_vec();
     let quotes = client.get_quote(&sym_refs).await?;
     let csym = match market { Market::Us => "$", Market::In => "₹" };
-
     let monthly = amount.unwrap_or(10000.0);
 
-    print_header(&format!("Long-Term Wealth Bot — {} Market", match market { Market::Us => "US", Market::In => "India" }));
-    println!("  {} Analyzing {} stocks for long-term wealth building...\n", "⟳".yellow(), quotes.len());
+    print_header(&format!("Long-Term Wealth Bot v2 — {} Market", match market { Market::Us => "US", Market::In => "India" }));
+    println!("  {} Scoring {} stocks across 6 pillars + Monte Carlo...\n", "⟳".yellow(), quotes.len());
 
-    let mut scores: Vec<longterm::LongTermScore> = quotes.iter().map(|q| longterm::score_for_longterm(q)).collect();
+    // Fetch 1Y chart data for volatility analysis (for top candidates)
+    let mut scores: Vec<longterm::LongTermScore> = Vec::new();
+    for q in &quotes {
+        let sym = q.symbol.as_deref().unwrap_or("");
+        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
+            c.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
+        });
+        scores.push(longterm::score_for_longterm(q, hist.as_deref()));
+    }
     scores.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap());
 
-    // Top picks table
-    print_section("Top Long-Term Picks");
-    println!("  {:<14} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>8}",
-        "Symbol".bold(), "Val".bold(), "Grow".bold(), "Qual".bold(), "Mom".bold(), "Div".bold(), "Total".bold(), "5Y Est".bold());
-    println!("  {}", "─".repeat(72).dimmed());
+    // Summary table with all 6 pillars
+    print_section("Ranking (6-Pillar Score)");
+    println!("  {:<14} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>8}",
+        "Symbol".bold(), "Val".bold(), "Grw".bold(), "Qua".bold(), "Mom".bold(), "Div".bold(), "Saf".bold(), "Total".bold(), "Moat".bold(), "Risk".bold());
+    println!("  {}", "─".repeat(78).dimmed());
 
-    for s in scores.iter().take(10) {
-        let score_color = if s.total_score >= 70.0 { format!("{:.0}", s.total_score).green().bold().to_string() }
+    for s in scores.iter().take(12) {
+        let sc = if s.total_score >= 70.0 { format!("{:.0}", s.total_score).green().bold().to_string() }
             else if s.total_score >= 55.0 { format!("{:.0}", s.total_score).yellow().to_string() }
             else { format!("{:.0}", s.total_score).dimmed().to_string() };
-        let ret5y = if s.projected_5y_return >= 50.0 { format!("+{:.0}%", s.projected_5y_return).green().to_string() }
-            else { format!("+{:.0}%", s.projected_5y_return).to_string() };
-        println!("  {:<14} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>7} {:>8}",
-            s.symbol.cyan(), s.valuation_score, s.growth_score, s.quality_score, s.momentum_score, s.dividend_score, score_color, ret5y);
+        let moat_str = match s.moat { longterm::MoatRating::Wide => "Wide".green().to_string(), longterm::MoatRating::Narrow => "Nar".yellow().to_string(), longterm::MoatRating::None => "—".dimmed().to_string() };
+        let risk_str = match s.risk_tier { longterm::RiskTier::Conservative => "Cons".green().to_string(), longterm::RiskTier::Moderate => "Mod".yellow().to_string(), longterm::RiskTier::Aggressive => "Aggr".red().to_string() };
+        println!("  {:<14} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>6} {:>6} {:>8}",
+            s.symbol.cyan(), s.valuation_score, s.growth_score, s.quality_score, s.momentum_score, s.dividend_score, s.safety_score, sc, moat_str, risk_str);
     }
 
     // Detailed top 3
     for (i, s) in scores.iter().take(3).enumerate() {
         println!();
-        print_section(&format!("#{} {} — {}", i + 1, s.symbol, s.name));
+        print_section(&format!("#{} {} — {} [{}]", i + 1, s.symbol, s.name, s.moat));
         print_kv("Price", &format!("{}{:.2}", csym, s.price));
-        print_kv("Score", &format!("{:.0}/100", s.total_score).bold().to_string());
+        print_kv("Score", &format!("{:.0}/100 ({})", s.total_score, s.risk_tier).bold().to_string());
+        if let Some(peg) = s.peg_ratio { print_kv("PEG Ratio", &format!("{:.2}", peg)); }
+        if let Some(ey) = s.earnings_yield { print_kv("Earnings Yield", &format!("{:.1}%", ey)); }
 
         if !s.reasons.is_empty() {
             println!();
-            println!("  {} {}", "Strengths:".green(), "");
             for r in &s.reasons { println!("    {} {}", "✓".green(), r); }
         }
         if !s.risk_flags.is_empty() {
-            println!("  {} {}", "Risks:".red(), "");
             for r in &s.risk_flags { println!("    {} {}", "✗".red(), r); }
         }
 
-        println!();
-        print_kv("Est. 5Y Return", &format!("+{:.1}%", s.projected_5y_return));
-        let investment_5y = monthly * 60.0;
-        let est_value = investment_5y * (1.0 + s.projected_5y_return / 100.0);
-        print_kv(&format!("If SIP {}{}/mo × 5Y", csym, monthly), &format!("{}{:.0} → {}{:.0}", csym, investment_5y, csym, est_value).green().to_string());
+        print_section("Projections");
+        print_kv("Est. Annual Return", &format!("{:.1}%", s.est_annual_return));
+        print_kv("5-Year Projection", &format!("+{:.0}%", s.projected_5y_return).green().to_string());
+        print_kv("10-Year Projection", &format!("+{:.0}%", s.projected_10y_return).green().to_string());
+        if s.drip_multiplier_10y > 1.01 {
+            print_kv("DRIP Boost (10Y)", &format!("{:.2}x from dividend reinvestment", s.drip_multiplier_10y));
+        }
+        print_kv(&format!("SIP for {}10L/10Y", csym), &format!("{}{:.0}/month", csym, s.sip_monthly_10l_10y));
+
+        // Monte Carlo
+        print_section("Monte Carlo (1000 sims, 5Y)");
+        let mc_bar = |val: f64| -> String { if val >= 0.0 { format!("+{:.0}%", val).green().to_string() } else { format!("{:.0}%", val).red().to_string() } };
+        print_kv("Best case (P90)", &mc_bar(s.monte_carlo_p90));
+        print_kv("Median", &mc_bar(s.monte_carlo_median));
+        print_kv("Worst case (P10)", &mc_bar(s.monte_carlo_p10));
+
+        // SIP projection
+        let inv_5y = monthly * 60.0;
+        let est_5y = inv_5y * (1.0 + s.projected_5y_return / 100.0);
+        let inv_10y = monthly * 120.0;
+        let est_10y = inv_10y * (1.0 + s.projected_10y_return / 100.0) * s.drip_multiplier_10y;
+        print_section("SIP Calculator");
+        print_kv(&format!("{}{}/mo × 5Y", csym, monthly), &format!("{}{:.0} → {}{:.0}", csym, inv_5y, csym, est_5y).green().to_string());
+        print_kv(&format!("{}{}/mo × 10Y", csym, monthly), &format!("{}{:.0} → {}{:.0} (incl DRIP)", csym, inv_10y, csym, est_10y).green().bold().to_string());
     }
 
-    // Suggested portfolio allocation
+    // Portfolio allocation
     print_section("Suggested SIP Allocation");
     let top5: Vec<&longterm::LongTermScore> = scores.iter().take(5).collect();
-    let total_score: f64 = top5.iter().map(|s| s.total_score).sum();
+    let total_sc: f64 = top5.iter().map(|s| s.total_score).sum();
     println!("  Monthly budget: {}{:.0}\n", csym, monthly);
     for s in &top5 {
-        let pct = s.total_score / total_score;
+        let pct = s.total_score / total_sc;
         let alloc = monthly * pct;
         let bar_len = (pct * 30.0) as usize;
-        println!("  {:<14} {}{:>8.0} ({:>4.1}%) {}", s.symbol.cyan(), csym, alloc, pct * 100.0, "█".repeat(bar_len).green());
+        let moat_tag = match s.moat { longterm::MoatRating::Wide => " [Wide Moat]".green().to_string(), longterm::MoatRating::Narrow => " [Narrow]".yellow().to_string(), _ => String::new() };
+        println!("  {:<14} {}{:>8.0} ({:>4.1}%) {}{}", s.symbol.cyan(), csym, alloc, pct * 100.0, "█".repeat(bar_len).green(), moat_tag);
     }
 
     println!("\n  {}", "─".repeat(60).dimmed());
     println!("  {}", "Long-term investing involves risk. Diversify across asset classes.".dimmed().italic());
-    println!("  {}", "This is algorithmic analysis, NOT financial advice.".dimmed().italic());
+    println!("  {}", "Monte Carlo uses historical volatility. Past ≠ future.".dimmed().italic());
     println!();
     Ok(())
 }
