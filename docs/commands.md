@@ -8,10 +8,11 @@ Default market is India. Use `-m us` for US stocks.
 |---------|-------|-------------|
 | `quote <SYMBOLS...>` | `q` | Live price, volume, P/E, market cap, MAs, 52-week range |
 | `analyze <SYMBOL>` | `a` | Fundamental analysis: valuation, profitability, growth, analyst ratings, AI insights, verdict |
-| `technical <SYMBOL>` | `t` | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts, AI interpretation |
+| `technical <SYMBOL> [-p PERIOD]` | `t` | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts, AI interpretation. Default: 3mo |
 | `compare <SYMBOLS...>` | `c` | Side-by-side comparison across 16 metrics with AI verdict |
-| `history <SYMBOL> -p <PERIOD>` | | Price history with braille line chart, volume bars, SMA overlay. Periods: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `max` |
-| `deep <SYMBOL>` | | Everything about a stock in one command — fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights, AI analysis |
+| `history <SYMBOL> [-p PERIOD]` | | Price history with braille line chart, volume bars, SMA overlay. Default: 1mo |
+| `chart <SYMBOL>` | | Multi-timeframe charts (1W, 1M, 3M, 1Y at once) |
+| `deep <SYMBOL> [-p PERIOD]` | | Everything about a stock — fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights, AI. Default: 3mo |
 
 ## Market Intelligence
 
@@ -39,15 +40,16 @@ Default market is India. Use `-m us` for US stocks.
 
 | Command | Description |
 |---------|-------------|
-| `support <SYMBOL>` | Pivot points (R1-R3, S1-S3) + Fibonacci retracement levels |
-| `fibs <SYMBOL>` | Multi-timeframe Fibonacci (1M/3M/6M swings) with "you are here" marker |
-| `volume <SYMBOL>` | On-Balance Volume chart, A/D line, volume ratio, 40-day volume bars |
-| `gaps <SYMBOL>` | Detect unfilled/filled price gaps in last 3 months |
-| `stoploss <SYMBOL> --entry <PRICE>` | ATR-based (1.5x/2x/3x), percentage (2-8%), Chandelier exit, R:R targets |
+| `support <SYMBOL> [-p PERIOD]` | Pivot points (R1-R3, S1-S3) + Fibonacci retracement levels |
+| `fibs <SYMBOL> [-p PERIOD]` | Fibonacci retracement levels with "you are here" marker |
+| `volume <SYMBOL> [-p PERIOD]` | On-Balance Volume chart, A/D line, volume ratio, volume bars |
+| `gaps <SYMBOL> [-p PERIOD]` | Detect unfilled/filled price gaps |
+| `stoploss <SYMBOL> [--entry PRICE] [-p PERIOD]` | ATR-based (1.5x/2x/3x), percentage, Chandelier exit, R:R targets |
+| `patterns <SYMBOL> [-p PERIOD]` | Candlestick pattern detection (doji, hammer, engulfing, morning star) |
+| `options <SYMBOL> [-p PERIOD]` | Expected moves (1/5/10/30 day), OTM strike suggestions |
 | `peers <SYMBOL>` | Auto-find same-sector peers, compare P/E, P/B, market cap |
 | `dividends <SYMBOL>` | Yield analysis, income projection (₹1L/5L/10L invested), 10Y DRIP growth |
 | `insider <SYMBOL>` | Analyst consensus + insider-related news |
-| `options <SYMBOL>` | Expected moves (1/5/10/30 day), OTM strike suggestions |
 | `ipo` | IPO calendar and latest IPO news |
 
 ## Wealth Generation
@@ -99,6 +101,20 @@ Default market is India. Use `-m us` for US stocks.
 | `daemon intraday [CAPITAL]` | Continuous intraday worker (9AM–3:30PM IST). Scans, enters, monitors every 60s, trails stops, books T1 at 50%, squares off at 3:15, settles EOD. Risk: 1%/trade, 3% daily kill switch |
 | `daemon longterm` | Daily post-market analysis: score 30 stocks, check portfolio, alerts, tax harvest, AI memo |
 
+## Market Analysis
+
+| Command | Description |
+|---------|-------------|
+| `rotation` | Sector rotation signals — overweight/underweight vs 50-day MA |
+| `matrix` | Quality-vs-Growth 4-quadrant categorization (Stars/Quality/Growth/Laggards) |
+| `surprise` | Earnings momentum — accelerating vs decelerating EPS |
+| `divcal` | Dividend dashboard — yield ranking + income projection for portfolio |
+| `pcorr` | Portfolio correlation matrix + diversification warnings |
+| `returns <SYMBOL>` | All-timeframe returns (1W to 5Y) with CAGR and ₹1L growth |
+| `heatmap` | Visual market heatmap of all 30 stocks |
+| `sectorcmp <SECTOR1> <SECTOR2>` | Head-to-head sector comparison |
+| `whatif <SYMBOL> <AMOUNT> <DATE>` | "What if I invested ₹X on YYYY-MM-DD?" calculator |
+
 ## AI Reports
 
 | Command | Description |
@@ -107,3 +123,5 @@ Default market is India. Use `-m us` for US stocks.
 | `report longterm` | AI investment memo |
 | `report portfolio` | AI portfolio review |
 | `report <SYMBOL>` | AI single-stock analysis |
+
+All chart-based commands accept `-p <PERIOD>` flag. Available periods: `1d`, `5d`, `1w`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `max`.

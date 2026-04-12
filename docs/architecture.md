@@ -38,6 +38,34 @@ User Input → clap CLI → commands.rs → api.rs → Yahoo Finance
                                    → portfolio.rs / watchlist.rs (persistence)
 ```
 
+## Caching
+
+Hybrid cache: Redis (primary) + in-memory (fallback).
+
+```
+Request → Check Redis → Check Memory → Fetch Yahoo → Store Redis + Memory → Return
+```
+
+| Data | TTL | Why |
+|------|-----|-----|
+| Quotes | 30s | Live prices, short freshness |
+| Charts (1d/5d) | 60s | Intraday data |
+| Charts (1mo/3mo) | 5 min | Historical, moderate |
+| Charts (1y+) | 10 min | Rarely changes |
+| Search | 2 min | Static-ish |
+
+Redis keys use `stockwise:` prefix. Cache persists across CLI invocations — run `stockwise deep RELIANCE`, then `stockwise technical RELIANCE` and chart data comes from Redis.
+
+```bash
+brew services start redis       # Enable Redis caching
+redis-cli keys "stockwise:*"    # See cached entries
+redis-cli flushdb               # Clear cache
+```
+
+Falls back to in-memory HashMap silently if Redis isn't running.
+
+Rate limiting: 200ms minimum between requests (5 req/sec). Retry: 3 attempts with exponential backoff. HTTP 429: aggressive backoff (2s, 4s, 8s).
+
 ## Data Storage
 
 Location: `~/Library/Application Support/stockwise/` (macOS) or `~/.local/share/stockwise/` (Linux)
@@ -57,6 +85,7 @@ Location: `~/Library/Application Support/stockwise/` (macOS) or `~/.local/share/
 |-------|---------|
 | `clap` | CLI argument parsing (derive macros) |
 | `reqwest` | HTTP client (Yahoo Finance, Angel One, Ollama) |
+| `redis` | Redis caching (optional, falls back to in-memory) |
 | `tokio` | Async runtime |
 | `serde` / `serde_json` | JSON serialization |
 | `colored` | Terminal colors |

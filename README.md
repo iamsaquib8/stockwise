@@ -2,7 +2,7 @@
 
 Autonomous stock market CLI built in Rust. Supports **US** and **Indian** markets.
 
-**50+ commands** | **Daemon workers** | **Live trading** | **AI-powered (Ollama)** | **61 tests**
+**57 commands** | **Daemon workers** | **Live trading** | **AI (Ollama)** | **Redis cache** | **89 tests**
 
 ## Install
 
@@ -27,8 +27,9 @@ stockwise daemon intraday 25000           # Run the intraday bot all day
 |----------|----------|
 | **Analysis** | `quote`, `analyze`, `technical`, `compare`, `history`, `deep`, `risk`, `correlate`, `timeframes`, `picks`, `earnings` |
 | **Market** | `markets`, `movers`, `sectors`, `news`, `search`, `sentiment` |
-| **Screening** | `screen`, `support`, `fibs`, `volume`, `gaps`, `stoploss`, `peers`, `dividends`, `options`, `insider`, `ipo` |
+| **Screening** | `screen`, `support`, `fibs`, `volume`, `gaps`, `stoploss`, `peers`, `dividends`, `options`, `insider`, `ipo`, `patterns` |
 | **Bots** | `intraday` (9-strategy), `longterm` (6-pillar + Monte Carlo), `forecast`, `backtest`, `sip` |
+| **Market** | `rotation`, `matrix`, `surprise`, `divcal`, `pcorr`, `returns`, `heatmap`, `sectorcmp`, `whatif` |
 | **Daemon** | `daemon intraday` (continuous 9AM–3:30PM worker), `daemon longterm` (daily post-market analysis) |
 | **Trading** | `trade buy/sell/limit/holdings/orders` (Angel One), `import kite/indmoney/csv` |
 | **Portfolio** | `portfolio`, `watch`, `alert`, `export`, `wealth`, `rebalance`, `harvest`, `tax`, `dashboard` |
