@@ -11,6 +11,7 @@ mod angel;
 mod intraday;
 mod longterm;
 mod market;
+mod simulator;
 mod portfolio;
 mod technical;
 mod watchlist;
@@ -171,6 +172,17 @@ enum Commands {
     #[command(alias = "bot")]
     Intraday { amount: f64, target: f64 },
 
+    /// Paper trading simulator — test bot without real money
+    Sim {
+        /// Action: start, status, settle, history, reset
+        #[arg(default_value = "help")]
+        action: String,
+        /// Capital amount (for start)
+        amount: Option<f64>,
+        /// Target % (for start)
+        target: Option<f64>,
+    },
+
     /// AI-powered reports (uses local Ollama)
     Report {
         /// Type: intraday, longterm, portfolio, or a stock symbol
@@ -299,6 +311,7 @@ async fn main() {
         }
         Commands::Forecast { symbol, days } => commands::cmd_forecast(&symbol, days, m).await,
         Commands::Intraday { amount, target } => commands::cmd_intraday(amount, target, m).await,
+        Commands::Sim { action, amount, target } => commands::cmd_sim(&action, amount, target, m).await,
         Commands::Report { what } => commands::cmd_report(&what, m).await,
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance => commands::cmd_rebalance(&[], m).await,
