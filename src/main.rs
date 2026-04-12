@@ -6,6 +6,7 @@ mod charts;
 mod commands;
 mod display;
 mod insights;
+mod ai;
 mod angel;
 mod intraday;
 mod longterm;
@@ -170,6 +171,12 @@ enum Commands {
     #[command(alias = "bot")]
     Intraday { amount: f64, target: f64 },
 
+    /// AI-powered reports (uses local Ollama)
+    Report {
+        /// Type: intraday, longterm, portfolio, or a stock symbol
+        what: String,
+    },
+
     /// Track portfolio value over time (run daily)
     Wealth,
 
@@ -291,7 +298,8 @@ async fn main() {
             commands::cmd_sip(&symbol, amount, &period, m).await
         }
         Commands::Forecast { symbol, days } => commands::cmd_forecast(&symbol, days, m).await,
-        Commands::Intraday { amount, target } => commands::cmd_intraday(amount, target).await,
+        Commands::Intraday { amount, target } => commands::cmd_intraday(amount, target, m).await,
+        Commands::Report { what } => commands::cmd_report(&what, m).await,
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance => commands::cmd_rebalance(&[], m).await,
         Commands::Harvest => commands::cmd_harvest(m).await,
