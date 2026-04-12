@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const OLLAMA_URL: &str = "http://localhost:11434";
-const DEFAULT_MODEL: &str = "gemma3:4b";
+const DEFAULT_MODEL: &str = "gemma3:12b";
 
 #[derive(Serialize)]
 struct OllamaRequest {
@@ -135,6 +135,63 @@ Write a concise investment memo covering:
 Write like a fund manager's note to clients. Be specific and actionable."#,
             report_data
         );
+        self.generate(&prompt).await
+    }
+
+    /// Quick 2-3 sentence insight for any data context (fast, for inline use)
+    pub async fn quick_insight(&self, context: &str) -> Result<String> {
+        let prompt = format!(
+            "You are a stock analyst. Given this data, give a 2-3 sentence actionable insight. Be specific with numbers. No disclaimers.\n\n{}",
+            context
+        );
+        self.generate(&prompt).await
+    }
+
+    /// Technical analysis interpretation
+    pub async fn interpret_technicals(&self, data: &str) -> Result<String> {
+        let prompt = format!(
+r#"You are a technical analyst. Interpret these indicators together and give a clear trade signal.
+
+{}
+
+In 3-4 sentences:
+1. What do these indicators mean together? (confluent or conflicting?)
+2. What's the most likely price action?
+3. Specific entry/exit suggestion
+Be direct."#, data);
+        self.generate(&prompt).await
+    }
+
+    /// Compare two or more stocks
+    pub async fn compare_stocks(&self, data: &str) -> Result<String> {
+        let prompt = format!(
+r#"You are an investment analyst. Compare these stocks and pick a winner.
+
+{}
+
+In 3-4 sentences: Which stock is the best investment right now and why? Be specific about valuation, growth, and risk. Give a clear verdict."#, data);
+        self.generate(&prompt).await
+    }
+
+    /// Backtest interpretation
+    pub async fn interpret_backtest(&self, data: &str) -> Result<String> {
+        let prompt = format!(
+r#"You are a quantitative analyst. Interpret these backtest results.
+
+{}
+
+In 3-4 sentences: Is this strategy viable? What market conditions would it work best in? Key risks? Would you deploy real capital on it?"#, data);
+        self.generate(&prompt).await
+    }
+
+    /// Screen results analysis
+    pub async fn analyze_screen(&self, data: &str) -> Result<String> {
+        let prompt = format!(
+r#"You are a stock screener analyst. Analyze these screened stocks.
+
+{}
+
+In 3-4 sentences: Which 2-3 stocks stand out most? Any value traps to avoid? What makes the top picks compelling?"#, data);
         self.generate(&prompt).await
     }
 

@@ -589,3 +589,75 @@ pub fn allocation_chart(items: &[(&str, f64)]) -> Vec<String> {
 
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_line_chart_empty() {
+        let result = line_chart(&[], 50, 8, "green", "Test");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_line_chart_single_point() {
+        let result = line_chart(&[100.0], 50, 8, "green", "Test");
+        assert!(result.len() > 1);
+    }
+
+    #[test]
+    fn test_line_chart_renders() {
+        let data: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0).collect();
+        let result = line_chart(&data, 40, 6, "green", "Price");
+        assert!(result.len() >= 6); // at least height rows
+    }
+
+    #[test]
+    fn test_dual_line_chart() {
+        let a: Vec<f64> = (0..50).map(|i| 100.0 + i as f64).collect();
+        let b: Vec<f64> = (0..50).map(|i| 110.0 + i as f64 * 0.8).collect();
+        let result = dual_line_chart(&a, &b, 40, 6, "Test", "A", "B");
+        assert!(result.len() >= 6);
+    }
+
+    #[test]
+    fn test_volume_bars() {
+        let vols = vec![100, 200, 150, 300, 250, 180, 220];
+        let result = volume_bars(&vols, 7, 3);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_rsi_gauge() {
+        let result = rsi_gauge(50.0);
+        assert!(!result.is_empty());
+        let result_low = rsi_gauge(20.0);
+        assert!(!result_low.is_empty());
+        let result_high = rsi_gauge(80.0);
+        assert!(!result_high.is_empty());
+    }
+
+    #[test]
+    fn test_allocation_chart() {
+        let items = vec![("AAPL", 5000.0), ("MSFT", 3000.0), ("GOOG", 2000.0)];
+        let result = allocation_chart(&items);
+        assert!(result.len() > 3); // bar + legend items
+    }
+
+    #[test]
+    fn test_braille_canvas_set() {
+        let mut canvas = BrailleCanvas::new(5, 5);
+        canvas.set(0, 0);
+        canvas.set(1, 1);
+        let rendered = canvas.render();
+        assert_eq!(rendered.len(), 5);
+    }
+
+    #[test]
+    fn test_bar_chart() {
+        let items = vec![("Tech", 2.5, true), ("Energy", -1.2, false), ("Finance", 0.8, true)];
+        let result = bar_chart(&items, 30);
+        assert_eq!(result.len(), 3);
+    }
+}

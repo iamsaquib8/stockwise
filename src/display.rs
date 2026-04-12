@@ -147,3 +147,78 @@ pub fn sentiment_label(recommendation_mean: f64) -> String {
         _ => "Strong Sell".red().bold().to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_price_usd() {
+        assert_eq!(format_price(100.50, Some("USD")), "$100.50");
+        assert_eq!(format_price(0.0, None), "$0.00");
+    }
+
+    #[test]
+    fn test_format_price_inr() {
+        let result = format_price(1350.75, Some("INR"));
+        assert!(result.contains("1350.75"));
+        assert!(result.contains("\u{20B9}"));
+    }
+
+    #[test]
+    fn test_format_large_number_usd() {
+        let result = format_large_number(1_500_000_000_000.0, Some("USD"));
+        assert!(result.contains("1.50T"));
+        let result = format_large_number(2_500_000_000.0, Some("USD"));
+        assert!(result.contains("2.50B"));
+        let result = format_large_number(3_500_000.0, Some("USD"));
+        assert!(result.contains("3.50M"));
+    }
+
+    #[test]
+    fn test_format_large_number_inr() {
+        let result = format_large_number(18_280_000_000_000.0, Some("INR"));
+        assert!(result.contains("L Cr"));
+        let result = format_large_number(50_000_000_000.0, Some("INR"));
+        assert!(result.contains("K Cr"));
+        let result = format_large_number(150_000_000.0, Some("INR"));
+        assert!(result.contains("Cr"));
+    }
+
+    #[test]
+    fn test_format_volume() {
+        assert_eq!(format_volume(1_500_000_000), "1.50B");
+        assert_eq!(format_volume(25_000_000), "25.00M");
+        assert_eq!(format_volume(1_500), "1.5K");
+        assert_eq!(format_volume(500), "500");
+    }
+
+    #[test]
+    fn test_format_optional_f64() {
+        assert_eq!(format_optional_f64(Some(25.5), "x"), "25.50x");
+        assert_eq!(format_optional_f64(Some(3.14), ""), "3.14");
+    }
+
+    #[test]
+    fn test_format_optional_price() {
+        let result = format_optional_price(Some(100.0), Some("USD"));
+        assert!(result.contains("$100.00"));
+    }
+
+    #[test]
+    fn test_sparkline_empty() {
+        assert_eq!(sparkline(&[]), "");
+    }
+
+    #[test]
+    fn test_sparkline_constant() {
+        let result = sparkline(&[50.0, 50.0, 50.0]);
+        assert_eq!(result.chars().count(), 3);
+    }
+
+    #[test]
+    fn test_sparkline_increasing() {
+        let result = sparkline(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(result.chars().count(), 5);
+    }
+}

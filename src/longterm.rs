@@ -550,3 +550,97 @@ fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
 
     (median, p10, p90)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Quote;
+
+    fn mock_quote(pe: f64, fwd_pe: f64, margin: f64, roe: f64, div: f64) -> Quote {
+        let mut q = Quote::default();
+        q.symbol = Some("TEST.NS".into());
+        q.short_name = Some("Test Corp".into());
+        q.regular_market_price = Some(100.0);
+        q.trailing_pe = Some(pe);
+        q.forward_pe = Some(fwd_pe);
+        q.profit_margins = Some(margin);
+        q.return_on_equity = Some(roe);
+        q.trailing_annual_dividend_yield = Some(div);
+        q.market_cap = Some(500_000_000_000.0);
+        q
+    }
+
+    #[test]
+    fn test_high_quality_stock_scores_high() {
+        let q = mock_quote(12.0, 10.0, 0.25, 0.30, 0.035);
+        let score = score_for_longterm(&q, None);
+        assert!(score.total_score > 55.0, "High quality stock scored only {:.0}", score.total_score);
+    }
+
+    #[test]
+    fn test_expensive_unprofitable_scores_low() {
+        let q = mock_quote(60.0, 70.0, -0.05, -0.10, 0.0);
+        let score = score_for_longterm(&q, None);
+        assert!(score.total_score < 45.0, "Bad stock scored {:.0}", score.total_score);
+    }
+
+    #[test]
+    fn test_moat_detection() {
+        let q = mock_quote(15.0, 12.0, 0.30, 0.28, 0.02);
+        let score = score_for_longterm(&q, None);
+        assert!(score.moat == MoatRating::Wide || score.moat == MoatRating::Narrow,
+            "High margin + ROE should detect moat, got {:?}", score.moat);
+    }
+
+    #[test]
+    fn test_score_bounds() {
+        let q = mock_quote(20.0, 18.0, 0.15, 0.12, 0.015);
+        let score = score_for_longterm(&q, None);
+        assert!(score.total_score >= 0.0 && score.total_score <= 100.0);
+        assert!(score.valuation_score >= 0.0 && score.valuation_score <= 100.0);
+        assert!(score.growth_score >= 0.0 && score.growth_score <= 100.0);
+        assert!(score.quality_score >= 0.0 && score.quality_score <= 100.0);
+        assert!(score.safety_score >= 0.0 && score.safety_score <= 100.0);
+    }
+
+    #[test]
+    fn test_sip_calculation_positive() {
+        let q = mock_quote(15.0, 12.0, 0.20, 0.15, 0.02);
+        let score = score_for_longterm(&q, None);
+        assert!(score.sip_monthly_10l_10y > 0.0);
+        assert!(score.sip_monthly_10l_10y < 20000.0); // should be reasonable
+    }
+
+    #[test]
+    fn test_monte_carlo_produces_results() {
+        let q = mock_quote(15.0, 12.0, 0.20, 0.15, 0.02);
+        let closes: Vec<f64> = (0..252).map(|i| 100.0 + (i as f64 * 0.05).sin() * 10.0).collect();
+        let score = score_for_longterm(&q, Some(&closes));
+        assert!(score.monte_carlo_p90 > score.monte_carlo_p10, "P90 should be > P10");
+        assert!(score.monte_carlo_median > score.monte_carlo_p10);
+    }
+
+    #[test]
+    fn test_drip_multiplier() {
+        let q = mock_quote(15.0, 12.0, 0.20, 0.15, 0.04); // 4% dividend
+        let score = score_for_longterm(&q, None);
+        assert!(score.drip_multiplier_10y > 1.0, "DRIP should boost returns");
+        assert!(score.drip_multiplier_10y < 2.0, "10Y DRIP at 4% should be ~1.48");
+    }
+
+    #[test]
+    fn test_projected_returns_positive_for_good_stock() {
+        let q = mock_quote(12.0, 10.0, 0.25, 0.25, 0.03);
+        let score = score_for_longterm(&q, None);
+        assert!(score.projected_5y_return > 0.0);
+        assert!(score.projected_10y_return > score.projected_5y_return);
+    }
+
+    #[test]
+    fn test_simple_monte_carlo() {
+        let (median, p10, p90) = simple_monte_carlo(12.0, 0.25);
+        assert!(p90 > p10);
+        assert!(median > p10);
+        assert!(p90 > median);
+    }
+}

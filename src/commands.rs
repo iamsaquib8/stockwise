@@ -214,6 +214,17 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
     println!("{}", insights::overall_verdict(q));
     println!("{}", "─".repeat(60).dimmed());
 
+    // AI-powered analysis (if Ollama available)
+    let ai = crate::ai::AiClient::new();
+    if ai.is_available().await {
+        print_section("Ollama AI Analysis");
+        let stock_data = crate::ai::StockData::from_quote(q);
+        match ai.analyze_stock(&stock_data).await {
+            Ok(analysis) => { for line in analysis.lines() { println!("  {}", line); } }
+            Err(_) => { println!("  {}", "AI analysis unavailable.".dimmed()); }
+        }
+    }
+
     println!(
         "\n  {}",
         "Disclaimer: This is not financial advice. Do your own research."
@@ -459,6 +470,21 @@ pub async fn cmd_technical(symbol: &str, market: Market) -> Result<()> {
         println!("  Technical Bias: {}", verdict);
     }
 
+    // AI technical interpretation
+    let ai = crate::ai::AiClient::new();
+    if ai.is_available().await {
+        let rsi_val: String = technical::rsi(&closes, 14).map_or("N/A".into(), |r| format!("{:.0}", r));
+        let macd_val: String = technical::macd(&closes).map_or("N/A".into(), |(_,_,h)| if h > 0.0 { "bullish".into() } else { "bearish".into() });
+        let bb_pos: String = technical::bollinger_bands(&closes, 20).map_or("N/A".into(), |(u,_,l)| { let p = (current - l) / (u - l) * 100.0; format!("{:.0}% of range", p) });
+        let sma_pos: String = technical::sma(&closes, 200).map_or("N/A".into(), |s| if current > s { "above 200-MA".into() } else { "below 200-MA".into() });
+        let data = format!("Stock: {}, Price: {:.2}, RSI: {}, MACD: {}, BB: {}, Trend: {}", resolved, current, rsi_val, macd_val, bb_pos, sma_pos);
+        print_section("Ollama AI Interpretation");
+        match ai.interpret_technicals(&data).await {
+            Ok(analysis) => { for line in analysis.lines() { println!("  {}", line); } }
+            Err(_) => { println!("  {}", "AI unavailable.".dimmed()); }
+        }
+    }
+
     println!(
         "\n  {}",
         "Past performance does not indicate future results."
@@ -604,6 +630,24 @@ pub async fn cmd_compare(symbols: &[String], market: Market) -> Result<()> {
             print!(" {:>14}", func(q));
         }
         println!();
+    }
+
+    // AI comparison verdict
+    let ai = crate::ai::AiClient::new();
+    if ai.is_available().await {
+        let mut data = String::new();
+        for q in &quotes {
+            let sym = q.symbol.as_deref().unwrap_or("?");
+            data.push_str(&format!("{}: price={:.2}, P/E={}, fwdP/E={}, chg={:+.2}%\n", sym,
+                q.regular_market_price.unwrap_or(0.0),
+                q.trailing_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
+                q.forward_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
+                q.regular_market_change_percent.unwrap_or(0.0)));
+        }
+        print_section("Ollama AI Verdict");
+        if let Ok(verdict) = ai.compare_stocks(&data).await {
+            for line in verdict.lines() { println!("  {}", line); }
+        }
     }
 
     println!();
@@ -1439,6 +1483,24 @@ pub async fn cmd_screen(category: &str, market: Market) -> Result<()> {
             q.market_cap.map_or("N/A".to_string(), |v| format_large_number(v, cur)));
     }
     println!("\n  {} {} stocks matched", "→".cyan(), filtered.len());
+
+    // AI screen analysis
+    let ai = crate::ai::AiClient::new();
+    if ai.is_available().await && !filtered.is_empty() {
+        let mut data = format!("Screen: {}\n", category);
+        for q in filtered.iter().take(8) {
+            let sym = q.symbol.as_deref().unwrap_or("?");
+            data.push_str(&format!("{}: price={:.2}, P/E={}, chg={:+.2}%\n", sym,
+                q.regular_market_price.unwrap_or(0.0),
+                q.trailing_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
+                q.regular_market_change_percent.unwrap_or(0.0)));
+        }
+        print_section("Ollama AI Analysis");
+        if let Ok(analysis) = ai.analyze_screen(&data).await {
+            for line in analysis.lines() { println!("  {}", line); }
+        }
+    }
+
     println!();
     Ok(())
 }
@@ -1810,6 +1872,18 @@ pub async fn cmd_backtest(symbol: &str, strategy: &str, period: &str, market: Ma
             println!("  {:<6} {:>10} {:>10} {:>10}", format!("#{}", result.trades.len() - i), format!("{}{:.2}", csym, t.entry_price), format!("{}{:.2}", csym, t.exit_price), pnl);
         }
     }
+    // AI backtest interpretation
+    let ai = crate::ai::AiClient::new();
+    if ai.is_available().await {
+        let data = format!("Strategy: {}, Period: {}, Return: {:.2}%, Buy&Hold: {:.2}%, Win rate: {:.0}%, Trades: {}, Max DD: {:.1}%, Sharpe: {}",
+            strategy, period, result.total_return, result.buy_hold_return, result.win_rate, result.trades.len(), result.max_drawdown,
+            result.sharpe.map_or("N/A".into(), |s| format!("{:.2}", s)));
+        print_section("Ollama AI Interpretation");
+        if let Ok(interp) = ai.interpret_backtest(&data).await {
+            for line in interp.lines() { println!("  {}", line); }
+        }
+    }
+
     println!("\n  {}", "Backtests use historical data. Past results ≠ future performance.".dimmed().italic());
     println!();
     Ok(())

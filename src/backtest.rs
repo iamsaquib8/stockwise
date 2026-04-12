@@ -238,3 +238,104 @@ fn execute_trades(closes: &[f64], signals: &[Signal]) -> Vec<Trade> {
     }
     trades
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rising_prices(n: usize) -> Vec<f64> {
+        (0..n).map(|i| 100.0 + i as f64 * 0.5).collect()
+    }
+
+    fn sine_prices(n: usize) -> Vec<f64> {
+        (0..n).map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0).collect()
+    }
+
+    #[test]
+    fn test_rsi_strategy_generates_signals() {
+        let prices = sine_prices(200);
+        let result = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 200]);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_macd_strategy() {
+        let prices = sine_prices(200);
+        let result = run_backtest("macd", &prices, &prices, &prices, &vec![1000u64; 200]);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(!r.equity_curve.is_empty());
+    }
+
+    #[test]
+    fn test_sma_crossover_strategy() {
+        let prices = sine_prices(200);
+        let result = run_backtest("sma", &prices, &prices, &prices, &vec![1000u64; 200]);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_bollinger_strategy() {
+        let prices = sine_prices(200);
+        let result = run_backtest("bb", &prices, &prices, &prices, &vec![1000u64; 200]);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_mean_reversion_strategy() {
+        let prices = sine_prices(200);
+        let result = run_backtest("mr", &prices, &prices, &prices, &vec![1000u64; 200]);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_unknown_strategy_returns_none() {
+        let prices = vec![100.0; 50];
+        let result = run_backtest("unknown", &prices, &prices, &prices, &vec![1000u64; 50]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_backtest_equity_curve_starts_at_100() {
+        let prices = rising_prices(200);
+        let result = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 200]).unwrap();
+        assert_eq!(result.equity_curve[0], 100.0);
+    }
+
+    #[test]
+    fn test_win_rate_bounds() {
+        let prices = sine_prices(200);
+        let result = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 200]).unwrap();
+        assert!(result.win_rate >= 0.0 && result.win_rate <= 100.0);
+    }
+
+    #[test]
+    fn test_buy_hold_return_matches() {
+        let prices = vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0];
+        // Not enough for any strategy, but buy_hold should still work
+        let result = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 6]);
+        if let Some(r) = result {
+            assert!((r.buy_hold_return - 50.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_execute_trades_closes_open_position() {
+        let closes = vec![100.0, 105.0, 110.0];
+        let signals = vec![Signal::Buy, Signal::Hold, Signal::Hold];
+        let trades = execute_trades(&closes, &signals);
+        assert_eq!(trades.len(), 1);
+        assert!((trades[0].exit_price - 110.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_execute_trades_buy_sell_pair() {
+        let closes = vec![100.0, 105.0, 110.0, 108.0];
+        let signals = vec![Signal::Buy, Signal::Hold, Signal::Sell, Signal::Hold];
+        let trades = execute_trades(&closes, &signals);
+        assert_eq!(trades.len(), 1);
+        assert!((trades[0].entry_price - 100.0).abs() < f64::EPSILON);
+        assert!((trades[0].exit_price - 110.0).abs() < f64::EPSILON);
+        assert!(trades[0].pnl_pct > 0.0);
+    }
+}
