@@ -54,7 +54,11 @@ enum Commands {
 
     /// Technical analysis (RSI, MACD, Bollinger Bands, etc.)
     #[command(alias = "t")]
-    Technical { symbol: String },
+    Technical {
+        symbol: String,
+        #[arg(short, long, default_value = "3mo")]
+        period: String,
+    },
 
     /// Compare multiple stocks side-by-side
     #[command(alias = "c")]
@@ -125,7 +129,11 @@ enum Commands {
 
     // ── Analysis ──
     /// Risk analysis (volatility, Sharpe, drawdown, VaR)
-    Risk { symbol: String },
+    Risk {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
 
     /// Price correlation matrix between stocks
     #[command(alias = "corr")]
@@ -174,6 +182,9 @@ enum Commands {
         /// Days to project forward
         #[arg(short, long, default_value = "30")]
         days: usize,
+        /// Historical data period for trend calculation
+        #[arg(long, default_value = "1mo")]
+        period: String,
     },
 
     /// Intraday bot: suggest trades for target return
@@ -181,7 +192,11 @@ enum Commands {
     Intraday { amount: f64, target: f64 },
 
     /// Everything about a stock in one command
-    Deep { symbol: String },
+    Deep {
+        symbol: String,
+        #[arg(short, long, default_value = "3mo")]
+        period: String,
+    },
 
     /// Sector rotation — which sectors to overweight/underweight
     Rotation,
@@ -198,7 +213,11 @@ enum Commands {
     /// Market heatmap — visual overview of all stocks
     Heatmap,
     /// Candlestick pattern detection
-    Patterns { symbol: String },
+    Patterns {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
     /// Compare two sectors head-to-head
     Sectorcmp { sector1: String, sector2: String },
     /// What-if: if you invested X on a past date
@@ -260,21 +279,34 @@ enum Commands {
 
     // ── Advanced Stock Features ──
     /// Support & resistance levels (pivot points + Fibonacci)
-    Support { symbol: String },
+    Support {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
 
     /// Volume profile analysis (OBV, A/D line, volume stats)
     #[command(alias = "vol")]
-    Volume { symbol: String },
+    Volume {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
 
     /// Detect price gaps (unfilled/filled)
-    Gaps { symbol: String },
+    Gaps {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
 
     /// Stop-loss calculator (ATR-based, percentage, Chandelier exit)
     Stoploss {
         symbol: String,
-        /// Entry price (defaults to current price)
         #[arg(short, long)]
         entry: Option<f64>,
+        #[arg(long, default_value = "1mo")]
+        period: String,
     },
 
     /// Compare against industry peers automatically
@@ -290,10 +322,18 @@ enum Commands {
     Ipo,
 
     /// Options overview (expected moves, strike suggestions)
-    Options { symbol: String },
+    Options {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
 
     /// Fibonacci retracement levels across multiple timeframes
-    Fibs { symbol: String },
+    Fibs {
+        symbol: String,
+        #[arg(short, long, default_value = "1mo")]
+        period: String,
+    },
 
     /// Angel One trading: setup, buy, sell, holdings, orders
     Trade {
@@ -320,7 +360,7 @@ async fn main() {
     let result = match cli.command {
         Commands::Quote { symbols } => commands::cmd_quote(&symbols, m).await,
         Commands::Analyze { symbol } => commands::cmd_analyze(&symbol, m).await,
-        Commands::Technical { symbol } => commands::cmd_technical(&symbol, m).await,
+        Commands::Technical { symbol, period } => commands::cmd_technical(&symbol, &period, m).await,
         Commands::Compare { symbols } => commands::cmd_compare(&symbols, m).await,
         Commands::History { symbol, period } => commands::cmd_history(&symbol, &period, m).await,
         Commands::Chart { symbol } => commands::cmd_chart(&symbol, m).await,
@@ -338,7 +378,7 @@ async fn main() {
         Commands::News { symbol } => commands::cmd_news(&symbol, m).await,
         Commands::Search { query } => commands::cmd_search(&query).await,
         Commands::Sentiment => commands::cmd_sentiment().await,
-        Commands::Risk { symbol } => commands::cmd_risk(&symbol, m).await,
+        Commands::Risk { symbol, period } => commands::cmd_risk(&symbol, &period, m).await,
         Commands::Correlate { symbols } => commands::cmd_correlate(&symbols, m).await,
         Commands::Screen { category } => commands::cmd_screen(&category, m).await,
         Commands::Timeframes { symbol } => commands::cmd_multitimeframe(&symbol, m).await,
@@ -350,8 +390,8 @@ async fn main() {
         Commands::Sip { symbol, amount, period } => {
             commands::cmd_sip(&symbol, amount, &period, m).await
         }
-        Commands::Forecast { symbol, days } => commands::cmd_forecast(&symbol, days, m).await,
-        Commands::Deep { symbol } => commands::cmd_deep(&symbol, m).await,
+        Commands::Forecast { symbol, days, period } => commands::cmd_forecast(&symbol, days, &period, m).await,
+        Commands::Deep { symbol, period } => commands::cmd_deep(&symbol, &period, m).await,
         Commands::Rotation => commands::cmd_rotation(m).await,
         Commands::Matrix => commands::cmd_matrix(m).await,
         Commands::Surprise => commands::cmd_surprise(m).await,
@@ -359,7 +399,7 @@ async fn main() {
         Commands::Pcorr => commands::cmd_pcorr(m).await,
         Commands::Returns { symbol } => commands::cmd_returns(&symbol, m).await,
         Commands::Heatmap => commands::cmd_heatmap(m).await,
-        Commands::Patterns { symbol } => commands::cmd_patterns(&symbol, m).await,
+        Commands::Patterns { symbol, period } => commands::cmd_patterns(&symbol, &period, m).await,
         Commands::Sectorcmp { sector1, sector2 } => commands::cmd_sectorcmp(&sector1, &sector2, m).await,
         Commands::Whatif { symbol, amount, date } => commands::cmd_whatif(&symbol, amount, &date, m).await,
         Commands::Daemon { mode, amount } => commands::cmd_daemon(&mode, amount, m).await,
@@ -372,16 +412,16 @@ async fn main() {
         Commands::Import { source, file } => commands::cmd_import(&source, &file, m).await,
         Commands::Longterm { amount } => commands::cmd_longterm(amount, m).await,
         Commands::Tax { country } => commands::cmd_tax(&country, m).await,
-        Commands::Support { symbol } => commands::cmd_support(&symbol, m).await,
-        Commands::Volume { symbol } => commands::cmd_volume(&symbol, m).await,
-        Commands::Gaps { symbol } => commands::cmd_gaps(&symbol, m).await,
-        Commands::Stoploss { symbol, entry } => commands::cmd_stoploss(&symbol, entry, m).await,
+        Commands::Support { symbol, period } => commands::cmd_support(&symbol, &period, m).await,
+        Commands::Volume { symbol, period } => commands::cmd_volume(&symbol, &period, m).await,
+        Commands::Gaps { symbol, period } => commands::cmd_gaps(&symbol, &period, m).await,
+        Commands::Stoploss { symbol, entry, period } => commands::cmd_stoploss(&symbol, entry, &period, m).await,
         Commands::Peers { symbol } => commands::cmd_peers(&symbol, m).await,
         Commands::Dividends { symbol } => commands::cmd_dividends(&symbol, m).await,
         Commands::Insider { symbol } => commands::cmd_insider(&symbol, m).await,
         Commands::Ipo => commands::cmd_ipo().await,
-        Commands::Options { symbol } => commands::cmd_options(&symbol, m).await,
-        Commands::Fibs { symbol } => commands::cmd_fibs(&symbol, m).await,
+        Commands::Options { symbol, period } => commands::cmd_options(&symbol, &period, m).await,
+        Commands::Fibs { symbol, period } => commands::cmd_fibs(&symbol, &period, m).await,
         Commands::Trade { action, symbol, qty, price } => {
             commands::cmd_trade(&action, symbol.as_deref(), qty, price, m).await
         }

@@ -15,6 +15,18 @@ use crate::wealth::WealthHistory;
 use anyhow::{Context, Result};
 use colored::Colorize;
 
+fn period_to_interval(period: &str) -> &str {
+    match period {
+        "1d" => "5m",
+        "5d" | "1w" => "15m",
+        "1mo" => "1d",
+        "3mo" | "6mo" => "1d",
+        "1y" | "2y" => "1wk",
+        "5y" | "10y" | "max" => "1mo",
+        _ => "1d",
+    }
+}
+
 fn resolve_symbols(symbols: &[String], market: Market) -> Vec<String> {
     symbols
         .iter()
@@ -235,12 +247,12 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_technical(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
 
-    // Fetch 1 year of daily data for technical analysis
-    let chart = client.get_chart(&resolved, "1y", "1d").await?;
+    let interval = period_to_interval(period);
+    let chart = client.get_chart(&resolved, period, interval).await?;
     let cur = chart
         .meta
         .as_ref()
@@ -1202,10 +1214,10 @@ pub async fn cmd_news(symbol: &str, market: Market) -> Result<()> {
 
 // ── 5. Risk Analysis ──
 
-pub async fn cmd_risk(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_risk(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "1y", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
@@ -1951,10 +1963,10 @@ pub async fn cmd_sip(symbol: &str, amount: f64, period: &str, market: Market) ->
 
 // ── 3. Forecast ──
 
-pub async fn cmd_forecast(symbol: &str, days: usize, market: Market) -> Result<()> {
+pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "1y", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
@@ -3051,10 +3063,10 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
 
 // ── 1. Support & Resistance ──
 
-pub async fn cmd_support(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "3mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
@@ -3107,10 +3119,10 @@ pub async fn cmd_support(symbol: &str, market: Market) -> Result<()> {
 
 // ── 2. Volume Profile ──
 
-pub async fn cmd_volume(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_volume(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "3mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
     let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
     let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
@@ -3158,10 +3170,10 @@ pub async fn cmd_volume(symbol: &str, market: Market) -> Result<()> {
 
 // ── 3. Gaps ──
 
-pub async fn cmd_gaps(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_gaps(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "3mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
     let opens: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
@@ -3208,10 +3220,10 @@ pub async fn cmd_gaps(symbol: &str, market: Market) -> Result<()> {
 
 // ── 4. Stoploss Calculator ──
 
-pub async fn cmd_stoploss(symbol: &str, entry: Option<f64>, market: Market) -> Result<()> {
+pub async fn cmd_stoploss(symbol: &str, entry: Option<f64>, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "1mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
@@ -3425,7 +3437,7 @@ pub async fn cmd_ipo() -> Result<()> {
 
 // ── 9. Options Overview (Put/Call data from quote) ──
 
-pub async fn cmd_options(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_options(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&[&resolved]).await?;
@@ -3441,7 +3453,7 @@ pub async fn cmd_options(symbol: &str, market: Market) -> Result<()> {
     if let Some(beta) = q.beta { print_kv("Beta", &format!("{:.2}", beta)); }
 
     // Fetch 1mo data for realized vol
-    let chart = client.get_chart(&resolved, "1mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
     if let Some(vol) = technical::annualized_volatility(&closes) {
         print_kv("Realized Vol (1M)", &format!("{:.1}%", vol * 100.0));
@@ -3470,10 +3482,10 @@ pub async fn cmd_options(symbol: &str, market: Market) -> Result<()> {
 
 // ── 10. Fibonacci Levels (standalone) ──
 
-pub async fn cmd_fibs(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_fibs(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "6mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
     let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
@@ -3715,7 +3727,7 @@ pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, mar
 
 // ── Deep Dive: Everything about a stock ──
 
-pub async fn cmd_deep(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     let cur_ref = &resolved;
@@ -3802,7 +3814,7 @@ pub async fn cmd_deep(symbol: &str, market: Market) -> Result<()> {
     if let Some(n) = q.number_of_analyst_opinions { print_kv("# Analysts", &n.to_string()); }
 
     // ── 2. Technical Indicators ──
-    let chart = client.get_chart(&resolved, "1y", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let closes: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
     let highs: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
     let lows: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
@@ -4639,10 +4651,10 @@ pub async fn cmd_heatmap(market: Market) -> Result<()> {
 
 // ── 8. Patterns (candlestick pattern detection) ──
 
-pub async fn cmd_patterns(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_patterns(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, "1mo", "1d").await?;
+    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
     let opens: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
