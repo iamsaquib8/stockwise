@@ -6,6 +6,7 @@ mod charts;
 mod commands;
 mod display;
 mod insights;
+mod angel;
 mod intraday;
 mod longterm;
 mod market;
@@ -30,7 +31,7 @@ use market::Market;
 )]
 struct Cli {
     /// Market: us (default) or in (India — auto-appends .NS)
-    #[arg(short = 'm', long = "market", global = true, default_value = "us")]
+    #[arg(short = 'm', long = "market", global = true, default_value = "in")]
     market: Market,
 
     #[command(subcommand)]
@@ -178,6 +179,14 @@ enum Commands {
     /// Find tax-loss harvesting opportunities in portfolio
     Harvest,
 
+    /// Import holdings from Kite/IndMoney/CSV
+    Import {
+        /// Source: kite, indmoney, csv
+        source: String,
+        /// Path to exported CSV file
+        file: String,
+    },
+
     /// Long-term wealth generation bot — best stocks for SIP
     Longterm {
         /// Monthly SIP budget (default 10000)
@@ -188,6 +197,18 @@ enum Commands {
     Tax {
         /// Country: in (India), us (USA), uk (UK)
         country: String,
+    },
+
+    /// Angel One trading: setup, buy, sell, holdings, orders
+    Trade {
+        /// Action: setup, config, holdings, positions, buy, sell, limit, orders
+        action: String,
+        /// Symbol (for buy/sell/limit)
+        symbol: Option<String>,
+        /// Quantity (for buy/sell/limit)
+        qty: Option<u32>,
+        /// Price (for limit orders)
+        price: Option<f64>,
     },
 
     /// Combined dashboard: markets + portfolio + watchlist + alerts
@@ -237,8 +258,12 @@ async fn main() {
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance => commands::cmd_rebalance(&[], m).await,
         Commands::Harvest => commands::cmd_harvest(m).await,
+        Commands::Import { source, file } => commands::cmd_import(&source, &file, m).await,
         Commands::Longterm { amount } => commands::cmd_longterm(amount, m).await,
         Commands::Tax { country } => commands::cmd_tax(&country, m).await,
+        Commands::Trade { action, symbol, qty, price } => {
+            commands::cmd_trade(&action, symbol.as_deref(), qty, price, m).await
+        }
         Commands::Dashboard => commands::cmd_dashboard(m).await,
     };
 

@@ -2471,3 +2471,428 @@ pub async fn cmd_tax(country: &str, market: Market) -> Result<()> {
     println!();
     Ok(())
 }
+
+// ── Import from brokers ──
+
+pub async fn cmd_import(source: &str, file: &str, market: Market) -> Result<()> {
+    let path = std::path::Path::new(file);
+    if !path.exists() {
+        println!("  {} File not found: {}", "✗".red(), file);
+        println!();
+        println!("  {} How to export:", "→".cyan());
+        match source {
+            "kite" | "zerodha" => {
+                println!("    1. Login to {} → Portfolio → Holdings", "kite.zerodha.com".cyan());
+                println!("    2. Click the {} icon (top-right of holdings table)", "download/export".bold());
+                println!("    3. Save the CSV file");
+                println!("    4. Run: stockwise import kite <path-to-file.csv>");
+            }
+            "indmoney" => {
+                println!("    1. Open {} app → Portfolio → Stocks", "IndMoney".cyan());
+                println!("    2. Tap {} → Download Statement / Export", "⋮ (menu)".bold());
+                println!("    3. Save the CSV/Excel file");
+                println!("    4. Run: stockwise import indmoney <path-to-file.csv>");
+            }
+            _ => {
+                println!("    Provide a CSV with columns: Symbol, Quantity, Average Price");
+                println!("    Run: stockwise import csv <path-to-file.csv>");
+            }
+        }
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(path).context("Failed to read file")?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 2 {
+        println!("  {} File is empty or has no data rows.", "✗".red());
+        return Ok(());
+    }
+
+    let header = lines[0].to_lowercase();
+    let mut portfolio = Portfolio::load()?;
+    let mut imported = 0;
+
+    match source {
+        "kite" | "zerodha" => {
+            // Kite CSV: Instrument, Qty., Avg. cost, LTP, Cur. val, P&L, Net chg., Day chg.
+            let cols = parse_csv_header(&header);
+            let sym_col = find_col(&cols, &["instrument", "tradingsymbol", "symbol", "stock"]);
+            let qty_col = find_col(&cols, &["qty", "qty.", "quantity", "shares"]);
+            let avg_col = find_col(&cols, &["avg. cost", "avg cost", "average cost", "avg_price", "average price", "buy avg", "buy avg."]);
+
+            if sym_col.is_none() || qty_col.is_none() || avg_col.is_none() {
+                println!("  {} Could not detect Kite CSV columns.", "✗".red());
+                println!("  Expected columns: Instrument, Qty., Avg. cost");
+                println!("  Found: {}", header);
+                return Ok(());
+            }
+            let (si, qi, ai) = (sym_col.unwrap(), qty_col.unwrap(), avg_col.unwrap());
+
+            for line in &lines[1..] {
+                let fields = parse_csv_row(line);
+                if fields.len() <= si.max(qi).max(ai) { continue; }
+                let symbol_raw = fields[si].trim().trim_matches('"');
+                if symbol_raw.is_empty() { continue; }
+                let qty: f64 = fields[qi].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
+                let avg: f64 = fields[ai].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
+                if qty <= 0.0 || avg <= 0.0 { continue; }
+
+                let resolved = market::resolve_symbol(symbol_raw, market);
+                portfolio.add(&resolved, qty, avg);
+                imported += 1;
+                println!("  {} {} — {} shares @ ₹{:.2}", "✓".green(), resolved.cyan(), qty, avg);
+            }
+        }
+        "indmoney" => {
+            // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, Current Price, ...
+            let cols = parse_csv_header(&header);
+            let sym_col = find_col(&cols, &["symbol", "isin", "stock symbol", "scrip", "stock name", "name"]);
+            let qty_col = find_col(&cols, &["quantity", "qty", "shares", "units"]);
+            let avg_col = find_col(&cols, &["avg buy price", "avg price", "average price", "buy price", "avg. buy price", "average cost"]);
+
+            if sym_col.is_none() || qty_col.is_none() || avg_col.is_none() {
+                println!("  {} Could not detect IndMoney CSV columns.", "✗".red());
+                println!("  Expected columns: Symbol/Stock Name, Quantity, Avg Buy Price");
+                println!("  Found: {}", header);
+                return Ok(());
+            }
+            let (si, qi, ai) = (sym_col.unwrap(), qty_col.unwrap(), avg_col.unwrap());
+
+            for line in &lines[1..] {
+                let fields = parse_csv_row(line);
+                if fields.len() <= si.max(qi).max(ai) { continue; }
+                let symbol_raw = fields[si].trim().trim_matches('"');
+                if symbol_raw.is_empty() { continue; }
+                let qty: f64 = fields[qi].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
+                let avg: f64 = fields[ai].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
+                if qty <= 0.0 || avg <= 0.0 { continue; }
+
+                let resolved = market::resolve_symbol(symbol_raw, market);
+                portfolio.add(&resolved, qty, avg);
+                imported += 1;
+                println!("  {} {} — {} shares @ ₹{:.2}", "✓".green(), resolved.cyan(), qty, avg);
+            }
+        }
+        "csv" | _ => {
+            // Generic CSV: try to find Symbol, Quantity, Price columns
+            let cols = parse_csv_header(&header);
+            let sym_col = find_col(&cols, &["symbol", "stock", "instrument", "name", "ticker", "scrip", "tradingsymbol"]);
+            let qty_col = find_col(&cols, &["quantity", "qty", "qty.", "shares", "units"]);
+            let avg_col = find_col(&cols, &["avg price", "avg. price", "average price", "avg cost", "avg. cost", "buy price", "price", "cost"]);
+
+            if sym_col.is_none() || qty_col.is_none() || avg_col.is_none() {
+                println!("  {} Could not auto-detect CSV columns.", "✗".red());
+                println!("  Your CSV must have columns for: Symbol, Quantity, Average Price");
+                println!("  Found: {}", header);
+                return Ok(());
+            }
+            let (si, qi, ai) = (sym_col.unwrap(), qty_col.unwrap(), avg_col.unwrap());
+
+            for line in &lines[1..] {
+                let fields = parse_csv_row(line);
+                if fields.len() <= si.max(qi).max(ai) { continue; }
+                let symbol_raw = fields[si].trim().trim_matches('"');
+                if symbol_raw.is_empty() { continue; }
+                let qty: f64 = fields[qi].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
+                let avg: f64 = fields[ai].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
+                if qty <= 0.0 || avg <= 0.0 { continue; }
+
+                let resolved = market::resolve_symbol(symbol_raw, market);
+                portfolio.add(&resolved, qty, avg);
+                imported += 1;
+                println!("  {} {} — {} shares @ {:.2}", "✓".green(), resolved.cyan(), qty, avg);
+            }
+        }
+    }
+
+    if imported > 0 {
+        portfolio.save()?;
+        println!("\n  {} Imported {} holdings into portfolio.", "✓".green().bold(), imported);
+        println!("  Run {} to see your portfolio.", "stockwise portfolio show".cyan());
+    } else {
+        println!("\n  {} No holdings found in file. Check the format.", "✗".red());
+    }
+    println!();
+    Ok(())
+}
+
+fn parse_csv_header(header: &str) -> Vec<String> {
+    parse_csv_row(header).iter().map(|s| s.trim().trim_matches('"').to_lowercase()).collect()
+}
+
+fn parse_csv_row(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                fields.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current);
+    fields
+}
+
+fn find_col(cols: &[String], names: &[&str]) -> Option<usize> {
+    for name in names {
+        if let Some(i) = cols.iter().position(|c| c.contains(name)) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+// ── Angel One Trading ──
+
+pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, price: Option<f64>, _market: Market) -> Result<()> {
+    match action {
+        "setup" => {
+            println!();
+            print_header("Angel One SmartAPI Setup");
+            println!("  To connect your Angel One account, you need:");
+            println!();
+            println!("  1. Go to {} and create an app", "smartapi.angelone.in".cyan());
+            println!("  2. Note your {} (from the app dashboard)", "API Key".bold());
+            println!("  3. Your {} (Angel One login ID)", "Client ID".bold());
+            println!("  4. Your {} (Angel One login password)", "Password".bold());
+            println!("  5. Your {} (from Authenticator app / Angel One TOTP setup)", "TOTP Secret".bold());
+            println!();
+            println!("  Then run:");
+            println!("    {} stockwise trade config <API_KEY> <CLIENT_ID> <PASSWORD> <TOTP_SECRET>", "$".dimmed());
+            println!();
+            println!("  {}", "Your credentials are stored locally and never sent anywhere except Angel One's API.".dimmed());
+            println!();
+            Ok(())
+        }
+        "config" => {
+            // symbol=api_key, qty arg repurposed... Actually let's parse from positional args differently
+            // This is called as: stockwise trade config <API_KEY> <CLIENT_ID> <PASSWORD> <TOTP_SECRET>
+            // But our CLI structure passes them as symbol, and we need more args.
+            // For simplicity, read from the config directly
+            println!("  {}", "Use this format:".bold());
+            println!("    stockwise trade config");
+            println!("  Then edit the config file at:");
+            let path = dirs::data_local_dir().map(|d| d.join("stockwise/angel_config.json"));
+            if let Some(p) = &path { println!("    {}", p.display().to_string().cyan()); }
+            println!();
+            // Create template config
+            let config = crate::angel::AngelConfig::load()?;
+            if !config.is_configured() {
+                let template = crate::angel::AngelConfig {
+                    api_key: "YOUR_API_KEY".into(),
+                    client_id: "YOUR_CLIENT_ID".into(),
+                    password: "YOUR_PASSWORD".into(),
+                    totp_secret: "YOUR_TOTP_SECRET".into(),
+                };
+                template.save()?;
+                println!("  {} Created config template. Edit the file above with your credentials.", "✓".green());
+            } else {
+                println!("  {} Already configured for client: {}", "✓".green(), config.client_id.cyan());
+            }
+            println!();
+            Ok(())
+        }
+        "holdings" => {
+            let client = crate::angel::AngelClient::new().await?;
+            let holdings = client.get_holdings().await?;
+
+            if holdings.is_empty() {
+                println!("\n  {}", "No holdings found.".dimmed());
+                return Ok(());
+            }
+
+            print_header("Angel One — Holdings (Live)");
+            println!("  {:<14} {:>8} {:>10} {:>10} {:>12} {:>10}",
+                "Symbol".bold(), "Qty".bold(), "Avg Cost".bold(), "LTP".bold(), "P&L".bold(), "P&L %".bold());
+            println!("  {}", "─".repeat(68).dimmed());
+
+            let mut total_pnl = 0.0_f64;
+            let mut total_value = 0.0_f64;
+            let mut total_cost = 0.0_f64;
+
+            for h in &holdings {
+                let sym = h.tradingsymbol.as_deref().unwrap_or("???");
+                let qty = h.quantity.unwrap_or(0);
+                let avg = h.averageprice.unwrap_or(0.0);
+                let ltp = h.ltp.unwrap_or(0.0);
+                let pnl = h.pnl.unwrap_or(0.0);
+                let pnl_pct = h.pnlpercentage.unwrap_or(0.0);
+                total_pnl += pnl;
+                total_value += ltp * qty as f64;
+                total_cost += avg * qty as f64;
+
+                let pnl_str = if pnl >= 0.0 { format!("+₹{:.2}", pnl).green().to_string() } else { format!("-₹{:.2}", pnl.abs()).red().to_string() };
+                let pct_str = if pnl_pct >= 0.0 { format!("+{:.2}%", pnl_pct).green().to_string() } else { format!("{:.2}%", pnl_pct).red().to_string() };
+
+                println!("  {:<14} {:>8} {:>10} {:>10} {:>12} {:>10}",
+                    sym.cyan(), qty, format!("₹{:.2}", avg), format!("₹{:.2}", ltp), pnl_str, pct_str);
+            }
+
+            println!("  {}", "─".repeat(68).dimmed());
+            let total_str = if total_pnl >= 0.0 { format!("+₹{:.2}", total_pnl).green().bold().to_string() } else { format!("-₹{:.2}", total_pnl.abs()).red().bold().to_string() };
+            println!("  {:<14} {:>8} {:>10} {:>10} {:>12}",
+                "TOTAL".bold(), "", format!("₹{:.0}", total_cost), format!("₹{:.0}", total_value), total_str);
+
+            // Also sync to stockwise portfolio
+            let mut portfolio = Portfolio::load()?;
+            for h in &holdings {
+                let sym = h.tradingsymbol.as_deref().unwrap_or("");
+                let qty = h.quantity.unwrap_or(0) as f64;
+                let avg = h.averageprice.unwrap_or(0.0);
+                if !sym.is_empty() && qty > 0.0 && avg > 0.0 {
+                    let resolved = if sym.contains('.') { sym.to_string() } else { format!("{}.NS", sym) };
+                    // Remove old and re-add to sync
+                    portfolio.remove(&resolved);
+                    portfolio.add(&resolved, qty, avg);
+                }
+            }
+            portfolio.save()?;
+            println!("\n  {} Holdings synced to StockWise portfolio.", "✓".green());
+            println!();
+            Ok(())
+        }
+        "positions" => {
+            let client = crate::angel::AngelClient::new().await?;
+            let positions = client.get_positions().await?;
+
+            if positions.is_empty() {
+                println!("\n  {}", "No open positions.".dimmed());
+                return Ok(());
+            }
+
+            print_header("Angel One — Open Positions");
+            println!("  {:<14} {:>8} {:>10} {:>10} {:>12}",
+                "Symbol".bold(), "Qty".bold(), "Buy Avg".bold(), "LTP".bold(), "P&L".bold());
+            println!("  {}", "─".repeat(58).dimmed());
+
+            for p in &positions {
+                let sym = p.tradingsymbol.as_deref().unwrap_or("???");
+                let qty = p.quantity.as_deref().unwrap_or("0");
+                let avg = p.buyavgprice.as_deref().unwrap_or("0");
+                let ltp = p.ltp.as_deref().unwrap_or("0");
+                let pnl = p.pnl.as_deref().unwrap_or("0");
+                let pnl_f: f64 = pnl.parse().unwrap_or(0.0);
+                let pnl_str = if pnl_f >= 0.0 { format!("+₹{}", pnl).green().to_string() } else { format!("-₹{}", pnl).red().to_string() };
+                println!("  {:<14} {:>8} {:>10} {:>10} {:>12}", sym.cyan(), qty, format!("₹{}", avg), format!("₹{}", ltp), pnl_str);
+            }
+            println!();
+            Ok(())
+        }
+        "buy" => {
+            let sym = symbol.context("Symbol required. Usage: stockwise trade buy RELIANCE 10")?;
+            let quantity = qty.context("Quantity required. Usage: stockwise trade buy RELIANCE 10")?;
+            let sym_upper = sym.to_uppercase();
+
+            let client = crate::angel::AngelClient::new().await?;
+
+            // Search for the symbol token
+            let token = client.search_scrip(&sym_upper, "NSE").await?
+                .context(format!("Could not find symbol {} on NSE", sym_upper))?;
+
+            println!("  {} Placing {} order: {} {} shares...", "⟳".yellow(), "BUY".green().bold(), sym_upper.cyan(), quantity);
+
+            let result = client.place_order(&sym_upper, &token, "NSE", "BUY", quantity, "MARKET", 0.0, 0.0).await?;
+
+            if let Some(id) = &result.orderid {
+                println!("  {} Order placed! ID: {}", "✓".green().bold(), id.cyan());
+                println!("  {} BUY {} × {} shares at MARKET", "→".green(), sym_upper.cyan(), quantity);
+            }
+            println!();
+            Ok(())
+        }
+        "sell" => {
+            let sym = symbol.context("Symbol required. Usage: stockwise trade sell RELIANCE 10")?;
+            let quantity = qty.context("Quantity required. Usage: stockwise trade sell RELIANCE 10")?;
+            let sym_upper = sym.to_uppercase();
+
+            let client = crate::angel::AngelClient::new().await?;
+            let token = client.search_scrip(&sym_upper, "NSE").await?
+                .context(format!("Could not find symbol {} on NSE", sym_upper))?;
+
+            println!("  {} Placing {} order: {} {} shares...", "⟳".yellow(), "SELL".red().bold(), sym_upper.cyan(), quantity);
+
+            let result = client.place_order(&sym_upper, &token, "NSE", "SELL", quantity, "MARKET", 0.0, 0.0).await?;
+
+            if let Some(id) = &result.orderid {
+                println!("  {} Order placed! ID: {}", "✓".green().bold(), id.cyan());
+                println!("  {} SELL {} × {} shares at MARKET", "→".red(), sym_upper.cyan(), quantity);
+            }
+            println!();
+            Ok(())
+        }
+        "limit" => {
+            let sym = symbol.context("Symbol required. Usage: stockwise trade limit RELIANCE 10 1300")?;
+            let quantity = qty.context("Quantity required")?;
+            let limit_price = price.context("Limit price required. Usage: stockwise trade limit RELIANCE 10 1300")?;
+            let sym_upper = sym.to_uppercase();
+
+            let client = crate::angel::AngelClient::new().await?;
+            let token = client.search_scrip(&sym_upper, "NSE").await?
+                .context(format!("Could not find symbol {}", sym_upper))?;
+
+            println!("  {} Placing LIMIT BUY: {} × {} @ ₹{:.2}...", "⟳".yellow(), sym_upper.cyan(), quantity, limit_price);
+
+            let result = client.place_order(&sym_upper, &token, "NSE", "BUY", quantity, "LIMIT", limit_price, 0.0).await?;
+
+            if let Some(id) = &result.orderid {
+                println!("  {} Limit order placed! ID: {}", "✓".green().bold(), id.cyan());
+            }
+            println!();
+            Ok(())
+        }
+        "orders" => {
+            let client = crate::angel::AngelClient::new().await?;
+            let orders = client.get_order_book().await?;
+
+            if orders.is_empty() {
+                println!("\n  {}", "No orders today.".dimmed());
+                return Ok(());
+            }
+
+            print_header("Angel One — Order Book");
+            println!("  {:<12} {:<14} {:>6} {:>8} {:>10} {:>12}",
+                "Order ID".bold(), "Symbol".bold(), "Type".bold(), "Qty".bold(), "Price".bold(), "Status".bold());
+            println!("  {}", "─".repeat(66).dimmed());
+
+            for o in &orders {
+                let id = o.orderid.as_deref().unwrap_or("???");
+                let sym = o.tradingsymbol.as_deref().unwrap_or("???");
+                let txn = o.transactiontype.as_deref().unwrap_or("?");
+                let qty = o.quantity.as_deref().unwrap_or("0");
+                let price = o.price.as_deref().unwrap_or("0");
+                let status = o.status.as_deref().unwrap_or("???");
+                let txn_str = if txn == "BUY" { txn.green().to_string() } else { txn.red().to_string() };
+                let status_str = match status {
+                    "complete" => status.green().bold().to_string(),
+                    "rejected" => status.red().to_string(),
+                    "open" | "pending" => status.yellow().to_string(),
+                    _ => status.to_string(),
+                };
+                println!("  {:<12} {:<14} {:>6} {:>8} {:>10} {:>12}",
+                    id.dimmed(), sym.cyan(), txn_str, qty, format!("₹{}", price), status_str);
+            }
+            println!();
+            Ok(())
+        }
+        _ => {
+            println!();
+            println!("  {} Angel One Trading Commands:", "→".cyan());
+            println!();
+            println!("    {} — Set up Angel One API credentials", "stockwise trade setup".bold());
+            println!("    {} — Create config file to edit", "stockwise trade config".bold());
+            println!("    {} — View your live holdings", "stockwise trade holdings".bold());
+            println!("    {} — View open intraday positions", "stockwise trade positions".bold());
+            println!("    {} — Place a market buy order", "stockwise trade buy RELIANCE 10".bold());
+            println!("    {} — Place a market sell order", "stockwise trade sell RELIANCE 10".bold());
+            println!("    {} — Place a limit buy order", "stockwise trade limit RELIANCE 10 1300".bold());
+            println!("    {} — View today's order book", "stockwise trade orders".bold());
+            println!();
+            Ok(())
+        }
+    }
+}
