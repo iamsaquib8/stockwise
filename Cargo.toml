@@ -2,7 +2,7 @@
 name = "stockwise"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["iamsaquib8 <saquibulhassan6@gmail.com>"]
 description = "Autonomous stock market CLI — quotes, analysis, backtesting, SIP, intraday signals, tax, and wealth tracking across US and Indian markets."
 documentation = "https://github.com/iamsaquib8/stockwise/tree/master/docs"

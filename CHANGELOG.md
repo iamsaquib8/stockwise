@@ -15,13 +15,13 @@ First public release — published to crates.io with prebuilt binaries.
 - **Packaging & distribution**: published to crates.io (`cargo install stockwise`),
   prebuilt binaries for macOS (x86_64/arm64), Linux, and Windows on each release.
 - **CI**: GitHub Actions running `rustfmt`, `clippy -D warnings`, and the full test
-  suite (213 tests) on Linux/macOS/Windows plus an MSRV (1.85) job.
+  suite (213 tests) on Linux/macOS/Windows plus an MSRV (1.88) job.
 - **Project docs**: `LICENSE` (MIT), `DISCLAIMER.md`, `ROADMAP.md`, `CHANGELOG.md`,
   `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, and issue/PR templates.
 - Multi-source news collation for `news`, `insider`, `ipo`, and `sentiment`.
 
 ### Changed
-- Migrated to Rust edition 2024; MSRV is now 1.85.
+- Migrated to Rust edition 2024; MSRV is now 1.88 (the codebase uses let-chains).
 - Codebase is `rustfmt`- and `clippy`-clean (enforced in CI).
 - `risk` now defaults to a `1y` period so it has enough data to run.
 - Backtest Sharpe is now a per-trade ratio (no longer annualized from a

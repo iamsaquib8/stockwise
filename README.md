@@ -8,7 +8,7 @@ all from your terminal.
 [![crates.io](https://img.shields.io/crates/v/stockwise.svg)](https://crates.io/crates/stockwise)
 [![Downloads](https://img.shields.io/crates/d/stockwise.svg)](https://crates.io/crates/stockwise)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rustc-1.85+-blue.svg)](#install)
+[![MSRV](https://img.shields.io/badge/rustc-1.88+-blue.svg)](#install)
 
 **57 commands** · **daemon workers** · **live trading** · **local AI (Ollama)** · **Redis cache** · **213 tests**
 
@@ -39,7 +39,7 @@ Grab a binary for macOS (Intel/Apple Silicon), Linux, or Windows from the
 ```bash
 git clone https://github.com/iamsaquib8/stockwise
 cd stockwise
-cargo install --path .       # needs Rust 1.85+
+cargo install --path .       # needs Rust 1.88+
 ```
 
 ## Quick Start
