@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a command, data source, broker, or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      placeholder: "I want to track mutual funds alongside stocks..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: A new command? A flag? A broker or data source? Sketch the CLI if you can.
+      placeholder: "stockwise mf <SCHEME_CODE> ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New command / analysis
+        - Broker / live trading
+        - Data source / market
+        - Daemon / bots
+        - AI integration
+        - Output / charts / UX
+        - Packaging / distribution
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

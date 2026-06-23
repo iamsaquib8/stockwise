@@ -122,13 +122,13 @@ impl std::fmt::Display for OBVTrend {
 pub struct TradePlan {
     pub signal: IntradaySignal,
     pub entry: f64,
-    pub target1: f64,      // first target (book 50%)
-    pub target2: f64,      // second target (let it ride)
+    pub target1: f64, // first target (book 50%)
+    pub target2: f64, // second target (let it ride)
     pub stop_loss: f64,
     pub trailing_stop: f64,
     pub qty: u32,
     pub capital_required: f64,
-    pub max_risk: f64,      // max loss in currency
+    pub max_risk: f64, // max loss in currency
     pub expected_profit: f64,
     pub risk_reward: f64,
     pub kelly_fraction: f64, // optimal bet fraction
@@ -159,7 +159,11 @@ fn detect_regime(closes: &[f64]) -> MarketRegime {
 
     // ADX-like trend strength using directional movement
     let returns = technical::daily_returns(closes);
-    let recent = if returns.len() > 10 { &returns[returns.len() - 10..] } else { &returns };
+    let recent = if returns.len() > 10 {
+        &returns[returns.len() - 10..]
+    } else {
+        &returns
+    };
     let positive: f64 = recent.iter().filter(|&&r| r > 0.0).count() as f64;
     let trend_strength = (positive / recent.len() as f64 - 0.5).abs() * 2.0; // 0=mixed, 1=directional
 
@@ -243,7 +247,11 @@ fn compute_signal(
     // ── Strategy 3: Bollinger Band Squeeze & Breakout ──
     let bb = technical::bollinger_bands(closes, 20);
     let bb_position = bb.map(|(upper, _, lower)| {
-        if (upper - lower).abs() < f64::EPSILON { 0.5 } else { (price - lower) / (upper - lower) }
+        if (upper - lower).abs() < f64::EPSILON {
+            0.5
+        } else {
+            (price - lower) / (upper - lower)
+        }
     });
     if let Some((upper, middle, lower)) = bb {
         let bandwidth = (upper - lower) / middle * 100.0;
@@ -253,7 +261,10 @@ fn compute_signal(
                 name: "BB Squeeze",
                 direction: Direction::Long,
                 strength: 70.0,
-                reason: format!("Bollinger squeeze ({:.1}% width), price above middle", bandwidth),
+                reason: format!(
+                    "Bollinger squeeze ({:.1}% width), price above middle",
+                    bandwidth
+                ),
             });
         } else if bb_position.unwrap_or(0.5) < 0.1 {
             strategies.push(StrategySignal {
@@ -299,13 +310,20 @@ fn compute_signal(
     // ── Strategy 5: Volume Breakout ──
     let avg_vol = quote.average_daily_volume_3_month.unwrap_or(1) as f64;
     let today_vol = quote.regular_market_volume.unwrap_or(0) as f64;
-    let volume_ratio = if avg_vol > 0.0 { today_vol / avg_vol } else { 1.0 };
+    let volume_ratio = if avg_vol > 0.0 {
+        today_vol / avg_vol
+    } else {
+        1.0
+    };
     if volume_ratio > 2.0 && quote.regular_market_change_percent.unwrap_or(0.0) > 0.5 {
         strategies.push(StrategySignal {
             name: "Volume Breakout",
             direction: Direction::Long,
             strength: 80.0,
-            reason: format!("Volume {:.1}x average with positive price action", volume_ratio),
+            reason: format!(
+                "Volume {:.1}x average with positive price action",
+                volume_ratio
+            ),
         });
     }
 
@@ -344,7 +362,10 @@ fn compute_signal(
     // ── Strategy 7: Gap Play ──
     let gap_detected = if opens.len() >= 2 && highs.len() >= 2 && lows.len() >= 2 {
         let gaps = technical::detect_gaps(opens, highs, lows, closes);
-        let recent_unfilled: Vec<_> = gaps.iter().filter(|g| !g.filled && g.index >= opens.len().saturating_sub(5)).collect();
+        let recent_unfilled: Vec<_> = gaps
+            .iter()
+            .filter(|g| !g.filled && g.index >= opens.len().saturating_sub(5))
+            .collect();
         if let Some(gap) = recent_unfilled.last() {
             match gap.gap_type {
                 technical::GapType::Up => {
@@ -406,14 +427,23 @@ fn compute_signal(
                 name: "Mean Reversion",
                 direction: Direction::Long,
                 strength: 62.0 + deviation.abs().min(5.0) * 2.0,
-                reason: format!("Price {:.1}% below 20-SMA, mean reversion expected", deviation),
+                reason: format!(
+                    "Price {:.1}% below 20-SMA, mean reversion expected",
+                    deviation
+                ),
             });
         }
     }
 
     // ── Compute Composite Score ──
-    let long_signals: Vec<&StrategySignal> = strategies.iter().filter(|s| s.direction == Direction::Long).collect();
-    let short_signals: Vec<&StrategySignal> = strategies.iter().filter(|s| s.direction == Direction::Short).collect();
+    let long_signals: Vec<&StrategySignal> = strategies
+        .iter()
+        .filter(|s| s.direction == Direction::Long)
+        .collect();
+    let short_signals: Vec<&StrategySignal> = strategies
+        .iter()
+        .filter(|s| s.direction == Direction::Short)
+        .collect();
 
     let long_strength: f64 = long_signals.iter().map(|s| s.strength).sum();
     let short_strength: f64 = short_signals.iter().map(|s| s.strength).sum();
@@ -427,11 +457,21 @@ fn compute_signal(
     };
 
     // Normalize: more strategies agreeing = higher score
-    let agreeing_count = if direction == Direction::Long { long_signals.len() } else { short_signals.len() };
+    let agreeing_count = if direction == Direction::Long {
+        long_signals.len()
+    } else {
+        short_signals.len()
+    };
     let consensus_bonus = (agreeing_count as f64 - 1.0).max(0.0) * 8.0; // bonus for multi-strategy agreement
 
     // Volume confirmation multiplier
-    let vol_mult = if volume_ratio > 1.5 { 1.15 } else if volume_ratio > 1.0 { 1.0 } else { 0.85 };
+    let vol_mult = if volume_ratio > 1.5 {
+        1.15
+    } else if volume_ratio > 1.0 {
+        1.0
+    } else {
+        0.85
+    };
 
     // Regime alignment bonus
     let regime_mult = match (direction, &regime) {
@@ -444,7 +484,11 @@ fn compute_signal(
         _ => 1.0,
     };
 
-    let avg_strength = if agreeing_count > 0 { raw_score / agreeing_count as f64 } else { 0.0 };
+    let avg_strength = if agreeing_count > 0 {
+        raw_score / agreeing_count as f64
+    } else {
+        0.0
+    };
     let score = ((avg_strength + consensus_bonus) * vol_mult * regime_mult).clamp(0.0, 100.0);
 
     let confidence = match (score, agreeing_count) {
@@ -459,7 +503,12 @@ fn compute_signal(
 
     IntradaySignal {
         symbol: symbol.to_string(),
-        name: quote.short_name.as_deref().or(quote.long_name.as_deref()).unwrap_or("Unknown").to_string(),
+        name: quote
+            .short_name
+            .as_deref()
+            .or(quote.long_name.as_deref())
+            .unwrap_or("Unknown")
+            .to_string(),
         price,
         currency: quote.currency.clone(),
         change_pct,
@@ -504,11 +553,14 @@ pub fn generate_trade_plans(
     target_pct: f64,
     max_risk_pct: f64, // max % of capital to risk per trade (e.g., 1.0 = 1%)
 ) -> Vec<TradePlan> {
-    let target_profit = capital * (target_pct / 100.0);
+    let _target_profit = capital * (target_pct / 100.0);
     let max_risk_per_trade = capital * (max_risk_pct / 100.0);
     let mut plans = Vec::new();
 
-    for signal in signals.iter().filter(|s| s.score >= 50.0 && s.confidence != Confidence::Low) {
+    for signal in signals
+        .iter()
+        .filter(|s| s.score >= 50.0 && s.confidence != Confidence::Low)
+    {
         let price = signal.price;
         let atr_pct = signal.atr_pct.unwrap_or(2.0);
 
@@ -543,7 +595,10 @@ pub fn generate_trade_plans(
         let stop_loss = if signal.direction == Direction::Long {
             signal.support1.map(|s| s.max(atr_stop)).unwrap_or(atr_stop)
         } else {
-            signal.resistance1.map(|r| r.min(atr_stop)).unwrap_or(atr_stop)
+            signal
+                .resistance1
+                .map(|r| r.min(atr_stop))
+                .unwrap_or(atr_stop)
         };
 
         // Trailing stop: 1.5x ATR from current price
@@ -605,7 +660,9 @@ pub fn generate_trade_plans(
     plans.sort_by(|a, b| {
         let a_val = a.signal.score * a.risk_reward;
         let b_val = b.signal.score * b.risk_reward;
-        b_val.partial_cmp(&a_val).unwrap()
+        b_val
+            .partial_cmp(&a_val)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     plans
@@ -634,7 +691,11 @@ pub async fn scan_sector_heat(client: &YahooClient) -> Result<Vec<SectorHeat>> {
         })
         .collect();
 
-    heats.sort_by(|a, b| b.change_pct.partial_cmp(&a.change_pct).unwrap());
+    heats.sort_by(|a, b| {
+        b.change_pct
+            .partial_cmp(&a.change_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(heats)
 }
 
@@ -642,7 +703,10 @@ pub async fn scan_sector_heat(client: &YahooClient) -> Result<Vec<SectorHeat>> {
 // SCANNER
 // ══════════════════════════════════════════════════════════
 
-pub async fn scan_intraday(client: &YahooClient, market: market::Market) -> Result<Vec<IntradaySignal>> {
+pub async fn scan_intraday(
+    client: &YahooClient,
+    market: market::Market,
+) -> Result<Vec<IntradaySignal>> {
     let symbols = match market {
         market::Market::In => market::INDIA_POPULAR,
         market::Market::Us => market::US_POPULAR,
@@ -666,15 +730,25 @@ pub async fn scan_intraday(client: &YahooClient, market: market::Market) -> Resu
             Err(_) => continue,
         };
 
-        let extract = |f: &dyn Fn(&crate::api::QuoteIndicator) -> &Option<Vec<Option<f64>>>| -> Vec<f64> {
-            chart.indicators.quote.first().and_then(|q| f(q).as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default()
-        };
+        let extract =
+            |f: &dyn Fn(&crate::api::QuoteIndicator) -> &Option<Vec<Option<f64>>>| -> Vec<f64> {
+                chart
+                    .indicators
+                    .quote
+                    .first()
+                    .and_then(|q| f(q).as_ref())
+                    .map(|c| c.iter().filter_map(|v| *v).collect())
+                    .unwrap_or_default()
+            };
 
         let closes: Vec<f64> = extract(&|q| &q.close);
         let highs: Vec<f64> = extract(&|q| &q.high);
         let lows: Vec<f64> = extract(&|q| &q.low);
         let opens: Vec<f64> = extract(&|q| &q.open);
-        let volumes: Vec<u64> = chart.indicators.quote.first()
+        let volumes: Vec<u64> = chart
+            .indicators
+            .quote
+            .first()
             .and_then(|q| q.volume.as_ref())
             .map(|c| c.iter().filter_map(|v| *v).collect())
             .unwrap_or_default();
@@ -683,18 +757,55 @@ pub async fn scan_intraday(client: &YahooClient, market: market::Market) -> Resu
             continue;
         }
 
-        let signal = compute_signal(&symbol, quote, price, &closes, &highs, &lows, &volumes, &opens);
+        let signal = compute_signal(
+            &symbol, quote, price, &closes, &highs, &lows, &volumes, &opens,
+        );
         signals.push(signal);
     }
 
-    signals.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    signals.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(signals)
+}
+
+// Helper to clone signal without implementing Clone on the whole struct
+impl IntradaySignal {
+    pub fn clone_signal(&self) -> IntradaySignal {
+        IntradaySignal {
+            symbol: self.symbol.clone(),
+            name: self.name.clone(),
+            price: self.price,
+            currency: self.currency.clone(),
+            change_pct: self.change_pct,
+            volume_ratio: self.volume_ratio,
+            regime: self.regime,
+            confidence: self.confidence,
+            direction: self.direction,
+            score: self.score,
+            strategies: self.strategies.clone(),
+            rsi: self.rsi,
+            vwap: self.vwap,
+            above_vwap: self.above_vwap,
+            macd_histogram: self.macd_histogram,
+            bb_position: self.bb_position,
+            atr_pct: self.atr_pct,
+            obv_trend: self.obv_trend,
+            gap_detected: self.gap_detected,
+            near_support: self.near_support,
+            near_resistance: self.near_resistance,
+            pivot: self.pivot,
+            support1: self.support1,
+            resistance1: self.resistance1,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::Quote;
 
     fn make_signal(score: f64, confidence: Confidence, atr_pct: f64) -> IntradaySignal {
         IntradaySignal {
@@ -737,7 +848,10 @@ mod tests {
         assert_eq!(format!("{}", MarketRegime::Uptrend), "Uptrend");
         assert_eq!(format!("{}", MarketRegime::Ranging), "Ranging");
         assert_eq!(format!("{}", MarketRegime::Downtrend), "Downtrend");
-        assert_eq!(format!("{}", MarketRegime::StrongDowntrend), "Strong Downtrend");
+        assert_eq!(
+            format!("{}", MarketRegime::StrongDowntrend),
+            "Strong Downtrend"
+        );
     }
 
     #[test]
@@ -868,7 +982,11 @@ mod tests {
 
     #[test]
     fn test_sector_heat_struct() {
-        let sh = SectorHeat { name: "IT".into(), change_pct: 1.5, hot: true };
+        let sh = SectorHeat {
+            name: "IT".into(),
+            change_pct: 1.5,
+            hot: true,
+        };
         assert!(sh.hot);
         assert_eq!(sh.name, "IT");
     }
@@ -880,37 +998,5 @@ mod tests {
         assert_eq!(c.symbol, s.symbol);
         assert_eq!(c.price, s.price);
         assert_eq!(c.score, s.score);
-    }
-}
-
-// Helper to clone signal without implementing Clone on the whole struct
-impl IntradaySignal {
-    pub fn clone_signal(&self) -> IntradaySignal {
-        IntradaySignal {
-            symbol: self.symbol.clone(),
-            name: self.name.clone(),
-            price: self.price,
-            currency: self.currency.clone(),
-            change_pct: self.change_pct,
-            volume_ratio: self.volume_ratio,
-            regime: self.regime,
-            confidence: self.confidence,
-            direction: self.direction,
-            score: self.score,
-            strategies: self.strategies.clone(),
-            rsi: self.rsi,
-            vwap: self.vwap,
-            above_vwap: self.above_vwap,
-            macd_histogram: self.macd_histogram,
-            bb_position: self.bb_position,
-            atr_pct: self.atr_pct,
-            obv_trend: self.obv_trend,
-            gap_detected: self.gap_detected,
-            near_support: self.near_support,
-            near_resistance: self.near_resistance,
-            pivot: self.pivot,
-            support1: self.support1,
-            resistance1: self.resistance1,
-        }
     }
 }

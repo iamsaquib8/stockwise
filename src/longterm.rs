@@ -70,9 +70,9 @@ pub struct LongTermScore {
     pub sip_monthly_10l_10y: f64, // SIP to ₹10L in 10 years
     pub drip_multiplier_10y: f64, // dividend reinvestment multiplier over 10 years
     // Monte Carlo
-    pub monte_carlo_median: f64,    // median 5Y return from simulation
-    pub monte_carlo_p10: f64,       // 10th percentile (bad case)
-    pub monte_carlo_p90: f64,       // 90th percentile (good case)
+    pub monte_carlo_median: f64, // median 5Y return from simulation
+    pub monte_carlo_p10: f64,    // 10th percentile (bad case)
+    pub monte_carlo_p90: f64,    // 90th percentile (good case)
 }
 
 pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermScore {
@@ -140,7 +140,10 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         if f < t * 0.8 && t > 0.0 && f > 0.0 {
             val += 10.0;
             growth += 10.0;
-            reasons.push(format!("P/E compression {:.0}→{:.0} (strong growth ahead)", t, f));
+            reasons.push(format!(
+                "P/E compression {:.0}→{:.0} (strong growth ahead)",
+                t, f
+            ));
         } else if f > t * 1.2 && t > 0.0 {
             risk_flags.push("Forward P/E expanding — earnings expected to slow".into());
         }
@@ -159,10 +162,10 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
 
     // Earnings yield (Buffett: compare to bond yields)
     let earnings_yield = q.trailing_pe.filter(|&pe| pe > 0.0).map(|pe| 100.0 / pe);
-    if let Some(ey) = earnings_yield {
-        if ey > 8.0 {
-            val += 5.0; // earning more than bonds
-        }
+    if let Some(ey) = earnings_yield
+        && ey > 8.0
+    {
+        val += 5.0; // earning more than bonds
     }
 
     // ══════════════════════════════════════════
@@ -283,9 +286,11 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // PILLAR 4: MOMENTUM
     // ══════════════════════════════════════════
 
-    if let (Some(p), Some(ma50), Some(ma200)) =
-        (q.regular_market_price, q.fifty_day_average, q.two_hundred_day_average)
-    {
+    if let (Some(p), Some(ma50), Some(ma200)) = (
+        q.regular_market_price,
+        q.fifty_day_average,
+        q.two_hundred_day_average,
+    ) {
         if p > ma50 && ma50 > ma200 {
             momentum += 20.0;
             reasons.push("Strong uptrend (Golden Cross)".into());
@@ -300,7 +305,10 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         let dist = ((p - ma200) / ma200) * 100.0;
         if dist < -20.0 {
             momentum += 10.0; // deeply below MA = potential entry
-            reasons.push(format!("{:.0}% below 200-MA — contrarian opportunity", dist.abs()));
+            reasons.push(format!(
+                "{:.0}% below 200-MA — contrarian opportunity",
+                dist.abs()
+            ));
         } else if dist > 40.0 {
             momentum -= 10.0;
             risk_flags.push(format!("{:.0}% above 200-MA — extended", dist));
@@ -377,14 +385,14 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     }
 
     // Historical volatility from price data
-    if let Some(closes) = hist_closes {
-        if let Some(vol) = technical::annualized_volatility(closes) {
-            if vol < 0.2 {
-                safety += 8.0;
-            } else if vol > 0.5 {
-                safety -= 10.0;
-                risk_flags.push(format!("High historical volatility ({:.0}%)", vol * 100.0));
-            }
+    if let Some(closes) = hist_closes
+        && let Some(vol) = technical::annualized_volatility(closes)
+    {
+        if vol < 0.2 {
+            safety += 8.0;
+        } else if vol > 0.5 {
+            safety -= 10.0;
+            risk_flags.push(format!("High historical volatility ({:.0}%)", vol * 100.0));
         }
     }
 
@@ -393,10 +401,10 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // ══════════════════════════════════════════
 
     // Additional moat signals from market cap dominance
-    if let Some(mc) = q.market_cap {
-        if mc > 1_000_000_000_000.0 {
-            moat_points += 1; // mega-cap likely has moat
-        }
+    if let Some(mc) = q.market_cap
+        && mc > 1_000_000_000_000.0
+    {
+        moat_points += 1; // mega-cap likely has moat
     }
 
     let moat = match moat_points {
@@ -422,7 +430,13 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
 
     // Dynamic weighting: growth investors weight growth more, value investors weight valuation more
     // We use a balanced approach with slight tilt to quality+growth (long-term compounders)
-    let total = (val * 0.18 + growth * 0.22 + quality * 0.25 + momentum * 0.10 + dividend * 0.10 + safety * 0.15).clamp(0.0, 100.0);
+    let total = (val * 0.18
+        + growth * 0.22
+        + quality * 0.25
+        + momentum * 0.10
+        + dividend * 0.10
+        + safety * 0.15)
+        .clamp(0.0, 100.0);
 
     // Risk tier
     let risk_tier = if safety >= 65.0 && quality >= 60.0 {
@@ -483,7 +497,11 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
 
     LongTermScore {
         symbol: q.symbol.clone().unwrap_or_default(),
-        name: q.short_name.clone().or(q.long_name.clone()).unwrap_or_default(),
+        name: q
+            .short_name
+            .clone()
+            .or(q.long_name.clone())
+            .unwrap_or_default(),
         price,
         currency: q.currency.clone(),
         valuation_score: val,
@@ -531,9 +549,13 @@ fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
         let mut value = 100.0_f64;
         for _ in 0..days {
             // Simple LCG PRNG → Box-Muller approximation
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u1 = (seed >> 33) as f64 / (1u64 << 31) as f64;
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u2 = (seed >> 33) as f64 / (1u64 << 31) as f64;
             let u1 = u1.max(1e-10);
             let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -543,7 +565,7 @@ fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
         results.push(value - 100.0); // return %
     }
 
-    results.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    results.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = results[sims / 2];
     let p10 = results[sims / 10];
     let p90 = results[sims * 9 / 10];
@@ -574,22 +596,33 @@ mod tests {
     fn test_high_quality_stock_scores_high() {
         let q = mock_quote(12.0, 10.0, 0.25, 0.30, 0.035);
         let score = score_for_longterm(&q, None);
-        assert!(score.total_score > 55.0, "High quality stock scored only {:.0}", score.total_score);
+        assert!(
+            score.total_score > 55.0,
+            "High quality stock scored only {:.0}",
+            score.total_score
+        );
     }
 
     #[test]
     fn test_expensive_unprofitable_scores_low() {
         let q = mock_quote(60.0, 70.0, -0.05, -0.10, 0.0);
         let score = score_for_longterm(&q, None);
-        assert!(score.total_score < 45.0, "Bad stock scored {:.0}", score.total_score);
+        assert!(
+            score.total_score < 45.0,
+            "Bad stock scored {:.0}",
+            score.total_score
+        );
     }
 
     #[test]
     fn test_moat_detection() {
         let q = mock_quote(15.0, 12.0, 0.30, 0.28, 0.02);
         let score = score_for_longterm(&q, None);
-        assert!(score.moat == MoatRating::Wide || score.moat == MoatRating::Narrow,
-            "High margin + ROE should detect moat, got {:?}", score.moat);
+        assert!(
+            score.moat == MoatRating::Wide || score.moat == MoatRating::Narrow,
+            "High margin + ROE should detect moat, got {:?}",
+            score.moat
+        );
     }
 
     #[test]
@@ -614,9 +647,14 @@ mod tests {
     #[test]
     fn test_monte_carlo_produces_results() {
         let q = mock_quote(15.0, 12.0, 0.20, 0.15, 0.02);
-        let closes: Vec<f64> = (0..252).map(|i| 100.0 + (i as f64 * 0.05).sin() * 10.0).collect();
+        let closes: Vec<f64> = (0..252)
+            .map(|i| 100.0 + (i as f64 * 0.05).sin() * 10.0)
+            .collect();
         let score = score_for_longterm(&q, Some(&closes));
-        assert!(score.monte_carlo_p90 > score.monte_carlo_p10, "P90 should be > P10");
+        assert!(
+            score.monte_carlo_p90 > score.monte_carlo_p10,
+            "P90 should be > P10"
+        );
         assert!(score.monte_carlo_median > score.monte_carlo_p10);
     }
 
@@ -625,7 +663,10 @@ mod tests {
         let q = mock_quote(15.0, 12.0, 0.20, 0.15, 0.04); // 4% dividend
         let score = score_for_longterm(&q, None);
         assert!(score.drip_multiplier_10y > 1.0, "DRIP should boost returns");
-        assert!(score.drip_multiplier_10y < 2.0, "10Y DRIP at 4% should be ~1.48");
+        assert!(
+            score.drip_multiplier_10y < 2.0,
+            "10Y DRIP at 4% should be ~1.48"
+        );
     }
 
     #[test]

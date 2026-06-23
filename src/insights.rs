@@ -9,17 +9,18 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     // Valuation insights
     if let Some(pe) = q.trailing_pe {
         if pe < 0.0 {
-            insights.push("Company is currently unprofitable (negative P/E)".red().to_string());
+            insights.push(
+                "Company is currently unprofitable (negative P/E)"
+                    .red()
+                    .to_string(),
+            );
         } else if pe < 10.0 {
             insights.push(format!(
                 "P/E of {:.1} is very low — could be undervalued or facing challenges",
                 pe
             ));
         } else if pe < 20.0 {
-            insights.push(format!(
-                "P/E of {:.1} suggests reasonable valuation",
-                pe
-            ));
+            insights.push(format!("P/E of {:.1} suggests reasonable valuation", pe));
         } else if pe < 35.0 {
             insights.push(format!(
                 "P/E of {:.1} indicates growth expectations priced in",
@@ -27,19 +28,24 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
             ));
         } else {
             insights.push(
-                format!("P/E of {:.1} is very high — stock is priced for aggressive growth", pe)
-                    .yellow()
-                    .to_string(),
+                format!(
+                    "P/E of {:.1} is very high — stock is priced for aggressive growth",
+                    pe
+                )
+                .yellow()
+                .to_string(),
             );
         }
     }
 
     // Forward vs trailing PE
-    if let (Some(trailing), Some(forward)) = (q.trailing_pe, q.forward_pe) {
-        if trailing > 0.0 && forward > 0.0 {
-            let compression = ((trailing - forward) / trailing) * 100.0;
-            if compression > 15.0 {
-                insights.push(
+    if let (Some(trailing), Some(forward)) = (q.trailing_pe, q.forward_pe)
+        && trailing > 0.0
+        && forward > 0.0
+    {
+        let compression = ((trailing - forward) / trailing) * 100.0;
+        if compression > 15.0 {
+            insights.push(
                     format!(
                         "Forward P/E ({:.1}) is {:.0}% lower than trailing ({:.1}) — analysts expect strong earnings growth",
                         forward, compression, trailing
@@ -47,8 +53,8 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
                     .green()
                     .to_string(),
                 );
-            } else if compression < -15.0 {
-                insights.push(
+        } else if compression < -15.0 {
+            insights.push(
                     format!(
                         "Forward P/E ({:.1}) is higher than trailing ({:.1}) — earnings expected to decline",
                         forward, trailing
@@ -56,14 +62,15 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
                     .red()
                     .to_string(),
                 );
-            }
         }
     }
 
     // Price vs moving averages
-    if let (Some(price), Some(ma50), Some(ma200)) =
-        (q.regular_market_price, q.fifty_day_average, q.two_hundred_day_average)
-    {
+    if let (Some(price), Some(ma50), Some(ma200)) = (
+        q.regular_market_price,
+        q.fifty_day_average,
+        q.two_hundred_day_average,
+    ) {
         if price > ma50 && ma50 > ma200 {
             insights.push(
                 "Price above both 50-day and 200-day MA — strong uptrend (Golden Cross zone)"
@@ -77,9 +84,15 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
                     .to_string(),
             );
         } else if price > ma200 && price < ma50 {
-            insights.push("Price between MAs — possible short-term pullback in longer uptrend".to_string());
+            insights.push(
+                "Price between MAs — possible short-term pullback in longer uptrend".to_string(),
+            );
         } else if price < ma200 && price > ma50 {
-            insights.push("Short-term recovery but still in longer-term downtrend".yellow().to_string());
+            insights.push(
+                "Short-term recovery but still in longer-term downtrend"
+                    .yellow()
+                    .to_string(),
+            );
         }
 
         let dist_from_200 = ((price - ma200) / ma200) * 100.0;
@@ -105,9 +118,11 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     }
 
     // 52-week range position
-    if let (Some(price), Some(high), Some(low)) =
-        (q.regular_market_price, q.fifty_two_week_high, q.fifty_two_week_low)
-    {
+    if let (Some(price), Some(high), Some(low)) = (
+        q.regular_market_price,
+        q.fifty_two_week_high,
+        q.fifty_two_week_low,
+    ) {
         let range = high - low;
         if range > 0.0 {
             let position = ((price - low) / range) * 100.0;
@@ -127,20 +142,27 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     }
 
     // Dividend analysis
-    if let Some(div_yield) = q.trailing_annual_dividend_yield {
-        if div_yield > 0.0 {
-            let pct = div_yield * 100.0;
-            if pct > 5.0 {
-                insights.push(
-                    format!("High dividend yield of {:.2}% — check if it's sustainable", pct)
-                        .yellow()
-                        .to_string(),
-                );
-            } else if pct > 2.0 {
-                insights.push(format!("Solid dividend yield of {:.2}%", pct).green().to_string());
-            } else {
-                insights.push(format!("Modest dividend yield of {:.2}%", pct).to_string());
-            }
+    if let Some(div_yield) = q.trailing_annual_dividend_yield
+        && div_yield > 0.0
+    {
+        let pct = div_yield * 100.0;
+        if pct > 5.0 {
+            insights.push(
+                format!(
+                    "High dividend yield of {:.2}% — check if it's sustainable",
+                    pct
+                )
+                .yellow()
+                .to_string(),
+            );
+        } else if pct > 2.0 {
+            insights.push(
+                format!("Solid dividend yield of {:.2}%", pct)
+                    .green()
+                    .to_string(),
+            );
+        } else {
+            insights.push(format!("Modest dividend yield of {:.2}%", pct).to_string());
         }
     }
 
@@ -184,9 +206,20 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     if let Some(margin) = q.profit_margins {
         let pct = margin * 100.0;
         if pct > 20.0 {
-            insights.push(format!("Excellent profit margin of {:.1}%", pct).green().to_string());
+            insights.push(
+                format!("Excellent profit margin of {:.1}%", pct)
+                    .green()
+                    .to_string(),
+            );
         } else if pct < 0.0 {
-            insights.push(format!("Negative profit margin ({:.1}%) — company is losing money", pct).red().to_string());
+            insights.push(
+                format!(
+                    "Negative profit margin ({:.1}%) — company is losing money",
+                    pct
+                )
+                .red()
+                .to_string(),
+            );
         }
     }
 
@@ -194,15 +227,21 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     if let Some(de) = q.debt_to_equity {
         if de > 200.0 {
             insights.push(
-                format!("Very high debt-to-equity ratio of {:.0} — significant leverage risk", de)
-                    .red()
-                    .to_string(),
+                format!(
+                    "Very high debt-to-equity ratio of {:.0} — significant leverage risk",
+                    de
+                )
+                .red()
+                .to_string(),
             );
         } else if de < 30.0 {
             insights.push(
-                format!("Low debt-to-equity of {:.0} — conservative balance sheet", de)
-                    .green()
-                    .to_string(),
+                format!(
+                    "Low debt-to-equity of {:.0} — conservative balance sheet",
+                    de
+                )
+                .green()
+                .to_string(),
             );
         }
     }
@@ -211,56 +250,66 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     if let Some(beta) = q.beta {
         if beta > 1.5 {
             insights.push(
-                format!("High beta of {:.2} — stock is significantly more volatile than the market", beta)
-                    .yellow()
-                    .to_string(),
+                format!(
+                    "High beta of {:.2} — stock is significantly more volatile than the market",
+                    beta
+                )
+                .yellow()
+                .to_string(),
             );
         } else if beta < 0.5 {
             insights.push(
-                format!("Low beta of {:.2} — defensive stock, less volatile than market", beta)
-                    .to_string(),
+                format!(
+                    "Low beta of {:.2} — defensive stock, less volatile than market",
+                    beta
+                )
+                .to_string(),
             );
         }
     }
 
     // Analyst consensus
-    if let (Some(rec), Some(target)) = (q.recommendation_mean, q.target_mean_price) {
-        if let Some(price) = q.regular_market_price {
-            let csym = market::currency_symbol(q.currency.as_deref());
-            let upside = ((target - price) / price) * 100.0;
-            let label = match q.recommendation_key.as_deref() {
-                Some(k) => k.to_string(),
-                None => format!("{:.1}", rec),
-            };
-            if upside > 20.0 {
-                insights.push(
-                    format!(
-                        "Analyst consensus: {} — target {}{:.2} implies {:.1}% upside",
-                        label, csym, target, upside
-                    )
-                    .green()
-                    .to_string(),
-                );
-            } else if upside < -10.0 {
-                insights.push(
-                    format!(
-                        "Analyst consensus: {} — target {}{:.2} implies {:.1}% downside",
-                        label, csym, target, upside
-                    )
-                    .red()
-                    .to_string(),
-                );
-            } else {
-                insights.push(format!(
-                    "Analyst consensus: {} — target {}{:.2} ({:+.1}%)",
+    if let (Some(rec), Some(target)) = (q.recommendation_mean, q.target_mean_price)
+        && let Some(price) = q.regular_market_price
+    {
+        let csym = market::currency_symbol(q.currency.as_deref());
+        let upside = ((target - price) / price) * 100.0;
+        let label = match q.recommendation_key.as_deref() {
+            Some(k) => k.to_string(),
+            None => format!("{:.1}", rec),
+        };
+        if upside > 20.0 {
+            insights.push(
+                format!(
+                    "Analyst consensus: {} — target {}{:.2} implies {:.1}% upside",
                     label, csym, target, upside
-                ));
-            }
+                )
+                .green()
+                .to_string(),
+            );
+        } else if upside < -10.0 {
+            insights.push(
+                format!(
+                    "Analyst consensus: {} — target {}{:.2} implies {:.1}% downside",
+                    label, csym, target, upside
+                )
+                .red()
+                .to_string(),
+            );
+        } else {
+            insights.push(format!(
+                "Analyst consensus: {} — target {}{:.2} ({:+.1}%)",
+                label, csym, target, upside
+            ));
         }
     }
 
     if insights.is_empty() {
-        insights.push("Limited data available for generating insights".dimmed().to_string());
+        insights.push(
+            "Limited data available for generating insights"
+                .dimmed()
+                .to_string(),
+        );
     }
 
     insights
@@ -277,15 +326,17 @@ pub fn overall_verdict(q: &Quote) -> String {
         factors += 1;
         if pe > 0.0 && pe < 25.0 {
             score += 1;
-        } else if pe > 40.0 || pe < 0.0 {
+        } else if !(0.0..=40.0).contains(&pe) {
             score -= 1;
         }
     }
 
     // Trend
-    if let (Some(price), Some(ma50), Some(ma200)) =
-        (q.regular_market_price, q.fifty_day_average, q.two_hundred_day_average)
-    {
+    if let (Some(price), Some(ma50), Some(ma200)) = (
+        q.regular_market_price,
+        q.fifty_day_average,
+        q.two_hundred_day_average,
+    ) {
         factors += 1;
         if price > ma50 && ma50 > ma200 {
             score += 2;

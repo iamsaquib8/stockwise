@@ -102,12 +102,13 @@ pub fn bollinger_bands(data: &[f64], period: usize) -> Option<(f64, f64, f64)> {
 
 /// Calculate Average True Range (volatility indicator)
 pub fn atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> Option<f64> {
-    if highs.len() < period + 1 || lows.len() < period + 1 || closes.len() < period + 1 {
+    let n = highs.len().min(lows.len()).min(closes.len());
+    if n < period + 1 {
         return None;
     }
 
     let mut true_ranges = Vec::new();
-    for i in 1..highs.len() {
+    for i in 1..n {
         let tr = (highs[i] - lows[i])
             .max((highs[i] - closes[i - 1]).abs())
             .max((lows[i] - closes[i - 1]).abs());
@@ -128,12 +129,17 @@ pub fn atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> Option
 
 /// Calculate VWAP approximation from typical price * volume
 pub fn vwap(highs: &[f64], lows: &[f64], closes: &[f64], volumes: &[u64]) -> Option<f64> {
-    if highs.is_empty() {
+    let n = highs
+        .len()
+        .min(lows.len())
+        .min(closes.len())
+        .min(volumes.len());
+    if n == 0 {
         return None;
     }
     let mut cum_tp_vol = 0.0;
     let mut cum_vol = 0.0;
-    for i in 0..highs.len() {
+    for i in 0..n {
         let tp = (highs[i] + lows[i] + closes[i]) / 3.0;
         cum_tp_vol += tp * volumes[i] as f64;
         cum_vol += volumes[i] as f64;
@@ -171,6 +177,7 @@ pub fn macd_signal(histogram: f64) -> &'static str {
 pub fn daily_returns(prices: &[f64]) -> Vec<f64> {
     prices
         .windows(2)
+        .filter(|w| w[0] != 0.0)
         .map(|w| (w[1] - w[0]) / w[0])
         .collect()
 }
@@ -194,8 +201,11 @@ pub fn sharpe_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
         return None;
     }
     let mean_daily = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance =
-        returns.iter().map(|r| (r - mean_daily).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
+    let variance = returns
+        .iter()
+        .map(|r| (r - mean_daily).powi(2))
+        .sum::<f64>()
+        / (returns.len() - 1) as f64;
     let std_daily = variance.sqrt();
     if std_daily == 0.0 {
         return None;
@@ -257,7 +267,7 @@ pub fn value_at_risk(prices: &[f64], confidence: f64) -> Option<f64> {
     if returns.len() < 10 {
         return None;
     }
-    returns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    returns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = ((1.0 - confidence) * returns.len() as f64).floor() as usize;
     Some(returns[idx.min(returns.len() - 1)])
 }
@@ -337,13 +347,16 @@ pub fn fibonacci_levels(swing_high: f64, swing_low: f64) -> [f64; 5] {
 
 /// Find the most recent swing high and swing low in a price series
 pub fn find_swing_points(highs: &[f64], lows: &[f64], lookback: usize) -> Option<(f64, f64)> {
-    if highs.len() < lookback || lows.len() < lookback {
+    if lookback == 0 || highs.len() < lookback || lows.len() < lookback {
         return None;
     }
     let n = highs.len();
     let recent_highs = &highs[n - lookback..];
     let recent_lows = &lows[n - lookback..];
-    let swing_high = recent_highs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let swing_high = recent_highs
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let swing_low = recent_lows.iter().cloned().fold(f64::INFINITY, f64::min);
     Some((swing_high, swing_low))
 }
@@ -354,7 +367,9 @@ pub fn find_swing_points(highs: &[f64], lows: &[f64], lookback: usize) -> Option
 pub fn obv(closes: &[f64], volumes: &[u64]) -> Vec<f64> {
     let n = closes.len().min(volumes.len());
     let mut result = Vec::with_capacity(n);
-    if n == 0 { return result; }
+    if n == 0 {
+        return result;
+    }
     result.push(volumes[0] as f64);
     for i in 1..n {
         let prev = *result.last().unwrap();
@@ -371,7 +386,11 @@ pub fn obv(closes: &[f64], volumes: &[u64]) -> Vec<f64> {
 
 /// Accumulation/Distribution Line
 pub fn ad_line(highs: &[f64], lows: &[f64], closes: &[f64], volumes: &[u64]) -> Vec<f64> {
-    let n = closes.len().min(highs.len()).min(lows.len()).min(volumes.len());
+    let n = closes
+        .len()
+        .min(highs.len())
+        .min(lows.len())
+        .min(volumes.len());
     let mut result = Vec::with_capacity(n);
     let mut ad = 0.0_f64;
     for i in 0..n {
@@ -399,11 +418,18 @@ pub struct Gap {
 }
 
 #[derive(Debug)]
-pub enum GapType { Up, Down }
+pub enum GapType {
+    Up,
+    Down,
+}
 
 /// Detect price gaps between consecutive candles
 pub fn detect_gaps(opens: &[f64], highs: &[f64], lows: &[f64], closes: &[f64]) -> Vec<Gap> {
-    let n = opens.len().min(highs.len()).min(lows.len()).min(closes.len());
+    let n = opens
+        .len()
+        .min(highs.len())
+        .min(lows.len())
+        .min(closes.len());
     let mut gaps = Vec::new();
     for i in 1..n {
         // Gap up: today's low > yesterday's high
@@ -412,14 +438,26 @@ pub fn detect_gaps(opens: &[f64], highs: &[f64], lows: &[f64], closes: &[f64]) -
             let gap_high = lows[i];
             // Check if gap was filled in subsequent candles
             let filled = (i + 1..n).any(|j| lows[j] <= gap_low);
-            gaps.push(Gap { index: i, gap_type: GapType::Up, gap_low, gap_high, filled });
+            gaps.push(Gap {
+                index: i,
+                gap_type: GapType::Up,
+                gap_low,
+                gap_high,
+                filled,
+            });
         }
         // Gap down: today's high < yesterday's low
         if highs[i] < lows[i - 1] {
             let gap_low = highs[i];
             let gap_high = lows[i - 1];
             let filled = (i + 1..n).any(|j| highs[j] >= gap_high);
-            gaps.push(Gap { index: i, gap_type: GapType::Down, gap_low, gap_high, filled });
+            gaps.push(Gap {
+                index: i,
+                gap_type: GapType::Down,
+                gap_low,
+                gap_high,
+                filled,
+            });
         }
     }
     gaps
@@ -462,14 +500,20 @@ mod tests {
         assert!(result.is_some());
         // EMA(3) on [10,11,12,13,14]: SMA start=11, then apply EMA formula
         let r = result.unwrap();
-        assert!(r > 12.0 && r < 15.0, "EMA should be between 12 and 15, got {}", r);
+        assert!(
+            r > 12.0 && r < 15.0,
+            "EMA should be between 12 and 15, got {}",
+            r
+        );
         assert_eq!(ema(&[1.0], 3), None);
     }
 
     #[test]
     fn test_rsi() {
         // Monotonically increasing = RSI 100
-        let up = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
+        let up = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ];
         assert_eq!(rsi(&up, 14), Some(100.0));
         // Too short
         assert_eq!(rsi(&[1.0, 2.0], 14), None);
@@ -477,9 +521,11 @@ mod tests {
 
     #[test]
     fn test_rsi_range() {
-        let data: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0).collect();
+        let data: Vec<f64> = (0..100)
+            .map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0)
+            .collect();
         let r = rsi(&data, 14).unwrap();
-        assert!(r >= 0.0 && r <= 100.0);
+        assert!((0.0..=100.0).contains(&r));
     }
 
     #[test]
@@ -519,7 +565,9 @@ mod tests {
 
     #[test]
     fn test_value_at_risk() {
-        let prices: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.3).sin() * 5.0).collect();
+        let prices: Vec<f64> = (0..100)
+            .map(|i| 100.0 + (i as f64 * 0.3).sin() * 5.0)
+            .collect();
         let var95 = value_at_risk(&prices, 0.95);
         assert!(var95.is_some());
         assert!(var95.unwrap() < 0.0); // VaR should be negative
@@ -539,7 +587,11 @@ mod tests {
         let a = vec![100.0, 110.0, 100.0, 110.0, 100.0, 110.0];
         let b = vec![100.0, 90.0, 100.0, 90.0, 100.0, 90.0];
         let corr = correlation(&a, &b).unwrap();
-        assert!((corr - (-1.0)).abs() < 0.01, "Expected -1.0 correlation, got {}", corr);
+        assert!(
+            (corr - (-1.0)).abs() < 0.01,
+            "Expected -1.0 correlation, got {}",
+            corr
+        );
     }
 
     #[test]
@@ -649,7 +701,9 @@ mod tests {
     #[test]
     fn test_sortino_ratio() {
         // Use a volatile series so there are downside returns
-        let prices: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.3).sin() * 10.0).collect();
+        let prices: Vec<f64> = (0..100)
+            .map(|i| 100.0 + (i as f64 * 0.3).sin() * 10.0)
+            .collect();
         let s = sortino_ratio(&prices, 0.0);
         // May be None if no downside deviation, so just verify it doesn't panic
         if let Some(s_val) = s {
@@ -669,7 +723,9 @@ mod tests {
 
     #[test]
     fn test_find_swing_points() {
-        let highs: Vec<f64> = (0..30).map(|i| 100.0 + (i as f64 * 0.3).sin() * 10.0).collect();
+        let highs: Vec<f64> = (0..30)
+            .map(|i| 100.0 + (i as f64 * 0.3).sin() * 10.0)
+            .collect();
         let lows: Vec<f64> = highs.iter().map(|h| h - 5.0).collect();
         let result = find_swing_points(&highs, &lows, 5);
         assert!(result.is_some());
@@ -703,7 +759,11 @@ mod tests {
         let result = chandelier_exit(&highs, 2.0, 3.0);
         if let Some(exit) = result {
             assert!(exit > 0.0);
-            assert!(exit <= *highs.iter().fold(&f64::NEG_INFINITY, |a, b| if b > a { b } else { a }));
+            assert!(
+                exit <= *highs
+                    .iter()
+                    .fold(&f64::NEG_INFINITY, |a, b| if b > a { b } else { a })
+            );
         }
     }
 
@@ -727,5 +787,47 @@ mod tests {
         if let Some((dd, _, _)) = result {
             assert_eq!(dd, 0.0); // monotonically increasing, no drawdown
         }
+    }
+
+    #[test]
+    fn test_vwap_mismatched_lengths_no_panic() {
+        // Yahoo can return a null in one OHLCV channel but not others, giving
+        // ragged vectors. vwap must not index out of bounds.
+        let highs = vec![10.0, 11.0, 12.0, 13.0];
+        let lows = vec![9.0, 10.0]; // shorter
+        let closes = vec![9.5, 10.5, 11.5];
+        let volumes = vec![100u64, 200]; // shortest
+        let v = vwap(&highs, &lows, &closes, &volumes);
+        assert!(v.is_some());
+    }
+
+    #[test]
+    fn test_atr_mismatched_lengths_no_panic() {
+        let highs = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
+        let lows = vec![9.0, 10.0, 11.0]; // shorter than highs
+        let closes = vec![9.5, 10.5, 11.5, 12.5];
+        // Must return None (not panic) when the common length is below period+1.
+        assert!(atr(&highs, &lows, &closes, 14).is_none());
+    }
+
+    #[test]
+    fn test_daily_returns_skips_zero_price() {
+        // A 0.0 price must not produce Inf/NaN — that window is skipped.
+        let prices = vec![100.0, 0.0, 50.0, 55.0];
+        let returns = daily_returns(&prices);
+        assert!(returns.iter().all(|r| r.is_finite()));
+    }
+
+    #[test]
+    fn test_value_at_risk_no_panic_with_zero_price() {
+        // A 0.0 in the series would historically NaN-poison the sort and panic.
+        let mut prices: Vec<f64> = (0..20).map(|i| 100.0 + i as f64).collect();
+        prices[5] = 0.0;
+        let _ = value_at_risk(&prices, 0.95); // must not panic
+    }
+
+    #[test]
+    fn test_find_swing_points_zero_lookback_is_none() {
+        assert!(find_swing_points(&[], &[], 0).is_none());
     }
 }

@@ -73,7 +73,12 @@ impl AiClient {
 
     async fn cache_get(&mut self, key: &str) -> Option<String> {
         if let Some(ref mut conn) = self.redis {
-            redis::cmd("GET").arg(key).query_async::<Option<String>>(conn).await.ok().flatten()
+            redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<String>>(conn)
+                .await
+                .ok()
+                .flatten()
         } else {
             None
         }
@@ -119,10 +124,10 @@ impl AiClient {
         } else {
             let mut combined = String::new();
             for line in raw.lines() {
-                if let Ok(obj) = serde_json::from_str::<OllamaResponse>(line) {
-                    if let Some(r) = obj.response {
-                        combined.push_str(&r);
-                    }
+                if let Ok(obj) = serde_json::from_str::<OllamaResponse>(line)
+                    && let Some(r) = obj.response
+                {
+                    combined.push_str(&r);
                 }
             }
             combined
@@ -142,7 +147,7 @@ impl AiClient {
 
     pub async fn analyze_stock(&mut self, data: &StockData) -> Result<String> {
         let prompt = format!(
-r#"You are a stock market analyst. Analyze this stock and give a concise investment opinion.
+            r#"You are a stock market analyst. Analyze this stock and give a concise investment opinion.
 
 Stock: {} ({})
 Price: {:.2} | Change: {:+.2}%
@@ -162,25 +167,36 @@ Give a 3-4 sentence analysis covering:
 4. Overall verdict (BUY/HOLD/SELL for short-term and long-term)
 
 Be direct and specific. No disclaimers."#,
-            data.symbol, data.name, data.price, data.change_pct,
+            data.symbol,
+            data.name,
+            data.price,
+            data.change_pct,
             data.pe.map_or("N/A".to_string(), |v| format!("{:.1}", v)),
-            data.forward_pe.map_or("N/A".to_string(), |v| format!("{:.1}", v)),
+            data.forward_pe
+                .map_or("N/A".to_string(), |v| format!("{:.1}", v)),
             data.pb.map_or("N/A".to_string(), |v| format!("{:.1}", v)),
-            data.week52_low, data.week52_high, data.market_cap,
-            data.eps_ttm.map_or("N/A".to_string(), |v| format!("{:.2}", v)),
-            data.eps_fwd.map_or("N/A".to_string(), |v| format!("{:.2}", v)),
-            data.div_yield.map_or("N/A".to_string(), |v| format!("{:.2}", v * 100.0)),
-            data.ma50, data.ma200,
+            data.week52_low,
+            data.week52_high,
+            data.market_cap,
+            data.eps_ttm
+                .map_or("N/A".to_string(), |v| format!("{:.2}", v)),
+            data.eps_fwd
+                .map_or("N/A".to_string(), |v| format!("{:.2}", v)),
+            data.div_yield
+                .map_or("N/A".to_string(), |v| format!("{:.2}", v * 100.0)),
+            data.ma50,
+            data.ma200,
             data.rsi.map_or("N/A".to_string(), |v| format!("{:.0}", v)),
             data.beta.map_or("N/A".to_string(), |v| format!("{:.2}", v)),
-            data.sector, data.industry,
+            data.sector,
+            data.industry,
         );
         self.generate(&prompt).await
     }
 
     pub async fn generate_intraday_report(&mut self, report_data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are an expert intraday trader. Based on this scan data, write a concise morning trading brief.
+            r#"You are an expert intraday trader. Based on this scan data, write a concise morning trading brief.
 
 {}
 
@@ -199,7 +215,7 @@ Be specific with price levels. Write like a professional trading desk note."#,
 
     pub async fn generate_longterm_report(&mut self, report_data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are a long-term investment advisor. Based on this analysis, write an investment memo.
+            r#"You are a long-term investment advisor. Based on this analysis, write an investment memo.
 
 {}
 
@@ -228,7 +244,7 @@ Write like a fund manager's note to clients. Be specific and actionable."#,
     /// Technical analysis interpretation
     pub async fn interpret_technicals(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are a technical analyst. Interpret these indicators together and give a clear trade signal.
+            r#"You are a technical analyst. Interpret these indicators together and give a clear trade signal.
 
 {}
 
@@ -236,46 +252,54 @@ In 3-4 sentences:
 1. What do these indicators mean together? (confluent or conflicting?)
 2. What's the most likely price action?
 3. Specific entry/exit suggestion
-Be direct."#, data);
+Be direct."#,
+            data
+        );
         self.generate(&prompt).await
     }
 
     /// Compare two or more stocks
     pub async fn compare_stocks(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are an investment analyst. Compare these stocks and pick a winner.
+            r#"You are an investment analyst. Compare these stocks and pick a winner.
 
 {}
 
-In 3-4 sentences: Which stock is the best investment right now and why? Be specific about valuation, growth, and risk. Give a clear verdict."#, data);
+In 3-4 sentences: Which stock is the best investment right now and why? Be specific about valuation, growth, and risk. Give a clear verdict."#,
+            data
+        );
         self.generate(&prompt).await
     }
 
     /// Backtest interpretation
     pub async fn interpret_backtest(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are a quantitative analyst. Interpret these backtest results.
+            r#"You are a quantitative analyst. Interpret these backtest results.
 
 {}
 
-In 3-4 sentences: Is this strategy viable? What market conditions would it work best in? Key risks? Would you deploy real capital on it?"#, data);
+In 3-4 sentences: Is this strategy viable? What market conditions would it work best in? Key risks? Would you deploy real capital on it?"#,
+            data
+        );
         self.generate(&prompt).await
     }
 
     /// Screen results analysis
     pub async fn analyze_screen(&mut self, data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are a stock screener analyst. Analyze these screened stocks.
+            r#"You are a stock screener analyst. Analyze these screened stocks.
 
 {}
 
-In 3-4 sentences: Which 2-3 stocks stand out most? Any value traps to avoid? What makes the top picks compelling?"#, data);
+In 3-4 sentences: Which 2-3 stocks stand out most? Any value traps to avoid? What makes the top picks compelling?"#,
+            data
+        );
         self.generate(&prompt).await
     }
 
     pub async fn generate_portfolio_report(&mut self, report_data: &str) -> Result<String> {
         let prompt = format!(
-r#"You are a portfolio analyst. Review this portfolio and give actionable advice.
+            r#"You are a portfolio analyst. Review this portfolio and give actionable advice.
 
 {}
 
@@ -296,13 +320,16 @@ Be direct and specific with recommendations."#,
 /// Strip <think>...</think> tags from qwen3-style thinking models
 fn strip_think_tags(text: &str) -> String {
     let mut result = text.to_string();
-    // Remove <think>...</think> blocks (can be multiline)
+    // Remove <think>...</think> blocks (can be multiline). Search for the
+    // closing tag *after* the opening one, so a stray "</think>" earlier in the
+    // text can't corrupt the slice.
     while let Some(start) = result.find("<think>") {
-        if let Some(end) = result.find("</think>") {
-            result = format!("{}{}", &result[..start], &result[end + 8..]);
+        if let Some(rel_end) = result[start..].find("</think>") {
+            let end = start + rel_end + "</think>".len();
+            result = format!("{}{}", &result[..start], &result[end..]);
         } else {
             // Unclosed think tag — remove from <think> to end
-            result = result[..start].to_string();
+            result.truncate(start);
             break;
         }
     }
@@ -336,7 +363,11 @@ impl StockData {
     pub fn from_quote(q: &crate::api::Quote) -> Self {
         Self {
             symbol: q.symbol.clone().unwrap_or_default(),
-            name: q.short_name.clone().or(q.long_name.clone()).unwrap_or_default(),
+            name: q
+                .short_name
+                .clone()
+                .or(q.long_name.clone())
+                .unwrap_or_default(),
             price: q.regular_market_price.unwrap_or(0.0),
             change_pct: q.regular_market_change_percent.unwrap_or(0.0),
             pe: q.trailing_pe,

@@ -1,16 +1,15 @@
-use anyhow::Result;
-use chrono::{Local, NaiveTime, Datelike, Weekday};
+use chrono::{Datelike, Local, NaiveTime, Weekday};
 
 /// Market session phases
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Phase {
-    PreMarket,    // 9:00 – 9:14
-    Opening,      // 9:15 – 9:30
-    Active,       // 9:30 – 14:00
-    WindDown,     // 14:00 – 15:15
-    SquareOff,    // 15:15 – 15:20
-    PostMarket,   // 15:20 – 16:00
-    Closed,       // outside market hours
+    PreMarket,  // 9:00 – 9:14
+    Opening,    // 9:15 – 9:30
+    Active,     // 9:30 – 14:00
+    WindDown,   // 14:00 – 15:15
+    SquareOff,  // 15:15 – 15:20
+    PostMarket, // 15:20 – 16:00
+    Closed,     // outside market hours
 }
 
 impl std::fmt::Display for Phase {
@@ -69,8 +68,9 @@ pub struct LivePosition {
     pub stop_loss: f64,
     pub trailing_stop: f64,
     pub qty: u32,
-    pub t1_booked: bool,       // has T1 been partially booked?
-    pub remaining_qty: u32,     // qty left after partial booking
+    pub t1_booked: bool,    // has T1 been partially booked?
+    pub remaining_qty: u32, // qty left after partial booking
+    pub booked_pnl: f64,    // realized P&L locked in on the booked half at T1
     pub pnl: f64,
     pub pnl_pct: f64,
     pub status: PositionStatus,
@@ -81,10 +81,10 @@ pub struct LivePosition {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PositionStatus {
     Open,
-    T1Hit,       // partial booked
-    T2Hit,       // fully closed at target
-    StopHit,     // stopped out
-    SquaredOff,  // forced close at EOD
+    T1Hit,      // partial booked
+    T2Hit,      // fully closed at target
+    StopHit,    // stopped out
+    SquaredOff, // forced close at EOD
 }
 
 impl std::fmt::Display for PositionStatus {
@@ -147,48 +147,86 @@ pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
     pos.current_price = new_price;
     let is_long = pos.direction == "BUY";
 
-    // Calculate P&L
-    if is_long {
-        pos.pnl = (new_price - pos.entry_price) * pos.remaining_qty as f64;
-        pos.pnl_pct = ((new_price / pos.entry_price) - 1.0) * 100.0;
+    // Calculate P&L = realized (booked half) + open leg on the remaining qty.
+    let leg = if is_long {
+        (new_price - pos.entry_price) * pos.remaining_qty as f64
     } else {
-        pos.pnl = (pos.entry_price - new_price) * pos.remaining_qty as f64;
-        pos.pnl_pct = ((pos.entry_price / new_price) - 1.0) * 100.0;
-    }
+        (pos.entry_price - new_price) * pos.remaining_qty as f64
+    };
+    pos.pnl = pos.booked_pnl + leg;
+    // Percentage return on entry capital (divide by entry_price, never by the
+    // current price which can be reported as 0).
+    pos.pnl_pct = if is_long {
+        ((new_price - pos.entry_price) / pos.entry_price) * 100.0
+    } else {
+        ((pos.entry_price - new_price) / pos.entry_price) * 100.0
+    };
 
-    if pos.status == PositionStatus::T2Hit || pos.status == PositionStatus::StopHit || pos.status == PositionStatus::SquaredOff {
+    if pos.status == PositionStatus::T2Hit
+        || pos.status == PositionStatus::StopHit
+        || pos.status == PositionStatus::SquaredOff
+    {
         return; // already closed
     }
 
     // Check stop loss
-    let stopped = if is_long { new_price <= pos.stop_loss } else { new_price >= pos.stop_loss };
+    let stopped = if is_long {
+        new_price <= pos.stop_loss
+    } else {
+        new_price >= pos.stop_loss
+    };
     if stopped {
         pos.status = PositionStatus::StopHit;
         return;
     }
 
     // Check trailing stop
-    let trail_stopped = if is_long { new_price <= pos.trailing_stop } else { new_price >= pos.trailing_stop };
+    let trail_stopped = if is_long {
+        new_price <= pos.trailing_stop
+    } else {
+        new_price >= pos.trailing_stop
+    };
     if trail_stopped && pos.t1_booked {
         pos.status = PositionStatus::StopHit; // trailing stop after T1
         return;
     }
 
     // Check T2
-    let t2_hit = if is_long { new_price >= pos.target2 } else { new_price <= pos.target2 };
+    let t2_hit = if is_long {
+        new_price >= pos.target2
+    } else {
+        new_price <= pos.target2
+    };
     if t2_hit {
         pos.status = PositionStatus::T2Hit;
         return;
     }
 
     // Check T1 (partial book)
-    let t1_hit = if is_long { new_price >= pos.target1 } else { new_price <= pos.target1 };
+    let t1_hit = if is_long {
+        new_price >= pos.target1
+    } else {
+        new_price <= pos.target1
+    };
     if t1_hit && !pos.t1_booked {
         pos.t1_booked = true;
         let book_qty = pos.qty / 2;
         pos.remaining_qty = pos.qty - book_qty;
-        // Move stop to breakeven after T1
-        pos.stop_loss = pos.entry_price;
+        // Lock in realized P&L on the booked half (at target1).
+        pos.booked_pnl += if is_long {
+            (pos.target1 - pos.entry_price) * book_qty as f64
+        } else {
+            (pos.entry_price - pos.target1) * book_qty as f64
+        };
+        // Move stop to breakeven after T1, but only if it tightens the stop
+        // (entry is the correct side for both longs and shorts).
+        if is_long {
+            if pos.entry_price > pos.stop_loss {
+                pos.stop_loss = pos.entry_price;
+            }
+        } else if pos.entry_price < pos.stop_loss {
+            pos.stop_loss = pos.entry_price;
+        }
         pos.status = PositionStatus::T1Hit;
     }
 
@@ -207,11 +245,18 @@ pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
         }
     }
 
-    // Wind-down: tighten stops
+    // Wind-down: tighten stops on both sides
     if phase == Phase::WindDown {
         if is_long {
-            let tight = new_price * 0.995; // 0.5% stop in wind-down
-            if tight > pos.stop_loss { pos.stop_loss = tight; }
+            let tight = new_price * 0.995; // 0.5% below for longs
+            if tight > pos.stop_loss {
+                pos.stop_loss = tight;
+            }
+        } else {
+            let tight = new_price * 1.005; // 0.5% above for shorts
+            if tight < pos.stop_loss {
+                pos.stop_loss = tight;
+            }
         }
     }
 
@@ -223,24 +268,33 @@ pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
 
 /// Convert intraday trade plans to live positions
 pub fn plans_to_positions(plans: &[crate::intraday::TradePlan]) -> Vec<LivePosition> {
-    plans.iter().map(|p| LivePosition {
-        symbol: p.signal.symbol.clone(),
-        direction: p.signal.direction.to_string(),
-        entry_price: p.entry,
-        current_price: p.entry,
-        target1: p.target1,
-        target2: p.target2,
-        stop_loss: p.stop_loss,
-        trailing_stop: p.trailing_stop,
-        qty: p.qty,
-        t1_booked: false,
-        remaining_qty: p.qty,
-        pnl: 0.0,
-        pnl_pct: 0.0,
-        status: PositionStatus::Open,
-        strategies: p.signal.strategies.iter().map(|s| s.name.to_string()).collect(),
-        score: p.signal.score,
-    }).collect()
+    plans
+        .iter()
+        .map(|p| LivePosition {
+            symbol: p.signal.symbol.clone(),
+            direction: p.signal.direction.to_string(),
+            entry_price: p.entry,
+            current_price: p.entry,
+            target1: p.target1,
+            target2: p.target2,
+            stop_loss: p.stop_loss,
+            trailing_stop: p.trailing_stop,
+            qty: p.qty,
+            t1_booked: false,
+            remaining_qty: p.qty,
+            booked_pnl: 0.0,
+            pnl: 0.0,
+            pnl_pct: 0.0,
+            status: PositionStatus::Open,
+            strategies: p
+                .signal
+                .strategies
+                .iter()
+                .map(|s| s.name.to_string())
+                .collect(),
+            score: p.signal.score,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -249,11 +303,23 @@ mod tests {
 
     fn make_position(entry: f64, t1: f64, t2: f64, stop: f64) -> LivePosition {
         LivePosition {
-            symbol: "TEST.NS".into(), direction: "BUY".into(),
-            entry_price: entry, current_price: entry, target1: t1, target2: t2,
-            stop_loss: stop, trailing_stop: entry - 5.0, qty: 10, t1_booked: false,
-            remaining_qty: 10, pnl: 0.0, pnl_pct: 0.0, status: PositionStatus::Open,
-            strategies: vec!["RSI".into()], score: 75.0,
+            symbol: "TEST.NS".into(),
+            direction: "BUY".into(),
+            entry_price: entry,
+            current_price: entry,
+            target1: t1,
+            target2: t2,
+            stop_loss: stop,
+            trailing_stop: entry - 5.0,
+            qty: 10,
+            t1_booked: false,
+            remaining_qty: 10,
+            booked_pnl: 0.0,
+            pnl: 0.0,
+            pnl_pct: 0.0,
+            status: PositionStatus::Open,
+            strategies: vec!["RSI".into()],
+            score: 75.0,
         }
     }
 
@@ -286,7 +352,10 @@ mod tests {
         let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
         let initial_trail = pos.trailing_stop;
         update_position(&mut pos, 102.0, Phase::Active);
-        assert!(pos.trailing_stop > initial_trail, "Trailing stop should move up");
+        assert!(
+            pos.trailing_stop > initial_trail,
+            "Trailing stop should move up"
+        );
     }
 
     #[test]
@@ -295,7 +364,10 @@ mod tests {
         update_position(&mut pos, 102.0, Phase::Active);
         let trail_after_up = pos.trailing_stop;
         update_position(&mut pos, 101.0, Phase::Active);
-        assert_eq!(pos.trailing_stop, trail_after_up, "Trailing stop should not move down");
+        assert_eq!(
+            pos.trailing_stop, trail_after_up,
+            "Trailing stop should not move down"
+        );
     }
 
     #[test]
@@ -328,7 +400,7 @@ mod tests {
     #[test]
     fn test_risk_position_limit() {
         let risk = RiskState::new(25000.0);
-        assert!(risk.can_enter(4));  // 4 < 5 max
+        assert!(risk.can_enter(4)); // 4 < 5 max
         assert!(!risk.can_enter(5)); // 5 = max, can't enter
     }
 
@@ -353,5 +425,41 @@ mod tests {
         let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
         update_position(&mut pos, 102.0, Phase::WindDown);
         assert!(pos.stop_loss > 97.0, "Wind-down should tighten stop");
+    }
+
+    #[test]
+    fn test_short_pnl_and_pct() {
+        // Short from 100, price falls to 95 → +5/share profit.
+        let mut pos = make_position(100.0, 90.0, 85.0, 103.0);
+        pos.direction = "SELL".into();
+        pos.trailing_stop = 105.0;
+        update_position(&mut pos, 95.0, Phase::Active);
+        assert_eq!(pos.status, PositionStatus::Open);
+        assert!((pos.pnl - 50.0).abs() < 0.01); // 10 shares * 5.0
+        assert!((pos.pnl_pct - 5.0).abs() < 0.01); // (100-95)/100
+    }
+
+    #[test]
+    fn test_short_wind_down_tightens_stop() {
+        let mut pos = make_position(100.0, 90.0, 85.0, 103.0);
+        pos.direction = "SELL".into();
+        pos.trailing_stop = 105.0;
+        update_position(&mut pos, 96.0, Phase::WindDown);
+        assert!(
+            pos.stop_loss < 103.0,
+            "Wind-down should tighten a short's stop downward"
+        );
+    }
+
+    #[test]
+    fn test_t1_books_realized_pnl() {
+        // T1 at 104 books 5 shares * (104-100) = 20 realized.
+        let mut pos = make_position(100.0, 104.0, 110.0, 97.0);
+        update_position(&mut pos, 104.0, Phase::Active);
+        assert_eq!(pos.status, PositionStatus::T1Hit);
+        assert!((pos.booked_pnl - 20.0).abs() < 0.01);
+        // Next tick at 106: pnl = booked(20) + 5 remaining * (106-100)=30 → 50.
+        update_position(&mut pos, 106.0, Phase::Active);
+        assert!((pos.pnl - 50.0).abs() < 0.01);
     }
 }

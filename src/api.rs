@@ -48,12 +48,14 @@ impl HybridCache {
         let redis_key = format!("{}{}", REDIS_KEY_PREFIX, key);
 
         // Try Redis first
-        if let Some(ref mut conn) = self.redis {
-            if let Ok(val) = redis::cmd("GET").arg(&redis_key).query_async::<Option<String>>(conn).await {
-                if let Some(v) = val {
-                    return Some(v);
-                }
-            }
+        if let Some(ref mut conn) = self.redis
+            && let Ok(val) = redis::cmd("GET")
+                .arg(&redis_key)
+                .query_async::<Option<String>>(conn)
+                .await
+            && let Some(v) = val
+        {
+            return Some(v);
         }
 
         // Fallback to memory
@@ -85,10 +87,13 @@ impl HybridCache {
             let now = Instant::now();
             self.memory.retain(|_, v| now < v.expires);
         }
-        self.memory.insert(key, CacheEntry {
-            data,
-            expires: Instant::now() + ttl,
-        });
+        self.memory.insert(
+            key,
+            CacheEntry {
+                data,
+                expires: Instant::now() + ttl,
+            },
+        );
     }
 }
 
@@ -299,12 +304,16 @@ impl YahooClient {
                     cookie_str = cookies.join("; ");
                     break;
                 }
-                Err(e) if attempt < MAX_RETRIES - 1 => {
+                Err(_e) if attempt < MAX_RETRIES - 1 => {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt));
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                Err(e) => bail!("Failed to connect to Yahoo Finance after {} retries: {}", MAX_RETRIES, e),
+                Err(e) => bail!(
+                    "Failed to connect to Yahoo Finance after {} retries: {}",
+                    MAX_RETRIES,
+                    e
+                ),
             }
         }
 
@@ -321,7 +330,7 @@ impl YahooClient {
                     crumb = resp.text().await.context("Failed to read crumb")?;
                     break;
                 }
-                Err(e) if attempt < MAX_RETRIES - 1 => {
+                Err(_e) if attempt < MAX_RETRIES - 1 => {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt));
                     tokio::time::sleep(delay).await;
                     continue;
@@ -351,19 +360,19 @@ impl YahooClient {
             }
         }
 
-        // Rate limit
-        {
+        // Rate limit — reserve the next slot while holding the lock so
+        // concurrent callers serialize on a monotonically increasing schedule
+        // (the std Mutex is released before the await, never held across it).
+        let sleep_until = {
             let mut last = self.last_request.lock().unwrap();
-            let elapsed = last.elapsed();
             let min_interval = Duration::from_millis(MIN_REQUEST_INTERVAL_MS);
-            if elapsed < min_interval {
-                drop(last);
-                tokio::time::sleep(min_interval - elapsed).await;
-                let mut last = self.last_request.lock().unwrap();
-                *last = Instant::now();
-            } else {
-                *last = Instant::now();
-            }
+            let next = (*last + min_interval).max(Instant::now());
+            *last = next;
+            next
+        };
+        let now = Instant::now();
+        if sleep_until > now {
+            tokio::time::sleep(sleep_until - now).await;
         }
 
         // Fetch with retry + exponential backoff
@@ -387,7 +396,10 @@ impl YahooClient {
                     } else if status.as_u16() == 429 {
                         // Rate limited — back off aggressively
                         let delay = Duration::from_secs(2u64.pow(attempt + 1));
-                        eprintln!("  Rate limited by Yahoo Finance. Waiting {}s...", delay.as_secs());
+                        eprintln!(
+                            "  Rate limited by Yahoo Finance. Waiting {}s...",
+                            delay.as_secs()
+                        );
                         tokio::time::sleep(delay).await;
                         continue;
                     } else if status.as_u16() >= 500 {
@@ -399,7 +411,7 @@ impl YahooClient {
                         bail!("Yahoo Finance returned HTTP {}", status);
                     }
                 }
-                Err(e) if attempt < MAX_RETRIES - 1 => {
+                Err(_e) if attempt < MAX_RETRIES - 1 => {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt));
                     tokio::time::sleep(delay).await;
                     continue;
@@ -418,17 +430,12 @@ impl YahooClient {
         );
 
         let body = self.fetch(&url, Duration::from_secs(30)).await?; // cache 30s for quotes
-        let resp: QuoteResponse = serde_json::from_str(&body)
-            .context("Failed to parse quote response")?;
+        let resp: QuoteResponse =
+            serde_json::from_str(&body).context("Failed to parse quote response")?;
         Ok(resp.quote_response.result)
     }
 
-    pub async fn get_chart(
-        &self,
-        symbol: &str,
-        range: &str,
-        interval: &str,
-    ) -> Result<ChartData> {
+    pub async fn get_chart(&self, symbol: &str, range: &str, interval: &str) -> Result<ChartData> {
         let url = format!(
             "https://query1.finance.yahoo.com/v8/finance/chart/{}?range={}&interval={}",
             symbol, range, interval
@@ -442,12 +449,18 @@ impl YahooClient {
         };
 
         let body = self.fetch(&url, ttl).await?;
-        let resp: ChartResponse = serde_json::from_str(&body)
-            .context("Failed to parse chart response")?;
+        let resp: ChartResponse =
+            serde_json::from_str(&body).context("Failed to parse chart response")?;
 
         resp.chart
             .result
-            .and_then(|mut r| if r.is_empty() { None } else { Some(r.remove(0)) })
+            .and_then(|mut r| {
+                if r.is_empty() {
+                    None
+                } else {
+                    Some(r.remove(0))
+                }
+            })
             .context("No chart data returned")
     }
 
@@ -457,8 +470,8 @@ impl YahooClient {
 
     pub async fn raw_get(&self, url: &str) -> Result<serde_json::Value> {
         let body = self.fetch(url, Duration::from_secs(60)).await?;
-        let resp: serde_json::Value = serde_json::from_str(&body)
-            .context("Failed to parse JSON")?;
+        let resp: serde_json::Value =
+            serde_json::from_str(&body).context("Failed to parse JSON")?;
         Ok(resp)
     }
 
@@ -473,8 +486,8 @@ impl YahooClient {
             query
         );
         let body = self.fetch(&url, Duration::from_secs(120)).await?;
-        let resp: SearchResponse = serde_json::from_str(&body)
-            .context("Failed to parse search response")?;
+        let resp: SearchResponse =
+            serde_json::from_str(&body).context("Failed to parse search response")?;
         Ok(resp.quotes)
     }
 }

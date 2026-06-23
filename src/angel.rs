@@ -76,8 +76,12 @@ fn base32_decode(input: &str) -> Result<Vec<u8>> {
     let mut output = Vec::new();
 
     for ch in input.bytes() {
-        if ch == b'=' { break; }
-        let val = alphabet.iter().position(|&c| c == ch)
+        if ch == b'=' {
+            break;
+        }
+        let val = alphabet
+            .iter()
+            .position(|&c| c == ch)
             .context("Invalid base32 character")? as u64;
         bits = (bits << 5) | val;
         bit_count += 5;
@@ -122,27 +126,43 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     let bit_len = (data.len() as u64) * 8;
     let mut padded = data.to_vec();
     padded.push(0x80);
-    while padded.len() % 64 != 56 { padded.push(0); }
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
     for chunk in padded.chunks(64) {
         let mut w = [0u32; 80];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]);
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         for i in 16..80 {
-            w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]).rotate_left(1);
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
         for i in 0..80 {
             let (f, k) = match i {
-                0..=19  => ((b & c) | ((!b) & d), 0x5A827999u32),
+                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
-                _       => (b ^ c ^ d, 0xCA62C1D6u32),
+                _ => (b ^ c ^ d, 0xCA62C1D6u32),
             };
-            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(w[i]);
-            e = d; d = c; c = b.rotate_left(30); b = a; a = temp;
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(w[i]);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
         }
         h0 = h0.wrapping_add(a);
         h1 = h1.wrapping_add(b);
@@ -272,7 +292,10 @@ impl AngelClient {
         });
 
         let resp: ApiResponse<LoginData> = client
-            .post(format!("{}/rest/auth/angelbroking/user/v1/loginByPassword", BASE_URL))
+            .post(format!(
+                "{}/rest/auth/angelbroking/user/v1/loginByPassword",
+                BASE_URL
+            ))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .header("X-UserType", "USER")
@@ -305,7 +328,10 @@ impl AngelClient {
 
     fn auth_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("Authorization", format!("Bearer {}", self.jwt_token).parse().unwrap());
+        headers.insert(
+            "Authorization",
+            format!("Bearer {}", self.jwt_token).parse().unwrap(),
+        );
         headers.insert("Content-Type", "application/json".parse().unwrap());
         headers.insert("Accept", "application/json".parse().unwrap());
         headers.insert("X-UserType", "USER".parse().unwrap());
@@ -320,7 +346,10 @@ impl AngelClient {
     pub async fn get_holdings(&self) -> Result<Vec<Holding>> {
         let resp: ApiResponse<Vec<Holding>> = self
             .client
-            .get(format!("{}/rest/secure/angelbroking/portfolio/v1/getHolding", BASE_URL))
+            .get(format!(
+                "{}/rest/secure/angelbroking/portfolio/v1/getHolding",
+                BASE_URL
+            ))
             .headers(self.auth_headers())
             .send()
             .await?
@@ -333,7 +362,10 @@ impl AngelClient {
     pub async fn get_positions(&self) -> Result<Vec<Position>> {
         let resp: ApiResponse<Vec<Position>> = self
             .client
-            .get(format!("{}/rest/secure/angelbroking/order/v1/getPosition", BASE_URL))
+            .get(format!(
+                "{}/rest/secure/angelbroking/order/v1/getPosition",
+                BASE_URL
+            ))
             .headers(self.auth_headers())
             .send()
             .await?
@@ -350,7 +382,10 @@ impl AngelClient {
         });
         let resp: ApiResponse<Vec<SearchScrip>> = self
             .client
-            .post(format!("{}/rest/secure/angelbroking/order/v1/searchScrip", BASE_URL))
+            .post(format!(
+                "{}/rest/secure/angelbroking/order/v1/searchScrip",
+                BASE_URL
+            ))
             .headers(self.auth_headers())
             .json(&body)
             .send()
@@ -358,7 +393,8 @@ impl AngelClient {
             .json()
             .await?;
 
-        Ok(resp.data
+        Ok(resp
+            .data
             .and_then(|v| v.into_iter().next())
             .and_then(|s| s.symboltoken))
     }
@@ -370,7 +406,7 @@ impl AngelClient {
         exchange: &str,
         transaction: &str, // BUY or SELL
         qty: u32,
-        order_type: &str,  // MARKET, LIMIT, SL
+        order_type: &str, // MARKET, LIMIT, SL
         price: f64,
         trigger: f64,
     ) -> Result<OrderResponse> {
@@ -384,13 +420,26 @@ impl AngelClient {
             producttype: "DELIVERY".into(),
             duration: "DAY".into(),
             quantity: qty.to_string(),
-            price: if order_type == "MARKET" { "0".into() } else { format!("{:.2}", price) },
-            triggerprice: if trigger > 0.0 { format!("{:.2}", trigger) } else { "0".into() },
+            price: if order_type == "MARKET" {
+                "0".into()
+            } else {
+                format!("{:.2}", price)
+            },
+            // Angel One only accepts a trigger price on stop-loss order types;
+            // sending it on MARKET/LIMIT orders is rejected.
+            triggerprice: if matches!(order_type, "SL" | "SL-M") && trigger > 0.0 {
+                format!("{:.2}", trigger)
+            } else {
+                "0".into()
+            },
         };
 
         let resp: ApiResponse<OrderResponse> = self
             .client
-            .post(format!("{}/rest/secure/angelbroking/order/v1/placeOrder", BASE_URL))
+            .post(format!(
+                "{}/rest/secure/angelbroking/order/v1/placeOrder",
+                BASE_URL
+            ))
             .headers(self.auth_headers())
             .json(&order)
             .send()
@@ -410,7 +459,10 @@ impl AngelClient {
     pub async fn get_order_book(&self) -> Result<Vec<OrderStatus>> {
         let resp: ApiResponse<Vec<OrderStatus>> = self
             .client
-            .get(format!("{}/rest/secure/angelbroking/order/v1/getOrderBook", BASE_URL))
+            .get(format!(
+                "{}/rest/secure/angelbroking/order/v1/getOrderBook",
+                BASE_URL
+            ))
             .headers(self.auth_headers())
             .send()
             .await?

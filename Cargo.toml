@@ -1,8 +1,18 @@
 [package]
 name = "stockwise"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "A CLI tool for stock investment insights and analysis"
+rust-version = "1.88"
+authors = ["iamsaquib8 <saquibulhassan6@gmail.com>"]
+description = "Autonomous stock market CLI — quotes, analysis, backtesting, SIP, intraday signals, tax, and wealth tracking across US and Indian markets."
+documentation = "https://github.com/iamsaquib8/stockwise/tree/master/docs"
+homepage = "https://github.com/iamsaquib8/stockwise"
+repository = "https://github.com/iamsaquib8/stockwise"
+readme = "README.md"
+license = "MIT"
+keywords = ["stocks", "trading", "finance", "cli", "stock-market"]
+categories = ["command-line-utilities", "finance"]
+exclude = ["assets/", "docs/", ".github/", "*.tape"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
