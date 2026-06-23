@@ -17,9 +17,25 @@ all from your terminal.
 > every trade. Markets are risky — you can lose money. See
 > [DISCLAIMER.md](DISCLAIMER.md) before using live trading.
 
-![StockWise demo](assets/demo.gif)
+<!--
+  Animated demo: build the binary, then record with VHS:
+      cargo build --release && vhs assets/demo.tape
+  That writes assets/demo.gif. Then replace this comment with:
+      ![StockWise demo](assets/demo.gif)
+-->
 
-<sub>Demo recorded with [VHS](https://github.com/charmbracelet/vhs) — regenerate with `vhs assets/demo.tape`.</sub>
+```text
+$ stockwise quote AAPL -m us
+
+────────────────────────────────────────────────────────────
+  AAPL — Apple Inc.
+────────────────────────────────────────────────────────────
+  $295.78  ▼ -1.23 (-0.41%)
+
+  Day Range        $295.18 — $301.64     Market Cap   $4.34T
+  52-Week Range    $199.26 — $317.40     P/E (TTM)    35.81
+  50-Day MA        $289.47               200-Day MA   $268.49
+```
 
 ## Install
 
@@ -50,20 +66,6 @@ stockwise quote AAPL MSFT -m us          # US stocks
 stockwise deep HDFCBANK                   # everything about a stock, one shot
 stockwise markets                         # US + India indices at a glance
 stockwise dashboard                       # markets + portfolio + alerts
-```
-
-```text
-────────────────────────────────────────────────────────────
-  AAPL — Apple Inc.
-────────────────────────────────────────────────────────────
-  $295.78  ▼ -1.23 (-0.41%)
-
-  Day Range                    $295.18 — $301.64
-  52-Week Range                $199.26 — $317.40
-  Market Cap                   $4.34T
-  P/E (TTM)                    35.81
-  50-Day MA                    $289.47
-  200-Day MA                   $268.49
 ```
 
 ## What It Does

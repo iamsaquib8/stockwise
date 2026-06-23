@@ -7090,7 +7090,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
 
                             // Status update every 5 ticks (~5 minutes)
                             tick_count += 1;
-                            if tick_count % 5 == 0 || any_change {
+                            if tick_count.is_multiple_of(5) || any_change {
                                 let open_count = positions
                                     .iter()
                                     .filter(|p| {
