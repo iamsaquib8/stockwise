@@ -3,8 +3,8 @@ use crate::api::YahooClient;
 use crate::backtest;
 use crate::charts;
 use crate::display::*;
-use crate::intraday;
 use crate::insights;
+use crate::intraday;
 use crate::longterm;
 use crate::market::{self, Market};
 use crate::portfolio::Portfolio;
@@ -47,7 +47,11 @@ pub async fn cmd_quote(symbols: &[String], market: Market) -> Result<()> {
 
     for q in &quotes {
         let symbol = q.symbol.as_deref().unwrap_or("???");
-        let name = q.long_name.as_deref().or(q.short_name.as_deref()).unwrap_or("Unknown");
+        let name = q
+            .long_name
+            .as_deref()
+            .or(q.short_name.as_deref())
+            .unwrap_or("Unknown");
         let price = q.regular_market_price.unwrap_or(0.0);
         let change = q.regular_market_change.unwrap_or(0.0);
         let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
@@ -62,7 +66,10 @@ pub async fn cmd_quote(symbols: &[String], market: Market) -> Result<()> {
         );
 
         println!();
-        print_kv("Open", &format_price(q.regular_market_open.unwrap_or(0.0), cur));
+        print_kv(
+            "Open",
+            &format_price(q.regular_market_open.unwrap_or(0.0), cur),
+        );
         print_kv(
             "Day Range",
             &format!(
@@ -93,14 +100,23 @@ pub async fn cmd_quote(symbols: &[String], market: Market) -> Result<()> {
                 .map_or("N/A".to_string(), |v| format_large_number(v, cur)),
         );
         print_kv("P/E (TTM)", &format_optional_f64(q.trailing_pe, ""));
-        print_kv("EPS (TTM)", &format_optional_f64(q.eps_trailing_twelve_months, ""));
-        print_kv("50-Day MA", &format_optional_price(q.fifty_day_average, cur));
-        print_kv("200-Day MA", &format_optional_price(q.two_hundred_day_average, cur));
+        print_kv(
+            "EPS (TTM)",
+            &format_optional_f64(q.eps_trailing_twelve_months, ""),
+        );
+        print_kv(
+            "50-Day MA",
+            &format_optional_price(q.fifty_day_average, cur),
+        );
+        print_kv(
+            "200-Day MA",
+            &format_optional_price(q.two_hundred_day_average, cur),
+        );
 
-        if let Some(div) = q.trailing_annual_dividend_yield {
-            if div > 0.0 {
-                print_kv("Dividend Yield", &format!("{:.2}%", div * 100.0));
-            }
+        if let Some(div) = q.trailing_annual_dividend_yield
+            && div > 0.0
+        {
+            print_kv("Dividend Yield", &format!("{:.2}%", div * 100.0));
         }
     }
     println!();
@@ -113,17 +129,18 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
     let quotes = client.get_quote(&[&resolved]).await?;
     let q = quotes.first().context("No data found for this symbol")?;
 
-    let name = q.long_name.as_deref().or(q.short_name.as_deref()).unwrap_or("Unknown");
+    let name = q
+        .long_name
+        .as_deref()
+        .or(q.short_name.as_deref())
+        .unwrap_or("Unknown");
     let price = q.regular_market_price.unwrap_or(0.0);
     let change = q.regular_market_change.unwrap_or(0.0);
     let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
     let cur = q.currency.as_deref();
     let csym = market::currency_symbol(cur);
 
-    print_header(&format!(
-        "Deep Analysis: {} — {}",
-        resolved, name
-    ));
+    print_header(&format!("Deep Analysis: {} — {}", resolved, name));
     println!(
         "  {}  {}\n",
         format_price(price, cur).bold(),
@@ -152,18 +169,33 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
     print_kv("P/E (Trailing)", &format_optional_f64(q.trailing_pe, "x"));
     print_kv("P/E (Forward)", &format_optional_f64(q.forward_pe, "x"));
     print_kv("Price/Book", &format_optional_f64(q.price_to_book, "x"));
-    print_kv("EV/Revenue", &format_optional_f64(q.enterprise_to_revenue, "x"));
-    print_kv("EV/EBITDA", &format_optional_f64(q.enterprise_to_ebitda, "x"));
+    print_kv(
+        "EV/Revenue",
+        &format_optional_f64(q.enterprise_to_revenue, "x"),
+    );
+    print_kv(
+        "EV/EBITDA",
+        &format_optional_f64(q.enterprise_to_ebitda, "x"),
+    );
 
     // Profitability
     print_section("Profitability & Growth");
     print_kv("Profit Margin", &format_optional_pct(q.profit_margins));
     print_kv("Return on Equity", &format_optional_pct(q.return_on_equity));
     print_kv("Revenue Growth", &format_optional_pct(q.revenue_growth));
-    print_kv("Earnings Growth (Q)", &format_optional_pct(q.earnings_quarterly_growth));
-    print_kv("EPS (TTM)", &format_optional_f64(q.eps_trailing_twelve_months, ""));
+    print_kv(
+        "Earnings Growth (Q)",
+        &format_optional_pct(q.earnings_quarterly_growth),
+    );
+    print_kv(
+        "EPS (TTM)",
+        &format_optional_f64(q.eps_trailing_twelve_months, ""),
+    );
     print_kv("EPS (Forward)", &format_optional_f64(q.eps_forward, ""));
-    print_kv("Revenue/Share", &format_optional_f64(q.revenue_per_share, ""));
+    print_kv(
+        "Revenue/Share",
+        &format_optional_f64(q.revenue_per_share, ""),
+    );
 
     // Financial health
     print_section("Financial Health");
@@ -232,8 +264,14 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
         print_section("Ollama AI Analysis");
         let stock_data = crate::ai::StockData::from_quote(q);
         match ai.analyze_stock(&stock_data).await {
-            Ok(analysis) => { for line in analysis.lines() { println!("  {}", line); } }
-            Err(_) => { println!("  {}", "AI analysis unavailable.".dimmed()); }
+            Ok(analysis) => {
+                for line in analysis.lines() {
+                    println!("  {}", line);
+                }
+            }
+            Err(_) => {
+                println!("  {}", "AI analysis unavailable.".dimmed());
+            }
         }
     }
 
@@ -253,10 +291,7 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result
 
     let interval = period_to_interval(period);
     let chart = client.get_chart(&resolved, period, interval).await?;
-    let cur = chart
-        .meta
-        .as_ref()
-        .and_then(|m| m.currency.as_deref());
+    let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
     let closes: Vec<f64> = chart
@@ -298,17 +333,18 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result
 
     let current = *closes.last().unwrap();
     print_header(&format!("Technical Analysis: {}", resolved));
-    println!(
-        "  Current Price: {}\n",
-        format_price(current, cur).bold()
-    );
+    println!("  Current Price: {}\n", format_price(current, cur).bold());
 
     // Moving Averages
     print_section("Moving Averages");
     let ma_periods = [10, 20, 50, 100, 200];
     for period in ma_periods {
         if let Some(ma) = technical::sma(&closes, period) {
-            let signal = if current > ma { "▲ Above" } else { "▼ Below" };
+            let signal = if current > ma {
+                "▲ Above"
+            } else {
+                "▼ Below"
+            };
             let colored_signal = if current > ma {
                 signal.green().to_string()
             } else {
@@ -396,13 +432,17 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result
     } else {
         closes.clone()
     };
-    let color = if recent.last() >= recent.first() { "green" } else { "red" };
+    let color = if recent.last() >= recent.first() {
+        "green"
+    } else {
+        "red"
+    };
     for line in charts::line_chart(&recent, 50, 8, color, "") {
         println!("{}", line);
     }
 
     // SMA overlay chart if enough data
-    if let Some(_) = technical::sma(&closes, 20) {
+    if technical::sma(&closes, 20).is_some() {
         let sma20_vals: Vec<f64> = (0..recent.len())
             .map(|i| {
                 let end = closes.len() - recent.len() + i + 1;
@@ -410,7 +450,15 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result
             })
             .collect();
         println!();
-        for line in charts::dual_line_chart(&recent, &sma20_vals, 50, 6, "Price vs SMA-20", "Price", "SMA-20") {
+        for line in charts::dual_line_chart(
+            &recent,
+            &sma20_vals,
+            50,
+            6,
+            "Price vs SMA-20",
+            "Price",
+            "SMA-20",
+        ) {
             println!("{}", line);
         }
     }
@@ -485,15 +533,41 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market) -> Result
     // AI technical interpretation
     let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
-        let rsi_val: String = technical::rsi(&closes, 14).map_or("N/A".into(), |r| format!("{:.0}", r));
-        let macd_val: String = technical::macd(&closes).map_or("N/A".into(), |(_,_,h)| if h > 0.0 { "bullish".into() } else { "bearish".into() });
-        let bb_pos: String = technical::bollinger_bands(&closes, 20).map_or("N/A".into(), |(u,_,l)| { let p = (current - l) / (u - l) * 100.0; format!("{:.0}% of range", p) });
-        let sma_pos: String = technical::sma(&closes, 200).map_or("N/A".into(), |s| if current > s { "above 200-MA".into() } else { "below 200-MA".into() });
-        let data = format!("Stock: {}, Price: {:.2}, RSI: {}, MACD: {}, BB: {}, Trend: {}", resolved, current, rsi_val, macd_val, bb_pos, sma_pos);
+        let rsi_val: String =
+            technical::rsi(&closes, 14).map_or("N/A".into(), |r| format!("{:.0}", r));
+        let macd_val: String = technical::macd(&closes).map_or("N/A".into(), |(_, _, h)| {
+            if h > 0.0 {
+                "bullish".into()
+            } else {
+                "bearish".into()
+            }
+        });
+        let bb_pos: String =
+            technical::bollinger_bands(&closes, 20).map_or("N/A".into(), |(u, _, l)| {
+                let p = (current - l) / (u - l) * 100.0;
+                format!("{:.0}% of range", p)
+            });
+        let sma_pos: String = technical::sma(&closes, 200).map_or("N/A".into(), |s| {
+            if current > s {
+                "above 200-MA".into()
+            } else {
+                "below 200-MA".into()
+            }
+        });
+        let data = format!(
+            "Stock: {}, Price: {:.2}, RSI: {}, MACD: {}, BB: {}, Trend: {}",
+            resolved, current, rsi_val, macd_val, bb_pos, sma_pos
+        );
         print_section("Ollama AI Interpretation");
         match ai.interpret_technicals(&data).await {
-            Ok(analysis) => { for line in analysis.lines() { println!("  {}", line); } }
-            Err(_) => { println!("  {}", "AI unavailable.".dimmed()); }
+            Ok(analysis) => {
+                for line in analysis.lines() {
+                    println!("  {}", line);
+                }
+            }
+            Err(_) => {
+                println!("  {}", "AI unavailable.".dimmed());
+            }
         }
     }
 
@@ -556,8 +630,9 @@ pub async fn cmd_compare(symbols: &[String], market: Market) -> Result<()> {
         (
             "Market Cap",
             Box::new(|q| {
-                q.market_cap
-                    .map_or("N/A".into(), |v| format_large_number(v, q.currency.as_deref()))
+                q.market_cap.map_or("N/A".into(), |v| {
+                    format_large_number(v, q.currency.as_deref())
+                })
             }),
         ),
         (
@@ -578,7 +653,10 @@ pub async fn cmd_compare(symbols: &[String], market: Market) -> Result<()> {
         ),
         (
             "P/B",
-            Box::new(|q| q.price_to_book.map_or("N/A".into(), |v| format!("{:.2}", v))),
+            Box::new(|q| {
+                q.price_to_book
+                    .map_or("N/A".into(), |v| format!("{:.2}", v))
+            }),
         ),
         (
             "Div Yield",
@@ -603,7 +681,10 @@ pub async fn cmd_compare(symbols: &[String], market: Market) -> Result<()> {
         ),
         (
             "Debt/Equity",
-            Box::new(|q| q.debt_to_equity.map_or("N/A".into(), |v| format!("{:.0}", v))),
+            Box::new(|q| {
+                q.debt_to_equity
+                    .map_or("N/A".into(), |v| format!("{:.0}", v))
+            }),
         ),
         (
             "Beta",
@@ -650,15 +731,20 @@ pub async fn cmd_compare(symbols: &[String], market: Market) -> Result<()> {
         let mut data = String::new();
         for q in &quotes {
             let sym = q.symbol.as_deref().unwrap_or("?");
-            data.push_str(&format!("{}: price={:.2}, P/E={}, fwdP/E={}, chg={:+.2}%\n", sym,
+            data.push_str(&format!(
+                "{}: price={:.2}, P/E={}, fwdP/E={}, chg={:+.2}%\n",
+                sym,
                 q.regular_market_price.unwrap_or(0.0),
                 q.trailing_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
                 q.forward_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
-                q.regular_market_change_percent.unwrap_or(0.0)));
+                q.regular_market_change_percent.unwrap_or(0.0)
+            ));
         }
         print_section("Ollama AI Verdict");
         if let Ok(verdict) = ai.compare_stocks(&data).await {
-            for line in verdict.lines() { println!("  {}", line); }
+            for line in verdict.lines() {
+                println!("  {}", line);
+            }
         }
     }
 
@@ -709,7 +795,11 @@ pub async fn cmd_history(symbol: &str, period: &str, market: Market) -> Result<(
     let valid_closes: Vec<f64> = closes.iter().filter_map(|v| *v).collect();
     let valid_volumes: Vec<u64> = volumes.iter().filter_map(|v| *v).collect();
     if !valid_closes.is_empty() {
-        let color = if valid_closes.last() >= valid_closes.first() { "green" } else { "red" };
+        let color = if valid_closes.last() >= valid_closes.first() {
+            "green"
+        } else {
+            "red"
+        };
         println!();
         for line in charts::line_chart(&valid_closes, 55, 10, color, "Price") {
             println!("{}", line);
@@ -742,7 +832,10 @@ pub async fn cmd_history(symbol: &str, period: &str, market: Market) -> Result<(
             change_str
         );
         let min = valid_closes.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = valid_closes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max = valid_closes
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         println!(
             "  {} {}{:.2}  {} {}{:.2}",
             "Low:".dimmed(),
@@ -779,7 +872,7 @@ pub async fn cmd_history(symbol: &str, period: &str, market: Market) -> Result<(
         let vol = volumes
             .get(i)
             .and_then(|v| *v)
-            .map(|v| format_volume(v))
+            .map(format_volume)
             .unwrap_or_else(|| "N/A".to_string());
         println!("  {:<14} {:>12} {:>14}", date.dimmed(), close, vol);
     }
@@ -834,8 +927,11 @@ pub async fn cmd_portfolio(
             }
 
             // Fetch current prices for all holdings
-            let symbols: Vec<String> =
-                portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+            let symbols: Vec<String> = portfolio
+                .holdings
+                .iter()
+                .map(|h| h.symbol.clone())
+                .collect();
             let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
             let client = YahooClient::new().await?;
             let quotes = client.get_quote(&sym_refs).await?;
@@ -924,10 +1020,7 @@ pub async fn cmd_portfolio(
                     .to_string()
             };
             let total_pnl_pct_str = if total_pnl_pct >= 0.0 {
-                format!("+{:.2}%", total_pnl_pct)
-                    .green()
-                    .bold()
-                    .to_string()
+                format!("+{:.2}%", total_pnl_pct).green().bold().to_string()
             } else {
                 format!("{:.2}%", total_pnl_pct).red().bold().to_string()
             };
@@ -992,8 +1085,15 @@ pub async fn cmd_markets(market: Market) -> Result<()> {
 
         print_header(title);
 
-        for (i, q) in quotes.iter().enumerate() {
-            let label = indices.get(i).map(|(_, name)| *name).unwrap_or("???");
+        for q in &quotes {
+            // Match the label by symbol — Yahoo may reorder or drop symbols, so
+            // pairing by position can mislabel an index.
+            let q_sym = q.symbol.as_deref().unwrap_or("");
+            let label = indices
+                .iter()
+                .find(|(sym, _)| *sym == q_sym)
+                .map(|(_, name)| *name)
+                .unwrap_or(q_sym);
             let price = q.regular_market_price.unwrap_or(0.0);
             let change = q.regular_market_change.unwrap_or(0.0);
             let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
@@ -1048,8 +1148,7 @@ pub async fn cmd_watchlist(action: &str, symbols: &[String], market: Market) -> 
             if wl.symbols.is_empty() {
                 println!(
                     "\n  {}",
-                    "Watchlist is empty. Use 'stockwise watch add <SYMBOL>' to add."
-                        .dimmed()
+                    "Watchlist is empty. Use 'stockwise watch add <SYMBOL>' to add.".dimmed()
                 );
                 return Ok(());
             }
@@ -1061,8 +1160,11 @@ pub async fn cmd_watchlist(action: &str, symbols: &[String], market: Market) -> 
             print_header("Watchlist");
             println!(
                 "  {:<12} {:>10} {:>12} {:>10} {:>14}",
-                "Symbol".bold(), "Price".bold(), "Change".bold(),
-                "Change %".bold(), "Volume".bold(),
+                "Symbol".bold(),
+                "Price".bold(),
+                "Change".bold(),
+                "Change %".bold(),
+                "Volume".bold(),
             );
             println!("  {}", "─".repeat(62).dimmed());
 
@@ -1085,7 +1187,11 @@ pub async fn cmd_watchlist(action: &str, symbols: &[String], market: Market) -> 
                 };
                 println!(
                     "  {:<12} {:>10} {:>12} {:>10} {:>14}",
-                    sym.cyan(), format_price(price, cur), change_str, pct_str, format_volume(vol),
+                    sym.cyan(),
+                    format_price(price, cur),
+                    change_str,
+                    pct_str,
+                    format_volume(vol),
                 );
             }
             println!();
@@ -1114,30 +1220,53 @@ pub async fn cmd_movers(market: Market) -> Result<()> {
             .unwrap()
     });
 
-    let market_name = match market { Market::Us => "US", Market::In => "India" };
+    let market_name = match market {
+        Market::Us => "US",
+        Market::In => "India",
+    };
 
     print_header(&format!("Top Gainers — {}", market_name));
-    println!("  {:<14} {:>10} {:>10} {:>14}", "Symbol".bold(), "Price".bold(), "Change %".bold(), "Volume".bold());
+    println!(
+        "  {:<14} {:>10} {:>10} {:>14}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Change %".bold(),
+        "Volume".bold()
+    );
     println!("  {}", "─".repeat(52).dimmed());
     for q in quotes.iter().take(10) {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let cur = q.currency.as_deref();
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        println!("  {:<14} {:>10} {:>10} {:>14}", sym.cyan(),
+        println!(
+            "  {:<14} {:>10} {:>10} {:>14}",
+            sym.cyan(),
             format_price(q.regular_market_price.unwrap_or(0.0), cur),
-            format!("{:+.2}%", pct).green(), format_volume(q.regular_market_volume.unwrap_or(0)));
+            format!("{:+.2}%", pct).green(),
+            format_volume(q.regular_market_volume.unwrap_or(0))
+        );
     }
 
     print_header(&format!("Top Losers — {}", market_name));
-    println!("  {:<14} {:>10} {:>10} {:>14}", "Symbol".bold(), "Price".bold(), "Change %".bold(), "Volume".bold());
+    println!(
+        "  {:<14} {:>10} {:>10} {:>14}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Change %".bold(),
+        "Volume".bold()
+    );
     println!("  {}", "─".repeat(52).dimmed());
     for q in quotes.iter().rev().take(10) {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let cur = q.currency.as_deref();
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        println!("  {:<14} {:>10} {:>10} {:>14}", sym.cyan(),
+        println!(
+            "  {:<14} {:>10} {:>10} {:>14}",
+            sym.cyan(),
             format_price(q.regular_market_price.unwrap_or(0.0), cur),
-            format!("{:+.2}%", pct).red(), format_volume(q.regular_market_volume.unwrap_or(0)));
+            format!("{:+.2}%", pct).red(),
+            format_volume(q.regular_market_volume.unwrap_or(0))
+        );
     }
     println!();
     Ok(())
@@ -1154,23 +1283,49 @@ pub async fn cmd_sectors(market: Market) -> Result<()> {
     let symbols: Vec<&str> = sectors.iter().map(|(s, _)| *s).collect();
     let mut quotes = client.get_quote(&symbols).await?;
     quotes.sort_by(|a, b| {
-        b.regular_market_change_percent.unwrap_or(0.0)
-            .partial_cmp(&a.regular_market_change_percent.unwrap_or(0.0)).unwrap()
+        b.regular_market_change_percent
+            .unwrap_or(0.0)
+            .partial_cmp(&a.regular_market_change_percent.unwrap_or(0.0))
+            .unwrap()
     });
 
     print_header(title);
-    println!("  {:<18} {:>10} {:>10} {:>20}", "Sector".bold(), "Price".bold(), "Change %".bold(), "".bold());
+    println!(
+        "  {:<18} {:>10} {:>10} {:>20}",
+        "Sector".bold(),
+        "Price".bold(),
+        "Change %".bold(),
+        "".bold()
+    );
     println!("  {}", "─".repeat(60).dimmed());
 
     for q in &quotes {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let cur = q.currency.as_deref();
-        let name = sectors.iter().find(|(s, _)| *s == sym).map(|(_, n)| *n).unwrap_or(sym);
+        let name = sectors
+            .iter()
+            .find(|(s, _)| *s == sym)
+            .map(|(_, n)| *n)
+            .unwrap_or(sym);
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
         let bar_len = (pct.abs() * 3.0).min(20.0) as usize;
-        let bar = if pct >= 0.0 { "█".repeat(bar_len).green().to_string() } else { "█".repeat(bar_len).red().to_string() };
-        let pct_str = if pct >= 0.0 { format!("{:+.2}%", pct).green().to_string() } else { format!("{:+.2}%", pct).red().to_string() };
-        println!("  {:<18} {:>10} {:>10} {}", name.bold(), format_price(q.regular_market_price.unwrap_or(0.0), cur), pct_str, bar);
+        let bar = if pct >= 0.0 {
+            "█".repeat(bar_len).green().to_string()
+        } else {
+            "█".repeat(bar_len).red().to_string()
+        };
+        let pct_str = if pct >= 0.0 {
+            format!("{:+.2}%", pct).green().to_string()
+        } else {
+            format!("{:+.2}%", pct).red().to_string()
+        };
+        println!(
+            "  {:<18} {:>10} {:>10} {}",
+            name.bold(),
+            format_price(q.regular_market_price.unwrap_or(0.0), cur),
+            pct_str,
+            bar
+        );
     }
     println!();
     Ok(())
@@ -1184,21 +1339,24 @@ pub async fn cmd_sectors(market: Market) -> Result<()> {
 struct NewsItem {
     title: String,
     publisher: String,
-    timestamp: Option<i64>, // unix seconds
+    timestamp: Option<i64>,   // unix seconds
     source_tag: &'static str, // e.g. "Yahoo", "Google News"
 }
 
 /// Strip CDATA wrappers and XML entities from an RSS field
 fn rss_clean(s: &str) -> String {
     let s = s.trim();
-    let s = s.strip_prefix("<![CDATA[").and_then(|s| s.strip_suffix("]]>")).unwrap_or(s);
+    let s = s
+        .strip_prefix("<![CDATA[")
+        .and_then(|s| s.strip_suffix("]]>"))
+        .unwrap_or(s);
     s.replace("&amp;", "&")
-     .replace("&lt;", "<")
-     .replace("&gt;", ">")
-     .replace("&quot;", "\"")
-     .replace("&apos;", "'")
-     .trim()
-     .to_string()
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .trim()
+        .to_string()
 }
 
 /// Extract text between two markers (first occurrence)
@@ -1210,30 +1368,40 @@ fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
 
 /// Parse RSS XML into NewsItems
 fn parse_rss(xml: &str, source_tag: &'static str) -> Vec<NewsItem> {
-    xml.split("<item>").skip(1).filter_map(|chunk| {
-        let end = chunk.find("</item>").unwrap_or(chunk.len());
-        let item = &chunk[..end];
+    xml.split("<item>")
+        .skip(1)
+        .filter_map(|chunk| {
+            let end = chunk.find("</item>").unwrap_or(chunk.len());
+            let item = &chunk[..end];
 
-        // Title: try CDATA first, then plain
-        let title_raw = between(item, "<title><![CDATA[", "]]></title>")
-            .or_else(|| between(item, "<title>", "</title>"))?;
-        let title = rss_clean(title_raw);
-        if title.is_empty() { return None; }
+            // Title: try CDATA first, then plain
+            let title_raw = between(item, "<title><![CDATA[", "]]></title>")
+                .or_else(|| between(item, "<title>", "</title>"))?;
+            let title = rss_clean(title_raw);
+            if title.is_empty() {
+                return None;
+            }
 
-        // Publisher from <source ...>Name</source> or hardcode source_tag
-        let publisher = between(item, "<source", "</source>")
-            .and_then(|s| between(s, ">", "\n").or_else(|| Some(s.trim())))
-            .map(|s| rss_clean(s))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| source_tag.to_string());
+            // Publisher from <source ...>Name</source> or hardcode source_tag
+            let publisher = between(item, "<source", "</source>")
+                .and_then(|s| between(s, ">", "\n").or_else(|| Some(s.trim())))
+                .map(rss_clean)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| source_tag.to_string());
 
-        // Timestamp from <pubDate>
-        let timestamp = between(item, "<pubDate>", "</pubDate>")
-            .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
-            .map(|d| d.timestamp());
+            // Timestamp from <pubDate>
+            let timestamp = between(item, "<pubDate>", "</pubDate>")
+                .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
+                .map(|d| d.timestamp());
 
-        Some(NewsItem { title, publisher, timestamp, source_tag })
-    }).collect()
+            Some(NewsItem {
+                title,
+                publisher,
+                timestamp,
+                source_tag,
+            })
+        })
+        .collect()
 }
 
 /// Fetch Yahoo Finance RSS for a symbol
@@ -1271,32 +1439,50 @@ async fn fetch_yahoo_json_news(client: &YahooClient, query: &str, count: usize) 
         Ok(r) => r,
         Err(_) => return vec![],
     };
-    resp.get("news").and_then(|n| n.as_array()).map(|arr| {
-        arr.iter().filter_map(|item| {
-            let title = item.get("title").and_then(|t| t.as_str())?.to_string();
-            let publisher = item.get("publisher").and_then(|p| p.as_str()).unwrap_or("Yahoo Finance").to_string();
-            let timestamp = item.get("providerPublishTime").and_then(|t| t.as_i64());
-            Some(NewsItem { title, publisher, timestamp, source_tag: "Yahoo Finance" })
-        }).collect()
-    }).unwrap_or_default()
+    resp.get("news")
+        .and_then(|n| n.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let title = item.get("title").and_then(|t| t.as_str())?.to_string();
+                    let publisher = item
+                        .get("publisher")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("Yahoo Finance")
+                        .to_string();
+                    let timestamp = item.get("providerPublishTime").and_then(|t| t.as_i64());
+                    Some(NewsItem {
+                        title,
+                        publisher,
+                        timestamp,
+                        source_tag: "Yahoo Finance",
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Deduplicate news items: remove near-duplicate titles, sort newest first
 fn collate_news(mut items: Vec<NewsItem>) -> Vec<NewsItem> {
     // Sort newest first (None timestamps go to the end)
-    items.sort_by(|a, b| b.timestamp.unwrap_or(0).cmp(&a.timestamp.unwrap_or(0)));
+    items.sort_by_key(|i| std::cmp::Reverse(i.timestamp.unwrap_or(0)));
 
     // Dedup: fingerprint as owned Strings so there are no borrow issues
     let mut seen: Vec<Vec<String>> = Vec::new();
     let mut result = Vec::new();
 
     for item in items {
-        let words: Vec<String> = item.title.split_whitespace()
+        let words: Vec<String> = item
+            .title
+            .split_whitespace()
             .filter(|w| w.len() > 3)
             .map(|w| w.to_lowercase())
             .collect();
         let is_dup = seen.iter().any(|existing| {
-            if existing.is_empty() || words.is_empty() { return false; }
+            if existing.is_empty() || words.is_empty() {
+                return false;
+            }
             let matches = words.iter().filter(|w| existing.contains(w)).count();
             matches as f64 / words.len().min(existing.len()) as f64 > 0.6
         });
@@ -1319,11 +1505,13 @@ fn print_news_items(items: &[NewsItem], limit: usize) {
         ("Google News", "green"),
     ];
     for item in items.iter().take(limit) {
-        let ts = item.timestamp
+        let ts = item
+            .timestamp
             .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_default();
-        let tag = source_colors.iter()
+        let tag = source_colors
+            .iter()
             .find(|(s, _)| *s == item.source_tag)
             .map(|(_, c)| match *c {
                 "cyan" => format!("[{}]", item.source_tag).cyan().to_string(),
@@ -1334,7 +1522,13 @@ fn print_news_items(items: &[NewsItem], limit: usize) {
             .unwrap_or_else(|| format!("[{}]", item.source_tag));
         println!();
         println!("  {} {}", "●".cyan(), item.title.bold());
-        println!("    {} {} · {} · {}", "└".dimmed(), item.publisher.dimmed(), ts.dimmed(), tag);
+        println!(
+            "    {} {} · {} · {}",
+            "└".dimmed(),
+            item.publisher.dimmed(),
+            ts.dimmed(),
+            tag
+        );
     }
 }
 
@@ -1354,7 +1548,7 @@ pub async fn cmd_news(symbol: &str, market: Market) -> Result<()> {
         fetch_google_news_rss(&client, &google_query),
     );
 
-    let mut all: Vec<NewsItem> = [yahoo_json, yahoo_rss, google].concat();
+    let all: Vec<NewsItem> = [yahoo_json, yahoo_rss, google].concat();
     let collated = collate_news(all);
 
     print_header(&format!("News: {} — {} sources", resolved, 3));
@@ -1368,11 +1562,16 @@ pub async fn cmd_news(symbol: &str, market: Market) -> Result<()> {
 pub async fn cmd_risk(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
-    let closes: Vec<f64> = chart.indicators.quote.first()
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
         .and_then(|q| q.close.as_ref())
         .map(|c| c.iter().filter_map(|v| *v).collect())
         .unwrap_or_default();
@@ -1387,27 +1586,41 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market) -> Result<()> 
     let total_return = (current / first - 1.0) * 100.0;
 
     print_header(&format!("Risk Analysis: {}", resolved));
-    println!("  Current: {}  |  1Y Return: {}\n",
+    println!(
+        "  Current: {}  |  Return ({}): {}\n",
         format_price(current, cur).bold(),
-        if total_return >= 0.0 { format!("+{:.2}%", total_return).green().to_string() }
-        else { format!("{:.2}%", total_return).red().to_string() }
+        period,
+        if total_return >= 0.0 {
+            format!("+{:.2}%", total_return).green().to_string()
+        } else {
+            format!("{:.2}%", total_return).red().to_string()
+        }
     );
 
     print_section("Volatility Metrics");
     if let Some(vol) = technical::annualized_volatility(&closes) {
         print_kv("Annual Volatility", &format!("{:.2}%", vol * 100.0));
-        let risk_level = if vol > 0.5 { "Very High".red().to_string() }
-            else if vol > 0.3 { "High".red().to_string() }
-            else if vol > 0.2 { "Moderate".yellow().to_string() }
-            else { "Low".green().to_string() };
+        let risk_level = if vol > 0.5 {
+            "Very High".red().to_string()
+        } else if vol > 0.3 {
+            "High".red().to_string()
+        } else if vol > 0.2 {
+            "Moderate".yellow().to_string()
+        } else {
+            "Low".green().to_string()
+        };
         print_kv("Risk Level", &risk_level);
     }
 
     print_section("Risk-Adjusted Returns");
     if let Some(sharpe) = technical::sharpe_ratio(&closes, 0.05) {
-        let color = if sharpe > 1.0 { format!("{:.3}", sharpe).green().to_string() }
-            else if sharpe > 0.0 { format!("{:.3}", sharpe).yellow().to_string() }
-            else { format!("{:.3}", sharpe).red().to_string() };
+        let color = if sharpe > 1.0 {
+            format!("{:.3}", sharpe).green().to_string()
+        } else if sharpe > 0.0 {
+            format!("{:.3}", sharpe).yellow().to_string()
+        } else {
+            format!("{:.3}", sharpe).red().to_string()
+        };
         print_kv("Sharpe Ratio", &color);
         let interp = match sharpe {
             s if s > 2.0 => "Excellent risk-adjusted returns",
@@ -1426,26 +1639,53 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market) -> Result<()> 
 
     print_section("Drawdown Analysis");
     if let Some((mdd, peak_idx, trough_idx)) = technical::max_drawdown(&closes) {
-        print_kv("Max Drawdown", &format!("-{:.2}%", mdd * 100.0).red().to_string());
-        print_kv("Peak → Trough", &format!("{}{:.2} → {}{:.2}", csym, closes[peak_idx], csym, closes[trough_idx]));
-        print_kv("Duration", &format!("{} trading days", trough_idx as i64 - peak_idx as i64));
+        print_kv(
+            "Max Drawdown",
+            &format!("-{:.2}%", mdd * 100.0).red().to_string(),
+        );
+        print_kv(
+            "Peak → Trough",
+            &format!(
+                "{}{:.2} → {}{:.2}",
+                csym, closes[peak_idx], csym, closes[trough_idx]
+            ),
+        );
+        print_kv(
+            "Duration",
+            &format!("{} trading days", trough_idx as i64 - peak_idx as i64),
+        );
     }
 
     print_section("Value at Risk (VaR)");
     if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
-        print_kv("Daily VaR (95%)", &format!("{:.2}%", var95 * 100.0).red().to_string());
+        print_kv(
+            "Daily VaR (95%)",
+            &format!("{:.2}%", var95 * 100.0).red().to_string(),
+        );
     }
     if let Some(var99) = technical::value_at_risk(&closes, 0.99) {
-        print_kv("Daily VaR (99%)", &format!("{:.2}%", var99 * 100.0).red().to_string());
+        print_kv(
+            "Daily VaR (99%)",
+            &format!("{:.2}%", var99 * 100.0).red().to_string(),
+        );
     }
 
     print_section(&format!("Price Chart ({})", period));
-    let color = if *closes.last().unwrap() >= closes[0] { "green" } else { "red" };
+    let color = if *closes.last().unwrap() >= closes[0] {
+        "green"
+    } else {
+        "red"
+    };
     for line in charts::line_chart(&closes, 50, 8, color, "") {
         println!("{}", line);
     }
 
-    println!("\n  {}", "Risk metrics based on historical data. Past performance ≠ future results.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Risk metrics based on historical data. Past performance ≠ future results."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -1463,7 +1703,10 @@ pub async fn cmd_correlate(symbols: &[String], market: Market) -> Result<()> {
     let mut all_closes: Vec<(String, Vec<f64>)> = Vec::new();
     for sym in &resolved {
         let chart = client.get_chart(sym, "1y", "1d").await?;
-        let closes: Vec<f64> = chart.indicators.quote.first()
+        let closes: Vec<f64> = chart
+            .indicators
+            .quote
+            .first()
             .and_then(|q| q.close.as_ref())
             .map(|c| c.iter().filter_map(|v| *v).collect())
             .unwrap_or_default();
@@ -1472,7 +1715,9 @@ pub async fn cmd_correlate(symbols: &[String], market: Market) -> Result<()> {
 
     print_header("Correlation Matrix (1Y daily returns)");
     print!("  {:<12}", "");
-    for (sym, _) in &all_closes { print!(" {:>10}", sym.cyan()); }
+    for (sym, _) in &all_closes {
+        print!(" {:>10}", sym.cyan());
+    }
     println!();
     println!("  {}", "─".repeat(12 + all_closes.len() * 11).dimmed());
 
@@ -1483,16 +1728,26 @@ pub async fn cmd_correlate(symbols: &[String], market: Market) -> Result<()> {
                 print!(" {:>10}", "1.000".bold());
             } else {
                 let corr = technical::correlation(closes_a, closes_b).unwrap_or(0.0);
-                let colored = if corr > 0.7 { format!("{:.3}", corr).green().to_string() }
-                    else if corr > 0.3 { format!("{:.3}", corr).yellow().to_string() }
-                    else if corr > -0.3 { format!("{:.3}", corr).to_string() }
-                    else { format!("{:.3}", corr).red().to_string() };
+                let colored = if corr > 0.7 {
+                    format!("{:.3}", corr).green().to_string()
+                } else if corr > 0.3 {
+                    format!("{:.3}", corr).yellow().to_string()
+                } else if corr > -0.3 {
+                    format!("{:.3}", corr).to_string()
+                } else {
+                    format!("{:.3}", corr).red().to_string()
+                };
                 print!(" {:>10}", colored);
             }
         }
         println!();
     }
-    println!("\n  {} >0.7 strong  {} 0.3-0.7 moderate  {} <-0.3 inverse", "●".green(), "●".yellow(), "●".red());
+    println!(
+        "\n  {} >0.7 strong  {} 0.3-0.7 moderate  {} <-0.3 inverse",
+        "●".green(),
+        "●".yellow(),
+        "●".red()
+    );
     println!();
     Ok(())
 }
@@ -1503,100 +1758,194 @@ pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
     match what {
         "portfolio" => {
             let portfolio = Portfolio::load()?;
-            if portfolio.holdings.is_empty() { println!("  {}", "Portfolio is empty.".dimmed()); return Ok(()); }
+            if portfolio.holdings.is_empty() {
+                println!("  {}", "Portfolio is empty.".dimmed());
+                return Ok(());
+            }
             let client = YahooClient::new().await?;
-            let symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+            let symbols: Vec<String> = portfolio
+                .holdings
+                .iter()
+                .map(|h| h.symbol.clone())
+                .collect();
             let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
             let quotes = client.get_quote(&sym_refs).await?;
             let path = "portfolio_export.csv";
             let mut csv = String::from("Symbol,Shares,Avg Cost,Current Price,Value,P&L,P&L %\n");
             for h in &portfolio.holdings {
-                let price = quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol))
-                    .and_then(|q| q.regular_market_price).unwrap_or(0.0);
+                let price = quotes
+                    .iter()
+                    .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+                    .and_then(|q| q.regular_market_price)
+                    .unwrap_or(0.0);
                 let value = h.shares * price;
                 let cost = h.shares * h.avg_cost;
                 let pnl = value - cost;
-                let pnl_pct = if cost > 0.0 { (pnl / cost) * 100.0 } else { 0.0 };
-                csv.push_str(&format!("{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}%\n", h.symbol, h.shares, h.avg_cost, price, value, pnl, pnl_pct));
+                let pnl_pct = if cost > 0.0 {
+                    (pnl / cost) * 100.0
+                } else {
+                    0.0
+                };
+                csv.push_str(&format!(
+                    "{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}%\n",
+                    h.symbol, h.shares, h.avg_cost, price, value, pnl, pnl_pct
+                ));
             }
             std::fs::write(path, &csv)?;
             println!("  {} Exported portfolio to {}", "✓".green(), path.cyan());
         }
         "watchlist" => {
             let wl = Watchlist::load()?;
-            if wl.symbols.is_empty() { println!("  {}", "Watchlist is empty.".dimmed()); return Ok(()); }
+            if wl.symbols.is_empty() {
+                println!("  {}", "Watchlist is empty.".dimmed());
+                return Ok(());
+            }
             let client = YahooClient::new().await?;
             let sym_refs: Vec<&str> = wl.symbols.iter().map(|s| s.as_str()).collect();
             let quotes = client.get_quote(&sym_refs).await?;
             let path = "watchlist_export.csv";
             let mut csv = String::from("Symbol,Price,Change,Change %,Volume,Market Cap\n");
             for q in &quotes {
-                csv.push_str(&format!("{},{:.2},{:.2},{:.2}%,{},{:.0}\n",
-                    q.symbol.as_deref().unwrap_or(""), q.regular_market_price.unwrap_or(0.0),
-                    q.regular_market_change.unwrap_or(0.0), q.regular_market_change_percent.unwrap_or(0.0),
-                    q.regular_market_volume.unwrap_or(0), q.market_cap.unwrap_or(0.0)));
+                csv.push_str(&format!(
+                    "{},{:.2},{:.2},{:.2}%,{},{:.0}\n",
+                    q.symbol.as_deref().unwrap_or(""),
+                    q.regular_market_price.unwrap_or(0.0),
+                    q.regular_market_change.unwrap_or(0.0),
+                    q.regular_market_change_percent.unwrap_or(0.0),
+                    q.regular_market_volume.unwrap_or(0),
+                    q.market_cap.unwrap_or(0.0)
+                ));
             }
             std::fs::write(path, &csv)?;
             println!("  {} Exported watchlist to {}", "✓".green(), path.cyan());
         }
-        _ => { println!("  Unknown: {}. Available: portfolio, watchlist", what); }
+        _ => {
+            println!("  Unknown: {}. Available: portfolio, watchlist", what);
+        }
     }
     Ok(())
 }
 
 // ── 8. Alerts ──
 
-pub async fn cmd_alert(action: &str, symbol: Option<&str>, condition: Option<&str>, target: Option<f64>, market: Market) -> Result<()> {
+pub async fn cmd_alert(
+    action: &str,
+    symbol: Option<&str>,
+    condition: Option<&str>,
+    target: Option<f64>,
+    market: Market,
+) -> Result<()> {
     let mut store = AlertStore::load()?;
     match action {
         "add" => {
             let sym = symbol.context("Symbol is required")?;
             let resolved = market::resolve_symbol(sym, market);
             let cond_str = condition.context("Condition required (above/below)")?;
-            let cond = match cond_str { "above" | ">" => AlertCondition::Above, "below" | "<" => AlertCondition::Below,
-                _ => { println!("  Condition must be 'above' or 'below'"); return Ok(()); } };
+            let cond = match cond_str {
+                "above" | ">" => AlertCondition::Above,
+                "below" | "<" => AlertCondition::Below,
+                _ => {
+                    println!("  Condition must be 'above' or 'below'");
+                    return Ok(());
+                }
+            };
             let tgt = target.context("Target price is required")?;
             store.add(&resolved, cond.clone(), tgt);
             store.save()?;
-            println!("  {} Alert: {} {} {:.2}", "✓".green(), resolved.cyan(), cond, tgt);
+            println!(
+                "  {} Alert: {} {} {:.2}",
+                "✓".green(),
+                resolved.cyan(),
+                cond,
+                tgt
+            );
         }
         "remove" | "rm" => {
             let idx_str = symbol.context("Alert index required (see 'alert list')")?;
             let idx: usize = idx_str.parse().context("Invalid index")?;
-            if store.remove_by_index(idx) { store.save()?; println!("  {} Removed alert #{}", "✓".green(), idx); }
-            else { println!("  {} Invalid index", "✗".red()); }
+            if store.remove_by_index(idx) {
+                store.save()?;
+                println!("  {} Removed alert #{}", "✓".green(), idx);
+            } else {
+                println!("  {} Invalid index", "✗".red());
+            }
         }
         "check" => {
-            if store.alerts.is_empty() { println!("  {}", "No alerts configured.".dimmed()); return Ok(()); }
+            if store.alerts.is_empty() {
+                println!("  {}", "No alerts configured.".dimmed());
+                return Ok(());
+            }
             let a_syms: Vec<String> = store.alerts.iter().map(|a| a.symbol.clone()).collect();
             let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect();
-            unique.sort(); unique.dedup();
+            unique.sort();
+            unique.dedup();
             let client = YahooClient::new().await?;
             let quotes = client.get_quote(&unique).await?;
             print_header("Alert Check");
             let mut triggered = 0;
             for alert in &store.alerts {
-                let price = quotes.iter().find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str()))
-                    .and_then(|q| q.regular_market_price).unwrap_or(0.0);
-                let cur = quotes.iter().find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str()))
+                let price = quotes
+                    .iter()
+                    .find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str()))
+                    .and_then(|q| q.regular_market_price)
+                    .unwrap_or(0.0);
+                let cur = quotes
+                    .iter()
+                    .find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str()))
                     .and_then(|q| q.currency.as_deref());
-                let is_hit = match alert.condition { AlertCondition::Above => price >= alert.target, AlertCondition::Below => price <= alert.target };
-                let status = if is_hit { triggered += 1; "TRIGGERED".red().bold().to_string() } else { "waiting".dimmed().to_string() };
-                println!("  {} {} {:.2} | Now: {} | {}", alert.symbol.cyan(), alert.condition, alert.target, format_price(price, cur), status);
+                let is_hit = match alert.condition {
+                    AlertCondition::Above => price >= alert.target,
+                    AlertCondition::Below => price <= alert.target,
+                };
+                let status = if is_hit {
+                    triggered += 1;
+                    "TRIGGERED".red().bold().to_string()
+                } else {
+                    "waiting".dimmed().to_string()
+                };
+                println!(
+                    "  {} {} {:.2} | Now: {} | {}",
+                    alert.symbol.cyan(),
+                    alert.condition,
+                    alert.target,
+                    format_price(price, cur),
+                    status
+                );
             }
-            if triggered == 0 { println!("\n  {}", "No alerts triggered.".dimmed()); }
-            else { println!("\n  {} {} alert(s) triggered!", "⚠".yellow(), triggered); }
+            if triggered == 0 {
+                println!("\n  {}", "No alerts triggered.".dimmed());
+            } else {
+                println!("\n  {} {} alert(s) triggered!", "⚠".yellow(), triggered);
+            }
             println!();
         }
         "list" | "show" | "" => {
-            if store.alerts.is_empty() { println!("\n  {}", "No alerts. Use 'stockwise alert add <SYMBOL> above/below <PRICE>'.".dimmed()); return Ok(()); }
+            if store.alerts.is_empty() {
+                println!(
+                    "\n  {}",
+                    "No alerts. Use 'stockwise alert add <SYMBOL> above/below <PRICE>'.".dimmed()
+                );
+                return Ok(());
+            }
             print_header("Price Alerts");
             for (i, a) in store.alerts.iter().enumerate() {
-                println!("  #{} {} {} {:.2}  (set {})", i, a.symbol.cyan(), a.condition, a.target, a.created_at.dimmed());
+                println!(
+                    "  #{} {} {} {:.2}  (set {})",
+                    i,
+                    a.symbol.cyan(),
+                    a.condition,
+                    a.target,
+                    a.created_at.dimmed()
+                );
             }
             println!();
         }
-        _ => { println!("  Unknown action: {}. Available: add, remove, check, list", action); }
+        _ => {
+            println!(
+                "  Unknown action: {}. Available: add, remove, check, list",
+                action
+            );
+        }
     }
     Ok(())
 }
@@ -1605,7 +1954,10 @@ pub async fn cmd_alert(action: &str, symbol: Option<&str>, condition: Option<&st
 
 pub async fn cmd_screen(category: &str, market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let symbols = match market {
+        Market::Us => market::US_POPULAR,
+        Market::In => market::INDIA_POPULAR,
+    };
     let sym_refs: Vec<&str> = symbols.to_vec();
     let quotes = client.get_quote(&sym_refs).await?;
 
@@ -1628,23 +1980,48 @@ pub async fn cmd_screen(category: &str, market: Market) -> Result<()> {
     };
 
     if category != "momentum" {
-        filtered.sort_by(|a, b| b.market_cap.unwrap_or(0.0).partial_cmp(&a.market_cap.unwrap_or(0.0)).unwrap());
+        filtered.sort_by(|a, b| {
+            b.market_cap
+                .unwrap_or(0.0)
+                .partial_cmp(&a.market_cap.unwrap_or(0.0))
+                .unwrap()
+        });
     }
 
     print_header(&title);
-    if filtered.is_empty() { println!("  {}", "No stocks match this screen.".dimmed()); return Ok(()); }
-    println!("  {:<14} {:>10} {:>10} {:>10} {:>14}", "Symbol".bold(), "Price".bold(), "Change %".bold(), "P/E".bold(), "Market Cap".bold());
+    if filtered.is_empty() {
+        println!("  {}", "No stocks match this screen.".dimmed());
+        return Ok(());
+    }
+    println!(
+        "  {:<14} {:>10} {:>10} {:>10} {:>14}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Change %".bold(),
+        "P/E".bold(),
+        "Market Cap".bold()
+    );
     println!("  {}", "─".repeat(62).dimmed());
 
     for q in &filtered {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let cur = q.currency.as_deref();
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        let pct_str = if pct >= 0.0 { format!("+{:.2}%", pct).green().to_string() } else { format!("{:.2}%", pct).red().to_string() };
-        println!("  {:<14} {:>10} {:>10} {:>10} {:>14}", sym.cyan(),
-            format_price(q.regular_market_price.unwrap_or(0.0), cur), pct_str,
-            q.trailing_pe.map_or("N/A".to_string(), |v| format!("{:.1}", v)),
-            q.market_cap.map_or("N/A".to_string(), |v| format_large_number(v, cur)));
+        let pct_str = if pct >= 0.0 {
+            format!("+{:.2}%", pct).green().to_string()
+        } else {
+            format!("{:.2}%", pct).red().to_string()
+        };
+        println!(
+            "  {:<14} {:>10} {:>10} {:>10} {:>14}",
+            sym.cyan(),
+            format_price(q.regular_market_price.unwrap_or(0.0), cur),
+            pct_str,
+            q.trailing_pe
+                .map_or("N/A".to_string(), |v| format!("{:.1}", v)),
+            q.market_cap
+                .map_or("N/A".to_string(), |v| format_large_number(v, cur))
+        );
     }
     println!("\n  {} {} stocks matched", "→".cyan(), filtered.len());
 
@@ -1654,14 +2031,19 @@ pub async fn cmd_screen(category: &str, market: Market) -> Result<()> {
         let mut data = format!("Screen: {}\n", category);
         for q in filtered.iter().take(8) {
             let sym = q.symbol.as_deref().unwrap_or("?");
-            data.push_str(&format!("{}: price={:.2}, P/E={}, chg={:+.2}%\n", sym,
+            data.push_str(&format!(
+                "{}: price={:.2}, P/E={}, chg={:+.2}%\n",
+                sym,
                 q.regular_market_price.unwrap_or(0.0),
                 q.trailing_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
-                q.regular_market_change_percent.unwrap_or(0.0)));
+                q.regular_market_change_percent.unwrap_or(0.0)
+            ));
         }
         print_section("Ollama AI Analysis");
         if let Ok(analysis) = ai.analyze_screen(&data).await {
-            for line in analysis.lines() { println!("  {}", line); }
+            for line in analysis.lines() {
+                println!("  {}", line);
+            }
         }
     }
 
@@ -1673,7 +2055,10 @@ pub async fn cmd_screen(category: &str, market: Market) -> Result<()> {
 
 pub async fn cmd_dashboard(market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let (indices, market_title) = match market { Market::Us => (market::US_INDICES, "US"), Market::In => (market::INDIA_INDICES, "India") };
+    let (indices, market_title) = match market {
+        Market::Us => (market::US_INDICES, "US"),
+        Market::In => (market::INDIA_INDICES, "India"),
+    };
     let idx_syms: Vec<&str> = indices.iter().map(|(s, _)| *s).collect();
     let idx_quotes = client.get_quote(&idx_syms).await?;
 
@@ -1682,28 +2067,61 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
     for (i, q) in idx_quotes.iter().enumerate() {
         let label = indices.get(i).map(|(_, n)| *n).unwrap_or("???");
         let cur = q.currency.as_deref();
-        println!("  {:<16} {}  {}", label, format_price(q.regular_market_price.unwrap_or(0.0), cur).bold(),
-            format_change(q.regular_market_change.unwrap_or(0.0), q.regular_market_change_percent.unwrap_or(0.0)));
+        println!(
+            "  {:<16} {}  {}",
+            label,
+            format_price(q.regular_market_price.unwrap_or(0.0), cur).bold(),
+            format_change(
+                q.regular_market_change.unwrap_or(0.0),
+                q.regular_market_change_percent.unwrap_or(0.0)
+            )
+        );
     }
 
     let portfolio = Portfolio::load()?;
     if !portfolio.holdings.is_empty() {
-        let p_syms: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+        let p_syms: Vec<String> = portfolio
+            .holdings
+            .iter()
+            .map(|h| h.symbol.clone())
+            .collect();
         let p_refs: Vec<&str> = p_syms.iter().map(|s| s.as_str()).collect();
         let p_quotes = client.get_quote(&p_refs).await?;
-        let mut total_cost = 0.0_f64; let mut total_value = 0.0_f64;
+        let mut total_cost = 0.0_f64;
+        let mut total_value = 0.0_f64;
         for h in &portfolio.holdings {
-            let price = p_quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol)).and_then(|q| q.regular_market_price).unwrap_or(0.0);
-            total_cost += h.shares * h.avg_cost; total_value += h.shares * price;
+            let price = p_quotes
+                .iter()
+                .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+                .and_then(|q| q.regular_market_price)
+                .unwrap_or(0.0);
+            total_cost += h.shares * h.avg_cost;
+            total_value += h.shares * price;
         }
         let pnl = total_value - total_cost;
-        let pnl_pct = if total_cost > 0.0 { (pnl / total_cost) * 100.0 } else { 0.0 };
+        let pnl_pct = if total_cost > 0.0 {
+            (pnl / total_cost) * 100.0
+        } else {
+            0.0
+        };
         let cur = p_quotes.first().and_then(|q| q.currency.as_deref());
         let csym = market::currency_symbol(cur);
-        print_section(&format!("Portfolio ({} holdings)", portfolio.holdings.len()));
+        print_section(&format!(
+            "Portfolio ({} holdings)",
+            portfolio.holdings.len()
+        ));
         print_kv("Total Value", &format_price(total_value, cur));
-        let pnl_str = if pnl >= 0.0 { format!("+{}{:.2} (+{:.2}%)", csym, pnl, pnl_pct).green().bold().to_string() }
-            else { format!("-{}{:.2} ({:.2}%)", csym, pnl.abs(), pnl_pct).red().bold().to_string() };
+        let pnl_str = if pnl >= 0.0 {
+            format!("+{}{:.2} (+{:.2}%)", csym, pnl, pnl_pct)
+                .green()
+                .bold()
+                .to_string()
+        } else {
+            format!("-{}{:.2} ({:.2}%)", csym, pnl.abs(), pnl_pct)
+                .red()
+                .bold()
+                .to_string()
+        };
         print_kv("P&L", &pnl_str);
     }
 
@@ -1715,25 +2133,50 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
         for q in &w_quotes {
             let cur = q.currency.as_deref();
             let pct = q.regular_market_change_percent.unwrap_or(0.0);
-            let pct_str = if pct >= 0.0 { format!("+{:.2}%", pct).green().to_string() } else { format!("{:.2}%", pct).red().to_string() };
-            println!("  {:<12} {}  {}", q.symbol.as_deref().unwrap_or("???"), format_price(q.regular_market_price.unwrap_or(0.0), cur), pct_str);
+            let pct_str = if pct >= 0.0 {
+                format!("+{:.2}%", pct).green().to_string()
+            } else {
+                format!("{:.2}%", pct).red().to_string()
+            };
+            println!(
+                "  {:<12} {}  {}",
+                q.symbol.as_deref().unwrap_or("???"),
+                format_price(q.regular_market_price.unwrap_or(0.0), cur),
+                pct_str
+            );
         }
     }
 
     let store = AlertStore::load()?;
     if !store.alerts.is_empty() {
         let a_syms: Vec<String> = store.alerts.iter().map(|a| a.symbol.clone()).collect();
-        let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect(); unique.sort(); unique.dedup();
+        let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect();
+        unique.sort();
+        unique.dedup();
         let a_quotes = client.get_quote(&unique).await?;
         let mut triggered = Vec::new();
         for alert in &store.alerts {
-            let price = a_quotes.iter().find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str())).and_then(|q| q.regular_market_price).unwrap_or(0.0);
-            let hit = match alert.condition { AlertCondition::Above => price >= alert.target, AlertCondition::Below => price <= alert.target };
-            if hit { triggered.push(format!("{} {} {:.2}", alert.symbol, alert.condition, alert.target)); }
+            let price = a_quotes
+                .iter()
+                .find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str()))
+                .and_then(|q| q.regular_market_price)
+                .unwrap_or(0.0);
+            let hit = match alert.condition {
+                AlertCondition::Above => price >= alert.target,
+                AlertCondition::Below => price <= alert.target,
+            };
+            if hit {
+                triggered.push(format!(
+                    "{} {} {:.2}",
+                    alert.symbol, alert.condition, alert.target
+                ));
+            }
         }
         if !triggered.is_empty() {
             print_section("Triggered Alerts");
-            for t in &triggered { println!("  {} {}", "⚠".yellow(), t.red()); }
+            for t in &triggered {
+                println!("  {} {}", "⚠".yellow(), t.red());
+            }
         }
     }
     println!();
@@ -1745,14 +2188,30 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
 pub async fn cmd_search(query: &str) -> Result<()> {
     let client = YahooClient::new().await?;
     let results = client.search(query).await?;
-    if results.is_empty() { println!("  {}", "No results found.".dimmed()); return Ok(()); }
+    if results.is_empty() {
+        println!("  {}", "No results found.".dimmed());
+        return Ok(());
+    }
     print_header(&format!("Search: {}", query));
-    println!("  {:<14} {:<30} {:>10} {:>10}", "Symbol".bold(), "Name".bold(), "Type".bold(), "Exchange".bold());
+    println!(
+        "  {:<14} {:<30} {:>10} {:>10}",
+        "Symbol".bold(),
+        "Name".bold(),
+        "Type".bold(),
+        "Exchange".bold()
+    );
     println!("  {}", "─".repeat(68).dimmed());
     for r in &results {
-        println!("  {:<14} {:<30} {:>10} {:>10}", r.symbol.as_deref().unwrap_or("???").cyan(),
-            r.long_name.as_deref().or(r.short_name.as_deref()).unwrap_or("—"),
-            r.quote_type.as_deref().unwrap_or("—").dimmed(), r.exchange.as_deref().unwrap_or("—").dimmed());
+        println!(
+            "  {:<14} {:<30} {:>10} {:>10}",
+            r.symbol.as_deref().unwrap_or("???").cyan(),
+            r.long_name
+                .as_deref()
+                .or(r.short_name.as_deref())
+                .unwrap_or("—"),
+            r.quote_type.as_deref().unwrap_or("—").dimmed(),
+            r.exchange.as_deref().unwrap_or("—").dimmed()
+        );
     }
     println!();
     Ok(())
@@ -1762,12 +2221,23 @@ pub async fn cmd_search(query: &str) -> Result<()> {
 
 pub async fn cmd_intraday(amount: f64, target_pct: f64, market: Market) -> Result<()> {
     let target_profit = amount * (target_pct / 100.0);
-    let csym = match market { Market::In => "₹", Market::Us => "$" };
-    let market_name = match market { Market::In => "Indian", Market::Us => "US" };
+    let csym = match market {
+        Market::In => "₹",
+        Market::Us => "$",
+    };
+    let market_name = match market {
+        Market::In => "Indian",
+        Market::Us => "US",
+    };
 
     print_header(&format!("Intraday Trading Bot — {} Market", market_name));
-    println!("  Capital: {}  |  Target: {}% ({}{:.2})  |  Max Risk: 1%/trade\n",
-        format!("{}{:.2}", csym, amount).bold().cyan(), target_pct, csym, target_profit);
+    println!(
+        "  Capital: {}  |  Target: {}% ({}{:.2})  |  Max Risk: 1%/trade\n",
+        format!("{}{:.2}", csym, amount).bold().cyan(),
+        target_pct,
+        csym,
+        target_profit
+    );
 
     let client = YahooClient::new().await?;
 
@@ -1778,91 +2248,240 @@ pub async fn cmd_intraday(amount: f64, target_pct: f64, market: Market) -> Resul
             print_section("Sector Heat");
             for h in &heats {
                 let bar_len = (h.change_pct.abs() * 5.0).min(20.0) as usize;
-                let bar = if h.change_pct >= 0.0 { "█".repeat(bar_len.max(1)).green().to_string() } else { "█".repeat(bar_len.max(1)).red().to_string() };
-                let pct = if h.change_pct >= 0.0 { format!("{:+.2}%", h.change_pct).green().to_string() } else { format!("{:+.2}%", h.change_pct).red().to_string() };
-                let hot = if h.hot { " HOT".yellow().bold().to_string() } else { String::new() };
+                let bar = if h.change_pct >= 0.0 {
+                    "█".repeat(bar_len.max(1)).green().to_string()
+                } else {
+                    "█".repeat(bar_len.max(1)).red().to_string()
+                };
+                let pct = if h.change_pct >= 0.0 {
+                    format!("{:+.2}%", h.change_pct).green().to_string()
+                } else {
+                    format!("{:+.2}%", h.change_pct).red().to_string()
+                };
+                let hot = if h.hot {
+                    " HOT".yellow().bold().to_string()
+                } else {
+                    String::new()
+                };
                 println!("  {:<12} {} {}{}", h.name, bar, pct, hot);
             }
         }
     }
 
     // Scan stocks
-    println!("\n  {} Scanning stocks with 9 strategies...\n", "⟳".yellow());
+    println!(
+        "\n  {} Scanning stocks with 9 strategies...\n",
+        "⟳".yellow()
+    );
     let signals = intraday::scan_intraday(&client, market).await?;
     let plans = intraday::generate_trade_plans(&signals, amount, target_pct, 1.0);
 
     // Market regime summary
     let regimes: Vec<_> = signals.iter().map(|s| &s.regime).collect();
-    let uptrend = regimes.iter().filter(|r| matches!(r, intraday::MarketRegime::Uptrend | intraday::MarketRegime::StrongUptrend)).count();
-    let downtrend = regimes.iter().filter(|r| matches!(r, intraday::MarketRegime::Downtrend | intraday::MarketRegime::StrongDowntrend)).count();
-    let market_bias = if uptrend > downtrend * 2 { "BULLISH".green().bold() } else if downtrend > uptrend * 2 { "BEARISH".red().bold() } else { "MIXED".yellow().bold() };
-    println!("  Market Bias: {} ({} bullish, {} bearish, {} ranging)\n", market_bias, uptrend, downtrend, signals.len() - uptrend - downtrend);
+    let uptrend = regimes
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                intraday::MarketRegime::Uptrend | intraday::MarketRegime::StrongUptrend
+            )
+        })
+        .count();
+    let downtrend = regimes
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                intraday::MarketRegime::Downtrend | intraday::MarketRegime::StrongDowntrend
+            )
+        })
+        .count();
+    let market_bias = if uptrend > downtrend * 2 {
+        "BULLISH".green().bold()
+    } else if downtrend > uptrend * 2 {
+        "BEARISH".red().bold()
+    } else {
+        "MIXED".yellow().bold()
+    };
+    println!(
+        "  Market Bias: {} ({} bullish, {} bearish, {} ranging)\n",
+        market_bias,
+        uptrend,
+        downtrend,
+        signals.len() - uptrend - downtrend
+    );
 
     // Top signals table
     print_section("Signal Scanner");
-    println!("  {:<14} {:>8} {:>8} {:>5} {:>6} {:>8} {:>7} {:>5}",
-        "Symbol".bold(), "Price".bold(), "Chg%".bold(), "RSI".bold(), "Vol".bold(), "Regime".bold(), "Score".bold(), "Conf".bold());
+    println!(
+        "  {:<14} {:>8} {:>8} {:>5} {:>6} {:>8} {:>7} {:>5}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Chg%".bold(),
+        "RSI".bold(),
+        "Vol".bold(),
+        "Regime".bold(),
+        "Score".bold(),
+        "Conf".bold()
+    );
     println!("  {}", "─".repeat(72).dimmed());
 
     for s in signals.iter().take(15) {
-        let chg = if s.change_pct >= 0.0 { format!("{:+.2}%", s.change_pct).green().to_string() } else { format!("{:+.2}%", s.change_pct).red().to_string() };
-        let rsi_str = s.rsi.map_or("—".into(), |r| { let t = format!("{:.0}", r); if r < 35.0 { t.green().to_string() } else if r > 70.0 { t.red().to_string() } else { t } });
-        let regime_str = match s.regime { intraday::MarketRegime::StrongUptrend => "▲▲".green().to_string(), intraday::MarketRegime::Uptrend => "▲".green().to_string(), intraday::MarketRegime::Ranging => "─".yellow().to_string(), intraday::MarketRegime::Downtrend => "▼".red().to_string(), intraday::MarketRegime::StrongDowntrend => "▼▼".red().to_string() };
-        let score_str = if s.score >= 70.0 { format!("{:.0}", s.score).green().bold().to_string() } else if s.score >= 55.0 { format!("{:.0}", s.score).yellow().to_string() } else { format!("{:.0}", s.score).dimmed().to_string() };
-        let conf_str = match s.confidence { intraday::Confidence::High => "H".green().bold().to_string(), intraday::Confidence::Medium => "M".yellow().to_string(), intraday::Confidence::Low => "L".dimmed().to_string() };
-        println!("  {:<14} {:>8} {:>8} {:>5} {:>6} {:>8} {:>7} {:>5}",
-            s.symbol.cyan(), format!("{}{:.2}", csym, s.price), chg, rsi_str, format!("{:.1}x", s.volume_ratio), regime_str, score_str, conf_str);
+        let chg = if s.change_pct >= 0.0 {
+            format!("{:+.2}%", s.change_pct).green().to_string()
+        } else {
+            format!("{:+.2}%", s.change_pct).red().to_string()
+        };
+        let rsi_str = s.rsi.map_or("—".into(), |r| {
+            let t = format!("{:.0}", r);
+            if r < 35.0 {
+                t.green().to_string()
+            } else if r > 70.0 {
+                t.red().to_string()
+            } else {
+                t
+            }
+        });
+        let regime_str = match s.regime {
+            intraday::MarketRegime::StrongUptrend => "▲▲".green().to_string(),
+            intraday::MarketRegime::Uptrend => "▲".green().to_string(),
+            intraday::MarketRegime::Ranging => "─".yellow().to_string(),
+            intraday::MarketRegime::Downtrend => "▼".red().to_string(),
+            intraday::MarketRegime::StrongDowntrend => "▼▼".red().to_string(),
+        };
+        let score_str = if s.score >= 70.0 {
+            format!("{:.0}", s.score).green().bold().to_string()
+        } else if s.score >= 55.0 {
+            format!("{:.0}", s.score).yellow().to_string()
+        } else {
+            format!("{:.0}", s.score).dimmed().to_string()
+        };
+        let conf_str = match s.confidence {
+            intraday::Confidence::High => "H".green().bold().to_string(),
+            intraday::Confidence::Medium => "M".yellow().to_string(),
+            intraday::Confidence::Low => "L".dimmed().to_string(),
+        };
+        println!(
+            "  {:<14} {:>8} {:>8} {:>5} {:>6} {:>8} {:>7} {:>5}",
+            s.symbol.cyan(),
+            format!("{}{:.2}", csym, s.price),
+            chg,
+            rsi_str,
+            format!("{:.1}x", s.volume_ratio),
+            regime_str,
+            score_str,
+            conf_str
+        );
     }
 
     // Trade plans
     if plans.is_empty() {
-        println!("\n  {}", "No high-confidence trades found. Market conditions may be unfavorable.".yellow());
+        println!(
+            "\n  {}",
+            "No high-confidence trades found. Market conditions may be unfavorable.".yellow()
+        );
     } else {
-        print_section(&format!("Trade Plans (target: {}{:.2})", csym, target_profit));
+        print_section(&format!(
+            "Trade Plans (target: {}{:.2})",
+            csym, target_profit
+        ));
 
         for (i, plan) in plans.iter().take(5).enumerate() {
             let s = &plan.signal;
             println!();
-            println!("  {}  {} — {} [{} | {} confidence]",
-                format!("#{}", i + 1).bold().cyan(), s.symbol.bold().cyan(), s.name,
-                s.regime, match s.confidence { intraday::Confidence::High => "HIGH".green().bold().to_string(), intraday::Confidence::Medium => "MED".yellow().to_string(), _ => "LOW".dimmed().to_string() });
+            println!(
+                "  {}  {} — {} [{} | {} confidence]",
+                format!("#{}", i + 1).bold().cyan(),
+                s.symbol.bold().cyan(),
+                s.name,
+                s.regime,
+                match s.confidence {
+                    intraday::Confidence::High => "HIGH".green().bold().to_string(),
+                    intraday::Confidence::Medium => "MED".yellow().to_string(),
+                    _ => "LOW".dimmed().to_string(),
+                }
+            );
             println!("  {}", "─".repeat(55).dimmed());
 
             // Show which strategies triggered
-            println!("  {} {}", "Strategies:".dimmed(),
-                s.strategies.iter().map(|st| format!("{} ({:.0})", st.name, st.strength)).collect::<Vec<_>>().join(" + "));
+            println!(
+                "  {} {}",
+                "Strategies:".dimmed(),
+                s.strategies
+                    .iter()
+                    .map(|st| format!("{} ({:.0})", st.name, st.strength))
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            );
             for st in &s.strategies {
                 println!("    {} {}", "→".cyan(), st.reason.dimmed());
             }
 
             println!();
-            println!("  {} {}    {} {}    {} {}",
-                "Entry:".dimmed(), format!("{}{:.2}", csym, plan.entry).bold(),
-                "Target 1:".dimmed(), format!("{}{:.2}", csym, plan.target1).green(),
-                "Target 2:".dimmed(), format!("{}{:.2}", csym, plan.target2).green().bold());
-            println!("  {} {}    {} {}    {} {}",
-                "Stop Loss:".dimmed(), format!("{}{:.2}", csym, plan.stop_loss).red(),
-                "Trailing:".dimmed(), format!("{}{:.2}", csym, plan.trailing_stop).red().dimmed(),
-                "R:R:".dimmed(), format!("1:{:.1}", plan.risk_reward).yellow());
-            println!("  {} {}    {} {}    {} {}    {} {}",
-                "Qty:".dimmed(), format!("{}", plan.qty).bold(),
-                "Capital:".dimmed(), format!("{}{:.0} ({:.0}%)", csym, plan.capital_required, plan.position_pct),
-                "Max Risk:".dimmed(), format!("{}{:.0}", csym, plan.max_risk).red(),
-                "Exp P&L:".dimmed(), format!("+{}{:.0}", csym, plan.expected_profit).green().bold());
-            println!("  {} Kelly fraction: {:.1}%", "→".dimmed(), plan.kelly_fraction * 100.0);
+            println!(
+                "  {} {}    {} {}    {} {}",
+                "Entry:".dimmed(),
+                format!("{}{:.2}", csym, plan.entry).bold(),
+                "Target 1:".dimmed(),
+                format!("{}{:.2}", csym, plan.target1).green(),
+                "Target 2:".dimmed(),
+                format!("{}{:.2}", csym, plan.target2).green().bold()
+            );
+            println!(
+                "  {} {}    {} {}    {} {}",
+                "Stop Loss:".dimmed(),
+                format!("{}{:.2}", csym, plan.stop_loss).red(),
+                "Trailing:".dimmed(),
+                format!("{}{:.2}", csym, plan.trailing_stop).red().dimmed(),
+                "R:R:".dimmed(),
+                format!("1:{:.1}", plan.risk_reward).yellow()
+            );
+            let capital = format!(
+                "{}{:.0} ({:.0}%)",
+                csym, plan.capital_required, plan.position_pct
+            );
+            println!(
+                "  {} {}    {} {}    {} {}    {} {}",
+                "Qty:".dimmed(),
+                plan.qty.to_string().bold(),
+                "Capital:".dimmed(),
+                capital,
+                "Max Risk:".dimmed(),
+                format!("{}{:.0}", csym, plan.max_risk).red(),
+                "Exp P&L:".dimmed(),
+                format!("+{}{:.0}", csym, plan.expected_profit)
+                    .green()
+                    .bold()
+            );
+            println!(
+                "  {} Kelly fraction: {:.1}%",
+                "→".dimmed(),
+                plan.kelly_fraction * 100.0
+            );
         }
 
         let total_profit: f64 = plans.iter().take(3).map(|p| p.expected_profit).sum();
         let total_risk: f64 = plans.iter().take(3).map(|p| p.max_risk).sum();
         println!("\n  {}", "─".repeat(60).dimmed());
-        println!("  {} Top 3 combined: {} potential | {} max risk",
-            if total_profit >= target_profit { "✓".green().bold() } else { "→".yellow().bold() },
+        println!(
+            "  {} Top 3 combined: {} potential | {} max risk",
+            if total_profit >= target_profit {
+                "✓".green().bold()
+            } else {
+                "→".yellow().bold()
+            },
             format!("+{}{:.0}", csym, total_profit).green().bold(),
-            format!("{}{:.0}", csym, total_risk).red());
+            format!("{}{:.0}", csym, total_risk).red()
+        );
     }
 
     println!("\n  {}", "─".repeat(60).dimmed());
-    println!("  {}", "This is NOT financial advice. Trade at your own risk.".red().italic());
+    println!(
+        "  {}",
+        "This is NOT financial advice. Trade at your own risk."
+            .red()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -1872,8 +2491,16 @@ pub async fn cmd_intraday(amount: f64, target_pct: f64, market: Market) -> Resul
 pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
     let mut ai = crate::ai::AiClient::connect().await;
     if !ai.is_available().await {
-        println!("  {} Ollama is not running. Start it with: {}", "✗".red(), "ollama serve".cyan());
-        println!("  {} Reports need a local AI model. Set model: {}", "→".dimmed(), "STOCKWISE_MODEL=gemma3:4b".cyan());
+        println!(
+            "  {} Ollama is not running. Start it with: {}",
+            "✗".red(),
+            "ollama serve".cyan()
+        );
+        println!(
+            "  {} Reports need a local AI model. Set model: {}",
+            "→".dimmed(),
+            "STOCKWISE_MODEL=gemma3:4b".cyan()
+        );
         return Ok(());
     }
 
@@ -1881,7 +2508,10 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
 
     match what {
         "intraday" => {
-            println!("  {} Generating intraday report with local AI...\n", "⟳".yellow());
+            println!(
+                "  {} Generating intraday report with local AI...\n",
+                "⟳".yellow()
+            );
             let signals = intraday::scan_intraday(&client, market).await?;
             // Build summary for AI
             let mut data = String::new();
@@ -1896,12 +2526,20 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
             let report = ai.generate_intraday_report(&data).await?;
             print_header("AI Intraday Trading Brief");
             println!();
-            for line in report.lines() { println!("  {}", line); }
+            for line in report.lines() {
+                println!("  {}", line);
+            }
             println!();
         }
         "longterm" => {
-            println!("  {} Generating long-term investment memo...\n", "⟳".yellow());
-            let symbols = match market { Market::In => market::INDIA_POPULAR, Market::Us => market::US_POPULAR };
+            println!(
+                "  {} Generating long-term investment memo...\n",
+                "⟳".yellow()
+            );
+            let symbols = match market {
+                Market::In => market::INDIA_POPULAR,
+                Market::Us => market::US_POPULAR,
+            };
             let sym_refs: Vec<&str> = symbols.to_vec();
             let quotes = client.get_quote(&sym_refs).await?;
             let mut data = String::new();
@@ -1919,30 +2557,53 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
             let report = ai.generate_longterm_report(&data).await?;
             print_header("AI Long-Term Investment Memo");
             println!();
-            for line in report.lines() { println!("  {}", line); }
+            for line in report.lines() {
+                println!("  {}", line);
+            }
             println!();
         }
         "portfolio" => {
             let portfolio = Portfolio::load()?;
-            if portfolio.holdings.is_empty() { println!("  {}", "Portfolio is empty.".dimmed()); return Ok(()); }
+            if portfolio.holdings.is_empty() {
+                println!("  {}", "Portfolio is empty.".dimmed());
+                return Ok(());
+            }
             println!("  {} Analyzing your portfolio...\n", "⟳".yellow());
-            let symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+            let symbols: Vec<String> = portfolio
+                .holdings
+                .iter()
+                .map(|h| h.symbol.clone())
+                .collect();
             let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
             let quotes = client.get_quote(&sym_refs).await?;
             let mut data = String::new();
             for h in &portfolio.holdings {
-                let q = quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol));
+                let q = quotes
+                    .iter()
+                    .find(|q| q.symbol.as_deref() == Some(&h.symbol));
                 let price = q.and_then(|q| q.regular_market_price).unwrap_or(0.0);
-                let pnl_pct = ((price / h.avg_cost) - 1.0) * 100.0;
-                data.push_str(&format!("{}: {} shares, avg={:.2}, now={:.2}, P&L={:+.1}%, P/E={}\n",
-                    h.symbol, h.shares, h.avg_cost, price, pnl_pct,
-                    q.and_then(|q| q.trailing_pe).map_or("N/A".into(), |v| format!("{:.1}", v)),
+                let pnl_pct = if h.avg_cost > 0.0 {
+                    ((price / h.avg_cost) - 1.0) * 100.0
+                } else {
+                    0.0
+                };
+                data.push_str(&format!(
+                    "{}: {} shares, avg={:.2}, now={:.2}, P&L={:+.1}%, P/E={}\n",
+                    h.symbol,
+                    h.shares,
+                    h.avg_cost,
+                    price,
+                    pnl_pct,
+                    q.and_then(|q| q.trailing_pe)
+                        .map_or("N/A".into(), |v| format!("{:.1}", v)),
                 ));
             }
             let report = ai.generate_portfolio_report(&data).await?;
             print_header("AI Portfolio Review");
             println!();
-            for line in report.lines() { println!("  {}", line); }
+            for line in report.lines() {
+                println!("  {}", line);
+            }
             println!();
         }
         "stock" => {
@@ -1952,19 +2613,30 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
         _ => {
             // Treat as a stock symbol
             let resolved = market::resolve_symbol(what, market);
-            println!("  {} Analyzing {} with local AI...\n", "⟳".yellow(), resolved.cyan());
+            println!(
+                "  {} Analyzing {} with local AI...\n",
+                "⟳".yellow(),
+                resolved.cyan()
+            );
             let quotes = client.get_quote(&[resolved.as_str()]).await?;
             let q = quotes.first().context("Symbol not found")?;
             let stock_data = crate::ai::StockData::from_quote(q);
             let report = ai.analyze_stock(&stock_data).await?;
             print_header(&format!("AI Analysis: {}", resolved));
             println!();
-            for line in report.lines() { println!("  {}", line); }
+            for line in report.lines() {
+                println!("  {}", line);
+            }
             println!();
         }
     }
 
-    println!("  {}", "Generated by local AI (Ollama). Not financial advice.".dimmed().italic());
+    println!(
+        "  {}",
+        "Generated by local AI (Ollama). Not financial advice."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -1975,19 +2647,51 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
 
 // ── 1. Backtest ──
 
-pub async fn cmd_backtest(symbol: &str, strategy: &str, period: &str, market: Market) -> Result<()> {
+pub async fn cmd_backtest(
+    symbol: &str,
+    strategy: &str,
+    period: &str,
+    market: Market,
+) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     let chart = client.get_chart(&resolved, period, "1d").await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
 
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let volumes: Vec<u64> = chart.indicators.quote.first().and_then(|q| q.volume.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let volumes: Vec<u64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.volume.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
 
     if closes.len() < 50 {
-        println!("{}", "Not enough data for backtesting. Use a longer period.".red());
+        println!(
+            "{}",
+            "Not enough data for backtesting. Use a longer period.".red()
+        );
         return Ok(());
     }
 
@@ -1995,60 +2699,134 @@ pub async fn cmd_backtest(symbol: &str, strategy: &str, period: &str, market: Ma
     let result = match result {
         Some(r) => r,
         None => {
-            println!("  Unknown strategy: {}. Available: rsi, macd, sma, bb, vwap, mr", strategy);
+            println!(
+                "  Unknown strategy: {}. Available: rsi, macd, sma, bb, vwap, mr",
+                strategy
+            );
             return Ok(());
         }
     };
 
-    print_header(&format!("Backtest: {} — {} strategy ({})", resolved, strategy.to_uppercase(), period));
+    print_header(&format!(
+        "Backtest: {} — {} strategy ({})",
+        resolved,
+        strategy.to_uppercase(),
+        period
+    ));
     println!();
 
     // Equity curve chart
-    for line in charts::line_chart(&result.equity_curve, 55, 8, if result.total_return >= 0.0 { "green" } else { "red" }, "Equity Curve (starting at 100)") {
+    for line in charts::line_chart(
+        &result.equity_curve,
+        55,
+        8,
+        if result.total_return >= 0.0 {
+            "green"
+        } else {
+            "red"
+        },
+        "Equity Curve (starting at 100)",
+    ) {
         println!("{}", line);
     }
 
     print_section("Performance");
-    let ret_str = if result.total_return >= 0.0 { format!("+{:.2}%", result.total_return).green().to_string() } else { format!("{:.2}%", result.total_return).red().to_string() };
-    let bh_str = if result.buy_hold_return >= 0.0 { format!("+{:.2}%", result.buy_hold_return).green().to_string() } else { format!("{:.2}%", result.buy_hold_return).red().to_string() };
+    let ret_str = if result.total_return >= 0.0 {
+        format!("+{:.2}%", result.total_return).green().to_string()
+    } else {
+        format!("{:.2}%", result.total_return).red().to_string()
+    };
+    let bh_str = if result.buy_hold_return >= 0.0 {
+        format!("+{:.2}%", result.buy_hold_return)
+            .green()
+            .to_string()
+    } else {
+        format!("{:.2}%", result.buy_hold_return).red().to_string()
+    };
     print_kv("Strategy Return", &ret_str);
     print_kv("Buy & Hold Return", &bh_str);
     let alpha = result.total_return - result.buy_hold_return;
-    let alpha_str = if alpha >= 0.0 { format!("+{:.2}%", alpha).green().bold().to_string() } else { format!("{:.2}%", alpha).red().to_string() };
+    let alpha_str = if alpha >= 0.0 {
+        format!("+{:.2}%", alpha).green().bold().to_string()
+    } else {
+        format!("{:.2}%", alpha).red().to_string()
+    };
     print_kv("Alpha (vs B&H)", &alpha_str);
 
     print_section("Trade Statistics");
     print_kv("Total Trades", &result.trades.len().to_string());
     print_kv("Win Rate", &format!("{:.1}%", result.win_rate));
-    print_kv("Avg Win", &format!("+{:.2}%", result.avg_win).green().to_string());
-    print_kv("Avg Loss", &format!("{:.2}%", result.avg_loss).red().to_string());
-    print_kv("Max Drawdown", &format!("-{:.2}%", result.max_drawdown).red().to_string());
-    if let Some(s) = result.sharpe { print_kv("Sharpe Ratio", &format!("{:.3}", s)); }
+    print_kv(
+        "Avg Win",
+        &format!("+{:.2}%", result.avg_win).green().to_string(),
+    );
+    print_kv(
+        "Avg Loss",
+        &format!("{:.2}%", result.avg_loss).red().to_string(),
+    );
+    print_kv(
+        "Max Drawdown",
+        &format!("-{:.2}%", result.max_drawdown).red().to_string(),
+    );
+    if let Some(s) = result.sharpe {
+        print_kv("Sharpe Ratio", &format!("{:.3}", s));
+    }
 
     // Last 10 trades
     if !result.trades.is_empty() {
         print_section("Recent Trades");
         let csym = market::currency_symbol(cur);
-        println!("  {:<6} {:>10} {:>10} {:>10}", "Trade".bold(), "Entry".bold(), "Exit".bold(), "P&L".bold());
+        println!(
+            "  {:<6} {:>10} {:>10} {:>10}",
+            "Trade".bold(),
+            "Entry".bold(),
+            "Exit".bold(),
+            "P&L".bold()
+        );
         println!("  {}", "─".repeat(40).dimmed());
         for (i, t) in result.trades.iter().rev().take(10).enumerate() {
-            let pnl = if t.pnl_pct >= 0.0 { format!("+{:.2}%", t.pnl_pct).green().to_string() } else { format!("{:.2}%", t.pnl_pct).red().to_string() };
-            println!("  {:<6} {:>10} {:>10} {:>10}", format!("#{}", result.trades.len() - i), format!("{}{:.2}", csym, t.entry_price), format!("{}{:.2}", csym, t.exit_price), pnl);
+            let pnl = if t.pnl_pct >= 0.0 {
+                format!("+{:.2}%", t.pnl_pct).green().to_string()
+            } else {
+                format!("{:.2}%", t.pnl_pct).red().to_string()
+            };
+            println!(
+                "  {:<6} {:>10} {:>10} {:>10}",
+                format!("#{}", result.trades.len() - i),
+                format!("{}{:.2}", csym, t.entry_price),
+                format!("{}{:.2}", csym, t.exit_price),
+                pnl
+            );
         }
     }
     // AI backtest interpretation
     let mut ai = crate::ai::AiClient::connect().await;
     if ai.is_available().await {
-        let data = format!("Strategy: {}, Period: {}, Return: {:.2}%, Buy&Hold: {:.2}%, Win rate: {:.0}%, Trades: {}, Max DD: {:.1}%, Sharpe: {}",
-            strategy, period, result.total_return, result.buy_hold_return, result.win_rate, result.trades.len(), result.max_drawdown,
-            result.sharpe.map_or("N/A".into(), |s| format!("{:.2}", s)));
+        let data = format!(
+            "Strategy: {}, Period: {}, Return: {:.2}%, Buy&Hold: {:.2}%, Win rate: {:.0}%, Trades: {}, Max DD: {:.1}%, Sharpe: {}",
+            strategy,
+            period,
+            result.total_return,
+            result.buy_hold_return,
+            result.win_rate,
+            result.trades.len(),
+            result.max_drawdown,
+            result.sharpe.map_or("N/A".into(), |s| format!("{:.2}", s))
+        );
         print_section("Ollama AI Interpretation");
         if let Ok(interp) = ai.interpret_backtest(&data).await {
-            for line in interp.lines() { println!("  {}", line); }
+            for line in interp.lines() {
+                println!("  {}", line);
+            }
         }
     }
 
-    println!("\n  {}", "Backtests use historical data. Past results ≠ future performance.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Backtests use historical data. Past results ≠ future performance."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -2063,10 +2841,19 @@ pub async fn cmd_sip(symbol: &str, amount: f64, period: &str, market: Market) ->
     let csym = market::currency_symbol(cur);
 
     let timestamps = chart.timestamp.unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
     let n = timestamps.len().min(closes.len());
 
-    if n < 2 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    if n < 2 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     let mut total_invested = 0.0;
     let mut total_units = 0.0;
@@ -2075,6 +2862,9 @@ pub async fn cmd_sip(symbol: &str, amount: f64, period: &str, market: Market) ->
 
     for i in 0..n {
         let price = closes[i];
+        if price <= 0.0 {
+            continue; // skip halt/delist bars with no valid price
+        }
         let units = amount / price;
         total_units += units;
         total_invested += amount;
@@ -2083,14 +2873,37 @@ pub async fn cmd_sip(symbol: &str, amount: f64, period: &str, market: Market) ->
         invested_history.push(total_invested);
     }
 
+    if total_units <= 0.0 || total_invested <= 0.0 {
+        println!(
+            "{}",
+            "Not enough valid price data for SIP simulation.".red()
+        );
+        return Ok(());
+    }
+
     let final_value = total_units * closes[n - 1];
     let total_return = ((final_value / total_invested) - 1.0) * 100.0;
-    let xirr_approx = if n > 1 { total_return / (n as f64 / 12.0) } else { 0.0 }; // annualized approx
+    let xirr_approx = if n > 1 {
+        total_return / (n as f64 / 12.0)
+    } else {
+        0.0
+    }; // annualized approx
 
-    print_header(&format!("SIP Simulator: {} — {}{}/month for {}", resolved, csym, amount, period));
+    print_header(&format!(
+        "SIP Simulator: {} — {}{}/month for {}",
+        resolved, csym, amount, period
+    ));
 
     // Chart: invested vs value
-    for line in charts::dual_line_chart(&value_history, &invested_history, 55, 8, "Portfolio Value vs Amount Invested", "Value", "Invested") {
+    for line in charts::dual_line_chart(
+        &value_history,
+        &invested_history,
+        55,
+        8,
+        "Portfolio Value vs Amount Invested",
+        "Value",
+        "Invested",
+    ) {
         println!("{}", line);
     }
 
@@ -2098,15 +2911,32 @@ pub async fn cmd_sip(symbol: &str, amount: f64, period: &str, market: Market) ->
     print_kv("Months Invested", &n.to_string());
     print_kv("Monthly Amount", &format!("{}{:.2}", csym, amount));
     print_kv("Total Invested", &format!("{}{:.2}", csym, total_invested));
-    print_kv("Current Value", &format!("{}{:.2}", csym, final_value).bold().to_string());
+    print_kv(
+        "Current Value",
+        &format!("{}{:.2}", csym, final_value).bold().to_string(),
+    );
     let profit = final_value - total_invested;
-    let profit_str = if profit >= 0.0 { format!("+{}{:.2}", csym, profit).green().bold().to_string() } else { format!("-{}{:.2}", csym, profit.abs()).red().bold().to_string() };
+    let profit_str = if profit >= 0.0 {
+        format!("+{}{:.2}", csym, profit).green().bold().to_string()
+    } else {
+        format!("-{}{:.2}", csym, profit.abs())
+            .red()
+            .bold()
+            .to_string()
+    };
     print_kv("Profit/Loss", &profit_str);
-    let ret_str = if total_return >= 0.0 { format!("+{:.2}%", total_return).green().to_string() } else { format!("{:.2}%", total_return).red().to_string() };
+    let ret_str = if total_return >= 0.0 {
+        format!("+{:.2}%", total_return).green().to_string()
+    } else {
+        format!("{:.2}%", total_return).red().to_string()
+    };
     print_kv("Total Return", &ret_str);
     print_kv("Annualized (approx)", &format!("{:.2}%", xirr_approx));
     print_kv("Total Units", &format!("{:.4}", total_units));
-    print_kv("Avg Cost/Unit", &format!("{}{:.2}", csym, total_invested / total_units));
+    print_kv(
+        "Avg Cost/Unit",
+        &format!("{}{:.2}", csym, total_invested / total_units),
+    );
     print_kv("Current Price", &format!("{}{:.2}", csym, closes[n - 1]));
     println!();
     Ok(())
@@ -2117,12 +2947,23 @@ pub async fn cmd_sip(symbol: &str, amount: f64, period: &str, market: Market) ->
 pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    if closes.len() < 30 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    if closes.len() < 30 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     let n = closes.len();
     // Linear regression on last 90 days
@@ -2152,32 +2993,58 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
 
     // Show chart with historical + forecast
     let chart_data = &forecast[forecast.len().saturating_sub(90 + days)..];
-    let color = if projected_end >= current { "green" } else { "red" };
+    let color = if projected_end >= current {
+        "green"
+    } else {
+        "red"
+    };
     for line in charts::line_chart(chart_data, 55, 10, color, "Price Trend + Forecast") {
         println!("{}", line);
     }
-    println!("  {}  {}",
+    println!(
+        "  {}  {}",
         "Historical ←".dimmed(),
         format!("→ {} day forecast", days).cyan()
     );
 
     print_section("Projection");
     print_kv("Current Price", &format!("{}{:.2}", csym, current));
-    print_kv(&format!("{}-Day Forecast", days), &format!("{}{:.2}", csym, projected_end));
-    let chg = if change_pct >= 0.0 { format!("+{:.2}%", change_pct).green().to_string() } else { format!("{:.2}%", change_pct).red().to_string() };
+    print_kv(
+        &format!("{}-Day Forecast", days),
+        &format!("{}{:.2}", csym, projected_end),
+    );
+    let chg = if change_pct >= 0.0 {
+        format!("+{:.2}%", change_pct).green().to_string()
+    } else {
+        format!("{:.2}%", change_pct).red().to_string()
+    };
     print_kv("Expected Change", &chg);
-    print_kv("Daily Trend", &format!("{}{:.4}/day", if slope >= 0.0 { "+" } else { "" }, slope));
+    print_kv(
+        "Daily Trend",
+        &format!("{}{:.4}/day", if slope >= 0.0 { "+" } else { "" }, slope),
+    );
 
     print_section("Confidence Bands (95%)");
     if let (Some(u), Some(l)) = (upper.last(), lower.last()) {
-        print_kv("Upper Band", &format!("{}{:.2}", csym, u).green().to_string());
+        print_kv(
+            "Upper Band",
+            &format!("{}{:.2}", csym, u).green().to_string(),
+        );
         print_kv("Center", &format!("{}{:.2}", csym, projected_end));
         print_kv("Lower Band", &format!("{}{:.2}", csym, l).red().to_string());
-        print_kv("Band Width", &format!("{:.2}%", ((u - l) / projected_end) * 100.0));
+        print_kv(
+            "Band Width",
+            &format!("{:.2}%", ((u - l) / projected_end) * 100.0),
+        );
     }
     print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
 
-    println!("\n  {}", "Forecast based on linear trend extrapolation. NOT a prediction.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Forecast based on linear trend extrapolation. NOT a prediction."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -2201,31 +3068,109 @@ pub async fn cmd_multitimeframe(symbol: &str, market: Market) -> Result<()> {
 
     print_header(&format!("Multi-Timeframe Analysis: {}", resolved));
 
-    let timeframes = [("1mo", "1d", "1 Month"), ("3mo", "1d", "3 Months"), ("6mo", "1d", "6 Months"), ("1y", "1d", "1 Year"), ("2y", "1wk", "2 Years"), ("5y", "1mo", "5 Years")];
+    let timeframes = [
+        ("1mo", "1d", "1 Month"),
+        ("3mo", "1d", "3 Months"),
+        ("6mo", "1d", "6 Months"),
+        ("1y", "1d", "1 Year"),
+        ("2y", "1wk", "2 Years"),
+        ("5y", "1mo", "5 Years"),
+    ];
 
-    println!("  {:<12} {:>8} {:>10} {:>6} {:>8} {:>8} {:>8}",
-        "Timeframe".bold(), "Return".bold(), "Volatility".bold(), "RSI".bold(), "SMA".bold(), "MACD".bold(), "Signal".bold());
+    println!(
+        "  {:<12} {:>8} {:>10} {:>6} {:>8} {:>8} {:>8}",
+        "Timeframe".bold(),
+        "Return".bold(),
+        "Volatility".bold(),
+        "RSI".bold(),
+        "SMA".bold(),
+        "MACD".bold(),
+        "Signal".bold()
+    );
     println!("  {}", "─".repeat(68).dimmed());
 
     for (range, interval, label) in &timeframes {
-        let chart = match client.get_chart(&resolved, range, interval).await { Ok(c) => c, Err(_) => continue };
-        let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-        if closes.len() < 5 { continue; }
+        let chart = match client.get_chart(&resolved, range, interval).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let closes: Vec<f64> = chart
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_ref())
+            .map(|c| c.iter().filter_map(|v| *v).collect())
+            .unwrap_or_default();
+        if closes.len() < 5 {
+            continue;
+        }
 
         let ret = (closes.last().unwrap() / closes[0] - 1.0) * 100.0;
-        let vol = technical::annualized_volatility(&closes).map(|v| format!("{:.1}%", v * 100.0)).unwrap_or("—".into());
-        let rsi = technical::rsi(&closes, 14).map(|r| format!("{:.0}", r)).unwrap_or("—".into());
-        let sma_sig = technical::sma(&closes, 20).map(|s| if *closes.last().unwrap() > s { "▲".green().to_string() } else { "▼".red().to_string() }).unwrap_or("—".into());
-        let macd_sig = technical::macd(&closes).map(|(_, _, h)| if h > 0.0 { "▲".green().to_string() } else { "▼".red().to_string() }).unwrap_or("—".into());
+        let vol = technical::annualized_volatility(&closes)
+            .map(|v| format!("{:.1}%", v * 100.0))
+            .unwrap_or("—".into());
+        let rsi = technical::rsi(&closes, 14)
+            .map(|r| format!("{:.0}", r))
+            .unwrap_or("—".into());
+        let sma_sig = technical::sma(&closes, 20)
+            .map(|s| {
+                if *closes.last().unwrap() > s {
+                    "▲".green().to_string()
+                } else {
+                    "▼".red().to_string()
+                }
+            })
+            .unwrap_or("—".into());
+        let macd_sig = technical::macd(&closes)
+            .map(|(_, _, h)| {
+                if h > 0.0 {
+                    "▲".green().to_string()
+                } else {
+                    "▼".red().to_string()
+                }
+            })
+            .unwrap_or("—".into());
 
-        let mut bullish = 0; let mut bearish = 0;
-        if let Some(r) = technical::rsi(&closes, 14) { if r < 40.0 { bullish += 1; } else if r > 60.0 { bearish += 1; } }
-        if let Some(s) = technical::sma(&closes, 20) { if *closes.last().unwrap() > s { bullish += 1; } else { bearish += 1; } }
-        if let Some((_, _, h)) = technical::macd(&closes) { if h > 0.0 { bullish += 1; } else { bearish += 1; } }
-        let signal = if bullish > bearish { "BUY".green().bold().to_string() } else if bearish > bullish { "SELL".red().bold().to_string() } else { "HOLD".yellow().to_string() };
+        let mut bullish = 0;
+        let mut bearish = 0;
+        if let Some(r) = technical::rsi(&closes, 14) {
+            if r < 40.0 {
+                bullish += 1;
+            } else if r > 60.0 {
+                bearish += 1;
+            }
+        }
+        if let Some(s) = technical::sma(&closes, 20) {
+            if *closes.last().unwrap() > s {
+                bullish += 1;
+            } else {
+                bearish += 1;
+            }
+        }
+        if let Some((_, _, h)) = technical::macd(&closes) {
+            if h > 0.0 {
+                bullish += 1;
+            } else {
+                bearish += 1;
+            }
+        }
+        let signal = if bullish > bearish {
+            "BUY".green().bold().to_string()
+        } else if bearish > bullish {
+            "SELL".red().bold().to_string()
+        } else {
+            "HOLD".yellow().to_string()
+        };
 
-        let ret_str = if ret >= 0.0 { format!("+{:.2}%", ret).green().to_string() } else { format!("{:.2}%", ret).red().to_string() };
-        println!("  {:<12} {:>8} {:>10} {:>6} {:>8} {:>8} {:>8}", label, ret_str, vol, rsi, sma_sig, macd_sig, signal);
+        let ret_str = if ret >= 0.0 {
+            format!("+{:.2}%", ret).green().to_string()
+        } else {
+            format!("{:.2}%", ret).red().to_string()
+        };
+        println!(
+            "  {:<12} {:>8} {:>10} {:>6} {:>8} {:>8} {:>8}",
+            label, ret_str, vol, rsi, sma_sig, macd_sig, signal
+        );
     }
     println!();
     Ok(())
@@ -2235,56 +3180,146 @@ pub async fn cmd_multitimeframe(symbol: &str, market: Market) -> Result<()> {
 
 pub async fn cmd_picks(market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let symbols = match market {
+        Market::Us => market::US_POPULAR,
+        Market::In => market::INDIA_POPULAR,
+    };
     let sym_refs: Vec<&str> = symbols.to_vec();
     let quotes = client.get_quote(&sym_refs).await?;
 
-    print_header(&format!("Top Picks — {} Market", match market { Market::Us => "US", Market::In => "India" }));
-    println!("  {} Scoring {} stocks across 8 factors...\n", "⟳".yellow(), quotes.len());
+    print_header(&format!(
+        "Top Picks — {} Market",
+        match market {
+            Market::Us => "US",
+            Market::In => "India",
+        }
+    ));
+    println!(
+        "  {} Scoring {} stocks across 8 factors...\n",
+        "⟳".yellow(),
+        quotes.len()
+    );
 
     let mut scored: Vec<(&crate::api::Quote, f64, Vec<&str>)> = Vec::new();
     for q in &quotes {
         let mut score = 50.0_f64;
         let mut reasons: Vec<&str> = Vec::new();
         // P/E
-        if let Some(pe) = q.trailing_pe { if pe > 0.0 && pe < 20.0 { score += 10.0; reasons.push("Low P/E"); } else if pe > 40.0 { score -= 10.0; } }
+        if let Some(pe) = q.trailing_pe {
+            if pe > 0.0 && pe < 20.0 {
+                score += 10.0;
+                reasons.push("Low P/E");
+            } else if pe > 40.0 {
+                score -= 10.0;
+            }
+        }
         // Forward > Trailing (earnings growing)
-        if let (Some(t), Some(f)) = (q.trailing_pe, q.forward_pe) { if f < t && t > 0.0 && f > 0.0 { score += 8.0; reasons.push("Earnings growth"); } }
+        if let (Some(t), Some(f)) = (q.trailing_pe, q.forward_pe)
+            && f < t
+            && t > 0.0
+            && f > 0.0
+        {
+            score += 8.0;
+            reasons.push("Earnings growth");
+        }
         // Moving averages
-        if let (Some(p), Some(ma50), Some(ma200)) = (q.regular_market_price, q.fifty_day_average, q.two_hundred_day_average) {
-            if p > ma50 && ma50 > ma200 { score += 12.0; reasons.push("Strong uptrend"); }
-            else if p < ma50 && ma50 < ma200 { score -= 10.0; }
+        if let (Some(p), Some(ma50), Some(ma200)) = (
+            q.regular_market_price,
+            q.fifty_day_average,
+            q.two_hundred_day_average,
+        ) {
+            if p > ma50 && ma50 > ma200 {
+                score += 12.0;
+                reasons.push("Strong uptrend");
+            } else if p < ma50 && ma50 < ma200 {
+                score -= 10.0;
+            }
         }
         // Analyst rating
-        if let Some(rec) = q.recommendation_mean { if rec <= 2.0 { score += 10.0; reasons.push("Analyst buy"); } else if rec >= 4.0 { score -= 8.0; } }
+        if let Some(rec) = q.recommendation_mean {
+            if rec <= 2.0 {
+                score += 10.0;
+                reasons.push("Analyst buy");
+            } else if rec >= 4.0 {
+                score -= 8.0;
+            }
+        }
         // Revenue growth
-        if let Some(g) = q.revenue_growth { if g > 0.15 { score += 8.0; reasons.push("Revenue growth >15%"); } }
+        if let Some(g) = q.revenue_growth
+            && g > 0.15
+        {
+            score += 8.0;
+            reasons.push("Revenue growth >15%");
+        }
         // Profit margin
-        if let Some(m) = q.profit_margins { if m > 0.2 { score += 5.0; reasons.push("High margins"); } }
+        if let Some(m) = q.profit_margins
+            && m > 0.2
+        {
+            score += 5.0;
+            reasons.push("High margins");
+        }
         // Dividend
-        if let Some(d) = q.trailing_annual_dividend_yield { if d > 0.02 { score += 3.0; reasons.push("Dividend >2%"); } }
+        if let Some(d) = q.trailing_annual_dividend_yield
+            && d > 0.02
+        {
+            score += 3.0;
+            reasons.push("Dividend >2%");
+        }
         // Volume
-        if let (Some(v), Some(avg)) = (q.regular_market_volume, q.average_daily_volume_3_month) {
-            if avg > 0 && v as f64 / avg as f64 > 1.3 { score += 5.0; reasons.push("High volume"); }
+        if let (Some(v), Some(avg)) = (q.regular_market_volume, q.average_daily_volume_3_month)
+            && avg > 0
+            && v as f64 / avg as f64 > 1.3
+        {
+            score += 5.0;
+            reasons.push("High volume");
         }
         score = score.clamp(0.0, 100.0);
         scored.push((q, score, reasons));
     }
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    println!("  {:<14} {:>10} {:>8} {:>7} {}", "Symbol".bold(), "Price".bold(), "Chg%".bold(), "Score".bold(), "Reasons".bold());
+    println!(
+        "  {:<14} {:>10} {:>8} {:>7} {}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Chg%".bold(),
+        "Score".bold(),
+        "Reasons".bold()
+    );
     println!("  {}", "─".repeat(72).dimmed());
 
     for (q, score, reasons) in scored.iter().take(15) {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let cur = q.currency.as_deref();
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        let pct_str = if pct >= 0.0 { format!("+{:.2}%", pct).green().to_string() } else { format!("{:.2}%", pct).red().to_string() };
-        let score_str = if *score >= 75.0 { format!("{:.0}", score).green().bold().to_string() } else if *score >= 60.0 { format!("{:.0}", score).yellow().to_string() } else { format!("{:.0}", score).dimmed().to_string() };
+        let pct_str = if pct >= 0.0 {
+            format!("+{:.2}%", pct).green().to_string()
+        } else {
+            format!("{:.2}%", pct).red().to_string()
+        };
+        let score_str = if *score >= 75.0 {
+            format!("{:.0}", score).green().bold().to_string()
+        } else if *score >= 60.0 {
+            format!("{:.0}", score).yellow().to_string()
+        } else {
+            format!("{:.0}", score).dimmed().to_string()
+        };
         let reasons_str = reasons.join(", ");
-        println!("  {:<14} {:>10} {:>8} {:>7} {}", sym.cyan(), format_price(q.regular_market_price.unwrap_or(0.0), cur), pct_str, score_str, reasons_str.dimmed());
+        println!(
+            "  {:<14} {:>10} {:>8} {:>7} {}",
+            sym.cyan(),
+            format_price(q.regular_market_price.unwrap_or(0.0), cur),
+            pct_str,
+            score_str,
+            reasons_str.dimmed()
+        );
     }
-    println!("\n  {}", "Scores are algorithmic. Always do your own research.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Scores are algorithmic. Always do your own research."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -2294,19 +3329,43 @@ pub async fn cmd_picks(market: Market) -> Result<()> {
 pub async fn cmd_sentiment() -> Result<()> {
     let client = YahooClient::new().await?;
     // Fetch VIX, S&P500, and some breadth proxies
-    let quotes = client.get_quote(&["^VIX", "^GSPC", "^IXIC", "^DJI", "SPY", "QQQ"]).await?;
+    let quotes = client
+        .get_quote(&["^VIX", "^GSPC", "^IXIC", "^DJI", "SPY", "QQQ"])
+        .await?;
 
-    let vix = quotes.iter().find(|q| q.symbol.as_deref() == Some("^VIX")).and_then(|q| q.regular_market_price);
-    let sp_chg = quotes.iter().find(|q| q.symbol.as_deref() == Some("^GSPC")).and_then(|q| q.regular_market_change_percent);
+    let vix = quotes
+        .iter()
+        .find(|q| q.symbol.as_deref() == Some("^VIX"))
+        .and_then(|q| q.regular_market_price);
+    let sp_chg = quotes
+        .iter()
+        .find(|q| q.symbol.as_deref() == Some("^GSPC"))
+        .and_then(|q| q.regular_market_change_percent);
 
     let mut score = 50.0_f64;
     let mut factors = Vec::new();
 
     // VIX: <15 extreme greed, 15-20 greed, 20-25 neutral, 25-35 fear, >35 extreme fear
     if let Some(v) = vix {
-        let vix_score = match v { x if x < 15.0 => 90.0, x if x < 20.0 => 70.0, x if x < 25.0 => 50.0, x if x < 35.0 => 30.0, _ => 10.0 };
+        let vix_score = match v {
+            x if x < 15.0 => 90.0,
+            x if x < 20.0 => 70.0,
+            x if x < 25.0 => 50.0,
+            x if x < 35.0 => 30.0,
+            _ => 10.0,
+        };
         score = (score + vix_score) / 2.0;
-        factors.push(format!("VIX: {:.1} → {}", v, if vix_score > 60.0 { "Greed" } else if vix_score < 40.0 { "Fear" } else { "Neutral" }));
+        factors.push(format!(
+            "VIX: {:.1} → {}",
+            v,
+            if vix_score > 60.0 {
+                "Greed"
+            } else if vix_score < 40.0 {
+                "Fear"
+            } else {
+                "Neutral"
+            }
+        ));
     }
 
     // Market momentum
@@ -2319,7 +3378,13 @@ pub async fn cmd_sentiment() -> Result<()> {
     // Get broader market momentum (20-day)
     let chart = client.get_chart("^GSPC", "1mo", "1d").await;
     if let Ok(c) = chart {
-        let closes: Vec<f64> = c.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+        let closes: Vec<f64> = c
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_ref())
+            .map(|c| c.iter().filter_map(|v| *v).collect())
+            .unwrap_or_default();
         if closes.len() > 5 {
             let monthly_ret = (closes.last().unwrap() / closes[0] - 1.0) * 100.0;
             let trend_score = (50.0 + monthly_ret * 5.0).clamp(0.0, 100.0);
@@ -2337,20 +3402,54 @@ pub async fn cmd_sentiment() -> Result<()> {
     let collated_news = collate_news(all_news);
 
     // Simple keyword-based sentiment scoring
-    let bullish_words = ["rally", "surge", "gain", "rise", "high", "bull", "growth", "record", "up", "buy", "strong", "positive"];
-    let bearish_words = ["fall", "drop", "crash", "decline", "fear", "bear", "loss", "low", "sell", "weak", "negative", "recession"];
+    let bullish_words = [
+        "rally", "surge", "gain", "rise", "high", "bull", "growth", "record", "up", "buy",
+        "strong", "positive",
+    ];
+    let bearish_words = [
+        "fall",
+        "drop",
+        "crash",
+        "decline",
+        "fear",
+        "bear",
+        "loss",
+        "low",
+        "sell",
+        "weak",
+        "negative",
+        "recession",
+    ];
     let mut news_bull = 0i32;
     let mut news_bear = 0i32;
     for item in &collated_news {
         let t = item.title.to_lowercase();
-        for w in &bullish_words { if t.contains(w) { news_bull += 1; } }
-        for w in &bearish_words { if t.contains(w) { news_bear += 1; } }
+        for w in &bullish_words {
+            if t.contains(w) {
+                news_bull += 1;
+            }
+        }
+        for w in &bearish_words {
+            if t.contains(w) {
+                news_bear += 1;
+            }
+        }
     }
     if news_bull + news_bear > 0 {
-        let news_score = ((news_bull as f64 / (news_bull + news_bear) as f64) * 100.0).clamp(0.0, 100.0);
+        let news_score =
+            ((news_bull as f64 / (news_bull + news_bear) as f64) * 100.0).clamp(0.0, 100.0);
         score = (score * 0.7 + news_score * 0.3).clamp(0.0, 100.0);
-        let label = if news_score > 55.0 { "bullish" } else if news_score < 45.0 { "bearish" } else { "neutral" };
-        factors.push(format!("News sentiment: {} ({} positive / {} negative headlines)", label, news_bull, news_bear));
+        let label = if news_score > 55.0 {
+            "bullish"
+        } else if news_score < 45.0 {
+            "bearish"
+        } else {
+            "neutral"
+        };
+        factors.push(format!(
+            "News sentiment: {} ({} positive / {} negative headlines)",
+            label, news_bull, news_bear
+        ));
     }
 
     let (label, color) = match score {
@@ -2368,15 +3467,33 @@ pub async fn cmd_sentiment() -> Result<()> {
     let pos = (score / 100.0 * gauge_width as f64) as usize;
     let mut gauge = String::new();
     for i in 0..gauge_width {
-        let ch = if i == pos { "▼".bold().to_string() } else if i < 10 { "█".red().to_string() } else if i < 20 { "█".red().dimmed().to_string() } else if i < 30 { "█".yellow().to_string() } else if i < 40 { "█".green().dimmed().to_string() } else { "█".green().to_string() };
+        let ch = if i == pos {
+            "▼".bold().to_string()
+        } else if i < 10 {
+            "█".red().to_string()
+        } else if i < 20 {
+            "█".red().dimmed().to_string()
+        } else if i < 30 {
+            "█".yellow().to_string()
+        } else if i < 40 {
+            "█".green().dimmed().to_string()
+        } else {
+            "█".green().to_string()
+        };
         gauge.push_str(&ch);
     }
     println!("\n  {}  {}  {}", "Fear".red(), gauge, "Greed".green());
-    let score_display = match color { "green" => format!("{:.0}", score).green().bold().to_string(), "red" => format!("{:.0}", score).red().bold().to_string(), _ => format!("{:.0}", score).yellow().bold().to_string() };
+    let score_display = match color {
+        "green" => format!("{:.0}", score).green().bold().to_string(),
+        "red" => format!("{:.0}", score).red().bold().to_string(),
+        _ => format!("{:.0}", score).yellow().bold().to_string(),
+    };
     println!("  {:>28} {} {}", "", score_display, label.bold());
 
     print_section("Contributing Factors");
-    for f in &factors { println!("  {} {}", "→".cyan(), f); }
+    for f in &factors {
+        println!("  {} {}", "→".cyan(), f);
+    }
 
     if !collated_news.is_empty() {
         print_section("Top Market Headlines");
@@ -2388,11 +3505,18 @@ pub async fn cmd_sentiment() -> Result<()> {
 
 // ── 7. Tax Harvest ──
 
-pub async fn cmd_harvest(market: Market) -> Result<()> {
+pub async fn cmd_harvest(_market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() { println!("\n  {}", "Portfolio is empty.".dimmed()); return Ok(()); }
+    if portfolio.holdings.is_empty() {
+        println!("\n  {}", "Portfolio is empty.".dimmed());
+        return Ok(());
+    }
 
-    let symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&sym_refs).await?;
@@ -2400,20 +3524,34 @@ pub async fn cmd_harvest(market: Market) -> Result<()> {
     print_header("Tax-Loss Harvesting Opportunities");
     let mut found = false;
 
-    println!("  {:<14} {:>10} {:>10} {:>12} {:>10}", "Symbol".bold(), "Avg Cost".bold(), "Price".bold(), "Loss".bold(), "Loss %".bold());
+    println!(
+        "  {:<14} {:>10} {:>10} {:>12} {:>10}",
+        "Symbol".bold(),
+        "Avg Cost".bold(),
+        "Price".bold(),
+        "Loss".bold(),
+        "Loss %".bold()
+    );
     println!("  {}", "─".repeat(60).dimmed());
 
     for h in &portfolio.holdings {
-        let quote = quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol));
+        let quote = quotes
+            .iter()
+            .find(|q| q.symbol.as_deref() == Some(&h.symbol));
         let price = quote.and_then(|q| q.regular_market_price).unwrap_or(0.0);
         let cur = quote.and_then(|q| q.currency.as_deref());
         let csym = market::currency_symbol(cur);
         let pnl = (price - h.avg_cost) * h.shares;
-        let pnl_pct = ((price / h.avg_cost) - 1.0) * 100.0;
+        let pnl_pct = if h.avg_cost > 0.0 {
+            ((price / h.avg_cost) - 1.0) * 100.0
+        } else {
+            0.0
+        };
 
         if pnl < 0.0 {
             found = true;
-            println!("  {:<14} {:>10} {:>10} {:>12} {:>10}",
+            println!(
+                "  {:<14} {:>10} {:>10} {:>12} {:>10}",
                 h.symbol.cyan(),
                 format!("{}{:.2}", csym, h.avg_cost),
                 format!("{}{:.2}", csym, price),
@@ -2424,10 +3562,21 @@ pub async fn cmd_harvest(market: Market) -> Result<()> {
     }
 
     if !found {
-        println!("\n  {} No losing positions — nothing to harvest!", "✓".green());
+        println!(
+            "\n  {} No losing positions — nothing to harvest!",
+            "✓".green()
+        );
     } else {
-        println!("\n  {} Sell these positions to realize losses and offset capital gains.", "→".yellow());
-        println!("  {}", "Consult a tax advisor. Wash sale rules may apply.".dimmed().italic());
+        println!(
+            "\n  {} Sell these positions to realize losses and offset capital gains.",
+            "→".yellow()
+        );
+        println!(
+            "  {}",
+            "Consult a tax advisor. Wash sale rules may apply."
+                .dimmed()
+                .italic()
+        );
     }
     println!();
     Ok(())
@@ -2435,7 +3584,7 @@ pub async fn cmd_harvest(market: Market) -> Result<()> {
 
 // ── 8. Wealth Tracker ──
 
-pub async fn cmd_wealth(market: Market) -> Result<()> {
+pub async fn cmd_wealth(_market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
     let mut history = WealthHistory::load()?;
 
@@ -2445,7 +3594,11 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
     }
 
     // Fetch current values and snapshot
-    let symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&sym_refs).await?;
@@ -2453,7 +3606,11 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
     let mut total_value = 0.0;
     let mut total_cost = 0.0;
     for h in &portfolio.holdings {
-        let price = quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol)).and_then(|q| q.regular_market_price).unwrap_or(0.0);
+        let price = quotes
+            .iter()
+            .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+            .and_then(|q| q.regular_market_price)
+            .unwrap_or(0.0);
         total_value += h.shares * price;
         total_cost += h.shares * h.avg_cost;
     }
@@ -2469,39 +3626,75 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
 
     if history.snapshots.len() >= 2 {
         let values: Vec<f64> = history.snapshots.iter().map(|s| s.total_value).collect();
-        let color = if *values.last().unwrap() >= values[0] { "green" } else { "red" };
+        let color = if *values.last().unwrap() >= values[0] {
+            "green"
+        } else {
+            "red"
+        };
         for line in charts::line_chart(&values, 55, 8, color, "Portfolio Value Over Time") {
             println!("{}", line);
         }
     }
 
     print_section("Current Snapshot");
-    print_kv("Total Value", &format!("{}{:.2}", csym, total_value).bold().to_string());
+    print_kv(
+        "Total Value",
+        &format!("{}{:.2}", csym, total_value).bold().to_string(),
+    );
     print_kv("Total Invested", &format!("{}{:.2}", csym, total_cost));
     let pnl = total_value - total_cost;
-    let pnl_pct = if total_cost > 0.0 { (pnl / total_cost) * 100.0 } else { 0.0 };
-    let pnl_str = if pnl >= 0.0 { format!("+{}{:.2} (+{:.2}%)", csym, pnl, pnl_pct).green().bold().to_string() } else { format!("-{}{:.2} ({:.2}%)", csym, pnl.abs(), pnl_pct).red().bold().to_string() };
+    let pnl_pct = if total_cost > 0.0 {
+        (pnl / total_cost) * 100.0
+    } else {
+        0.0
+    };
+    let pnl_str = if pnl >= 0.0 {
+        format!("+{}{:.2} (+{:.2}%)", csym, pnl, pnl_pct)
+            .green()
+            .bold()
+            .to_string()
+    } else {
+        format!("-{}{:.2} ({:.2}%)", csym, pnl.abs(), pnl_pct)
+            .red()
+            .bold()
+            .to_string()
+    };
     print_kv("Total P&L", &pnl_str);
     print_kv("Snapshots", &history.snapshots.len().to_string());
 
     if history.snapshots.len() >= 2 {
         let first = &history.snapshots[0];
         let growth = ((total_value / first.total_value) - 1.0) * 100.0;
-        print_kv("Since First Track", &format!("{:+.2}% (from {})", growth, first.date));
+        print_kv(
+            "Since First Track",
+            &format!("{:+.2}% (from {})", growth, first.date),
+        );
     }
 
-    println!("\n  {}", "Run 'stockwise wealth' daily to build your growth chart.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Run 'stockwise wealth' daily to build your growth chart."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
 
 // ── 9. Rebalance ──
 
-pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<()> {
+pub async fn cmd_rebalance(targets: &[(String, f64)], _market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() { println!("\n  {}", "Portfolio is empty.".dimmed()); return Ok(()); }
+    if portfolio.holdings.is_empty() {
+        println!("\n  {}", "Portfolio is empty.".dimmed());
+        return Ok(());
+    }
 
-    let symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&sym_refs).await?;
@@ -2509,7 +3702,11 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
     let mut total_value = 0.0;
     let mut holdings_value: Vec<(String, f64, f64)> = Vec::new(); // symbol, value, price
     for h in &portfolio.holdings {
-        let price = quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol)).and_then(|q| q.regular_market_price).unwrap_or(0.0);
+        let price = quotes
+            .iter()
+            .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+            .and_then(|q| q.regular_market_price)
+            .unwrap_or(0.0);
         let value = h.shares * price;
         total_value += value;
         holdings_value.push((h.symbol.clone(), value, price));
@@ -2524,18 +3721,32 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
     // If no targets given, show equal-weight rebalance
     let target_pct = if targets.is_empty() {
         let equal = 100.0 / holdings_value.len() as f64;
-        holdings_value.iter().map(|(s, _, _)| (s.clone(), equal)).collect::<Vec<_>>()
+        holdings_value
+            .iter()
+            .map(|(s, _, _)| (s.clone(), equal))
+            .collect::<Vec<_>>()
     } else {
         targets.to_vec()
     };
 
     println!();
-    println!("  {:<14} {:>10} {:>8} {:>8} {:>12}", "Symbol".bold(), "Current".bold(), "Now%".bold(), "Target%".bold(), "Action".bold());
+    println!(
+        "  {:<14} {:>10} {:>8} {:>8} {:>12}",
+        "Symbol".bold(),
+        "Current".bold(),
+        "Now%".bold(),
+        "Target%".bold(),
+        "Action".bold()
+    );
     println!("  {}", "─".repeat(56).dimmed());
 
     for (sym, value, price) in &holdings_value {
         let current_pct = (value / total_value) * 100.0;
-        let tgt = target_pct.iter().find(|(s, _)| s == sym).map(|(_, p)| *p).unwrap_or(100.0 / holdings_value.len() as f64);
+        let tgt = target_pct
+            .iter()
+            .find(|(s, _)| s == sym)
+            .map(|(_, p)| *p)
+            .unwrap_or(100.0 / holdings_value.len() as f64);
         let target_value = total_value * (tgt / 100.0);
         let diff = target_value - value;
         let diff_shares = if *price > 0.0 { diff / price } else { 0.0 };
@@ -2543,12 +3754,23 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
         let action = if diff.abs() < 1.0 {
             "OK".green().to_string()
         } else if diff > 0.0 {
-            format!("BUY {:.0} shares", diff_shares.ceil()).green().to_string()
+            format!("BUY {:.0} shares", diff_shares.ceil())
+                .green()
+                .to_string()
         } else {
-            format!("SELL {:.0} shares", diff_shares.abs().floor()).red().to_string()
+            format!("SELL {:.0} shares", diff_shares.abs().floor())
+                .red()
+                .to_string()
         };
 
-        println!("  {:<14} {:>10} {:>8} {:>8} {:>12}", sym.cyan(), format!("{}{:.2}", csym, value), format!("{:.1}%", current_pct), format!("{:.1}%", tgt), action);
+        println!(
+            "  {:<14} {:>10} {:>8} {:>8} {:>12}",
+            sym.cyan(),
+            format!("{}{:.2}", csym, value),
+            format!("{:.1}%", current_pct),
+            format!("{:.1}%", tgt),
+            action
+        );
     }
     println!();
     Ok(())
@@ -2556,17 +3778,28 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
 
 // ── 10. Earnings Calendar ──
 
-pub async fn cmd_earnings(market: Market) -> Result<()> {
+pub async fn cmd_earnings(_market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
 
     // Check portfolio + watchlist stocks
     let portfolio = Portfolio::load()?;
     let wl = Watchlist::load()?;
-    let mut all_symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
-    for s in &wl.symbols { if !all_symbols.contains(s) { all_symbols.push(s.clone()); } }
+    let mut all_symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    for s in &wl.symbols {
+        if !all_symbols.contains(s) {
+            all_symbols.push(s.clone());
+        }
+    }
 
     if all_symbols.is_empty() {
-        println!("\n  {}", "Add stocks to portfolio or watchlist first.".dimmed());
+        println!(
+            "\n  {}",
+            "Add stocks to portfolio or watchlist first.".dimmed()
+        );
         return Ok(());
     }
 
@@ -2574,7 +3807,14 @@ pub async fn cmd_earnings(market: Market) -> Result<()> {
     let quotes = client.get_quote(&sym_refs).await?;
 
     print_header("Earnings Overview");
-    println!("  {:<14} {:>10} {:>10} {:>10} {:>10}", "Symbol".bold(), "Price".bold(), "EPS TTM".bold(), "EPS Fwd".bold(), "P/E Fwd".bold());
+    println!(
+        "  {:<14} {:>10} {:>10} {:>10} {:>10}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "EPS TTM".bold(),
+        "EPS Fwd".bold(),
+        "P/E Fwd".bold()
+    );
     println!("  {}", "─".repeat(58).dimmed());
 
     let mut growing = 0;
@@ -2587,12 +3827,19 @@ pub async fn cmd_earnings(market: Market) -> Result<()> {
         let fwd_pe = q.forward_pe;
 
         let growth_indicator = match (eps_ttm, eps_fwd) {
-            (Some(t), Some(f)) if f > t && t > 0.0 => { growing += 1; "▲".green().to_string() }
-            (Some(t), Some(f)) if f < t && t > 0.0 => { declining += 1; "▼".red().to_string() }
+            (Some(t), Some(f)) if f > t && t > 0.0 => {
+                growing += 1;
+                "▲".green().to_string()
+            }
+            (Some(t), Some(f)) if f < t && t > 0.0 => {
+                declining += 1;
+                "▼".red().to_string()
+            }
             _ => "—".dimmed().to_string(),
         };
 
-        println!("  {:<14} {:>10} {:>10} {:>10} {:>10} {}",
+        println!(
+            "  {:<14} {:>10} {:>10} {:>10} {:>10} {}",
             sym.cyan(),
             format_price(q.regular_market_price.unwrap_or(0.0), cur),
             eps_ttm.map_or("—".to_string(), |v| format!("{:.2}", v)),
@@ -2604,7 +3851,11 @@ pub async fn cmd_earnings(market: Market) -> Result<()> {
 
     print_section("Summary");
     println!("  {} {} stocks with growing earnings", "▲".green(), growing);
-    println!("  {} {} stocks with declining earnings", "▼".red(), declining);
+    println!(
+        "  {} {} stocks with declining earnings",
+        "▼".red(),
+        declining
+    );
     println!();
     Ok(())
 }
@@ -2613,71 +3864,173 @@ pub async fn cmd_earnings(market: Market) -> Result<()> {
 
 pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let symbols = match market {
+        Market::Us => market::US_POPULAR,
+        Market::In => market::INDIA_POPULAR,
+    };
     let sym_refs: Vec<&str> = symbols.to_vec();
     let quotes = client.get_quote(&sym_refs).await?;
-    let csym = match market { Market::Us => "$", Market::In => "₹" };
+    let csym = match market {
+        Market::Us => "$",
+        Market::In => "₹",
+    };
     let monthly = amount.unwrap_or(10000.0);
 
-    print_header(&format!("Long-Term Wealth Bot v2 — {} Market", match market { Market::Us => "US", Market::In => "India" }));
-    println!("  {} Scoring {} stocks across 6 pillars + Monte Carlo...\n", "⟳".yellow(), quotes.len());
+    print_header(&format!(
+        "Long-Term Wealth Bot v2 — {} Market",
+        match market {
+            Market::Us => "US",
+            Market::In => "India",
+        }
+    ));
+    println!(
+        "  {} Scoring {} stocks across 6 pillars + Monte Carlo...\n",
+        "⟳".yellow(),
+        quotes.len()
+    );
 
     // Fetch 1Y chart data for volatility analysis (for top candidates)
     let mut scores: Vec<longterm::LongTermScore> = Vec::new();
     for q in &quotes {
         let sym = q.symbol.as_deref().unwrap_or("");
         let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-            c.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
+            c.indicators
+                .quote
+                .first()
+                .and_then(|qi| qi.close.as_ref())
+                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
         });
         scores.push(longterm::score_for_longterm(q, hist.as_deref()));
     }
-    scores.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap());
+    scores.sort_by(|a, b| {
+        b.total_score
+            .partial_cmp(&a.total_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Summary table with all 6 pillars
     print_section("Ranking (6-Pillar Score)");
-    println!("  {:<14} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>8}",
-        "Symbol".bold(), "Val".bold(), "Grw".bold(), "Qua".bold(), "Mom".bold(), "Div".bold(), "Saf".bold(), "Total".bold(), "Moat".bold(), "Risk".bold());
+    println!(
+        "  {:<14} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>8}",
+        "Symbol".bold(),
+        "Val".bold(),
+        "Grw".bold(),
+        "Qua".bold(),
+        "Mom".bold(),
+        "Div".bold(),
+        "Saf".bold(),
+        "Total".bold(),
+        "Moat".bold(),
+        "Risk".bold()
+    );
     println!("  {}", "─".repeat(78).dimmed());
 
     for s in scores.iter().take(12) {
-        let sc = if s.total_score >= 70.0 { format!("{:.0}", s.total_score).green().bold().to_string() }
-            else if s.total_score >= 55.0 { format!("{:.0}", s.total_score).yellow().to_string() }
-            else { format!("{:.0}", s.total_score).dimmed().to_string() };
-        let moat_str = match s.moat { longterm::MoatRating::Wide => "Wide".green().to_string(), longterm::MoatRating::Narrow => "Nar".yellow().to_string(), longterm::MoatRating::None => "—".dimmed().to_string() };
-        let risk_str = match s.risk_tier { longterm::RiskTier::Conservative => "Cons".green().to_string(), longterm::RiskTier::Moderate => "Mod".yellow().to_string(), longterm::RiskTier::Aggressive => "Aggr".red().to_string() };
-        println!("  {:<14} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>6} {:>6} {:>8}",
-            s.symbol.cyan(), s.valuation_score, s.growth_score, s.quality_score, s.momentum_score, s.dividend_score, s.safety_score, sc, moat_str, risk_str);
+        let sc = if s.total_score >= 70.0 {
+            format!("{:.0}", s.total_score).green().bold().to_string()
+        } else if s.total_score >= 55.0 {
+            format!("{:.0}", s.total_score).yellow().to_string()
+        } else {
+            format!("{:.0}", s.total_score).dimmed().to_string()
+        };
+        let moat_str = match s.moat {
+            longterm::MoatRating::Wide => "Wide".green().to_string(),
+            longterm::MoatRating::Narrow => "Nar".yellow().to_string(),
+            longterm::MoatRating::None => "—".dimmed().to_string(),
+        };
+        let risk_str = match s.risk_tier {
+            longterm::RiskTier::Conservative => "Cons".green().to_string(),
+            longterm::RiskTier::Moderate => "Mod".yellow().to_string(),
+            longterm::RiskTier::Aggressive => "Aggr".red().to_string(),
+        };
+        println!(
+            "  {:<14} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>6} {:>6} {:>8}",
+            s.symbol.cyan(),
+            s.valuation_score,
+            s.growth_score,
+            s.quality_score,
+            s.momentum_score,
+            s.dividend_score,
+            s.safety_score,
+            sc,
+            moat_str,
+            risk_str
+        );
     }
 
     // Detailed top 3
     for (i, s) in scores.iter().take(3).enumerate() {
         println!();
-        print_section(&format!("#{} {} — {} [{}]", i + 1, s.symbol, s.name, s.moat));
+        print_section(&format!(
+            "#{} {} — {} [{}]",
+            i + 1,
+            s.symbol,
+            s.name,
+            s.moat
+        ));
         print_kv("Price", &format!("{}{:.2}", csym, s.price));
-        print_kv("Score", &format!("{:.0}/100 ({})", s.total_score, s.risk_tier).bold().to_string());
-        if let Some(peg) = s.peg_ratio { print_kv("PEG Ratio", &format!("{:.2}", peg)); }
-        if let Some(ey) = s.earnings_yield { print_kv("Earnings Yield", &format!("{:.1}%", ey)); }
+        print_kv(
+            "Score",
+            &format!("{:.0}/100 ({})", s.total_score, s.risk_tier)
+                .bold()
+                .to_string(),
+        );
+        if let Some(peg) = s.peg_ratio {
+            print_kv("PEG Ratio", &format!("{:.2}", peg));
+        }
+        if let Some(ey) = s.earnings_yield {
+            print_kv("Earnings Yield", &format!("{:.1}%", ey));
+        }
 
         if !s.reasons.is_empty() {
             println!();
-            for r in &s.reasons { println!("    {} {}", "✓".green(), r); }
+            for r in &s.reasons {
+                println!("    {} {}", "✓".green(), r);
+            }
         }
         if !s.risk_flags.is_empty() {
-            for r in &s.risk_flags { println!("    {} {}", "✗".red(), r); }
+            for r in &s.risk_flags {
+                println!("    {} {}", "✗".red(), r);
+            }
         }
 
         print_section("Projections");
-        print_kv("Est. Annual Return", &format!("{:.1}%", s.est_annual_return));
-        print_kv("5-Year Projection", &format!("+{:.0}%", s.projected_5y_return).green().to_string());
-        print_kv("10-Year Projection", &format!("+{:.0}%", s.projected_10y_return).green().to_string());
+        print_kv(
+            "Est. Annual Return",
+            &format!("{:.1}%", s.est_annual_return),
+        );
+        print_kv(
+            "5-Year Projection",
+            &format!("+{:.0}%", s.projected_5y_return)
+                .green()
+                .to_string(),
+        );
+        print_kv(
+            "10-Year Projection",
+            &format!("+{:.0}%", s.projected_10y_return)
+                .green()
+                .to_string(),
+        );
         if s.drip_multiplier_10y > 1.01 {
-            print_kv("DRIP Boost (10Y)", &format!("{:.2}x from dividend reinvestment", s.drip_multiplier_10y));
+            print_kv(
+                "DRIP Boost (10Y)",
+                &format!("{:.2}x from dividend reinvestment", s.drip_multiplier_10y),
+            );
         }
-        print_kv(&format!("SIP for {}10L/10Y", csym), &format!("{}{:.0}/month", csym, s.sip_monthly_10l_10y));
+        print_kv(
+            &format!("SIP for {}10L/10Y", csym),
+            &format!("{}{:.0}/month", csym, s.sip_monthly_10l_10y),
+        );
 
         // Monte Carlo
         print_section("Monte Carlo (1000 sims, 5Y)");
-        let mc_bar = |val: f64| -> String { if val >= 0.0 { format!("+{:.0}%", val).green().to_string() } else { format!("{:.0}%", val).red().to_string() } };
+        let mc_bar = |val: f64| -> String {
+            if val >= 0.0 {
+                format!("+{:.0}%", val).green().to_string()
+            } else {
+                format!("{:.0}%", val).red().to_string()
+            }
+        };
         print_kv("Best case (P90)", &mc_bar(s.monte_carlo_p90));
         print_kv("Median", &mc_bar(s.monte_carlo_median));
         print_kv("Worst case (P10)", &mc_bar(s.monte_carlo_p10));
@@ -2688,8 +4041,22 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         let inv_10y = monthly * 120.0;
         let est_10y = inv_10y * (1.0 + s.projected_10y_return / 100.0) * s.drip_multiplier_10y;
         print_section("SIP Calculator");
-        print_kv(&format!("{}{}/mo × 5Y", csym, monthly), &format!("{}{:.0} → {}{:.0}", csym, inv_5y, csym, est_5y).green().to_string());
-        print_kv(&format!("{}{}/mo × 10Y", csym, monthly), &format!("{}{:.0} → {}{:.0} (incl DRIP)", csym, inv_10y, csym, est_10y).green().bold().to_string());
+        print_kv(
+            &format!("{}{}/mo × 5Y", csym, monthly),
+            &format!("{}{:.0} → {}{:.0}", csym, inv_5y, csym, est_5y)
+                .green()
+                .to_string(),
+        );
+        print_kv(
+            &format!("{}{}/mo × 10Y", csym, monthly),
+            &format!(
+                "{}{:.0} → {}{:.0} (incl DRIP)",
+                csym, inv_10y, csym, est_10y
+            )
+            .green()
+            .bold()
+            .to_string(),
+        );
     }
 
     // Portfolio allocation
@@ -2701,24 +4068,53 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         let pct = s.total_score / total_sc;
         let alloc = monthly * pct;
         let bar_len = (pct * 30.0) as usize;
-        let moat_tag = match s.moat { longterm::MoatRating::Wide => " [Wide Moat]".green().to_string(), longterm::MoatRating::Narrow => " [Narrow]".yellow().to_string(), _ => String::new() };
-        println!("  {:<14} {}{:>8.0} ({:>4.1}%) {}{}", s.symbol.cyan(), csym, alloc, pct * 100.0, "█".repeat(bar_len).green(), moat_tag);
+        let moat_tag = match s.moat {
+            longterm::MoatRating::Wide => " [Wide Moat]".green().to_string(),
+            longterm::MoatRating::Narrow => " [Narrow]".yellow().to_string(),
+            _ => String::new(),
+        };
+        println!(
+            "  {:<14} {}{:>8.0} ({:>4.1}%) {}{}",
+            s.symbol.cyan(),
+            csym,
+            alloc,
+            pct * 100.0,
+            "█".repeat(bar_len).green(),
+            moat_tag
+        );
     }
 
     println!("\n  {}", "─".repeat(60).dimmed());
-    println!("  {}", "Long-term investing involves risk. Diversify across asset classes.".dimmed().italic());
-    println!("  {}", "Monte Carlo uses historical volatility. Past ≠ future.".dimmed().italic());
+    println!(
+        "  {}",
+        "Long-term investing involves risk. Diversify across asset classes."
+            .dimmed()
+            .italic()
+    );
+    println!(
+        "  {}",
+        "Monte Carlo uses historical volatility. Past ≠ future."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
 
 // ── Tax Calculator ──
 
-pub async fn cmd_tax(country: &str, market: Market) -> Result<()> {
+pub async fn cmd_tax(country: &str, _market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() { println!("\n  {}", "Portfolio is empty.".dimmed()); return Ok(()); }
+    if portfolio.holdings.is_empty() {
+        println!("\n  {}", "Portfolio is empty.".dimmed());
+        return Ok(());
+    }
 
-    let symbols: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
     let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&sym_refs).await?;
@@ -2728,20 +4124,36 @@ pub async fn cmd_tax(country: &str, market: Market) -> Result<()> {
     let mut total_stcl = 0.0_f64;
     let mut total_ltcl = 0.0_f64;
 
-    let (country_name, stcg_rate, ltcg_rate, ltcg_exempt, holding_months, currency_sym) = match country.to_lowercase().as_str() {
-        "in" | "india" => ("India", 20.0, 12.5, 125000.0, 12, "₹"),
-        "us" | "usa" => ("United States", 37.0, 20.0, 0.0, 12, "$"),
-        "uk" => ("United Kingdom", 20.0, 20.0, 3000.0, 12, "£"),
-        _ => { println!("  Supported countries: in (India), us (USA), uk (UK)"); return Ok(()); }
-    };
+    let (country_name, stcg_rate, ltcg_rate, ltcg_exempt, holding_months, currency_sym) =
+        match country.to_lowercase().as_str() {
+            "in" | "india" => ("India", 20.0, 12.5, 125000.0, 12, "₹"),
+            "us" | "usa" => ("United States", 37.0, 20.0, 0.0, 12, "$"),
+            "uk" => ("United Kingdom", 20.0, 20.0, 3000.0, 12, "£"),
+            _ => {
+                println!("  Supported countries: in (India), us (USA), uk (UK)");
+                return Ok(());
+            }
+        };
 
     print_header(&format!("Tax Report — {} (FY 2025-26)", country_name));
 
-    println!("  {:<14} {:>10} {:>10} {:>12} {:>8} {:>8}", "Symbol".bold(), "Cost".bold(), "Value".bold(), "Gain/Loss".bold(), "Type".bold(), "Tax".bold());
+    println!(
+        "  {:<14} {:>10} {:>10} {:>12} {:>8} {:>8}",
+        "Symbol".bold(),
+        "Cost".bold(),
+        "Value".bold(),
+        "Gain/Loss".bold(),
+        "Type".bold(),
+        "Tax".bold()
+    );
     println!("  {}", "─".repeat(68).dimmed());
 
     for h in &portfolio.holdings {
-        let price = quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol)).and_then(|q| q.regular_market_price).unwrap_or(0.0);
+        let price = quotes
+            .iter()
+            .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+            .and_then(|q| q.regular_market_price)
+            .unwrap_or(0.0);
         let cost = h.shares * h.avg_cost;
         let value = h.shares * price;
         let gain = value - cost;
@@ -2751,9 +4163,12 @@ pub async fn cmd_tax(country: &str, market: Market) -> Result<()> {
             .ok()
             .map(|d| {
                 let now = chrono::Local::now().date_naive();
-                use chrono::Datelike;
-                let months = (now.year() - d.year()) * 12 + (now.month() as i32 - d.month() as i32);
-                months >= holding_months
+                // Long-term = held strictly longer than the holding period.
+                // Compare real dates so the day-of-month is respected.
+                let threshold = d
+                    .checked_add_months(chrono::Months::new(holding_months as u32))
+                    .unwrap_or(d);
+                now > threshold
             })
             .unwrap_or(false);
 
@@ -2761,29 +4176,67 @@ pub async fn cmd_tax(country: &str, market: Market) -> Result<()> {
         let tax_rate = if is_longterm { ltcg_rate } else { stcg_rate };
 
         if gain >= 0.0 {
-            if is_longterm { total_ltcg += gain; } else { total_stcg += gain; }
+            if is_longterm {
+                total_ltcg += gain;
+            } else {
+                total_stcg += gain;
+            }
         } else {
-            if is_longterm { total_ltcl += gain.abs(); } else { total_stcl += gain.abs(); }
+            if is_longterm {
+                total_ltcl += gain.abs();
+            } else {
+                total_stcl += gain.abs();
+            }
         }
 
-        let gain_str = if gain >= 0.0 { format!("+{}{:.2}", currency_sym, gain).green().to_string() } else { format!("-{}{:.2}", currency_sym, gain.abs()).red().to_string() };
-        let tax = if gain > 0.0 { gain * tax_rate / 100.0 } else { 0.0 };
-        let tax_str = if tax > 0.0 { format!("{}{:.0}", currency_sym, tax) } else { "—".dimmed().to_string() };
+        let gain_str = if gain >= 0.0 {
+            format!("+{}{:.2}", currency_sym, gain).green().to_string()
+        } else {
+            format!("-{}{:.2}", currency_sym, gain.abs())
+                .red()
+                .to_string()
+        };
+        let tax = if gain > 0.0 {
+            gain * tax_rate / 100.0
+        } else {
+            0.0
+        };
+        let tax_str = if tax > 0.0 {
+            format!("{}{:.0}", currency_sym, tax)
+        } else {
+            "—".dimmed().to_string()
+        };
 
-        println!("  {:<14} {:>10} {:>10} {:>12} {:>8} {:>8}",
+        println!(
+            "  {:<14} {:>10} {:>10} {:>12} {:>8} {:>8}",
             h.symbol.cyan(),
             format!("{}{:.0}", currency_sym, cost),
             format!("{}{:.0}", currency_sym, value),
-            gain_str, hold_type, tax_str);
+            gain_str,
+            hold_type,
+            tax_str
+        );
     }
 
     println!("  {}", "─".repeat(68).dimmed());
 
     print_section("Tax Summary");
-    print_kv("Short-Term Gains", &format!("{}{:.2}", currency_sym, total_stcg));
-    print_kv("Short-Term Losses", &format!("{}{:.2}", currency_sym, total_stcl));
-    print_kv("Long-Term Gains", &format!("{}{:.2}", currency_sym, total_ltcg));
-    print_kv("Long-Term Losses", &format!("{}{:.2}", currency_sym, total_ltcl));
+    print_kv(
+        "Short-Term Gains",
+        &format!("{}{:.2}", currency_sym, total_stcg),
+    );
+    print_kv(
+        "Short-Term Losses",
+        &format!("{}{:.2}", currency_sym, total_stcl),
+    );
+    print_kv(
+        "Long-Term Gains",
+        &format!("{}{:.2}", currency_sym, total_ltcg),
+    );
+    print_kv(
+        "Long-Term Losses",
+        &format!("{}{:.2}", currency_sym, total_ltcl),
+    );
 
     // Net gains after offsetting losses
     let net_stcg = (total_stcg - total_stcl).max(0.0);
@@ -2794,21 +4247,53 @@ pub async fn cmd_tax(country: &str, market: Market) -> Result<()> {
     let total_tax = stcg_tax + ltcg_tax;
 
     print_section("Estimated Tax Liability");
-    print_kv(&format!("STCG Tax ({}%)", stcg_rate), &format!("{}{:.2}", currency_sym, stcg_tax));
+    print_kv(
+        &format!("STCG Tax ({}%)", stcg_rate),
+        &format!("{}{:.2}", currency_sym, stcg_tax),
+    );
     if ltcg_exempt > 0.0 {
-        print_kv("LTCG Exemption", &format!("{}{:.0}", currency_sym, ltcg_exempt));
+        print_kv(
+            "LTCG Exemption",
+            &format!("{}{:.0}", currency_sym, ltcg_exempt),
+        );
     }
-    print_kv(&format!("LTCG Tax ({}%)", ltcg_rate), &format!("{}{:.2}", currency_sym, ltcg_tax));
+    print_kv(
+        &format!("LTCG Tax ({}%)", ltcg_rate),
+        &format!("{}{:.2}", currency_sym, ltcg_tax),
+    );
     println!("  {}", "─".repeat(40).dimmed());
-    let total_str = if total_tax > 0.0 { format!("{}{:.2}", currency_sym, total_tax).red().bold().to_string() } else { format!("{}{:.2}", currency_sym, total_tax).green().to_string() };
+    let total_str = if total_tax > 0.0 {
+        format!("{}{:.2}", currency_sym, total_tax)
+            .red()
+            .bold()
+            .to_string()
+    } else {
+        format!("{}{:.2}", currency_sym, total_tax)
+            .green()
+            .to_string()
+    };
     print_kv("TOTAL TAX", &total_str);
 
     if total_stcl + total_ltcl > 0.0 {
         println!();
-        print_kv("Tax Saved (losses)", &format!("{}{:.2}", currency_sym, (total_stcl * stcg_rate / 100.0 + total_ltcl * ltcg_rate / 100.0)).green().to_string());
+        print_kv(
+            "Tax Saved (losses)",
+            &format!(
+                "{}{:.2}",
+                currency_sym,
+                (total_stcl * stcg_rate / 100.0 + total_ltcl * ltcg_rate / 100.0)
+            )
+            .green()
+            .to_string(),
+        );
     }
 
-    println!("\n  {}", "Tax rates are approximate. Consult a chartered accountant / CPA.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Tax rates are approximate. Consult a chartered accountant / CPA."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -2823,14 +4308,23 @@ pub async fn cmd_import(source: &str, file: &str, market: Market) -> Result<()> 
         println!("  {} How to export:", "→".cyan());
         match source {
             "kite" | "zerodha" => {
-                println!("    1. Login to {} → Portfolio → Holdings", "kite.zerodha.com".cyan());
-                println!("    2. Click the {} icon (top-right of holdings table)", "download/export".bold());
+                println!(
+                    "    1. Login to {} → Portfolio → Holdings",
+                    "kite.zerodha.com".cyan()
+                );
+                println!(
+                    "    2. Click the {} icon (top-right of holdings table)",
+                    "download/export".bold()
+                );
                 println!("    3. Save the CSV file");
                 println!("    4. Run: stockwise import kite <path-to-file.csv>");
             }
             "indmoney" => {
                 println!("    1. Open {} app → Portfolio → Stocks", "IndMoney".cyan());
-                println!("    2. Tap {} → Download Statement / Export", "⋮ (menu)".bold());
+                println!(
+                    "    2. Tap {} → Download Statement / Export",
+                    "⋮ (menu)".bold()
+                );
                 println!("    3. Save the CSV/Excel file");
                 println!("    4. Run: stockwise import indmoney <path-to-file.csv>");
             }
@@ -2859,7 +4353,18 @@ pub async fn cmd_import(source: &str, file: &str, market: Market) -> Result<()> 
             let cols = parse_csv_header(&header);
             let sym_col = find_col(&cols, &["instrument", "tradingsymbol", "symbol", "stock"]);
             let qty_col = find_col(&cols, &["qty", "qty.", "quantity", "shares"]);
-            let avg_col = find_col(&cols, &["avg. cost", "avg cost", "average cost", "avg_price", "average price", "buy avg", "buy avg."]);
+            let avg_col = find_col(
+                &cols,
+                &[
+                    "avg. cost",
+                    "avg cost",
+                    "average cost",
+                    "avg_price",
+                    "average price",
+                    "buy avg",
+                    "buy avg.",
+                ],
+            );
 
             if sym_col.is_none() || qty_col.is_none() || avg_col.is_none() {
                 println!("  {} Could not detect Kite CSV columns.", "✗".red());
@@ -2871,25 +4376,67 @@ pub async fn cmd_import(source: &str, file: &str, market: Market) -> Result<()> 
 
             for line in &lines[1..] {
                 let fields = parse_csv_row(line);
-                if fields.len() <= si.max(qi).max(ai) { continue; }
+                if fields.len() <= si.max(qi).max(ai) {
+                    continue;
+                }
                 let symbol_raw = fields[si].trim().trim_matches('"');
-                if symbol_raw.is_empty() { continue; }
-                let qty: f64 = fields[qi].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
-                let avg: f64 = fields[ai].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
-                if qty <= 0.0 || avg <= 0.0 { continue; }
+                if symbol_raw.is_empty() {
+                    continue;
+                }
+                let qty: f64 = fields[qi]
+                    .trim()
+                    .trim_matches('"')
+                    .replace(',', "")
+                    .parse()
+                    .unwrap_or(0.0);
+                let avg: f64 = fields[ai]
+                    .trim()
+                    .trim_matches('"')
+                    .replace(',', "")
+                    .parse()
+                    .unwrap_or(0.0);
+                if qty <= 0.0 || avg <= 0.0 {
+                    continue;
+                }
 
                 let resolved = market::resolve_symbol(symbol_raw, market);
                 portfolio.add(&resolved, qty, avg);
                 imported += 1;
-                println!("  {} {} — {} shares @ ₹{:.2}", "✓".green(), resolved.cyan(), qty, avg);
+                println!(
+                    "  {} {} — {} shares @ ₹{:.2}",
+                    "✓".green(),
+                    resolved.cyan(),
+                    qty,
+                    avg
+                );
             }
         }
         "indmoney" => {
             // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, Current Price, ...
             let cols = parse_csv_header(&header);
-            let sym_col = find_col(&cols, &["symbol", "isin", "stock symbol", "scrip", "stock name", "name"]);
+            let sym_col = find_col(
+                &cols,
+                &[
+                    "symbol",
+                    "isin",
+                    "stock symbol",
+                    "scrip",
+                    "stock name",
+                    "name",
+                ],
+            );
             let qty_col = find_col(&cols, &["quantity", "qty", "shares", "units"]);
-            let avg_col = find_col(&cols, &["avg buy price", "avg price", "average price", "buy price", "avg. buy price", "average cost"]);
+            let avg_col = find_col(
+                &cols,
+                &[
+                    "avg buy price",
+                    "avg price",
+                    "average price",
+                    "buy price",
+                    "avg. buy price",
+                    "average cost",
+                ],
+            );
 
             if sym_col.is_none() || qty_col.is_none() || avg_col.is_none() {
                 println!("  {} Could not detect IndMoney CSV columns.", "✗".red());
@@ -2901,25 +4448,71 @@ pub async fn cmd_import(source: &str, file: &str, market: Market) -> Result<()> 
 
             for line in &lines[1..] {
                 let fields = parse_csv_row(line);
-                if fields.len() <= si.max(qi).max(ai) { continue; }
+                if fields.len() <= si.max(qi).max(ai) {
+                    continue;
+                }
                 let symbol_raw = fields[si].trim().trim_matches('"');
-                if symbol_raw.is_empty() { continue; }
-                let qty: f64 = fields[qi].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
-                let avg: f64 = fields[ai].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
-                if qty <= 0.0 || avg <= 0.0 { continue; }
+                if symbol_raw.is_empty() {
+                    continue;
+                }
+                let qty: f64 = fields[qi]
+                    .trim()
+                    .trim_matches('"')
+                    .replace(',', "")
+                    .parse()
+                    .unwrap_or(0.0);
+                let avg: f64 = fields[ai]
+                    .trim()
+                    .trim_matches('"')
+                    .replace(',', "")
+                    .parse()
+                    .unwrap_or(0.0);
+                if qty <= 0.0 || avg <= 0.0 {
+                    continue;
+                }
 
                 let resolved = market::resolve_symbol(symbol_raw, market);
                 portfolio.add(&resolved, qty, avg);
                 imported += 1;
-                println!("  {} {} — {} shares @ ₹{:.2}", "✓".green(), resolved.cyan(), qty, avg);
+                println!(
+                    "  {} {} — {} shares @ ₹{:.2}",
+                    "✓".green(),
+                    resolved.cyan(),
+                    qty,
+                    avg
+                );
             }
         }
-        "csv" | _ => {
+        // "csv" or any unrecognized format falls back to generic CSV parsing
+        _ => {
             // Generic CSV: try to find Symbol, Quantity, Price columns
             let cols = parse_csv_header(&header);
-            let sym_col = find_col(&cols, &["symbol", "stock", "instrument", "name", "ticker", "scrip", "tradingsymbol"]);
+            let sym_col = find_col(
+                &cols,
+                &[
+                    "symbol",
+                    "stock",
+                    "instrument",
+                    "name",
+                    "ticker",
+                    "scrip",
+                    "tradingsymbol",
+                ],
+            );
             let qty_col = find_col(&cols, &["quantity", "qty", "qty.", "shares", "units"]);
-            let avg_col = find_col(&cols, &["avg price", "avg. price", "average price", "avg cost", "avg. cost", "buy price", "price", "cost"]);
+            let avg_col = find_col(
+                &cols,
+                &[
+                    "avg price",
+                    "avg. price",
+                    "average price",
+                    "avg cost",
+                    "avg. cost",
+                    "buy price",
+                    "price",
+                    "cost",
+                ],
+            );
 
             if sym_col.is_none() || qty_col.is_none() || avg_col.is_none() {
                 println!("  {} Could not auto-detect CSV columns.", "✗".red());
@@ -2931,34 +4524,69 @@ pub async fn cmd_import(source: &str, file: &str, market: Market) -> Result<()> 
 
             for line in &lines[1..] {
                 let fields = parse_csv_row(line);
-                if fields.len() <= si.max(qi).max(ai) { continue; }
+                if fields.len() <= si.max(qi).max(ai) {
+                    continue;
+                }
                 let symbol_raw = fields[si].trim().trim_matches('"');
-                if symbol_raw.is_empty() { continue; }
-                let qty: f64 = fields[qi].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
-                let avg: f64 = fields[ai].trim().trim_matches('"').replace(',', "").parse().unwrap_or(0.0);
-                if qty <= 0.0 || avg <= 0.0 { continue; }
+                if symbol_raw.is_empty() {
+                    continue;
+                }
+                let qty: f64 = fields[qi]
+                    .trim()
+                    .trim_matches('"')
+                    .replace(',', "")
+                    .parse()
+                    .unwrap_or(0.0);
+                let avg: f64 = fields[ai]
+                    .trim()
+                    .trim_matches('"')
+                    .replace(',', "")
+                    .parse()
+                    .unwrap_or(0.0);
+                if qty <= 0.0 || avg <= 0.0 {
+                    continue;
+                }
 
                 let resolved = market::resolve_symbol(symbol_raw, market);
                 portfolio.add(&resolved, qty, avg);
                 imported += 1;
-                println!("  {} {} — {} shares @ {:.2}", "✓".green(), resolved.cyan(), qty, avg);
+                println!(
+                    "  {} {} — {} shares @ {:.2}",
+                    "✓".green(),
+                    resolved.cyan(),
+                    qty,
+                    avg
+                );
             }
         }
     }
 
     if imported > 0 {
         portfolio.save()?;
-        println!("\n  {} Imported {} holdings into portfolio.", "✓".green().bold(), imported);
-        println!("  Run {} to see your portfolio.", "stockwise portfolio show".cyan());
+        println!(
+            "\n  {} Imported {} holdings into portfolio.",
+            "✓".green().bold(),
+            imported
+        );
+        println!(
+            "  Run {} to see your portfolio.",
+            "stockwise portfolio show".cyan()
+        );
     } else {
-        println!("\n  {} No holdings found in file. Check the format.", "✗".red());
+        println!(
+            "\n  {} No holdings found in file. Check the format.",
+            "✗".red()
+        );
     }
     println!();
     Ok(())
 }
 
 fn parse_csv_header(header: &str) -> Vec<String> {
-    parse_csv_row(header).iter().map(|s| s.trim().trim_matches('"').to_lowercase()).collect()
+    parse_csv_row(header)
+        .iter()
+        .map(|s| s.trim().trim_matches('"').to_lowercase())
+        .collect()
 }
 
 fn parse_csv_row(line: &str) -> Vec<String> {
@@ -2990,21 +4618,39 @@ fn find_col(cols: &[String], names: &[&str]) -> Option<usize> {
 
 // ── Angel One Trading ──
 
-pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, price: Option<f64>, _market: Market) -> Result<()> {
+pub async fn cmd_trade(
+    action: &str,
+    symbol: Option<&str>,
+    qty: Option<u32>,
+    price: Option<f64>,
+    _market: Market,
+) -> Result<()> {
     match action {
         "setup" => {
             println!();
             print_header("Angel One SmartAPI Setup");
             println!("  To connect your Angel One account, you need:");
             println!();
-            println!("  1. Go to {} and create an app", "smartapi.angelone.in".cyan());
-            println!("  2. Note your {} (from the app dashboard)", "API Key".bold());
+            println!(
+                "  1. Go to {} and create an app",
+                "smartapi.angelone.in".cyan()
+            );
+            println!(
+                "  2. Note your {} (from the app dashboard)",
+                "API Key".bold()
+            );
             println!("  3. Your {} (Angel One login ID)", "Client ID".bold());
             println!("  4. Your {} (Angel One login password)", "Password".bold());
-            println!("  5. Your {} (from Authenticator app / Angel One TOTP setup)", "TOTP Secret".bold());
+            println!(
+                "  5. Your {} (from Authenticator app / Angel One TOTP setup)",
+                "TOTP Secret".bold()
+            );
             println!();
             println!("  Then run:");
-            println!("    {} stockwise trade config <API_KEY> <CLIENT_ID> <PASSWORD> <TOTP_SECRET>", "$".dimmed());
+            println!(
+                "    {} stockwise trade config <API_KEY> <CLIENT_ID> <PASSWORD> <TOTP_SECRET>",
+                "$".dimmed()
+            );
             println!();
             println!("  {}", "Your credentials are stored locally and never sent anywhere except Angel One's API.".dimmed());
             println!();
@@ -3019,7 +4665,9 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
             println!("    stockwise trade config");
             println!("  Then edit the config file at:");
             let path = dirs::data_local_dir().map(|d| d.join("stockwise/angel_config.json"));
-            if let Some(p) = &path { println!("    {}", p.display().to_string().cyan()); }
+            if let Some(p) = &path {
+                println!("    {}", p.display().to_string().cyan());
+            }
             println!();
             // Create template config
             let config = crate::angel::AngelConfig::load()?;
@@ -3031,9 +4679,16 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
                     totp_secret: "YOUR_TOTP_SECRET".into(),
                 };
                 template.save()?;
-                println!("  {} Created config template. Edit the file above with your credentials.", "✓".green());
+                println!(
+                    "  {} Created config template. Edit the file above with your credentials.",
+                    "✓".green()
+                );
             } else {
-                println!("  {} Already configured for client: {}", "✓".green(), config.client_id.cyan());
+                println!(
+                    "  {} Already configured for client: {}",
+                    "✓".green(),
+                    config.client_id.cyan()
+                );
             }
             println!();
             Ok(())
@@ -3048,8 +4703,15 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
             }
 
             print_header("Angel One — Holdings (Live)");
-            println!("  {:<14} {:>8} {:>10} {:>10} {:>12} {:>10}",
-                "Symbol".bold(), "Qty".bold(), "Avg Cost".bold(), "LTP".bold(), "P&L".bold(), "P&L %".bold());
+            println!(
+                "  {:<14} {:>8} {:>10} {:>10} {:>12} {:>10}",
+                "Symbol".bold(),
+                "Qty".bold(),
+                "Avg Cost".bold(),
+                "LTP".bold(),
+                "P&L".bold(),
+                "P&L %".bold()
+            );
             println!("  {}", "─".repeat(68).dimmed());
 
             let mut total_pnl = 0.0_f64;
@@ -3067,17 +4729,42 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
                 total_value += ltp * qty as f64;
                 total_cost += avg * qty as f64;
 
-                let pnl_str = if pnl >= 0.0 { format!("+₹{:.2}", pnl).green().to_string() } else { format!("-₹{:.2}", pnl.abs()).red().to_string() };
-                let pct_str = if pnl_pct >= 0.0 { format!("+{:.2}%", pnl_pct).green().to_string() } else { format!("{:.2}%", pnl_pct).red().to_string() };
+                let pnl_str = if pnl >= 0.0 {
+                    format!("+₹{:.2}", pnl).green().to_string()
+                } else {
+                    format!("-₹{:.2}", pnl.abs()).red().to_string()
+                };
+                let pct_str = if pnl_pct >= 0.0 {
+                    format!("+{:.2}%", pnl_pct).green().to_string()
+                } else {
+                    format!("{:.2}%", pnl_pct).red().to_string()
+                };
 
-                println!("  {:<14} {:>8} {:>10} {:>10} {:>12} {:>10}",
-                    sym.cyan(), qty, format!("₹{:.2}", avg), format!("₹{:.2}", ltp), pnl_str, pct_str);
+                println!(
+                    "  {:<14} {:>8} {:>10} {:>10} {:>12} {:>10}",
+                    sym.cyan(),
+                    qty,
+                    format!("₹{:.2}", avg),
+                    format!("₹{:.2}", ltp),
+                    pnl_str,
+                    pct_str
+                );
             }
 
             println!("  {}", "─".repeat(68).dimmed());
-            let total_str = if total_pnl >= 0.0 { format!("+₹{:.2}", total_pnl).green().bold().to_string() } else { format!("-₹{:.2}", total_pnl.abs()).red().bold().to_string() };
-            println!("  {:<14} {:>8} {:>10} {:>10} {:>12}",
-                "TOTAL".bold(), "", format!("₹{:.0}", total_cost), format!("₹{:.0}", total_value), total_str);
+            let total_str = if total_pnl >= 0.0 {
+                format!("+₹{:.2}", total_pnl).green().bold().to_string()
+            } else {
+                format!("-₹{:.2}", total_pnl.abs()).red().bold().to_string()
+            };
+            println!(
+                "  {:<14} {:>8} {:>10} {:>10} {:>12}",
+                "TOTAL".bold(),
+                "",
+                format!("₹{:.0}", total_cost),
+                format!("₹{:.0}", total_value),
+                total_str
+            );
 
             // Also sync to stockwise portfolio
             let mut portfolio = Portfolio::load()?;
@@ -3086,14 +4773,21 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
                 let qty = h.quantity.unwrap_or(0) as f64;
                 let avg = h.averageprice.unwrap_or(0.0);
                 if !sym.is_empty() && qty > 0.0 && avg > 0.0 {
-                    let resolved = if sym.contains('.') { sym.to_string() } else { format!("{}.NS", sym) };
+                    let resolved = if sym.contains('.') {
+                        sym.to_string()
+                    } else {
+                        format!("{}.NS", sym)
+                    };
                     // Remove old and re-add to sync
                     portfolio.remove(&resolved);
                     portfolio.add(&resolved, qty, avg);
                 }
             }
             portfolio.save()?;
-            println!("\n  {} Holdings synced to StockWise portfolio.", "✓".green());
+            println!(
+                "\n  {} Holdings synced to StockWise portfolio.",
+                "✓".green()
+            );
             println!();
             Ok(())
         }
@@ -3107,8 +4801,14 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
             }
 
             print_header("Angel One — Open Positions");
-            println!("  {:<14} {:>8} {:>10} {:>10} {:>12}",
-                "Symbol".bold(), "Qty".bold(), "Buy Avg".bold(), "LTP".bold(), "P&L".bold());
+            println!(
+                "  {:<14} {:>8} {:>10} {:>10} {:>12}",
+                "Symbol".bold(),
+                "Qty".bold(),
+                "Buy Avg".bold(),
+                "LTP".bold(),
+                "P&L".bold()
+            );
             println!("  {}", "─".repeat(58).dimmed());
 
             for p in &positions {
@@ -3118,70 +4818,160 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
                 let ltp = p.ltp.as_deref().unwrap_or("0");
                 let pnl = p.pnl.as_deref().unwrap_or("0");
                 let pnl_f: f64 = pnl.parse().unwrap_or(0.0);
-                let pnl_str = if pnl_f >= 0.0 { format!("+₹{}", pnl).green().to_string() } else { format!("-₹{}", pnl).red().to_string() };
-                println!("  {:<14} {:>8} {:>10} {:>10} {:>12}", sym.cyan(), qty, format!("₹{}", avg), format!("₹{}", ltp), pnl_str);
+                let pnl_str = if pnl_f >= 0.0 {
+                    format!("+₹{}", pnl).green().to_string()
+                } else {
+                    format!("-₹{}", pnl).red().to_string()
+                };
+                println!(
+                    "  {:<14} {:>8} {:>10} {:>10} {:>12}",
+                    sym.cyan(),
+                    qty,
+                    format!("₹{}", avg),
+                    format!("₹{}", ltp),
+                    pnl_str
+                );
             }
             println!();
             Ok(())
         }
         "buy" => {
             let sym = symbol.context("Symbol required. Usage: stockwise trade buy RELIANCE 10")?;
-            let quantity = qty.context("Quantity required. Usage: stockwise trade buy RELIANCE 10")?;
+            let quantity =
+                qty.context("Quantity required. Usage: stockwise trade buy RELIANCE 10")?;
             let sym_upper = sym.to_uppercase();
 
             let client = crate::angel::AngelClient::new().await?;
 
             // Search for the symbol token
-            let token = client.search_scrip(&sym_upper, "NSE").await?
+            let token = client
+                .search_scrip(&sym_upper, "NSE")
+                .await?
                 .context(format!("Could not find symbol {} on NSE", sym_upper))?;
 
-            println!("  {} Placing {} order: {} {} shares...", "⟳".yellow(), "BUY".green().bold(), sym_upper.cyan(), quantity);
+            println!(
+                "  {} Placing {} order: {} {} shares...",
+                "⟳".yellow(),
+                "BUY".green().bold(),
+                sym_upper.cyan(),
+                quantity
+            );
 
-            let result = client.place_order(&sym_upper, &token, "NSE", "BUY", quantity, "MARKET", 0.0, 0.0).await?;
+            let result = client
+                .place_order(
+                    &sym_upper, &token, "NSE", "BUY", quantity, "MARKET", 0.0, 0.0,
+                )
+                .await?;
 
             if let Some(id) = &result.orderid {
                 println!("  {} Order placed! ID: {}", "✓".green().bold(), id.cyan());
-                println!("  {} BUY {} × {} shares at MARKET", "→".green(), sym_upper.cyan(), quantity);
+                println!(
+                    "  {} BUY {} × {} shares at MARKET",
+                    "→".green(),
+                    sym_upper.cyan(),
+                    quantity
+                );
+            } else {
+                println!(
+                    "  {} Order accepted but no order id was returned — {}",
+                    "⚠".yellow().bold(),
+                    "do NOT resubmit; verify with `stockwise trade orders`.".yellow()
+                );
             }
             println!();
             Ok(())
         }
         "sell" => {
             let sym = symbol.context("Symbol required. Usage: stockwise trade sell RELIANCE 10")?;
-            let quantity = qty.context("Quantity required. Usage: stockwise trade sell RELIANCE 10")?;
+            let quantity =
+                qty.context("Quantity required. Usage: stockwise trade sell RELIANCE 10")?;
             let sym_upper = sym.to_uppercase();
 
             let client = crate::angel::AngelClient::new().await?;
-            let token = client.search_scrip(&sym_upper, "NSE").await?
+            let token = client
+                .search_scrip(&sym_upper, "NSE")
+                .await?
                 .context(format!("Could not find symbol {} on NSE", sym_upper))?;
 
-            println!("  {} Placing {} order: {} {} shares...", "⟳".yellow(), "SELL".red().bold(), sym_upper.cyan(), quantity);
+            println!(
+                "  {} Placing {} order: {} {} shares...",
+                "⟳".yellow(),
+                "SELL".red().bold(),
+                sym_upper.cyan(),
+                quantity
+            );
 
-            let result = client.place_order(&sym_upper, &token, "NSE", "SELL", quantity, "MARKET", 0.0, 0.0).await?;
+            let result = client
+                .place_order(
+                    &sym_upper, &token, "NSE", "SELL", quantity, "MARKET", 0.0, 0.0,
+                )
+                .await?;
 
             if let Some(id) = &result.orderid {
                 println!("  {} Order placed! ID: {}", "✓".green().bold(), id.cyan());
-                println!("  {} SELL {} × {} shares at MARKET", "→".red(), sym_upper.cyan(), quantity);
+                println!(
+                    "  {} SELL {} × {} shares at MARKET",
+                    "→".red(),
+                    sym_upper.cyan(),
+                    quantity
+                );
+            } else {
+                println!(
+                    "  {} Order accepted but no order id was returned — {}",
+                    "⚠".yellow().bold(),
+                    "do NOT resubmit; verify with `stockwise trade orders`.".yellow()
+                );
             }
             println!();
             Ok(())
         }
         "limit" => {
-            let sym = symbol.context("Symbol required. Usage: stockwise trade limit RELIANCE 10 1300")?;
+            let sym =
+                symbol.context("Symbol required. Usage: stockwise trade limit RELIANCE 10 1300")?;
             let quantity = qty.context("Quantity required")?;
-            let limit_price = price.context("Limit price required. Usage: stockwise trade limit RELIANCE 10 1300")?;
+            let limit_price = price
+                .context("Limit price required. Usage: stockwise trade limit RELIANCE 10 1300")?;
             let sym_upper = sym.to_uppercase();
 
             let client = crate::angel::AngelClient::new().await?;
-            let token = client.search_scrip(&sym_upper, "NSE").await?
+            let token = client
+                .search_scrip(&sym_upper, "NSE")
+                .await?
                 .context(format!("Could not find symbol {}", sym_upper))?;
 
-            println!("  {} Placing LIMIT BUY: {} × {} @ ₹{:.2}...", "⟳".yellow(), sym_upper.cyan(), quantity, limit_price);
+            println!(
+                "  {} Placing LIMIT BUY: {} × {} @ ₹{:.2}...",
+                "⟳".yellow(),
+                sym_upper.cyan(),
+                quantity,
+                limit_price
+            );
 
-            let result = client.place_order(&sym_upper, &token, "NSE", "BUY", quantity, "LIMIT", limit_price, 0.0).await?;
+            let result = client
+                .place_order(
+                    &sym_upper,
+                    &token,
+                    "NSE",
+                    "BUY",
+                    quantity,
+                    "LIMIT",
+                    limit_price,
+                    0.0,
+                )
+                .await?;
 
             if let Some(id) = &result.orderid {
-                println!("  {} Limit order placed! ID: {}", "✓".green().bold(), id.cyan());
+                println!(
+                    "  {} Limit order placed! ID: {}",
+                    "✓".green().bold(),
+                    id.cyan()
+                );
+            } else {
+                println!(
+                    "  {} Order accepted but no order id was returned — {}",
+                    "⚠".yellow().bold(),
+                    "do NOT resubmit; verify with `stockwise trade orders`.".yellow()
+                );
             }
             println!();
             Ok(())
@@ -3196,8 +4986,15 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
             }
 
             print_header("Angel One — Order Book");
-            println!("  {:<12} {:<14} {:>6} {:>8} {:>10} {:>12}",
-                "Order ID".bold(), "Symbol".bold(), "Type".bold(), "Qty".bold(), "Price".bold(), "Status".bold());
+            println!(
+                "  {:<12} {:<14} {:>6} {:>8} {:>10} {:>12}",
+                "Order ID".bold(),
+                "Symbol".bold(),
+                "Type".bold(),
+                "Qty".bold(),
+                "Price".bold(),
+                "Status".bold()
+            );
             println!("  {}", "─".repeat(66).dimmed());
 
             for o in &orders {
@@ -3207,15 +5004,26 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
                 let qty = o.quantity.as_deref().unwrap_or("0");
                 let price = o.price.as_deref().unwrap_or("0");
                 let status = o.status.as_deref().unwrap_or("???");
-                let txn_str = if txn == "BUY" { txn.green().to_string() } else { txn.red().to_string() };
+                let txn_str = if txn == "BUY" {
+                    txn.green().to_string()
+                } else {
+                    txn.red().to_string()
+                };
                 let status_str = match status {
                     "complete" => status.green().bold().to_string(),
                     "rejected" => status.red().to_string(),
                     "open" | "pending" => status.yellow().to_string(),
                     _ => status.to_string(),
                 };
-                println!("  {:<12} {:<14} {:>6} {:>8} {:>10} {:>12}",
-                    id.dimmed(), sym.cyan(), txn_str, qty, format!("₹{}", price), status_str);
+                println!(
+                    "  {:<12} {:<14} {:>6} {:>8} {:>10} {:>12}",
+                    id.dimmed(),
+                    sym.cyan(),
+                    txn_str,
+                    qty,
+                    format!("₹{}", price),
+                    status_str
+                );
             }
             println!();
             Ok(())
@@ -3224,14 +5032,38 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
             println!();
             println!("  {} Angel One Trading Commands:", "→".cyan());
             println!();
-            println!("    {} — Set up Angel One API credentials", "stockwise trade setup".bold());
-            println!("    {} — Create config file to edit", "stockwise trade config".bold());
-            println!("    {} — View your live holdings", "stockwise trade holdings".bold());
-            println!("    {} — View open intraday positions", "stockwise trade positions".bold());
-            println!("    {} — Place a market buy order", "stockwise trade buy RELIANCE 10".bold());
-            println!("    {} — Place a market sell order", "stockwise trade sell RELIANCE 10".bold());
-            println!("    {} — Place a limit buy order", "stockwise trade limit RELIANCE 10 1300".bold());
-            println!("    {} — View today's order book", "stockwise trade orders".bold());
+            println!(
+                "    {} — Set up Angel One API credentials",
+                "stockwise trade setup".bold()
+            );
+            println!(
+                "    {} — Create config file to edit",
+                "stockwise trade config".bold()
+            );
+            println!(
+                "    {} — View your live holdings",
+                "stockwise trade holdings".bold()
+            );
+            println!(
+                "    {} — View open intraday positions",
+                "stockwise trade positions".bold()
+            );
+            println!(
+                "    {} — Place a market buy order",
+                "stockwise trade buy RELIANCE 10".bold()
+            );
+            println!(
+                "    {} — Place a market sell order",
+                "stockwise trade sell RELIANCE 10".bold()
+            );
+            println!(
+                "    {} — Place a limit buy order",
+                "stockwise trade limit RELIANCE 10 1300".bold()
+            );
+            println!(
+                "    {} — View today's order book",
+                "stockwise trade orders".bold()
+            );
             println!();
             Ok(())
         }
@@ -3247,14 +5079,37 @@ pub async fn cmd_trade(action: &str, symbol: Option<&str>, qty: Option<u32>, pri
 pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    if closes.len() < 5 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    if closes.len() < 5 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     let current = *closes.last().unwrap();
     let last_high = *highs.last().unwrap();
@@ -3267,22 +5122,33 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
     println!("  Current Price: {}\n", format_price(current, cur).bold());
 
     print_section("Classic Pivot Points");
-    print_kv("R3 (Resistance)", &format!("{}{:.2}", csym, r3).red().to_string());
+    print_kv(
+        "R3 (Resistance)",
+        &format!("{}{:.2}", csym, r3).red().to_string(),
+    );
     print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
     print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
     print_kv("Pivot", &format!("{}{:.2}", csym, pivot).bold().to_string());
     print_kv("S1", &format!("{}{:.2}", csym, s1).green().to_string());
     print_kv("S2", &format!("{}{:.2}", csym, s2).green().to_string());
-    print_kv("S3 (Support)", &format!("{}{:.2}", csym, s3).green().to_string());
+    print_kv(
+        "S3 (Support)",
+        &format!("{}{:.2}", csym, s3).green().to_string(),
+    );
 
     // Fibonacci levels
-    if let Some((swing_high, swing_low)) = technical::find_swing_points(&highs, &lows, 60.min(highs.len())) {
+    if let Some((swing_high, swing_low)) =
+        technical::find_swing_points(&highs, &lows, 60.min(highs.len()))
+    {
         let fibs = technical::fibonacci_levels(swing_high, swing_low);
         print_section("Fibonacci Retracement");
         print_kv("Swing High", &format!("{}{:.2}", csym, swing_high));
         print_kv("23.6%", &format!("{}{:.2}", csym, fibs[0]));
         print_kv("38.2%", &format!("{}{:.2}", csym, fibs[1]));
-        print_kv("50.0%", &format!("{}{:.2}", csym, fibs[2]).bold().to_string());
+        print_kv(
+            "50.0%",
+            &format!("{}{:.2}", csym, fibs[2]).bold().to_string(),
+        );
         print_kv("61.8%", &format!("{}{:.2}", csym, fibs[3]));
         print_kv("78.6%", &format!("{}{:.2}", csym, fibs[4]));
         print_kv("Swing Low", &format!("{}{:.2}", csym, swing_low));
@@ -3290,10 +5156,35 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
 
     // Price position
     print_section("Current Position");
-    if current > r1 { println!("  {} Above R1 — bullish, next target R2 ({}{:.2})", "▲".green(), csym, r2); }
-    else if current > pivot { println!("  {} Above pivot — mildly bullish, resistance at R1 ({}{:.2})", "▲".green(), csym, r1); }
-    else if current > s1 { println!("  {} Below pivot — mildly bearish, support at S1 ({}{:.2})", "▼".yellow(), csym, s1); }
-    else { println!("  {} Below S1 — bearish, next support S2 ({}{:.2})", "▼".red(), csym, s2); }
+    if current > r1 {
+        println!(
+            "  {} Above R1 — bullish, next target R2 ({}{:.2})",
+            "▲".green(),
+            csym,
+            r2
+        );
+    } else if current > pivot {
+        println!(
+            "  {} Above pivot — mildly bullish, resistance at R1 ({}{:.2})",
+            "▲".green(),
+            csym,
+            r1
+        );
+    } else if current > s1 {
+        println!(
+            "  {} Below pivot — mildly bearish, support at S1 ({}{:.2})",
+            "▼".yellow(),
+            csym,
+            s1
+        );
+    } else {
+        println!(
+            "  {} Below S1 — bearish, next support S2 ({}{:.2})",
+            "▼".red(),
+            csym,
+            s2
+        );
+    }
     println!();
     Ok(())
 }
@@ -3303,13 +5194,42 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
 pub async fn cmd_volume(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let volumes: Vec<u64> = chart.indicators.quote.first().and_then(|q| q.volume.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let volumes: Vec<u64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.volume.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
     let n = closes.len().min(volumes.len());
-    if n < 10 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    if n < 10 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     print_header(&format!("Volume Analysis: {}", resolved));
 
@@ -3317,8 +5237,14 @@ pub async fn cmd_volume(symbol: &str, period: &str, market: Market) -> Result<()
     let obv = technical::obv(&closes, &volumes);
     if obv.len() > 20 {
         let recent_obv: Vec<f64> = obv[obv.len() - 60.min(obv.len())..].to_vec();
-        for line in charts::line_chart(&recent_obv, 50, 6, "cyan", "On-Balance Volume (OBV)") { println!("{}", line); }
-        let obv_trend = if obv.last() > obv.get(obv.len().saturating_sub(20)) { "Rising — accumulation".green().to_string() } else { "Falling — distribution".red().to_string() };
+        for line in charts::line_chart(&recent_obv, 50, 6, "cyan", "On-Balance Volume (OBV)") {
+            println!("{}", line);
+        }
+        let obv_trend = if obv.last() > obv.get(obv.len().saturating_sub(20)) {
+            "Rising — accumulation".green().to_string()
+        } else {
+            "Falling — distribution".red().to_string()
+        };
         print_kv("OBV Trend", &obv_trend);
     }
 
@@ -3327,7 +5253,9 @@ pub async fn cmd_volume(symbol: &str, period: &str, market: Market) -> Result<()
     if ad.len() > 20 {
         let recent_ad: Vec<f64> = ad[ad.len() - 60.min(ad.len())..].to_vec();
         println!();
-        for line in charts::line_chart(&recent_ad, 50, 6, "yellow", "Accumulation/Distribution") { println!("{}", line); }
+        for line in charts::line_chart(&recent_ad, 50, 6, "yellow", "Accumulation/Distribution") {
+            println!("{}", line);
+        }
     }
 
     // Volume stats
@@ -3337,14 +5265,22 @@ pub async fn cmd_volume(symbol: &str, period: &str, market: Market) -> Result<()
     let ratio = today_vol as f64 / avg_vol_20.max(1) as f64;
     print_kv("Today's Volume", &format_volume(today_vol));
     print_kv("20-Day Avg Volume", &format_volume(avg_vol_20));
-    let ratio_str = if ratio > 1.5 { format!("{:.2}x (HIGH)", ratio).green().bold().to_string() } else if ratio > 1.0 { format!("{:.2}x (above avg)", ratio).to_string() } else { format!("{:.2}x (below avg)", ratio).red().to_string() };
+    let ratio_str = if ratio > 1.5 {
+        format!("{:.2}x (HIGH)", ratio).green().bold().to_string()
+    } else if ratio > 1.0 {
+        format!("{:.2}x (above avg)", ratio).to_string()
+    } else {
+        format!("{:.2}x (below avg)", ratio).red().to_string()
+    };
     print_kv("Volume Ratio", &ratio_str);
 
     // Volume bars
     let recent_vols: Vec<u64> = volumes[n.saturating_sub(40)..].to_vec();
     println!();
     println!("  {}", "Volume (40 days)".bold());
-    for line in charts::volume_bars(&recent_vols, 40, 4) { println!("{}", line); }
+    for line in charts::volume_bars(&recent_vols, 40, 4) {
+        println!("{}", line);
+    }
     println!();
     Ok(())
 }
@@ -3354,13 +5290,39 @@ pub async fn cmd_volume(symbol: &str, period: &str, market: Market) -> Result<()
 pub async fn cmd_gaps(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
-    let opens: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let opens: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.open.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
 
     let gaps = technical::detect_gaps(&opens, &highs, &lows, &closes);
     let timestamps = chart.timestamp.unwrap_or_default();
@@ -3376,23 +5338,60 @@ pub async fn cmd_gaps(symbol: &str, period: &str, market: Market) -> Result<()> 
     let unfilled: Vec<&technical::Gap> = gaps.iter().filter(|g| !g.filled).collect();
     let filled: Vec<&technical::Gap> = gaps.iter().filter(|g| g.filled).collect();
 
-    println!("  Found {} gaps ({} unfilled, {} filled)\n", gaps.len(), unfilled.len(), filled.len());
+    println!(
+        "  Found {} gaps ({} unfilled, {} filled)\n",
+        gaps.len(),
+        unfilled.len(),
+        filled.len()
+    );
 
     if !unfilled.is_empty() {
         print_section("Open (Unfilled) Gaps");
         for g in &unfilled {
-            let date = timestamps.get(g.index).and_then(|&t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
-            let dir = match g.gap_type { technical::GapType::Up => "GAP UP".green().bold().to_string(), technical::GapType::Down => "GAP DOWN".red().bold().to_string() };
-            println!("  {} {} — {}{:.2} to {}{:.2} ({})", date.dimmed(), dir, csym, g.gap_low, csym, g.gap_high, format!("{}{:.2} range", csym, g.gap_high - g.gap_low).dimmed());
+            let date = timestamps
+                .get(g.index)
+                .and_then(|&t| chrono::DateTime::from_timestamp(t, 0))
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            let dir = match g.gap_type {
+                technical::GapType::Up => "GAP UP".green().bold().to_string(),
+                technical::GapType::Down => "GAP DOWN".red().bold().to_string(),
+            };
+            println!(
+                "  {} {} — {}{:.2} to {}{:.2} ({})",
+                date.dimmed(),
+                dir,
+                csym,
+                g.gap_low,
+                csym,
+                g.gap_high,
+                format!("{}{:.2} range", csym, g.gap_high - g.gap_low).dimmed()
+            );
         }
     }
 
     if !filled.is_empty() {
         print_section(&format!("Filled Gaps ({})", filled.len()));
         for g in filled.iter().rev().take(5) {
-            let date = timestamps.get(g.index).and_then(|&t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
-            let dir = match g.gap_type { technical::GapType::Up => "UP", technical::GapType::Down => "DN" };
-            println!("  {} {} {}{:.2}–{}{:.2} {}", date.dimmed(), dir, csym, g.gap_low, csym, g.gap_high, "FILLED".dimmed());
+            let date = timestamps
+                .get(g.index)
+                .and_then(|&t| chrono::DateTime::from_timestamp(t, 0))
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            let dir = match g.gap_type {
+                technical::GapType::Up => "UP",
+                technical::GapType::Down => "DN",
+            };
+            println!(
+                "  {} {} {}{:.2}–{}{:.2} {}",
+                date.dimmed(),
+                dir,
+                csym,
+                g.gap_low,
+                csym,
+                g.gap_high,
+                "FILLED".dimmed()
+            );
         }
     }
     println!();
@@ -3401,32 +5400,97 @@ pub async fn cmd_gaps(symbol: &str, period: &str, market: Market) -> Result<()> 
 
 // ── 4. Stoploss Calculator ──
 
-pub async fn cmd_stoploss(symbol: &str, entry: Option<f64>, period: &str, market: Market) -> Result<()> {
+pub async fn cmd_stoploss(
+    symbol: &str,
+    entry: Option<f64>,
+    period: &str,
+    market: Market,
+) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
 
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    if closes.len() < 14 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    if closes.len() < 14 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     let current = *closes.last().unwrap();
     let entry_price = entry.unwrap_or(current);
+    if entry_price <= 0.0 {
+        println!("{}", "Entry price must be greater than zero.".red());
+        return Ok(());
+    }
     let atr = technical::atr(&highs, &lows, &closes, 14).unwrap_or(0.0);
 
     print_header(&format!("Stop-Loss Calculator: {}", resolved));
     print_kv("Entry Price", &format!("{}{:.2}", csym, entry_price));
     print_kv("Current Price", &format!("{}{:.2}", csym, current));
-    print_kv("ATR (14)", &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / current) * 100.0));
+    print_kv(
+        "ATR (14)",
+        &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / current) * 100.0),
+    );
 
     let (cons, moderate, aggressive) = technical::atr_stop_loss(entry_price, atr);
     print_section("ATR-Based Stop Loss");
-    print_kv("Conservative (3x ATR)", &format!("{}{:.2} ({:.2}% risk)", csym, cons, ((entry_price - cons) / entry_price) * 100.0).green().to_string());
-    print_kv("Moderate (2x ATR)", &format!("{}{:.2} ({:.2}% risk)", csym, moderate, ((entry_price - moderate) / entry_price) * 100.0).yellow().to_string());
-    print_kv("Aggressive (1.5x ATR)", &format!("{}{:.2} ({:.2}% risk)", csym, aggressive, ((entry_price - aggressive) / entry_price) * 100.0).red().to_string());
+    print_kv(
+        "Conservative (3x ATR)",
+        &format!(
+            "{}{:.2} ({:.2}% risk)",
+            csym,
+            cons,
+            ((entry_price - cons) / entry_price) * 100.0
+        )
+        .green()
+        .to_string(),
+    );
+    print_kv(
+        "Moderate (2x ATR)",
+        &format!(
+            "{}{:.2} ({:.2}% risk)",
+            csym,
+            moderate,
+            ((entry_price - moderate) / entry_price) * 100.0
+        )
+        .yellow()
+        .to_string(),
+    );
+    print_kv(
+        "Aggressive (1.5x ATR)",
+        &format!(
+            "{}{:.2} ({:.2}% risk)",
+            csym,
+            aggressive,
+            ((entry_price - aggressive) / entry_price) * 100.0
+        )
+        .red()
+        .to_string(),
+    );
 
     // Percentage-based
     print_section("Percentage-Based");
@@ -3446,7 +5510,17 @@ pub async fn cmd_stoploss(symbol: &str, entry: Option<f64>, period: &str, market
     let risk = entry_price - moderate;
     for rr in [1.5, 2.0, 3.0] {
         let target = entry_price + risk * rr;
-        print_kv(&format!("R:R 1:{:.1}", rr), &format!("{}{:.2} (+{:.2}%)", csym, target, ((target - entry_price) / entry_price) * 100.0).green().to_string());
+        print_kv(
+            &format!("R:R 1:{:.1}", rr),
+            &format!(
+                "{}{:.2} (+{:.2}%)",
+                csym,
+                target,
+                ((target - entry_price) / entry_price) * 100.0
+            )
+            .green()
+            .to_string(),
+        );
     }
     println!();
     Ok(())
@@ -3462,11 +5536,22 @@ pub async fn cmd_peers(symbol: &str, market: Market) -> Result<()> {
     let sector = q.sector.as_deref().unwrap_or("Unknown");
 
     // Get all popular stocks and filter by same sector
-    let all_symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let all_symbols = match market {
+        Market::Us => market::US_POPULAR,
+        Market::In => market::INDIA_POPULAR,
+    };
     let all_refs: Vec<&str> = all_symbols.to_vec();
     let all_quotes = client.get_quote(&all_refs).await?;
-    let mut peers: Vec<&crate::api::Quote> = all_quotes.iter().filter(|p| p.sector.as_deref() == Some(sector) && p.symbol.as_deref() != Some(&resolved)).collect();
-    peers.sort_by(|a, b| b.market_cap.unwrap_or(0.0).partial_cmp(&a.market_cap.unwrap_or(0.0)).unwrap());
+    let mut peers: Vec<&crate::api::Quote> = all_quotes
+        .iter()
+        .filter(|p| p.sector.as_deref() == Some(sector) && p.symbol.as_deref() != Some(&resolved))
+        .collect();
+    peers.sort_by(|a, b| {
+        b.market_cap
+            .unwrap_or(0.0)
+            .partial_cmp(&a.market_cap.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     print_header(&format!("Peer Comparison: {} ({})", resolved, sector));
 
@@ -3474,24 +5559,46 @@ pub async fn cmd_peers(symbol: &str, market: Market) -> Result<()> {
     let mut all_peers = vec![q];
     all_peers.extend(peers.iter().take(8).copied());
 
-    println!("  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}", "Symbol".bold(), "Price".bold(), "P/E".bold(), "P/B".bold(), "Chg%".bold(), "Mkt Cap".bold());
+    println!(
+        "  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "P/E".bold(),
+        "P/B".bold(),
+        "Chg%".bold(),
+        "Mkt Cap".bold()
+    );
     println!("  {}", "─".repeat(62).dimmed());
 
     for p in &all_peers {
         let sym = p.symbol.as_deref().unwrap_or("???");
         let cur = p.currency.as_deref();
         let is_target = sym == resolved;
-        let name = if is_target { format!("{} ←", sym).cyan().bold().to_string() } else { sym.cyan().to_string() };
+        let name = if is_target {
+            format!("{} ←", sym).cyan().bold().to_string()
+        } else {
+            sym.cyan().to_string()
+        };
         let pct = p.regular_market_change_percent.unwrap_or(0.0);
-        let pct_str = if pct >= 0.0 { format!("+{:.2}%", pct).green().to_string() } else { format!("{:.2}%", pct).red().to_string() };
-        println!("  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}", name,
+        let pct_str = if pct >= 0.0 {
+            format!("+{:.2}%", pct).green().to_string()
+        } else {
+            format!("{:.2}%", pct).red().to_string()
+        };
+        println!(
+            "  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}",
+            name,
             format_price(p.regular_market_price.unwrap_or(0.0), cur),
             p.trailing_pe.map_or("—".into(), |v| format!("{:.1}", v)),
             p.price_to_book.map_or("—".into(), |v| format!("{:.1}", v)),
             pct_str,
-            p.market_cap.map_or("—".into(), |v| format_large_number(v, cur)));
+            p.market_cap
+                .map_or("—".into(), |v| format_large_number(v, cur))
+        );
     }
-    if peers.is_empty() { println!("\n  {}", "No peers found in the same sector.".dimmed()); }
+    if peers.is_empty() {
+        println!("\n  {}", "No peers found in the same sector.".dimmed());
+    }
     println!();
     Ok(())
 }
@@ -3514,7 +5621,10 @@ pub async fn cmd_dividends(symbol: &str, market: Market) -> Result<()> {
     let div_rate = q.trailing_annual_dividend_yield.unwrap_or(0.0) * price;
     if div_yield > 0.0 {
         print_kv("Annual Dividend", &format!("{}{:.2}/share", csym, div_rate));
-        print_kv("Dividend Yield", &format!("{:.2}%", div_yield * 100.0).green().to_string());
+        print_kv(
+            "Dividend Yield",
+            &format!("{:.2}%", div_yield * 100.0).green().to_string(),
+        );
 
         // Dividend income projection
         print_section("Income Projection");
@@ -3522,7 +5632,13 @@ pub async fn cmd_dividends(symbol: &str, market: Market) -> Result<()> {
             let shares = (investment / price).floor();
             let annual_income = shares * div_rate;
             let monthly = annual_income / 12.0;
-            print_kv(&format!("{}{:.0} invested", csym, investment), &format!("{}{:.0}/year ({}{:.0}/month)", csym, annual_income, csym, monthly));
+            print_kv(
+                &format!("{}{:.0} invested", csym, investment),
+                &format!(
+                    "{}{:.0}/year ({}{:.0}/month)",
+                    csym, annual_income, csym, monthly
+                ),
+            );
         }
 
         // DRIP projection (dividend reinvestment)
@@ -3535,7 +5651,10 @@ pub async fn cmd_dividends(symbol: &str, market: Market) -> Result<()> {
             shares += new_shares;
             if year == 1 || year == 5 || year == 10 {
                 let growth = ((shares / initial_shares) - 1.0) * 100.0;
-                print_kv(&format!("Year {}", year), &format!("{:.2} shares (+{:.1}% from DRIP)", shares, growth));
+                print_kv(
+                    &format!("Year {}", year),
+                    &format!("{:.2} shares (+{:.1}% from DRIP)", shares, growth),
+                );
             }
         }
     } else {
@@ -3552,19 +5671,41 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&[&resolved]).await?;
     let q = quotes.first().context("Symbol not found")?;
-    let name = q.short_name.as_deref().or(q.long_name.as_deref()).unwrap_or("Unknown");
+    let name = q
+        .short_name
+        .as_deref()
+        .or(q.long_name.as_deref())
+        .unwrap_or("Unknown");
 
     // Yahoo doesn't have a free insider endpoint, but we can show key holder metrics
     print_header(&format!("Insider & Institutional: {}", resolved));
     print_kv("Company", name);
-    print_kv("Price", &format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref()));
+    print_kv(
+        "Price",
+        &format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref()),
+    );
 
     // Show what we have from the quote
-    if let Some(rec) = q.recommendation_mean { print_kv("Analyst Consensus", &sentiment_label(rec)); }
-    if let Some(n) = q.number_of_analyst_opinions { print_kv("# Analysts", &n.to_string()); }
+    if let Some(rec) = q.recommendation_mean {
+        print_kv("Analyst Consensus", &sentiment_label(rec));
+    }
+    if let Some(n) = q.number_of_analyst_opinions {
+        print_kv("# Analysts", &n.to_string());
+    }
     if let Some(target) = q.target_mean_price {
-        let upside = q.regular_market_price.map(|p| ((target - p) / p) * 100.0).unwrap_or(0.0);
-        print_kv("Target Price", &format!("{}{:.2} ({:+.1}%)", market::currency_symbol(q.currency.as_deref()), target, upside));
+        let upside = q
+            .regular_market_price
+            .map(|p| ((target - p) / p) * 100.0)
+            .unwrap_or(0.0);
+        print_kv(
+            "Target Price",
+            &format!(
+                "{}{:.2} ({:+.1}%)",
+                market::currency_symbol(q.currency.as_deref()),
+                target,
+                upside
+            ),
+        );
     }
 
     // Fetch insider-related news from multiple sources concurrently
@@ -3625,11 +5766,21 @@ pub async fn cmd_options(symbol: &str, period: &str, market: Market) -> Result<(
     print_kv("Spot Price", &format_price(price, cur));
 
     // Use beta and volatility as implied vol proxy
-    if let Some(beta) = q.beta { print_kv("Beta", &format!("{:.2}", beta)); }
+    if let Some(beta) = q.beta {
+        print_kv("Beta", &format!("{:.2}", beta));
+    }
 
     // Fetch 1mo data for realized vol
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
     if let Some(vol) = technical::annualized_volatility(&closes) {
         print_kv("Realized Vol (1M)", &format!("{:.1}%", vol * 100.0));
         // Estimate option prices using simplified Black-Scholes-ish approach
@@ -3637,20 +5788,43 @@ pub async fn cmd_options(symbol: &str, period: &str, market: Market) -> Result<(
         print_section("Expected Moves");
         for days in [1, 5, 10, 30] {
             let move_pct = daily_move * (days as f64).sqrt() * price;
-            print_kv(&format!("{}-day move", days), &format!("+/- {}{:.2} ({:.2}%)", csym, move_pct, (move_pct / price) * 100.0));
+            print_kv(
+                &format!("{}-day move", days),
+                &format!(
+                    "+/- {}{:.2} ({:.2}%)",
+                    csym,
+                    move_pct,
+                    (move_pct / price) * 100.0
+                ),
+            );
         }
 
         print_section("Suggested Strike Prices");
         let otm_pct = [2.0, 5.0, 10.0];
-        println!("  {:<10} {:>14} {:>14}", "Distance".bold(), "Call Strike".bold(), "Put Strike".bold());
+        println!(
+            "  {:<10} {:>14} {:>14}",
+            "Distance".bold(),
+            "Call Strike".bold(),
+            "Put Strike".bold()
+        );
         println!("  {}", "─".repeat(40).dimmed());
         for pct in otm_pct {
             let call = price * (1.0 + pct / 100.0);
             let put = price * (1.0 - pct / 100.0);
-            println!("  {:<10} {:>14} {:>14}", format!("{}% OTM", pct), format!("{}{:.2}", csym, call).green(), format!("{}{:.2}", csym, put).red());
+            println!(
+                "  {:<10} {:>14} {:>14}",
+                format!("{}% OTM", pct),
+                format!("{}{:.2}", csym, call).green(),
+                format!("{}{:.2}", csym, put).red()
+            );
         }
     }
-    println!("\n  {}", "For full options chain, check your broker platform.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "For full options chain, check your broker platform."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -3660,13 +5834,36 @@ pub async fn cmd_options(symbol: &str, period: &str, market: Market) -> Result<(
 pub async fn cmd_fibs(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    if closes.len() < 20 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    if closes.len() < 20 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     let current = *closes.last().unwrap();
 
@@ -3678,10 +5875,25 @@ pub async fn cmd_fibs(symbol: &str, period: &str, market: Market) -> Result<()> 
         let lb = lookback.min(highs.len());
         if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, lb) {
             let fibs = technical::fibonacci_levels(sh, sl);
-            print_section(&format!("{} Swing ({}{:.2} → {}{:.2})", label, csym, sh, csym, sl));
-            let levels = [("0.0% (High)", sh), ("23.6%", fibs[0]), ("38.2%", fibs[1]), ("50.0%", fibs[2]), ("61.8%", fibs[3]), ("78.6%", fibs[4]), ("100% (Low)", sl)];
+            print_section(&format!(
+                "{} Swing ({}{:.2} → {}{:.2})",
+                label, csym, sh, csym, sl
+            ));
+            let levels = [
+                ("0.0% (High)", sh),
+                ("23.6%", fibs[0]),
+                ("38.2%", fibs[1]),
+                ("50.0%", fibs[2]),
+                ("61.8%", fibs[3]),
+                ("78.6%", fibs[4]),
+                ("100% (Low)", sl),
+            ];
             for (name, val) in &levels {
-                let marker = if (current - val).abs() / current < 0.01 { " ← YOU ARE HERE".yellow().bold().to_string() } else { String::new() };
+                let marker = if (current - val).abs() / current < 0.01 {
+                    " ← YOU ARE HERE".yellow().bold().to_string()
+                } else {
+                    String::new()
+                };
                 print_kv(name, &format!("{}{:.2}{}", csym, val, marker));
             }
         }
@@ -3693,8 +5905,16 @@ pub async fn cmd_fibs(symbol: &str, period: &str, market: Market) -> Result<()> 
 // PAPER TRADING SIMULATOR
 // ══════════════════════════════════════════════════════════
 
-pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, market: Market) -> Result<()> {
-    let csym = match market { Market::In => "₹", Market::Us => "$" };
+pub async fn cmd_sim(
+    action: &str,
+    amount: Option<f64>,
+    target: Option<f64>,
+    market: Market,
+) -> Result<()> {
+    let csym = match market {
+        Market::In => "₹",
+        Market::Us => "$",
+    };
 
     match action {
         "start" => {
@@ -3703,14 +5923,31 @@ pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, mar
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
             let mut history = SimHistory::load()?;
-            if history.sessions.iter().any(|s| s.date == today && !s.settled) {
-                println!("  {} Already have an open simulation for today.", "!".yellow());
-                println!("  Run {} to settle it, or {} to check status.", "stockwise sim settle".cyan(), "stockwise sim status".cyan());
+            if history
+                .sessions
+                .iter()
+                .any(|s| s.date == today && !s.settled)
+            {
+                println!(
+                    "  {} Already have an open simulation for today.",
+                    "!".yellow()
+                );
+                println!(
+                    "  Run {} to settle it, or {} to check status.",
+                    "stockwise sim settle".cyan(),
+                    "stockwise sim status".cyan()
+                );
                 return Ok(());
             }
 
             print_header("Paper Trading Simulation — Starting");
-            println!("  Date: {}  |  Capital: {}{:.0}  |  Target: {}%\n", today.bold(), csym, capital, target_pct);
+            println!(
+                "  Date: {}  |  Capital: {}{:.0}  |  Target: {}%\n",
+                today.bold(),
+                csym,
+                capital,
+                target_pct
+            );
             println!("  {} Running intraday bot scan...\n", "⟳".yellow());
 
             let client = YahooClient::new().await?;
@@ -3718,69 +5955,200 @@ pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, mar
             let plans = intraday::generate_trade_plans(&signals, capital, target_pct, 1.0);
 
             if plans.is_empty() {
-                println!("  {} No trades qualified today. Try tomorrow.", "→".yellow());
+                println!(
+                    "  {} No trades qualified today. Try tomorrow.",
+                    "→".yellow()
+                );
                 return Ok(());
             }
 
-            let sim_trades: Vec<SimTrade> = plans.iter().take(5).map(|p| {
-                SimTrade {
-                    symbol: p.signal.symbol.clone(), direction: p.signal.direction.to_string(),
-                    entry_price: p.entry, target1: p.target1, target2: p.target2, stop_loss: p.stop_loss,
-                    qty: p.qty, capital: p.capital_required, score: p.signal.score,
+            let sim_trades: Vec<SimTrade> = plans
+                .iter()
+                .take(5)
+                .map(|p| SimTrade {
+                    symbol: p.signal.symbol.clone(),
+                    direction: p.signal.direction.to_string(),
+                    entry_price: p.entry,
+                    target1: p.target1,
+                    target2: p.target2,
+                    stop_loss: p.stop_loss,
+                    qty: p.qty,
+                    capital: p.capital_required,
+                    score: p.signal.score,
                     confidence: p.signal.confidence.to_string(),
-                    strategies: p.signal.strategies.iter().map(|s| s.name.to_string()).collect(),
-                    exit_price: None, pnl: None, pnl_pct: None, hit_target: None, hit_stop: None,
-                }
-            }).collect();
+                    strategies: p
+                        .signal
+                        .strategies
+                        .iter()
+                        .map(|s| s.name.to_string())
+                        .collect(),
+                    exit_price: None,
+                    pnl: None,
+                    pnl_pct: None,
+                    hit_target: None,
+                    hit_stop: None,
+                })
+                .collect();
 
             println!("  {} Simulation trades locked in:\n", "✓".green().bold());
-            println!("  {:<14} {:>6} {:>10} {:>10} {:>10} {:>6}", "Symbol".bold(), "Qty".bold(), "Entry".bold(), "Target".bold(), "Stop".bold(), "Score".bold());
+            println!(
+                "  {:<14} {:>6} {:>10} {:>10} {:>10} {:>6}",
+                "Symbol".bold(),
+                "Qty".bold(),
+                "Entry".bold(),
+                "Target".bold(),
+                "Stop".bold(),
+                "Score".bold()
+            );
             println!("  {}", "─".repeat(60).dimmed());
             for t in &sim_trades {
-                println!("  {:<14} {:>6} {:>10} {:>10} {:>10} {:>6}", t.symbol.cyan(), t.qty,
-                    format!("{}{:.2}", csym, t.entry_price), format!("{}{:.2}", csym, t.target2).green(),
-                    format!("{}{:.2}", csym, t.stop_loss).red(), format!("{:.0}", t.score));
+                println!(
+                    "  {:<14} {:>6} {:>10} {:>10} {:>10} {:>6}",
+                    t.symbol.cyan(),
+                    t.qty,
+                    format!("{}{:.2}", csym, t.entry_price),
+                    format!("{}{:.2}", csym, t.target2).green(),
+                    format!("{}{:.2}", csym, t.stop_loss).red(),
+                    format!("{:.0}", t.score)
+                );
             }
 
             history.sessions.push(SimSession {
-                date: today, market: match market { Market::In => "IN", Market::Us => "US" }.into(),
-                capital, target_pct, trades: sim_trades,
-                total_pnl: None, total_pnl_pct: None, win_count: None, loss_count: None, settled: false,
+                date: today,
+                market: match market {
+                    Market::In => "IN",
+                    Market::Us => "US",
+                }
+                .into(),
+                capital,
+                target_pct,
+                trades: sim_trades,
+                total_pnl: None,
+                total_pnl_pct: None,
+                win_count: None,
+                loss_count: None,
+                settled: false,
             });
             history.save()?;
 
-            println!("\n  {} Trades recorded. Run {} at EOD to see results.", "✓".green(), "stockwise sim settle".cyan());
-            println!("  {} Run {} anytime to check live P&L.", "→".dimmed(), "stockwise sim status".cyan());
+            println!(
+                "\n  {} Trades recorded. Run {} at EOD to see results.",
+                "✓".green(),
+                "stockwise sim settle".cyan()
+            );
+            println!(
+                "  {} Run {} anytime to check live P&L.",
+                "→".dimmed(),
+                "stockwise sim status".cyan()
+            );
             println!();
         }
         "status" => {
             let history = SimHistory::load()?;
             let open: Vec<&SimSession> = history.sessions.iter().filter(|s| !s.settled).collect();
-            if open.is_empty() { println!("\n  {} No open simulations. Run {}.", "→".dimmed(), "stockwise sim start".cyan()); return Ok(()); }
+            if open.is_empty() {
+                println!(
+                    "\n  {} No open simulations. Run {}.",
+                    "→".dimmed(),
+                    "stockwise sim start".cyan()
+                );
+                return Ok(());
+            }
 
             let client = YahooClient::new().await?;
             for session in &open {
                 print_header(&format!("Simulation Status — {}", session.date));
-                println!("  Capital: {}{:.0}  |  Target: {}%\n", csym, session.capital, session.target_pct);
+                println!(
+                    "  Capital: {}{:.0}  |  Target: {}%\n",
+                    csym, session.capital, session.target_pct
+                );
                 let syms: Vec<&str> = session.trades.iter().map(|t| t.symbol.as_str()).collect();
                 let quotes = client.get_quote(&syms).await?;
 
-                println!("  {:<14} {:>6} {:>10} {:>10} {:>12} {:>10}", "Symbol".bold(), "Qty".bold(), "Entry".bold(), "Now".bold(), "P&L".bold(), "Status".bold());
+                println!(
+                    "  {:<14} {:>6} {:>10} {:>10} {:>12} {:>10}",
+                    "Symbol".bold(),
+                    "Qty".bold(),
+                    "Entry".bold(),
+                    "Now".bold(),
+                    "P&L".bold(),
+                    "Status".bold()
+                );
                 println!("  {}", "─".repeat(66).dimmed());
 
                 let mut total_pnl = 0.0_f64;
                 for t in &session.trades {
-                    let current = quotes.iter().find(|q| q.symbol.as_deref() == Some(&t.symbol)).and_then(|q| q.regular_market_price).unwrap_or(t.entry_price);
-                    let pnl = (current - t.entry_price) * t.qty as f64;
+                    let current = quotes
+                        .iter()
+                        .find(|q| q.symbol.as_deref() == Some(&t.symbol))
+                        .and_then(|q| q.regular_market_price)
+                        .unwrap_or(t.entry_price);
+                    let is_long = t.direction == "BUY";
+                    let pnl = if is_long {
+                        (current - t.entry_price) * t.qty as f64
+                    } else {
+                        (t.entry_price - current) * t.qty as f64
+                    };
                     total_pnl += pnl;
-                    let status = if current >= t.target2 { "TARGET HIT".green().bold().to_string() } else if current <= t.stop_loss { "STOPPED".red().bold().to_string() } else if current >= t.target1 { "T1 hit".green().to_string() } else { "Open".yellow().to_string() };
-                    let pnl_str = if pnl >= 0.0 { format!("+{}{:.0}", csym, pnl).green().to_string() } else { format!("-{}{:.0}", csym, pnl.abs()).red().to_string() };
-                    println!("  {:<14} {:>6} {:>10} {:>10} {:>12} {:>10}", t.symbol.cyan(), t.qty, format!("{}{:.2}", csym, t.entry_price), format!("{}{:.2}", csym, current), pnl_str, status);
+                    let hit_t2 = if is_long {
+                        current >= t.target2
+                    } else {
+                        current <= t.target2
+                    };
+                    let hit_stop = if is_long {
+                        current <= t.stop_loss
+                    } else {
+                        current >= t.stop_loss
+                    };
+                    let hit_t1 = if is_long {
+                        current >= t.target1
+                    } else {
+                        current <= t.target1
+                    };
+                    let status = if hit_t2 {
+                        "TARGET HIT".green().bold().to_string()
+                    } else if hit_stop {
+                        "STOPPED".red().bold().to_string()
+                    } else if hit_t1 {
+                        "T1 hit".green().to_string()
+                    } else {
+                        "Open".yellow().to_string()
+                    };
+                    let pnl_str = if pnl >= 0.0 {
+                        format!("+{}{:.0}", csym, pnl).green().to_string()
+                    } else {
+                        format!("-{}{:.0}", csym, pnl.abs()).red().to_string()
+                    };
+                    println!(
+                        "  {:<14} {:>6} {:>10} {:>10} {:>12} {:>10}",
+                        t.symbol.cyan(),
+                        t.qty,
+                        format!("{}{:.2}", csym, t.entry_price),
+                        format!("{}{:.2}", csym, current),
+                        pnl_str,
+                        status
+                    );
                 }
                 println!("  {}", "─".repeat(66).dimmed());
-                let total_str = if total_pnl >= 0.0 { format!("+{}{:.0}", csym, total_pnl).green().bold().to_string() } else { format!("-{}{:.0}", csym, total_pnl.abs()).red().bold().to_string() };
+                let total_str = if total_pnl >= 0.0 {
+                    format!("+{}{:.0}", csym, total_pnl)
+                        .green()
+                        .bold()
+                        .to_string()
+                } else {
+                    format!("-{}{:.0}", csym, total_pnl.abs())
+                        .red()
+                        .bold()
+                        .to_string()
+                };
                 let target_profit = session.capital * (session.target_pct / 100.0);
-                let on_track = if total_pnl >= target_profit { "TARGET MET".green().bold().to_string() } else { format!("{}{:.0} to go", csym, target_profit - total_pnl).yellow().to_string() };
+                let on_track = if total_pnl >= target_profit {
+                    "TARGET MET".green().bold().to_string()
+                } else {
+                    format!("{}{:.0} to go", csym, target_profit - total_pnl)
+                        .yellow()
+                        .to_string()
+                };
                 println!("  Total: {}  |  {}", total_str, on_track);
             }
             println!();
@@ -3797,85 +6165,252 @@ pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, mar
                 let (mut wins, mut losses) = (0u32, 0u32);
 
                 print_header(&format!("Settling — {}", session.date));
-                println!("  {:<14} {:>10} {:>10} {:>12} {:>8}", "Symbol".bold(), "Entry".bold(), "Close".bold(), "P&L".bold(), "Result".bold());
+                println!(
+                    "  {:<14} {:>10} {:>10} {:>12} {:>8}",
+                    "Symbol".bold(),
+                    "Entry".bold(),
+                    "Close".bold(),
+                    "P&L".bold(),
+                    "Result".bold()
+                );
                 println!("  {}", "─".repeat(58).dimmed());
 
                 for trade in session.trades.iter_mut() {
-                    let current = quotes.iter().find(|q| q.symbol.as_deref() == Some(&trade.symbol)).and_then(|q| q.regular_market_price).unwrap_or(trade.entry_price);
-                    let pnl = (current - trade.entry_price) * trade.qty as f64;
-                    let pnl_pct = ((current / trade.entry_price) - 1.0) * 100.0;
-                    trade.exit_price = Some(current); trade.pnl = Some(pnl); trade.pnl_pct = Some(pnl_pct);
-                    trade.hit_target = Some(current >= trade.target1); trade.hit_stop = Some(current <= trade.stop_loss);
+                    let current = quotes
+                        .iter()
+                        .find(|q| q.symbol.as_deref() == Some(&trade.symbol))
+                        .and_then(|q| q.regular_market_price)
+                        .unwrap_or(trade.entry_price);
+                    let is_long = trade.direction == "BUY";
+                    let pnl = if is_long {
+                        (current - trade.entry_price) * trade.qty as f64
+                    } else {
+                        (trade.entry_price - current) * trade.qty as f64
+                    };
+                    let pnl_pct = if trade.entry_price != 0.0 {
+                        let move_pct = (current - trade.entry_price) / trade.entry_price * 100.0;
+                        if is_long { move_pct } else { -move_pct }
+                    } else {
+                        0.0
+                    };
+                    let hit_target = if is_long {
+                        current >= trade.target1
+                    } else {
+                        current <= trade.target1
+                    };
+                    let hit_stop = if is_long {
+                        current <= trade.stop_loss
+                    } else {
+                        current >= trade.stop_loss
+                    };
+                    trade.exit_price = Some(current);
+                    trade.pnl = Some(pnl);
+                    trade.pnl_pct = Some(pnl_pct);
+                    trade.hit_target = Some(hit_target);
+                    trade.hit_stop = Some(hit_stop);
                     total_pnl += pnl;
-                    if pnl > 0.0 { wins += 1; } else { losses += 1; }
-                    let result = if current >= trade.target1 { "WIN".green().bold().to_string() } else if current <= trade.stop_loss { "STOPPED".red().to_string() } else if pnl > 0.0 { "Profit".green().to_string() } else { "Loss".red().to_string() };
-                    let pnl_str = if pnl >= 0.0 { format!("+{}{:.0}", csym, pnl).green().to_string() } else { format!("-{}{:.0}", csym, pnl.abs()).red().to_string() };
-                    println!("  {:<14} {:>10} {:>10} {:>12} {:>8}", trade.symbol.cyan(), format!("{}{:.2}", csym, trade.entry_price), format!("{}{:.2}", csym, current), pnl_str, result);
+                    if pnl > 0.0 {
+                        wins += 1;
+                    } else {
+                        losses += 1;
+                    }
+                    let result = if hit_target {
+                        "WIN".green().bold().to_string()
+                    } else if hit_stop {
+                        "STOPPED".red().to_string()
+                    } else if pnl > 0.0 {
+                        "Profit".green().to_string()
+                    } else {
+                        "Loss".red().to_string()
+                    };
+                    let pnl_str = if pnl >= 0.0 {
+                        format!("+{}{:.0}", csym, pnl).green().to_string()
+                    } else {
+                        format!("-{}{:.0}", csym, pnl.abs()).red().to_string()
+                    };
+                    println!(
+                        "  {:<14} {:>10} {:>10} {:>12} {:>8}",
+                        trade.symbol.cyan(),
+                        format!("{}{:.2}", csym, trade.entry_price),
+                        format!("{}{:.2}", csym, current),
+                        pnl_str,
+                        result
+                    );
                 }
 
                 let total_pnl_pct = (total_pnl / session.capital) * 100.0;
-                session.total_pnl = Some(total_pnl); session.total_pnl_pct = Some(total_pnl_pct);
-                session.win_count = Some(wins); session.loss_count = Some(losses); session.settled = true;
+                session.total_pnl = Some(total_pnl);
+                session.total_pnl_pct = Some(total_pnl_pct);
+                session.win_count = Some(wins);
+                session.loss_count = Some(losses);
+                session.settled = true;
                 settled_any = true;
 
                 println!("  {}", "─".repeat(58).dimmed());
                 let verdict = if total_pnl >= session.capital * (session.target_pct / 100.0) {
-                    format!("TARGET MET — {}{:.0} ({:+.2}%)", csym, total_pnl, total_pnl_pct).green().bold().to_string()
+                    format!(
+                        "TARGET MET — {}{:.0} ({:+.2}%)",
+                        csym, total_pnl, total_pnl_pct
+                    )
+                    .green()
+                    .bold()
+                    .to_string()
                 } else if total_pnl > 0.0 {
-                    format!("Partial win — {}{:.0} ({:+.2}%)", csym, total_pnl, total_pnl_pct).yellow().to_string()
-                } else { format!("Loss — {}{:.0} ({:.2}%)", csym, total_pnl.abs(), total_pnl_pct).red().to_string() };
+                    format!(
+                        "Partial win — {}{:.0} ({:+.2}%)",
+                        csym, total_pnl, total_pnl_pct
+                    )
+                    .yellow()
+                    .to_string()
+                } else {
+                    format!(
+                        "Loss — {}{:.0} ({:.2}%)",
+                        csym,
+                        total_pnl.abs(),
+                        total_pnl_pct
+                    )
+                    .red()
+                    .to_string()
+                };
                 println!("  {} {}", "→".bold(), verdict);
             }
-            if !settled_any { println!("\n  {} No open simulations.", "→".dimmed()); }
-            else { history.save()?; println!("\n  {} Run {} for stats.", "→".dimmed(), "stockwise sim history".cyan()); }
+            if !settled_any {
+                println!("\n  {} No open simulations.", "→".dimmed());
+            } else {
+                history.save()?;
+                println!(
+                    "\n  {} Run {} for stats.",
+                    "→".dimmed(),
+                    "stockwise sim history".cyan()
+                );
+            }
             println!();
         }
         "history" | "stats" => {
             let history = SimHistory::load()?;
             let stats = history.stats();
-            if stats.total_days == 0 { println!("\n  {} No history. Run {}.", "→".dimmed(), "stockwise sim start".cyan()); return Ok(()); }
+            if stats.total_days == 0 {
+                println!(
+                    "\n  {} No history. Run {}.",
+                    "→".dimmed(),
+                    "stockwise sim start".cyan()
+                );
+                return Ok(());
+            }
 
             print_header("Paper Trading Performance");
-            let daily_pnls: Vec<f64> = history.sessions.iter().filter(|s| s.settled).filter_map(|s| s.total_pnl).collect();
+            let daily_pnls: Vec<f64> = history
+                .sessions
+                .iter()
+                .filter(|s| s.settled)
+                .filter_map(|s| s.total_pnl)
+                .collect();
             if daily_pnls.len() > 1 {
                 let mut equity = vec![0.0_f64];
-                for &pnl in &daily_pnls { equity.push(equity.last().unwrap() + pnl); }
-                let color = if *equity.last().unwrap() >= 0.0 { "green" } else { "red" };
-                for line in charts::line_chart(&equity, 50, 8, color, "Cumulative P&L") { println!("{}", line); }
+                for &pnl in &daily_pnls {
+                    equity.push(equity.last().unwrap() + pnl);
+                }
+                let color = if *equity.last().unwrap() >= 0.0 {
+                    "green"
+                } else {
+                    "red"
+                };
+                for line in charts::line_chart(&equity, 50, 8, color, "Cumulative P&L") {
+                    println!("{}", line);
+                }
                 println!();
                 println!("  {}", "Daily P&L".bold());
                 for s in history.sessions.iter().filter(|s| s.settled) {
                     let pnl = s.total_pnl.unwrap_or(0.0);
-                    let bar_len = (pnl.abs() / stats.best_day.unwrap_or(1.0).abs().max(stats.worst_day.unwrap_or(1.0).abs()) * 20.0).min(20.0) as usize;
-                    let bar = if pnl >= 0.0 { "█".repeat(bar_len.max(1)).green().to_string() } else { "█".repeat(bar_len.max(1)).red().to_string() };
-                    let ps = if pnl >= 0.0 { format!("+{}{:.0}", csym, pnl).green().to_string() } else { format!("-{}{:.0}", csym, pnl.abs()).red().to_string() };
+                    let bar_len = (pnl.abs()
+                        / stats
+                            .best_day
+                            .unwrap_or(1.0)
+                            .abs()
+                            .max(stats.worst_day.unwrap_or(1.0).abs())
+                        * 20.0)
+                        .min(20.0) as usize;
+                    let bar = if pnl >= 0.0 {
+                        "█".repeat(bar_len.max(1)).green().to_string()
+                    } else {
+                        "█".repeat(bar_len.max(1)).red().to_string()
+                    };
+                    let ps = if pnl >= 0.0 {
+                        format!("+{}{:.0}", csym, pnl).green().to_string()
+                    } else {
+                        format!("-{}{:.0}", csym, pnl.abs()).red().to_string()
+                    };
                     println!("  {} {} {}", s.date.dimmed(), bar, ps);
                 }
             }
 
             print_section("Performance");
             print_kv("Days Simulated", &stats.total_days.to_string());
-            print_kv("Winning Days", &format!("{} ({:.0}%)", stats.winning_days, stats.day_win_rate));
-            let ts = if stats.total_pnl >= 0.0 { format!("+{}{:.0}", csym, stats.total_pnl).green().bold().to_string() } else { format!("-{}{:.0}", csym, stats.total_pnl.abs()).red().bold().to_string() };
+            print_kv(
+                "Winning Days",
+                &format!("{} ({:.0}%)", stats.winning_days, stats.day_win_rate),
+            );
+            let ts = if stats.total_pnl >= 0.0 {
+                format!("+{}{:.0}", csym, stats.total_pnl)
+                    .green()
+                    .bold()
+                    .to_string()
+            } else {
+                format!("-{}{:.0}", csym, stats.total_pnl.abs())
+                    .red()
+                    .bold()
+                    .to_string()
+            };
             print_kv("Total P&L", &ts);
-            print_kv("Avg Daily P&L", &format!("{}{:.0}", csym, stats.avg_daily_pnl));
-            if let Some(b) = stats.best_day { print_kv("Best Day", &format!("+{}{:.0}", csym, b).green().to_string()); }
-            if let Some(w) = stats.worst_day { print_kv("Worst Day", &format!("{}{:.0}", csym, w).red().to_string()); }
+            print_kv(
+                "Avg Daily P&L",
+                &format!("{}{:.0}", csym, stats.avg_daily_pnl),
+            );
+            if let Some(b) = stats.best_day {
+                print_kv(
+                    "Best Day",
+                    &format!("+{}{:.0}", csym, b).green().to_string(),
+                );
+            }
+            if let Some(w) = stats.worst_day {
+                print_kv("Worst Day", &format!("{}{:.0}", csym, w).red().to_string());
+            }
             print_kv("Total Trades", &stats.total_trades.to_string());
             print_kv("Trade Win Rate", &format!("{:.0}%", stats.trade_win_rate));
             print_kv("Max Win Streak", &format!("{} days", stats.max_win_streak));
-            print_kv("Max Loss Streak", &format!("{} days", stats.max_loss_streak));
-            if let Some(s) = stats.sharpe { print_kv("Sharpe (ann.)", &format!("{:.2}", s)); }
+            print_kv(
+                "Max Loss Streak",
+                &format!("{} days", stats.max_loss_streak),
+            );
+            if let Some(s) = stats.sharpe {
+                print_kv("Sharpe (ann.)", &format!("{:.2}", s));
+            }
 
             print_section("Bot Confidence");
             if stats.total_days >= 5 {
-                let conf = if stats.day_win_rate >= 65.0 && stats.trade_win_rate >= 55.0 && stats.total_pnl > 0.0 {
-                    "HIGH — Bot is consistently profitable. Consider going live.".green().bold().to_string()
+                let conf = if stats.day_win_rate >= 65.0
+                    && stats.trade_win_rate >= 55.0
+                    && stats.total_pnl > 0.0
+                {
+                    "HIGH — Bot is consistently profitable. Consider going live."
+                        .green()
+                        .bold()
+                        .to_string()
                 } else if stats.day_win_rate >= 50.0 && stats.total_pnl > 0.0 {
-                    "MODERATE — Profitable but inconsistent. Keep testing.".yellow().to_string()
-                } else { "LOW — Underperforming. Review strategy.".red().to_string() };
+                    "MODERATE — Profitable but inconsistent. Keep testing."
+                        .yellow()
+                        .to_string()
+                } else {
+                    "LOW — Underperforming. Review strategy.".red().to_string()
+                };
                 println!("  {}", conf);
-            } else { println!("  {} Need 5+ days for confidence rating ({}/5)", "→".dimmed(), stats.total_days); }
+            } else {
+                println!(
+                    "  {} Need 5+ days for confidence rating ({}/5)",
+                    "→".dimmed(),
+                    stats.total_days
+                );
+            }
             println!();
         }
         "reset" => {
@@ -3887,13 +6422,28 @@ pub async fn cmd_sim(action: &str, amount: Option<f64>, target: Option<f64>, mar
             println!();
             println!("  {} Paper Trading Simulator:", "→".cyan());
             println!();
-            println!("    {} — Lock in today's bot trades", "stockwise sim start [AMOUNT] [TARGET%]".bold());
+            println!(
+                "    {} — Lock in today's bot trades",
+                "stockwise sim start [AMOUNT] [TARGET%]".bold()
+            );
             println!("    {} — Check live P&L", "stockwise sim status".bold());
-            println!("    {} — Settle at end-of-day", "stockwise sim settle".bold());
-            println!("    {} — View cumulative stats + confidence", "stockwise sim history".bold());
+            println!(
+                "    {} — Settle at end-of-day",
+                "stockwise sim settle".bold()
+            );
+            println!(
+                "    {} — View cumulative stats + confidence",
+                "stockwise sim history".bold()
+            );
             println!("    {} — Clear all data", "stockwise sim reset".bold());
             println!();
-            println!("  {} Morning: {} → Track: {} → EOD: {}", "Workflow:".dimmed(), "sim start".cyan(), "sim status".cyan(), "sim settle".cyan());
+            println!(
+                "  {} Morning: {} → Track: {} → EOD: {}",
+                "Workflow:".dimmed(),
+                "sim start".cyan(),
+                "sim status".cyan(),
+                "sim settle".cyan()
+            );
             println!();
         }
     }
@@ -3912,50 +6462,104 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
     let q = quotes.first().context("Symbol not found")?;
     let cur = q.currency.as_deref();
     let csym = market::currency_symbol(cur);
-    let name = q.long_name.as_deref().or(q.short_name.as_deref()).unwrap_or("Unknown");
+    let name = q
+        .long_name
+        .as_deref()
+        .or(q.short_name.as_deref())
+        .unwrap_or("Unknown");
     let price = q.regular_market_price.unwrap_or(0.0);
     let change = q.regular_market_change.unwrap_or(0.0);
     let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
 
     print_header(&format!("DEEP DIVE: {} — {}", resolved, name));
-    println!("  {}  {}\n", format_price(price, cur).bold(), format_change(change, change_pct));
+    println!(
+        "  {}  {}\n",
+        format_price(price, cur).bold(),
+        format_change(change, change_pct)
+    );
 
     // Overview
     print_section("Company");
-    if let Some(s) = &q.sector { print_kv("Sector", s); }
-    if let Some(i) = &q.industry { print_kv("Industry", i); }
-    if let Some(e) = &q.exchange { print_kv("Exchange", e); }
-    print_kv("Market Cap", &q.market_cap.map_or("N/A".into(), |v| format_large_number(v, cur)));
+    if let Some(s) = &q.sector {
+        print_kv("Sector", s);
+    }
+    if let Some(i) = &q.industry {
+        print_kv("Industry", i);
+    }
+    if let Some(e) = &q.exchange {
+        print_kv("Exchange", e);
+    }
+    print_kv(
+        "Market Cap",
+        &q.market_cap
+            .map_or("N/A".into(), |v| format_large_number(v, cur)),
+    );
 
     // Price
     print_section("Price Action");
-    print_kv("Open", &format_price(q.regular_market_open.unwrap_or(0.0), cur));
-    print_kv("Day Range", &format!("{} — {}", format_price(q.regular_market_day_low.unwrap_or(0.0), cur), format_price(q.regular_market_day_high.unwrap_or(0.0), cur)));
-    print_kv("52-Week Range", &format!("{} — {}", format_price(q.fifty_two_week_low.unwrap_or(0.0), cur), format_price(q.fifty_two_week_high.unwrap_or(0.0), cur)));
-    print_kv("Volume", &format_volume(q.regular_market_volume.unwrap_or(0)));
-    print_kv("Avg Vol (3M)", &format_volume(q.average_daily_volume_3_month.unwrap_or(0)));
+    print_kv(
+        "Open",
+        &format_price(q.regular_market_open.unwrap_or(0.0), cur),
+    );
+    print_kv(
+        "Day Range",
+        &format!(
+            "{} — {}",
+            format_price(q.regular_market_day_low.unwrap_or(0.0), cur),
+            format_price(q.regular_market_day_high.unwrap_or(0.0), cur)
+        ),
+    );
+    print_kv(
+        "52-Week Range",
+        &format!(
+            "{} — {}",
+            format_price(q.fifty_two_week_low.unwrap_or(0.0), cur),
+            format_price(q.fifty_two_week_high.unwrap_or(0.0), cur)
+        ),
+    );
+    print_kv(
+        "Volume",
+        &format_volume(q.regular_market_volume.unwrap_or(0)),
+    );
+    print_kv(
+        "Avg Vol (3M)",
+        &format_volume(q.average_daily_volume_3_month.unwrap_or(0)),
+    );
 
     // Valuation
     print_section("Valuation");
     print_kv("P/E (TTM)", &format_optional_f64(q.trailing_pe, "x"));
     print_kv("P/E (Forward)", &format_optional_f64(q.forward_pe, "x"));
     print_kv("P/B", &format_optional_f64(q.price_to_book, "x"));
-    print_kv("EV/Revenue", &format_optional_f64(q.enterprise_to_revenue, "x"));
-    print_kv("EV/EBITDA", &format_optional_f64(q.enterprise_to_ebitda, "x"));
-    if let Some(pe) = q.trailing_pe {
-        if let Some(g) = q.earnings_quarterly_growth {
-            if g > 0.01 { print_kv("PEG Ratio", &format!("{:.2}", pe / (g * 100.0))); }
-        }
+    print_kv(
+        "EV/Revenue",
+        &format_optional_f64(q.enterprise_to_revenue, "x"),
+    );
+    print_kv(
+        "EV/EBITDA",
+        &format_optional_f64(q.enterprise_to_ebitda, "x"),
+    );
+    if let Some(pe) = q.trailing_pe
+        && let Some(g) = q.earnings_quarterly_growth
+        && g > 0.01
+    {
+        print_kv("PEG Ratio", &format!("{:.2}", pe / (g * 100.0)));
     }
 
     // Profitability
     print_section("Profitability & Growth");
-    print_kv("EPS (TTM)", &format_optional_f64(q.eps_trailing_twelve_months, ""));
+    print_kv(
+        "EPS (TTM)",
+        &format_optional_f64(q.eps_trailing_twelve_months, ""),
+    );
     print_kv("EPS (Forward)", &format_optional_f64(q.eps_forward, ""));
     print_kv("Profit Margin", &format_optional_pct(q.profit_margins));
     print_kv("Return on Equity", &format_optional_pct(q.return_on_equity));
     print_kv("Revenue Growth", &format_optional_pct(q.revenue_growth));
-    print_kv("Earnings Growth (Q)", &format_optional_pct(q.earnings_quarterly_growth));
+    print_kv(
+        "Earnings Growth (Q)",
+        &format_optional_pct(q.earnings_quarterly_growth),
+    );
 
     // Financial Health
     print_section("Financial Health");
@@ -3965,74 +6569,152 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
     print_kv("Beta", &format_optional_f64(q.beta, ""));
 
     // Dividends
-    if let Some(dy) = q.trailing_annual_dividend_yield {
-        if dy > 0.0 {
-            print_section("Dividend");
-            print_kv("Yield", &format!("{:.2}%", dy * 100.0));
-            let annual = dy * price;
-            print_kv("Annual/Share", &format!("{}{:.2}", csym, annual));
-            print_kv("Income on {}1L", &format!("{}{:.0}/year", csym, 100000.0 * dy));
-        }
+    if let Some(dy) = q.trailing_annual_dividend_yield
+        && dy > 0.0
+    {
+        print_section("Dividend");
+        print_kv("Yield", &format!("{:.2}%", dy * 100.0));
+        let annual = dy * price;
+        print_kv("Annual/Share", &format!("{}{:.2}", csym, annual));
+        print_kv(
+            "Income on {}1L",
+            &format!("{}{:.0}/year", csym, 100000.0 * dy),
+        );
     }
 
     // Analyst
     print_section("Analyst Ratings");
     if let Some(rec) = q.recommendation_mean {
         print_kv("Consensus", &sentiment_label(rec));
-        print_kv("Score", &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)));
+        print_kv(
+            "Score",
+            &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)),
+        );
     }
     if let Some(target) = q.target_mean_price {
-        let upside = q.regular_market_price.map(|p| ((target - p) / p) * 100.0).unwrap_or(0.0);
-        let u = if upside >= 0.0 { format!("+{:.1}%", upside).green().to_string() } else { format!("{:.1}%", upside).red().to_string() };
+        let upside = q
+            .regular_market_price
+            .map(|p| ((target - p) / p) * 100.0)
+            .unwrap_or(0.0);
+        let u = if upside >= 0.0 {
+            format!("+{:.1}%", upside).green().to_string()
+        } else {
+            format!("{:.1}%", upside).red().to_string()
+        };
         print_kv("Price Target", &format!("{}{:.2} ({})", csym, target, u));
     }
-    if let Some(n) = q.number_of_analyst_opinions { print_kv("# Analysts", &n.to_string()); }
+    if let Some(n) = q.number_of_analyst_opinions {
+        print_kv("# Analysts", &n.to_string());
+    }
 
     // ── 2. Technical Indicators ──
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let volumes: Vec<u64> = chart.indicators.quote.first().and_then(|qi| qi.volume.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|qi| qi.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|qi| qi.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|qi| qi.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let volumes: Vec<u64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|qi| qi.volume.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
 
     if closes.len() >= 20 {
         // Chart
         print_section(&format!("Price Chart ({})", period));
-        let color = if *closes.last().unwrap() >= closes[0] { "green" } else { "red" };
-        for line in charts::line_chart(&closes, 55, 8, color, "") { println!("{}", line); }
+        let color = if *closes.last().unwrap() >= closes[0] {
+            "green"
+        } else {
+            "red"
+        };
+        for line in charts::line_chart(&closes, 55, 8, color, "") {
+            println!("{}", line);
+        }
 
         // Key technicals
         print_section("Technical Indicators");
         if let Some(rsi) = technical::rsi(&closes, 14) {
-            let r = if rsi >= 70.0 { format!("{:.1}", rsi).red().to_string() } else if rsi <= 30.0 { format!("{:.1}", rsi).green().to_string() } else { format!("{:.1}", rsi).to_string() };
+            let r = if rsi >= 70.0 {
+                format!("{:.1}", rsi).red().to_string()
+            } else if rsi <= 30.0 {
+                format!("{:.1}", rsi).green().to_string()
+            } else {
+                format!("{:.1}", rsi).to_string()
+            };
             print_kv("RSI (14)", &r);
             println!("{}", charts::rsi_gauge(rsi));
         }
         for period in [20, 50, 200] {
             if let Some(ma) = technical::sma(&closes, period) {
-                let sig = if price > ma { "▲ Above".green().to_string() } else { "▼ Below".red().to_string() };
-                print_kv(&format!("SMA {}", period), &format!("{}{:.2}  {}", csym, ma, sig));
+                let sig = if price > ma {
+                    "▲ Above".green().to_string()
+                } else {
+                    "▼ Below".red().to_string()
+                };
+                print_kv(
+                    &format!("SMA {}", period),
+                    &format!("{}{:.2}  {}", csym, ma, sig),
+                );
             }
         }
         if let Some((_, _, hist)) = technical::macd(&closes) {
-            let h = if hist > 0.0 { format!("{:.2} Bullish", hist).green().to_string() } else { format!("{:.2} Bearish", hist).red().to_string() };
+            let h = if hist > 0.0 {
+                format!("{:.2} Bullish", hist).green().to_string()
+            } else {
+                format!("{:.2} Bearish", hist).red().to_string()
+            };
             print_kv("MACD Histogram", &h);
         }
         if let Some((upper, middle, lower)) = technical::bollinger_bands(&closes, 20) {
-            print_kv("Bollinger", &format!("{}{:.2} / {}{:.2} / {}{:.2}", csym, lower, csym, middle, csym, upper));
+            print_kv(
+                "Bollinger",
+                &format!(
+                    "{}{:.2} / {}{:.2} / {}{:.2}",
+                    csym, lower, csym, middle, csym, upper
+                ),
+            );
         }
         if let Some(atr) = technical::atr(&highs, &lows, &closes, 14) {
-            print_kv("ATR (14)", &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / price) * 100.0));
+            print_kv(
+                "ATR (14)",
+                &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / price) * 100.0),
+            );
         }
         if let Some(vwap) = technical::vwap(&highs, &lows, &closes, &volumes) {
-            let sig = if price > vwap { "Above".green().to_string() } else { "Below".red().to_string() };
+            let sig = if price > vwap {
+                "Above".green().to_string()
+            } else {
+                "Below".red().to_string()
+            };
             print_kv("VWAP", &format!("{}{:.2} ({})", csym, vwap, sig));
         }
 
         // Support/Resistance
         let n = highs.len();
         if n > 1 {
-            let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(highs[n-1], lows[n-1], closes[n-1]);
+            let (pivot, r1, r2, _r3, s1, s2, _s3) =
+                technical::pivot_points(highs[n - 1], lows[n - 1], closes[n - 1]);
             print_section("Support & Resistance");
             print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
             print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
@@ -4045,8 +6727,17 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
         if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, 60.min(n)) {
             let fibs = technical::fibonacci_levels(sh, sl);
             print_section("Fibonacci (3M swing)");
-            for (name, val) in [("23.6%", fibs[0]), ("38.2%", fibs[1]), ("50.0%", fibs[2]), ("61.8%", fibs[3])] {
-                let marker = if (price - val).abs() / price < 0.01 { " ← HERE".yellow().bold().to_string() } else { String::new() };
+            for (name, val) in [
+                ("23.6%", fibs[0]),
+                ("38.2%", fibs[1]),
+                ("50.0%", fibs[2]),
+                ("61.8%", fibs[3]),
+            ] {
+                let marker = if (price - val).abs() / price < 0.01 {
+                    " ← HERE".yellow().bold().to_string()
+                } else {
+                    String::new()
+                };
                 print_kv(name, &format!("{}{:.2}{}", csym, val, marker));
             }
         }
@@ -4060,7 +6751,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
             print_kv("Sharpe Ratio", &format!("{:.2}", sharpe));
         }
         if let Some((mdd, _, _)) = technical::max_drawdown(&closes) {
-            print_kv("Max Drawdown", &format!("-{:.1}%", mdd * 100.0).red().to_string());
+            print_kv(
+                "Max Drawdown",
+                &format!("-{:.1}%", mdd * 100.0).red().to_string(),
+            );
         }
         if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
             print_kv("Daily VaR (95%)", &format!("{:.2}%", var95 * 100.0));
@@ -4069,19 +6763,35 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
         // Volume
         let obv = technical::obv(&closes, &volumes);
         if obv.len() > 20 {
-            let obv_trend = if obv.last() > obv.get(obv.len().saturating_sub(20)) { "Accumulation".green().to_string() } else { "Distribution".red().to_string() };
+            let obv_trend = if obv.last() > obv.get(obv.len().saturating_sub(20)) {
+                "Accumulation".green().to_string()
+            } else {
+                "Distribution".red().to_string()
+            };
             print_kv("OBV Trend", &obv_trend);
         }
 
         // Gaps
-        let opens: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
+        let opens: Vec<f64> = chart
+            .indicators
+            .quote
+            .first()
+            .and_then(|qi| qi.open.as_ref())
+            .map(|c| c.iter().filter_map(|v| *v).collect())
+            .unwrap_or_default();
         let gaps = technical::detect_gaps(&opens, &highs, &lows, &closes);
         let unfilled: Vec<_> = gaps.iter().filter(|g| !g.filled).collect();
         if !unfilled.is_empty() {
             print_section(&format!("Open Gaps ({})", unfilled.len()));
             for g in unfilled.iter().rev().take(3) {
-                let dir = match g.gap_type { technical::GapType::Up => "UP".green().to_string(), technical::GapType::Down => "DN".red().to_string() };
-                println!("  {} {}{:.2} — {}{:.2}", dir, csym, g.gap_low, csym, g.gap_high);
+                let dir = match g.gap_type {
+                    technical::GapType::Up => "UP".green().to_string(),
+                    technical::GapType::Down => "DN".red().to_string(),
+                };
+                println!(
+                    "  {} {}{:.2} — {}{:.2}",
+                    dir, csym, g.gap_low, csym, g.gap_high
+                );
             }
         }
     }
@@ -4102,12 +6812,23 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
         print_section("AI Analysis (Ollama)");
         let stock_data = crate::ai::StockData::from_quote(q);
         match ai.analyze_stock(&stock_data).await {
-            Ok(analysis) => { for line in analysis.lines() { println!("  {}", line); } }
-            Err(_) => { println!("  {}", "AI unavailable.".dimmed()); }
+            Ok(analysis) => {
+                for line in analysis.lines() {
+                    println!("  {}", line);
+                }
+            }
+            Err(_) => {
+                println!("  {}", "AI unavailable.".dimmed());
+            }
         }
     }
 
-    println!("\n  {}", "Not financial advice. Do your own research.".dimmed().italic());
+    println!(
+        "\n  {}",
+        "Not financial advice. Do your own research."
+            .dimmed()
+            .italic()
+    );
     println!();
     Ok(())
 }
@@ -4117,7 +6838,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
 // ══════════════════════════════════════════════════════════
 
 pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Result<()> {
-    let csym = match market { Market::In => "₹", Market::Us => "$" };
+    let csym = match market {
+        Market::In => "₹",
+        Market::Us => "$",
+    };
 
     match mode {
         "intraday" => {
@@ -4130,10 +6854,19 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             let mut last_phase = crate::daemon::Phase::Closed;
 
             print_header("Intraday Daemon — Starting");
-            println!("  Capital: {}{:.0}  |  Target: {}%  |  Max Risk: {}% daily", csym, capital, target_pct, risk.daily_loss_limit_pct);
-            println!("  Max {} positions  |  Paper trading mode", risk.max_positions);
+            println!(
+                "  Capital: {}{:.0}  |  Target: {}%  |  Max Risk: {}% daily",
+                csym, capital, target_pct, risk.daily_loss_limit_pct
+            );
+            println!(
+                "  Max {} positions  |  Paper trading mode",
+                risk.max_positions
+            );
             println!("  {}", "─".repeat(60).dimmed());
-            println!("  {} Press Ctrl+C to stop. Positions will be squared off.\n", "→".dimmed());
+            println!(
+                "  {} Press Ctrl+C to stop. Positions will be squared off.\n",
+                "→".dimmed()
+            );
 
             loop {
                 let phase = crate::daemon::current_phase_india();
@@ -4141,21 +6874,54 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                 // Phase transition announcements
                 if phase != last_phase {
                     let phase_str = match phase {
-                        crate::daemon::Phase::PreMarket => format!("PRE-MARKET — Scanning...").yellow().bold().to_string(),
-                        crate::daemon::Phase::Opening => format!("MARKET OPEN — Entering positions").green().bold().to_string(),
-                        crate::daemon::Phase::Active => format!("ACTIVE TRADING — Monitoring").cyan().bold().to_string(),
-                        crate::daemon::Phase::WindDown => format!("WIND-DOWN — Tightening stops, no new entries").yellow().to_string(),
-                        crate::daemon::Phase::SquareOff => format!("SQUARE OFF — Closing all positions").red().bold().to_string(),
-                        crate::daemon::Phase::PostMarket => format!("POST-MARKET — Settling").dimmed().to_string(),
-                        crate::daemon::Phase::Closed => format!("MARKET CLOSED").dimmed().to_string(),
+                        crate::daemon::Phase::PreMarket => "PRE-MARKET — Scanning..."
+                            .to_string()
+                            .yellow()
+                            .bold()
+                            .to_string(),
+                        crate::daemon::Phase::Opening => "MARKET OPEN — Entering positions"
+                            .to_string()
+                            .green()
+                            .bold()
+                            .to_string(),
+                        crate::daemon::Phase::Active => "ACTIVE TRADING — Monitoring"
+                            .to_string()
+                            .cyan()
+                            .bold()
+                            .to_string(),
+                        crate::daemon::Phase::WindDown => {
+                            "WIND-DOWN — Tightening stops, no new entries"
+                                .to_string()
+                                .yellow()
+                                .to_string()
+                        }
+                        crate::daemon::Phase::SquareOff => "SQUARE OFF — Closing all positions"
+                            .to_string()
+                            .red()
+                            .bold()
+                            .to_string(),
+                        crate::daemon::Phase::PostMarket => {
+                            "POST-MARKET — Settling".to_string().dimmed().to_string()
+                        }
+                        crate::daemon::Phase::Closed => {
+                            "MARKET CLOSED".to_string().dimmed().to_string()
+                        }
                     };
-                    println!("\n  {} [{}] {}", "▶".bold(), chrono::Local::now().format("%H:%M:%S"), phase_str);
+                    println!(
+                        "\n  {} [{}] {}",
+                        "▶".bold(),
+                        chrono::Local::now().format("%H:%M:%S"),
+                        phase_str
+                    );
                     last_phase = phase;
                 }
 
                 match phase {
                     crate::daemon::Phase::Closed => {
-                        println!("  {} Market is closed. Daemon will wait for market hours.", "→".dimmed());
+                        println!(
+                            "  {} Market is closed. Daemon will wait for market hours.",
+                            "→".dimmed()
+                        );
                         println!("  {} NSE: Mon-Fri 9:00 AM – 3:30 PM IST", "→".dimmed());
                         // Wait 5 minutes before checking again
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
@@ -4170,7 +6936,13 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                             if let Ok(heats) = intraday::scan_sector_heat(&client).await {
                                 let hot: Vec<_> = heats.iter().filter(|h| h.hot).collect();
                                 if !hot.is_empty() {
-                                    println!("  {} Hot sectors: {}", "🔥".to_string(), hot.iter().map(|h| format!("{} ({:+.1}%)", h.name, h.change_pct)).collect::<Vec<_>>().join(", "));
+                                    println!(
+                                        "  🔥 Hot sectors: {}",
+                                        hot.iter()
+                                            .map(|h| format!("{} ({:+.1}%)", h.name, h.change_pct))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    );
                                 }
                             }
                         }
@@ -4182,17 +6954,36 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                             println!("  {} Running 9-strategy scan...", "⟳".yellow());
                             let client = YahooClient::new().await?;
                             let signals = intraday::scan_intraday(&client, market).await?;
-                            let plans = intraday::generate_trade_plans(&signals, capital, target_pct, 1.0);
+                            let plans =
+                                intraday::generate_trade_plans(&signals, capital, target_pct, 1.0);
 
                             if !plans.is_empty() {
-                                positions = crate::daemon::plans_to_positions(&plans[..plans.len().min(risk.max_positions)]);
+                                positions = crate::daemon::plans_to_positions(
+                                    &plans[..plans.len().min(risk.max_positions)],
+                                );
                                 entered = true;
 
-                                println!("  {} {} positions entered:\n", "✓".green().bold(), positions.len());
+                                println!(
+                                    "  {} {} positions entered:\n",
+                                    "✓".green().bold(),
+                                    positions.len()
+                                );
                                 for p in &positions {
-                                    println!("    {} {} {} × {} @ {}{:.2}  T1:{}{:.2}  T2:{}{:.2}  SL:{}{:.2}",
-                                        "→".green(), p.direction, p.symbol.cyan(), p.qty, csym, p.entry_price,
-                                        csym, p.target1, csym, p.target2, csym, p.stop_loss);
+                                    println!(
+                                        "    {} {} {} × {} @ {}{:.2}  T1:{}{:.2}  T2:{}{:.2}  SL:{}{:.2}",
+                                        "→".green(),
+                                        p.direction,
+                                        p.symbol.cyan(),
+                                        p.qty,
+                                        csym,
+                                        p.entry_price,
+                                        csym,
+                                        p.target1,
+                                        csym,
+                                        p.target2,
+                                        csym,
+                                        p.stop_loss
+                                    );
                                 }
                             } else {
                                 println!("  {} No qualified trades. Watching...", "→".yellow());
@@ -4205,7 +6996,8 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                         if !positions.is_empty() {
                             // Fetch live prices
                             let client = YahooClient::new().await?;
-                            let syms: Vec<&str> = positions.iter().map(|p| p.symbol.as_str()).collect();
+                            let syms: Vec<&str> =
+                                positions.iter().map(|p| p.symbol.as_str()).collect();
                             let quotes = client.get_quote(&syms).await?;
 
                             // Update each position
@@ -4214,40 +7006,82 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
 
                             for pos in positions.iter_mut() {
                                 let old_status = pos.status;
-                                if let Some(q) = quotes.iter().find(|q| q.symbol.as_deref() == Some(&pos.symbol)) {
-                                    if let Some(price) = q.regular_market_price {
-                                        crate::daemon::update_position(pos, price, phase);
-                                    }
+                                if let Some(q) = quotes
+                                    .iter()
+                                    .find(|q| q.symbol.as_deref() == Some(&pos.symbol))
+                                    && let Some(price) = q.regular_market_price
+                                {
+                                    crate::daemon::update_position(pos, price, phase);
                                 }
                                 total_pnl += pos.pnl;
 
                                 if pos.status != old_status {
                                     any_change = true;
                                     let alert = match pos.status {
-                                        crate::daemon::PositionStatus::T1Hit => format!("T1 HIT — booked 50% of {} at {}{:.2}", pos.symbol, csym, pos.current_price).green().bold().to_string(),
-                                        crate::daemon::PositionStatus::T2Hit => format!("TARGET HIT — {} fully closed at {}{:.2}", pos.symbol, csym, pos.current_price).green().bold().to_string(),
+                                        crate::daemon::PositionStatus::T1Hit => format!(
+                                            "T1 HIT — booked 50% of {} at {}{:.2}",
+                                            pos.symbol, csym, pos.current_price
+                                        )
+                                        .green()
+                                        .bold()
+                                        .to_string(),
+                                        crate::daemon::PositionStatus::T2Hit => format!(
+                                            "TARGET HIT — {} fully closed at {}{:.2}",
+                                            pos.symbol, csym, pos.current_price
+                                        )
+                                        .green()
+                                        .bold()
+                                        .to_string(),
                                         crate::daemon::PositionStatus::StopHit => {
                                             risk.record_exit(pos.pnl);
-                                            format!("STOPPED — {} at {}{:.2} (P&L: {}{:.0})", pos.symbol, csym, pos.current_price, csym, pos.pnl).red().bold().to_string()
+                                            format!(
+                                                "STOPPED — {} at {}{:.2} (P&L: {}{:.0})",
+                                                pos.symbol, csym, pos.current_price, csym, pos.pnl
+                                            )
+                                            .red()
+                                            .bold()
+                                            .to_string()
                                         }
                                         crate::daemon::PositionStatus::SquaredOff => {
                                             risk.record_exit(pos.pnl);
-                                            format!("SQUARED OFF — {} at {}{:.2}", pos.symbol, csym, pos.current_price).yellow().to_string()
+                                            format!(
+                                                "SQUARED OFF — {} at {}{:.2}",
+                                                pos.symbol, csym, pos.current_price
+                                            )
+                                            .yellow()
+                                            .to_string()
                                         }
                                         _ => String::new(),
                                     };
                                     if !alert.is_empty() {
-                                        println!("  {} [{}] {}", "⚡".to_string(), chrono::Local::now().format("%H:%M:%S"), alert);
+                                        println!(
+                                            "  ⚡ [{}] {}",
+                                            chrono::Local::now().format("%H:%M:%S"),
+                                            alert
+                                        );
                                     }
                                 }
                             }
 
                             // Check daily loss limit
-                            let unrealized: f64 = positions.iter().filter(|p| p.status == crate::daemon::PositionStatus::Open || p.status == crate::daemon::PositionStatus::T1Hit).map(|p| p.pnl).sum();
+                            let unrealized: f64 = positions
+                                .iter()
+                                .filter(|p| {
+                                    p.status == crate::daemon::PositionStatus::Open
+                                        || p.status == crate::daemon::PositionStatus::T1Hit
+                                })
+                                .map(|p| p.pnl)
+                                .sum();
                             if risk.check_daily_limit(unrealized) {
-                                println!("  {} [{}] {} Daily loss limit breached! Closing all positions.", "🛑".to_string(), chrono::Local::now().format("%H:%M:%S"), "KILL SWITCH".red().bold());
+                                println!(
+                                    "  🛑 [{}] {} Daily loss limit breached! Closing all positions.",
+                                    chrono::Local::now().format("%H:%M:%S"),
+                                    "KILL SWITCH".red().bold()
+                                );
                                 for pos in positions.iter_mut() {
-                                    if pos.status == crate::daemon::PositionStatus::Open || pos.status == crate::daemon::PositionStatus::T1Hit {
+                                    if pos.status == crate::daemon::PositionStatus::Open
+                                        || pos.status == crate::daemon::PositionStatus::T1Hit
+                                    {
                                         pos.status = crate::daemon::PositionStatus::SquaredOff;
                                         risk.record_exit(pos.pnl);
                                     }
@@ -4257,16 +7091,45 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                             // Status update every 5 ticks (~5 minutes)
                             tick_count += 1;
                             if tick_count % 5 == 0 || any_change {
-                                let open_count = positions.iter().filter(|p| matches!(p.status, crate::daemon::PositionStatus::Open | crate::daemon::PositionStatus::T1Hit)).count();
-                                let total_str = if total_pnl >= 0.0 { format!("+{}{:.0}", csym, total_pnl).green().to_string() } else { format!("-{}{:.0}", csym, total_pnl.abs()).red().to_string() };
-                                println!("  {} [{}] {} | {} open | P&L: {} | Phase: {}",
-                                    "●".dimmed(), chrono::Local::now().format("%H:%M:%S"),
-                                    format!("Tick #{}", tick_count).dimmed(), open_count, total_str, phase);
+                                let open_count = positions
+                                    .iter()
+                                    .filter(|p| {
+                                        matches!(
+                                            p.status,
+                                            crate::daemon::PositionStatus::Open
+                                                | crate::daemon::PositionStatus::T1Hit
+                                        )
+                                    })
+                                    .count();
+                                let total_str = if total_pnl >= 0.0 {
+                                    format!("+{}{:.0}", csym, total_pnl).green().to_string()
+                                } else {
+                                    format!("-{}{:.0}", csym, total_pnl.abs()).red().to_string()
+                                };
+                                println!(
+                                    "  {} [{}] {} | {} open | P&L: {} | Phase: {}",
+                                    "●".dimmed(),
+                                    chrono::Local::now().format("%H:%M:%S"),
+                                    format!("Tick #{}", tick_count).dimmed(),
+                                    open_count,
+                                    total_str,
+                                    phase
+                                );
                             }
 
                             // All positions closed? Stop monitoring
-                            if positions.iter().all(|p| matches!(p.status, crate::daemon::PositionStatus::T2Hit | crate::daemon::PositionStatus::StopHit | crate::daemon::PositionStatus::SquaredOff)) {
-                                println!("\n  {} All positions closed. Waiting for post-market.", "✓".green().bold());
+                            if positions.iter().all(|p| {
+                                matches!(
+                                    p.status,
+                                    crate::daemon::PositionStatus::T2Hit
+                                        | crate::daemon::PositionStatus::StopHit
+                                        | crate::daemon::PositionStatus::SquaredOff
+                                )
+                            }) {
+                                println!(
+                                    "\n  {} All positions closed. Waiting for post-market.",
+                                    "✓".green().bold()
+                                );
                                 // Skip to post-market wait
                                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                                 continue;
@@ -4278,10 +7141,18 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                     crate::daemon::Phase::SquareOff => {
                         // Force close everything
                         for pos in positions.iter_mut() {
-                            if pos.status == crate::daemon::PositionStatus::Open || pos.status == crate::daemon::PositionStatus::T1Hit {
+                            if pos.status == crate::daemon::PositionStatus::Open
+                                || pos.status == crate::daemon::PositionStatus::T1Hit
+                            {
                                 pos.status = crate::daemon::PositionStatus::SquaredOff;
                                 risk.record_exit(pos.pnl);
-                                println!("  {} Squared off {} at {}{:.2}", "→".yellow(), pos.symbol.cyan(), csym, pos.current_price);
+                                println!(
+                                    "  {} Squared off {} at {}{:.2}",
+                                    "→".yellow(),
+                                    pos.symbol.cyan(),
+                                    csym,
+                                    pos.current_price
+                                );
                             }
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -4297,36 +7168,87 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                             let wins = positions.iter().filter(|p| p.pnl > 0.0).count();
                             let losses = positions.iter().filter(|p| p.pnl <= 0.0).count();
 
-                            println!("  {:<14} {:>10} {:>10} {:>12} {:>10}", "Symbol".bold(), "Entry".bold(), "Exit".bold(), "P&L".bold(), "Status".bold());
+                            println!(
+                                "  {:<14} {:>10} {:>10} {:>12} {:>10}",
+                                "Symbol".bold(),
+                                "Entry".bold(),
+                                "Exit".bold(),
+                                "P&L".bold(),
+                                "Status".bold()
+                            );
                             println!("  {}", "─".repeat(60).dimmed());
                             for p in &positions {
-                                let pnl_str = if p.pnl >= 0.0 { format!("+{}{:.0}", csym, p.pnl).green().to_string() } else { format!("-{}{:.0}", csym, p.pnl.abs()).red().to_string() };
-                                println!("  {:<14} {:>10} {:>10} {:>12} {:>10}", p.symbol.cyan(), format!("{}{:.2}", csym, p.entry_price), format!("{}{:.2}", csym, p.current_price), pnl_str, p.status);
+                                let pnl_str = if p.pnl >= 0.0 {
+                                    format!("+{}{:.0}", csym, p.pnl).green().to_string()
+                                } else {
+                                    format!("-{}{:.0}", csym, p.pnl.abs()).red().to_string()
+                                };
+                                println!(
+                                    "  {:<14} {:>10} {:>10} {:>12} {:>10}",
+                                    p.symbol.cyan(),
+                                    format!("{}{:.2}", csym, p.entry_price),
+                                    format!("{}{:.2}", csym, p.current_price),
+                                    pnl_str,
+                                    p.status
+                                );
                             }
                             println!("  {}", "─".repeat(60).dimmed());
-                            let total_str = if total_pnl >= 0.0 { format!("+{}{:.0}", csym, total_pnl).green().bold().to_string() } else { format!("-{}{:.0}", csym, total_pnl.abs()).red().bold().to_string() };
-                            println!("  Total: {}  |  {} wins, {} losses", total_str, wins, losses);
+                            let total_str = if total_pnl >= 0.0 {
+                                format!("+{}{:.0}", csym, total_pnl)
+                                    .green()
+                                    .bold()
+                                    .to_string()
+                            } else {
+                                format!("-{}{:.0}", csym, total_pnl.abs())
+                                    .red()
+                                    .bold()
+                                    .to_string()
+                            };
+                            println!(
+                                "  Total: {}  |  {} wins, {} losses",
+                                total_str, wins, losses
+                            );
 
                             // Save to sim history
                             let mut history = crate::simulator::SimHistory::load()?;
                             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-                            let trades: Vec<crate::simulator::SimTrade> = positions.iter().map(|p| {
-                                crate::simulator::SimTrade {
-                                    symbol: p.symbol.clone(), direction: p.direction.clone(),
-                                    entry_price: p.entry_price, target1: p.target1, target2: p.target2,
-                                    stop_loss: p.stop_loss, qty: p.qty, capital: p.entry_price * p.qty as f64,
-                                    score: p.score, confidence: "DAEMON".into(),
+                            let trades: Vec<crate::simulator::SimTrade> = positions
+                                .iter()
+                                .map(|p| crate::simulator::SimTrade {
+                                    symbol: p.symbol.clone(),
+                                    direction: p.direction.clone(),
+                                    entry_price: p.entry_price,
+                                    target1: p.target1,
+                                    target2: p.target2,
+                                    stop_loss: p.stop_loss,
+                                    qty: p.qty,
+                                    capital: p.entry_price * p.qty as f64,
+                                    score: p.score,
+                                    confidence: "DAEMON".into(),
                                     strategies: p.strategies.clone(),
-                                    exit_price: Some(p.current_price), pnl: Some(p.pnl),
-                                    pnl_pct: Some(p.pnl_pct), hit_target: Some(p.status == crate::daemon::PositionStatus::T2Hit),
-                                    hit_stop: Some(p.status == crate::daemon::PositionStatus::StopHit),
-                                }
-                            }).collect();
+                                    exit_price: Some(p.current_price),
+                                    pnl: Some(p.pnl),
+                                    pnl_pct: Some(p.pnl_pct),
+                                    hit_target: Some(
+                                        p.status == crate::daemon::PositionStatus::T2Hit,
+                                    ),
+                                    hit_stop: Some(
+                                        p.status == crate::daemon::PositionStatus::StopHit,
+                                    ),
+                                })
+                                .collect();
                             let total_pnl_pct = (total_pnl / capital) * 100.0;
                             history.sessions.push(crate::simulator::SimSession {
-                                date: today, market: "IN".into(), capital, target_pct,
-                                trades, total_pnl: Some(total_pnl), total_pnl_pct: Some(total_pnl_pct),
-                                win_count: Some(wins as u32), loss_count: Some(losses as u32), settled: true,
+                                date: today,
+                                market: "IN".into(),
+                                capital,
+                                target_pct,
+                                trades,
+                                total_pnl: Some(total_pnl),
+                                total_pnl_pct: Some(total_pnl_pct),
+                                win_count: Some(wins as u32),
+                                loss_count: Some(losses as u32),
+                                settled: true,
                             });
                             history.save()?;
                             println!("  {} Saved to simulation history.", "✓".green());
@@ -4335,17 +7257,28 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                             let mut ai = crate::ai::AiClient::connect().await;
                             if ai.is_available().await {
                                 println!("  {} Generating AI EOD report...", "⟳".yellow());
-                                let mut data = format!("Intraday results: P&L={}{:.0}, {} wins {} losses\n", csym, total_pnl, wins, losses);
+                                let mut data = format!(
+                                    "Intraday results: P&L={}{:.0}, {} wins {} losses\n",
+                                    csym, total_pnl, wins, losses
+                                );
                                 for p in &positions {
-                                    data.push_str(&format!("{}: entry={:.2}, exit={:.2}, pnl={:.0}, status={}\n", p.symbol, p.entry_price, p.current_price, p.pnl, p.status));
+                                    data.push_str(&format!(
+                                        "{}: entry={:.2}, exit={:.2}, pnl={:.0}, status={}\n",
+                                        p.symbol, p.entry_price, p.current_price, p.pnl, p.status
+                                    ));
                                 }
                                 if let Ok(report) = ai.generate_intraday_report(&data).await {
                                     print_section("AI EOD Analysis");
-                                    for line in report.lines() { println!("  {}", line); }
+                                    for line in report.lines() {
+                                        println!("  {}", line);
+                                    }
                                 }
                             }
 
-                            println!("\n  {} Daemon complete for today. Exiting.", "✓".green().bold());
+                            println!(
+                                "\n  {} Daemon complete for today. Exiting.",
+                                "✓".green().bold()
+                            );
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -4362,37 +7295,74 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
 
             // 1. Score all stocks
             println!("  [1/5] Scoring stocks...");
-            let symbols = match market { Market::In => market::INDIA_POPULAR, Market::Us => market::US_POPULAR };
+            let symbols = match market {
+                Market::In => market::INDIA_POPULAR,
+                Market::Us => market::US_POPULAR,
+            };
             let sym_refs: Vec<&str> = symbols.to_vec();
             let quotes = client.get_quote(&sym_refs).await?;
             let mut scores: Vec<crate::longterm::LongTermScore> = Vec::new();
             for q in &quotes {
                 let sym = q.symbol.as_deref().unwrap_or("");
                 let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-                    c.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
+                    c.indicators
+                        .quote
+                        .first()
+                        .and_then(|qi| qi.close.as_ref())
+                        .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
                 });
                 scores.push(crate::longterm::score_for_longterm(q, hist.as_deref()));
             }
-            scores.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap());
-            println!("    Top 3: {}", scores.iter().take(3).map(|s| format!("{} ({:.0})", s.symbol, s.total_score)).collect::<Vec<_>>().join(", "));
+            scores.sort_by(|a, b| {
+                b.total_score
+                    .partial_cmp(&a.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            println!(
+                "    Top 3: {}",
+                scores
+                    .iter()
+                    .take(3)
+                    .map(|s| format!("{} ({:.0})", s.symbol, s.total_score))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
 
             // 2. Check portfolio
             println!("  [2/5] Checking portfolio...");
             let portfolio = Portfolio::load()?;
             if !portfolio.holdings.is_empty() {
-                let p_syms: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+                let p_syms: Vec<String> = portfolio
+                    .holdings
+                    .iter()
+                    .map(|h| h.symbol.clone())
+                    .collect();
                 let p_refs: Vec<&str> = p_syms.iter().map(|s| s.as_str()).collect();
                 let p_quotes = client.get_quote(&p_refs).await?;
                 let mut total_value = 0.0_f64;
                 let mut total_cost = 0.0_f64;
                 for h in &portfolio.holdings {
-                    let price = p_quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol)).and_then(|q| q.regular_market_price).unwrap_or(0.0);
+                    let price = p_quotes
+                        .iter()
+                        .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+                        .and_then(|q| q.regular_market_price)
+                        .unwrap_or(0.0);
                     total_value += h.shares * price;
                     total_cost += h.shares * h.avg_cost;
                 }
                 let pnl = total_value - total_cost;
-                let pnl_str = if pnl >= 0.0 { format!("+{}{:.0}", csym, pnl).green().to_string() } else { format!("-{}{:.0}", csym, pnl.abs()).red().to_string() };
-                println!("    Portfolio: {}{:.0} ({}) | {} holdings", csym, total_value, pnl_str, portfolio.holdings.len());
+                let pnl_str = if pnl >= 0.0 {
+                    format!("+{}{:.0}", csym, pnl).green().to_string()
+                } else {
+                    format!("-{}{:.0}", csym, pnl.abs()).red().to_string()
+                };
+                println!(
+                    "    Portfolio: {}{:.0} ({}) | {} holdings",
+                    csym,
+                    total_value,
+                    pnl_str,
+                    portfolio.holdings.len()
+                );
 
                 // Wealth snapshot
                 let mut wealth = crate::wealth::WealthHistory::load()?;
@@ -4408,29 +7378,70 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             if !store.alerts.is_empty() {
                 let a_syms: Vec<String> = store.alerts.iter().map(|a| a.symbol.clone()).collect();
                 let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect();
-                unique.sort(); unique.dedup();
+                unique.sort();
+                unique.dedup();
                 let a_quotes = client.get_quote(&unique).await?;
                 let mut triggered = 0;
                 for alert in &store.alerts {
-                    let price = a_quotes.iter().find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str())).and_then(|q| q.regular_market_price).unwrap_or(0.0);
-                    let hit = match alert.condition { crate::alerts::AlertCondition::Above => price >= alert.target, crate::alerts::AlertCondition::Below => price <= alert.target };
-                    if hit { triggered += 1; println!("    {} {} {} {:.2} — TRIGGERED (now {}{:.2})", "⚠".yellow(), alert.symbol, alert.condition, alert.target, csym, price); }
+                    let price = a_quotes
+                        .iter()
+                        .find(|q| q.symbol.as_deref() == Some(alert.symbol.as_str()))
+                        .and_then(|q| q.regular_market_price)
+                        .unwrap_or(0.0);
+                    let hit = match alert.condition {
+                        crate::alerts::AlertCondition::Above => price >= alert.target,
+                        crate::alerts::AlertCondition::Below => price <= alert.target,
+                    };
+                    if hit {
+                        triggered += 1;
+                        println!(
+                            "    {} {} {} {:.2} — TRIGGERED (now {}{:.2})",
+                            "⚠".yellow(),
+                            alert.symbol,
+                            alert.condition,
+                            alert.target,
+                            csym,
+                            price
+                        );
+                    }
                 }
-                if triggered == 0 { println!("    No alerts triggered."); }
+                if triggered == 0 {
+                    println!("    No alerts triggered.");
+                }
             }
 
             // 4. Tax harvest check
             println!("  [4/5] Tax harvest scan...");
             if !portfolio.holdings.is_empty() {
-                let p_syms: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+                let p_syms: Vec<String> = portfolio
+                    .holdings
+                    .iter()
+                    .map(|h| h.symbol.clone())
+                    .collect();
                 let p_refs: Vec<&str> = p_syms.iter().map(|s| s.as_str()).collect();
                 let p_quotes = client.get_quote(&p_refs).await?;
-                let losers: Vec<_> = portfolio.holdings.iter().filter(|h| {
-                    let price = p_quotes.iter().find(|q| q.symbol.as_deref() == Some(&h.symbol)).and_then(|q| q.regular_market_price).unwrap_or(0.0);
-                    price < h.avg_cost
-                }).collect();
+                let losers: Vec<_> = portfolio
+                    .holdings
+                    .iter()
+                    .filter(|h| {
+                        let price = p_quotes
+                            .iter()
+                            .find(|q| q.symbol.as_deref() == Some(&h.symbol))
+                            .and_then(|q| q.regular_market_price)
+                            .unwrap_or(0.0);
+                        price < h.avg_cost
+                    })
+                    .collect();
                 if !losers.is_empty() {
-                    println!("    {} positions with losses (harvest candidates): {}", losers.len(), losers.iter().map(|h| h.symbol.as_str()).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "    {} positions with losses (harvest candidates): {}",
+                        losers.len(),
+                        losers
+                            .iter()
+                            .map(|h| h.symbol.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                 } else {
                     println!("    No tax-loss harvest opportunities.");
                 }
@@ -4442,11 +7453,16 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             if ai.is_available().await {
                 let mut data = String::new();
                 for s in scores.iter().take(10) {
-                    data.push_str(&format!("{}: score={:.0}, moat={}, 5Y={:+.0}%, risk={}\n", s.symbol, s.total_score, s.moat, s.projected_5y_return, s.risk_tier));
+                    data.push_str(&format!(
+                        "{}: score={:.0}, moat={}, 5Y={:+.0}%, risk={}\n",
+                        s.symbol, s.total_score, s.moat, s.projected_5y_return, s.risk_tier
+                    ));
                 }
                 if let Ok(report) = ai.generate_longterm_report(&data).await {
                     print_section("AI Investment Memo");
-                    for line in report.lines() { println!("  {}", line); }
+                    for line in report.lines() {
+                        println!("  {}", line);
+                    }
                 }
             } else {
                 println!("    Ollama not running. Skipping AI report.");
@@ -4459,12 +7475,27 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             println!();
             println!("  {} Daemon Modes:", "→".cyan());
             println!();
-            println!("    {} — Continuous intraday monitor (9 AM – 3:30 PM)", "stockwise daemon intraday [CAPITAL]".bold());
-            println!("    {} — Daily long-term analysis (run after market close)", "stockwise daemon longterm".bold());
+            println!(
+                "    {} — Continuous intraday monitor (9 AM – 3:30 PM)",
+                "stockwise daemon intraday [CAPITAL]".bold()
+            );
+            println!(
+                "    {} — Daily long-term analysis (run after market close)",
+                "stockwise daemon longterm".bold()
+            );
             println!();
-            println!("  {} The intraday daemon runs in paper trading mode by default.", "→".dimmed());
-            println!("  {} It scans, enters, monitors, and squares off automatically.", "→".dimmed());
-            println!("  {} Results are saved to simulation history.", "→".dimmed());
+            println!(
+                "  {} The intraday daemon runs in paper trading mode by default.",
+                "→".dimmed()
+            );
+            println!(
+                "  {} It scans, enters, monitors, and squares off automatically.",
+                "→".dimmed()
+            );
+            println!(
+                "  {} Results are saved to simulation history.",
+                "→".dimmed()
+            );
             println!();
         }
     }
@@ -4483,9 +7514,18 @@ pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
     let cur = q.currency.as_deref();
     let csym = market::currency_symbol(cur);
     let price = q.regular_market_price.unwrap_or(0.0);
-    let name = q.short_name.as_deref().or(q.long_name.as_deref()).unwrap_or("Unknown");
+    let name = q
+        .short_name
+        .as_deref()
+        .or(q.long_name.as_deref())
+        .unwrap_or("Unknown");
 
-    print_header(&format!("{} — {}  {}", resolved, name, format_price(price, cur).bold()));
+    print_header(&format!(
+        "{} — {}  {}",
+        resolved,
+        name,
+        format_price(price, cur).bold()
+    ));
 
     let timeframes: [(&str, &str, &str); 4] = [
         ("5d", "15m", "1 Week"),
@@ -4500,12 +7540,17 @@ pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
             Err(_) => continue,
         };
 
-        let closes: Vec<f64> = chart.indicators.quote.first()
+        let closes: Vec<f64> = chart
+            .indicators
+            .quote
+            .first()
             .and_then(|qi| qi.close.as_ref())
             .map(|c| c.iter().filter_map(|v| *v).collect())
             .unwrap_or_default();
 
-        if closes.len() < 3 { continue; }
+        if closes.len() < 3 {
+            continue;
+        }
 
         let first = closes[0];
         let last = *closes.last().unwrap();
@@ -4522,14 +7567,25 @@ pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
 
         let color = if last >= first { "green" } else { "red" };
         println!();
-        for line in charts::line_chart(&closes, 55, 6, color, &format!("{} ({})", label, change_str)) {
+        for line in charts::line_chart(
+            &closes,
+            55,
+            6,
+            color,
+            &format!("{} ({})", label, change_str),
+        ) {
             println!("{}", line);
         }
         println!(
             "  {} {}{:.2}  {} {}{:.2}  {} {}",
-            "Low:".dimmed(), csym, min,
-            "High:".dimmed(), csym, max,
-            "Vol:".dimmed(), vol.map_or("—".into(), |v| format!("{:.0}%", v * 100.0)),
+            "Low:".dimmed(),
+            csym,
+            min,
+            "High:".dimmed(),
+            csym,
+            max,
+            "Vol:".dimmed(),
+            vol.map_or("—".into(), |v| format!("{:.0}%", v * 100.0)),
         );
     }
 
@@ -4553,7 +7609,14 @@ pub async fn cmd_rotation(market: Market) -> Result<()> {
     let quotes = client.get_quote(&syms).await?;
 
     print_header(title);
-    println!("  {:<16} {:>10} {:>10} {:>10} {:>10}", "Sector".bold(), "Price".bold(), "Change%".bold(), "vs 50MA".bold(), "Signal".bold());
+    println!(
+        "  {:<16} {:>10} {:>10} {:>10} {:>10}",
+        "Sector".bold(),
+        "Price".bold(),
+        "Change%".bold(),
+        "vs 50MA".bold(),
+        "Signal".bold()
+    );
     println!("  {}", "─".repeat(60).dimmed());
 
     for (i, q) in quotes.iter().enumerate() {
@@ -4562,16 +7625,45 @@ pub async fn cmd_rotation(market: Market) -> Result<()> {
         let price = q.regular_market_price.unwrap_or(0.0);
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
         let ma50 = q.fifty_day_average.unwrap_or(price);
-        let vs_ma = ((price - ma50) / ma50) * 100.0;
-        let signal = if vs_ma > 3.0 && pct > 0.0 { "OVERWEIGHT".green().bold().to_string() }
-            else if vs_ma < -3.0 { "UNDERWEIGHT".red().to_string() }
-            else { "NEUTRAL".yellow().to_string() };
-        let pct_str = if pct >= 0.0 { format!("{:+.2}%", pct).green().to_string() } else { format!("{:+.2}%", pct).red().to_string() };
-        let ma_str = if vs_ma >= 0.0 { format!("{:+.1}%", vs_ma).green().to_string() } else { format!("{:+.1}%", vs_ma).red().to_string() };
-        println!("  {:<16} {:>10} {:>10} {:>10} {:>10}", name.bold(), format_price(price, cur), pct_str, ma_str, signal);
+        let vs_ma = if ma50.abs() > f64::EPSILON {
+            ((price - ma50) / ma50) * 100.0
+        } else {
+            0.0
+        };
+        let signal = if vs_ma > 3.0 && pct > 0.0 {
+            "OVERWEIGHT".green().bold().to_string()
+        } else if vs_ma < -3.0 {
+            "UNDERWEIGHT".red().to_string()
+        } else {
+            "NEUTRAL".yellow().to_string()
+        };
+        let pct_str = if pct >= 0.0 {
+            format!("{:+.2}%", pct).green().to_string()
+        } else {
+            format!("{:+.2}%", pct).red().to_string()
+        };
+        let ma_str = if vs_ma >= 0.0 {
+            format!("{:+.1}%", vs_ma).green().to_string()
+        } else {
+            format!("{:+.1}%", vs_ma).red().to_string()
+        };
+        println!(
+            "  {:<16} {:>10} {:>10} {:>10} {:>10}",
+            name.bold(),
+            format_price(price, cur),
+            pct_str,
+            ma_str,
+            signal
+        );
     }
-    println!("\n  {} Overweight sectors above 50-day MA with positive momentum.", "→".cyan());
-    println!("  {} Underweight sectors below 50-day MA trending down.", "→".cyan());
+    println!(
+        "\n  {} Overweight sectors above 50-day MA with positive momentum.",
+        "→".cyan()
+    );
+    println!(
+        "  {} Underweight sectors below 50-day MA trending down.",
+        "→".cyan()
+    );
     println!();
     Ok(())
 }
@@ -4580,7 +7672,10 @@ pub async fn cmd_rotation(market: Market) -> Result<()> {
 
 pub async fn cmd_matrix(market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let symbols = match market {
+        Market::Us => market::US_POPULAR,
+        Market::In => market::INDIA_POPULAR,
+    };
     let sym_refs: Vec<&str> = symbols.to_vec();
     let quotes = client.get_quote(&sym_refs).await?;
 
@@ -4600,25 +7695,49 @@ pub async fn cmd_matrix(market: Market) -> Result<()> {
         let quality = roe * 50.0 + margin * 50.0; // combined quality score
         let growth = rev_growth * 100.0;
 
-        let entry = (sym.to_string(), quality, growth, q.trailing_pe.unwrap_or(0.0));
-        if quality > 10.0 && growth > 10.0 { stars.push(entry); }
-        else if quality > 10.0 { quality_plays.push(entry); }
-        else if growth > 10.0 { growth_plays.push(entry); }
-        else { laggards.push(entry); }
+        let entry = (
+            sym.to_string(),
+            quality,
+            growth,
+            q.trailing_pe.unwrap_or(0.0),
+        );
+        if quality > 10.0 && growth > 10.0 {
+            stars.push(entry);
+        } else if quality > 10.0 {
+            quality_plays.push(entry);
+        } else if growth > 10.0 {
+            growth_plays.push(entry);
+        } else {
+            laggards.push(entry);
+        }
     }
 
-    let print_quad = |name: &str, color: &str, items: &[(String, f64, f64, f64)]| {
+    let print_quad = |name: &str, _color: &str, items: &[(String, f64, f64, f64)]| {
         print_section(name);
-        if items.is_empty() { println!("  {}", "None".dimmed()); return; }
+        if items.is_empty() {
+            println!("  {}", "None".dimmed());
+            return;
+        }
         for (sym, q, g, pe) in items.iter().take(8) {
             let sym_str = sym.cyan();
-            println!("  {:<14} Quality: {:>5.1}  Growth: {:>5.1}%  P/E: {:>5.1}", sym_str, q, g, pe);
+            println!(
+                "  {:<14} Quality: {:>5.1}  Growth: {:>5.1}%  P/E: {:>5.1}",
+                sym_str, q, g, pe
+            );
         }
     };
 
     print_quad("Stars (High Quality + High Growth)", "green", &stars);
-    print_quad("Quality Plays (High Quality, Low Growth)", "cyan", &quality_plays);
-    print_quad("Growth Plays (High Growth, Lower Quality)", "yellow", &growth_plays);
+    print_quad(
+        "Quality Plays (High Quality, Low Growth)",
+        "cyan",
+        &quality_plays,
+    );
+    print_quad(
+        "Growth Plays (High Growth, Lower Quality)",
+        "yellow",
+        &growth_plays,
+    );
     print_quad("Laggards", "red", &laggards);
     println!();
     Ok(())
@@ -4628,12 +7747,23 @@ pub async fn cmd_matrix(market: Market) -> Result<()> {
 
 pub async fn cmd_surprise(market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let symbols = match market { Market::Us => market::US_POPULAR, Market::In => market::INDIA_POPULAR };
+    let symbols = match market {
+        Market::Us => market::US_POPULAR,
+        Market::In => market::INDIA_POPULAR,
+    };
     let sym_refs: Vec<&str> = symbols.to_vec();
     let quotes = client.get_quote(&sym_refs).await?;
 
     print_header("Earnings Momentum");
-    println!("  {:<14} {:>10} {:>10} {:>10} {:>8} {:>10}", "Symbol".bold(), "EPS TTM".bold(), "EPS Fwd".bold(), "Growth%".bold(), "P/E".bold(), "Signal".bold());
+    println!(
+        "  {:<14} {:>10} {:>10} {:>10} {:>8} {:>10}",
+        "Symbol".bold(),
+        "EPS TTM".bold(),
+        "EPS Fwd".bold(),
+        "Growth%".bold(),
+        "P/E".bold(),
+        "Signal".bold()
+    );
     println!("  {}", "─".repeat(66).dimmed());
 
     let mut accelerating = Vec::new();
@@ -4643,20 +7773,49 @@ pub async fn cmd_surprise(market: Market) -> Result<()> {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let eps_ttm = q.eps_trailing_twelve_months.unwrap_or(0.0);
         let eps_fwd = q.eps_forward.unwrap_or(0.0);
-        if eps_ttm <= 0.0 { continue; }
+        if eps_ttm <= 0.0 {
+            continue;
+        }
         let growth = ((eps_fwd / eps_ttm) - 1.0) * 100.0;
         let pe = q.trailing_pe.unwrap_or(0.0);
-        let signal = if growth > 15.0 { accelerating.push(sym.to_string()); "ACCELERATING".green().bold().to_string() }
-            else if growth > 0.0 { "Growing".green().to_string() }
-            else if growth > -10.0 { "Slowing".yellow().to_string() }
-            else { decelerating.push(sym.to_string()); "DECELERATING".red().bold().to_string() };
-        let g_str = if growth >= 0.0 { format!("+{:.1}%", growth).green().to_string() } else { format!("{:.1}%", growth).red().to_string() };
-        println!("  {:<14} {:>10.2} {:>10.2} {:>10} {:>8.1} {:>10}", sym.cyan(), eps_ttm, eps_fwd, g_str, pe, signal);
+        let signal = if growth > 15.0 {
+            accelerating.push(sym.to_string());
+            "ACCELERATING".green().bold().to_string()
+        } else if growth > 0.0 {
+            "Growing".green().to_string()
+        } else if growth > -10.0 {
+            "Slowing".yellow().to_string()
+        } else {
+            decelerating.push(sym.to_string());
+            "DECELERATING".red().bold().to_string()
+        };
+        let g_str = if growth >= 0.0 {
+            format!("+{:.1}%", growth).green().to_string()
+        } else {
+            format!("{:.1}%", growth).red().to_string()
+        };
+        println!(
+            "  {:<14} {:>10.2} {:>10.2} {:>10} {:>8.1} {:>10}",
+            sym.cyan(),
+            eps_ttm,
+            eps_fwd,
+            g_str,
+            pe,
+            signal
+        );
     }
 
     print_section("Summary");
-    println!("  {} {} stocks with accelerating earnings", "▲".green(), accelerating.len());
-    println!("  {} {} stocks with decelerating earnings", "▼".red(), decelerating.len());
+    println!(
+        "  {} {} stocks with accelerating earnings",
+        "▲".green(),
+        accelerating.len()
+    );
+    println!(
+        "  {} {} stocks with decelerating earnings",
+        "▼".red(),
+        decelerating.len()
+    );
     println!();
     Ok(())
 }
@@ -4667,10 +7826,21 @@ pub async fn cmd_divcal(market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
     let portfolio = Portfolio::load()?;
     let wl = Watchlist::load()?;
-    let mut all: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
-    for s in &wl.symbols { if !all.contains(s) { all.push(s.clone()); } }
+    let mut all: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    for s in &wl.symbols {
+        if !all.contains(s) {
+            all.push(s.clone());
+        }
+    }
     if all.is_empty() {
-        let symbols = match market { Market::In => market::INDIA_POPULAR, Market::Us => market::US_POPULAR };
+        let symbols = match market {
+            Market::In => market::INDIA_POPULAR,
+            Market::Us => market::US_POPULAR,
+        };
         all = symbols.iter().map(|s| s.to_string()).collect();
     }
 
@@ -4682,54 +7852,109 @@ pub async fn cmd_divcal(market: Market) -> Result<()> {
     for q in &quotes {
         let dy = q.trailing_annual_dividend_yield.unwrap_or(0.0);
         if dy > 0.001 {
-            payers.push((q.symbol.as_deref().unwrap_or("???").to_string(), dy, q.regular_market_price.unwrap_or(0.0), q.currency.clone()));
+            payers.push((
+                q.symbol.as_deref().unwrap_or("???").to_string(),
+                dy,
+                q.regular_market_price.unwrap_or(0.0),
+                q.currency.clone(),
+            ));
         }
     }
-    payers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    payers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    if payers.is_empty() { println!("  {}", "No dividend-paying stocks found.".dimmed()); return Ok(()); }
+    if payers.is_empty() {
+        println!("  {}", "No dividend-paying stocks found.".dimmed());
+        return Ok(());
+    }
 
-    let csym = match market { Market::In => "₹", Market::Us => "$" };
-    println!("  {:<14} {:>8} {:>12} {:>14}", "Symbol".bold(), "Yield".bold(), "Annual/Sh".bold(), "Income/₹1L".bold());
+    let csym = match market {
+        Market::In => "₹",
+        Market::Us => "$",
+    };
+    println!(
+        "  {:<14} {:>8} {:>12} {:>14}",
+        "Symbol".bold(),
+        "Yield".bold(),
+        "Annual/Sh".bold(),
+        "Income/₹1L".bold()
+    );
     println!("  {}", "─".repeat(52).dimmed());
 
     let mut total_yield_weighted = 0.0;
     for (sym, dy, price, _cur) in &payers {
         let annual = dy * price;
         let income_1l = 100000.0 * dy;
-        println!("  {:<14} {:>8} {:>12} {:>14}", sym.cyan(), format!("{:.2}%", dy * 100.0).green(), format!("{}{:.2}", csym, annual), format!("{}{:.0}/yr", csym, income_1l));
+        println!(
+            "  {:<14} {:>8} {:>12} {:>14}",
+            sym.cyan(),
+            format!("{:.2}%", dy * 100.0).green(),
+            format!("{}{:.2}", csym, annual),
+            format!("{}{:.0}/yr", csym, income_1l)
+        );
         total_yield_weighted += dy;
     }
 
     print_section("Portfolio Dividend Summary");
-    let avg_yield = if !payers.is_empty() { total_yield_weighted / payers.len() as f64 } else { 0.0 };
-    print_kv("Dividend Payers", &format!("{}/{}", payers.len(), all.len()));
+    let avg_yield = if !payers.is_empty() {
+        total_yield_weighted / payers.len() as f64
+    } else {
+        0.0
+    };
+    print_kv(
+        "Dividend Payers",
+        &format!("{}/{}", payers.len(), all.len()),
+    );
     print_kv("Avg Yield", &format!("{:.2}%", avg_yield * 100.0));
-    print_kv("Income on ₹10L", &format!("{}{:.0}/year ({}{:.0}/month)", csym, 1000000.0 * avg_yield, csym, 1000000.0 * avg_yield / 12.0));
+    print_kv(
+        "Income on ₹10L",
+        &format!(
+            "{}{:.0}/year ({}{:.0}/month)",
+            csym,
+            1000000.0 * avg_yield,
+            csym,
+            1000000.0 * avg_yield / 12.0
+        ),
+    );
     println!();
     Ok(())
 }
 
 // ── 5. Portfolio Correlation Dashboard ──
 
-pub async fn cmd_pcorr(market: Market) -> Result<()> {
+pub async fn cmd_pcorr(_market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
-    if portfolio.holdings.len() < 2 { println!("\n  {}", "Need 2+ holdings for correlation.".dimmed()); return Ok(()); }
+    if portfolio.holdings.len() < 2 {
+        println!("\n  {}", "Need 2+ holdings for correlation.".dimmed());
+        return Ok(());
+    }
 
     let client = YahooClient::new().await?;
     let mut all_closes: Vec<(String, Vec<f64>)> = Vec::new();
     for h in &portfolio.holdings {
         if let Ok(chart) = client.get_chart(&h.symbol, "6mo", "1d").await {
-            let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-            if closes.len() > 20 { all_closes.push((h.symbol.clone(), closes)); }
+            let closes: Vec<f64> = chart
+                .indicators
+                .quote
+                .first()
+                .and_then(|q| q.close.as_ref())
+                .map(|c| c.iter().filter_map(|v| *v).collect())
+                .unwrap_or_default();
+            if closes.len() > 20 {
+                all_closes.push((h.symbol.clone(), closes));
+            }
         }
     }
 
-    if all_closes.len() < 2 { println!("  {}", "Not enough data.".dimmed()); return Ok(()); }
+    if all_closes.len() < 2 {
+        println!("  {}", "Not enough data.".dimmed());
+        return Ok(());
+    }
 
     print_header("Portfolio Correlation (6M)");
     print!("  {:<12}", "");
-    for (sym, _) in &all_closes { print!(" {:>10}", sym.cyan()); }
+    for (sym, _) in &all_closes {
+        print!(" {:>10}", sym.cyan());
+    }
     println!();
     println!("  {}", "─".repeat(12 + all_closes.len() * 11).dimmed());
 
@@ -4737,11 +7962,20 @@ pub async fn cmd_pcorr(market: Market) -> Result<()> {
     for (i, (sym_a, ca)) in all_closes.iter().enumerate() {
         print!("  {:<12}", sym_a.cyan());
         for (j, (sym_b, cb)) in all_closes.iter().enumerate() {
-            if i == j { print!(" {:>10}", "1.000".bold()); }
-            else {
+            if i == j {
+                print!(" {:>10}", "1.000".bold());
+            } else {
                 let corr = technical::correlation(ca, cb).unwrap_or(0.0);
-                if corr > 0.7 && i < j { high_corr_pairs.push((sym_a.clone(), sym_b.clone(), corr)); }
-                let c = if corr > 0.7 { format!("{:.3}", corr).red().to_string() } else if corr > 0.3 { format!("{:.3}", corr).yellow().to_string() } else { format!("{:.3}", corr).to_string() };
+                if corr > 0.7 && i < j {
+                    high_corr_pairs.push((sym_a.clone(), sym_b.clone(), corr));
+                }
+                let c = if corr > 0.7 {
+                    format!("{:.3}", corr).red().to_string()
+                } else if corr > 0.3 {
+                    format!("{:.3}", corr).yellow().to_string()
+                } else {
+                    format!("{:.3}", corr).to_string()
+                };
                 print!(" {:>10}", c);
             }
         }
@@ -4751,7 +7985,13 @@ pub async fn cmd_pcorr(market: Market) -> Result<()> {
     if !high_corr_pairs.is_empty() {
         print_section("Diversification Warning");
         for (a, b, c) in &high_corr_pairs {
-            println!("  {} {} + {} correlation {:.2} — consider reducing one", "⚠".yellow(), a.cyan(), b.cyan(), c);
+            println!(
+                "  {} {} + {} correlation {:.2} — consider reducing one",
+                "⚠".yellow(),
+                a.cyan(),
+                b.cyan(),
+                c
+            );
         }
     } else {
         println!("\n  {} Portfolio is well-diversified.", "✓".green());
@@ -4773,23 +8013,66 @@ pub async fn cmd_returns(symbol: &str, market: Market) -> Result<()> {
 
     print_header(&format!("Returns: {} @ {}{:.2}", resolved, csym, price));
 
-    let periods = [("5d", "1 Week"), ("1mo", "1 Month"), ("3mo", "3 Months"), ("6mo", "6 Months"), ("1y", "1 Year"), ("2y", "2 Years"), ("5y", "5 Years")];
-    println!("  {:<14} {:>10} {:>12} {:>14}", "Period".bold(), "Return".bold(), "Annualized".bold(), "₹1L became".bold());
+    let periods = [
+        ("5d", "1 Week"),
+        ("1mo", "1 Month"),
+        ("3mo", "3 Months"),
+        ("6mo", "6 Months"),
+        ("1y", "1 Year"),
+        ("2y", "2 Years"),
+        ("5y", "5 Years"),
+    ];
+    println!(
+        "  {:<14} {:>10} {:>12} {:>14}",
+        "Period".bold(),
+        "Return".bold(),
+        "Annualized".bold(),
+        "₹1L became".bold()
+    );
     println!("  {}", "─".repeat(54).dimmed());
 
     for (range, label) in &periods {
-        let chart = match client.get_chart(&resolved, range, "1d").await { Ok(c) => c, Err(_) => continue };
-        let closes: Vec<f64> = chart.indicators.quote.first().and_then(|qi| qi.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-        if closes.len() < 2 { continue; }
+        let chart = match client.get_chart(&resolved, range, "1d").await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let closes: Vec<f64> = chart
+            .indicators
+            .quote
+            .first()
+            .and_then(|qi| qi.close.as_ref())
+            .map(|c| c.iter().filter_map(|v| *v).collect())
+            .unwrap_or_default();
+        if closes.len() < 2 {
+            continue;
+        }
         let first = closes[0];
         let last = *closes.last().unwrap();
         let ret = ((last / first) - 1.0) * 100.0;
         let days = closes.len() as f64;
-        let annual = if days > 30.0 { ((last / first).powf(252.0 / days) - 1.0) * 100.0 } else { ret * (252.0 / days) };
+        let annual = if days > 30.0 {
+            ((last / first).powf(252.0 / days) - 1.0) * 100.0
+        } else {
+            ret * (252.0 / days)
+        };
         let value = 100000.0 * (last / first);
-        let ret_str = if ret >= 0.0 { format!("+{:.2}%", ret).green().to_string() } else { format!("{:.2}%", ret).red().to_string() };
-        let ann_str = if annual >= 0.0 { format!("+{:.1}%", annual).green().to_string() } else { format!("{:.1}%", annual).red().to_string() };
-        println!("  {:<14} {:>10} {:>12} {:>14}", label, ret_str, ann_str, format!("{}{:.0}", csym, value));
+        let ret_str = if ret >= 0.0 {
+            format!("+{:.2}%", ret).green().to_string()
+        } else {
+            format!("{:.2}%", ret).red().to_string()
+        };
+        let ann_str = if annual >= 0.0 {
+            format!("+{:.1}%", annual).green().to_string()
+        } else {
+            format!("{:.1}%", annual).red().to_string()
+        };
+        println!(
+            "  {:<14} {:>10} {:>12} {:>14}",
+            label,
+            ret_str,
+            ann_str,
+            format!("{}{:.0}", csym, value)
+        );
     }
     println!();
     Ok(())
@@ -4799,24 +8082,44 @@ pub async fn cmd_returns(symbol: &str, market: Market) -> Result<()> {
 
 pub async fn cmd_heatmap(market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let symbols = match market { Market::In => market::INDIA_POPULAR, Market::Us => market::US_POPULAR };
+    let symbols = match market {
+        Market::In => market::INDIA_POPULAR,
+        Market::Us => market::US_POPULAR,
+    };
     let refs: Vec<&str> = symbols.to_vec();
     let mut quotes = client.get_quote(&refs).await?;
-    quotes.sort_by(|a, b| b.regular_market_change_percent.unwrap_or(0.0).partial_cmp(&a.regular_market_change_percent.unwrap_or(0.0)).unwrap());
+    quotes.sort_by(|a, b| {
+        b.regular_market_change_percent
+            .unwrap_or(0.0)
+            .partial_cmp(&a.regular_market_change_percent.unwrap_or(0.0))
+            .unwrap()
+    });
 
-    print_header(&format!("{} Market Heatmap", match market { Market::In => "India", Market::Us => "US" }));
+    print_header(&format!(
+        "{} Market Heatmap",
+        match market {
+            Market::In => "India",
+            Market::Us => "US",
+        }
+    ));
     println!();
 
     for q in &quotes {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let short = sym.split('.').next().unwrap_or(sym);
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        let block_count = (pct.abs() * 3.0).min(15.0).max(1.0) as usize;
+        let block_count = (pct.abs() * 3.0).clamp(1.0, 15.0) as usize;
         let blocks = "█".repeat(block_count);
         let (colored_blocks, pct_str) = if pct >= 0.0 {
-            (blocks.green().to_string(), format!("{:+.2}%", pct).green().to_string())
+            (
+                blocks.green().to_string(),
+                format!("{:+.2}%", pct).green().to_string(),
+            )
         } else {
-            (blocks.red().to_string(), format!("{:+.2}%", pct).red().to_string())
+            (
+                blocks.red().to_string(),
+                format!("{:+.2}%", pct).red().to_string(),
+            )
         };
         println!("  {:<12} {} {}", short, colored_blocks, pct_str);
     }
@@ -4829,54 +8132,129 @@ pub async fn cmd_heatmap(market: Market) -> Result<()> {
 pub async fn cmd_patterns(symbol: &str, period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client.get_chart(&resolved, period, period_to_interval(period)).await?;
+    let chart = client
+        .get_chart(&resolved, period, period_to_interval(period))
+        .await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
-    let csym = market::currency_symbol(cur);
-    let opens: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.open.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let highs: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.high.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let lows: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.low.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-    let n = opens.len().min(highs.len()).min(lows.len()).min(closes.len());
-    if n < 3 { println!("{}", "Not enough data.".red()); return Ok(()); }
+    let _csym = market::currency_symbol(cur);
+    let opens: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.open.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let highs: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.high.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let lows: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.low.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let closes: Vec<f64> = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default();
+    let n = opens
+        .len()
+        .min(highs.len())
+        .min(lows.len())
+        .min(closes.len());
+    if n < 3 {
+        println!("{}", "Not enough data.".red());
+        return Ok(());
+    }
 
     print_header(&format!("Candlestick Patterns: {}", resolved));
     let mut found = Vec::new();
 
     for i in 1..n {
-        let o = opens[i]; let h = highs[i]; let l = lows[i]; let c = closes[i];
-        let prev_o = opens[i-1]; let prev_c = closes[i-1];
+        let o = opens[i];
+        let h = highs[i];
+        let l = lows[i];
+        let c = closes[i];
+        let prev_o = opens[i - 1];
+        let prev_c = closes[i - 1];
         let body = (c - o).abs();
         let range = h - l;
-        if range < f64::EPSILON { continue; }
+        if range < f64::EPSILON {
+            continue;
+        }
 
         // Doji
-        if body / range < 0.1 { found.push((i, "Doji", "Indecision — potential reversal", "yellow")); }
+        if body / range < 0.1 {
+            found.push((i, "Doji", "Indecision — potential reversal", "yellow"));
+        }
         // Hammer (bullish)
-        if c > o && (o - l) > body * 2.0 && (h - c) < body * 0.5 { found.push((i, "Hammer", "Bullish reversal signal", "green")); }
+        if c > o && (o - l) > body * 2.0 && (h - c) < body * 0.5 {
+            found.push((i, "Hammer", "Bullish reversal signal", "green"));
+        }
         // Shooting Star (bearish)
-        if o > c && (h - o) > body * 2.0 && (c - l) < body * 0.5 { found.push((i, "Shooting Star", "Bearish reversal signal", "red")); }
+        if o > c && (h - o) > body * 2.0 && (c - l) < body * 0.5 {
+            found.push((i, "Shooting Star", "Bearish reversal signal", "red"));
+        }
         // Bullish Engulfing
-        if i > 0 && prev_c < prev_o && c > o && o < prev_c && c > prev_o { found.push((i, "Bullish Engulfing", "Strong bullish reversal", "green")); }
+        if i > 0 && prev_c < prev_o && c > o && o < prev_c && c > prev_o {
+            found.push((i, "Bullish Engulfing", "Strong bullish reversal", "green"));
+        }
         // Bearish Engulfing
-        if i > 0 && prev_c > prev_o && c < o && o > prev_c && c < prev_o { found.push((i, "Bearish Engulfing", "Strong bearish reversal", "red")); }
+        if i > 0 && prev_c > prev_o && c < o && o > prev_c && c < prev_o {
+            found.push((i, "Bearish Engulfing", "Strong bearish reversal", "red"));
+        }
         // Morning Star (3-candle)
         if i >= 2 {
-            let pp_o = opens[i-2]; let pp_c = closes[i-2];
-            if pp_c < pp_o && (prev_c - prev_o).abs() / (highs[i-1] - lows[i-1]).max(0.01) < 0.3 && c > o && c > (pp_o + pp_c) / 2.0 {
-                found.push((i, "Morning Star", "Strong bullish reversal (3-candle)", "green"));
+            let pp_o = opens[i - 2];
+            let pp_c = closes[i - 2];
+            if pp_c < pp_o
+                && (prev_c - prev_o).abs() / (highs[i - 1] - lows[i - 1]).max(0.01) < 0.3
+                && c > o
+                && c > (pp_o + pp_c) / 2.0
+            {
+                found.push((
+                    i,
+                    "Morning Star",
+                    "Strong bullish reversal (3-candle)",
+                    "green",
+                ));
             }
         }
     }
 
     if found.is_empty() {
-        println!("  {}", "No significant patterns detected in this period.".dimmed());
+        println!(
+            "  {}",
+            "No significant patterns detected in this period.".dimmed()
+        );
     } else {
         let timestamps = chart.timestamp.unwrap_or_default();
-        println!("  {:<14} {:<22} {}", "Date".bold(), "Pattern".bold(), "Signal".bold());
+        println!(
+            "  {:<14} {:<22} {}",
+            "Date".bold(),
+            "Pattern".bold(),
+            "Signal".bold()
+        );
         println!("  {}", "─".repeat(55).dimmed());
         for (idx, name, desc, color) in found.iter().rev().take(10) {
-            let date = timestamps.get(*idx).and_then(|&t| chrono::DateTime::from_timestamp(t, 0)).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
-            let colored = match *color { "green" => name.green().bold().to_string(), "red" => name.red().bold().to_string(), _ => name.yellow().to_string() };
+            let date = timestamps
+                .get(*idx)
+                .and_then(|&t| chrono::DateTime::from_timestamp(t, 0))
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            let colored = match *color {
+                "green" => name.green().bold().to_string(),
+                "red" => name.red().bold().to_string(),
+                _ => name.yellow().to_string(),
+            };
             println!("  {:<14} {:<22} {}", date.dimmed(), colored, desc.dimmed());
         }
     }
@@ -4888,35 +8266,87 @@ pub async fn cmd_patterns(symbol: &str, period: &str, market: Market) -> Result<
 
 pub async fn cmd_sectorcmp(sector1: &str, sector2: &str, market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let sectors = match market { Market::Us => market::US_SECTOR_ETFS, Market::In => market::INDIA_SECTOR_INDICES };
-    let find = |name: &str| -> Option<&str> { sectors.iter().find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase())).map(|(s, _)| *s) };
+    let sectors = match market {
+        Market::Us => market::US_SECTOR_ETFS,
+        Market::In => market::INDIA_SECTOR_INDICES,
+    };
+    let find = |name: &str| -> Option<&str> {
+        sectors
+            .iter()
+            .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()))
+            .map(|(s, _)| *s)
+    };
     let sym1 = find(sector1).context(format!("Sector '{}' not found", sector1))?;
     let sym2 = find(sector2).context(format!("Sector '{}' not found", sector2))?;
     let quotes = client.get_quote(&[sym1, sym2]).await?;
-    if quotes.len() < 2 { println!("{}", "Could not fetch both sectors.".red()); return Ok(()); }
+    if quotes.len() < 2 {
+        println!("{}", "Could not fetch both sectors.".red());
+        return Ok(());
+    }
 
     print_header(&format!("{} vs {}", sector1, sector2));
-    println!("  {:<20} {:>14} {:>14}", "Metric".bold(), sector1.bold().cyan(), sector2.bold().cyan());
+    println!(
+        "  {:<20} {:>14} {:>14}",
+        "Metric".bold(),
+        sector1.bold().cyan(),
+        sector2.bold().cyan()
+    );
     println!("  {}", "─".repeat(50).dimmed());
 
     let rows: Vec<(&str, Box<dyn Fn(&crate::api::Quote) -> String>)> = vec![
-        ("Price", Box::new(|q: &crate::api::Quote| format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref()))),
-        ("Change %", Box::new(|q| { let v = q.regular_market_change_percent.unwrap_or(0.0); if v >= 0.0 { format!("{:+.2}%", v).green().to_string() } else { format!("{:+.2}%", v).red().to_string() } })),
-        ("P/E", Box::new(|q| q.trailing_pe.map_or("—".into(), |v| format!("{:.1}", v)))),
-        ("50-Day MA", Box::new(|q| format_optional_price(q.fifty_day_average, q.currency.as_deref()))),
-        ("52W High", Box::new(|q| format_optional_price(q.fifty_two_week_high, q.currency.as_deref()))),
-        ("52W Low", Box::new(|q| format_optional_price(q.fifty_two_week_low, q.currency.as_deref()))),
+        (
+            "Price",
+            Box::new(|q: &crate::api::Quote| {
+                format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref())
+            }),
+        ),
+        (
+            "Change %",
+            Box::new(|q| {
+                let v = q.regular_market_change_percent.unwrap_or(0.0);
+                if v >= 0.0 {
+                    format!("{:+.2}%", v).green().to_string()
+                } else {
+                    format!("{:+.2}%", v).red().to_string()
+                }
+            }),
+        ),
+        (
+            "P/E",
+            Box::new(|q| q.trailing_pe.map_or("—".into(), |v| format!("{:.1}", v))),
+        ),
+        (
+            "50-Day MA",
+            Box::new(|q| format_optional_price(q.fifty_day_average, q.currency.as_deref())),
+        ),
+        (
+            "52W High",
+            Box::new(|q| format_optional_price(q.fifty_two_week_high, q.currency.as_deref())),
+        ),
+        (
+            "52W Low",
+            Box::new(|q| format_optional_price(q.fifty_two_week_low, q.currency.as_deref())),
+        ),
     ];
 
     for (label, func) in &rows {
-        println!("  {:<20} {:>14} {:>14}", (*label).dimmed(), func(&quotes[0]), func(&quotes[1]));
+        println!(
+            "  {:<20} {:>14} {:>14}",
+            (*label).dimmed(),
+            func(&quotes[0]),
+            func(&quotes[1])
+        );
     }
 
     // Verdict
     let pct1 = quotes[0].regular_market_change_percent.unwrap_or(0.0);
     let pct2 = quotes[1].regular_market_change_percent.unwrap_or(0.0);
     let winner = if pct1 > pct2 { sector1 } else { sector2 };
-    println!("\n  {} {} is outperforming today.", "→".cyan(), winner.green().bold());
+    println!(
+        "\n  {} {} is outperforming today.",
+        "→".cyan(),
+        winner.green().bold()
+    );
     println!();
     Ok(())
 }
@@ -4928,51 +8358,114 @@ pub async fn cmd_whatif(symbol: &str, amount: f64, date_str: &str, market: Marke
     let client = YahooClient::new().await?;
 
     // Determine period from date
-    let target_date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").context("Date format: YYYY-MM-DD")?;
+    let target_date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .context("Date format: YYYY-MM-DD")?;
     let today = chrono::Local::now().date_naive();
     let days = (today - target_date).num_days();
-    let range = if days <= 30 { "1mo" } else if days <= 90 { "3mo" } else if days <= 180 { "6mo" } else if days <= 365 { "1y" } else if days <= 730 { "2y" } else { "5y" };
+    let range = if days <= 30 {
+        "1mo"
+    } else if days <= 90 {
+        "3mo"
+    } else if days <= 180 {
+        "6mo"
+    } else if days <= 365 {
+        "1y"
+    } else if days <= 730 {
+        "2y"
+    } else {
+        "5y"
+    };
 
     let chart = client.get_chart(&resolved, range, "1d").await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
     let timestamps = chart.timestamp.unwrap_or_default();
-    let closes: Vec<f64> = chart.indicators.quote.first().and_then(|q| q.close.as_ref()).map(|c| c.iter().filter_map(|v| *v).collect()).unwrap_or_default();
-
-    // Find closest price to target date
-    let target_ts = target_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-    let mut best_idx = 0;
-    let mut best_diff = i64::MAX;
-    for (i, &ts) in timestamps.iter().enumerate() {
-        let diff = (ts - target_ts).abs();
-        if diff < best_diff { best_diff = diff; best_idx = i; }
+    let closes_raw = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.clone())
+        .unwrap_or_default();
+    // Pair each timestamp with its close, dropping bars with no price, so the
+    // timestamp↔price index alignment can never drift (a null interior close
+    // would otherwise shift every later index and pick the wrong buy price).
+    let series: Vec<(i64, f64)> = timestamps
+        .iter()
+        .zip(closes_raw.iter())
+        .filter_map(|(&ts, &c)| c.map(|p| (ts, p)))
+        .collect();
+    if series.is_empty() {
+        println!("{}", "No price data available for that range.".red());
+        return Ok(());
     }
 
-    let buy_price = closes.get(best_idx).copied().unwrap_or(0.0);
-    let current = closes.last().copied().unwrap_or(0.0);
-    if buy_price <= 0.0 { println!("{}", "Could not find price for that date.".red()); return Ok(()); }
+    // Find closest price to target date
+    let target_ts = target_date
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    let mut best_idx = 0;
+    let mut best_diff = i64::MAX;
+    for (i, (ts, _)) in series.iter().enumerate() {
+        let diff = (ts - target_ts).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best_idx = i;
+        }
+    }
+
+    let buy_price = series[best_idx].1;
+    let current = series.last().map(|(_, p)| *p).unwrap_or(0.0);
+    if buy_price <= 0.0 {
+        println!("{}", "Could not find price for that date.".red());
+        return Ok(());
+    }
 
     let shares = (amount / buy_price).floor();
     let invested = shares * buy_price;
     let value = shares * current;
     let pnl = value - invested;
     let pnl_pct = ((current / buy_price) - 1.0) * 100.0;
-    use chrono::Datelike;
-    let years = days as f64 / 365.0;
-    let cagr = if years > 0.1 { ((current / buy_price).powf(1.0 / years) - 1.0) * 100.0 } else { pnl_pct };
 
-    print_header(&format!("What If: {}{:.0} in {} on {}", csym, amount, resolved, date_str));
+    let years = days as f64 / 365.0;
+    let cagr = if years > 0.1 {
+        ((current / buy_price).powf(1.0 / years) - 1.0) * 100.0
+    } else {
+        pnl_pct
+    };
+
+    print_header(&format!(
+        "What If: {}{:.0} in {} on {}",
+        csym, amount, resolved, date_str
+    ));
     print_kv("Buy Date", date_str);
     print_kv("Buy Price", &format!("{}{:.2}", csym, buy_price));
     print_kv("Shares Bought", &format!("{:.0}", shares));
     print_kv("Amount Invested", &format!("{}{:.2}", csym, invested));
     println!();
     print_kv("Current Price", &format!("{}{:.2}", csym, current));
-    print_kv("Current Value", &format!("{}{:.2}", csym, value).bold().to_string());
-    let pnl_str = if pnl >= 0.0 { format!("+{}{:.2} (+{:.2}%)", csym, pnl, pnl_pct).green().bold().to_string() } else { format!("-{}{:.2} ({:.2}%)", csym, pnl.abs(), pnl_pct).red().bold().to_string() };
+    print_kv(
+        "Current Value",
+        &format!("{}{:.2}", csym, value).bold().to_string(),
+    );
+    let pnl_str = if pnl >= 0.0 {
+        format!("+{}{:.2} (+{:.2}%)", csym, pnl, pnl_pct)
+            .green()
+            .bold()
+            .to_string()
+    } else {
+        format!("-{}{:.2} ({:.2}%)", csym, pnl.abs(), pnl_pct)
+            .red()
+            .bold()
+            .to_string()
+    };
     print_kv("Profit/Loss", &pnl_str);
     print_kv("CAGR", &format!("{:.1}%", cagr));
-    print_kv("Holding Period", &format!("{} days ({:.1} years)", days, years));
+    print_kv(
+        "Holding Period",
+        &format!("{} days ({:.1} years)", days, years),
+    );
     println!();
     Ok(())
 }

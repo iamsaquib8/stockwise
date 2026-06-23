@@ -80,28 +80,47 @@ pub const INDIA_SECTOR_INDICES: &[(&str, &str)] = &[
 
 /// Popular large-cap symbols for the movers feature
 pub const US_POPULAR: &[&str] = &[
-    "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "V",
-    "UNH", "XOM", "JNJ", "WMT", "MA", "PG", "HD", "COST", "MRK", "ABBV",
-    "CRM", "AVGO", "PEP", "KO", "TMO", "ADBE", "NFLX", "CSCO", "ACN", "AMD",
+    "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "V", "UNH", "XOM",
+    "JNJ", "WMT", "MA", "PG", "HD", "COST", "MRK", "ABBV", "CRM", "AVGO", "PEP", "KO", "TMO",
+    "ADBE", "NFLX", "CSCO", "ACN", "AMD",
 ];
 
 pub const INDIA_POPULAR: &[&str] = &[
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-    "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS",
-    "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "TITAN.NS",
-    "SUNPHARMA.NS", "TATAMOTORS.NS", "BAJFINANCE.NS", "WIPRO.NS", "HCLTECH.NS",
-    "ONGC.NS", "NTPC.NS", "POWERGRID.NS", "TATASTEEL.NS", "ADANIENT.NS",
-    "ULTRACEMCO.NS", "JSWSTEEL.NS", "TECHM.NS", "INDUSINDBK.NS", "DRREDDY.NS",
+    "RELIANCE.NS",
+    "TCS.NS",
+    "HDFCBANK.NS",
+    "INFY.NS",
+    "ICICIBANK.NS",
+    "HINDUNILVR.NS",
+    "SBIN.NS",
+    "BHARTIARTL.NS",
+    "ITC.NS",
+    "KOTAKBANK.NS",
+    "LT.NS",
+    "AXISBANK.NS",
+    "ASIANPAINT.NS",
+    "MARUTI.NS",
+    "TITAN.NS",
+    "SUNPHARMA.NS",
+    "TATAMOTORS.NS",
+    "BAJFINANCE.NS",
+    "WIPRO.NS",
+    "HCLTECH.NS",
+    "ONGC.NS",
+    "NTPC.NS",
+    "POWERGRID.NS",
+    "TATASTEEL.NS",
+    "ADANIENT.NS",
+    "ULTRACEMCO.NS",
+    "JSWSTEEL.NS",
+    "TECHM.NS",
+    "INDUSINDBK.NS",
+    "DRREDDY.NS",
 ];
 
 /// Predefined screener categories
-pub const SCREENER_CATEGORIES: &[&str] = &[
-    "undervalued",
-    "growth",
-    "dividend",
-    "momentum",
-    "bluechip",
-];
+pub const SCREENER_CATEGORIES: &[&str] =
+    &["undervalued", "growth", "dividend", "momentum", "bluechip"];
 
 #[cfg(test)]
 mod tests {

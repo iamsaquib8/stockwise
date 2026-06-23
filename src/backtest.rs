@@ -41,10 +41,9 @@ pub fn run_backtest(
     };
 
     let trades = execute_trades(closes, &signals);
-    let buy_hold_return = if !closes.is_empty() {
-        (closes.last().unwrap() / closes[0] - 1.0) * 100.0
-    } else {
-        0.0
+    let buy_hold_return = match closes.first() {
+        Some(&first) if first != 0.0 => (closes.last().unwrap() / first - 1.0) * 100.0,
+        _ => 0.0,
     };
 
     // Build equity curve
@@ -80,7 +79,21 @@ pub fn run_backtest(
     let max_drawdown = technical::max_drawdown(&equity)
         .map(|(dd, _, _)| dd * 100.0)
         .unwrap_or(0.0);
-    let sharpe = technical::sharpe_ratio(&equity, 0.0);
+    // Trade-level Sharpe: mean / std-dev of per-trade returns. The equity curve
+    // has one point per trade (not per day), so annualizing by √252 would be
+    // meaningless — report the raw per-trade ratio instead.
+    let sharpe = {
+        let rets = technical::daily_returns(&equity);
+        if rets.len() < 2 {
+            None
+        } else {
+            let mean = rets.iter().sum::<f64>() / rets.len() as f64;
+            let var =
+                rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (rets.len() - 1) as f64;
+            let sd = var.sqrt();
+            if sd == 0.0 { None } else { Some(mean / sd) }
+        }
+    };
 
     Some(BacktestResult {
         strategy: strategy.to_string(),
@@ -168,10 +181,16 @@ fn strategy_bollinger(closes: &[f64]) -> Vec<Signal> {
 
 fn strategy_vwap(closes: &[f64], highs: &[f64], lows: &[f64], volumes: &[u64]) -> Vec<Signal> {
     let mut signals = vec![Signal::Hold; closes.len()];
-    let n = closes.len().min(highs.len()).min(lows.len()).min(volumes.len());
+    let n = closes
+        .len()
+        .min(highs.len())
+        .min(lows.len())
+        .min(volumes.len());
     let mut prev_above = false;
     for i in 10..n {
-        if let Some(vwap) = technical::vwap(&highs[..=i], &lows[..=i], &closes[..=i], &volumes[..=i]) {
+        if let Some(vwap) =
+            technical::vwap(&highs[..=i], &lows[..=i], &closes[..=i], &volumes[..=i])
+        {
             let above = closes[i] > vwap;
             if above && !prev_above {
                 signals[i] = Signal::Buy;
@@ -211,7 +230,11 @@ fn execute_trades(closes: &[f64], signals: &[Signal]) -> Vec<Trade> {
             Signal::Sell if position.is_some() => {
                 let (entry_idx, entry_price) = position.unwrap();
                 let exit_price = closes[i];
-                let pnl_pct = (exit_price / entry_price - 1.0) * 100.0;
+                let pnl_pct = if entry_price != 0.0 {
+                    (exit_price / entry_price - 1.0) * 100.0
+                } else {
+                    0.0
+                };
                 trades.push(Trade {
                     entry_idx,
                     exit_idx: i,
@@ -227,7 +250,11 @@ fn execute_trades(closes: &[f64], signals: &[Signal]) -> Vec<Trade> {
     // Close open position at end
     if let Some((entry_idx, entry_price)) = position {
         let exit_price = *closes.last().unwrap();
-        let pnl_pct = (exit_price / entry_price - 1.0) * 100.0;
+        let pnl_pct = if entry_price != 0.0 {
+            (exit_price / entry_price - 1.0) * 100.0
+        } else {
+            0.0
+        };
         trades.push(Trade {
             entry_idx,
             exit_idx: closes.len() - 1,
@@ -248,7 +275,9 @@ mod tests {
     }
 
     fn sine_prices(n: usize) -> Vec<f64> {
-        (0..n).map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0).collect()
+        (0..n)
+            .map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0)
+            .collect()
     }
 
     #[test]
@@ -313,7 +342,7 @@ mod tests {
     fn test_buy_hold_return_matches() {
         let prices = vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0];
         // Not enough for any strategy, but buy_hold should still work
-        let result = run_backtest("rsi", &prices, &prices, &prices, &vec![1000u64; 6]);
+        let result = run_backtest("rsi", &prices, &prices, &prices, &[1000u64; 6]);
         if let Some(r) = result {
             assert!((r.buy_hold_return - 50.0).abs() < 0.01);
         }
@@ -376,7 +405,14 @@ mod tests {
     #[test]
     fn test_execute_trades_multiple_pairs() {
         let closes = vec![100.0, 105.0, 110.0, 108.0, 112.0, 115.0];
-        let signals = vec![Signal::Buy, Signal::Hold, Signal::Sell, Signal::Buy, Signal::Hold, Signal::Hold];
+        let signals = vec![
+            Signal::Buy,
+            Signal::Hold,
+            Signal::Sell,
+            Signal::Buy,
+            Signal::Hold,
+            Signal::Hold,
+        ];
         let trades = execute_trades(&closes, &signals);
         // First pair closed at index 2, second remains open at end
         assert_eq!(trades.len(), 2);

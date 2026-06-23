@@ -171,11 +171,15 @@ pub fn line_chart(
     }
 
     // X-axis
-    output.push(format!(
-        "  {} {}",
-        " ".repeat(label_width - 2),
-        "└".to_string() + &"─".repeat(width)
-    ).dimmed().to_string());
+    output.push(
+        format!(
+            "  {} {}",
+            " ".repeat(label_width - 2),
+            "└".to_string() + &"─".repeat(width)
+        )
+        .dimmed()
+        .to_string(),
+    );
 
     output
 }
@@ -290,9 +294,13 @@ pub fn dual_line_chart(
     }
 
     output.push(
-        format!("  {}  {}", " ".repeat(8), "└".to_string() + &"─".repeat(width))
-            .dimmed()
-            .to_string(),
+        format!(
+            "  {}  {}",
+            " ".repeat(8),
+            "└".to_string() + &"─".repeat(width)
+        )
+        .dimmed()
+        .to_string(),
     );
 
     output
@@ -388,13 +396,21 @@ pub fn candlestick_chart(
     width: usize,
     height: usize,
 ) -> Vec<String> {
-    let n = opens.len().min(highs.len()).min(lows.len()).min(closes.len());
+    let n = opens
+        .len()
+        .min(highs.len())
+        .min(lows.len())
+        .min(closes.len());
     if n == 0 {
         return vec!["  No data".to_string()];
     }
 
     let all_min = lows.iter().take(n).cloned().fold(f64::INFINITY, f64::min);
-    let all_max = highs.iter().take(n).cloned().fold(f64::NEG_INFINITY, f64::max);
+    let all_max = highs
+        .iter()
+        .take(n)
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let range = if (all_max - all_min).abs() < f64::EPSILON {
         1.0
     } else {
@@ -479,8 +495,7 @@ pub fn candlestick_chart(
 
         // Color based on candle direction
         let mut colored_row = String::new();
-        let mut col_idx = 0;
-        for &ch in row {
+        for (col_idx, &ch) in row.iter().enumerate() {
             if ch == '│' || ch == '┃' || ch == '─' {
                 // Determine if this column's candle was bullish
                 let candle_idx = col_idx / 2;
@@ -494,16 +509,24 @@ pub fn candlestick_chart(
             } else {
                 colored_row.push(ch);
             }
-            col_idx += 1;
         }
 
-        output.push(format!("  {} {}{}", label.dimmed(), "│".dimmed(), colored_row));
+        output.push(format!(
+            "  {} {}{}",
+            label.dimmed(),
+            "│".dimmed(),
+            colored_row
+        ));
     }
 
     output.push(
-        format!("  {}  {}", " ".repeat(8), "└".to_string() + &"─".repeat(width))
-            .dimmed()
-            .to_string(),
+        format!(
+            "  {}  {}",
+            " ".repeat(8),
+            "└".to_string() + &"─".repeat(width)
+        )
+        .dimmed()
+        .to_string(),
     );
 
     output
@@ -530,12 +553,7 @@ pub fn rsi_gauge(rsi: f64) -> String {
         }
     }
 
-    format!(
-        "  {}  {}  {}",
-        "0".dimmed(),
-        bar,
-        "100".dimmed()
-    )
+    format!("  {}  {}  {}", "0".dimmed(), bar, "100".dimmed())
 }
 
 /// Portfolio allocation donut/bar
@@ -545,9 +563,7 @@ pub fn allocation_chart(items: &[(&str, f64)]) -> Vec<String> {
         return vec![];
     }
 
-    let colors = [
-        "green", "cyan", "yellow", "magenta", "blue", "red", "white",
-    ];
+    let colors = ["green", "cyan", "yellow", "magenta", "blue", "red", "white"];
     let bar_width = 40;
 
     let mut output = Vec::new();
@@ -608,7 +624,9 @@ mod tests {
 
     #[test]
     fn test_line_chart_renders() {
-        let data: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0).collect();
+        let data: Vec<f64> = (0..100)
+            .map(|i| 100.0 + (i as f64 * 0.1).sin() * 10.0)
+            .collect();
         let result = line_chart(&data, 40, 6, "green", "Price");
         assert!(result.len() >= 6); // at least height rows
     }
@@ -656,7 +674,11 @@ mod tests {
 
     #[test]
     fn test_bar_chart() {
-        let items = vec![("Tech", 2.5, true), ("Energy", -1.2, false), ("Finance", 0.8, true)];
+        let items = vec![
+            ("Tech", 2.5, true),
+            ("Energy", -1.2, false),
+            ("Finance", 0.8, true),
+        ];
         let result = bar_chart(&items, 30);
         assert_eq!(result.len(), 3);
     }

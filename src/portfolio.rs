@@ -99,7 +99,7 @@ mod tests {
     fn test_add_averages_cost_unequal_lots() {
         let mut p = Portfolio::default();
         p.add("TCS", 10.0, 3000.0); // 10 shares at 3000 = 30000
-        p.add("TCS", 5.0, 3600.0);  // 5 shares at 3600 = 18000
+        p.add("TCS", 5.0, 3600.0); // 5 shares at 3600 = 18000
         // total cost 48000, total shares 15 → avg = 3200
         assert_eq!(p.holdings[0].shares, 15.0);
         assert!((p.holdings[0].avg_cost - 3200.0).abs() < 1e-9);

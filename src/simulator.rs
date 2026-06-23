@@ -75,21 +75,42 @@ impl SimHistory {
     pub fn stats(&self) -> SimStats {
         let settled: Vec<&SimSession> = self.sessions.iter().filter(|s| s.settled).collect();
         let total_days = settled.len();
-        let winning_days = settled.iter().filter(|s| s.total_pnl.unwrap_or(0.0) > 0.0).count();
+        let winning_days = settled
+            .iter()
+            .filter(|s| s.total_pnl.unwrap_or(0.0) > 0.0)
+            .count();
         let total_pnl: f64 = settled.iter().filter_map(|s| s.total_pnl).sum();
         let total_trades: u32 = settled.iter().map(|s| s.trades.len() as u32).sum();
         let winning_trades: u32 = settled.iter().filter_map(|s| s.win_count).sum();
         let losing_trades: u32 = settled.iter().filter_map(|s| s.loss_count).sum();
-        let avg_daily_pnl = if total_days > 0 { total_pnl / total_days as f64 } else { 0.0 };
-        let best_day = settled.iter().filter_map(|s| s.total_pnl).fold(f64::NEG_INFINITY, f64::max);
-        let worst_day = settled.iter().filter_map(|s| s.total_pnl).fold(f64::INFINITY, f64::min);
+        let avg_daily_pnl = if total_days > 0 {
+            total_pnl / total_days as f64
+        } else {
+            0.0
+        };
+        let best_day = settled
+            .iter()
+            .filter_map(|s| s.total_pnl)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let worst_day = settled
+            .iter()
+            .filter_map(|s| s.total_pnl)
+            .fold(f64::INFINITY, f64::min);
 
         let daily_returns: Vec<f64> = settled.iter().filter_map(|s| s.total_pnl_pct).collect();
         let sharpe = if daily_returns.len() > 1 {
             let mean = daily_returns.iter().sum::<f64>() / daily_returns.len() as f64;
-            let variance = daily_returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (daily_returns.len() - 1) as f64;
+            let variance = daily_returns
+                .iter()
+                .map(|r| (r - mean).powi(2))
+                .sum::<f64>()
+                / (daily_returns.len() - 1) as f64;
             let std = variance.sqrt();
-            if std > 0.0 { Some(mean / std * (252.0_f64).sqrt()) } else { None }
+            if std > 0.0 {
+                Some(mean / std * (252.0_f64).sqrt())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -116,13 +137,29 @@ impl SimHistory {
             winning_days,
             total_pnl,
             avg_daily_pnl,
-            best_day: if best_day.is_finite() { Some(best_day) } else { None },
-            worst_day: if worst_day.is_finite() { Some(worst_day) } else { None },
+            best_day: if best_day.is_finite() {
+                Some(best_day)
+            } else {
+                None
+            },
+            worst_day: if worst_day.is_finite() {
+                Some(worst_day)
+            } else {
+                None
+            },
             total_trades,
             winning_trades,
             losing_trades,
-            trade_win_rate: if total_trades > 0 { winning_trades as f64 / total_trades as f64 * 100.0 } else { 0.0 },
-            day_win_rate: if total_days > 0 { winning_days as f64 / total_days as f64 * 100.0 } else { 0.0 },
+            trade_win_rate: if total_trades > 0 {
+                winning_trades as f64 / total_trades as f64 * 100.0
+            } else {
+                0.0
+            },
+            day_win_rate: if total_days > 0 {
+                winning_days as f64 / total_days as f64 * 100.0
+            } else {
+                0.0
+            },
             sharpe,
             max_win_streak,
             max_loss_streak,
@@ -154,19 +191,37 @@ mod tests {
 
     fn make_trade(sym: &str, pnl: f64) -> SimTrade {
         SimTrade {
-            symbol: sym.into(), direction: "BUY".into(), entry_price: 100.0,
-            target1: 102.0, target2: 104.0, stop_loss: 98.0, qty: 10,
-            capital: 1000.0, score: 70.0, confidence: "HIGH".into(), strategies: vec!["RSI".into()],
-            exit_price: Some(100.0 + pnl / 10.0), pnl: Some(pnl), pnl_pct: Some(pnl / 10.0),
-            hit_target: Some(pnl > 0.0), hit_stop: Some(pnl < -15.0),
+            symbol: sym.into(),
+            direction: "BUY".into(),
+            entry_price: 100.0,
+            target1: 102.0,
+            target2: 104.0,
+            stop_loss: 98.0,
+            qty: 10,
+            capital: 1000.0,
+            score: 70.0,
+            confidence: "HIGH".into(),
+            strategies: vec!["RSI".into()],
+            exit_price: Some(100.0 + pnl / 10.0),
+            pnl: Some(pnl),
+            pnl_pct: Some(pnl / 10.0),
+            hit_target: Some(pnl > 0.0),
+            hit_stop: Some(pnl < -15.0),
         }
     }
 
     fn make_session(date: &str, pnl: f64, wins: u32, losses: u32) -> SimSession {
         SimSession {
-            date: date.into(), market: "IN".into(), capital: 25000.0, target_pct: 2.0,
+            date: date.into(),
+            market: "IN".into(),
+            capital: 25000.0,
+            target_pct: 2.0,
             trades: vec![make_trade("TEST.NS", pnl)],
-            total_pnl: Some(pnl), total_pnl_pct: Some(pnl / 250.0), win_count: Some(wins), loss_count: Some(losses), settled: true,
+            total_pnl: Some(pnl),
+            total_pnl_pct: Some(pnl / 250.0),
+            win_count: Some(wins),
+            loss_count: Some(losses),
+            settled: true,
         }
     }
 
@@ -217,7 +272,18 @@ mod tests {
     #[test]
     fn test_unsettled_sessions_excluded() {
         let mut h = SimHistory::default();
-        h.sessions.push(SimSession { date: "2026-04-01".into(), market: "IN".into(), capital: 25000.0, target_pct: 2.0, trades: vec![], total_pnl: None, total_pnl_pct: None, win_count: None, loss_count: None, settled: false });
+        h.sessions.push(SimSession {
+            date: "2026-04-01".into(),
+            market: "IN".into(),
+            capital: 25000.0,
+            target_pct: 2.0,
+            trades: vec![],
+            total_pnl: None,
+            total_pnl_pct: None,
+            win_count: None,
+            loss_count: None,
+            settled: false,
+        });
         let s = h.stats();
         assert_eq!(s.total_days, 0); // unsettled shouldn't count
     }
@@ -235,7 +301,12 @@ mod tests {
     fn test_sharpe_calculation() {
         let mut h = SimHistory::default();
         for i in 0..20 {
-            h.sessions.push(make_session(&format!("2026-04-{:02}", i + 1), if i % 3 == 0 { -100.0 } else { 200.0 }, 1, 0));
+            h.sessions.push(make_session(
+                &format!("2026-04-{:02}", i + 1),
+                if i % 3 == 0 { -100.0 } else { 200.0 },
+                1,
+                0,
+            ));
         }
         let s = h.stats();
         assert!(s.sharpe.is_some());
