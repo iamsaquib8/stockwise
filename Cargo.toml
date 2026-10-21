@@ -35,7 +35,7 @@ colored = "3"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
-redis = { version = "0.27", features = ["tokio-comp"] }
+redis = { version = "1.7", features = ["tokio-comp"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 clap_mangen = { version = "0.3", features = ["env"] }
 # Email notifications over SMTP (rustls, no OpenSSL).
