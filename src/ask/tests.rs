@@ -447,3 +447,24 @@ fn system_prompt_names_the_market_and_the_rules() {
     assert!(p.contains("not financial advice"));
     assert!(p.contains("cannot place orders"));
 }
+
+#[tokio::test]
+async fn ollama_answers_before_the_context_window_fills() {
+    let big_prompt = json!({
+        "message": {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "watchlist", "arguments": {}}}
+        ]},
+        "prompt_eval_count": 13_000, "eval_count": 200,
+    });
+    let answer = json!({"message": {"role": "assistant", "content": "Your watchlist is mixed."}});
+    let (t, reqs) = run(
+        AiProvider::Ollama,
+        vec![big_prompt, answer],
+        AskOptions::default(),
+    )
+    .await;
+    let t = t.unwrap();
+    assert!(reqs[1].json().get("tools").is_none());
+    assert!(t.stopped_early.unwrap().contains("context window"));
+    assert!(reqs[0].json()["options"]["num_predict"].as_u64().unwrap() <= 4_096);
+}

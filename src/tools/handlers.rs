@@ -23,9 +23,11 @@ pub(super) async fn run<D: DataSource>(
 ) -> Result<Value> {
     let src = &ctx.source;
     let m = a.market(ctx.market);
+    // Room for the envelope around the data.
+    let budget = ctx.max_result_bytes.saturating_sub(super::NOTE.len() + 400);
     match name {
         "quote" => quote(src, a, m).await,
-        "history" => history(src, a, m).await,
+        "history" => history(src, a, m, budget).await,
         "technical" => technical(src, a, m).await,
         "risk" => risk(src, a, m).await,
         "search" => search(src, a).await,
@@ -37,9 +39,7 @@ pub(super) async fn run<D: DataSource>(
         "mf_sip" => mf_sip(a).await,
         "options_chain" => {
             let chain = chain(a, m).await?;
-            let mut v = commands::chain_json(&chain, a.usize_or("strikes", 12), None, 0.0);
-            truncate_at(&mut v, "expiries", 6);
-            Ok(v)
+            Ok(chain_within(&chain, a.usize_or("strikes", 6), budget))
         }
         "options_pcr" => Ok(commands::pcr_json(&chain(a, m).await?)),
         "options_maxpain" => {
@@ -64,7 +64,7 @@ pub(super) async fn run<D: DataSource>(
         "goal_education" => goal_education(a, m),
         "alerts_list" => Ok(json!({ "alerts": views::alerts(src).await? })),
         "watchlist" => Ok(json!({ "watchlist": views::watchlist(src).await? })),
-        "order_preview" => order_preview(src, a, m).await,
+        "order_preview" => order_preview(src, a).await,
         other => bail!("Tool '{}' has no handler", other),
     }
 }
@@ -86,6 +86,40 @@ fn truncate_at(v: &mut Value, key: &str, n: usize) {
     }
 }
 
+fn size(v: &impl serde::Serialize) -> usize {
+    serde_json::to_string(v).map_or(0, |s| s.len())
+}
+
+/// The newest of `items` whose JSON fits in `budget` bytes, oldest first.
+pub(super) fn newest_within<T: serde::Serialize>(items: &[T], budget: usize) -> &[T] {
+    let mut used = 2;
+    let mut start = items.len();
+    while start > 0 {
+        let next = size(&items[start - 1]) + 1;
+        if used + next > budget {
+            break;
+        }
+        used += next;
+        start -= 1;
+    }
+    &items[start..]
+}
+
+/// The option chain with `strikes` each side of the money, or fewer until
+/// it fits in `budget` bytes: the strikes nearest the money matter most.
+fn chain_within(chain: &derivatives::OptionChain, strikes: usize, budget: usize) -> Value {
+    let mut n = strikes.max(1);
+    loop {
+        let mut v = commands::chain_json(chain, n, None, 0.0);
+        truncate_at(&mut v, "expiries", 6);
+        v["strikes_each_side"] = json!(n);
+        if n == 1 || size(&v) <= budget {
+            return v;
+        }
+        n = (n * 2 / 3).max(1);
+    }
+}
+
 async fn quote(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let resolved: Vec<String> = a
         .list("symbols")
@@ -104,7 +138,7 @@ async fn quote(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     Ok(json!({ "quotes": rows, "missing": set.missing }))
 }
 
-async fn history(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+async fn history(src: &impl DataSource, a: &Args, m: Market, budget: usize) -> Result<Value> {
     let period = period(a, "6mo")?;
     let h = views::history(src, &symbol(a, m)?, period, m).await?;
     let closes: Vec<f64> = h.bars.iter().filter_map(|b| b.close).collect();
@@ -113,7 +147,11 @@ async fn history(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let low = h.bars.iter().filter_map(|b| b.low).reduce(f64::min);
     let limit = a.usize_or("limit", 60);
     let total = h.bars.len();
-    let bars = &h.bars[total.saturating_sub(limit)..];
+    // The newest bars, as many as fit next to the summary fields.
+    let bars = newest_within(
+        &h.bars[total.saturating_sub(limit)..],
+        budget.saturating_sub(600),
+    );
     Ok(json!({
         "symbol": h.symbol,
         "currency": h.currency,
@@ -561,17 +599,26 @@ fn goal_education(a: &Args, m: Market) -> Result<Value> {
 /// never reads broker credentials: it prices the order from the last quote
 /// and returns the `stockwise trade` command, whose own preview, value cap
 /// and typed confirmation then apply.
-async fn order_preview(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+async fn order_preview(src: &impl DataSource, a: &Args) -> Result<Value> {
     use crate::brokers::{self, OrderKind, Side};
-    if m != Market::In {
-        bail!("Orders go through Indian brokers on NSE; use an NSE symbol (market=in)");
-    }
     let side = match a.need_str("side")? {
         "buy" => Side::Buy,
         _ => Side::Sell,
     };
     let qty = a.i64("quantity").unwrap_or(0) as u32;
+    // The symbol ends up in a command the user may paste into a shell.
     let sym = brokers::nse_symbol(a.need_str("symbol")?)?;
+    if sym.len() > 20
+        || !sym
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '&' || c == '-')
+    {
+        bail!(
+            "'{}' is not an NSE symbol (letters, digits, & and - only)",
+            sym
+        );
+    }
+    // Orders go through Indian brokers on NSE, whatever the default market.
     let resolved = market::resolve_symbol(&sym, Market::In);
     let (limit, trigger) = (a.f64("limit"), a.f64("trigger"));
     let kind = match (limit, trigger) {
@@ -581,6 +628,9 @@ async fn order_preview(src: &impl DataSource, a: &Args, m: Market) -> Result<Val
         (None, Some(trigger)) => OrderKind::StopMarket { trigger },
     };
     let quotes = views::quotes(src, std::slice::from_ref(&resolved)).await?;
+    if quotes.quotes.is_empty() {
+        bail!("No NSE quote for {resolved}; check the symbol with the search tool");
+    }
     let last = quotes.quotes.first().and_then(|q| q.regular_market_price);
     brokers::validate_order(side, &kind, last)?;
     let est = brokers::estimate_value(&kind, qty, last);

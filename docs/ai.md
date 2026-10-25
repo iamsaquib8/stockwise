@@ -91,8 +91,10 @@ same ones the [MCP server](#tools) offers.
 | `--max-steps N` | 6 | Most model requests (1-20); the last one runs without tools, so the model must answer |
 | `--max-tokens N` | 100000 | Token budget across requests (input + output); once used, the next request must answer |
 
-At most 12 tool calls run per question, and each result is cut to about
-24 KB (12 KB for local models) with a note saying so.
+At most 12 tool calls run per question, and each result is kept to about
+24 KB (12 KB for local models): long price histories keep their newest bars
+and option chains their strikes nearest the money. With Ollama the model
+must answer once the conversation fills most of its 16k-token context.
 
 **Models.** `ask` needs a model with tool (function) calling:
 

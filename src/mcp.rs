@@ -107,10 +107,7 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
     pub async fn call(&self, name: &str, args: &Value) -> CallToolResult {
         match self.ctx.call(name, args).await {
             Ok(v) => CallToolResult::structured(v),
-            Err(e) => {
-                let msg = crate::server::redact(&format!("{:#}", e));
-                CallToolResult::error(vec![ContentBlock::text(msg)])
-            }
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(client_error(&e))]),
         }
     }
 
@@ -124,6 +121,20 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
             "stockwise://alerts" => serde_json::to_value(views::alerts(src).await?)?,
             other => anyhow::bail!("Unknown resource {}", other),
         })
+    }
+}
+
+/// An error as the client sees it: without the Yahoo session crumb, and
+/// without local file paths (those go to stderr, the server's log), as
+/// `serve` does.
+fn client_error(e: &anyhow::Error) -> String {
+    if e.downcast_ref::<views::LocalData>().is_some() {
+        eprintln!("stockwise mcp: {:#}", e);
+        "Could not read the local StockWise data (portfolio, watchlist or alerts); \
+         the details are in the server's log"
+            .to_string()
+    } else {
+        crate::server::redact(&format!("{:#}", e))
     }
 }
 
@@ -284,9 +295,10 @@ impl<D: DataSource + 'static> ServerHandler for StockwiseMcp<D> {
                 None,
             ));
         }
-        let value = self.read(&request.uri).await.map_err(|e| {
-            McpError::internal_error(crate::server::redact(&format!("{:#}", e)), None)
-        })?;
+        let value = self
+            .read(&request.uri)
+            .await
+            .map_err(|e| McpError::internal_error(client_error(&e), None))?;
         let text = serde_json::to_string(&value)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(ReadResourceResult::new(vec![
