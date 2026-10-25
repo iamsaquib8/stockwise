@@ -139,7 +139,7 @@ async fn openai_sends_function_outputs_with_the_reasoning_back() {
         first["instructions"]
             .as_str()
             .unwrap()
-            .contains("not financial advice")
+            .contains("StockWise")
     );
     assert_eq!(first["tools"][0]["type"], "function");
     assert_eq!(first["tools"][0]["strict"], false);

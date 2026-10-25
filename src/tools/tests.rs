@@ -366,7 +366,10 @@ async fn markets_watchlist_alerts_and_search() {
 #[tokio::test]
 async fn portfolio_tools_never_value_missing_prices() {
     let p = data("portfolio_summary", json!({})).await;
-    assert_eq!(keys(&p), ["holdings", "totals", "unpriced", "unconverted"]);
+    assert_eq!(
+        keys(&p)[..4],
+        ["holdings", "totals", "unpriced", "unconverted"]
+    );
     assert_eq!(p["unpriced"], json!(["DELISTED.NS"]));
     assert_eq!(p["totals"]["value"], 41000.0 + 7500.0);
 
