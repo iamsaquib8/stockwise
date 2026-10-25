@@ -377,3 +377,49 @@ async fn http_calls_a_tool_statelessly() {
         "{v}"
     );
 }
+
+/// Market data from the fixture; the portfolio file is broken.
+struct BrokenPortfolio(Fixture);
+
+impl DataSource for BrokenPortfolio {
+    async fn quotes(&self, symbols: &[&str]) -> anyhow::Result<Vec<crate::api::Quote>> {
+        self.0.quotes(symbols).await
+    }
+    async fn chart(
+        &self,
+        symbol: &str,
+        range: &str,
+        interval: &str,
+    ) -> anyhow::Result<crate::api::ChartData> {
+        self.0.chart(symbol, range, interval).await
+    }
+    async fn search(&self, query: &str) -> anyhow::Result<Vec<crate::api::SearchResult>> {
+        self.0.search(query).await
+    }
+    fn portfolio(&self) -> anyhow::Result<crate::portfolio::Portfolio> {
+        anyhow::bail!("/home/asha/.local/share/stockwise/portfolio.json is not valid JSON")
+    }
+}
+
+#[tokio::test]
+async fn local_file_errors_keep_paths_out_of_tool_results() {
+    let server = StockwiseMcp::new(ToolContext::new(
+        BrokenPortfolio(Fixture::default()),
+        Market::In,
+    ));
+    let r = server.call("portfolio_summary", &json!({})).await;
+    assert_eq!(r.is_error, Some(true));
+    let text = serde_json::to_string(&r.content).unwrap();
+    assert!(
+        text.contains("Could not read the local StockWise data"),
+        "{text}"
+    );
+    assert!(!text.contains("/home/asha"), "{text}");
+    // Market data errors still say what went wrong.
+    let r = server.call("quote", &json!({"symbols": ["NOPE"]})).await;
+    assert!(
+        serde_json::to_string(&r.content)
+            .unwrap()
+            .contains("No quote for NOPE.NS")
+    );
+}

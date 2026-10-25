@@ -30,7 +30,13 @@ pub async fn cmd_ask(question: &str, opts: AskOptions, market: Market, json: boo
         bail!("{}", ask_unavailable(&ai));
     }
     let mut ctx = ToolContext::new(views::LiveSource::new(), market);
-    if !ai.provider().is_cloud() {
+    if ai.provider().is_cloud() {
+        eprintln!(
+            "  \u{24d8} {} also receives what the tools return — including your holdings, lots \
+             and tax figures if it asks for them.",
+            ai.provider().name()
+        );
+    } else {
         ctx.max_result_bytes = ask::OLLAMA_RESULT_BYTES;
     }
     {

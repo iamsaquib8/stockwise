@@ -19,6 +19,9 @@ use serde_json::{Value, json};
 /// Context window asked of Ollama: tool definitions alone take a few
 /// thousand tokens, more than older defaults leave for the conversation.
 const OLLAMA_NUM_CTX: u32 = 16_384;
+/// Longest Ollama response: room for a thinking model's reasoning and the
+/// answer, while the conversation keeps most of the window.
+const OLLAMA_NUM_PREDICT: u32 = 4_096;
 /// Tool results for local models are kept smaller than for cloud models.
 pub const OLLAMA_RESULT_BYTES: usize = 12_000;
 
@@ -171,7 +174,10 @@ impl Chat {
                     "model": self.model,
                     "messages": self.history,
                     "stream": false,
-                    "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": max_out},
+                    "options": {
+                        "num_ctx": OLLAMA_NUM_CTX,
+                        "num_predict": max_out.min(OLLAMA_NUM_PREDICT),
+                    },
                 });
                 if !final_turn {
                     body["tools"] = tools
@@ -256,6 +262,12 @@ impl Chat {
     /// Read a reply and append the model's turn to the history, exactly as
     /// received (providers need their own blocks back: thinking signatures,
     /// encrypted reasoning, call ids).
+    /// Tokens the model can read, when the conversation must fit it (Ollama
+    /// drops the start of a conversation that doesn't).
+    fn context_window(&self) -> Option<u64> {
+        (self.provider == AiProvider::Ollama).then_some(OLLAMA_NUM_CTX as u64)
+    }
+
     fn take_reply(&mut self, resp: &Value) -> Result<Reply> {
         match self.provider {
             AiProvider::Ollama => self.take_ollama(resp),
@@ -547,6 +559,9 @@ pub async fn ask<D: DataSource>(
         stopped_early: None,
         note: NOTE,
     };
+    // Estimated length of the next prompt, in tokens (for a model whose
+    // context window it must fit).
+    let mut next_prompt: u64 = 0;
     loop {
         let limit = if t.usage.requests + 1 >= opts.max_steps.max(1) {
             Some(format!("reached {} model requests", opts.max_steps))
@@ -554,6 +569,11 @@ pub async fn ask<D: DataSource>(
             Some(format!("reached {} tool calls", opts.max_tool_calls))
         } else if t.usage.total() >= opts.token_budget {
             Some(format!("used {} tokens", t.usage.total()))
+        } else if chat
+            .context_window()
+            .is_some_and(|w| next_prompt > w * 3 / 4)
+        {
+            Some("filled most of the model's context window".to_string())
         } else {
             None
         };
@@ -567,6 +587,7 @@ pub async fn ask<D: DataSource>(
         let reply = chat.take_reply(&resp)?;
         t.usage.input_tokens += reply.input_tokens;
         t.usage.output_tokens += reply.output_tokens;
+        next_prompt = reply.input_tokens + reply.output_tokens;
 
         if reply.paused && !final_turn {
             continue;
@@ -609,6 +630,8 @@ pub async fn ask<D: DataSource>(
                 }
             };
             let bytes = value.to_string().len();
+            // About four bytes a token for JSON.
+            next_prompt += bytes as u64 / 4;
             if opts.verbose {
                 match &error {
                     None => eprintln!("    ✓ {bytes} bytes"),

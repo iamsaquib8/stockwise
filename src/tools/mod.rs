@@ -206,8 +206,9 @@ pub const TOOLS: &[Tool] = &[
         name: "history",
         title: "Price history",
         description: "OHLCV bars for one ticker over a period (5-minute bars for 1d, daily up to \
-                      6mo, weekly to 2y, monthly beyond). Returns at most `limit` most recent bars \
-                      plus first/last close and the change over the period.",
+                      6mo, weekly to 2y, monthly beyond). Returns the most recent `limit` bars \
+                      (fewer if the result would be too large) plus first/last close, high, low \
+                      and the change over the whole period.",
         params: &[
             SYMBOL,
             PERIOD,
@@ -330,7 +331,8 @@ pub const TOOLS: &[Tool] = &[
         title: "Option chain",
         description: "Option chain for an index or stock (NSE/BSE for India, Yahoo for US): \
                       strikes around the money with calls and puts, OI, volume, IV and greeks. \
-                      Returns at most `strikes` strikes centred on the spot.",
+                      Returns `strikes` strikes each side of the money (fewer if the result \
+                      would be too large; `strikes_each_side` says how many).",
         params: &[
             req(
                 "symbol",
@@ -344,8 +346,8 @@ pub const TOOLS: &[Tool] = &[
             ),
             opt(
                 "strikes",
-                Kind::Integer { min: 4, max: 40 },
-                "Strikes to return around the spot (default 16)",
+                Kind::Integer { min: 1, max: 20 },
+                "Strikes each side of the money (default 6)",
             ),
             MARKET,
         ],
@@ -655,13 +657,18 @@ pub const TOOLS: &[Tool] = &[
 pub const ORDER_PREVIEW: Tool = Tool {
     name: "order_preview",
     title: "Order preview (dry run)",
-    description: "Check an order a user is considering and estimate its value from the last \
-                  price, against the max_order_value cap in their broker config. NEVER places an \
-                  order: it returns the `stockwise trade` command the user can review and run \
-                  themselves (live orders always need their typed confirmation).",
+    description: "Check an NSE order a user is considering (symbol, trigger and limit against \
+                  the last price) and estimate its value. NEVER places an order and does not read \
+                  the broker account or its limits: it returns the `stockwise trade` command for \
+                  the user to review and run themselves; that command applies their \
+                  max_order_value cap and asks for typed confirmation.",
     params: &[
         req("side", Kind::Enum(&["buy", "sell"]), "Buy or sell"),
-        SYMBOL,
+        req(
+            "symbol",
+            Kind::Str,
+            "NSE symbol, e.g. RELIANCE, M&M, BAJAJ-AUTO",
+        ),
         req(
             "quantity",
             Kind::Integer {
