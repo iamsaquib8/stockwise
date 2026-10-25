@@ -1,9 +1,19 @@
 # AI Integration
 
-StockWise can add plain-English commentary to its analysis. By default the
-model runs **locally** through [Ollama](https://ollama.com): no stock data,
-portfolio or credentials leave your machine. If you prefer a hosted model you
-can opt in to OpenAI, Anthropic or Google Gemini instead (see
+StockWise works with AI in three ways:
+
+- **Commentary** — `report` and `--ai` add a plain-English section to analysis
+  commands.
+- **`stockwise ask`** — ask a question; the model calls StockWise's read-only
+  tools (quotes, technicals, your portfolio, ...) and answers from the
+  results. See [Ask in plain English](#ask-in-plain-english).
+- **`stockwise mcp`** — an [MCP](https://modelcontextprotocol.io) server, so
+  Claude Desktop, Claude Code, Cursor and other assistants can use the same
+  tools. See [Use StockWise from AI assistants](#use-stockwise-from-ai-assistants-mcp).
+
+By default the model runs **locally** through [Ollama](https://ollama.com): no
+stock data, portfolio or credentials leave your machine. If you prefer a
+hosted model you can opt in to OpenAI, Anthropic or Google Gemini instead (see
 [Cloud providers](#cloud-providers-opt-in)). Everything else in StockWise
 works without any AI.
 
@@ -23,7 +33,7 @@ ollama pull qwen3:14b
 stockwise doctor
 ```
 
-## Two ways to use it
+## Commentary: reports and `--ai`
 
 **Dedicated reports** always use the model:
 
@@ -58,6 +68,212 @@ an hour when Redis is available.
 
 The `daemon` workers write an end-of-day AI note when local Ollama is running.
 With a cloud provider they only do so when started with `--ai`.
+
+## Ask in plain English
+
+```bash
+stockwise ask "how is my portfolio doing?"
+stockwise ask "compare TCS and INFY on RSI and one-year risk" --verbose
+stockwise ask "what SIP reaches 1 crore in 15 years at 12%?"
+stockwise ask "which of my holdings are long term for tax?" --json
+```
+
+`ask` sends your question and the list of StockWise tools to the configured
+model. The model picks tools, StockWise runs them (read-only, against live
+data and your local portfolio), sends the results back, and the model answers
+in plain English. The answer ends with the tools that ran. The tools are the
+same ones the [MCP server](#tools) offers.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--verbose`, `-v` | off | Print each tool call and the size of its result on stderr |
+| `--json` | off | Print the transcript: question, answer, every tool call with its arguments, token usage |
+| `--max-steps N` | 6 | Most model requests (1-20); the last one runs without tools, so the model must answer |
+| `--max-tokens N` | 100000 | Token budget across requests (input + output); once used, the next request must answer |
+
+At most 12 tool calls run per question, and each result is cut to about
+24 KB (12 KB for local models) with a note saying so.
+
+**Models.** `ask` needs a model with tool (function) calling:
+
+- Ollama: `qwen3` (the default `qwen3:14b`), `llama3.1`, `qwen2.5`,
+  `mistral-nemo` and other models tagged *tools* on ollama.com. StockWise asks
+  Ollama for a 16k-token context, because the tool definitions alone take a
+  few thousand tokens. A model without tool support gets a clear error naming
+  one that has it.
+- Cloud (opt-in, see below): OpenAI (Responses API function calling),
+  Anthropic (Messages API tool use) and Gemini (`generateContent` function
+  calling). Running `ask` is the opt-in, as with `report`; `--ai` is not
+  needed.
+
+Answers are educational, not financial advice: the model is told to describe
+what the data shows and its risks, not to tell you to buy or sell. **The tools
+cannot place orders.**
+
+**Privacy.** With a cloud provider, the question and every tool result go to
+that provider — including your holdings, lots and tax figures when the model
+calls `portfolio_summary`, `holdings_lots` or `tax_estimate`. Keep the default
+local Ollama if that matters to you. The first request of each run prints the
+usual notice.
+
+## Use StockWise from AI assistants (MCP)
+
+`stockwise mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server built on the official Rust SDK. AI assistants start it and call its
+tools; it runs on your machine with your data directory and needs no account.
+
+```bash
+stockwise mcp                          # stdio — what desktop and editor clients use
+stockwise mcp --http 127.0.0.1:8788    # Streamable HTTP at http://127.0.0.1:8788/mcp
+stockwise mcp --list-tools             # the tools and their JSON schemas
+```
+
+### Set it up
+
+**Claude Code**
+
+```bash
+claude mcp add stockwise -- stockwise mcp
+claude mcp add stockwise -- stockwise mcp -m us     # US tickers by default
+```
+
+**Claude Desktop** — Settings → Developer → Edit Config, then restart:
+
+```json
+{
+  "mcpServers": {
+    "stockwise": {
+      "command": "stockwise",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Use the full path from `which stockwise` (`where stockwise` on Windows) if
+Claude Desktop can't find the command.
+
+**Cursor** — `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
+
+```json
+{
+  "mcpServers": {
+    "stockwise": {
+      "command": "stockwise",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Without installing** — once the PyPI wheels are published, any client can
+run it through [uv](https://docs.astral.sh/uv/): command `uvx`, args
+`["stockwise", "mcp"]`. With Docker: command `docker`, args
+`["run", "-i", "--rm", "-v", "stockwise:/data", "ghcr.io/iamsaquib8/stockwise", "mcp"]`.
+
+**Other clients** — command `stockwise`, args `["mcp"]`, transport stdio; or
+point an HTTP client at `stockwise mcp --http`.
+
+Settings work as usual: `-m us` (or `STOCKWISE_MARKET`) sets the market for
+bare tickers, `--portfolio NAME` picks a named portfolio, `STOCKWISE_HOME`
+the data directory. Add them to `args` or the client's `env`.
+
+### Tools
+
+Every tool only reads. Each result is JSON with the data, a short "not
+financial advice" `note`, and `truncated` when long lists were shortened.
+Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
+`commodity`, `uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).
+
+| Tool | What it returns | Same as |
+|------|-----------------|---------|
+| `quote` | Price, change, day and 52-week range, volume, market cap, P/E for up to 20 tickers | `quote --json` |
+| `history` | OHLCV bars (most recent `limit`, default 60) with the period's change, high and low | `history --json` |
+| `technical` | SMAs, EMAs, RSI, MACD, Bollinger Bands, ATR, VWAP and a signal tally | `technical --json` |
+| `risk` | Volatility, Sharpe, Sortino, Calmar, max drawdown, value at risk | `risk --json` |
+| `search` | Tickers matching a company name | `search --json` |
+| `markets` | Index levels; optional crypto, FX and global benchmarks | `markets --json` |
+| `mf_search` / `mf_nav` / `mf_sip` | Mutual fund search, NAV with expense ratio, past SIP returns with XIRR (by AMFI code or ISIN) | `mf search/nav/sip --json` |
+| `options_chain` / `options_pcr` / `options_maxpain` | Strikes around the money with OI, IV and greeks; put/call ratio; max pain | `options chain/pcr/maxpain --json` |
+| `options_payoff` | A preset strategy's max profit/loss, breakevens, probability of profit, payoff table | `options payoff --json` |
+| `screen` | A preset screen (undervalued, growth, dividend, momentum, bluechip) | `screen --json` |
+| `backtest` | A built-in strategy on one ticker after costs, against buy and hold (last 10 trades) | `backtest --json` |
+| `portfolio_summary` | Holdings, value, P&L, weights, XIRR and totals; unpriced holdings listed, never valued at 0 | `portfolio --json` |
+| `holdings_lots` | Purchase lots with days held and short/long term, and recent sales | `portfolio lots` |
+| `tax_estimate` | Realized and if-sold-today capital gains with India's set-off rules and ₹1.25 lakh exemption (or US/UK) | `tax --json` |
+| `calendar` | Results, ex-dividend and split dates for tickers, or for your holdings and watchlist | `calendar --json` |
+| `goal_sip` / `goal_retire` / `goal_education` | Goal calculators | `goal ... --json` |
+| `alerts_list` | Your alerts checked against live data | `alert check --json` |
+| `watchlist` | Your watchlist with live prices | `watch --json` |
+
+Hosts see each tool's read-only and open-world hints; the portfolio tools are
+marked as not reaching outside your machine.
+
+### Resources and prompts
+
+| Resource | Content |
+|----------|---------|
+| `stockwise://portfolio` | The portfolio as `portfolio --json` prints it |
+| `stockwise://watchlist` | The watchlist with prices |
+| `stockwise://alerts` | Alerts with their live status |
+
+| Prompt | What it asks for |
+|--------|------------------|
+| `review_portfolio` (optional `focus`) | Value, P&L, concentration and risk of your holdings, without buy/sell calls |
+| `tax_harvest_check` | Unrealized gains and losses by lot before 31 March, the LTCG exemption left and the set-off rules |
+| `explain_option_chain` (`symbol`, optional `expiry`) | OI, PCR, max pain, IV and greeks in plain English |
+
+### Orders stay with you
+
+The MCP server never places, modifies or cancels orders, and never reads
+broker credentials. That is a deliberate choice: an assistant can misread a
+request, and a prompt hidden in a web page or document it read could try to
+trade for you.
+
+`stockwise mcp --allow-orders` adds one more tool, `order_preview`. It checks
+an order you are considering against the last price (the same trigger and
+price checks as `trade`), estimates its value, and returns the
+`stockwise trade` command — for example
+`stockwise trade buy TCS 2 --broker zerodha --limit 4000` — for **you** to
+review and run. That command shows its own preview, applies the
+`max_order_value` cap from your broker config and asks you to type `yes`.
+Nothing is sent to a broker from the MCP server.
+
+### HTTP
+
+`--http ADDR` serves [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http)
+at `http://ADDR/mcp`, stateless, with JSON responses. It follows the same
+rules as `stockwise serve`:
+
+- Loopback addresses only (`127.0.0.1:8788`, `localhost:8788`) unless you
+  pass `--allow-remote`, which requires `STOCKWISE_API_TOKEN` (16+ characters);
+  every request must then send `Authorization: Bearer <token>`.
+- Without a token, requests must name a loopback host (`Host` header) and
+  come from no browser origin or a `localhost` one, so a web page you visit
+  can't reach it through DNS rebinding.
+
+Put a TLS proxy in front of it before exposing it beyond your network.
+
+### Registry and Claude Desktop extension
+
+- [`server.json`](../server.json) describes the server for the
+  [official MCP registry](https://registry.modelcontextprotocol.io) as
+  `io.github.iamsaquib8/stockwise`, installable from crates.io, PyPI
+  (`uvx stockwise mcp`) and GHCR.
+- [`packaging/mcpb/`](../packaging/mcpb/README.md) builds a Claude Desktop
+  extension (`.mcpb`) from a release binary.
+
+### For agents: Agent Skill and llms.txt
+
+- [`skills/stockwise/SKILL.md`](../skills/stockwise/SKILL.md) is an
+  [Agent Skill](https://agentskills.io) that tells Claude Code and other agents
+  how to use the CLI (`--json`, markets, safe commands) and the MCP server.
+  Copy the folder into `~/.claude/skills/` (or a project's `.claude/skills/`).
+- The documentation site publishes
+  [`llms.txt`](https://iamsaquib8.github.io/stockwise/llms.txt) (an index of
+  the docs and the cheatsheet's commands) and
+  [`llms-full.txt`](https://iamsaquib8.github.io/stockwise/llms-full.txt)
+  (every page in one file), and a Markdown copy of each page.
 
 ## Configuration
 

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.iamsaquib8/stockwise",
+  "title": "StockWise",
+  "description": "Indian (NSE/BSE) and US stock data, mutual funds, F&O, your portfolio and tax as read-only tools",
+  "repository": {
+    "url": "https://github.com/iamsaquib8/stockwise",
+    "source": "github"
+  },
+  "websiteUrl": "https://iamsaquib8.github.io/stockwise/ai.html",
+  "version": "0.6.0",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "stockwise",
+      "version": "0.6.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "STOCKWISE_MARKET",
+          "description": "Market for bare tickers: in (NSE, the default), us, crypto, fx, commodity, uk, de, jp, hk, sg, ca or au",
+          "isRequired": false,
+          "default": "in"
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "identifier": "stockwise",
+      "version": "0.6.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "STOCKWISE_MARKET",
+          "description": "Market for bare tickers: in (NSE, the default), us, crypto, fx, commodity, uk, de, jp, hk, sg, ca or au",
+          "isRequired": false,
+          "default": "in"
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/iamsaquib8/stockwise:0.6.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "stockwise:/data",
+          "description": "Keep the portfolio, watchlist and alerts in a named volume"
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "STOCKWISE_MARKET",
+          "description": "Market for bare tickers: in (NSE, the default), us, crypto, fx, commodity, uk, de, jp, hk, sg, ca or au",
+          "isRequired": false,
+          "default": "in"
+        }
+      ]
+    }
+  ]
+}

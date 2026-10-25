@@ -98,6 +98,17 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Your badges and best scores | `stockwise sim profile` |
 | Shareable result card | `stockwise sim card --svg card.svg` |
 
+## AI assistants
+
+| Do this | Command |
+|---|---|
+| Ask in plain English (local Ollama by default) | `stockwise ask "how did my portfolio do this month?"` |
+| See which tools it ran | `stockwise ask "compare TCS and INFY on RSI and risk" --verbose` |
+| MCP server for Claude, Cursor and other assistants | `stockwise mcp` |
+| Add it to Claude Code | `claude mcp add stockwise -- stockwise mcp` |
+| The MCP tools and their schemas | `stockwise mcp --list-tools` |
+| MCP over HTTP | `stockwise mcp --http 127.0.0.1:8788` |
+
 ## Dashboards and scripting
 
 | Do this | Command |

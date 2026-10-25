@@ -31,6 +31,7 @@ src/
     broker_selftest.rs  trade selftest: read-only checks + redacted report for broker test reports
     broker_sync.rs   trade sync (trade book → lots/sales, idempotent) and trade gtt list status changes
     interfaces.rs    tui and serve (behind the `tui` / `server` cargo features)
+    assistant.rs     ask and mcp (the MCP server behind the `mcp` cargo feature)
   views.rs           Data behind quote/history/markets/portfolio/watchlist/alerts as structs,
                      shared by the CLI printers, the TUI and the server; `DataSource` trait
   tui/               `stockwise tui`: app.rs (state + key handling, no I/O), ui.rs (ratatui
@@ -38,6 +39,14 @@ src/
   server/            `stockwise serve`: axum routes, bearer auth, Prometheus metrics; web.rs serves
                      the dashboard (web/, embedded with include_str!) and sets CSP/security headers
   daemon_status.rs   Reads the intraday daemon's daemon_state.json for /metrics
+  tools/             Read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
+                     definitions, JSON schemas from typed Param lists, the result envelope with
+                     the "not financial advice" note and size limit), args.rs (argument checks),
+                     handlers.rs (each tool calls the function behind the command's --json)
+  mcp.rs             `stockwise mcp`: rmcp ServerHandler (tools, resources, prompts), stdio and
+                     Streamable HTTP transports (`mcp` feature)
+  ask.rs             `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
+                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent)
   store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME)
   config.rs          Optional config.toml: defaults for market, AI, cache, data dir, periods
   output.rs          --json / --csv rendering (Format, CsvRow, RFC 4180 quoting)
@@ -216,10 +225,12 @@ the OS keyring when one is available (`STOCKWISE_KEYRING=off` keeps them in the 
 | `ratatui` | Terminal UI for `tui` (re-exports crossterm; `tui` feature) |
 | `axum` | HTTP server for `serve` (`server` feature) |
 | `wasmi` | WebAssembly interpreter for strategy plugins (optional `wasm-plugins` feature) |
+| `rmcp` | Official Model Context Protocol SDK for `stockwise mcp`, without its macros (`mcp` feature) |
 
-`tui` and `server` are on by default; `cargo build --no-default-features`
-leaves them out. `wasm-plugins` is off by default. CI-style checks should run
-clippy for all three builds.
+`tui`, `server` and `mcp` are on by default (`mcp` needs `server`);
+`cargo build --no-default-features` leaves them out (`ask` still works).
+`wasm-plugins` is off by default. CI-style checks should run clippy for all
+three builds.
 
 ## Releases and packaging
 

@@ -48,7 +48,7 @@ Run the same checks CI does — all of them must pass:
 ```bash
 cargo fmt --all            # format
 cargo clippy --all-targets -- -D warnings   # lint (must be clean)
-cargo clippy --all-targets --no-default-features -- -D warnings   # minimal build (no tui/serve)
+cargo clippy --all-targets --no-default-features -- -D warnings   # minimal build (no tui/serve/mcp)
 cargo clippy --all-targets --features wasm-plugins -- -D warnings  # WASM strategy plugins
 cargo test                 # all tests green
 cargo test --features wasm-plugins

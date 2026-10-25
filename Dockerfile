@@ -30,7 +30,8 @@ FROM gcr.io/distroless/cc-debian13:nonroot
 LABEL org.opencontainers.image.title="StockWise" \
       org.opencontainers.image.description="Stock market toolkit for your terminal: Indian (NSE/BSE) and US stocks" \
       org.opencontainers.image.source="https://github.com/iamsaquib8/stockwise" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      io.modelcontextprotocol.server.name="io.github.iamsaquib8/stockwise"
 COPY --from=build /usr/local/bin/stockwise /usr/local/bin/stockwise
 COPY --from=build --chown=65532:65532 /data /data
 # Portfolio, watchlist, alerts and history live here; mount a volume to keep them.

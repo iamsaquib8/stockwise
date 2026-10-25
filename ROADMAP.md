@@ -60,16 +60,17 @@ This comes first.
 - 🛠️ **Homebrew tap, Scoop bucket, winget and AUR** — manifests are generated on every release;
   publishing them needs the tap repository and package submissions. Then homebrew-core once
   eligible (75★ when a user submits it)
-- 📋 **`stockwise mcp` — an MCP server for AI assistants** — let Claude, ChatGPT, Cursor and other
-  agents use quotes, history and technicals, risk, fund NAVs and SIP returns, option chains and
-  payoffs, screens, backtests, your portfolio, tax estimates, the calendar and goal calculators as
-  tools; portfolio, watchlist and alerts as resources; ready-made prompts such as "review my
-  portfolio" and "tax-harvest check before 31 March". Read-only by default; live orders stay off
-  unless enabled, and then still go through the preview and typed confirmation. Listed in the
-  official MCP registry and awesome-mcp-servers, and shipped as a Claude Desktop extension
+- ✅ **`stockwise mcp` — an MCP server for AI assistants** — Claude, Cursor and other agents use
+  quotes, history and technicals, risk, fund NAVs and SIP returns, option chains and payoffs,
+  screens, backtests, your portfolio, lots, tax estimates, the calendar and goal calculators as 24
+  read-only tools; portfolio, watchlist and alerts as resources; prompts for a portfolio review, a
+  tax-harvest check before 31 March and an option-chain explainer. Stdio and Streamable HTTP. No
+  live orders: `--allow-orders` only adds a dry-run preview that hands you the `stockwise trade`
+  command. 🛠️ Next: list it in the official MCP registry (`server.json` is ready) and
+  awesome-mcp-servers, and attach Claude Desktop extensions (`packaging/mcpb/`) to releases
   (Zerodha, Groww, Dhan, Upstox and Fyers ship MCP servers; Angel One doesn't)
-- 📋 **Findable by AI assistants** — an `llms.txt` index on the docs site and a published Agent
-  Skill (`SKILL.md`) so Claude Code and other agents know how to use StockWise
+- ✅ **Findable by AI assistants** — `llms.txt` and `llms-full.txt` on the docs site and an Agent
+  Skill (`skills/stockwise/SKILL.md`) so Claude Code and other agents know how to use StockWise
 - 📋 **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels carrying the binary (maturin
   `bin`), where India's Python trading community already installs its tools
 - 📋 **Animated demo** (VHS) at the top of the README and terminal recordings in the docs
@@ -149,9 +150,10 @@ This comes first.
   Indian REIT/InvIT list (these already quote by symbol; this adds names, aliases and lists)
 
 **AI**
-- 📋 **One tool layer for agents** — the same typed tool definitions power `stockwise mcp` and a new
+- ✅ **One tool layer for agents** — the same typed tool definitions power `stockwise mcp` and
   `stockwise ask "which of my holdings fell most this month?"`, where a local Ollama model (with
-  tool calling) or an opt-in cloud model picks the commands, runs them and answers in plain English
+  tool calling) or an opt-in cloud model picks the tools, StockWise runs them and the model answers
+  in plain English
 - 📋 **`--explain` for beginners** — plain-English notes under technicals, risk metrics, option greeks
   and tax numbers (templates first, the local model optional)
 

@@ -3427,29 +3427,48 @@ mod tests {
         words
     }
 
-    #[test]
-    fn cheatsheet_commands_parse() {
-        // Read at run time: docs/ is not in the crates.io package.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/cheatsheet.md");
-        let Ok(sheet) = std::fs::read_to_string(path) else {
-            return;
+    /// Parse every `stockwise ...` code span in a Markdown file; returns how
+    /// many were checked (0 when the file isn't there).
+    fn check_doc_commands(file: &str) -> usize {
+        // Read at run time: docs/ and skills/ are not in the crates.io package.
+        let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), file);
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return 0;
         };
         let mut checked = 0;
-        for span in sheet.split('`').skip(1).step_by(2) {
+        for span in text.split('`').skip(1).step_by(2) {
             // Skip prose placeholders such as `stockwise <command> --help`.
-            if !span.starts_with("stockwise ") || span.contains('<') {
+            if !span.starts_with("stockwise ") || span.contains('<') || span.contains('…') {
                 continue;
             }
             let span = span.replace("\\|", "|");
             let args = shell_words(&span);
             if let Err(e) = Cli::try_parse_from(&args) {
-                panic!("docs/cheatsheet.md: `{span}` does not parse:\n{e}");
+                use clap::error::ErrorKind;
+                if !matches!(e.kind(), ErrorKind::DisplayVersion | ErrorKind::DisplayHelp) {
+                    panic!("{file}: `{span}` does not parse:\n{e}");
+                }
             }
             checked += 1;
         }
+        checked
+    }
+
+    #[test]
+    fn cheatsheet_commands_parse() {
+        let checked = check_doc_commands("docs/cheatsheet.md");
         assert!(
-            checked > 40,
+            checked == 0 || checked > 40,
             "only {checked} commands found in the cheatsheet"
+        );
+    }
+
+    #[test]
+    fn agent_skill_commands_parse() {
+        let checked = check_doc_commands("skills/stockwise/SKILL.md");
+        assert!(
+            checked == 0 || checked > 15,
+            "only {checked} commands found in the Agent Skill"
         );
     }
 

@@ -515,6 +515,23 @@ and lowers the SIP. In retirement the expense rises with inflation once a
 year and the corpus earns `--return-post` until it runs out at the end of the
 last year. Returns are assumptions, not promises.
 
+## AI assistants
+
+Both use the same read-only tools (quotes, history, technicals, risk, mutual
+funds, option chains, screens, backtests, your portfolio, lots, tax estimate,
+calendar, goals, watchlist and alerts). See [ai.md](ai.md).
+
+| Command | Description |
+|---------|-------------|
+| `ask <QUESTION> [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers. Needs a model with tool calling. `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage). The last request runs without tools, so the model must answer. Educational, not financial advice |
+| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude Desktop, Claude Code, Cursor and other assistants: 24 read-only tools, the portfolio, watchlist and alerts as resources, and three prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
+
+```bash
+stockwise ask "how is my portfolio doing?"
+claude mcp add stockwise -- stockwise mcp     # Claude Code
+stockwise mcp --list-tools | jq '.[].name'
+```
+
 ## Interfaces
 
 Both are read-only and share the data layer with the commands above, so they

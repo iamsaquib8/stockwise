@@ -502,3 +502,70 @@ async fn failures_are_errors_the_model_can_read() {
     assert!(e.to_string().contains("unreachable"), "{e}");
     let _ = quote("X", None, 0.0, "INR");
 }
+
+// ── packaging metadata kept in step with the tools ──
+
+/// A file from the repository, or None in the crates.io package.
+fn repo_file(path: &str) -> Option<String> {
+    std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path)).ok()
+}
+
+fn semver(v: &str) -> (u64, u64, u64) {
+    let mut parts = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+#[test]
+fn mcp_registry_entry_runs_the_mcp_subcommand() {
+    let Some(text) = repo_file("server.json") else {
+        return;
+    };
+    let s: Value = serde_json::from_str(&text).unwrap();
+    let name = s["name"].as_str().unwrap();
+    assert_eq!(name, "io.github.iamsaquib8/stockwise");
+    assert!(s["description"].as_str().unwrap().len() <= 100);
+    let version = s["version"].as_str().unwrap();
+    // Never behind the crate: the entry describes a release that has `mcp`.
+    assert!(semver(version) >= semver(env!("CARGO_PKG_VERSION")));
+    for p in s["packages"].as_array().unwrap() {
+        assert_eq!(p["transport"]["type"], "stdio");
+        assert_eq!(
+            p["packageArguments"],
+            json!([{"type": "positional", "value": "mcp"}])
+        );
+        let id = p["identifier"].as_str().unwrap();
+        match p["version"].as_str() {
+            Some(v) => assert_eq!(v, version, "{id}"),
+            None => assert!(id.ends_with(&format!(":{version}")), "{id}"),
+        }
+    }
+    // crates.io and PyPI verify ownership with this line in the README.
+    let readme = repo_file("README.md").unwrap();
+    assert!(readme.contains(&format!("mcp-name: {name}")));
+    let docker = repo_file("Dockerfile").unwrap();
+    assert!(docker.contains(&format!("io.modelcontextprotocol.server.name=\"{name}\"")));
+}
+
+#[test]
+fn claude_desktop_extension_lists_every_tool() {
+    let Some(text) = repo_file("packaging/mcpb/manifest.json") else {
+        return;
+    };
+    let m: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(m["server"]["type"], "binary");
+    assert_eq!(m["server"]["mcp_config"]["args"], json!(["mcp"]));
+    let listed: Vec<&str> = m["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    let tools: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+    assert_eq!(listed, tools, "update packaging/mcpb/manifest.json");
+    let market = m["user_config"]["market"]["default"].as_str().unwrap();
+    assert!(market_codes().iter().any(|c| c == market));
+}

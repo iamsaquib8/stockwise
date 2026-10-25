@@ -345,8 +345,13 @@ With [Ollama](https://ollama.com) running, `stockwise report TCS` writes an AI
 stock report, and `--ai` adds commentary to `analyze`, `technical`, `compare`,
 `screen`, `backtest` and `deep`. It's opt-in because local models take 30–60s.
 Prefer a hosted model? Set `STOCKWISE_AI_PROVIDER` to `openai`, `anthropic` or
-`gemini` with your key — still only for `report` and `--ai`, with a notice
-whenever data is sent. See [docs/ai.md](docs/ai.md).
+`gemini` with your key — still only for `report`, `ask` and `--ai`, with a
+notice whenever data is sent. See [docs/ai.md](docs/ai.md).
+
+```bash
+stockwise ask "how is my portfolio doing this month?"     # the model calls StockWise's tools
+stockwise ask "compare TCS and INFY on RSI and risk" -v   # -v shows each tool call
+```
 
 ### Global exchanges, crypto, forex and Hindi
 
@@ -360,6 +365,40 @@ stockwise quote USDINR EURUSD -m fx                  # USDINR=X, EURUSD=X, 4 dec
 stockwise markets --crypto --fx                      # indices + top coins + major pairs
 stockwise dashboard --lang hi                        # हिन्दी में (also STOCKWISE_LANG=hi)
 ```
+
+## Use with AI assistants
+
+`stockwise mcp` is an [MCP](https://modelcontextprotocol.io) server: Claude
+Desktop, Claude Code, Cursor and other assistants can look up quotes,
+technicals, risk, mutual funds, option chains, screens and backtests, and read
+your portfolio, lots, tax estimate, calendar, watchlist and alerts — 24
+read-only tools, three resources and ready-made prompts ("review my
+portfolio", "tax-harvest check before 31 March", "explain this option chain").
+It never places orders.
+
+```bash
+claude mcp add stockwise -- stockwise mcp        # Claude Code
+```
+
+Claude Desktop (Settings → Developer → Edit Config) and Cursor
+(`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "stockwise": { "command": "stockwise", "args": ["mcp"] }
+  }
+}
+```
+
+Without installing anything but [uv](https://docs.astral.sh/uv/), once the PyPI
+wheels are out: `"command": "uvx", "args": ["stockwise", "mcp"]`. Over HTTP:
+`stockwise mcp --http 127.0.0.1:8788`. Agents can also read the
+[Agent Skill](skills/stockwise/SKILL.md) and the docs'
+[llms.txt](https://iamsaquib8.github.io/stockwise/llms.txt). Details, the tool
+list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assistants-mcp).
+
+- MCP registry: mcp-name: io.github.iamsaquib8/stockwise
 
 ## Configuration
 
@@ -423,13 +462,13 @@ The full documentation is at **[iamsaquib8.github.io/stockwise](https://iamsaqui
 - [Trading bots](docs/bots.md) and [bot design](docs/bot-design.md)
 - [Practice mode: replays, challenges and scores](docs/simulator.md)
 - [Brokers: live trading, keyring, imports](docs/brokers.md)
-- [AI: Ollama and cloud providers](docs/ai.md)
+- [AI: `ask`, the MCP server, Ollama and cloud providers](docs/ai.md)
 - [Data providers](docs/data-providers.md)
 - [Architecture](docs/architecture.md)
 
 ## Roadmap & contributing
 
-Next up: an MCP server for AI assistants, `pipx`/`uvx` installs, published Homebrew/winget/Scoop/AUR packages, mutual funds in portfolio valuation, and tax-season tools — see the
+Next up: `pipx`/`uvx` installs, published Homebrew/winget/Scoop/AUR packages, mutual funds in portfolio valuation, and tax-season tools — see the
 [ROADMAP](ROADMAP.md). Ideas and bug reports are
 welcome in [Discussions](https://github.com/iamsaquib8/stockwise/discussions) and
 [Issues](https://github.com/iamsaquib8/stockwise/issues); start with

@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `stockwise mcp` — a [Model Context Protocol](https://modelcontextprotocol.io)
+  server for Claude Desktop, Claude Code, Cursor and other AI assistants, on
+  the official Rust SDK (`rmcp`). 24 read-only tools: `quote`, `history`,
+  `technical`, `risk`, `search`, `markets`, `mf_search`, `mf_nav`, `mf_sip`,
+  `options_chain`, `options_pcr`, `options_maxpain`, `options_payoff`,
+  `screen`, `backtest`, `portfolio_summary`, `holdings_lots`, `tax_estimate`,
+  `calendar`, `goal_sip`, `goal_retire`, `goal_education`, `alerts_list` and
+  `watchlist`, each returning the same data as the command's `--json`, with a
+  "not financial advice" note and results kept small. Resources: the
+  portfolio, watchlist and alerts. Prompts: `review_portfolio`,
+  `tax_harvest_check` and `explain_option_chain`. Stdio by default;
+  `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (loopback only,
+  or `--allow-remote` with a `STOCKWISE_API_TOKEN` bearer token, like
+  `serve`). `--list-tools` prints the tools and their JSON schemas. Behind
+  the default-on `mcp` cargo feature.
+- No orders from AI assistants: the MCP server never places, changes or
+  cancels orders and never reads broker credentials. `--allow-orders` only
+  adds `order_preview`, a dry run that checks an order against the last price
+  and returns the `stockwise trade` command for you to run (with its own
+  preview, value cap and typed `yes`).
+- `stockwise ask "question"` — the configured model (local Ollama by default;
+  OpenAI, Anthropic or Gemini when `STOCKWISE_AI_PROVIDER` selects one)
+  calls the same tools through each provider's tool calling and answers in
+  plain English. Model requests, tool calls (12) and tokens are capped
+  (`--max-steps`, `--max-tokens`); the last request runs without tools.
+  `--verbose` shows each tool call, `--json` prints the transcript. A model
+  without tool calling gets an error naming one that has it.
+- Findable by AI assistants: the docs site publishes `llms.txt` (the pages
+  and the cheatsheet's commands), `llms-full.txt` and a Markdown copy of each
+  page; `skills/stockwise/SKILL.md` is an Agent Skill for Claude Code and
+  other agents; `server.json` describes the server for the official MCP
+  registry (`io.github.iamsaquib8/stockwise`: crates.io, PyPI, GHCR), and
+  `packaging/mcpb/` builds a Claude Desktop extension (`.mcpb`).
+
+### Changed
+- The Docker image carries the `io.modelcontextprotocol.server.name` label the
+  MCP registry checks.
+
 ## [0.5.0] - 2026-10-25
 
 Planning, reporting and more markets: tax exports, benchmarks and goal
