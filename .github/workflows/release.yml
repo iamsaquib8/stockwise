@@ -192,9 +192,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
             manylinux: auto
             smoke-test: true
-          - os: ubuntu-latest
+          # Native arm64 runner: maturin-action then builds in
+          # quay.io/pypa/manylinux2014_aarch64. The x86_64 cross image's gcc
+          # cannot assemble ring ("ARM assembler must define __ARM_ARCH").
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             manylinux: auto
+            smoke-test: true
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             manylinux: musllinux_1_2
