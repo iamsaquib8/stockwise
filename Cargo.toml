@@ -57,11 +57,16 @@ rpassword = "7"
 # `wasm-plugins` feature: sandboxed WASM strategy plugins. wasmi is a pure-Rust
 # interpreter with fuel metering; `wat` lets plugins and tests be WAT text.
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "stable", "auto-dispatch", "wat"], optional = true }
+# `mcp` feature: `stockwise mcp`, the Model Context Protocol server, over stdio
+# and Streamable HTTP. The official Rust SDK without its proc macros.
+rmcp = { version = "3.7", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"], optional = true }
 
 [features]
-default = ["tui", "server"]
+default = ["tui", "server", "mcp"]
 tui = ["dep:ratatui"]
 server = ["dep:axum"]
+# `stockwise mcp`; its HTTP mode shares the `serve` bind and token checks.
+mcp = ["dep:rmcp", "server"]
 # `cargo install stockwise --features desktop-notify` for desktop notifications.
 desktop-notify = ["dep:notify-rust"]
 # `cargo install stockwise --features wasm-plugins` for `backtest -s wasm:PATH`.

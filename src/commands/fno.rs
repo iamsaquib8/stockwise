@@ -168,18 +168,15 @@ fn print_side(
     }
 }
 
-/// `options chain` — strikes around the money with OI, volume, IV and greeks.
-pub async fn cmd_options_chain(
-    symbol: &str,
-    expiry: Option<chrono::NaiveDate>,
+/// The rate used (a fraction), years to expiry, and the `strikes` rows
+/// around the money with IV and greeks.
+fn chain_views(
+    chain: &OptionChain,
     strikes: usize,
     rate_pct: Option<f64>,
     div_yield_pct: f64,
-    market: Market,
-    json: bool,
-) -> Result<()> {
-    let chain = derivatives::fetch_chain(symbol, market, expiry).await?;
-    let rate = rate_pct.unwrap_or(default_rate_pct(&chain)) / 100.0;
+) -> (f64, f64, Vec<derivatives::RowView>) {
+    let rate = rate_pct.unwrap_or(default_rate_pct(chain)) / 100.0;
     let years = chain.years_to_expiry(chrono::Utc::now());
     // Greeks need a live spot and time left; without them the chain still prints.
     let assumptions = chain
@@ -202,25 +199,51 @@ pub async fn cmd_options_chain(
             div_yield: 0.0,
         }),
     );
+    (rate, years, views)
+}
 
+/// `options chain --json`.
+pub(crate) fn chain_json(
+    chain: &OptionChain,
+    strikes: usize,
+    rate_pct: Option<f64>,
+    div_yield_pct: f64,
+) -> serde_json::Value {
+    let (rate, years, views) = chain_views(chain, strikes, rate_pct, div_yield_pct);
+    serde_json::json!({
+        "symbol": chain.symbol,
+        "source": chain.source,
+        "underlying": chain.underlying,
+        "currency": chain.currency,
+        "as_of": chain.as_of,
+        "expiry": chain.expiry,
+        "expiries": chain.expiries,
+        "lot_size": chain.lot_size,
+        "days_to_expiry": years * 365.0,
+        "rate": rate,
+        "div_yield": div_yield_pct / 100.0,
+        "rows": views,
+    })
+}
+
+/// `options chain` — strikes around the money with OI, volume, IV and greeks.
+pub async fn cmd_options_chain(
+    symbol: &str,
+    expiry: Option<chrono::NaiveDate>,
+    strikes: usize,
+    rate_pct: Option<f64>,
+    div_yield_pct: f64,
+    market: Market,
+    json: bool,
+) -> Result<()> {
+    let chain = derivatives::fetch_chain(symbol, market, expiry).await?;
     if json {
-        let out = serde_json::json!({
-            "symbol": chain.symbol,
-            "source": chain.source,
-            "underlying": chain.underlying,
-            "currency": chain.currency,
-            "as_of": chain.as_of,
-            "expiry": chain.expiry,
-            "expiries": chain.expiries,
-            "lot_size": chain.lot_size,
-            "days_to_expiry": years * 365.0,
-            "rate": rate,
-            "div_yield": div_yield_pct / 100.0,
-            "rows": views,
-        });
+        let out = chain_json(&chain, strikes, rate_pct, div_yield_pct);
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
+    let (rate, years, views) = chain_views(&chain, strikes, rate_pct, div_yield_pct);
+    let rows = derivatives::near_the_money(&chain.rows, chain.underlying, strikes);
 
     chain_header("Option chain", &chain);
     print_kv(
@@ -240,7 +263,7 @@ pub async fn cmd_options_chain(
     if let Some(lot) = chain.lot_size {
         print_kv("Lot size", &lot.to_string());
     }
-    if assumptions.is_none() {
+    if chain.underlying.is_none() || years <= 0.0 {
         println!(
             "\n  {}",
             "No live underlying price or time left to expiry: IV is the source's and greeks are skipped."
@@ -298,6 +321,25 @@ fn pcr_reading(ratio: f64) -> &'static str {
     }
 }
 
+/// `options pcr --json`.
+pub(crate) fn pcr_json(chain: &OptionChain) -> serde_json::Value {
+    let walls = |kind| -> Vec<serde_json::Value> {
+        derivatives::top_oi(&chain.rows, kind, 3)
+            .iter()
+            .map(|(s, oi)| serde_json::json!({"strike": s, "open_interest": oi}))
+            .collect()
+    };
+    serde_json::json!({
+        "symbol": chain.symbol,
+        "source": chain.source,
+        "underlying": chain.underlying,
+        "expiry": chain.expiry,
+        "pcr": derivatives::pcr(&chain.rows),
+        "top_call_oi": walls(OptionKind::Call),
+        "top_put_oi": walls(OptionKind::Put),
+    })
+}
+
 /// `options pcr` — put/call ratio and the strikes with the most open interest.
 pub async fn cmd_options_pcr(
     symbol: &str,
@@ -311,21 +353,7 @@ pub async fn cmd_options_pcr(
     let top_puts = derivatives::top_oi(&chain.rows, OptionKind::Put, 3);
 
     if json {
-        let walls = |v: &[(f64, u64)]| -> Vec<serde_json::Value> {
-            v.iter()
-                .map(|(s, oi)| serde_json::json!({"strike": s, "open_interest": oi}))
-                .collect()
-        };
-        let out = serde_json::json!({
-            "symbol": chain.symbol,
-            "source": chain.source,
-            "underlying": chain.underlying,
-            "expiry": chain.expiry,
-            "pcr": p,
-            "top_call_oi": walls(&top_calls),
-            "top_put_oi": walls(&top_puts),
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&pcr_json(&chain))?);
         return Ok(());
     }
 
@@ -370,6 +398,32 @@ pub async fn cmd_options_pcr(
     Ok(())
 }
 
+fn max_pain_of(chain: &OptionChain) -> Result<derivatives::MaxPain> {
+    derivatives::max_pain(&chain.rows).with_context(|| {
+        format!(
+            "No open interest for {} on {} — max pain needs open contracts",
+            chain.symbol, chain.expiry
+        )
+    })
+}
+
+/// `options maxpain --json`.
+pub(crate) fn maxpain_json(chain: &OptionChain, mp: &derivatives::MaxPain) -> serde_json::Value {
+    serde_json::json!({
+        "symbol": chain.symbol,
+        "source": chain.source,
+        "underlying": chain.underlying,
+        "expiry": chain.expiry,
+        "max_pain": mp.strike,
+        "curve": mp.curve,
+    })
+}
+
+/// `options maxpain` for an already fetched chain.
+pub(crate) fn maxpain_view(chain: &OptionChain) -> Result<serde_json::Value> {
+    Ok(maxpain_json(chain, &max_pain_of(chain)?))
+}
+
 /// `options maxpain` — the settlement price where option buyers collect least.
 pub async fn cmd_options_maxpain(
     symbol: &str,
@@ -378,23 +432,13 @@ pub async fn cmd_options_maxpain(
     json: bool,
 ) -> Result<()> {
     let chain = derivatives::fetch_chain(symbol, market, expiry).await?;
-    let mp = derivatives::max_pain(&chain.rows).with_context(|| {
-        format!(
-            "No open interest for {} on {} — max pain needs open contracts",
-            chain.symbol, chain.expiry
-        )
-    })?;
+    let mp = max_pain_of(&chain)?;
 
     if json {
-        let out = serde_json::json!({
-            "symbol": chain.symbol,
-            "source": chain.source,
-            "underlying": chain.underlying,
-            "expiry": chain.expiry,
-            "max_pain": mp.strike,
-            "curve": mp.curve,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&maxpain_json(&chain, &mp))?
+        );
         return Ok(());
     }
 
@@ -519,10 +563,89 @@ fn pl_colored(v: f64, cur: Option<&str>) -> String {
     }
 }
 
-/// `options payoff` — a multi-leg position priced from the live chain:
-/// net premium, max profit/loss, breakevens, probability of profit, net
-/// greeks and a payoff chart. Analysis only: nothing is ordered.
-pub async fn cmd_options_payoff(symbol: &str, args: PayoffArgs, market: Market) -> Result<()> {
+/// A priced multi-leg position: everything `options payoff` shows.
+pub(crate) struct PayoffAnalysis {
+    chain: OptionChain,
+    spot: f64,
+    years: f64,
+    rate: f64,
+    div_yield: f64,
+    width: f64,
+    lot_size: Option<u32>,
+    lot_from: Option<&'static str>,
+    /// Lot size × lots: per-unit amounts times this are position amounts.
+    scale: f64,
+    legs: Vec<LegView>,
+    notes: Vec<String>,
+    premium: f64,
+    ext: payoff::Extremes,
+    breakevens: Vec<f64>,
+    ranges: Vec<(f64, Option<f64>)>,
+    pop: Option<f64>,
+    pop_iv: Option<f64>,
+    pop_iv_from: &'static str,
+    greeks: Option<crate::greeks::Greeks>,
+    /// The payoff grid: underlying prices, P/L at expiry and (when every
+    /// leg has an IV) P/L today.
+    prices: Vec<f64>,
+    at_expiry: Vec<f64>,
+    today: Option<Vec<f64>>,
+}
+
+impl PayoffAnalysis {
+    /// `options payoff --json`.
+    pub(crate) fn json(&self, args: &PayoffArgs) -> serde_json::Value {
+        let scale = self.scale;
+        serde_json::json!({
+            "symbol": self.chain.symbol,
+            "source": self.chain.source,
+            "underlying": self.spot,
+            "currency": self.chain.currency,
+            "as_of": self.chain.as_of,
+            "expiry": self.chain.expiry,
+            "days_to_expiry": self.years * 365.0,
+            "strategy": args.strategy,
+            "width": args.strategy.filter(|p| *p != payoff::Preset::Straddle).map(|_| self.width),
+            "lot_size": self.lot_size,
+            "lot_size_from": self.lot_from,
+            "lots": args.lots,
+            "multiplier": self.scale,
+            "rate": self.rate,
+            "div_yield": self.div_yield,
+            "legs": self.legs,
+            "net_premium": self.premium,
+            "net_premium_total": round(self.premium * scale, 2),
+            "premium_type": if self.premium >= 0.0 { "debit" } else { "credit" },
+            "max_profit": round_opt(self.ext.max_profit.map(|v| v * scale), 2),
+            "max_loss": round_opt(self.ext.max_loss.map(|v| v * scale), 2),
+            "breakevens": self.breakevens.iter().map(|b| round(*b, 2)).collect::<Vec<_>>(),
+            "profit_ranges": self.ranges.iter().map(|(a, b)| serde_json::json!({"from": round(*a, 2), "to": round_opt(*b, 2)})).collect::<Vec<_>>(),
+            "pop": self.pop,
+            "pop_iv": self.pop_iv,
+            "pop_iv_from": self.pop_iv_from,
+            "greeks": self.greeks.map(|g| serde_json::json!({
+                "delta": round(g.delta * scale, 4),
+                "gamma": round(g.gamma * scale, 6),
+                "theta": round(g.theta * scale, 2),
+                "vega": round(g.vega * scale, 2),
+                "rho": round(g.rho * scale, 2),
+            })),
+            "notes": self.notes,
+            "curve": self.prices.iter().enumerate().map(|(i, p)| serde_json::json!({
+                "price": round(*p, 2),
+                "expiry": round(self.at_expiry[i], 2),
+                "today": self.today.as_ref().map(|t| round(t[i], 2)),
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Fetch the chain and price the position `args` describes.
+pub(crate) async fn payoff_analysis(
+    symbol: &str,
+    args: &PayoffArgs,
+    market: Market,
+) -> Result<PayoffAnalysis> {
     use payoff::{Instrument, Leg, StrikeSpec};
     if args.legs.is_empty() && args.strategy.is_none() {
         bail!(
@@ -540,7 +663,6 @@ pub async fn cmd_options_payoff(symbol: &str, args: PayoffArgs, market: Market) 
     }
 
     let chain = derivatives::fetch_chain(symbol, market, args.expiry).await?;
-    let cur = chain.currency.as_deref();
     let now = chrono::Utc::now();
     let spot = chain.underlying.with_context(|| {
         format!(
@@ -749,51 +871,63 @@ pub async fn cmd_options_payoff(symbol: &str, args: PayoffArgs, market: Market) 
         .map(|s| payoff::pl_before_expiry(&plain, *s, &m).map(|v| v * scale))
         .collect();
 
+    Ok(PayoffAnalysis {
+        chain,
+        spot,
+        years,
+        rate,
+        div_yield: assumptions.div_yield,
+        width,
+        lot_size,
+        lot_from,
+        scale,
+        legs,
+        notes,
+        premium,
+        ext,
+        breakevens,
+        ranges,
+        pop,
+        pop_iv,
+        pop_iv_from,
+        greeks,
+        prices,
+        at_expiry,
+        today,
+    })
+}
+
+/// `options payoff` — a multi-leg position priced from the live chain:
+/// net premium, max profit/loss, breakevens, probability of profit, net
+/// greeks and a payoff chart. Analysis only: nothing is ordered.
+pub async fn cmd_options_payoff(symbol: &str, args: PayoffArgs, market: Market) -> Result<()> {
+    use payoff::Instrument;
+    let a = payoff_analysis(symbol, &args, market).await?;
     if args.json {
-        let out = serde_json::json!({
-            "symbol": chain.symbol,
-            "source": chain.source,
-            "underlying": spot,
-            "currency": chain.currency,
-            "as_of": chain.as_of,
-            "expiry": chain.expiry,
-            "days_to_expiry": years * 365.0,
-            "strategy": args.strategy,
-            "width": args.strategy.filter(|p| *p != payoff::Preset::Straddle).map(|_| width),
-            "lot_size": lot_size,
-            "lot_size_from": lot_from,
-            "lots": args.lots,
-            "multiplier": scale,
-            "rate": rate,
-            "div_yield": assumptions.div_yield,
-            "legs": legs,
-            "net_premium": premium,
-            "net_premium_total": round(premium * scale, 2),
-            "premium_type": if premium >= 0.0 { "debit" } else { "credit" },
-            "max_profit": round_opt(ext.max_profit.map(|v| v * scale), 2),
-            "max_loss": round_opt(ext.max_loss.map(|v| v * scale), 2),
-            "breakevens": breakevens.iter().map(|b| round(*b, 2)).collect::<Vec<_>>(),
-            "profit_ranges": ranges.iter().map(|(a, b)| serde_json::json!({"from": round(*a, 2), "to": round_opt(*b, 2)})).collect::<Vec<_>>(),
-            "pop": pop,
-            "pop_iv": pop_iv,
-            "pop_iv_from": pop_iv_from,
-            "greeks": greeks.map(|g| serde_json::json!({
-                "delta": round(g.delta * scale, 4),
-                "gamma": round(g.gamma * scale, 6),
-                "theta": round(g.theta * scale, 2),
-                "vega": round(g.vega * scale, 2),
-                "rho": round(g.rho * scale, 2),
-            })),
-            "notes": notes,
-            "curve": prices.iter().enumerate().map(|(i, p)| serde_json::json!({
-                "price": round(*p, 2),
-                "expiry": round(at_expiry[i], 2),
-                "today": today.as_ref().map(|t| round(t[i], 2)),
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&a.json(&args))?);
         return Ok(());
     }
+    let PayoffAnalysis {
+        chain,
+        spot,
+        lot_size,
+        lot_from,
+        scale,
+        legs,
+        notes,
+        premium,
+        ext,
+        breakevens,
+        pop,
+        pop_iv,
+        pop_iv_from,
+        greeks,
+        prices,
+        at_expiry,
+        today,
+        ..
+    } = a;
+    let cur = chain.currency.as_deref();
 
     let title = match args.strategy {
         Some(p) => format!(

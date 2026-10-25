@@ -1519,6 +1519,34 @@ fn estimate_json(country: Country, b: tax::Buckets) -> serde_json::Value {
     })
 }
 
+/// `tax --json`: the report with the estimate for gains realized so far and
+/// for selling everything today.
+pub(crate) fn tax_json(
+    country: Country,
+    report: &TaxReport,
+    today: chrono::NaiveDate,
+) -> serde_json::Value {
+    let realized = report.realized;
+    let exemption_left = (country == Country::India).then(|| {
+        round(
+            country.exemption() - tax::estimate(country, realized).exemption_used,
+            2,
+        )
+    });
+    serde_json::json!({
+        "country": country.name(),
+        "tax_year": country.tax_year_label(today),
+        "currency": country.tax_currency(),
+        "sales": report.sales,
+        "holdings": report.holdings,
+        "realized": estimate_json(country, realized),
+        "if_sold_today": estimate_json(country, realized.plus(report.unrealized)),
+        "ltcg_exemption_left": exemption_left,
+        "unpriced": report.unpriced,
+        "other_currency": report.other_currency,
+    })
+}
+
 /// Capital-gains estimate for the current tax year: gains realized by
 /// `portfolio sell` (or a tradebook import) this year, plus what selling
 /// everything today would add. Every lot uses its own purchase date.
@@ -1555,26 +1583,7 @@ pub async fn cmd_tax(country: &str, _market: Market, fmt: Format) -> Result<()> 
     let realized = report.realized;
     let unrealized = report.unrealized;
     match fmt {
-        Format::Json => {
-            let exemption_left = (country == Country::India).then(|| {
-                round(
-                    country.exemption() - tax::estimate(country, realized).exemption_used,
-                    2,
-                )
-            });
-            return output::print_json(&serde_json::json!({
-                "country": country.name(),
-                "tax_year": country.tax_year_label(today),
-                "currency": country.tax_currency(),
-                "sales": report.sales,
-                "holdings": report.holdings,
-                "realized": estimate_json(country, realized),
-                "if_sold_today": estimate_json(country, realized.plus(unrealized)),
-                "ltcg_exemption_left": exemption_left,
-                "unpriced": report.unpriced,
-                "other_currency": report.other_currency,
-            }));
-        }
+        Format::Json => return output::print_json(&tax_json(country, &report, today)),
         Format::Csv => return output::print_csv(&report.holdings),
         Format::Table => {}
     }

@@ -1098,14 +1098,24 @@ fn pct_label(x: f64) -> String {
     tf(Msg::GoalPerYear, &[&s])
 }
 
-fn print_goal_json(kind: &str, currency: &str, plan: &impl Serialize) -> Result<()> {
+/// `goal <kind> --json`: the plan rounded to paise/cents, with its kind and
+/// currency.
+pub(crate) fn goal_json(
+    kind: &str,
+    currency: &str,
+    plan: &impl Serialize,
+) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(plan)?;
     round_floats(&mut v, 2);
     if let Some(o) = v.as_object_mut() {
         o.insert("goal".into(), serde_json::json!(kind));
         o.insert("currency".into(), serde_json::json!(currency));
     }
-    output::print_json(&v)
+    Ok(v)
+}
+
+fn print_goal_json(kind: &str, currency: &str, plan: &impl Serialize) -> Result<()> {
+    output::print_json(&goal_json(kind, currency, plan)?)
 }
 
 /// The SIP part shared by every goal: what to invest, the totals, and the

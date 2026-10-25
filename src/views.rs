@@ -43,6 +43,12 @@ pub trait DataSource: Send + Sync {
         async { None }
     }
 
+    /// The Yahoo client behind this source, for data the methods above don't
+    /// cover (the results calendar). Fixtures have none.
+    fn yahoo(&self) -> impl Future<Output = Result<&YahooClient>> + Send {
+        async { bail!("No Yahoo Finance client for this data source") }
+    }
+
     fn portfolio(&self) -> Result<Portfolio> {
         Portfolio::load()
     }
@@ -73,6 +79,9 @@ impl DataSource for YahooClient {
     }
     async fn india_10y(&self) -> Option<crate::gsec::YieldRow> {
         live_india_10y().await
+    }
+    async fn yahoo(&self) -> Result<&YahooClient> {
+        Ok(self)
     }
 }
 
@@ -123,6 +132,9 @@ impl DataSource for LiveSource {
     }
     async fn india_10y(&self) -> Option<crate::gsec::YieldRow> {
         live_india_10y().await
+    }
+    async fn yahoo(&self) -> Result<&YahooClient> {
+        self.client().await
     }
 }
 

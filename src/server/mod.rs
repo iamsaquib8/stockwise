@@ -70,7 +70,7 @@ impl ApiError {
 }
 
 /// Drop the Yahoo session crumb from error text before it leaves the process.
-fn redact(msg: &str) -> String {
+pub(crate) fn redact(msg: &str) -> String {
     let mut out = String::with_capacity(msg.len());
     let mut rest = msg;
     while let Some(i) = rest.find("crumb=") {
@@ -337,24 +337,51 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Whether `req` carries `Authorization: Bearer <token>`.
+fn has_bearer(req: &Request, token: &str) -> bool {
+    req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        axum::Json(serde_json::json!({ "error": "Missing or invalid bearer token" })),
+    )
+        .into_response()
+}
+
 async fn require_token<D: DataSource>(State(st): Shared<D>, req: Request, next: Next) -> Response {
-    if let Some(token) = &st.token {
-        let presented = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim);
-        if !presented.is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes())) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, "Bearer")],
-                axum::Json(serde_json::json!({ "error": "Missing or invalid bearer token" })),
-            )
-                .into_response();
-        }
+    if let Some(token) = &st.token
+        && !has_bearer(&req, token)
+    {
+        return unauthorized();
     }
     next.run(req).await
+}
+
+/// `router` with every request needing the bearer token, when there is one
+/// (`stockwise mcp --http`).
+pub fn with_bearer_token(router: Router, token: Option<String>) -> Router {
+    let Some(token) = token else {
+        return router;
+    };
+    let token = Arc::new(token);
+    router.layer(middleware::from_fn(move |req: Request, next: Next| {
+        let token = token.clone();
+        async move {
+            if has_bearer(&req, &token) {
+                next.run(req).await
+            } else {
+                unauthorized()
+            }
+        }
+    }))
 }
 
 /// Without a token the API trusts the network position, so it only answers

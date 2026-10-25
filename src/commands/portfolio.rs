@@ -398,7 +398,7 @@ fn held_for(from: &str, today: chrono::NaiveDate) -> String {
 /// The symbol of an existing holding: `symbol` resolved for `market`, or as
 /// typed when that is what the portfolio holds (`AAPL` while the market is
 /// India, where it would resolve to `AAPL.NS`). Sales count too.
-fn held_symbol(portfolio: &Portfolio, symbol: &str, market: Market) -> String {
+pub(crate) fn held_symbol(portfolio: &Portfolio, symbol: &str, market: Market) -> String {
     let resolved = market::resolve_symbol(symbol, market);
     let held = |s: &str| {
         portfolio.holding(s).is_some() || portfolio.realized.iter().any(|r| r.symbol == s)

@@ -695,19 +695,27 @@ impl CsvRow for ScreenRow {
     ];
 }
 
-pub async fn cmd_screen(
-    category: &str,
-    market: Market,
-    universe: Option<market::Universe>,
-    fmt: Format,
-) -> Result<()> {
-    market.require_stocks("screen")?;
-    check_universe(market, universe)?;
-    let client = YahooClient::new().await?;
-    let (symbols, scope) = scan_symbols(&client, market, universe).await?;
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+impl From<&crate::api::Quote> for ScreenRow {
+    fn from(q: &crate::api::Quote) -> Self {
+        ScreenRow {
+            symbol: q.symbol.clone().unwrap_or_default(),
+            name: q.short_name.clone().or_else(|| q.long_name.clone()),
+            price: q.regular_market_price,
+            change_percent: q.regular_market_change_percent,
+            pe: q.trailing_pe,
+            market_cap: q.market_cap,
+            dividend_yield: q.trailing_annual_dividend_yield,
+            currency: q.currency.clone(),
+        }
+    }
+}
 
+/// The quotes a preset screen keeps, largest first (momentum: biggest
+/// gainers first), and the screen's title.
+pub(crate) fn screen_matches<'a>(
+    category: &str,
+    quotes: &'a [crate::api::Quote],
+) -> Result<(String, Vec<&'a crate::api::Quote>)> {
     let (title, mut filtered): (String, Vec<&crate::api::Quote>) = match category {
         "undervalued" => ("Undervalued Stocks (P/E < 15)".into(),
             quotes.iter().filter(|q| q.trailing_pe.is_some_and(|pe| pe > 0.0 && pe < 15.0)).collect()),
@@ -740,20 +748,26 @@ pub async fn cmd_screen(
         });
     }
 
+    Ok((title, filtered))
+}
+
+pub async fn cmd_screen(
+    category: &str,
+    market: Market,
+    universe: Option<market::Universe>,
+    fmt: Format,
+) -> Result<()> {
+    market.require_stocks("screen")?;
+    check_universe(market, universe)?;
+    let client = YahooClient::new().await?;
+    let (symbols, scope) = scan_symbols(&client, market, universe).await?;
+    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+    let quotes = client.get_quote(&sym_refs).await?;
+
+    let (title, filtered) = screen_matches(category, &quotes)?;
+
     if !fmt.is_table() {
-        let rows: Vec<ScreenRow> = filtered
-            .iter()
-            .map(|q| ScreenRow {
-                symbol: q.symbol.clone().unwrap_or_default(),
-                name: q.short_name.clone().or_else(|| q.long_name.clone()),
-                price: q.regular_market_price,
-                change_percent: q.regular_market_change_percent,
-                pe: q.trailing_pe,
-                market_cap: q.market_cap,
-                dividend_yield: q.trailing_annual_dividend_yield,
-                currency: q.currency.clone(),
-            })
-            .collect();
+        let rows: Vec<ScreenRow> = filtered.iter().map(|q| ScreenRow::from(*q)).collect();
         return match fmt {
             Format::Csv => output::print_csv(&rows),
             _ => output::print_json(&rows),

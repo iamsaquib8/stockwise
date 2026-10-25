@@ -39,7 +39,7 @@ const AI_CACHE_PREFIX: &str = "stockwise:ai:";
 const AI_CACHE_TTL_SECS: i64 = 3600; // 1 hour for AI responses
 /// Upper bound on a cloud model's answer. The prompts ask for a few
 /// sentences; this only stops a runaway response.
-const CLOUD_MAX_TOKENS: u32 = 16_000;
+pub(crate) const CLOUD_MAX_TOKENS: u32 = 16_000;
 
 /// Where AI requests go. Ollama (local) is the default; the cloud providers
 /// are used only when `STOCKWISE_AI_PROVIDER` names one, and then only for
@@ -746,6 +746,57 @@ Be direct and specific with recommendations."#,
     }
 }
 
+/// Raw API access for `stockwise ask`, which builds its own tool-calling
+/// requests (see `ask.rs`).
+impl AiClient {
+    /// POST `body` to `path` on the provider's API with its authentication
+    /// headers, and return the JSON reply. Cloud providers need their key,
+    /// and the first request of a run prints the notice that data is leaving
+    /// the machine.
+    pub(crate) async fn post_api(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        if let Some(e) = &self.config_error {
+            bail!("{}", e);
+        }
+        let url = format!("{}{}", self.base_url, path);
+        let Some(key_env) = self.provider.key_env() else {
+            return self.post_json(&url, &[], body).await;
+        };
+        let key = self.api_key.as_deref().with_context(|| {
+            format!(
+                "{} is selected but {} is not set",
+                self.provider.name(),
+                key_env
+            )
+        })?;
+        notify_cloud_send(self.provider, &self.model);
+        let auth = format!("Bearer {}", key);
+        let headers: Vec<(&str, &str)> = match self.provider {
+            AiProvider::OpenAi => vec![("authorization", &auth)],
+            AiProvider::Anthropic => {
+                let mut h = vec![("x-api-key", key), ("anthropic-version", ANTHROPIC_VERSION)];
+                if self.anthropic_fallbacks() {
+                    h.push(("anthropic-beta", ANTHROPIC_FALLBACK_BETA));
+                }
+                h
+            }
+            AiProvider::Gemini => vec![("x-goog-api-key", key)],
+            AiProvider::Ollama => Vec::new(),
+        };
+        self.post_json(&url, &headers, body).await
+    }
+
+    /// Whether requests to this Claude model ask for server-side refusal
+    /// fallbacks (`fallbacks: "default"`).
+    pub(crate) fn anthropic_fallbacks(&self) -> bool {
+        self.provider == AiProvider::Anthropic
+            && ANTHROPIC_FALLBACK_MODELS.contains(&self.model.as_str())
+    }
+}
+
 /// The human-readable message in a cloud API error body. OpenAI and Gemini
 /// use `{"error": {"message": ...}}`; Anthropic nests it the same way under
 /// `{"type": "error", "error": {...}}`.
@@ -832,7 +883,7 @@ fn parse_gemini_response(json: &serde_json::Value) -> Result<String> {
 }
 
 /// Strip <think>...</think> tags from qwen3-style thinking models
-fn strip_think_tags(text: &str) -> String {
+pub(crate) fn strip_think_tags(text: &str) -> String {
     let mut result = text.to_string();
     // Remove <think>...</think> blocks (can be multiline). Search for the
     // closing tag *after* the opening one, so a stray "</think>" earlier in the
