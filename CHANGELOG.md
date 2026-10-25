@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a holding that then appears twice is merged).
 - `MF:` alerts follow Indian market hours instead of US ones.
 - `report portfolio` no longer gives the AI a price of 0 for holdings without
-  a live price.
+  a live price, and `export portfolio` / `export watchlist` leave a missing
+  price empty instead of writing 0.
 - The rule-based insights in `analyze` were titled "AI Insights"; they are not
   AI and are now titled "Insights".
 
