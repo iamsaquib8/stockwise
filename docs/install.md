@@ -23,8 +23,8 @@ Termux). `STOCKWISE_INSTALL=/usr/local/bin` changes the directory and
 | macOS, Linux | `brew install iamsaquib8/tap/stockwise` ¹ | ✓ | `brew upgrade` |
 | Any (Python) | `pipx install stockwise` or `uv tool install stockwise` ² | — | `pipx upgrade stockwise` / `uv tool upgrade stockwise` |
 | Any (Python), no install | `uvx stockwise quote RELIANCE` ² | — | always the latest |
-| Debian 13+, Ubuntu 24.04+ | `curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb` ² | ✓ | download the new `.deb` |
-| Fedora 40+ | `sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm` ² | ✓ | run the same command again |
+| Debian 12+, Ubuntu 22.04+ | `curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb` ² | ✓ | download the new `.deb` |
+| Fedora, RHEL 9+ | `sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm` ² | ✓ | run the same command again |
 | Arch Linux | `yay -S stockwise-bin` ¹ | ✓ | `yay -Syu` |
 | Nix | `nix profile install github:iamsaquib8/stockwise` | ✓ | `nix profile upgrade stockwise` |
 | NixOS / nixpkgs | `nix profile install nixpkgs#stockwise` ³ | ✓ | with your channel |
@@ -43,11 +43,11 @@ AUR/winget submission, Docker Hub credentials); see
 ² Releases after 0.5.0; PyPI also needs its one-time trusted-publisher setup.
 ³ Prepared and waiting to be submitted to nixpkgs and termux-packages.
 
-On ARM Linux, use `stockwise_arm64.deb` or `stockwise-aarch64.rpm`. The
-`.deb`/`.rpm` need glibc 2.39 or newer; on older distributions use the quick
-install, which works back to glibc 2.34 (e.g. Ubuntu 22.04, Debian 12, RHEL 9).
-The PyPI wheels are built for manylinux (glibc 2.17+) and musllinux, so
-`pipx` also works on older and Alpine systems.
+On ARM Linux, use `stockwise_arm64.deb` or `stockwise-aarch64.rpm`. The Linux
+binaries (archives, quick install, `.deb`/`.rpm`) need glibc 2.34 or newer:
+Ubuntu 22.04, Debian 12, RHEL 9 and later. The PyPI wheels are built for
+manylinux (glibc 2.17+) and musllinux, so `pipx` also works on older and
+Alpine systems.
 
 Where completions are not installed for you:
 

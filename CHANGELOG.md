@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prebuilt Linux binaries (archives, `install.sh`, `cargo binstall`, Homebrew
   on Linux, AUR) required glibc 2.39 and failed on Ubuntu 22.04, Debian 12 and
   RHEL 9 with "version `GLIBC_2.39' not found". They are now built on Ubuntu
-  22.04 and need glibc 2.35 or newer.
+  22.04 and need glibc 2.34 or newer.
 
 ## [0.5.0] - 2026-10-25
 

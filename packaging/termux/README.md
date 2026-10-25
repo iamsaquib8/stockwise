@@ -47,6 +47,10 @@ on new tags.
 ## Checks
 
 `.github/workflows/packaging.yml` builds `aarch64-linux-android` with the
-runner's NDK and syntax-checks `build.sh` on packaging changes. The release
-build was also checked locally with NDK r28 (`cargo build --release --target
-aarch64-linux-android`); the binary has not been run on a device yet.
+runner's NDK and syntax-checks `build.sh` on packaging changes. A release
+build with NDK r28 (`cargo build --release --target aarch64-linux-android`,
+API 24 clang) was run on an Android 16 arm64 emulator through `adb shell`:
+`--version`, `doctor`, a live `quote` over HTTPS and a watchlist write work;
+the OS keyring is reported as unavailable and secrets stay in owner-only
+files, as on other systems without one. Not yet run inside the Termux app
+itself, and `build.sh` has not been run through the Termux builder.

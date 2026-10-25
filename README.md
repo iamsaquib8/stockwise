@@ -102,15 +102,14 @@ yay -S stockwise-bin                             # Arch Linux, AUR (after the pa
 nix profile install github:iamsaquib8/stockwise  # Nix flake (try it: nix run github:iamsaquib8/stockwise)
 ```
 
-**Debian, Ubuntu, Fedora** — `.deb` / `.rpm` for x86_64 and arm64 (releases after 0.5.0; glibc 2.39+, e.g. Debian 13, Ubuntu 24.04, Fedora 40)
+**Debian, Ubuntu, Fedora, RHEL** — `.deb` / `.rpm` for x86_64 and arm64 (releases after 0.5.0; glibc 2.34+: Debian 12, Ubuntu 22.04, RHEL 9 and newer)
 
 ```bash
 curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb
 sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm
 ```
 
-On ARM use `stockwise_arm64.deb` / `stockwise-aarch64.rpm`. Older
-distributions: use the installer above.
+On ARM use `stockwise_arm64.deb` / `stockwise-aarch64.rpm`.
 
 **Windows**
 
