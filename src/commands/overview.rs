@@ -428,12 +428,13 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
             println!("  {}", note.dimmed());
         }
         totals.print_exclusions();
+        val.print_price_notes();
     }
 
     let wl = Watchlist::load()?;
     if !wl.symbols.is_empty() {
         let w_refs: Vec<&str> = wl.symbols.iter().map(|s| s.as_str()).collect();
-        let w_quotes = client.get_quote(&w_refs).await?;
+        let w_quotes = views::quotes_with_off_market(&client, &w_refs).await?.0;
         print_section(&tf(Msg::WatchlistCount, &[&wl.symbols.len()]));
         for q in &w_quotes {
             let cur = q.currency.as_deref();
@@ -459,7 +460,7 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
         let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect();
         unique.sort();
         unique.dedup();
-        let a_quotes = client.get_quote(&unique).await?;
+        let a_quotes = views::quotes_with_off_market(&client, &unique).await?.0;
         // Missing data (no price, too little history) never reads as triggered.
         let rows = views::alert_rows(&client, &store.alerts, &a_quotes, chrono::Utc::now()).await;
         let triggered: Vec<String> = rows

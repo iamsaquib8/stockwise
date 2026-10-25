@@ -37,6 +37,7 @@ mod intraday;
 mod longterm;
 mod market;
 mod notify;
+mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;

@@ -175,7 +175,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             }
 
             // 5. AI report
-            println!("  [5/5] Generating AI report...");
+            println!("  [5/5] Generating AI research notes...");
             let mut ai = crate::ai::AiClient::connect().await;
             if ai.is_available().await {
                 let mut data = String::new();
@@ -186,10 +186,8 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                     ));
                 }
                 if let Ok(report) = ai.generate_longterm_report(&data).await {
-                    print_section("AI Investment Memo");
-                    for line in report.lines() {
-                        println!("  {}", line);
-                    }
+                    print_section("AI Research Notes");
+                    print_ai_answer(&report);
                 }
             } else {
                 println!("    Ollama not running. Skipping AI report.");
@@ -969,7 +967,7 @@ async fn eod_ai_report(state: &DaemonState, market: Market) {
     if !ai.is_available().await {
         return;
     }
-    println!("  {} Generating AI EOD report...", "⟳".yellow());
+    println!("  {} Generating AI end-of-day notes...", "⟳".yellow());
     let wins = state.positions.iter().filter(|p| p.pnl > 0.0).count();
     let mut data = format!(
         "Intraday results: P&L={}{:.0}, {} wins {} losses\n",
@@ -985,10 +983,8 @@ async fn eod_ai_report(state: &DaemonState, market: Market) {
         ));
     }
     if let Ok(report) = ai.generate_intraday_report(&data).await {
-        print_section("AI EOD Analysis");
-        for line in report.lines() {
-            println!("  {}", line);
-        }
+        print_section("AI End-of-Day Notes");
+        print_ai_answer(&report);
     }
 }
 

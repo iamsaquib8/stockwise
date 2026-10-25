@@ -220,7 +220,7 @@ async fn check_alerts(
     symbols.sort();
     symbols.dedup();
     let client = feed.client().await?;
-    let quotes = client.get_quote(&symbols).await?;
+    let quotes = views::quotes_with_off_market(client, &symbols).await?.0;
     // Daily bars once per symbol per check, for the technical conditions.
     let due_alerts: Vec<crate::alerts::Alert> = due.iter().map(|a| (*a).clone()).collect();
     let data = views::alert_data(client, &due_alerts, &quotes, now).await;

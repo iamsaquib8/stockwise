@@ -8,7 +8,33 @@ pub struct Watchlist {
 
 impl Watchlist {
     pub fn load() -> Result<Self> {
-        crate::store::load("watchlist.json")
+        let mut wl: Self = crate::store::load("watchlist.json")?;
+        wl.repair_symbols();
+        Ok(wl)
+    }
+
+    /// Undo the market suffix older versions put on namespaced symbols
+    /// (`watch add MF:120503` stored `MF:120503.NS`), dropping a repeat that
+    /// creates. The repair is saved with the next change to the watchlist.
+    fn repair_symbols(&mut self) -> bool {
+        let mut changed = false;
+        let mut seen: Vec<String> = Vec::with_capacity(self.symbols.len());
+        for sym in std::mem::take(&mut self.symbols) {
+            let sym = match crate::market::repair_namespaced(&sym) {
+                Some(fixed) => {
+                    changed = true;
+                    fixed
+                }
+                None => sym,
+            };
+            if seen.contains(&sym) {
+                changed = true;
+            } else {
+                seen.push(sym);
+            }
+        }
+        self.symbols = seen;
+        changed
     }
 
     pub fn save(&self) -> Result<()> {
@@ -35,6 +61,22 @@ impl Watchlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fund_codes_stored_with_a_market_suffix_are_repaired() {
+        let mut wl = Watchlist {
+            symbols: vec![
+                "MF:120503.NS".into(),
+                "TCS.NS".into(),
+                "MF:120503".into(),
+                "MF:INF179K01UT0.L".into(),
+            ],
+        };
+        assert!(wl.repair_symbols());
+        assert_eq!(wl.symbols, ["MF:120503", "TCS.NS", "MF:INF179K01UT0"]);
+        assert!(!wl.repair_symbols(), "idempotent");
+        assert_eq!(wl.symbols.len(), 3);
+    }
 
     #[test]
     fn test_add_new_symbol() {

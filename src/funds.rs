@@ -1156,6 +1156,25 @@ pub async fn load_amfi() -> Result<Vec<Scheme>> {
     Ok(schemes)
 }
 
+/// [`load_amfi`], parsed once and shared: valuing `MF:` holdings on every
+/// `serve` request or TUI refresh reuses it for up to an hour.
+pub async fn load_amfi_shared() -> Result<std::sync::Arc<Vec<Scheme>>> {
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    static PARSED: Mutex<Option<(Instant, Arc<Vec<Scheme>>)>> = Mutex::new(None);
+    const KEEP: Duration = Duration::from_secs(3600);
+    if let Some((at, schemes)) = PARSED.lock().ok().and_then(|p| p.clone())
+        && at.elapsed() < KEEP
+    {
+        return Ok(schemes);
+    }
+    let schemes = Arc::new(load_amfi().await?);
+    if let Ok(mut p) = PARSED.lock() {
+        *p = Some((Instant::now(), schemes.clone()));
+    }
+    Ok(schemes)
+}
+
 /// NAV history for one scheme (cached for 12 hours).
 pub async fn load_history(client: &reqwest::Client, code: u32) -> Result<NavHistory> {
     let url = format!("{MFAPI_URL}/{code}");
@@ -1173,10 +1192,10 @@ pub async fn load_history(client: &reqwest::Client, code: u32) -> Result<NavHist
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    const NAVALL: &str = "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date\r
+    pub(crate) const NAVALL: &str = "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date\r
  \r
 Open Ended Schemes(Equity Scheme - Flexi Cap Fund)\r
  \r
