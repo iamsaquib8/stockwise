@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](index.md)
+[Install](install.md)
 [Cheatsheet](cheatsheet.md)
 [How StockWise compares](comparison.md)
 

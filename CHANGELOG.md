@@ -41,6 +41,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other agents; `server.json` describes the server for the official MCP
   registry (`io.github.iamsaquib8/stockwise`: crates.io, PyPI, GHCR), and
   `packaging/mcpb/` builds a Claude Desktop extension (`.mcpb`).
+- **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels that carry the
+  prebuilt binary (maturin `bindings = "bin"`, no Python code or
+  dependencies) for manylinux and musllinux x86_64/aarch64, macOS x86_64 and
+  arm64 and Windows x86_64, plus an sdist that builds from source. Built on
+  every tag; uploaded with PyPI trusted publishing once the maintainer
+  enables it.
+- **`.deb` and `.rpm` release assets** for x86_64 and arm64
+  (`stockwise_amd64.deb`, `stockwise-x86_64.rpm`, ...), with man pages, bash/
+  zsh/fish completions and docs, and `.sha256` files. Version-less names, so
+  `releases/latest/download/...` links stay stable; `sudo dnf install <URL>`
+  works directly.
+- **Termux on Android**: an `aarch64-linux-android` release archive (NDK, API
+  24), picked by `install.sh` on Termux (installs to `$PREFIX/bin`) and by
+  `cargo binstall`; and a ready-to-submit termux-packages recipe in
+  `packaging/termux/`.
+- **nixpkgs**: a ready-to-submit `packaging/nixpkgs/package.nix`
+  (`buildRustPackage` with `cargoHash`, man pages, completions, version check,
+  update script), built in CI with the flake's nixpkgs.
+- **Docker Hub mirror**: release tags copy the multi-arch GHCR image to
+  `docker.io/iamsaquib8/stockwise` with its description, when Docker Hub
+  credentials are configured. Both registries now carry an OCI description
+  on the multi-arch index.
+- **Download stats without telemetry**: a nightly workflow archives crates.io,
+  GitHub release (per asset), GHCR, Docker Hub, PyPI, Homebrew, AUR and GitHub
+  traffic/referrer numbers to the `stats` branch;
+  `scripts/download-stats.py summary` prints them. Nothing is collected from
+  users.
+- An [Install](docs/install.md) page listing every install path, what it
+  includes and how it updates.
 
 ### Changed
 - Mutual funds and Sovereign Gold Bonds are valued in `portfolio` (table,
@@ -84,6 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AI and are now titled "Insights".
 - The Docker image carries the `io.modelcontextprotocol.server.name` label the
   MCP registry checks.
+- Prebuilt Linux binaries (archives, `install.sh`, `cargo binstall`, Homebrew
+  on Linux, AUR) required glibc 2.39 and failed on Ubuntu 22.04, Debian 12 and
+  RHEL 9 with "version `GLIBC_2.39' not found". They are now built on Ubuntu
+  22.04 and need glibc 2.34 or newer.
 
 ## [0.5.0] - 2026-10-25
 
