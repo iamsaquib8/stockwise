@@ -28,9 +28,9 @@ stockwise doctor
 **Dedicated reports** always use the model:
 
 ```bash
-stockwise report intraday     # Morning trading brief
-stockwise report longterm     # Investment memo for SIP
-stockwise report portfolio    # Portfolio health review
+stockwise report intraday     # Notes on today's intraday scan
+stockwise report longterm     # Research notes on the long-term scores
+stockwise report portfolio    # Notes on your portfolio (funds at NAV, SGBs from NSE)
 stockwise report RELIANCE     # Single-stock analysis
 ```
 
@@ -44,12 +44,32 @@ stockwise compare TCS INFY --ai
 
 | Command | AI section |
 |---------|-----------|
-| `analyze` | Fundamental verdict |
-| `technical` | Indicator confluence interpretation |
-| `compare` | "Which looks stronger?" verdict |
-| `backtest` | Strategy viability notes |
+| `analyze` | Valuation in context, trend, risks, what to watch |
+| `technical` | Whether the indicators agree, possible scenarios, levels to watch |
+| `compare` | How the stocks differ on valuation, growth and risk (no overall pick) |
+| `backtest` | How robust the results look, when the strategy works or fails |
 | `screen` | Notes on the screened names, value-trap warnings |
 | `deep` | Summary of the full report |
+
+## Educational, not advice
+
+Every prompt starts with the same rules: explain what the data shows — signals,
+trends, valuation context, risks and what to watch — in neutral, conditional
+language, and never tell the reader to buy, sell, hold, accumulate or avoid
+anything, never pick a winner, and give no price targets, entry or exit levels,
+position sizes or allocations. This follows SEBI's rules for investment advisers
+and research analysts (and its guidance on finfluencers): StockWise is neither.
+Every AI section ends with a one-line disclaimer:
+
+> AI-generated educational analysis, not investment advice or a recommendation
+> to buy, sell or hold. StockWise is not a SEBI-registered investment adviser or
+> research analyst.
+
+A model can still ignore its instructions; treat its output as commentary. The
+prompts live in `src/ai.rs` (`ai::prompts`), and a test checks that none of
+them asks for a verdict or a call. When the prompts change, `PROMPT_VERSION` is
+bumped: it is part of the cache key, so an answer cached under older wording is
+never shown again.
 
 AI is opt-in because a local model typically takes **30–60 seconds** per
 answer, which would turn these sub-second commands into minute-long waits.
@@ -119,7 +139,7 @@ error, not as an empty answer.
   (or set `STOCKWISE_AI=1`). Plain commands never contact it.
 - **What is sent:** the prompt for that command — the market data StockWise
   fetched (prices, ratios, indicators, backtest numbers) and, for
-  `report portfolio`, your holdings with quantities and cost. No broker
+  `report portfolio`, your holdings with quantities, cost and fund names. No broker
   credentials, API keys for other services, or data-directory files are
   included.
 - **You are told when it happens:** the first cloud request of each run prints
@@ -130,7 +150,8 @@ error, not as an empty answer.
 - Requests to OpenAI set `store: false`. Each provider's own data-retention
   policy still applies; read it before sending portfolio data.
 - Answers are cached for an hour in Redis (when running) under a hash of the
-  provider, model and prompt, so repeating a command doesn't send it again.
+  prompt version, provider, model and prompt, so repeating a command doesn't
+  send it again.
 
 ## Suggested local models
 

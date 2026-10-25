@@ -57,6 +57,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Add a purchase (a lot) | `stockwise portfolio add TCS 10 3500 --date 2023-04-12` |
 | Sell (oldest lots first) | `stockwise portfolio sell TCS 5 3900` |
 | Holdings, P&L and XIRR | `stockwise portfolio` |
+| Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
 | Import from your broker | `stockwise import kite holdings.csv` (also `groww`, `upstox`, `indmoney`, `cas`) |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |
 | Splits, bonuses, dividends | `stockwise portfolio actions --apply` |

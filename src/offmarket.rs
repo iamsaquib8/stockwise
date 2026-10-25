@@ -436,11 +436,7 @@ pub async fn price(src: &impl DataSource, symbols: &[String], yahoo: &[Quote]) -
             Err(e) => price_funds(symbols, Err(&format!("{e:#}"))),
         });
     }
-    let sgbs: Vec<String> = symbols
-        .iter()
-        .filter_map(|s| sgb_id(s).map(|id| (s, id)))
-        .map(|(s, _)| s.clone())
-        .collect();
+    let sgbs: Vec<String> = symbols.iter().filter(|s| is_sgb(s)).cloned().collect();
     if sgbs.is_empty() {
         return out;
     }

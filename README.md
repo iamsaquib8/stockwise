@@ -341,8 +341,9 @@ read-only until you opt in. See [docs/brokers.md](docs/brokers.md).
 
 ### Local AI (optional)
 
-With [Ollama](https://ollama.com) running, `stockwise report TCS` writes an AI
-stock report, and `--ai` adds commentary to `analyze`, `technical`, `compare`,
+With [Ollama](https://ollama.com) running, `stockwise report TCS` writes
+educational AI notes on a stock (signals, risks, what to watch — never buy/sell
+calls), and `--ai` adds commentary to `analyze`, `technical`, `compare`,
 `screen`, `backtest` and `deep`. It's opt-in because local models take 30–60s.
 Prefer a hosted model? Set `STOCKWISE_AI_PROVIDER` to `openai`, `anthropic` or
 `gemini` with your key — still only for `report` and `--ai`, with a notice
@@ -429,7 +430,7 @@ The full documentation is at **[iamsaquib8.github.io/stockwise](https://iamsaqui
 
 ## Roadmap & contributing
 
-Next up: an MCP server for AI assistants, `pipx`/`uvx` installs, published Homebrew/winget/Scoop/AUR packages, mutual funds in portfolio valuation, and tax-season tools — see the
+Next up: an MCP server for AI assistants, `pipx`/`uvx` installs, published Homebrew/winget/Scoop/AUR packages, and tax-season tools — see the
 [ROADMAP](ROADMAP.md). Ideas and bug reports are
 welcome in [Discussions](https://github.com/iamsaquib8/stockwise/discussions) and
 [Issues](https://github.com/iamsaquib8/stockwise/issues); start with

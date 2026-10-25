@@ -83,7 +83,7 @@ This comes first.
 
 ## 🛠️ Now — finish what 0.5 started (0.5.x)
 
-- 📋 **Mutual funds and SGBs in portfolio valuation** — price `MF:<AMFI code|ISIN>` holdings (from
+- ✅ **Mutual funds and SGBs in portfolio valuation** — price `MF:<AMFI code|ISIN>` holdings (from
   `import cas`) from AMFI's end-of-day NAVs and SGBs from NSE across `portfolio`, `dashboard`,
   `tui`, `serve`, `wealth`, `rebalance` and `tax` (`portfolio benchmark` and `tax export` already
   handle fund codes), and stop `portfolio add`, `watch add` and `alert add` turning `MF:123` into
@@ -94,7 +94,7 @@ This comes first.
 - 🛠️ **Broker integrations verified against live accounts** — the read-only `trade selftest` and the
   [verification criteria](docs/brokers.md#help-verify-a-broker) are ready; we need 3 reports per
   broker plus one small live order a tester places themselves
-- 📋 **Educational AI wording** — reword `report` and `--ai` output from buy/hold/sell "verdicts" to
+- ✅ **Educational AI wording** — reword `report` and `--ai` output from buy/hold/sell "verdicts" to
   neutral analysis ("signals point to…, risks are…") with a disclaimer, in line with SEBI's
   research-analyst and finfluencer rules
 - 📋 **SEBI retail-algo rules** (in force since 1 Apr 2026) in `trade` — order-rate limits,
