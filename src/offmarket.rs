@@ -217,7 +217,6 @@ pub fn is_equity_oriented(category: &str, name: &str) -> bool {
         "debt",
         "liquid",
         "crisil",
-        "psu",
         "gold",
         "silver",
         "t-bill",
@@ -616,6 +615,11 @@ Old AMC\r
         assert!(eq("Equity Scheme - ELSS", "Axis ELSS Tax Saver"));
         assert!(eq("Hybrid Scheme - Arbitrage Fund", "Kotak Arbitrage Fund"));
         assert!(eq("Other Scheme - Index Funds", "UTI Nifty 50 Index Fund"));
+        assert!(eq("Other Scheme - Other  ETFs", "Kotak Nifty PSU Bank ETF"));
+        assert!(!eq(
+            "Other Scheme - Index Funds",
+            "Edelweiss Nifty PSU Bond Plus SDL"
+        ));
         assert!(!eq("Debt Scheme - Liquid Fund", "HDFC Liquid Fund"));
         assert!(!eq("Hybrid Scheme - Conservative Hybrid Fund", "X"));
         assert!(!eq(

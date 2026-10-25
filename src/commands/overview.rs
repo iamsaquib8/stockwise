@@ -439,11 +439,11 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
         for q in &w_quotes {
             let cur = q.currency.as_deref();
             let sym = q.symbol.as_deref().unwrap_or("???");
-            let pct = q.regular_market_change_percent.unwrap_or(0.0);
-            let pct_str = if pct >= 0.0 {
-                format!("+{:.2}%", pct).green().to_string()
-            } else {
-                format!("{:.2}%", pct).red().to_string()
+            // A fund's NAV has no intraday change: "—", not +0.00%.
+            let pct_str = match q.regular_market_change_percent {
+                Some(p) if p >= 0.0 => format!("+{:.2}%", p).green().to_string(),
+                Some(p) => format!("{:.2}%", p).red().to_string(),
+                None => "—".to_string(),
             };
             println!(
                 "  {:<12} {}  {}",

@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by older versions are repaired when the portfolio, watchlist and alerts load
   (a holding that then appears twice is merged).
 - `MF:` alerts follow Indian market hours instead of US ones.
+- `portfolio actions` skips funds and SGBs instead of asking Yahoo for them;
+  `portfolio benchmark` and `tax export` handle funds stored as `MF:<ISIN>`;
+  `portfolio sell` without a price refuses an SGB valued only by its gold
+  estimate.
 - `report portfolio` no longer gives the AI a price of 0 for holdings without
   a live price, and `export portfolio` / `export watchlist` leave a missing
   price empty instead of writing 0.

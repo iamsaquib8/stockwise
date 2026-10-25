@@ -999,6 +999,24 @@ pub async fn cmd_portfolio_sell(
             if let Some(c) = val.currency(&resolved) {
                 cur = Some(c);
             }
+            // An estimate is no sale price: SGBs NSE shows no trade for need one typed.
+            if val.price_source(&resolved) == Some(PriceSource::GoldEstimate) {
+                bail!(
+                    "No market price for {} (only an estimate from gold spot); give the sale price: \
+                     stockwise portfolio sell {} {} <PRICE>",
+                    resolved,
+                    symbol,
+                    shares
+                );
+            }
+            for note in val
+                .off
+                .notes
+                .iter()
+                .filter(|n| n.symbols.contains(&resolved))
+            {
+                println!("  {} {}", "!".yellow(), note.line());
+            }
             val.price(&resolved).with_context(|| {
                 format!(
                     "No live price for {}; give the sale price: stockwise portfolio sell {} {} <PRICE>",
@@ -1239,12 +1257,27 @@ pub async fn cmd_portfolio_actions(
             if !history.contains(&resolved) {
                 bail!("{} is not in your portfolio", resolved);
             }
+            if offmarket::is_off_market(&resolved) {
+                println!(
+                    "\n  {}",
+                    format!("{resolved}: fund and SGB units have no splits or dividends to apply.")
+                        .dimmed()
+                );
+                return Ok(());
+            }
             vec![resolved]
         }
-        None => history,
+        // Fund and SGB units never split, and Yahoo has no data for them.
+        None => history
+            .into_iter()
+            .filter(|s| !offmarket::is_off_market(s))
+            .collect(),
     };
     if targets.is_empty() {
-        println!("\n  {}", "Portfolio is empty.".dimmed());
+        println!(
+            "\n  {}",
+            "No holdings with corporate actions to check.".dimmed()
+        );
         return Ok(());
     }
 

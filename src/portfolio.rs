@@ -467,7 +467,15 @@ impl Portfolio {
         let upgrade = path.exists() && p.version < SCHEMA_VERSION;
         p.normalize();
         let repaired = p.repair_symbols();
-        if upgrade || (repaired && path.exists()) {
+        if repaired && !upgrade && path.exists() {
+            // Best effort: a read-only data directory (or `serve`) still
+            // loads, with the repair kept in memory until the next save.
+            if let Err(e) = p.save_repaired(path) {
+                eprintln!("  Warning: repaired fund symbols in memory only ({e:#})");
+            }
+            return Ok(p);
+        }
+        if upgrade {
             let bak = backup_path(path);
             if !bak.exists() {
                 std::fs::copy(path, &bak).with_context(|| {
@@ -481,6 +489,17 @@ impl Portfolio {
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
         crate::store::save_to(path, self, false)
+    }
+
+    /// Save symbols repaired on load, keeping the original once as `.bak`.
+    fn save_repaired(&self, path: &Path) -> Result<()> {
+        let bak = backup_path(path);
+        if !bak.exists() {
+            std::fs::copy(path, &bak).with_context(|| {
+                format!("Cannot back up {} before repairing it", path.display())
+            })?;
+        }
+        self.save_to(path)
     }
 
     /// Give every old-format holding a single lot (dated when it was added to
@@ -1420,6 +1439,25 @@ mod tests {
         let again = Portfolio::load_from(&path).unwrap();
         assert_eq!(again.holdings.len(), 3);
         assert_eq!(again.holding("MF:120503").unwrap().lots, fund.lots);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_still_loads_from_a_read_only_data_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("repair-ro");
+        let path = dir.join("portfolio.json");
+        let mut old = Portfolio::default();
+        old.add_lot("MF:120503.NS", lot(10.0, 50.0, "2024-01-10"));
+        old.save_to(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let p = Portfolio::load_from(&path);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = p.expect("a failed repair save must not fail the load");
+        assert_eq!(p.holdings[0].symbol, "MF:120503");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }
 
