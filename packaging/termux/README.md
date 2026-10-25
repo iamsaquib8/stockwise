@@ -3,7 +3,7 @@
 Two ways to get StockWise on an Android phone with
 [Termux](https://termux.dev):
 
-- **Prebuilt:** releases after 0.5.0 have `stockwise-aarch64-linux-android.tar.gz`,
+- **Prebuilt:** releases from 0.6.0 on have `stockwise-aarch64-linux-android.tar.gz`,
   built with the Android NDK (API 24, the Termux minimum). `install.sh` picks
   it on Termux and installs to `$PREFIX/bin`:
 

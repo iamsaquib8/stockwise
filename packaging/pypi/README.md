@@ -39,6 +39,19 @@ through Indian brokers — see the
 
 Your portfolio stays in local files and StockWise sends no telemetry.
 
+## Use with AI assistants
+
+`stockwise mcp` is a Model Context Protocol server: Claude Desktop, Claude
+Code, Cursor and other assistants can use quotes, fund NAVs, option chains,
+backtests and your portfolio as read-only tools. It never places orders. With
+`uvx` there is nothing to install first:
+
+```json
+{ "mcpServers": { "stockwise": { "command": "uvx", "args": ["stockwise", "mcp"] } } }
+```
+
+See [AI](https://iamsaquib8.github.io/stockwise/ai.html) for setup and limits.
+
 ## Other ways to install
 
 Homebrew, Scoop, winget, AUR, `.deb`/`.rpm`, Docker, Nix, Termux and
@@ -50,3 +63,5 @@ Homebrew, Scoop, winget, AUR, `.deb`/`.rpm`, Docker, Nix, Termux and
 
 MIT licensed · [Source](https://github.com/iamsaquib8/stockwise) ·
 [Changelog](https://github.com/iamsaquib8/stockwise/blob/master/CHANGELOG.md)
+
+<!-- mcp-name: io.github.iamsaquib8/stockwise -->

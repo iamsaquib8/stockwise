@@ -82,13 +82,13 @@ stockwise sip NIFTYBEES 5000 -p 5y      # what a ₹5,000/month SIP became (XIRR
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 ```
 
-Installs to `~/.local/bin` (`$PREFIX/bin` on Termux, releases after 0.5.0;
+Installs to `~/.local/bin` (`$PREFIX/bin` on Termux, 0.6.0 and later;
 override with `STOCKWISE_INSTALL=/usr/local/bin`) and verifies the release
 checksum. Every
 [release](https://github.com/iamsaquib8/stockwise/releases/latest) also has
 `.tar.gz` / `.zip` archives with the binary and man pages.
 
-**With Python tools** — any OS, no Rust needed (releases after 0.5.0)
+**With Python tools** — any OS, no Rust needed (0.6.0 and later)
 
 ```bash
 pipx install stockwise                  # or: uv tool install stockwise
@@ -103,7 +103,7 @@ yay -S stockwise-bin                             # Arch Linux, AUR (after the pa
 nix profile install github:iamsaquib8/stockwise  # Nix flake (try it: nix run github:iamsaquib8/stockwise)
 ```
 
-**Debian, Ubuntu, Fedora, RHEL** — `.deb` / `.rpm` for x86_64 and arm64 (releases after 0.5.0; glibc 2.34+: Debian 12, Ubuntu 22.04, RHEL 9 and newer)
+**Debian, Ubuntu, Fedora, RHEL** — `.deb` / `.rpm` for x86_64 and arm64 (0.6.0 and later; glibc 2.34+: Debian 12, Ubuntu 22.04, RHEL 9 and newer)
 
 ```bash
 curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb
@@ -424,7 +424,7 @@ wheels are out: `"command": "uvx", "args": ["stockwise", "mcp"]`. Over HTTP:
 [llms.txt](https://iamsaquib8.github.io/stockwise/llms.txt). Details, the tool
 list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assistants-mcp).
 
-- MCP registry: mcp-name: io.github.iamsaquib8/stockwise
+<!-- mcp-name: io.github.iamsaquib8/stockwise -->
 
 ## Configuration
 
@@ -494,11 +494,12 @@ The full documentation is at **[iamsaquib8.github.io/stockwise](https://iamsaqui
 
 ## Roadmap & contributing
 
-Next up: `pipx`/`uvx` installs, published Homebrew/winget/Scoop/AUR packages, and tax-season tools — see the
-[ROADMAP](ROADMAP.md). Ideas and bug reports are
+Next up: tax-season tools, published PyPI/Homebrew/winget/Scoop/AUR packages and more
+markets — see the [ROADMAP](ROADMAP.md). Ideas and bug reports are
 welcome in [Discussions](https://github.com/iamsaquib8/stockwise/discussions) and
 [Issues](https://github.com/iamsaquib8/stockwise/issues); start with
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md). New to the code? Pick a
+[good first issue](https://github.com/iamsaquib8/stockwise/labels/good%20first%20issue) — each one names the files to change and how to test.
 
 If StockWise is useful to you, a ⭐ helps other people find it.
 

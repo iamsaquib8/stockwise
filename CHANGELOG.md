@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
 ### Added
+- A documentation site at <https://iamsaquib8.github.io/stockwise/> with
+  search, a one-page [cheatsheet](docs/cheatsheet.md) (a test checks that every
+  command in it parses) and an honest [comparison](docs/comparison.md) with
+  other tools.
 - `stockwise mcp` — a [Model Context Protocol](https://modelcontextprotocol.io)
   server for Claude Desktop, Claude Code, Cursor and other AI assistants, on
   the official Rust SDK (`rmcp`). 24 read-only tools: `quote`, `history`,
@@ -740,7 +746,8 @@ Initial development. Not published. Highlights that landed during this phase:
 - Multi-timeframe and braille terminal charts; `-p/--period` flag on chart commands.
 - `deep` command — full report on a single stock in one shot.
 
-[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/iamsaquib8/stockwise/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/iamsaquib8/stockwise/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/iamsaquib8/stockwise/compare/v0.2.0...v0.3.0

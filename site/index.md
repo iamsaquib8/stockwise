@@ -15,7 +15,7 @@ API keys, no account.
 # macOS / Linux / Termux on Android
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 
-# With Python tools (any OS; releases after 0.5.0)
+# With Python tools (any OS; 0.6.0 and later)
 pipx install stockwise      # or: uvx stockwise quote RELIANCE
 
 # With Rust (1.97+)

@@ -10,6 +10,14 @@ docs, new commands, broker integrations, and strategy ideas.
   hard-code real broker credentials, API keys, or personal portfolio data into
   the repo, tests, or fixtures.
 
+## Where to start
+
+Issues labelled [good first issue](https://github.com/iamsaquib8/stockwise/labels/good%20first%20issue) are small and
+self-contained: each says what to change, links the code, and lists what
+"done" looks like. Comment on one to claim it so two people don't work on the
+same thing. Larger ideas are on the [roadmap](ROADMAP.md); open a discussion or
+issue before starting one.
+
 ## Getting set up
 
 ```bash

@@ -40,7 +40,7 @@ Termux). `STOCKWISE_INSTALL=/usr/local/bin` changes the directory and
 ¹ Needs a one-time publishing step by the maintainer (tap repository,
 AUR/winget submission, Docker Hub credentials); see
 [packaging](https://github.com/iamsaquib8/stockwise/blob/master/packaging/README.md).
-² Releases after 0.5.0; PyPI also needs its one-time trusted-publisher setup.
+² 0.6.0 and later; PyPI also needs its one-time trusted-publisher setup.
 ³ Prepared and waiting to be submitted to nixpkgs and termux-packages.
 
 On ARM Linux, use `stockwise_arm64.deb` or `stockwise-aarch64.rpm`. The Linux
