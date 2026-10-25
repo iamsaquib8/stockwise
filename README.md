@@ -82,8 +82,9 @@ stockwise sip NIFTYBEES 5000 -p 5y      # what a ₹5,000/month SIP became (XIRR
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 ```
 
-Installs to `~/.local/bin` (`$PREFIX/bin` on Termux; override with
-`STOCKWISE_INSTALL=/usr/local/bin`) and verifies the release checksum. Every
+Installs to `~/.local/bin` (`$PREFIX/bin` on Termux, releases after 0.5.0;
+override with `STOCKWISE_INSTALL=/usr/local/bin`) and verifies the release
+checksum. Every
 [release](https://github.com/iamsaquib8/stockwise/releases/latest) also has
 `.tar.gz` / `.zip` archives with the binary and man pages.
 

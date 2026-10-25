@@ -198,3 +198,29 @@ jobs:
           file target/aarch64-linux-android/debug/stockwise
       - name: Termux recipe syntax
         run: bash -n packaging/termux/build.sh
+
+  # Builds packaging/termux/build.sh (the released tag it names) with the
+  # official termux-packages builder, as a pull request there would.
+  termux:
+    name: Termux recipe (termux-packages builder)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: stockwise
+      - uses: actions/checkout@v7
+        with:
+          repository: termux/termux-packages
+          path: termux-packages
+      - name: Build packages/stockwise for aarch64
+        working-directory: termux-packages
+        run: |
+          mkdir -p packages/stockwise
+          cp ../stockwise/packaging/termux/build.sh packages/stockwise/build.sh
+          ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 stockwise
+          ls -l output/
+          dpkg-deb --contents output/stockwise_*_aarch64.deb | grep -E 'bin/stockwise|man1/stockwise.1|_stockwise'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: termux-deb
+          path: termux-packages/output/*.deb

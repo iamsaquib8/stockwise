@@ -26,9 +26,11 @@ default install step would treat as a Python package.
 ## Submitting (one time)
 
 1. Fork `termux/termux-packages` and copy `build.sh` to
-   `packages/stockwise/build.sh`.
-2. Build it with the official builder (needs Docker; on Apple silicon it runs
-   the x86_64 image under emulation, so expect a slow first build):
+   `packages/stockwise/build.sh`. If a newer tag is out, set
+   `TERMUX_PKG_VERSION` to it and `TERMUX_PKG_SHA256` to
+   `curl -sL https://github.com/iamsaquib8/stockwise/archive/refs/tags/v<version>.tar.gz | sha256sum`.
+2. Build it with the official builder (Docker on an x86_64 Linux machine; on
+   Apple silicon use the `termux` job's artifact from packaging.yml instead):
 
    ```bash
    ./scripts/run-docker.sh ./build-package.sh -a aarch64 stockwise
@@ -53,4 +55,7 @@ API 24 clang) was run on an Android 16 arm64 emulator through `adb shell`:
 `--version`, `doctor`, a live `quote` over HTTPS and a watchlist write work;
 the OS keyring is reported as unavailable and secrets stay in owner-only
 files, as on other systems without one. Not yet run inside the Termux app
-itself, and `build.sh` has not been run through the Termux builder.
+itself. The `termux` job in packaging.yml builds `build.sh` with the official
+builder on GitHub's x86_64 runners; locally on Apple silicon the builder image
+fails to unpack sources under emulation (`tar: Cannot mkdir: Function not
+implemented`), so that job is the place to check the recipe.

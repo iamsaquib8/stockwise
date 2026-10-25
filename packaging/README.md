@@ -120,7 +120,8 @@ it renders the templates, compares the AUR `.SRCINFO` with `makepkg
 --printsrcinfo`, builds and smoke-tests the Docker image, runs
 `nix flake check` and builds `nixpkgs/package.nix`, builds and installs the
 `.deb` (Ubuntu) and `.rpm` (Fedora), builds a manylinux wheel and the sdist and
-runs the wheel through `pipx`, and builds for `aarch64-linux-android`. Locally:
+runs the wheel through `pipx`, builds for `aarch64-linux-android`, and builds the
+Termux recipe with the termux-packages builder. Locally:
 
 ```bash
 docker build -t stockwise . && docker run --rm stockwise --version

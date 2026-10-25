@@ -14,7 +14,8 @@ flake's nixpkgs on every packaging change.
    `name`, `email`), in its own commit:
    `maintainers: add iamsaquib8`.
 2. Copy this file to `pkgs/by-name/st/stockwise/package.nix` and put your
-   handle in `maintainers = with lib.maintainers; [ iamsaquib8 ];`.
+   handle in `maintainers = with lib.maintainers; [ iamsaquib8 ];`. If a newer
+   tag is out, bump `version` and refresh both hashes (see *Updating*).
 3. Build and check it from the nixpkgs checkout:
 
    ```bash
