@@ -112,7 +112,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                 let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect();
                 unique.sort();
                 unique.dedup();
-                let a_quotes = client.get_quote(&unique).await?;
+                let a_quotes = views::quotes_with_off_market(&client, &unique).await?.0;
                 let rows =
                     views::alert_rows(&client, &store.alerts, &a_quotes, chrono::Utc::now()).await;
                 let mut triggered = 0;
@@ -146,18 +146,12 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                     .iter()
                     .map(|h| h.symbol.clone())
                     .collect();
-                let p_refs: Vec<&str> = p_syms.iter().map(|s| s.as_str()).collect();
-                let p_quotes = client.get_quote(&p_refs).await?;
+                // Same prices as `harvest`: funds at their NAV, SGBs from NSE.
+                let val = super::portfolio::value_holdings(&client, &p_syms, market, None).await?;
                 let losers: Vec<_> = portfolio
                     .holdings
                     .iter()
-                    .filter(|h| {
-                        p_quotes
-                            .iter()
-                            .find(|q| q.symbol.as_deref() == Some(&h.symbol))
-                            .and_then(|q| q.regular_market_price)
-                            .is_some_and(|price| price < h.avg_cost)
-                    })
+                    .filter(|h| val.price(&h.symbol).is_some_and(|price| price < h.avg_cost))
                     .collect();
                 if !losers.is_empty() {
                     println!(

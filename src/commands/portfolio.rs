@@ -1083,12 +1083,12 @@ pub async fn cmd_portfolio_lots(
     }
 
     // The live price is a nice-to-have here; lots still show without it.
+    // A fund's is its NAV.
     let quote = match YahooClient::new().await {
-        Ok(client) => client
-            .get_quote(&[resolved.as_str()])
+        Ok(client) => value_holdings(&client, std::slice::from_ref(&resolved), market, None)
             .await
             .ok()
-            .and_then(|q| q.into_iter().next()),
+            .and_then(|v| v.quote(&resolved).cloned()),
         Err(_) => None,
     };
     let price = quote.as_ref().and_then(|q| q.regular_market_price);

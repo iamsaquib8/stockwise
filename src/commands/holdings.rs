@@ -427,7 +427,7 @@ pub async fn cmd_alert_check(fmt: Format) -> Result<()> {
 
 // ── Screener ──
 
-pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
+pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
     match what {
         "portfolio" => {
             let portfolio = Portfolio::load()?;
@@ -441,27 +441,28 @@ pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
                 .iter()
                 .map(|h| h.symbol.clone())
                 .collect();
-            let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            // Funds at their NAV, SGBs from NSE; no price = empty cells, never 0.
+            let val = value_holdings(&client, &symbols, market, None).await?;
             let path = "portfolio_export.csv";
             let mut csv = String::from("Symbol,Shares,Avg Cost,Current Price,Value,P&L,P&L %\n");
             for h in &portfolio.holdings {
-                let price = quotes
-                    .iter()
-                    .find(|q| q.symbol.as_deref() == Some(&h.symbol))
-                    .and_then(|q| q.regular_market_price)
-                    .unwrap_or(0.0);
-                let value = h.shares * price;
                 let cost = h.shares * h.avg_cost;
-                let pnl = value - cost;
-                let pnl_pct = if cost > 0.0 {
-                    (pnl / cost) * 100.0
-                } else {
-                    0.0
+                let cells = match val.price(&h.symbol) {
+                    Some(price) => {
+                        let value = h.shares * price;
+                        let pnl = value - cost;
+                        let pnl_pct = if cost > 0.0 {
+                            format!("{:.2}%", pnl / cost * 100.0)
+                        } else {
+                            String::new()
+                        };
+                        format!("{price:.2},{value:.2},{pnl:.2},{pnl_pct}")
+                    }
+                    None => ",,,".to_string(),
                 };
                 csv.push_str(&format!(
-                    "{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}%\n",
-                    h.symbol, h.shares, h.avg_cost, price, value, pnl, pnl_pct
+                    "{},{:.2},{:.2},{}\n",
+                    h.symbol, h.shares, h.avg_cost, cells
                 ));
             }
             std::fs::write(path, &csv)?;
@@ -475,18 +476,24 @@ pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
             }
             let client = YahooClient::new().await?;
             let sym_refs: Vec<&str> = wl.symbols.iter().map(|s| s.as_str()).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            let quotes = views::quotes_with_off_market(&client, &sym_refs).await?.0;
             let path = "watchlist_export.csv";
             let mut csv = String::from("Symbol,Price,Change,Change %,Volume,Market Cap\n");
+            // Missing values are empty cells, never 0.
+            let num = |v: Option<f64>, places: usize| {
+                v.map_or(String::new(), |v| format!("{v:.places$}"))
+            };
             for q in &quotes {
                 csv.push_str(&format!(
-                    "{},{:.2},{:.2},{:.2}%,{},{:.0}\n",
+                    "{},{},{},{},{},{}\n",
                     q.symbol.as_deref().unwrap_or(""),
-                    q.regular_market_price.unwrap_or(0.0),
-                    q.regular_market_change.unwrap_or(0.0),
-                    q.regular_market_change_percent.unwrap_or(0.0),
-                    q.regular_market_volume.unwrap_or(0),
-                    q.market_cap.unwrap_or(0.0)
+                    num(q.regular_market_price, 2),
+                    num(q.regular_market_change, 2),
+                    q.regular_market_change_percent
+                        .map_or(String::new(), |p| format!("{p:.2}%")),
+                    q.regular_market_volume
+                        .map_or(String::new(), |v| v.to_string()),
+                    num(q.market_cap, 0)
                 ));
             }
             std::fs::write(path, &csv)?;
@@ -1499,7 +1506,8 @@ fn india_rules(symbol: &str, val: &Valuation) -> IndiaRules {
                  your slab rate, older units at 12.5% after 24 months"
             )),
             None => IndiaRules::Other(
-                "fund not found in AMFI's NAV file, so whether it is equity-oriented is unknown"
+                "no AMFI category (not in AMFI's NAV file, or the file could not be loaded), so \
+                 whether it is equity-oriented is unknown"
                     .into(),
             ),
         };
