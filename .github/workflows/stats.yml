@@ -1,0 +1,66 @@
+name: Download stats
+
+# Nightly snapshot of the public download and traffic counters (crates.io,
+# GitHub releases, GHCR, Docker Hub, PyPI, Homebrew analytics, AUR, GitHub
+# traffic). StockWise sends no telemetry; this only reads what the registries
+# already publish. Results are committed to the `stats` branch (created on the
+# first run); `scripts/download-stats.py summary` prints them.
+#
+# Repository traffic (views, clones, referrers) needs the optional STATS_TOKEN
+# secret: a fine-grained token with "Administration: Read-only" on this
+# repository and iamsaquib8/homebrew-tap. Without it those numbers are skipped.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: download-stats
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: collect
+    if: github.repository == 'iamsaquib8/stockwise'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check out the stats branch
+        run: |
+          if git fetch --depth 1 origin stats; then
+            git worktree add --detach stats FETCH_HEAD
+          else
+            git worktree add --orphan -b stats stats
+          fi
+
+      - name: Collect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
+        run: python3 scripts/download-stats.py collect --out stats
+
+      - name: Commit
+        working-directory: stats
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -q -m "stats $(date -u +%F)"
+          git push origin HEAD:refs/heads/stats
+
+      - name: Summary
+        run: |
+          {
+            echo '```'
+            python3 scripts/download-stats.py summary --dir stats
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

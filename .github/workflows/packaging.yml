@@ -1,7 +1,8 @@
 name: Packaging
 
-# Checks the package manifests, the Docker image and the Nix flake when they,
-# or the crate files they build from, change. Releases use the same files.
+# Checks the package manifests, the .deb/.rpm, the PyPI wheel, the Android
+# (Termux) build, the Docker image and the Nix expressions when they, or the
+# crate files they build from, change. Releases use the same files.
 on:
   pull_request:
     paths:
@@ -10,6 +11,8 @@ on:
       - ".dockerignore"
       - "flake.nix"
       - "flake.lock"
+      - "pyproject.toml"
+      - "install.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/packaging.yml"
@@ -100,3 +103,98 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - run: nix flake check -L
       - run: nix run . -- --version
+      # The nixpkgs submission builds the released tag, with the flake's nixpkgs.
+      - name: packaging/nixpkgs/package.nix
+        run: |
+          # shellcheck disable=SC2016 # the expression is Nix, not shell
+          nix build -L --no-link --print-out-paths --impure --expr \
+            'let pkgs = (builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+             in pkgs.callPackage ./packaging/nixpkgs/package.nix { }'
+
+  linux-packages:
+    name: .deb and .rpm
+    # Same runner as the release build (glibc 2.35), so this also checks the
+    # packages install on Ubuntu 22.04.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb@3.8.0,cargo-generate-rpm@0.21.1
+      - run: shellcheck packaging/linux/build-packages.sh
+      - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - run: packaging/linux/build-packages.sh x86_64-unknown-linux-gnu dist
+      - name: Install the .deb
+        run: |
+          dpkg-deb --info dist/stockwise_amd64.deb
+          sudo apt-get install -y ./dist/stockwise_amd64.deb
+          stockwise --version
+          man -w stockwise-backtest
+          test -s /usr/share/bash-completion/completions/stockwise
+          sudo apt-get remove -y stockwise
+      - name: Install the .rpm on Fedora and Rocky Linux 9
+        run: |
+          for image in fedora:latest rockylinux/rockylinux:9; do
+            docker run --rm -v "$PWD/dist:/dist:ro" "$image" sh -euxc '
+              dnf install -y /dist/stockwise-x86_64.rpm
+              stockwise --version
+              rpm -ql stockwise | grep -q /usr/share/man/man1/stockwise.1.gz
+              test -s /usr/share/zsh/site-functions/_stockwise'
+          done
+      - name: Install the .deb on Debian 12
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:12 sh -euxc '
+            apt-get update -qq
+            apt-get install -y /dist/stockwise_amd64.deb
+            stockwise --version'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: dist/
+
+  pypi:
+    name: PyPI wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # A debug build is enough to check the packaging.
+      - uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: stable
+          manylinux: auto
+          args: --locked --out dist
+      - uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: stable
+          command: sdist
+          args: --out dist
+      - run: pipx run twine check --strict dist/*
+      - name: Install the wheel and run it
+        run: |
+          pipx install "$(ls dist/*.whl)"
+          stockwise --version
+          STOCKWISE_HOME="$(mktemp -d)" stockwise doctor
+
+  android:
+    name: Android (Termux) build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for aarch64-linux-android with the runner's NDK
+        run: |
+          bin="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android24-clang"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          cargo build --locked --target aarch64-linux-android
+          file target/aarch64-linux-android/debug/stockwise
+      - name: Termux recipe syntax
+        run: bash -n packaging/termux/build.sh

@@ -223,12 +223,17 @@ clippy for all three builds.
 
 ## Releases and packaging
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the five release
-archives (binary, docs, and `man/*.1` from `stockwise man --dir`), publishes the crate,
-renders the Homebrew, Scoop, winget and AUR manifests in `packaging/` with the release's
-checksums, updates the Homebrew tap when its token is configured, and pushes the
-multi-arch `ghcr.io/iamsaquib8/stockwise` image built from `Dockerfile`. `flake.nix`
-builds the same crate with Nix. See [packaging/README.md](../packaging/README.md).
+Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the six release
+archives (binary, docs, and `man/*.1` from `stockwise man --dir`; Linux, macOS, Windows
+and Android for Termux), the `.deb`/`.rpm` packages (`packaging/linux/build-packages.sh`,
+metadata in `Cargo.toml`) and the PyPI wheels (`pyproject.toml`, maturin `bin`),
+publishes the crate, renders the Homebrew, Scoop, winget and AUR manifests in
+`packaging/` with the release's checksums, updates the Homebrew tap and uploads to PyPI
+and Docker Hub when their credentials are configured, and pushes the multi-arch
+`ghcr.io/iamsaquib8/stockwise` image built from `Dockerfile`. `flake.nix` builds the
+same crate with Nix; `packaging/nixpkgs/` and `packaging/termux/` hold the nixpkgs and
+termux-packages recipes. `.github/workflows/stats.yml` archives download counts nightly
+(`scripts/download-stats.py`). See [packaging/README.md](../packaging/README.md).
 
 ## Testing
 

@@ -70,16 +70,21 @@ This comes first.
   (Zerodha, Groww, Dhan, Upstox and Fyers ship MCP servers; Angel One doesn't)
 - 📋 **Findable by AI assistants** — an `llms.txt` index on the docs site and a published Agent
   Skill (`SKILL.md`) so Claude Code and other agents know how to use StockWise
-- 📋 **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels carrying the binary (maturin
-  `bin`), where India's Python trading community already installs its tools
+- 🛠️ **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels carrying the binary (maturin
+  `bin`), where India's Python trading community already installs its tools. Wheels (manylinux,
+  musllinux, macOS, Windows) and the sdist are built on every release; publishing needs the
+  one-time PyPI trusted-publisher setup
 - 📋 **Animated demo** (VHS) at the top of the README and terminal recordings in the docs
-- 📋 **More places to install** — nixpkgs, Termux on Android, `.deb`/`.rpm` release assets, and a
-  Docker Hub mirror of the GHCR image
+- 🛠️ **More places to install** — ✅ `.deb`/`.rpm` release assets and an Android build for Termux
+  (picked by `install.sh`); prepared and waiting on one-time steps: the nixpkgs and
+  termux-packages submissions, and a Docker Hub mirror of the GHCR image (needs Docker Hub
+  credentials)
 - 📋 **Try it without installing** — a Codespaces/devcontainer setup and a read-only hosted demo
   that runs on bundled historical data
 - 📋 **Daily replay challenge** with a shareable image card, built on the simulator's scoring
-- 📋 **Download stats without telemetry** — a nightly job that archives crates.io, GitHub release,
-  Homebrew, Docker and PyPI counts and GitHub traffic referrers
+- ✅ **Download stats without telemetry** — a nightly job archives crates.io, GitHub release,
+  Homebrew, GHCR/Docker Hub, PyPI and AUR counts and GitHub traffic referrers to a `stats` branch;
+  `scripts/download-stats.py summary` prints them
 
 ## 🛠️ Now — finish what 0.5 started (0.5.x)
 
