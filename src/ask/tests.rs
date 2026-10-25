@@ -139,7 +139,7 @@ async fn openai_sends_function_outputs_with_the_reasoning_back() {
         first["instructions"]
             .as_str()
             .unwrap()
-            .contains("not financial advice")
+            .contains("StockWise")
     );
     assert_eq!(first["tools"][0]["type"], "function");
     assert_eq!(first["tools"][0]["strict"], false);
@@ -443,7 +443,7 @@ fn transcript_json_shape() {
 #[test]
 fn system_prompt_names_the_market_and_the_rules() {
     let p = system_prompt(Market::Us);
+    assert!(p.starts_with(crate::ai::prompts::RULES));
     assert!(p.contains("`us`"));
-    assert!(p.contains("not financial advice"));
     assert!(p.contains("cannot place orders"));
 }

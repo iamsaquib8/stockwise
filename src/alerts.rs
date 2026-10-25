@@ -514,6 +514,7 @@ pub fn alert_market(symbol: &str) -> Option<Market> {
         None
     } else if s.ends_with(".NS")
         || s.ends_with(".BO")
+        || crate::offmarket::is_fund(&s)
         || s.starts_with("^NSE")
         || s.starts_with("^CNX")
         || s == "^BSESN"
@@ -616,7 +617,23 @@ pub struct AlertStore {
 
 impl AlertStore {
     pub fn load() -> Result<Self> {
-        crate::store::load("alerts.json")
+        let mut store: Self = crate::store::load("alerts.json")?;
+        store.repair_symbols();
+        Ok(store)
+    }
+
+    /// Undo the market suffix older versions put on namespaced symbols
+    /// (`alert add MF:120503 ...` stored `MF:120503.NS`). The repair is saved
+    /// with the next change to the alerts.
+    fn repair_symbols(&mut self) -> bool {
+        let mut changed = false;
+        for a in &mut self.alerts {
+            if let Some(fixed) = crate::market::repair_namespaced(&a.symbol) {
+                a.symbol = fixed;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn save(&self) -> Result<()> {
@@ -703,6 +720,18 @@ mod tests {
         assert_eq!(store.alerts[0].symbol, "RELIANCE.NS");
         assert_eq!(store.alerts[0].target, 1500.0);
         assert_eq!(store.alerts[0].period, None);
+    }
+
+    #[test]
+    fn fund_codes_stored_with_a_market_suffix_are_repaired() {
+        let mut store = AlertStore::default();
+        store.add("MF:120503.NS", AlertCondition::Above, 60.0);
+        store.add("MF:INF179K01UT0-USD", AlertCondition::Below, 40.0);
+        store.add("TCS.NS", AlertCondition::Above, 4000.0);
+        assert!(store.repair_symbols());
+        let symbols: Vec<&str> = store.alerts.iter().map(|a| a.symbol.as_str()).collect();
+        assert_eq!(symbols, ["MF:120503", "MF:INF179K01UT0", "TCS.NS"]);
+        assert!(!store.repair_symbols(), "idempotent");
     }
 
     #[test]
@@ -1160,6 +1189,7 @@ mod tests {
     fn alert_markets_follow_the_symbol() {
         assert_eq!(alert_market("TCS.NS"), Some(Market::In));
         assert_eq!(alert_market("RELIANCE.BO"), Some(Market::In));
+        assert_eq!(alert_market("MF:120503"), Some(Market::In));
         assert_eq!(alert_market("^NSEI"), Some(Market::In));
         assert_eq!(alert_market("AAPL"), Some(Market::Us));
         assert_eq!(alert_market("^GSPC"), Some(Market::Us));

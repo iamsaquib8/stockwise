@@ -521,12 +521,56 @@ pub fn quote_currency() -> &'static str {
 /// commodity market knows `GOLD` and `SILVER` (COMEX futures `GC=F`,
 /// `SI=F`); other bare tickers are NSE-listed ETFs and bonds (`GOLDBEES` →
 /// `GOLDBEES.NS`).
+///
+/// In every market a symbol in a StockWise namespace (`MF:120503`,
+/// `MF:INF179K01UT0`) is kept as typed, upper-cased: it is not a Yahoo
+/// ticker, so no exchange suffix belongs on it.
 pub fn resolve_symbol(symbol: &str, market: Market) -> String {
     resolve_symbol_in(symbol, market, quote_currency())
 }
 
+/// `MF:120503` (a mutual fund by AMFI code), `MF:INF179K01UT0` (by ISIN): a
+/// `PREFIX:ID` symbol StockWise prices itself. Yahoo tickers never contain
+/// a colon.
+pub fn is_namespaced(symbol: &str) -> bool {
+    symbol.contains(':')
+}
+
+/// `PREFIX:ID` upper-cased, with stray spaces around the colon removed.
+fn namespaced(upper: &str) -> Option<String> {
+    let (prefix, id) = upper.split_once(':')?;
+    Some(format!("{}:{}", prefix.trim(), id.trim()))
+}
+
+/// A namespaced symbol that an older StockWise stored with a market suffix
+/// (`MF:120503.NS`, `MF:120503-USD`, `MF:INF179K01UT0.L`), repaired; None
+/// when `symbol` needs no repair. Idempotent: a repaired symbol has no
+/// suffix left to strip.
+pub fn repair_namespaced(symbol: &str) -> Option<String> {
+    let upper = symbol.trim().to_uppercase();
+    if !is_namespaced(&upper) {
+        return None;
+    }
+    let crypto: Vec<String> = CRYPTO_QUOTES.iter().map(|q| format!("-{q}")).collect();
+    let suffixes = [".NS", ".BO"]
+        .into_iter()
+        .chain(GLOBAL_MARKETS.iter().map(|m| m.suffix))
+        .chain(crypto.iter().map(String::as_str));
+    for suffix in suffixes {
+        if let Some(base) = upper.strip_suffix(suffix)
+            && base.split_once(':').is_some_and(|(_, id)| !id.is_empty())
+        {
+            return namespaced(base);
+        }
+    }
+    namespaced(&upper).filter(|fixed| *fixed != symbol)
+}
+
 fn resolve_symbol_in(symbol: &str, market: Market, crypto_quote: &str) -> String {
     let upper = symbol.trim().to_uppercase();
+    if let Some(ns) = namespaced(&upper) {
+        return ns;
+    }
     let explicit = upper.contains('.')
         || upper.starts_with('^')
         || upper.contains('=')
@@ -1156,6 +1200,50 @@ mod tests {
             "ETH-EUR"
         );
         assert_eq!(resolve_symbol_in("^GSPC", Market::Crypto, "USD"), "^GSPC");
+    }
+
+    #[test]
+    fn namespaced_symbols_pass_through_in_every_market() {
+        for &market in Market::value_variants() {
+            for (typed, stored) in [
+                ("MF:120503", "MF:120503"),
+                ("mf:inf179k01ut0", "MF:INF179K01UT0"),
+                (" MF: 120503 ", "MF:120503"),
+            ] {
+                assert_eq!(
+                    resolve_symbol_in(typed, market, "USD"),
+                    stored,
+                    "{typed} in {}",
+                    market.code()
+                );
+            }
+        }
+        assert!(is_namespaced("MF:120503") && !is_namespaced("TCS.NS"));
+    }
+
+    #[test]
+    fn repairs_market_suffixes_on_namespaced_symbols() {
+        for (stored, fixed) in [
+            ("MF:120503.NS", "MF:120503"),
+            ("MF:120503.BO", "MF:120503"),
+            ("MF:INF179K01UT0.NS", "MF:INF179K01UT0"),
+            ("MF:120503-USD", "MF:120503"),
+            ("MF:120503-INR", "MF:120503"),
+            ("MF:120503.L", "MF:120503"),
+            ("MF:120503.HK", "MF:120503"),
+            ("mf:120503", "MF:120503"),
+        ] {
+            assert_eq!(
+                repair_namespaced(stored).as_deref(),
+                Some(fixed),
+                "{stored}"
+            );
+            // Idempotent: the repaired symbol needs nothing more.
+            assert_eq!(repair_namespaced(fixed), None, "{fixed}");
+        }
+        for untouched in ["MF:120503", "TCS.NS", "BTC-USD", "VOD.L", "MF:.NS"] {
+            assert_eq!(repair_namespaced(untouched), None, "{untouched}");
+        }
     }
 
     #[test]

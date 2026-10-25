@@ -206,26 +206,14 @@ async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {
 /// A scheme by AMFI code (`122639`, `MF:122639`) or ISIN.
 fn find_scheme<'a>(schemes: &'a [funds::Scheme], key: &str) -> Result<&'a funds::Scheme> {
     let key = key.trim();
-    let key = key
-        .strip_prefix("MF:")
-        .or_else(|| key.strip_prefix("mf:"))
-        .unwrap_or(key);
-    let found = match key.parse::<u32>() {
-        Ok(code) => schemes.iter().find(|s| s.code == code),
-        Err(_) => schemes.iter().find(|s| {
-            [&s.isin_growth, &s.isin_reinvest]
-                .into_iter()
-                .flatten()
-                .any(|i| i.eq_ignore_ascii_case(key))
-        }),
-    };
-    found.with_context(|| {
-        format!("No scheme with code or ISIN {key} in AMFI's NAV list; find it with mf_search")
+    let id = crate::offmarket::fund_id(key).unwrap_or(key);
+    crate::offmarket::find_scheme(schemes, id).with_context(|| {
+        format!("No scheme with code or ISIN {id} in AMFI's NAV list; find it with mf_search")
     })
 }
 
 async fn mf_search(a: &Args) -> Result<Value> {
-    let schemes = funds::load_amfi().await?;
+    let schemes = funds::load_amfi_shared().await?;
     let mut hits = funds::search(&schemes, a.need_str("query")?);
     match a.str("plan") {
         Some("direct") => hits.retain(|s| s.is_direct()),
@@ -238,7 +226,7 @@ async fn mf_search(a: &Args) -> Result<Value> {
 }
 
 async fn mf_nav(a: &Args) -> Result<Value> {
-    let (schemes, ter) = tokio::join!(funds::load_amfi(), funds::load_ter());
+    let (schemes, ter) = tokio::join!(funds::load_amfi_shared(), funds::load_ter());
     let schemes = schemes?;
     let scheme = find_scheme(&schemes, a.need_str("scheme")?)?;
     let ter = ter.ok().and_then(|t| t.for_scheme(scheme));
@@ -250,9 +238,10 @@ async fn mf_nav(a: &Args) -> Result<Value> {
 
 async fn mf_sip(a: &Args) -> Result<Value> {
     let key = a.need_str("scheme")?;
-    let code = match key.trim_start_matches("MF:").parse::<u32>() {
+    let id = crate::offmarket::fund_id(key).unwrap_or(key);
+    let code = match id.parse::<u32>() {
         Ok(code) => code,
-        Err(_) => find_scheme(&funds::load_amfi().await?, key)?.code,
+        Err(_) => find_scheme(&funds::load_amfi_shared().await?, key)?.code,
     };
     let amount = a.need_f64("monthly")?;
     let run = commands::run_sip(code, amount, a.str("period").unwrap_or("5y")).await?;
@@ -473,14 +462,9 @@ fn holdings_lots(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
 async fn tax_estimate(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let country = country(a, m)?;
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
-    let symbols: Vec<&str> = p.holdings.iter().map(|h| h.symbol.as_str()).collect();
-    let quotes = if symbols.is_empty() {
-        Vec::new()
-    } else {
-        src.quotes(&symbols).await?
-    };
+    let val = commands::tax_valuation(src, &p, m).await?;
     let today = chrono::Local::now().date_naive();
-    let report = commands::tax_report(country, &p, &quotes, today);
+    let report = commands::tax_report(country, &p, &val, today);
     Ok(commands::tax_json(country, &report, today))
 }
 

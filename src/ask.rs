@@ -91,22 +91,11 @@ impl Usage {
     }
 }
 
-/// The system prompt: what the model is, what it may do, and how to answer.
+/// The system prompt: the shared educational rules, then what the
+/// assistant may do and how to answer.
 pub fn system_prompt(market: crate::market::Market) -> String {
-    let today = chrono::Local::now().format("%A %d %B %Y");
-    format!(
-        "You are the research assistant of StockWise, a stock-market tool running in the user's \
-         terminal. Answer the user's question with the StockWise tools: they return live (often \
-         delayed) market data and the user's own portfolio, watchlist and alerts. Today is \
-         {today}. The user's default market is `{}`: bare tickers such as TCS resolve there; \
-         pass `market` for other markets (us, crypto, fx, commodity, uk, jp, ...).\n\n\
-         Call tools for every number instead of guessing, and keep calls few and targeted. Then \
-         answer in plain English, briefly, quoting the figures you used with their currency \
-         and date. Say when data is missing or a tool failed. This is educational information, \
-         not financial advice: describe what the data shows and the risks, and do not tell the \
-         user to buy, sell or hold. You cannot place orders.",
-        market_code(market)
-    )
+    let today = chrono::Local::now().format("%A %d %B %Y").to_string();
+    crate::ai::prompts::ask(&market_code(market), &today)
 }
 
 fn market_code(market: crate::market::Market) -> String {

@@ -111,16 +111,21 @@ fn portfolio_totals_skip_holdings_without_a_price() {
             "pnl_percent",
             "weight_percent",
             "xirr_percent",
-            "currency"
+            "currency",
+            "name",
+            "price_source",
+            "nav_date"
         ]
     );
+    assert_eq!(row["price_source"], "quote");
+    assert!(serde_json::to_value(&rows[1]).unwrap()["price_source"].is_null());
     assert_eq!(
         keys(&serde_json::to_value(totals).unwrap()),
         ["cost_basis", "value", "pnl", "pnl_percent", "currency"]
     );
     assert_eq!(
         keys(&serde_json::to_value(&report).unwrap()),
-        ["holdings", "totals", "unpriced", "unconverted"]
+        ["holdings", "totals", "unpriced", "unconverted", "notes"]
     );
     assert_columns(&rows[0]);
 }
@@ -131,7 +136,7 @@ fn portfolio_csv_leaves_missing_prices_empty() {
     let report = portfolio_report(&p, &valued(&p, Vec::new()), day("2026-01-02"));
     assert_eq!(
         to_csv(&report.holdings).unwrap().lines().nth(1),
-        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR")
+        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,")
     );
 }
 
@@ -189,11 +194,11 @@ fn tax_report_splits_terms_and_skips_unpriced() {
         ("NEW.NS", 10.0, 100.0, "2026-05-01"),
         ("GONE.NS", 10.0, 100.0, "2026-05-01"),
     ]);
-    let quotes = [
+    let quotes = vec![
         quote("OLD.NS", Some(150.0), None),
         quote("NEW.NS", Some(80.0), None),
     ];
-    let r = tax_report(Country::India, &p, &quotes, day("2026-06-01"));
+    let r = tax_report(Country::India, &p, &valued(&p, quotes), day("2026-06-01"));
     assert_eq!(r.unpriced, ["GONE.NS"]);
     assert_eq!(r.holdings[0].long_term_gain, 500.0);
     assert_eq!(r.holdings[0].short_term_gain, 0.0);

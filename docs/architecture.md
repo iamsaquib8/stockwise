@@ -20,6 +20,7 @@ src/
     backtests.rs     backtest (single, portfolio, walkforward, strategies)
     strategies.rs    sip, whatif, intraday, longterm, report
     portfolio.rs     portfolio (show, add, sell, lots, actions, list) and valuation in a base currency
+                     (`value_holdings`: market quotes + `offmarket` fund NAVs and SGB prices)
     planning.rs      tax export, portfolio benchmark (history, FX, sectors), goal sip/retire/education
     holdings.rs      watch, alert, import, export, wealth, rebalance, harvest, tax, divcal, pcorr
     imports.rs       Groww / Upstox CSV and CAS (casparser JSON/CSV) import parsers
@@ -72,11 +73,14 @@ src/
   greeks.rs          Black-Scholes pricing, greeks, implied-volatility solver
   payoff.rs          Multi-leg option payoffs: presets, max profit/loss, breakevens, probability of profit
   commodity.rs       Gold/silver spot in ₹ from COMEX × USDINR, futures and ETF lists, SGB tranches
-                     and NSE's SGB list parser (pure, fixture-tested)
+                     and NSE's SGB list (fixture-tested parser; `nse_sgb_list` fetches it)
+  offmarket.rs       Prices for holdings Yahoo doesn't quote: `MF:` funds at AMFI's NAV, SGBs from
+                     NSE's list or estimated from gold spot; used by the shared valuation
   bonds.rs           Bond math: price ↔ YTM (half-yearly, 30/360), accrued interest, duration, T-bills
   gsec.rs            CCIL tenor-wise yields, RBI benchmarks and outstanding G-sec list (HTML parsers)
   pagecache.rs       Cached fetch of public pages (CCIL, RBI, NSE SGB list) with a stale-copy fallback
-  ai.rs              AI: Ollama (default) or opt-in OpenAI / Anthropic / Gemini; prompts, opt-in flag, model checks
+  ai.rs              AI: Ollama (default) or opt-in OpenAI / Anthropic / Gemini; educational prompts
+                     (`ai::prompts`, versioned cache keys), disclaimer, opt-in flag, model checks
   clock.rs           Exchange clock: IST / US Eastern / European / Sydney time, NSE, NYSE and global
                      exchange holidays and half days, lunch breaks, session phases
   daemon.rs          Worker state: positions, risk manager, daemon_state.json, shutdown, retry

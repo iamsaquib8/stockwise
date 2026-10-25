@@ -425,6 +425,9 @@ stockwise import cas cas.json
   the quantity of holdings already in your portfolio (keeping your cost);
   new ones are listed with a `portfolio add` hint. Mutual funds in a demat CAS
   are imported with their average cost when it is given.
-- Feeding the PDF directly prints these instructions. Mutual funds have no live
-  price in StockWise yet, so `portfolio` shows them as N/A and `wealth` won't
-  snapshot until they're priced or removed.
+- Feeding the PDF directly prints these instructions. Imported funds are
+  valued at AMFI's latest end-of-day NAV in `portfolio`, `dashboard`, `wealth`,
+  `rebalance`, `tax` and the rest, matched by AMFI code or by either ISIN
+  (growth/payout or IDCW reinvestment). A scheme AMFI no longer lists stays
+  N/A with a note, never 0 (see
+  [Mutual funds and SGBs](commands.md#mutual-funds-and-sgbs)).

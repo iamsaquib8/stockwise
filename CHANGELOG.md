@@ -43,6 +43,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packaging/mcpb/` builds a Claude Desktop extension (`.mcpb`).
 
 ### Changed
+- Mutual funds and Sovereign Gold Bonds are valued in `portfolio` (table,
+  `--json`, `--csv`), `dashboard`, `tui`, `serve` / the web dashboard,
+  `wealth`, `rebalance`, `harvest`, `tax`, `report portfolio` and the long-term
+  daemon. `MF:<AMFI code>` and `MF:<ISIN>` (growth/payout or IDCW-reinvestment
+  ISIN) use AMFI's latest end-of-day NAV, shown as "NAV as of <date>"; SGBs (NSE
+  symbol or tranche ISIN) use NSE's last price, or one gram of gold at spot
+  labelled "estimated" when NSE refuses (the 2.5% interest is left out, and
+  said so). An unknown code stays N/A with a note, never 0. `portfolio --json`
+  rows gain `name`, `price_source` and `nav_date`, and the report a `notes`
+  list. `watch` and `alert` see fund NAVs too, `portfolio sell` defaults to
+  the NAV, and `MF:` symbols are no longer sent to Yahoo.
+- `tax in` counts equity-oriented mutual funds (by AMFI category) at the
+  listed-share rates and names them; debt and other funds and SGBs are left
+  out of the estimate with the rules that apply to them (`equity_funds` and
+  `other_rules` in `--json`), instead of silently getting equity rates.
+- AI sections (`report`, `--ai`) give neutral, educational analysis — signals,
+  risks, what to watch — instead of BUY/HOLD/SELL verdicts, picks or
+  allocation advice, in line with SEBI's adviser, research-analyst and
+  finfluencer rules. Section titles say "notes" and "comparison" rather than
+  "verdict", "memo" or "brief", and every AI section ends with a one-line
+  disclaimer. Cache keys include a prompt version, so answers cached under the
+  old wording are not shown again.
+
+### Fixed
+- `portfolio add MF:120503`, `watch add` and `alert add` stored `MF:120503.NS`
+  (`-USD`, `.L`, ... in other markets), which nothing could price. `PREFIX:ID`
+  symbols are now kept as typed in every market, and symbols stored that way
+  by older versions are repaired when the portfolio, watchlist and alerts load
+  (a holding that then appears twice is merged).
+- `MF:` alerts follow Indian market hours instead of US ones.
+- `portfolio actions` skips funds and SGBs instead of asking Yahoo for them;
+  `portfolio benchmark` and `tax export` handle funds stored as `MF:<ISIN>`;
+  `portfolio sell` without a price refuses an SGB valued only by its gold
+  estimate.
+- `report portfolio` no longer gives the AI a price of 0 for holdings without
+  a live price, and `export portfolio` / `export watchlist` leave a missing
+  price empty instead of writing 0.
+- The rule-based insights in `analyze` were titled "AI Insights"; they are not
+  AI and are now titled "Insights".
 - The Docker image carries the `io.modelcontextprotocol.server.name` label the
   MCP registry checks.
 

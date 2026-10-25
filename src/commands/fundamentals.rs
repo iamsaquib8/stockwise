@@ -126,7 +126,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
     }
 
     // Insights
-    print_section("AI Insights");
+    print_section("Insights");
     for insight in insights::generate_insights(q) {
         println!("  {} {}", "→".cyan(), insight);
     }
@@ -143,11 +143,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
         let stock_data = crate::ai::StockData::from_quote(q);
         match ai.analyze_stock(&stock_data).await {
-            Ok(analysis) => {
-                for line in analysis.lines() {
-                    println!("  {}", line);
-                }
-            }
+            Ok(analysis) => print_ai_answer(&analysis),
             Err(_) => {
                 println!("  {}", "AI analysis unavailable.".dimmed());
             }
@@ -409,11 +405,9 @@ pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Res
                 q.regular_market_change_percent.unwrap_or(0.0)
             ));
         }
-        print_section(&format!("AI Verdict ({})", ai.provider().name()));
-        if let Ok(verdict) = ai.compare_stocks(&data).await {
-            for line in verdict.lines() {
-                println!("  {}", line);
-            }
+        print_section(&format!("AI Comparison ({})", ai.provider().name()));
+        if let Ok(comparison) = ai.compare_stocks(&data).await {
+            print_ai_answer(&comparison);
         }
     }
 
@@ -1037,11 +1031,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
         let stock_data = crate::ai::StockData::from_quote(q);
         match ai.analyze_stock(&stock_data).await {
-            Ok(analysis) => {
-                for line in analysis.lines() {
-                    println!("  {}", line);
-                }
-            }
+            Ok(analysis) => print_ai_answer(&analysis),
             Err(_) => {
                 println!("  {}", "AI unavailable.".dimmed());
             }

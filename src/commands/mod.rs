@@ -38,6 +38,15 @@ pub(crate) fn period_to_interval(period: &str) -> &str {
     }
 }
 
+/// An AI answer, indented, with the one-line educational disclaimer under
+/// it. Every AI section ends this way.
+fn print_ai_answer(text: &str) {
+    for line in text.lines() {
+        println!("  {}", line);
+    }
+    println!("  {}", crate::ai::DISCLAIMER.dimmed().italic());
+}
+
 fn resolve_symbols(symbols: &[String], market: Market) -> Vec<String> {
     symbols
         .iter()

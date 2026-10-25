@@ -1,6 +1,6 @@
 //! Your data: watchlist, alerts, import/export, wealth history, rebalancing, tax, and dividends.
 
-use super::portfolio::{ESTIMATED_DATE_HINT, portfolio_title, value_holdings};
+use super::portfolio::{ESTIMATED_DATE_HINT, Valuation, portfolio_title, value_holdings};
 use super::*;
 use crate::portfolio::{self as pf, ImportOptions, ImportOutcome, ImportRow, SyncChange};
 use crate::tax::{self, Country};
@@ -95,7 +95,9 @@ pub async fn cmd_watchlist_show(fmt: Format) -> Result<()> {
         Vec::new()
     } else {
         let sym_refs: Vec<&str> = wl.symbols.iter().map(|s| s.as_str()).collect();
-        YahooClient::new().await?.get_quote(&sym_refs).await?
+        views::quotes_with_off_market(&YahooClient::new().await?, &sym_refs)
+            .await?
+            .0
     };
     let rows = watch_rows(&wl.symbols, &quotes);
     match fmt {
@@ -128,17 +130,16 @@ pub async fn cmd_watchlist_show(fmt: Format) -> Result<()> {
             );
             continue;
         };
-        let change = row.change.unwrap_or(0.0);
-        let pct = row.change_percent.unwrap_or(0.0);
-        let change_str = if change >= 0.0 {
-            format!("+{:.2}", change).green().to_string()
-        } else {
-            format!("{:.2}", change).red().to_string()
+        // A fund's NAV has no intraday change: "—", not +0.00.
+        let change_str = match row.change {
+            Some(c) if c >= 0.0 => format!("+{:.2}", c).green().to_string(),
+            Some(c) => format!("{:.2}", c).red().to_string(),
+            None => "—".to_string(),
         };
-        let pct_str = if pct >= 0.0 {
-            format!("+{:.2}%", pct).green().to_string()
-        } else {
-            format!("{:.2}%", pct).red().to_string()
+        let pct_str = match row.change_percent {
+            Some(p) if p >= 0.0 => format!("+{:.2}%", p).green().to_string(),
+            Some(p) => format!("{:.2}%", p).red().to_string(),
+            None => "—".to_string(),
         };
         println!(
             "  {:<12} {:>10} {:>12} {:>10} {:>14}",
@@ -426,7 +427,7 @@ pub async fn cmd_alert_check(fmt: Format) -> Result<()> {
 
 // ── Screener ──
 
-pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
+pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
     match what {
         "portfolio" => {
             let portfolio = Portfolio::load()?;
@@ -440,27 +441,28 @@ pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
                 .iter()
                 .map(|h| h.symbol.clone())
                 .collect();
-            let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            // Funds at their NAV, SGBs from NSE; no price = empty cells, never 0.
+            let val = value_holdings(&client, &symbols, market, None).await?;
             let path = "portfolio_export.csv";
             let mut csv = String::from("Symbol,Shares,Avg Cost,Current Price,Value,P&L,P&L %\n");
             for h in &portfolio.holdings {
-                let price = quotes
-                    .iter()
-                    .find(|q| q.symbol.as_deref() == Some(&h.symbol))
-                    .and_then(|q| q.regular_market_price)
-                    .unwrap_or(0.0);
-                let value = h.shares * price;
                 let cost = h.shares * h.avg_cost;
-                let pnl = value - cost;
-                let pnl_pct = if cost > 0.0 {
-                    (pnl / cost) * 100.0
-                } else {
-                    0.0
+                let cells = match val.price(&h.symbol) {
+                    Some(price) => {
+                        let value = h.shares * price;
+                        let pnl = value - cost;
+                        let pnl_pct = if cost > 0.0 {
+                            format!("{:.2}%", pnl / cost * 100.0)
+                        } else {
+                            String::new()
+                        };
+                        format!("{price:.2},{value:.2},{pnl:.2},{pnl_pct}")
+                    }
+                    None => ",,,".to_string(),
                 };
                 csv.push_str(&format!(
-                    "{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}%\n",
-                    h.symbol, h.shares, h.avg_cost, price, value, pnl, pnl_pct
+                    "{},{:.2},{:.2},{}\n",
+                    h.symbol, h.shares, h.avg_cost, cells
                 ));
             }
             std::fs::write(path, &csv)?;
@@ -474,18 +476,24 @@ pub async fn cmd_export(what: &str, _market: Market) -> Result<()> {
             }
             let client = YahooClient::new().await?;
             let sym_refs: Vec<&str> = wl.symbols.iter().map(|s| s.as_str()).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            let quotes = views::quotes_with_off_market(&client, &sym_refs).await?.0;
             let path = "watchlist_export.csv";
             let mut csv = String::from("Symbol,Price,Change,Change %,Volume,Market Cap\n");
+            // Missing values are empty cells, never 0.
+            let num = |v: Option<f64>, places: usize| {
+                v.map_or(String::new(), |v| format!("{v:.places$}"))
+            };
             for q in &quotes {
                 csv.push_str(&format!(
-                    "{},{:.2},{:.2},{:.2}%,{},{:.0}\n",
+                    "{},{},{},{},{},{}\n",
                     q.symbol.as_deref().unwrap_or(""),
-                    q.regular_market_price.unwrap_or(0.0),
-                    q.regular_market_change.unwrap_or(0.0),
-                    q.regular_market_change_percent.unwrap_or(0.0),
-                    q.regular_market_volume.unwrap_or(0),
-                    q.market_cap.unwrap_or(0.0)
+                    num(q.regular_market_price, 2),
+                    num(q.regular_market_change, 2),
+                    q.regular_market_change_percent
+                        .map_or(String::new(), |p| format!("{p:.2}%")),
+                    q.regular_market_volume
+                        .map_or(String::new(), |v| v.to_string()),
+                    num(q.market_cap, 0)
                 ));
             }
             std::fs::write(path, &csv)?;
@@ -1082,6 +1090,7 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
         println!("  {}", note.dimmed());
     }
     print_kv("Snapshots", &history.snapshots.len().to_string());
+    val.print_price_notes();
 
     if history.snapshots.len() >= 2 {
         let first = &history.snapshots[0];
@@ -1124,9 +1133,17 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
     let mut holdings_value: Vec<(String, f64, f64)> = Vec::new(); // symbol, value, price (base currency)
     for h in &portfolio.holdings {
         let Some(price) = val.price(&h.symbol) else {
+            let why = val
+                .off
+                .notes
+                .iter()
+                .find(|n| n.symbols.contains(&h.symbol))
+                .map(|n| format!(" ({})", n.text))
+                .unwrap_or_default();
             bail!(
-                "No live price for {} — fix or remove it before rebalancing",
-                h.symbol
+                "No live price for {} — fix or remove it before rebalancing{}",
+                h.symbol,
+                why
             );
         };
         let Some(price) = val.to_base(&h.symbol, price) else {
@@ -1157,16 +1174,23 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
         targets.to_vec()
     };
 
+    // Wide enough for `MF:<ISIN>`.
+    let sw = holdings_value
+        .iter()
+        .map(|(s, _, _)| s.len() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(14);
     println!();
     println!(
-        "  {:<14} {:>10} {:>8} {:>8} {:>12}",
+        "  {:<sw$} {:>10} {:>8} {:>8} {:>12}",
         "Symbol".bold(),
         "Current".bold(),
         "Now%".bold(),
         "Target%".bold(),
         "Action".bold()
     );
-    println!("  {}", "─".repeat(56).dimmed());
+    println!("  {}", "─".repeat(42 + sw).dimmed());
 
     for (sym, value, price) in &holdings_value {
         let current_pct = (value / total_value) * 100.0;
@@ -1179,20 +1203,35 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
         let diff = target_value - value;
         let diff_shares = if *price > 0.0 { diff / price } else { 0.0 };
 
+        // Fund units are bought and redeemed in fractions; shares whole.
+        let units = crate::offmarket::unit_word(sym);
+        let qty = |q: f64| {
+            if crate::offmarket::is_fund(sym) {
+                format!("{q:.3}")
+            } else {
+                format!("{q:.0}")
+            }
+        };
         let action = if diff.abs() < 1.0 {
             "OK".green().to_string()
         } else if diff > 0.0 {
-            format!("BUY {:.0} shares", diff_shares.ceil())
-                .green()
-                .to_string()
+            let q = if crate::offmarket::is_fund(sym) {
+                diff_shares
+            } else {
+                diff_shares.ceil()
+            };
+            format!("BUY {} {}", qty(q), units).green().to_string()
         } else {
-            format!("SELL {:.0} shares", diff_shares.abs().floor())
-                .red()
-                .to_string()
+            let q = if crate::offmarket::is_fund(sym) {
+                diff_shares.abs()
+            } else {
+                diff_shares.abs().floor()
+            };
+            format!("SELL {} {}", qty(q), units).red().to_string()
         };
 
         println!(
-            "  {:<14} {:>10} {:>8} {:>8} {:>12}",
+            "  {:<sw$} {:>10} {:>8} {:>8} {:>12}",
             sym.cyan(),
             format!("{}{:.2}", csym, value),
             format!("{:.1}%", current_pct),
@@ -1201,12 +1240,16 @@ pub async fn cmd_rebalance(targets: &[(String, f64)], market: Market) -> Result<
         );
     }
     println!();
+    val.print_price_notes();
+    if !val.off.marks.is_empty() {
+        println!();
+    }
     Ok(())
 }
 
 // ── Earnings Calendar ──
 
-pub async fn cmd_harvest(_market: Market) -> Result<()> {
+pub async fn cmd_harvest(market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.is_empty() {
         println!("\n  {}", "Portfolio is empty.".dimmed());
@@ -1218,9 +1261,8 @@ pub async fn cmd_harvest(_market: Market) -> Result<()> {
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let client = YahooClient::new().await?;
-    let quotes = client.get_quote(&sym_refs).await?;
+    let val = value_holdings(&client, &symbols, market, None).await?;
 
     print_header("Tax-Loss Harvesting Opportunities");
     let mut found = false;
@@ -1236,15 +1278,12 @@ pub async fn cmd_harvest(_market: Market) -> Result<()> {
     println!("  {}", "─".repeat(60).dimmed());
 
     for h in &portfolio.holdings {
-        let quote = quotes
-            .iter()
-            .find(|q| q.symbol.as_deref() == Some(&h.symbol));
         // Never suggest selling something just because its price is missing.
-        let Some(price) = quote.and_then(|q| q.regular_market_price) else {
+        let Some(price) = val.price(&h.symbol) else {
             continue;
         };
-        let cur = quote.and_then(|q| q.currency.as_deref());
-        let csym = market::currency_symbol(cur);
+        let cur = val.currency(&h.symbol);
+        let csym = market::currency_symbol(cur.as_deref());
         let pnl = (price - h.avg_cost) * h.shares;
         let pnl_pct = if h.avg_cost > 0.0 {
             ((price / h.avg_cost) - 1.0) * 100.0
@@ -1282,7 +1321,21 @@ pub async fn cmd_harvest(_market: Market) -> Result<()> {
                 .italic()
         );
     }
+    let unpriced: Vec<&str> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.as_str())
+        .filter(|s| val.price(s).is_none())
+        .collect();
+    if !unpriced.is_empty() {
+        println!(
+            "  {} No live price for {} — not checked.",
+            "!".yellow(),
+            unpriced.join(", ")
+        );
+    }
     println!();
+    val.print_price_notes();
     Ok(())
 }
 
@@ -1403,6 +1456,14 @@ impl CsvRow for TaxHoldingRow {
     ];
 }
 
+/// A holding or sale `tax in` leaves out because Indian tax treats it
+/// differently from listed shares (non-equity funds, SGBs).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct OtherRulesRow {
+    pub(crate) symbol: String,
+    pub(crate) reason: String,
+}
+
 /// The tax estimate's inputs, gathered before anything is printed.
 pub(crate) struct TaxReport {
     pub(crate) sales: Vec<TaxSaleRow>,
@@ -1411,25 +1472,69 @@ pub(crate) struct TaxReport {
     pub(crate) unrealized: tax::Buckets,
     pub(crate) unpriced: Vec<String>,
     pub(crate) other_currency: Vec<String>,
+    /// Equity-oriented mutual funds, counted at the listed-share rates.
+    pub(crate) equity_funds: Vec<String>,
+    /// Left out: taxed under other rules than listed shares.
+    pub(crate) other_rules: Vec<OtherRulesRow>,
 }
 
-/// Gains realized this tax year and what selling every open lot at `quotes`
-/// would add, in the country's currency. Holdings without a live price or
-/// in another currency are named, not counted.
+/// Whether Indian capital-gains tax treats `symbol` like a listed share
+/// (Sec. 111A/112A): shares and equity-oriented funds do; debt and other
+/// funds, funds of unknown category and SGBs don't (the reason says how
+/// they are taxed instead).
+enum IndiaRules {
+    Listed,
+    EquityFund,
+    Other(String),
+}
+
+fn india_rules(symbol: &str, val: &Valuation) -> IndiaRules {
+    use crate::offmarket;
+    if offmarket::is_fund(symbol) {
+        let mark = val.mark(symbol);
+        return match mark.and_then(|m| m.category.as_deref()) {
+            Some(cat)
+                if offmarket::is_equity_oriented(
+                    cat,
+                    mark.and_then(|m| m.name.as_deref()).unwrap_or(""),
+                ) =>
+            {
+                IndiaRules::EquityFund
+            }
+            Some(cat) => IndiaRules::Other(format!(
+                "{cat} — not an equity-oriented fund: units bought from 1 Apr 2023 are taxed at \
+                 your slab rate, older units at 12.5% after 24 months"
+            )),
+            None => IndiaRules::Other(
+                "no AMFI category (not in AMFI's NAV file, or the file could not be loaded), so \
+                 whether it is equity-oriented is unknown"
+                    .into(),
+            ),
+        };
+    }
+    if offmarket::is_sgb(symbol) {
+        return IndiaRules::Other(
+            "Sovereign Gold Bond — tax-free when RBI redeems it; sold on the exchange, 12.5% \
+             after 12 months (no ₹1.25 lakh exemption), else your slab rate"
+                .into(),
+        );
+    }
+    IndiaRules::Listed
+}
+
+/// Gains realized this tax year and what selling every open lot at `val`'s
+/// prices would add, in the country's currency. Holdings without a live
+/// price or in another currency are named, not counted. For India, funds
+/// that are not equity-oriented and SGBs are left out too (other rules).
 pub(crate) fn tax_report(
     country: Country,
     portfolio: &Portfolio,
-    quotes: &[crate::api::Quote],
+    val: &Valuation,
     today: chrono::NaiveDate,
 ) -> TaxReport {
     let (year_start, year_end) = country.tax_year(today);
     let date = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
-    let quote = |sym: &str| quotes.iter().find(|q| q.symbol.as_deref() == Some(sym));
-    let currency = |sym: &str| {
-        quote(sym)
-            .and_then(|q| q.currency.clone())
-            .or_else(|| pf::symbol_currency(sym).map(str::to_string))
-    };
+    let currency = |sym: &str| val.currency(sym);
     let terms = country.long_term_months().is_some();
     let mut r = TaxReport {
         sales: Vec::new(),
@@ -1438,6 +1543,33 @@ pub(crate) fn tax_report(
         unrealized: tax::Buckets::default(),
         unpriced: Vec::new(),
         other_currency: Vec::new(),
+        equity_funds: Vec::new(),
+        other_rules: Vec::new(),
+    };
+    // Sort a symbol into listed-share rules or not (India only); true when
+    // it counts.
+    let counts = |sym: &str, r: &mut TaxReport| -> bool {
+        if country != Country::India {
+            return true;
+        }
+        match india_rules(sym, val) {
+            IndiaRules::Listed => true,
+            IndiaRules::EquityFund => {
+                if !r.equity_funds.iter().any(|s| s == sym) {
+                    r.equity_funds.push(sym.to_string());
+                }
+                true
+            }
+            IndiaRules::Other(reason) => {
+                if !r.other_rules.iter().any(|o| o.symbol == sym) {
+                    r.other_rules.push(OtherRulesRow {
+                        symbol: sym.to_string(),
+                        reason,
+                    });
+                }
+                false
+            }
+        }
     };
 
     for s in portfolio
@@ -1449,6 +1581,9 @@ pub(crate) fn tax_report(
             r.other_currency.push(s.symbol.clone());
             continue;
         };
+        if !counts(&s.symbol, &mut r) {
+            continue;
+        }
         let long = match (date(&s.buy_date), date(&s.sell_date)) {
             (Some(b), Some(d)) => country.is_long_term(b, d),
             _ => false,
@@ -1471,8 +1606,11 @@ pub(crate) fn tax_report(
             r.other_currency.push(h.symbol.clone());
             continue;
         };
+        if !counts(&h.symbol, &mut r) {
+            continue;
+        }
         // A missing price must not count as a 100% capital loss.
-        let Some(price) = quote(&h.symbol).and_then(|q| q.regular_market_price) else {
+        let Some(price) = val.price(&h.symbol) else {
             r.unpriced.push(h.symbol.clone());
             continue;
         };
@@ -1544,13 +1682,40 @@ pub(crate) fn tax_json(
         "ltcg_exemption_left": exemption_left,
         "unpriced": report.unpriced,
         "other_currency": report.other_currency,
+        "equity_funds": report.equity_funds,
+        "other_rules": report.other_rules,
     })
+}
+
+/// Prices for `tax`: the holdings, plus funds sold this year (their AMFI
+/// category decides the rules they are taxed under). No network when there
+/// is nothing to price.
+pub(crate) async fn tax_valuation(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    market: Market,
+) -> Result<Valuation> {
+    let mut symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    for s in &portfolio.realized {
+        if crate::offmarket::is_fund(&s.symbol) && !symbols.contains(&s.symbol) {
+            symbols.push(s.symbol.clone());
+        }
+    }
+    if symbols.is_empty() {
+        Ok(Valuation::new(Vec::new(), &[], market, None))
+    } else {
+        value_holdings(src, &symbols, market, None).await
+    }
 }
 
 /// Capital-gains estimate for the current tax year: gains realized by
 /// `portfolio sell` (or a tradebook import) this year, plus what selling
 /// everything today would add. Every lot uses its own purchase date.
-pub async fn cmd_tax(country: &str, _market: Market, fmt: Format) -> Result<()> {
+pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     let Some(country) = Country::parse(country) else {
         bail!("Unsupported country '{}'. Use in, us, or uk", country);
     };
@@ -1569,17 +1734,8 @@ pub async fn cmd_tax(country: &str, _market: Market, fmt: Format) -> Result<()> 
         return Ok(());
     }
 
-    let quotes = if portfolio.holdings.is_empty() {
-        Vec::new()
-    } else {
-        let symbols: Vec<&str> = portfolio
-            .holdings
-            .iter()
-            .map(|h| h.symbol.as_str())
-            .collect();
-        YahooClient::new().await?.get_quote(&symbols).await?
-    };
-    let report = tax_report(country, &portfolio, &quotes, today);
+    let val = tax_valuation(&views::LiveSource::new(), &portfolio, market).await?;
+    let report = tax_report(country, &portfolio, &val, today);
     let realized = report.realized;
     let unrealized = report.unrealized;
     match fmt {
@@ -1742,6 +1898,23 @@ pub async fn cmd_tax(country: &str, _market: Market, fmt: Format) -> Result<()> 
             "!".yellow(),
             unpriced.join(", ")
         );
+    }
+    if !report.equity_funds.is_empty() {
+        println!(
+            "  {} Equity-oriented mutual funds ({}) are counted like listed shares (Sec. 111A/112A), \
+             going by their AMFI category.",
+            "·".dimmed(),
+            report.equity_funds.join(", ")
+        );
+    }
+    if !report.other_rules.is_empty() {
+        println!(
+            "  {} Not included — taxed under other rules than listed shares:",
+            "!".yellow()
+        );
+        for o in &report.other_rules {
+            println!("    {} {}", o.symbol.cyan(), o.reason.dimmed());
+        }
     }
     if estimated {
         println!("  {}", ESTIMATED_DATE_HINT.dimmed());

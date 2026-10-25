@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::commodity::{self as cm, InstrumentRow, SgbRow, SpotRow};
-use std::time::Duration;
 
 /// Which `commodity` view to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,8 +158,8 @@ async fn sgb(fmt: Format) -> Result<()> {
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&[cm::GOLD_FUTURE, cm::USDINR]).await?;
     let gold = cm::gold_inr_per_gram(&quotes);
-    let (live, problem) = match nse_sgb_list().await {
-        Ok(list) => (Some(list), None),
+    let (live, problem) = match cm::nse_sgb_list().await {
+        Ok(list) => (Some(list.rows), None),
         Err(e) => (None, Some(e)),
     };
     let today = crate::clock::session_date(Market::In, chrono::Utc::now());
@@ -249,47 +248,4 @@ fn print_sgb(r: &SgbRow, live_prices: bool) {
         ),
         pad_start(&r.volume.map(format_volume).unwrap_or_default(), 8).dimmed()
     );
-}
-
-/// NSE's list of traded SGBs through the shared NSE session (polite,
-/// cached 5 minutes); a copy is kept on disk so a refusal still shows the
-/// last prices seen, labelled with their date.
-async fn nse_sgb_list() -> Result<Vec<cm::NseSgb>> {
-    use crate::pagecache;
-    const CACHE: &str = "nse_sgb.json";
-    let valid = |t: &str| {
-        serde_json::from_str::<serde_json::Value>(t)
-            .ok()
-            .is_some_and(|v| cm::parse_nse_sgb(&v).is_ok_and(|rows| !rows.is_empty()))
-    };
-    let parse = |text: &str| -> Result<Vec<cm::NseSgb>> {
-        let json: serde_json::Value = serde_json::from_str(text).context("NSE sent no JSON")?;
-        cm::parse_nse_sgb(&json)
-            .map_err(|e| anyhow::anyhow!("NSE changed its SGB list format ({e})"))
-    };
-    let cached = pagecache::read(CACHE, Duration::from_secs(300), valid);
-    if let Some(page) = &cached
-        && !page.stale
-    {
-        return parse(&page.text);
-    }
-    let session = crate::providers::nse::shared_session();
-    match session
-        .get_json(cm::NSE_SGB_PATH, &[], Duration::from_secs(300))
-        .await
-    {
-        Ok(json) => {
-            let rows = cm::parse_nse_sgb(&json)
-                .map_err(|e| anyhow::anyhow!("NSE changed its SGB list format ({e})"))?;
-            if rows.is_empty() {
-                bail!("NSE's SGB list is empty");
-            }
-            pagecache::write(CACHE, &json.to_string());
-            Ok(rows)
-        }
-        Err(e) => {
-            let page = pagecache::fall_back(cached, anyhow::anyhow!("{e}"))?;
-            parse(&page.text)
-        }
-    }
 }

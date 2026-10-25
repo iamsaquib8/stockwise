@@ -547,9 +547,7 @@ pub async fn cmd_backtest(
         );
         print_section(&format!("AI Interpretation ({})", ai.provider().name()));
         if let Ok(interp) = ai.interpret_backtest(&data).await {
-            for line in interp.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&interp);
         }
     }
     footer();

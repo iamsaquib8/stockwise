@@ -36,7 +36,9 @@ http://127.0.0.1:8787/`), or start it with `--open`. One page shows:
   quantity, average cost, price, value, P&L, XIRR and weight. Column headers
   sort the table; *Totals in* switches the totals to INR or USD (`?base=`).
   Holdings without a live price or exchange rate are listed below the table
-  and left out of the totals, as in `portfolio`.
+  and left out of the totals, as in `portfolio`. Mutual funds show their
+  scheme name and are valued at AMFI's end-of-day NAV (its date is noted under
+  the table); SGBs come from NSE's list or a labelled gold-spot estimate.
 - **Alerts** — every alert with its live price; triggered ones first.
 - **Search** — type a company or ticker, pick a result with the arrow keys
   and Enter (or a click) to chart it.
@@ -87,14 +89,21 @@ request.
   "holdings": [
     {"symbol": "TCS.NS", "shares": 10.0, "avg_cost": 3500.0, "cost_basis": 35000.0,
      "price": 4100.0, "value": 41000.0, "pnl": 6000.0, "pnl_percent": 17.14,
-     "weight_percent": 100.0, "xirr_percent": 15.2, "currency": "INR"}
+     "weight_percent": 100.0, "xirr_percent": 15.2, "currency": "INR",
+     "name": "TATA CONSULTANCY SERV LT", "price_source": "quote", "nav_date": null}
   ],
   "totals": {"cost_basis": 35000.0, "value": 41000.0, "pnl": 6000.0,
              "pnl_percent": 17.14, "currency": "INR"},
   "unpriced": [],
-  "unconverted": []
+  "unconverted": [],
+  "notes": []
 }
 ```
+
+`price_source` is `quote`, `amfi_nav` (a mutual fund at its NAV, dated by
+`nav_date`), `nse_sgb`, `gold_estimate` (an SGB valued at its gram of gold) or
+`null`; `notes` explain fund and SGB prices (see
+[Mutual funds and SGBs](commands.md#mutual-funds-and-sgbs)).
 
 A holding's money values are in its own currency; `totals` and
 `weight_percent` are converted to the base currency at the live rate. A

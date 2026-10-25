@@ -40,6 +40,7 @@ mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod notify;
+mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;

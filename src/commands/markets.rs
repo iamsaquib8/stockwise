@@ -832,9 +832,7 @@ pub async fn cmd_screen(
         }
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
         if let Ok(analysis) = ai.analyze_screen(&data).await {
-            for line in analysis.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&analysis);
         }
     }
 

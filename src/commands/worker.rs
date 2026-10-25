@@ -112,7 +112,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                 let mut unique: Vec<&str> = a_syms.iter().map(|s| s.as_str()).collect();
                 unique.sort();
                 unique.dedup();
-                let a_quotes = client.get_quote(&unique).await?;
+                let a_quotes = views::quotes_with_off_market(&client, &unique).await?.0;
                 let rows =
                     views::alert_rows(&client, &store.alerts, &a_quotes, chrono::Utc::now()).await;
                 let mut triggered = 0;
@@ -146,18 +146,12 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                     .iter()
                     .map(|h| h.symbol.clone())
                     .collect();
-                let p_refs: Vec<&str> = p_syms.iter().map(|s| s.as_str()).collect();
-                let p_quotes = client.get_quote(&p_refs).await?;
+                // Same prices as `harvest`: funds at their NAV, SGBs from NSE.
+                let val = super::portfolio::value_holdings(&client, &p_syms, market, None).await?;
                 let losers: Vec<_> = portfolio
                     .holdings
                     .iter()
-                    .filter(|h| {
-                        p_quotes
-                            .iter()
-                            .find(|q| q.symbol.as_deref() == Some(&h.symbol))
-                            .and_then(|q| q.regular_market_price)
-                            .is_some_and(|price| price < h.avg_cost)
-                    })
+                    .filter(|h| val.price(&h.symbol).is_some_and(|price| price < h.avg_cost))
                     .collect();
                 if !losers.is_empty() {
                     println!(
@@ -175,7 +169,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
             }
 
             // 5. AI report
-            println!("  [5/5] Generating AI report...");
+            println!("  [5/5] Generating AI research notes...");
             let mut ai = crate::ai::AiClient::connect().await;
             if ai.is_available().await {
                 let mut data = String::new();
@@ -186,10 +180,8 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                     ));
                 }
                 if let Ok(report) = ai.generate_longterm_report(&data).await {
-                    print_section("AI Investment Memo");
-                    for line in report.lines() {
-                        println!("  {}", line);
-                    }
+                    print_section("AI Research Notes");
+                    print_ai_answer(&report);
                 }
             } else {
                 println!("    Ollama not running. Skipping AI report.");
@@ -969,7 +961,7 @@ async fn eod_ai_report(state: &DaemonState, market: Market) {
     if !ai.is_available().await {
         return;
     }
-    println!("  {} Generating AI EOD report...", "⟳".yellow());
+    println!("  {} Generating AI end-of-day notes...", "⟳".yellow());
     let wins = state.positions.iter().filter(|p| p.pnl > 0.0).count();
     let mut data = format!(
         "Intraday results: P&L={}{:.0}, {} wins {} losses\n",
@@ -985,10 +977,8 @@ async fn eod_ai_report(state: &DaemonState, market: Market) {
         ));
     }
     if let Ok(report) = ai.generate_intraday_report(&data).await {
-        print_section("AI EOD Analysis");
-        for line in report.lines() {
-            println!("  {}", line);
-        }
+        print_section("AI End-of-Day Notes");
+        print_ai_answer(&report);
     }
 }
 
