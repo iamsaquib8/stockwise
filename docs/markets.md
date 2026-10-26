@@ -82,7 +82,9 @@ in [commands.md](commands.md#commodities--bonds).
    If its time zone has summer time not covered by a `TzRule`, add the rule
    with a test of the changeover instants.
 3. Add its title to the `messages!` table in `src/i18n.rs` (`MarketXx`).
-4. `cargo test market clock` checks suffixes, universes, hours, that every
+4. If the exchange quotes in a new currency, add its symbol to
+   `currency_symbol` in `src/market.rs`.
+5. `cargo test market clock` checks suffixes, universes, hours, that every
    holiday is a weekday in a covered year and that half days trade.
 
 ## Updating holiday tables

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Prices in Swiss francs, South Korean won, New Taiwan dollars, Chinese yuan
+  and Brazilian reais are shown with `CHF `, `₩`, `NT$`, `CN¥` and `R$`
+  instead of `$`.
+
 ## [0.5.0] - 2026-10-25
 
 Planning, reporting and more markets: tax exports, benchmarks and goal

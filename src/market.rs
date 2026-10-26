@@ -789,6 +789,11 @@ pub fn currency_symbol(currency: Option<&str>) -> &'static str {
         Some("SGD") => "S$",
         Some("CAD") => "C$",
         Some("AUD") => "A$",
+        Some("CHF") => "CHF ",
+        Some("KRW") => "\u{20A9}",
+        Some("TWD") => "NT$",
+        Some("CNY") => "CN\u{00A5}",
+        Some("BRL") => "R$",
         _ => "$",
     }
 }
@@ -1118,7 +1123,7 @@ mod tests {
         assert_eq!(currency_symbol(Some("EUR")), "\u{20AC}");
         assert_eq!(currency_symbol(Some("JPY")), "\u{00A5}");
         // Unknown currencies fall back to $
-        assert_eq!(currency_symbol(Some("CHF")), "$");
+        assert_eq!(currency_symbol(Some("XXX")), "$");
     }
 
     #[test]
@@ -1343,6 +1348,11 @@ mod tests {
         assert_eq!(currency_symbol(Some("CAD")), "C$");
         assert_eq!(currency_symbol(Some("AUD")), "A$");
         assert_eq!(currency_symbol(Some("GBp")), "GBp ");
+        assert_eq!(currency_symbol(Some("CHF")), "CHF ");
+        assert_eq!(currency_symbol(Some("KRW")), "\u{20A9}");
+        assert_eq!(currency_symbol(Some("TWD")), "NT$");
+        assert_eq!(currency_symbol(Some("CNY")), "CN\u{00A5}");
+        assert_eq!(currency_symbol(Some("BRL")), "R$");
         assert_eq!(minor_unit("GBp"), Some(("GBP", 100.0)));
         assert_eq!(minor_unit("GBX"), Some(("GBP", 100.0)));
         assert_eq!(minor_unit("GBP"), None);
