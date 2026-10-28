@@ -113,6 +113,14 @@ fn retry_delay(attempt: u32, retry_after: Option<&header::HeaderValue>, base_ms:
         .min(MAX_RETRY_DELAY)
 }
 
+/// Hostname of a URL, for error messages ("query2.finance.yahoo.com", ...)
+fn host_of(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(url)
+}
+
 // ── Hybrid Cache: Redis (primary) + In-Memory (fallback) ──
 
 struct CacheEntry {
@@ -578,14 +586,35 @@ impl YahooClient {
 
     /// Rate-limited GET with retry and caching (Redis + in-memory)
     async fn fetch(&self, url: &str, cache_ttl: Duration) -> Result<String> {
-        let result = self.fetch_uncounted(url, cache_ttl).await;
+        self.fetch_with(url, cache_ttl, &[], true).await
+    }
+
+    /// Rate-limited GET with retry and caching, with optional extra headers.
+    /// `yahoo_auth` controls whether the Yahoo session cookie is sent — it is
+    /// disabled for third-party hosts (e.g. NSE) so we don't leak it.
+    pub async fn fetch_with(
+        &self,
+        url: &str,
+        cache_ttl: Duration,
+        extra_headers: &[(&str, &str)],
+        yahoo_auth: bool,
+    ) -> Result<String> {
+        let result = self
+            .fetch_uncounted_with(url, cache_ttl, extra_headers, yahoo_auth)
+            .await;
         if result.is_err() {
             count(&STATS.errors);
         }
         result
     }
 
-    async fn fetch_uncounted(&self, url: &str, cache_ttl: Duration) -> Result<String> {
+    async fn fetch_uncounted_with(
+        &self,
+        url: &str,
+        cache_ttl: Duration,
+        extra_headers: &[(&str, &str)],
+        yahoo_auth: bool,
+    ) -> Result<String> {
         // Check cache first (Redis → memory)
         {
             let mut cache = self.cache.lock().await;
@@ -610,13 +639,14 @@ impl YahooClient {
         }
 
         // Yahoo session cookies go to Yahoo only (news also comes from Google).
-        let is_yahoo = reqwest::Url::parse(url)
-            .ok()
-            .and_then(|u| {
-                u.host_str()
-                    .map(|h| h == "yahoo.com" || h.ends_with(".yahoo.com"))
-            })
-            .unwrap_or(false);
+        let is_yahoo = yahoo_auth
+            && reqwest::Url::parse(url)
+                .ok()
+                .and_then(|u| {
+                    u.host_str()
+                        .map(|h| h == "yahoo.com" || h.ends_with(".yahoo.com"))
+                })
+                .unwrap_or(false);
 
         // Fetch with retry + exponential backoff
         let mut last_status = None;
@@ -625,6 +655,9 @@ impl YahooClient {
             let mut req = self.client.get(url);
             if is_yahoo {
                 req = req.header(header::COOKIE, &self.cookie);
+            }
+            for (k, v) in extra_headers {
+                req = req.header(*k, *v);
             }
             count(&STATS.requests);
             let result = req.send().await;
@@ -647,7 +680,8 @@ impl YahooClient {
                         let delay =
                             retry_delay(attempt + 1, resp.headers().get(header::RETRY_AFTER), 1000);
                         eprintln!(
-                            "  Rate limited by Yahoo Finance. Waiting {}s...",
+                            "  Rate limited by {}. Waiting {}s...",
+                            host_of(url),
                             delay.as_secs()
                         );
                         tokio::time::sleep(delay).await;
@@ -657,14 +691,15 @@ impl YahooClient {
                         }
                         tokio::time::sleep(retry_delay(attempt, None, 500)).await;
                     } else {
-                        bail!("Yahoo Finance returned HTTP {}", status);
+                        bail!("{} returned HTTP {}", host_of(url), status);
                     }
                 }
                 Err(_e) if !last_attempt => {
                     tokio::time::sleep(retry_delay(attempt, None, 500)).await;
                 }
                 Err(e) => bail!(
-                    "Request to Yahoo Finance failed after {} attempts: {}",
+                    "Request to {} failed after {} attempts: {}",
+                    host_of(url),
                     MAX_RETRIES,
                     e
                 ),
@@ -852,6 +887,84 @@ impl YahooClient {
     /// Fetch raw text (for RSS/XML endpoints)
     pub async fn raw_get_text(&self, url: &str) -> Result<String> {
         self.fetch(url, Duration::from_secs(300)).await
+    }
+
+    /// Yahoo `quoteSummary` — returns the first result object containing the
+    /// requested modules (e.g. `financialData`, `earningsTrend`, ...).
+    /// Cached for 15 minutes; these modules change at most daily.
+    pub async fn quote_summary(&self, symbol: &str, modules: &[&str]) -> Result<serde_json::Value> {
+        let url = format!(
+            "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{}?modules={}&crumb={}",
+            symbol,
+            modules.join(","),
+            self.crumb
+        );
+        let body = self.fetch(&url, Duration::from_secs(900)).await?;
+        let mut resp: serde_json::Value =
+            serde_json::from_str(&body).context("Failed to parse quoteSummary response")?;
+        resp.get_mut("quoteSummary")
+            .and_then(|q| q.get_mut("result"))
+            .and_then(|r| r.as_array_mut())
+            .and_then(|a| {
+                if a.is_empty() {
+                    None
+                } else {
+                    Some(a.remove(0))
+                }
+            })
+            .context("quoteSummary returned no data")
+    }
+
+    /// Yahoo fundamentals time series (e.g. `quarterlyTotalRevenue`).
+    /// Returns the raw `timeseries.result` array. Cached for 1 hour.
+    pub async fn fundamentals_timeseries(
+        &self,
+        symbol: &str,
+        types: &[&str],
+        days_back: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let now = chrono::Utc::now().timestamp();
+        // Round period bounds to the day so the cache key is stable.
+        let period2 = now - now.rem_euclid(86_400) + 86_400;
+        let period1 = period2 - days_back * 86_400;
+        let url = format!(
+            "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{}?type={}&period1={}&period2={}&crumb={}",
+            symbol,
+            types.join(","),
+            period1,
+            period2,
+            self.crumb
+        );
+        let body = self.fetch(&url, Duration::from_secs(3600)).await?;
+        let resp: serde_json::Value =
+            serde_json::from_str(&body).context("Failed to parse timeseries response")?;
+        Ok(resp
+            .get("timeseries")
+            .and_then(|t| t.get("result"))
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// GET from NSE India (JSON APIs + archives). NSE rejects requests without
+    /// a browser-like Referer, and must not receive the Yahoo cookie.
+    pub async fn nse_get_text(&self, url: &str, ttl: Duration) -> Result<String> {
+        self.fetch_with(
+            url,
+            ttl,
+            &[
+                ("Referer", "https://www.nseindia.com/"),
+                ("Accept", "application/json, text/plain, */*"),
+                ("Accept-Language", "en-US,en;q=0.9"),
+            ],
+            false,
+        )
+        .await
+    }
+
+    pub async fn nse_get_json(&self, url: &str, ttl: Duration) -> Result<serde_json::Value> {
+        let body = self.nse_get_text(url, ttl).await?;
+        serde_json::from_str(&body).context("Failed to parse NSE response")
     }
 
     /// Yahoo symbols of an NSE index's members (`NIFTY 50` →

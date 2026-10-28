@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-28
+
+Stock key events timeline, INDmoney-style quantified impact cards, and institutional 6-pillar Buy/Sell decision verdict engine for Indian (NSE/BSE) and US equities.
+
+### Added
+- `stockwise events <SYMBOL> [--days N] [--ai]` (`ev`) — interactive, unified timeline of material events and exchange disclosures:
+  - Direct integration with NSE corporate announcements API and financial news RSS feeds.
+  - Regex financial figure extraction (revenues, PAT, order inflow values, price targets).
+  - Market reaction and excess return calculation against benchmark indices (NIFTY 50 for India, S&P 500 for US).
+  - Event classification (`Results`, `Orders`, `Analyst`, `Regulatory`, `M&A`, etc.) and upcoming corporate radar.
+- `stockwise insights <SYMBOL>` — INDmoney-style categorized impact cards (`POSITIVE IMPACT`, `NEGATIVE IMPACT`, `NEUTRAL IMPACT`):
+  - Quantitative metrics spanning 9 analysis dimensions: Ownership, Financial Growth, Margins, Valuation, Solvency & Health, Analyst Ratings, Technical Momentum, Dividends, and Newsflow.
+  - Live NSE XBRL shareholding pattern parsing for FII, DII, and promoter holdings/pledges.
+  - US market support (`-m us`) with SEC insider transactions and institutional holding trends.
+- `stockwise verdict <SYMBOL>` (`decision`, `signal`, `buysell`) — definitive institutional-grade decision engine:
+  - 6-pillar weighted scoring model (0–100): Valuation & Margin of Safety (20%), Growth & Financial Quality (25%), Solvency & Financial Health (15%), Smart Money & Ownership (15%), Analyst Conviction (10%), Technical Momentum & Trend (15%).
+  - Clear actionable verdicts (`STRONG BUY`, `BUY / ACCUMULATE`, `HOLD / NEUTRAL`, `REDUCE / TAKE PROFIT`, `STRONG SELL`).
+  - Automated entry zone, stop-loss level, target price, upside %, and risk-reward ratio computation.
+  - Multi-horizon guidance (1–4 weeks, 1–6 months, 1–3 years) and synthesized bull vs. bear thesis.
+
 ## [0.6.0] - 2026-10-26
 
 ### Added
@@ -746,7 +766,8 @@ Initial development. Not published. Highlights that landed during this phase:
 - Multi-timeframe and braille terminal charts; `-p/--period` flag on chart commands.
 - `deep` command — full report on a single stock in one shot.
 
-[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/iamsaquib8/stockwise/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/iamsaquib8/stockwise/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/iamsaquib8/stockwise/compare/v0.3.0...v0.4.0

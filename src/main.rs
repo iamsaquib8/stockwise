@@ -28,6 +28,7 @@ mod daemon;
 mod daemon_status;
 mod derivatives;
 mod display;
+mod events;
 mod funds;
 mod goals;
 mod greeks;
@@ -47,6 +48,7 @@ mod payoff;
 mod portfolio;
 mod practice;
 mod providers;
+mod research;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
@@ -59,6 +61,7 @@ mod testutil;
 mod tools;
 #[cfg(feature = "tui")]
 mod tui;
+mod verdict;
 mod views;
 mod watchlist;
 mod wealth;
@@ -215,6 +218,23 @@ enum Commands {
     /// Fundamental analysis with plain-English insights
     #[command(alias = "a")]
     Analyze { symbol: String },
+
+    /// Key events timeline, corporate disclosures & market reaction
+    #[command(alias = "ev")]
+    Events {
+        symbol: String,
+        #[arg(long, default_value = "90")]
+        days: i64,
+        #[arg(long)]
+        ai: bool,
+    },
+
+    /// INDmoney-style categorized impact cards (Growth, Valuation, Margins, Ownership, etc.)
+    Insights { symbol: String },
+
+    /// Definitive Buy/Sell verdict, multi-pillar scoring, targets & stop-loss
+    #[command(alias = "decision", alias = "signal", alias = "buysell")]
+    Verdict { symbol: String },
 
     /// Technical analysis (RSI, MACD, Bollinger Bands, ...)
     #[command(alias = "t")]
@@ -2164,6 +2184,9 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Analysis",
         &[
             "analyze",
+            "events",
+            "insights",
+            "verdict",
             "technical",
             "history",
             "chart",
@@ -2490,6 +2513,9 @@ async fn main() {
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
 
         Commands::Analyze { symbol } => commands::cmd_analyze(&symbol, m).await,
+        Commands::Events { symbol, days, ai } => commands::cmd_events(&symbol, days, ai, m).await,
+        Commands::Insights { symbol } => commands::cmd_insights(&symbol, m).await,
+        Commands::Verdict { symbol } => commands::cmd_verdict(&symbol, m).await,
         Commands::Technical {
             symbol,
             period,
