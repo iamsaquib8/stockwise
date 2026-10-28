@@ -603,6 +603,68 @@ pub fn parse_nse_sgb(json: &Value) -> Result<Vec<NseSgb>, &'static str> {
         .collect())
 }
 
+/// NSE's SGB list as [`nse_sgb_list`] returns it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SgbList {
+    pub rows: Vec<NseSgb>,
+    /// When NSE could not be reached and an older saved copy is used: when
+    /// that copy was fetched.
+    pub saved_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// NSE's list of traded SGBs through the shared NSE session (polite,
+/// cached 5 minutes); a copy is kept on disk so a refusal still shows the
+/// last prices seen, labelled with their date.
+pub async fn nse_sgb_list() -> anyhow::Result<SgbList> {
+    use crate::pagecache;
+    use anyhow::{Context, bail};
+    use std::time::Duration;
+    const CACHE: &str = "nse_sgb.json";
+    let valid = |t: &str| {
+        serde_json::from_str::<serde_json::Value>(t)
+            .ok()
+            .is_some_and(|v| parse_nse_sgb(&v).is_ok_and(|rows| !rows.is_empty()))
+    };
+    let parse = |text: &str| -> anyhow::Result<Vec<NseSgb>> {
+        let json: serde_json::Value = serde_json::from_str(text).context("NSE sent no JSON")?;
+        parse_nse_sgb(&json).map_err(|e| anyhow::anyhow!("NSE changed its SGB list format ({e})"))
+    };
+    let cached = pagecache::read(CACHE, Duration::from_secs(300), valid);
+    if let Some(page) = &cached
+        && !page.stale
+    {
+        return Ok(SgbList {
+            rows: parse(&page.text)?,
+            saved_at: None,
+        });
+    }
+    let session = crate::providers::nse::shared_session();
+    match session
+        .get_json(NSE_SGB_PATH, &[], Duration::from_secs(300))
+        .await
+    {
+        Ok(json) => {
+            let rows = parse_nse_sgb(&json)
+                .map_err(|e| anyhow::anyhow!("NSE changed its SGB list format ({e})"))?;
+            if rows.is_empty() {
+                bail!("NSE's SGB list is empty");
+            }
+            pagecache::write(CACHE, &json.to_string());
+            Ok(SgbList {
+                rows,
+                saved_at: None,
+            })
+        }
+        Err(e) => {
+            let page = pagecache::fall_back(cached, anyhow::anyhow!("{e}"))?;
+            Ok(SgbList {
+                rows: parse(&page.text)?,
+                saved_at: Some(page.fetched),
+            })
+        }
+    }
+}
+
 /// One line of `commodity sgb` (field order = JSON key order).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SgbRow {

@@ -10,6 +10,16 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 
 ## ✅ Shipped
 
+**0.6** — AI assistants and more ways to install
+- `stockwise mcp`: 24 read-only tools, resources and prompts for Claude, Cursor and other AI
+  assistants (no orders); `stockwise ask` with tool calling; `llms.txt` and an Agent Skill
+- Install: PyPI wheels (`pipx`/`uvx`, published once enabled), `.deb`/`.rpm`, a Termux build,
+  nixpkgs and Termux recipes, a Docker Hub mirror; Linux binaries run on glibc 2.34+
+  (Ubuntu 22.04, Debian 12, RHEL 9); download stats without telemetry
+- Mutual funds and SGBs valued across portfolio views and tax; `MF:` symbols fixed
+- Educational AI wording instead of buy/sell verdicts
+- Documentation site with a cheatsheet and a comparison with other tools
+
 **0.5** — planning, reporting and more markets
 - Planning: capital-gains export (`tax export in|us`), portfolio vs benchmark with attribution,
   goal planner (`goal sip|retire|education`)
@@ -50,64 +60,49 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 - Daemon workers, paper-trading simulator, Angel One live trading
 - Broker import (Kite, INDmoney, CSV), Redis cache, braille charts
 
-## 🚀 Reach — get StockWise to more people (0.5.x)
+## 🚀 Reach — get StockWise to more people (0.6.x)
 
 StockWise has the features; most people who would use it haven't found it yet.
 This comes first.
 
-- ✅ **Documentation site** on GitHub Pages with a one-page [cheatsheet](docs/cheatsheet.md) and an
-  honest [comparison](docs/comparison.md) with other tools
 - 🛠️ **Homebrew tap, Scoop bucket, winget and AUR** — manifests are generated on every release;
   publishing them needs the tap repository and package submissions. Then homebrew-core once
   eligible (75★ when a user submits it)
-- 📋 **`stockwise mcp` — an MCP server for AI assistants** — let Claude, ChatGPT, Cursor and other
-  agents use quotes, history and technicals, risk, fund NAVs and SIP returns, option chains and
-  payoffs, screens, backtests, your portfolio, tax estimates, the calendar and goal calculators as
-  tools; portfolio, watchlist and alerts as resources; ready-made prompts such as "review my
-  portfolio" and "tax-harvest check before 31 March". Read-only by default; live orders stay off
-  unless enabled, and then still go through the preview and typed confirmation. Listed in the
-  official MCP registry and awesome-mcp-servers, and shipped as a Claude Desktop extension
-  (Zerodha, Groww, Dhan, Upstox and Fyers ship MCP servers; Angel One doesn't)
-- 📋 **Findable by AI assistants** — an `llms.txt` index on the docs site and a published Agent
-  Skill (`SKILL.md`) so Claude Code and other agents know how to use StockWise
-- 📋 **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels carrying the binary (maturin
-  `bin`), where India's Python trading community already installs its tools
+- 🛠️ **List `stockwise mcp` where people look** — the official MCP registry (`server.json` is
+  ready), awesome-mcp-servers, and Claude Desktop extensions (`packaging/mcpb/`) attached to
+  releases (Zerodha, Groww, Dhan, Upstox and Fyers ship MCP servers; Angel One doesn't)
+- 🛠️ **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels carrying the binary (maturin
+  `bin`), where India's Python trading community already installs its tools. Wheels (manylinux,
+  musllinux, macOS, Windows) and the sdist are built on every release; publishing needs the
+  one-time PyPI trusted-publisher setup
 - 📋 **Animated demo** (VHS) at the top of the README and terminal recordings in the docs
-- 📋 **More places to install** — nixpkgs, Termux on Android, `.deb`/`.rpm` release assets, and a
-  Docker Hub mirror of the GHCR image
+  ([good first issue #23](https://github.com/iamsaquib8/stockwise/issues/23))
+- 🛠️ **More places to install** — submit the prepared nixpkgs and termux-packages recipes, and
+  turn on the Docker Hub mirror of the GHCR image (needs Docker Hub credentials)
 - 📋 **Try it without installing** — a Codespaces/devcontainer setup and a read-only hosted demo
   that runs on bundled historical data
 - 📋 **Daily replay challenge** with a shareable image card, built on the simulator's scoring
-- 📋 **Download stats without telemetry** — a nightly job that archives crates.io, GitHub release,
-  Homebrew, Docker and PyPI counts and GitHub traffic referrers
 
-## 🛠️ Now — finish what 0.5 started (0.5.x)
+## 🛠️ Now — loose ends (0.6.x)
 
-- 📋 **Mutual funds and SGBs in portfolio valuation** — price `MF:<AMFI code|ISIN>` holdings (from
-  `import cas`) from AMFI's end-of-day NAVs and SGBs from NSE across `portfolio`, `dashboard`,
-  `tui`, `serve`, `wealth`, `rebalance` and `tax` (`portfolio benchmark` and `tax export` already
-  handle fund codes), and stop `portfolio add`, `watch add` and `alert add` turning `MF:123` into
-  `MF:123.NS`
 - 📋 **Direct `.xlsx` imports** — teach the built-in reader dates and sheet selection, and read
   Groww, Zerodha Console and Upstox `.xlsx` holdings and tradebook exports without saving as CSV;
   add an Angel One import
 - 🛠️ **Broker integrations verified against live accounts** — the read-only `trade selftest` and the
   [verification criteria](docs/brokers.md#help-verify-a-broker) are ready; we need 3 reports per
   broker plus one small live order a tester places themselves
-- 📋 **Educational AI wording** — reword `report` and `--ai` output from buy/hold/sell "verdicts" to
-  neutral analysis ("signals point to…, risks are…") with a disclaimer, in line with SEBI's
-  research-analyst and finfluencer rules
 - 📋 **SEBI retail-algo rules** (in force since 1 Apr 2026) in `trade` — order-rate limits,
   price-protected market orders, daily login and static-IP guidance
 - 📋 **Check the NSE/BSE parsers against live responses** and add SENSEX from BSE (the endpoints are
   unofficial; licensed exchange feeds stay out of scope)
 
-## 📋 Next — your money, end to end, and more markets (0.6)
+## 📋 Next — your money, end to end, and more markets (0.7)
 
 **Tax season** (ship before the 15 Dec and 15 Mar advance-tax dates)
 - 📋 **Tax-gain and tax-loss harvesting by lot** — book gains inside India's ₹1.25 lakh LTCG
   exemption before 31 March, harvest losses with the STCL/LTCL set-off rules, and flag the US
-  wash-sale window (30 days either side)
+  wash-sale window (30 days either side). Smaller first step: `harvest --json`/`--csv`
+  ([#21](https://github.com/iamsaquib8/stockwise/issues/21))
 - 📋 **Advance tax** — quarterly estimates for the 15 Jun, 15 Sep, 15 Dec and 15 Mar instalments
 - 📋 **Indian ITR toolkit** — 31 Jan 2018 grandfathering from fair market values (flagged only
   today), Schedule FA for foreign holdings (calendar-year peak and closing values in INR),
@@ -129,7 +124,8 @@ This comes first.
 
 **Research**
 - 📋 **Screener queries** — `stockwise screen "roce > 20 and pe < 25"` with custom ratios, the
-  NIFTY Midcap 150 / Smallcap 250 / 500 universes, and importing your own screener exports
+  NIFTY Midcap 150 / Smallcap 250 / 500 universes ([#16](https://github.com/iamsaquib8/stockwise/issues/16)), and importing your own screener
+  exports
 - 📋 **Open-interest analytics** — OI change and build-up, PCR and IV history, IV percentile
 - 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates
 - 📋 **Market mood** — a transparent composite of India VIX, breadth and momentum, plus FII/DII
@@ -141,17 +137,15 @@ This comes first.
 **Markets**
 - 📋 **More exchanges** in the market table — South Korea (`-m kr`, `.KS` and KOSDAQ `.KQ`), Taiwan
   (`-m tw`, `.TW` and `.TWO`), France (`.PA`), Netherlands (`.AS`), Switzerland (`.SW`), China
-  (`.SS`/`.SZ`) and Brazil (`.SA`), each with its currency, hours and holidays
+  (`.SS`/`.SZ`) and Brazil (`.SA`), each with its currency ([#17](https://github.com/iamsaquib8/stockwise/issues/17)), hours and holidays
 - 📋 **Energy and industrial metals** in `-m commodity` — Brent and WTI crude (USD and ₹/bbl),
-  natural gas, copper, platinum
+  natural gas, copper, platinum (metals: [#20](https://github.com/iamsaquib8/stockwise/issues/20))
 - 📋 **Macro** — US Treasury yields (3M, 5Y, 10Y, 30Y) and the India–US 10Y spread in `bonds` and
-  `markets`, DXY and NRI cross-rates (AED, SGD, JPY, AUD, CAD, CHF vs INR) in `-m fx`, and an
+  `markets` ([#19](https://github.com/iamsaquib8/stockwise/issues/19)), DXY and NRI cross-rates (AED, SGD, JPY, AUD, CAD, CHF vs INR) in
+  `-m fx` ([#18](https://github.com/iamsaquib8/stockwise/issues/18)), and an
   Indian REIT/InvIT list (these already quote by symbol; this adds names, aliases and lists)
 
 **AI**
-- 📋 **One tool layer for agents** — the same typed tool definitions power `stockwise mcp` and a new
-  `stockwise ask "which of my holdings fell most this month?"`, where a local Ollama model (with
-  tool calling) or an opt-in cloud model picks the commands, runs them and answers in plain English
 - 📋 **`--explain` for beginners** — plain-English notes under technicals, risk metrics, option greeks
   and tax numbers (templates first, the local model optional)
 
@@ -167,7 +161,7 @@ This comes first.
 
 - 💡 **Options strategy backtests** on end-of-day chains
 - 💡 **Trade journal, position sizer and two-leg (OCO) GTTs** — notes and tags on lots and sales,
-  win-rate/expectancy, an R-multiple sizer
+  win-rate/expectancy, an R-multiple sizer (`stoploss` sizing: [#22](https://github.com/iamsaquib8/stockwise/issues/22))
 - 💡 **Ownership signals** — well-known investors' portfolios, shareholding and pledge changes,
   alerts on phrases in filings, and local-LLM summaries of earnings calls
 - 💡 **AI in the dashboards** — an assistant pane in the TUI and web dashboard on top of the same

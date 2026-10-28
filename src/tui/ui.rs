@@ -366,8 +366,13 @@ fn render_portfolio(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .iter()
         .map(|h| {
             let cur = h.currency.as_deref();
+            // A fund's code says nothing: show its scheme name.
+            let label = match (&h.name, crate::offmarket::is_fund(&h.symbol)) {
+                (Some(name), true) => name.clone(),
+                _ => short(&h.symbol).to_string(),
+            };
             let mut cells = vec![
-                Cell::from(short(&h.symbol).to_string()),
+                Cell::from(label),
                 Cell::from(Line::from(format!("{}", h.shares)).right_aligned()),
             ];
             if wide {
@@ -375,8 +380,15 @@ fn render_portfolio(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                     Line::from(format_price(h.avg_cost, cur)).right_aligned(),
                 ));
             }
+            // ≈: an SGB valued at its gram of gold (NSE had no price).
+            let estimated = h.price_source == Some(crate::offmarket::PriceSource::GoldEstimate);
             cells.push(Cell::from(
-                Line::from(price_text(h.price, cur)).right_aligned(),
+                Line::from(format!(
+                    "{}{}",
+                    if estimated { "≈" } else { "" },
+                    price_text(h.price, cur)
+                ))
+                .right_aligned(),
             ));
             if wide {
                 let pnl = h.pnl.map_or(Span::styled("—", theme.dim), |p| {

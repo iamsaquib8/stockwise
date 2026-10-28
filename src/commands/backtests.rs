@@ -55,20 +55,17 @@ impl BacktestOpts {
 
 /// Daily bars for `symbol`, with its currency.
 async fn fetch_bars(
-    client: &YahooClient,
+    client: &impl views::DataSource,
     symbol: &str,
     period: &str,
     market: Market,
 ) -> Result<(Bars, Option<String>)> {
-    let chart = client
-        .get_chart(symbol, period, "1d")
-        .await
-        .with_context(|| {
-            format!(
-                "No price history for {symbol}{}",
-                market::not_found_hint(market)
-            )
-        })?;
+    let chart = client.chart(symbol, period, "1d").await.with_context(|| {
+        format!(
+            "No price history for {symbol}{}",
+            market::not_found_hint(market)
+        )
+    })?;
     let currency = chart.meta.as_ref().and_then(|m| m.currency.clone());
     let bars = Bars::from_chart(&chart);
     if bars.is_empty() {
@@ -405,20 +402,50 @@ pub(crate) fn single_json(
 
 // ── backtest SYMBOL ──
 
-pub async fn cmd_backtest(
+/// One symbol backtested with and without costs, next to buy and hold.
+pub(crate) struct SingleRun {
+    pub(crate) resolved: String,
+    pub(crate) currency: Option<String>,
+    pub(crate) bars: Bars,
+    pub(crate) def: StrategyDef,
+    pub(crate) costs: CostModel,
+    pub(crate) net: SimResult,
+    pub(crate) gross: SimResult,
+    pub(crate) buy_hold_pct: f64,
+}
+
+impl SingleRun {
+    /// `backtest SYMBOL --json`.
+    pub(crate) fn json(&self, period: &str, opts: &BacktestOpts) -> Result<serde_json::Value> {
+        single_json(
+            &self.resolved,
+            self.currency.as_deref(),
+            period,
+            &self.bars,
+            &self.def,
+            opts,
+            &self.costs,
+            &self.net,
+            &self.gross.metrics(),
+            self.buy_hold_pct,
+        )
+    }
+}
+
+/// Backtest `opts.strategy` on `symbol`'s daily bars from `src`.
+pub(crate) async fn run_single(
+    src: &impl views::DataSource,
     symbol: &str,
     period: &str,
-    opts: BacktestOpts,
+    opts: &BacktestOpts,
     market: Market,
-) -> Result<()> {
+) -> Result<SingleRun> {
     let def = opts.strategy()?;
     let resolved = market::resolve_symbol(symbol, market);
-    let client = YahooClient::new().await?;
-    let (bars, currency) = fetch_bars(&client, &resolved, period, market).await?;
-    let cur = currency.as_deref();
+    let (bars, currency) = fetch_bars(src, &resolved, period, market).await?;
     check_history(&bars, &resolved, period, def.compile()?.lookback() + 10)?;
 
-    let costs = opts.cost_model(&resolved, cur)?;
+    let costs = opts.cost_model(&resolved, currency.as_deref())?;
     let cfg = opts.sim_config(&def, costs.clone(), std::slice::from_ref(&resolved));
     let net = single(&resolved, &bars, &def, &cfg)?;
     let gross = single(
@@ -430,26 +457,47 @@ pub async fn cmd_backtest(
             ..cfg.clone()
         },
     )?;
-    let (m, gm) = (net.metrics(), gross.metrics());
-    let bh = backtest::buy_and_hold_pct(&bars).unwrap_or(0.0);
+    let buy_hold_pct = backtest::buy_and_hold_pct(&bars).unwrap_or(0.0);
+    Ok(SingleRun {
+        resolved,
+        currency,
+        bars,
+        def,
+        costs,
+        net,
+        gross,
+        buy_hold_pct,
+    })
+}
 
-    match opts.fmt {
-        Format::Csv => return output::print_csv(&net.trades),
-        Format::Json => {
-            return output::print_json(&single_json(
-                &resolved,
-                currency.as_deref(),
-                period,
-                &bars,
-                &def,
-                &opts,
-                &costs,
-                &net,
-                &gm,
-                bh,
-            )?);
-        }
-        Format::Table => {}
+pub async fn cmd_backtest(
+    symbol: &str,
+    period: &str,
+    opts: BacktestOpts,
+    market: Market,
+) -> Result<()> {
+    // Strategy errors need no network.
+    opts.strategy()?;
+    let client = YahooClient::new().await?;
+    let run = run_single(&client, symbol, period, &opts, market).await?;
+    if opts.fmt == Format::Json {
+        return output::print_json(&run.json(period, &opts)?);
+    }
+    let SingleRun {
+        resolved,
+        currency,
+        bars,
+        def,
+        costs,
+        net,
+        gross,
+        buy_hold_pct: bh,
+    } = run;
+    let cur = currency.as_deref();
+    let (m, gm) = (net.metrics(), gross.metrics());
+
+    if opts.fmt == Format::Csv {
+        return output::print_csv(&net.trades);
     }
 
     print_header(&format!(
@@ -499,9 +547,7 @@ pub async fn cmd_backtest(
         );
         print_section(&format!("AI Interpretation ({})", ai.provider().name()));
         if let Ok(interp) = ai.interpret_backtest(&data).await {
-            for line in interp.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&interp);
         }
     }
     footer();

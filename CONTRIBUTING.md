@@ -10,6 +10,14 @@ docs, new commands, broker integrations, and strategy ideas.
   hard-code real broker credentials, API keys, or personal portfolio data into
   the repo, tests, or fixtures.
 
+## Where to start
+
+Issues labelled [good first issue](https://github.com/iamsaquib8/stockwise/labels/good%20first%20issue) are small and
+self-contained: each says what to change, links the code, and lists what
+"done" looks like. Comment on one to claim it so two people don't work on the
+same thing. Larger ideas are on the [roadmap](ROADMAP.md); open a discussion or
+issue before starting one.
+
 ## Getting set up
 
 ```bash
@@ -48,7 +56,7 @@ Run the same checks CI does — all of them must pass:
 ```bash
 cargo fmt --all            # format
 cargo clippy --all-targets -- -D warnings   # lint (must be clean)
-cargo clippy --all-targets --no-default-features -- -D warnings   # minimal build (no tui/serve)
+cargo clippy --all-targets --no-default-features -- -D warnings   # minimal build (no tui/serve/mcp)
 cargo clippy --all-targets --features wasm-plugins -- -D warnings  # WASM strategy plugins
 cargo test                 # all tests green
 cargo test --features wasm-plugins

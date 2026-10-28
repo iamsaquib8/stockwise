@@ -189,6 +189,7 @@ messages! {
     GroupLiveTrading => "Live trading", "लाइव ट्रेडिंग";
     GroupSetup => "Setup", "सेटअप";
     GroupPlanning => "Planning", "योजना";
+    GroupAi => "AI assistants", "एआई सहायक";
     AboutQuote => "Real-time quote for one or more stocks", "एक या अधिक शेयरों का ताज़ा भाव";
     AboutDeep => "Everything about a stock in one command", "एक कमांड में किसी शेयर की पूरी जानकारी";
     AboutMarkets => "Major market indices (US + India)", "प्रमुख बाज़ार सूचकांक (अमेरिका + भारत)";

@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::api::Quote;
+use crate::offmarket::{self, Mark, OffMarket, PriceSource};
 use crate::portfolio::{self as pf, DividendEvent, Fx, Lot, Split};
 use crate::tax;
 
@@ -20,9 +21,12 @@ pub(crate) fn market_currency(market: Market) -> &'static str {
 
 /// Live prices for a set of holdings plus the exchange rates to total them
 /// in one base currency, so INR and USD amounts are never added raw.
+/// Mutual funds are priced at AMFI's NAV and SGBs from NSE's list (see
+/// [`offmarket`]); `off` says how, and why some could not be.
 pub(crate) struct Valuation {
     pub quotes: Vec<Quote>,
     pub fx: Fx,
+    pub off: OffMarket,
 }
 
 /// Cost and value in the base currency, leaving out holdings without a live
@@ -47,10 +51,18 @@ impl Totals {
     /// Warn about holdings left out of the totals.
     pub fn print_exclusions(&self) {
         if !self.unpriced.is_empty() {
+            // Funds and SGBs get their own note saying why (see
+            // `Valuation::print_price_notes`); `search` can't find them.
+            let hint = if self.unpriced.iter().all(|s| offmarket::is_off_market(s)) {
+                ""
+            } else {
+                " Check the symbol with `stockwise search`."
+            };
             println!(
-                "  {} No live price for {} — excluded from totals. Check the symbol with `stockwise search`.",
+                "  {} No live price for {} — excluded from totals.{}",
                 "!".yellow(),
-                self.unpriced.join(", ")
+                self.unpriced.join(", "),
+                hint
             );
         }
         if !self.unconverted.is_empty() {
@@ -72,6 +84,76 @@ impl Valuation {
 
     pub fn price(&self, symbol: &str) -> Option<f64> {
         self.quote(symbol).and_then(|q| q.regular_market_price)
+    }
+
+    /// How a holding outside Yahoo was priced (funds, SGBs).
+    pub fn mark(&self, symbol: &str) -> Option<&Mark> {
+        self.off.mark(symbol)
+    }
+
+    /// Where `symbol`'s price came from; None when it has none.
+    pub fn price_source(&self, symbol: &str) -> Option<PriceSource> {
+        self.price(symbol)?;
+        Some(self.mark(symbol).map_or(PriceSource::Quote, |m| m.source))
+    }
+
+    /// A readable name: the fund's scheme or the SGB's series, else the
+    /// quote's name.
+    pub fn name(&self, symbol: &str) -> Option<String> {
+        self.mark(symbol).and_then(|m| m.name.clone()).or_else(|| {
+            let q = self.quote(symbol)?;
+            q.short_name.clone().or_else(|| q.long_name.clone())
+        })
+    }
+
+    /// The NAV's date for a fund priced at AMFI's NAV.
+    pub fn nav_date(&self, symbol: &str) -> Option<chrono::NaiveDate> {
+        self.mark(symbol)
+            .filter(|m| m.source == PriceSource::AmfiNav)
+            .and_then(|m| m.as_of)
+    }
+
+    /// One line per fund or SGB saying what it is and how it was priced
+    /// ("NAV as of 19 Oct 2026"), then the notes (unknown codes, estimates,
+    /// interest left out).
+    pub fn price_notes(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .off
+            .marks
+            .iter()
+            .map(|m| {
+                let how = match m.source {
+                    PriceSource::AmfiNav => match m.as_of {
+                        Some(d) => format!("NAV as of {} (AMFI, end of day)", d.format("%d %b %Y")),
+                        None => "AMFI NAV (end of day)".to_string(),
+                    },
+                    PriceSource::NseSgb => match m.as_of {
+                        Some(d) => format!("NSE last price, saved {}", d.format("%d %b %Y")),
+                        None => "NSE last price".to_string(),
+                    },
+                    PriceSource::GoldEstimate => "estimated from gold spot".to_string(),
+                    PriceSource::Quote => "market quote".to_string(),
+                };
+                match &m.name {
+                    Some(name) => format!("{} {} — {}", pad_end(&m.symbol, 14), name, how),
+                    None => format!("{} {}", pad_end(&m.symbol, 14), how),
+                }
+            })
+            .collect();
+        lines.extend(self.off.notes.iter().map(offmarket::Note::line));
+        lines
+    }
+
+    /// [`Valuation::price_notes`], dimmed, under a short heading.
+    pub fn print_price_notes(&self) {
+        let lines = self.price_notes();
+        if lines.is_empty() {
+            return;
+        }
+        println!("  {}", "Funds and gold bonds".dimmed().bold());
+        for line in lines {
+            println!("  {}", line.dimmed());
+        }
     }
 
     /// The quote's currency, or a guess from the symbol's exchange suffix.
@@ -150,19 +232,28 @@ pub(super) fn fx_pair(currency: &str, base: &str) -> (String, bool) {
 /// Price `symbols` and fetch the exchange rates to total them. The base
 /// currency is `base` if given; otherwise the holdings' own currency when
 /// they all share one, or the market's currency when they are mixed.
+/// `MF:` funds and SGBs are priced from AMFI and NSE (see [`offmarket`]).
 pub(crate) async fn value_holdings(
     src: &impl views::DataSource,
     symbols: &[String],
     market: Market,
     base: Option<&str>,
 ) -> Result<Valuation> {
-    let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = if refs.is_empty() {
+    // Yahoo has no `MF:` symbols; asking would only cost a lookup.
+    let refs: Vec<&str> = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !market::is_namespaced(s))
+        .collect();
+    let mut quotes = if refs.is_empty() {
         Vec::new()
     } else {
         src.quotes(&refs).await?
     };
+    let off = offmarket::price(src, symbols, &quotes).await;
+    off.merge_into(&mut quotes);
     let mut v = Valuation::new(quotes, symbols, market, base);
+    v.off = off;
     v.add_rates(src, &v.currencies(symbols)).await;
     Ok(v)
 }
@@ -175,6 +266,7 @@ impl Valuation {
         let mut v = Valuation {
             quotes,
             fx: Fx::new(market_currency(market)),
+            off: OffMarket::default(),
         };
         let currencies = v.currencies(symbols);
         let base = match base {
@@ -398,7 +490,7 @@ fn held_for(from: &str, today: chrono::NaiveDate) -> String {
 /// The symbol of an existing holding: `symbol` resolved for `market`, or as
 /// typed when that is what the portfolio holds (`AAPL` while the market is
 /// India, where it would resolve to `AAPL.NS`). Sales count too.
-fn held_symbol(portfolio: &Portfolio, symbol: &str, market: Market) -> String {
+pub(crate) fn held_symbol(portfolio: &Portfolio, symbol: &str, market: Market) -> String {
     let resolved = market::resolve_symbol(symbol, market);
     let held = |s: &str| {
         portfolio.holding(s).is_some() || portfolio.realized.iter().any(|r| r.symbol == s)
@@ -434,6 +526,13 @@ pub(crate) struct HoldingRow {
     /// Money-weighted annual return of the holding's buys, sales and dividends.
     pub(crate) xirr_percent: Option<f64>,
     pub(crate) currency: Option<String>,
+    /// The scheme name for a fund, the series for an SGB, else the quote's name.
+    pub(crate) name: Option<String>,
+    /// `quote`, `amfi_nav` (end-of-day NAV), `nse_sgb`, or `gold_estimate`
+    /// (an SGB valued at 1 g of gold at spot); null without a price.
+    pub(crate) price_source: Option<PriceSource>,
+    /// Date of the NAV a fund is valued at.
+    pub(crate) nav_date: Option<chrono::NaiveDate>,
 }
 
 impl CsvRow for HoldingRow {
@@ -449,6 +548,9 @@ impl CsvRow for HoldingRow {
         "weight_percent",
         "xirr_percent",
         "currency",
+        "name",
+        "price_source",
+        "nav_date",
     ];
 }
 
@@ -464,13 +566,15 @@ pub(crate) struct PortfolioTotals {
 
 /// `portfolio --json`: every holding, totals in one currency, and the
 /// holdings left out of the totals — without a live price (`unpriced`) or
-/// without an exchange rate (`unconverted`). Never valued at 0.
+/// without an exchange rate (`unconverted`). Never valued at 0. `notes`
+/// explain fund and SGB prices: unknown codes, estimates, what is left out.
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct PortfolioReport {
     pub(crate) holdings: Vec<HoldingRow>,
     pub(crate) totals: PortfolioTotals,
     pub(crate) unpriced: Vec<String>,
     pub(crate) unconverted: Vec<String>,
+    pub(crate) notes: Vec<String>,
 }
 
 fn pct_of(part: f64, whole: f64) -> f64 {
@@ -510,6 +614,9 @@ pub(crate) fn portfolio_report(
                     .and_then(|v| pf::xirr(&portfolio.cash_flows(&h.symbol), v, today))
                     .map(|r| round(r * 100.0, 2)),
                 currency: val.currency(&h.symbol),
+                name: val.name(&h.symbol),
+                price_source: val.price_source(&h.symbol),
+                nav_date: val.nav_date(&h.symbol),
             }
         })
         .collect();
@@ -524,6 +631,7 @@ pub(crate) fn portfolio_report(
         },
         unpriced: totals.unpriced,
         unconverted: totals.unconverted,
+        notes: val.off.notes.iter().map(offmarket::Note::line).collect(),
     }
 }
 
@@ -581,10 +689,19 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     let today = chrono::Local::now().date_naive();
 
     print_header(&portfolio_title(t(Msg::YourPortfolio)));
+    // Wide enough for `MF:<ISIN>` (and the `*` of estimated dates).
+    let sw = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.len() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(12);
+    let rule = "─".repeat(74 + sw);
     // Width-aware padding: translated labels (e.g. Hindi) aren't one column per char.
     println!(
         "  {} {} {} {} {} {} {} {}",
-        pad_end(t(Msg::Symbol), 12).bold(),
+        pad_end(t(Msg::Symbol), sw).bold(),
         pad_start(t(Msg::Shares), 8).bold(),
         pad_start(t(Msg::AvgCost), 10).bold(),
         pad_start(t(Msg::Price), 10).bold(),
@@ -593,7 +710,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         pad_start(t(Msg::PnLPct), 8).bold(),
         pad_start("XIRR", 8).bold(),
     );
-    println!("  {}", "─".repeat(86).dimmed());
+    println!("  {}", rule.dimmed());
 
     let mut any_estimated = false;
     for h in &portfolio.holdings {
@@ -608,7 +725,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         // leave it out of the totals rather than valuing it at 0.
         let Some(price) = val.price(&h.symbol) else {
             println!(
-                "  {:<12} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
+                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
                 label.yellow(),
                 h.shares,
                 format_price(h.avg_cost, cur),
@@ -626,7 +743,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let pnl_pct = if cost > 0.0 { pnl / cost * 100.0 } else { 0.0 };
         let xirr = pf::xirr(&portfolio.cash_flows(&h.symbol), value, today);
         println!(
-            "  {:<12} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
+            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
             label.cyan(),
             h.shares,
             format_price(h.avg_cost, cur),
@@ -660,10 +777,10 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         }
         pf::xirr(&flows, totals.value, today)
     };
-    println!("  {}", "─".repeat(86).dimmed());
+    println!("  {}", rule.dimmed());
     println!(
         "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
-        pad_end(t(Msg::Total), 12).bold(),
+        pad_end(t(Msg::Total), sw).bold(),
         "",
         format_price(totals.cost, base),
         "",
@@ -718,6 +835,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     }
     println!();
     totals.print_exclusions();
+    val.print_price_notes();
     if !unconverted.is_empty() {
         println!(
             "  {} No exchange rate for {} — left out of realized P&L and dividends.",
@@ -770,10 +888,12 @@ pub async fn cmd_portfolio_add(
     portfolio.add_lot(&resolved, Lot::new(shares, cost, &date, "manual"));
     portfolio.save()?;
     let cur = pf::symbol_currency(&resolved);
+    let units = offmarket::unit_word(&resolved);
     println!(
-        "  {} Added {} shares of {} at {} (bought {})",
+        "  {} Added {} {} of {} at {} (bought {})",
         "✓".green(),
         shares,
+        units,
         resolved,
         format_price(cost, cur),
         date
@@ -782,9 +902,10 @@ pub async fn cmd_portfolio_add(
         && h.lots.len() > 1
     {
         println!(
-            "  {} Now {} shares in {} lots, average cost {}",
+            "  {} Now {} {} in {} lots, average cost {}",
             "·".dimmed(),
             h.shares,
+            units,
             h.lots.len(),
             format_price(h.avg_cost, cur)
         );
@@ -843,8 +964,10 @@ pub async fn cmd_portfolio_sell(
     }
     // Lots must be in the sale date's share count: with a split or bonus not
     // yet applied, FIFO would match the wrong number of shares.
+    // Fund and SGB units never split.
     let client = YahooClient::new().await;
     let checked = match &client {
+        _ if offmarket::is_off_market(&resolved) => Some(Vec::new()),
         Ok(c) => pending_splits(c, &portfolio, &resolved).await.ok(),
         Err(_) => None,
     };
@@ -869,15 +992,32 @@ pub async fn cmd_portfolio_sell(
     let price = match price {
         Some(p) => p,
         None => {
+            // A fund is redeemed at its NAV: the same price `portfolio` shows.
             let client = client?;
-            let quotes = client.get_quote(&[resolved.as_str()]).await?;
-            let q = quotes
-                .iter()
-                .find(|q| q.symbol.as_deref() == Some(resolved.as_str()));
-            if let Some(c) = q.and_then(|q| q.currency.clone()) {
+            let val =
+                value_holdings(&client, std::slice::from_ref(&resolved), market, None).await?;
+            if let Some(c) = val.currency(&resolved) {
                 cur = Some(c);
             }
-            q.and_then(|q| q.regular_market_price).with_context(|| {
+            // An estimate is no sale price: SGBs NSE shows no trade for need one typed.
+            if val.price_source(&resolved) == Some(PriceSource::GoldEstimate) {
+                bail!(
+                    "No market price for {} (only an estimate from gold spot); give the sale price: \
+                     stockwise portfolio sell {} {} <PRICE>",
+                    resolved,
+                    symbol,
+                    shares
+                );
+            }
+            for note in val
+                .off
+                .notes
+                .iter()
+                .filter(|n| n.symbols.contains(&resolved))
+            {
+                println!("  {} {}", "!".yellow(), note.line());
+            }
+            val.price(&resolved).with_context(|| {
                 format!(
                     "No live price for {}; give the sale price: stockwise portfolio sell {} {} <PRICE>",
                     resolved, symbol, shares
@@ -961,12 +1101,12 @@ pub async fn cmd_portfolio_lots(
     }
 
     // The live price is a nice-to-have here; lots still show without it.
+    // A fund's is its NAV.
     let quote = match YahooClient::new().await {
-        Ok(client) => client
-            .get_quote(&[resolved.as_str()])
+        Ok(client) => value_holdings(&client, std::slice::from_ref(&resolved), market, None)
             .await
             .ok()
-            .and_then(|q| q.into_iter().next()),
+            .and_then(|v| v.quote(&resolved).cloned()),
         Err(_) => None,
     };
     let price = quote.as_ref().and_then(|q| q.regular_market_price);
@@ -1117,12 +1257,27 @@ pub async fn cmd_portfolio_actions(
             if !history.contains(&resolved) {
                 bail!("{} is not in your portfolio", resolved);
             }
+            if offmarket::is_off_market(&resolved) {
+                println!(
+                    "\n  {}",
+                    format!("{resolved}: fund and SGB units have no splits or dividends to apply.")
+                        .dimmed()
+                );
+                return Ok(());
+            }
             vec![resolved]
         }
-        None => history,
+        // Fund and SGB units never split, and Yahoo has no data for them.
+        None => history
+            .into_iter()
+            .filter(|s| !offmarket::is_off_market(s))
+            .collect(),
     };
     if targets.is_empty() {
-        println!("\n  {}", "Portfolio is empty.".dimmed());
+        println!(
+            "\n  {}",
+            "No holdings with corporate actions to check.".dimmed()
+        );
         return Ok(());
     }
 

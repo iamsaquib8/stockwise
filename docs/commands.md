@@ -86,7 +86,7 @@ network, invalid config file), `2` invalid arguments.
 
 | Command | Description |
 |---------|-------------|
-| `analyze <SYMBOL>` (`a`) | Valuation, profitability, growth, analyst ratings, plain-English verdict |
+| `analyze <SYMBOL>` (`a`) | Valuation, profitability, growth, analyst ratings, plain-English outlook |
 | `technical <SYMBOL> [-p] [--json]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |
@@ -269,6 +269,8 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
   falls on a holiday.
   Their NSE symbols come from a public list and are only shown when NSE's own
   list is unavailable. No new SGBs have been issued since February 2024.
+  SGBs you hold are valued from the same list in `portfolio` and the other
+  holdings commands (see [Mutual funds and SGBs](#mutual-funds-and-sgbs)).
 - **Yields**: CCIL's [tenor-wise indicative yields](https://www.ccilindia.com/tenorwise-indicative-yields),
   end of day, cached for 6 hours; when CCIL can't be reached, the five
   benchmark G-sec yields and T-bill cut-offs on the [RBI home page](https://www.rbi.org.in/).
@@ -312,7 +314,7 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 | `sim challenge list\|start NAME\|status\|end [--json]` | Goal-based challenges with hard and soft rules over the running replay or your live paper sessions: `beat-the-index`, `steady-hands`, `position-limit`, `stop-loss`, `sip-discipline`, `crash-survivor`, or `file:PATH.toml` |
 | `sim profile [--json]` | Badges (earned and how to earn the rest), streaks, best score per scenario, recent runs |
 | `sim card [--svg FILE] [--text]` | Your last run as a text card, or a 640 × 360 SVG image — with the paper-trading disclaimer |
-| `report <intraday\|longterm\|portfolio\|SYMBOL>` | AI report via local Ollama |
+| `report <intraday\|longterm\|portfolio\|SYMBOL>` | Educational AI notes (signals, risks, what to watch) via local Ollama or an opt-in cloud model — see [ai.md](ai.md) |
 
 Every `backtest` form also takes:
 
@@ -336,9 +338,9 @@ Data lives in the directory shown by `stockwise doctor`.
 
 | Command | Description |
 |---------|-------------|
-| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; holdings without a live price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
-| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD]` | Add a purchase as a new lot (default date: today) |
-| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price; a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
+| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
+| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD]` | Add a purchase as a new lot (default date: today). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
+| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N --date YYYY-MM-DD]` | Lots, sales, dividends and XIRR of one holding; `--lot N --date` corrects a purchase date |
 | `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo). Shows them; `--apply` adjusts lots and records dividends, and is safe to repeat |
 | `portfolio list` | Your portfolios: the default one and every named one |
@@ -351,7 +353,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace]` | Import broker holdings, a lot list, a tradebook or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
-| `rebalance` | Trades to reach equal weight |
+| `rebalance` | Trades to reach equal weight (fund units to three decimals) |
 | `harvest` | Tax-loss harvesting candidates |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
@@ -375,6 +377,43 @@ and STCG is taxed at 20%, LTCG at 12.5%. Losses left over are shown as carry
 forward. Holdings in another currency (e.g. US shares in `tax in`) are listed
 but not included. It is an estimate — no cess, surcharge, grandfathering or
 brought-forward losses.
+
+Mutual funds and SGBs in `tax in`: equity-oriented funds — by their AMFI
+category: equity schemes (ELSS included), arbitrage, aggressive hybrid and
+equity savings funds, and Nifty/Sensex index funds — are counted like listed
+shares and named under the estimate. Debt and other funds (taxed at your slab
+rate for units bought from 1 Apr 2023, at 12.5% after 24 months for older
+units), funds not found in AMFI's file, and SGBs (tax-free when RBI redeems
+them; sold on the exchange, 12.5% after 12 months without the ₹1.25 lakh
+exemption) are left out and listed with the rule that applies (`other_rules`
+in `--json`).
+
+### Mutual funds and SGBs
+
+Holdings that Yahoo Finance doesn't quote are priced by StockWise itself, the
+same way in `portfolio`, `dashboard`, `tui`, `serve`, `wealth`, `rebalance`,
+`harvest`, `tax`, `portfolio sell` and `report portfolio`:
+
+- **Mutual funds** — `MF:<AMFI code>` (`portfolio add MF:120503 10 50`) or
+  `MF:<ISIN>` (the growth/payout or IDCW-reinvestment ISIN, as `import cas` and
+  Groww imports store them) — at the latest NAV in AMFI's
+  [NAVAll.txt](https://portal.amfiindia.com/spages/NAVAll.txt) (cached 12
+  hours). NAVs are end of day: the table says "NAV as of <date>" for each fund,
+  and `--json` rows carry `name`, `price_source: "amfi_nav"` and `nav_date`. A
+  code or ISIN that isn't in AMFI's file, or a scheme AMFI lists without a NAV,
+  stays N/A with a note (find codes with `mf search`) — never 0. A scheme whose
+  last NAV is over a month older than the file is flagged as possibly matured.
+  `MF:` symbols are never sent to Yahoo, and `watch`/`alert` see the NAV too.
+- **Sovereign Gold Bonds** — the NSE symbol (`SGBNOV26`, stored as
+  `SGBNOV26.NS`) or the tranche's ISIN — at the last price in NSE's SGB list
+  (`price_source: "nse_sgb"`). When NSE refuses or shows no trade, the value is
+  one gram of gold at the international spot price per unit, labelled
+  "estimated from gold spot" (`gold_estimate`). Values leave out the 2.5% yearly
+  interest, which is paid to your bank every six months.
+
+Older versions stored `portfolio add MF:120503` as `MF:120503.NS` (and
+`watch add` / `alert add` likewise); those symbols are repaired when the files
+load.
 
 ### Tax export
 
@@ -515,6 +554,23 @@ and lowers the SIP. In retirement the expense rises with inflation once a
 year and the corpus earns `--return-post` until it runs out at the end of the
 last year. Returns are assumptions, not promises.
 
+## AI assistants
+
+Both use the same read-only tools (quotes, history, technicals, risk, mutual
+funds, option chains, screens, backtests, your portfolio, lots, tax estimate,
+calendar, goals, watchlist and alerts). See [ai.md](ai.md).
+
+| Command | Description |
+|---------|-------------|
+| `ask <QUESTION> [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers. Needs a model with tool calling. `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage). The last request runs without tools, so the model must answer. Educational, not financial advice |
+| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude Desktop, Claude Code, Cursor and other assistants: 24 read-only tools, the portfolio, watchlist and alerts as resources, and three prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
+
+```bash
+stockwise ask "how is my portfolio doing?"
+claude mcp add stockwise -- stockwise mcp     # Claude Code
+stockwise mcp --list-tools | jq '.[].name'
+```
+
 ## Interfaces
 
 Both are read-only and share the data layer with the commands above, so they
@@ -645,7 +701,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `backtest` | `{symbol, currency, strategy, period, interval, bars, start, end, fill, capital, start_value, end_value, total_return_percent, cagr_percent, max_drawdown_percent, sharpe, sortino, exposure_percent, trade_count, win_rate_percent, avg_win_percent, avg_loss_percent, profit_factor, costs_paid, gross_return_percent, buy_hold_return_percent, alpha_percent, skipped_entries, costs, cost_model, rules, trades: [trade], equity: [{date, value}]}` — returns are after costs except `gross_return_percent`; `portfolio` and `walkforward` shapes are in [backtesting.md](backtesting.md#json-output). trade = `{symbol, entry_date, exit_date, qty, entry_price, exit_price, gross_pnl, costs, net_pnl, pnl_percent, bars_held, exit_reason}` | trade (every form) |
 | `sip` | `{symbol, currency, period, interval, monthly_amount, months, total_invested, final_value, profit, total_return_percent, xirr_percent, total_units, avg_cost, current_price}` | — |
 | `whatif` | `{symbol, currency, amount, date, buy_date, buy_price, shares, invested, current_price, value, pnl, pnl_percent, cagr_percent, days, years}` — `buy_date` is the trading day closest to `date` | — |
-| `portfolio` | `{holdings: [holding], totals: {cost_basis, value, pnl, pnl_percent, currency}, unpriced: [symbol], unconverted: [symbol]}`, holding = `{symbol, shares, avg_cost, cost_basis, price, value, pnl, pnl_percent, weight_percent, xirr_percent, currency}` — a holding's money values are in its own currency; `totals` and `weight_percent` are in the base currency (`--base`); `unconverted` holdings had no exchange rate | holding |
+| `portfolio` | `{holdings: [holding], totals: {cost_basis, value, pnl, pnl_percent, currency}, unpriced: [symbol], unconverted: [symbol], notes: [text]}`, holding = `{symbol, shares, avg_cost, cost_basis, price, value, pnl, pnl_percent, weight_percent, xirr_percent, currency, name, price_source, nav_date}` — a holding's money values are in its own currency; `totals` and `weight_percent` are in the base currency (`--base`); `unconverted` holdings had no exchange rate; `price_source` is `quote`, `amfi_nav`, `nse_sgb`, `gold_estimate` or null (no price) and `nav_date` the date of a fund's NAV; `notes` explain fund and SGB prices (unknown codes, estimates) | holding |
 | `watch` | `[{symbol, price, change, change_percent, volume, currency}]`, in watchlist order | symbol |
 | `alert list` | `[{index, symbol, condition, target, created_at, period, description}]` — `index` is what `alert remove` takes; `condition` is the CLI name (`above`, `rsi-below`, ...), `period` the RSI or volume-average length (else null), `description` the condition in English words | alert |
 | `alert check` | `[{index, symbol, condition, target, price, currency, status, period, description, value, reference}]` — `status` is `triggered`, `waiting`, `no_price` (price alert without a live price) or `no_data` (too little history, or no results date); `value` is what the condition compared (price, RSI, day change %, volume multiple, days to results; the close for crosses and breakouts) and `reference` the moving average, previous high/low or average volume | alert |
@@ -655,7 +711,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `goal sip` | `{target, years, annual_return_pct, step_up_pct, savings, savings_future_value, monthly_sip, final_monthly_sip, total_invested, gains, lump_sum_today, schedule: [{year, monthly_sip, invested, value}], goal, currency}` — `goal` is `sip`, `retire` or `education` | — |
 | `goal retire` | `{monthly_expense_today, years_to_retire, years_in_retirement, inflation_pct, return_pre_pct, return_post_pct, monthly_expense_at_retirement, corpus, sip: plan, goal, currency}` — `plan` is the `goal sip` object without `goal`/`currency` | — |
 | `goal education` | `{cost_today, years, inflation_pct, future_cost, sip: plan, goal, currency}` | — |
-| `tax` | `{country, tax_year, currency, sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], holdings: [{symbol, cost, value, short_term_gain, long_term_gain, estimated_dates}], realized: estimate, if_sold_today: estimate, ltcg_exemption_left, unpriced: [symbol], other_currency: [symbol]}`, estimate = `{short_term_gains, short_term_losses, long_term_gains, long_term_losses, taxable_short_term, taxable_long_term, exemption_used, short_term_tax, long_term_tax, total_tax, loss_carried_forward}` — `term` is `short`, `long`, or null (UK); `ltcg_exemption_left` is India only | open holding |
+| `tax` | `{country, tax_year, currency, sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], holdings: [{symbol, cost, value, short_term_gain, long_term_gain, estimated_dates}], realized: estimate, if_sold_today: estimate, ltcg_exemption_left, unpriced: [symbol], other_currency: [symbol], equity_funds: [symbol], other_rules: [{symbol, reason}]}`, estimate = `{short_term_gains, short_term_losses, long_term_gains, long_term_losses, taxable_short_term, taxable_long_term, exemption_used, short_term_tax, long_term_tax, total_tax, loss_carried_forward}` — `term` is `short`, `long`, or null (UK); `ltcg_exemption_left` is India only; `equity_funds` (counted at listed-share rates) and `other_rules` (left out: debt/other funds, SGBs) are filled for India | open holding |
 | `sim history` | `{stats: {days, winning_days, day_win_rate_percent, total_pnl, avg_daily_pnl, best_day, worst_day, trades, winning_trades, losing_trades, trade_win_rate_percent, sharpe, max_win_streak, max_loss_streak}, confidence, sessions: [{date, market, capital, target_percent, settled, trades, pnl, pnl_percent, wins, losses}]}` — `confidence` is `high`, `moderate`, `low`, or null before 5 settled days | — |
 | `trade selftest` | `{stockwise, os, date, market, broker, broker_name, experimental, account, secrets, orders_enabled, max_order_value_set, amounts_redacted, read_only, checks: [{name, status, detail}], shapes: [{endpoint, status, rows, missing, unknown, error}], summary: {pass, warn, fail, skip}}` — `status` is `pass`, `warn`, `fail` or `skip`; `account` is the last 2 characters only | — |
 | `trade sync` | `{broker, experimental, portfolio, since, applied, orders: [{symbol, order_id, side, date, time, qty, price, fills, result, sales?, held?}], already_synced, skipped: [{order_id, symbol, reason}], open_orders: [{order_id, symbol, side, status, qty, filled_qty}], quantity_check: [{symbol, portfolio_qty, broker_qty}], gtt_changes: [change], notes}` — `result` is `lot`, `sold` (with `sales`) or `unmatched` (with `held`); `applied` is true only when `--apply` wrote something | — |

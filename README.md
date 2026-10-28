@@ -76,24 +76,41 @@ stockwise sip NIFTYBEES 5000 -p 5y      # what a ₹5,000/month SIP became (XIRR
 
 ## Install
 
-**macOS / Linux — prebuilt binary**
+**macOS, Linux and Termux (Android) — prebuilt binary**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 ```
 
-Installs to `~/.local/bin` (override with `STOCKWISE_INSTALL=/usr/local/bin`)
-and verifies the release checksum. Every
+Installs to `~/.local/bin` (`$PREFIX/bin` on Termux, 0.6.0 and later;
+override with `STOCKWISE_INSTALL=/usr/local/bin`) and verifies the release
+checksum. Every
 [release](https://github.com/iamsaquib8/stockwise/releases/latest) also has
 `.tar.gz` / `.zip` archives with the binary and man pages.
+
+**With Python tools** — any OS, no Rust needed (0.6.0 and later)
+
+```bash
+pipx install stockwise                  # or: uv tool install stockwise
+uvx stockwise quote RELIANCE TCS        # run it once without installing
+```
 
 **Package managers**
 
 ```bash
-brew install iamsaquib8/tap/stockwise            # Homebrew (after the tap is published)
+brew install iamsaquib8/tap/stockwise            # macOS/Linux, Homebrew (after the tap is published)
 yay -S stockwise-bin                             # Arch Linux, AUR (after the package is published)
 nix profile install github:iamsaquib8/stockwise  # Nix flake (try it: nix run github:iamsaquib8/stockwise)
 ```
+
+**Debian, Ubuntu, Fedora, RHEL** — `.deb` / `.rpm` for x86_64 and arm64 (0.6.0 and later; glibc 2.34+: Debian 12, Ubuntu 22.04, RHEL 9 and newer)
+
+```bash
+curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb
+sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm
+```
+
+On ARM use `stockwise_arm64.deb` / `stockwise-aarch64.rpm`.
 
 **Windows**
 
@@ -108,7 +125,9 @@ winget install iamsaquib8.StockWise        # after the manifest is accepted into
 docker run --rm -it -v stockwise-data:/data ghcr.io/iamsaquib8/stockwise quote RELIANCE TCS
 ```
 
-Portfolio, watchlist and alerts persist in the `stockwise-data` volume.
+Portfolio, watchlist and alerts persist in the `stockwise-data` volume. The
+same image is mirrored to Docker Hub as `iamsaquib8/stockwise` (once the mirror
+is set up).
 
 **With Rust**
 
@@ -116,6 +135,11 @@ Portfolio, watchlist and alerts persist in the `stockwise-data` volume.
 cargo binstall stockwise    # prebuilt binary via cargo-binstall
 cargo install stockwise     # or build from source (Rust 1.97+)
 ```
+
+On the way: `pkg install stockwise` in Termux and `nix profile install
+nixpkgs#stockwise`, once the [prepared packages](packaging/README.md) are
+submitted and accepted. Every option, with what it includes and how it
+updates: [Install](docs/install.md).
 
 Then:
 
@@ -125,7 +149,8 @@ stockwise completions zsh > ~/.zfunc/_stockwise           # optional: tab comple
 stockwise man --dir ~/.local/share/man/man1               # optional: man stockwise
 ```
 
-Homebrew, AUR and Nix install the man pages and completions for you.
+Homebrew, AUR, Nix and the `.deb`/`.rpm` packages install the man pages and
+completions for you.
 
 ## Tour
 
@@ -341,12 +366,18 @@ read-only until you opt in. See [docs/brokers.md](docs/brokers.md).
 
 ### Local AI (optional)
 
-With [Ollama](https://ollama.com) running, `stockwise report TCS` writes an AI
-stock report, and `--ai` adds commentary to `analyze`, `technical`, `compare`,
+With [Ollama](https://ollama.com) running, `stockwise report TCS` writes
+educational AI notes on a stock (signals, risks, what to watch — never buy/sell
+calls), and `--ai` adds commentary to `analyze`, `technical`, `compare`,
 `screen`, `backtest` and `deep`. It's opt-in because local models take 30–60s.
 Prefer a hosted model? Set `STOCKWISE_AI_PROVIDER` to `openai`, `anthropic` or
-`gemini` with your key — still only for `report` and `--ai`, with a notice
-whenever data is sent. See [docs/ai.md](docs/ai.md).
+`gemini` with your key — still only for `report`, `ask` and `--ai`, with a
+notice whenever data is sent. See [docs/ai.md](docs/ai.md).
+
+```bash
+stockwise ask "how is my portfolio doing this month?"     # the model calls StockWise's tools
+stockwise ask "compare TCS and INFY on RSI and risk" -v   # -v shows each tool call
+```
 
 ### Global exchanges, crypto, forex and Hindi
 
@@ -360,6 +391,40 @@ stockwise quote USDINR EURUSD -m fx                  # USDINR=X, EURUSD=X, 4 dec
 stockwise markets --crypto --fx                      # indices + top coins + major pairs
 stockwise dashboard --lang hi                        # हिन्दी में (also STOCKWISE_LANG=hi)
 ```
+
+## Use with AI assistants
+
+`stockwise mcp` is an [MCP](https://modelcontextprotocol.io) server: Claude
+Desktop, Claude Code, Cursor and other assistants can look up quotes,
+technicals, risk, mutual funds, option chains, screens and backtests, and read
+your portfolio, lots, tax estimate, calendar, watchlist and alerts — 24
+read-only tools, three resources and ready-made prompts ("review my
+portfolio", "tax-harvest check before 31 March", "explain this option chain").
+It never places orders.
+
+```bash
+claude mcp add stockwise -- stockwise mcp        # Claude Code
+```
+
+Claude Desktop (Settings → Developer → Edit Config) and Cursor
+(`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "stockwise": { "command": "stockwise", "args": ["mcp"] }
+  }
+}
+```
+
+Without installing anything but [uv](https://docs.astral.sh/uv/), once the PyPI
+wheels are out: `"command": "uvx", "args": ["stockwise", "mcp"]`. Over HTTP:
+`stockwise mcp --http 127.0.0.1:8788`. Agents can also read the
+[Agent Skill](skills/stockwise/SKILL.md) and the docs'
+[llms.txt](https://iamsaquib8.github.io/stockwise/llms.txt). Details, the tool
+list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assistants-mcp).
+
+<!-- mcp-name: io.github.iamsaquib8/stockwise -->
 
 ## Configuration
 
@@ -423,17 +488,18 @@ The full documentation is at **[iamsaquib8.github.io/stockwise](https://iamsaqui
 - [Trading bots](docs/bots.md) and [bot design](docs/bot-design.md)
 - [Practice mode: replays, challenges and scores](docs/simulator.md)
 - [Brokers: live trading, keyring, imports](docs/brokers.md)
-- [AI: Ollama and cloud providers](docs/ai.md)
+- [AI: `ask`, the MCP server, Ollama and cloud providers](docs/ai.md)
 - [Data providers](docs/data-providers.md)
 - [Architecture](docs/architecture.md)
 
 ## Roadmap & contributing
 
-Next up: an MCP server for AI assistants, `pipx`/`uvx` installs, published Homebrew/winget/Scoop/AUR packages, mutual funds in portfolio valuation, and tax-season tools — see the
-[ROADMAP](ROADMAP.md). Ideas and bug reports are
+Next up: tax-season tools, published PyPI/Homebrew/winget/Scoop/AUR packages and more
+markets — see the [ROADMAP](ROADMAP.md). Ideas and bug reports are
 welcome in [Discussions](https://github.com/iamsaquib8/stockwise/discussions) and
 [Issues](https://github.com/iamsaquib8/stockwise/issues); start with
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md). New to the code? Pick a
+[good first issue](https://github.com/iamsaquib8/stockwise/labels/good%20first%20issue) — each one names the files to change and how to test.
 
 If StockWise is useful to you, a ⭐ helps other people find it.
 

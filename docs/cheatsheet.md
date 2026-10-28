@@ -57,6 +57,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Add a purchase (a lot) | `stockwise portfolio add TCS 10 3500 --date 2023-04-12` |
 | Sell (oldest lots first) | `stockwise portfolio sell TCS 5 3900` |
 | Holdings, P&L and XIRR | `stockwise portfolio` |
+| Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
 | Import from your broker | `stockwise import kite holdings.csv` (also `groww`, `upstox`, `indmoney`, `cas`) |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |
 | Splits, bonuses, dividends | `stockwise portfolio actions --apply` |
@@ -97,6 +98,17 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Take a challenge | `stockwise sim challenge start beat-the-index` |
 | Your badges and best scores | `stockwise sim profile` |
 | Shareable result card | `stockwise sim card --svg card.svg` |
+
+## AI assistants
+
+| Do this | Command |
+|---|---|
+| Ask in plain English (local Ollama by default) | `stockwise ask "how did my portfolio do this month?"` |
+| See which tools it ran | `stockwise ask "compare TCS and INFY on RSI and risk" --verbose` |
+| MCP server for Claude, Cursor and other assistants | `stockwise mcp` |
+| Add it to Claude Code | `claude mcp add stockwise -- stockwise mcp` |
+| The MCP tools and their schemas | `stockwise mcp --list-tools` |
+| MCP over HTTP | `stockwise mcp --http 127.0.0.1:8788` |
 
 ## Dashboards and scripting
 

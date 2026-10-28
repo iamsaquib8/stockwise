@@ -13,6 +13,7 @@
 mod ai;
 mod alerts;
 mod api;
+mod ask;
 mod backtest;
 mod benchmark;
 mod bonds;
@@ -36,7 +37,10 @@ mod insights;
 mod intraday;
 mod longterm;
 mod market;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod notify;
+mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;
@@ -52,6 +56,7 @@ mod tax_export;
 mod technical;
 #[cfg(test)]
 mod testutil;
+mod tools;
 #[cfg(feature = "tui")]
 mod tui;
 mod views;
@@ -640,6 +645,54 @@ Amounts take Indian units: 50k, 25L (lakh), 1cr (crore).")]
         broker: brokers::BrokerKind,
         #[command(subcommand)]
         action: TradeCmd,
+    },
+
+    // ── AI assistants ──
+    /// Ask in plain English; the AI model answers with StockWise's read-only tools
+    #[command(after_help = "Examples:\n  \
+stockwise ask \"how is my portfolio doing?\"\n  \
+stockwise ask \"compare TCS and INFY on RSI and 1-year risk\" --verbose\n  \
+stockwise ask \"what SIP reaches 1 crore in 15 years at 12%?\" --json\n\n\
+Uses STOCKWISE_AI_PROVIDER (local Ollama by default) and needs a model with tool calling. \
+The tools only read data; nothing is ever ordered. Not financial advice.")]
+    Ask {
+        /// The question (quote it, or give it as several words)
+        #[arg(required = true, num_args = 1..)]
+        question: Vec<String>,
+        /// Most model requests; the last one must answer without tools
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=20))]
+        max_steps: u32,
+        /// Token budget across all requests (input + output); past it the model must answer
+        #[arg(long, default_value_t = 100_000, value_parser = clap::value_parser!(u64).range(1_000..=2_000_000))]
+        max_tokens: u64,
+        /// Show each tool call and the size of its result on stderr
+        #[arg(short, long)]
+        verbose: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+
+    /// MCP server for AI assistants (Claude, ChatGPT, Cursor): read-only tools over stdio or HTTP
+    #[command(after_help = "Examples:\n  \
+stockwise mcp                          stdio, for Claude Desktop / Claude Code / Cursor\n  \
+stockwise mcp --http 127.0.0.1:8788    Streamable HTTP at http://127.0.0.1:8788/mcp\n  \
+stockwise mcp --list-tools             the tools and their input schemas as JSON\n\n\
+Claude Code: claude mcp add stockwise -- stockwise mcp\n\
+Tools are read-only. Live orders are never exposed: --allow-orders only adds a dry-run preview \
+that returns the `stockwise trade` command for you to run yourself.")]
+    Mcp {
+        /// Serve Streamable HTTP at http://ADDR/mcp instead of stdio, e.g. 127.0.0.1:8788
+        #[arg(long, value_name = "ADDR")]
+        http: Option<String>,
+        /// Allow a non-loopback --http address; requires a STOCKWISE_API_TOKEN bearer token
+        #[arg(long, requires = "http")]
+        allow_remote: bool,
+        /// Add an order_preview tool (dry-run previews only; it never places an order)
+        #[arg(long)]
+        allow_orders: bool,
+        /// Print the tools and their input schemas as JSON and exit
+        #[arg(long)]
+        list_tools: bool,
     },
 
     // ── Interfaces ──
@@ -2175,6 +2228,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Planning", &["goal"]),
+    ("AI assistants", &["ask", "mcp"]),
     ("Interfaces", &["tui", "serve"]),
     ("Live trading", &["trade"]),
     ("Setup", &["notify", "config", "completions", "man", "help"]),
@@ -2196,6 +2250,7 @@ fn group_msg(english: &str) -> Option<i18n::Msg> {
         "Live trading" => Msg::GroupLiveTrading,
         "Setup" => Msg::GroupSetup,
         "Planning" => Msg::GroupPlanning,
+        "AI assistants" => Msg::GroupAi,
         _ => return None,
     })
 }
@@ -3063,6 +3118,27 @@ async fn main() {
             allow_remote,
             open,
         } => commands::cmd_serve(&bind, allow_remote, open, m).await,
+        Commands::Ask {
+            question,
+            max_steps,
+            max_tokens,
+            verbose,
+            out,
+        } => {
+            let opts = ask::AskOptions {
+                max_steps: max_steps as usize,
+                token_budget: max_tokens,
+                verbose,
+                ..Default::default()
+            };
+            commands::cmd_ask(&question.join(" "), opts, m, out.json).await
+        }
+        Commands::Mcp {
+            http,
+            allow_remote,
+            allow_orders,
+            list_tools,
+        } => commands::cmd_mcp(http.as_deref(), allow_remote, allow_orders, list_tools, m).await,
         Commands::Config { action } => match action {
             Some(ConfigCmd::Path) => commands::cmd_config_path(),
             Some(ConfigCmd::Init { force }) => commands::cmd_config_init(force),
@@ -3352,29 +3428,48 @@ mod tests {
         words
     }
 
-    #[test]
-    fn cheatsheet_commands_parse() {
-        // Read at run time: docs/ is not in the crates.io package.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/cheatsheet.md");
-        let Ok(sheet) = std::fs::read_to_string(path) else {
-            return;
+    /// Parse every `stockwise ...` code span in a Markdown file; returns how
+    /// many were checked (0 when the file isn't there).
+    fn check_doc_commands(file: &str) -> usize {
+        // Read at run time: docs/ and skills/ are not in the crates.io package.
+        let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), file);
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return 0;
         };
         let mut checked = 0;
-        for span in sheet.split('`').skip(1).step_by(2) {
+        for span in text.split('`').skip(1).step_by(2) {
             // Skip prose placeholders such as `stockwise <command> --help`.
-            if !span.starts_with("stockwise ") || span.contains('<') {
+            if !span.starts_with("stockwise ") || span.contains('<') || span.contains('…') {
                 continue;
             }
             let span = span.replace("\\|", "|");
             let args = shell_words(&span);
             if let Err(e) = Cli::try_parse_from(&args) {
-                panic!("docs/cheatsheet.md: `{span}` does not parse:\n{e}");
+                use clap::error::ErrorKind;
+                if !matches!(e.kind(), ErrorKind::DisplayVersion | ErrorKind::DisplayHelp) {
+                    panic!("{file}: `{span}` does not parse:\n{e}");
+                }
             }
             checked += 1;
         }
+        checked
+    }
+
+    #[test]
+    fn cheatsheet_commands_parse() {
+        let checked = check_doc_commands("docs/cheatsheet.md");
         assert!(
-            checked > 40,
+            checked == 0 || checked > 40,
             "only {checked} commands found in the cheatsheet"
+        );
+    }
+
+    #[test]
+    fn agent_skill_commands_parse() {
+        let checked = check_doc_commands("skills/stockwise/SKILL.md");
+        assert!(
+            checked == 0 || checked > 15,
+            "only {checked} commands found in the Agent Skill"
         );
     }
 

@@ -42,6 +42,24 @@ pub trait DataSource: Send + Sync {
     fn india_10y(&self) -> impl Future<Output = Option<crate::gsec::YieldRow>> + Send {
         async { None }
     }
+    /// AMFI's latest NAVs, to value `MF:` holdings. An error unless the
+    /// source reads AMFI.
+    fn fund_navs(
+        &self,
+    ) -> impl Future<Output = Result<std::sync::Arc<Vec<crate::funds::Scheme>>>> + Send {
+        async { bail!("no mutual-fund NAVs in this data source") }
+    }
+    /// NSE's list of traded Sovereign Gold Bonds, to value SGB holdings. An
+    /// error unless the source reads NSE.
+    fn sgb_list(&self) -> impl Future<Output = Result<crate::commodity::SgbList>> + Send {
+        async { bail!("no SGB prices in this data source") }
+    }
+
+    /// The Yahoo client behind this source, for data the methods above don't
+    /// cover (the results calendar). Fixtures have none.
+    fn yahoo(&self) -> impl Future<Output = Result<&YahooClient>> + Send {
+        async { bail!("No Yahoo Finance client for this data source") }
+    }
 
     fn portfolio(&self) -> Result<Portfolio> {
         Portfolio::load()
@@ -73,6 +91,15 @@ impl DataSource for YahooClient {
     }
     async fn india_10y(&self) -> Option<crate::gsec::YieldRow> {
         live_india_10y().await
+    }
+    async fn fund_navs(&self) -> Result<std::sync::Arc<Vec<crate::funds::Scheme>>> {
+        crate::funds::load_amfi_shared().await
+    }
+    async fn sgb_list(&self) -> Result<crate::commodity::SgbList> {
+        crate::commodity::nse_sgb_list().await
+    }
+    async fn yahoo(&self) -> Result<&YahooClient> {
+        Ok(self)
     }
 }
 
@@ -123,6 +150,15 @@ impl DataSource for LiveSource {
     }
     async fn india_10y(&self) -> Option<crate::gsec::YieldRow> {
         live_india_10y().await
+    }
+    async fn fund_navs(&self) -> Result<std::sync::Arc<Vec<crate::funds::Scheme>>> {
+        crate::funds::load_amfi_shared().await
+    }
+    async fn sgb_list(&self) -> Result<crate::commodity::SgbList> {
+        crate::commodity::nse_sgb_list().await
+    }
+    async fn yahoo(&self) -> Result<&YahooClient> {
+        self.client().await
     }
 }
 
@@ -501,11 +537,13 @@ pub(crate) use crate::commands::{AlertCheckRow, WatchRow};
 pub(crate) type PortfolioView = crate::commands::PortfolioReport;
 
 /// Value `portfolio` from `quotes` (which may hold other symbols too),
-/// fetching exchange rates only when holdings mix currencies.
+/// fetching exchange rates only when holdings mix currencies. `off` holds
+/// the fund and SGB prices already looked up (it may cover more symbols).
 pub async fn portfolio_view(
     src: &impl DataSource,
     portfolio: &Portfolio,
     quotes: &[Quote],
+    off: &crate::offmarket::OffMarket,
     market: Market,
 ) -> PortfolioView {
     let symbols: Vec<String> = portfolio
@@ -519,6 +557,8 @@ pub async fn portfolio_view(
         .cloned()
         .collect();
     let mut val = crate::commands::Valuation::new(own, &symbols, market, None);
+    val.off = off.restrict(&symbols);
+    val.off.merge_into(&mut val.quotes);
     let currencies = val.currencies(&symbols);
     val.add_rates(src, &currencies).await;
     crate::commands::portfolio_report(portfolio, &val, chrono::Local::now().date_naive())
@@ -558,6 +598,25 @@ async fn quotes_for(src: &impl DataSource, symbols: &[&str]) -> Result<Vec<Quote
     }
 }
 
+/// Market quotes for `symbols`, plus fund NAVs and SGB prices for the ones
+/// Yahoo does not quote (merged into the quotes, and returned with how
+/// each was priced). `MF:` symbols are never sent to Yahoo.
+pub async fn quotes_with_off_market(
+    src: &impl DataSource,
+    symbols: &[&str],
+) -> Result<(Vec<Quote>, crate::offmarket::OffMarket)> {
+    let yahoo: Vec<&str> = symbols
+        .iter()
+        .copied()
+        .filter(|s| !market::is_namespaced(s))
+        .collect();
+    let mut quotes = quotes_for(src, &yahoo).await?;
+    let owned: Vec<String> = symbols.iter().map(|s| s.to_string()).collect();
+    let off = crate::offmarket::price(src, &owned, &quotes).await;
+    off.merge_into(&mut quotes);
+    Ok((quotes, off))
+}
+
 /// `portfolio --json`, with totals in `base` (or the holdings' currency).
 pub async fn portfolio(
     src: &impl DataSource,
@@ -571,7 +630,7 @@ pub async fn portfolio(
 pub async fn watchlist(src: &impl DataSource) -> Result<Vec<WatchRow>> {
     let wl = local(src.watchlist())?;
     let symbols = unique_symbols(wl.symbols.iter().map(String::as_str));
-    let quotes = quotes_for(src, &symbols).await?;
+    let quotes = quotes_with_off_market(src, &symbols).await?.0;
     Ok(crate::commands::watch_rows(&wl.symbols, &quotes))
 }
 
@@ -580,7 +639,7 @@ pub async fn watchlist(src: &impl DataSource) -> Result<Vec<WatchRow>> {
 pub async fn alerts(src: &impl DataSource) -> Result<Vec<AlertCheckRow>> {
     let store = local(src.alerts())?;
     let symbols = unique_symbols(store.alerts.iter().map(|a| a.symbol.as_str()));
-    let quotes = quotes_for(src, &symbols).await?;
+    let quotes = quotes_with_off_market(src, &symbols).await?.0;
     Ok(alert_rows(src, &store.alerts, &quotes, Utc::now()).await)
 }
 
@@ -673,7 +732,7 @@ pub async fn snapshot(src: &impl DataSource, market: Market) -> Result<Snapshot>
             .chain(p.holdings.iter().map(|h| h.symbol.as_str()))
             .chain(store.alerts.iter().map(|a| a.symbol.as_str())),
     );
-    let quotes = src.quotes(&symbols).await?;
+    let (quotes, off) = quotes_with_off_market(src, &symbols).await?;
     let indices = spec
         .items
         .iter()
@@ -697,7 +756,7 @@ pub async fn snapshot(src: &impl DataSource, market: Market) -> Result<Snapshot>
     Ok(Snapshot {
         indices,
         watchlist: crate::commands::watch_rows(&wl.symbols, &quotes),
-        portfolio: portfolio_view(src, &p, &quotes, market).await,
+        portfolio: portfolio_view(src, &p, &quotes, &off, market).await,
         alerts: alert_rows(src, &store.alerts, &quotes, Utc::now()).await,
     })
 }
@@ -787,6 +846,12 @@ pub mod fixtures {
         pub fail: Mutex<Option<String>>,
         /// The India 10Y benchmark `markets` adds, if any.
         pub ten_year: Option<crate::gsec::YieldRow>,
+        /// AMFI's NAV file (`NAVAll.txt` text); None = AMFI unreachable.
+        pub navall: Option<String>,
+        /// NSE's SGB list; None = NSE refused.
+        pub sgbs: Option<Vec<crate::commodity::NseSgb>>,
+        /// Every symbol asked of the quote source, in order.
+        pub requested: Mutex<Vec<String>>,
     }
 
     impl Default for Fixture {
@@ -820,6 +885,9 @@ pub mod fixtures {
                 quote_calls: AtomicUsize::new(0),
                 fail: Mutex::new(None),
                 ten_year: None,
+                navall: None,
+                sgbs: None,
+                requested: Mutex::new(Vec::new()),
             }
         }
     }
@@ -837,6 +905,10 @@ pub mod fixtures {
         async fn quotes(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
             self.check()?;
             self.quote_calls.fetch_add(1, Ordering::SeqCst);
+            self.requested
+                .lock()
+                .unwrap()
+                .extend(symbols.iter().map(|s| s.to_string()));
             Ok(symbols
                 .iter()
                 .filter_map(|s| find_quote(&self.quotes, s).cloned())
@@ -876,6 +948,21 @@ pub mod fixtures {
         }
         async fn india_10y(&self) -> Option<crate::gsec::YieldRow> {
             self.ten_year.clone()
+        }
+        async fn fund_navs(&self) -> Result<std::sync::Arc<Vec<crate::funds::Scheme>>> {
+            match &self.navall {
+                Some(text) => Ok(std::sync::Arc::new(crate::funds::parse_navall(text))),
+                None => bail!("AMFI returned HTTP 503"),
+            }
+        }
+        async fn sgb_list(&self) -> Result<crate::commodity::SgbList> {
+            match &self.sgbs {
+                Some(rows) => Ok(crate::commodity::SgbList {
+                    rows: rows.clone(),
+                    saved_at: None,
+                }),
+                None => bail!("NSE answered HTTP 403"),
+            }
         }
         fn portfolio(&self) -> Result<Portfolio> {
             Ok(Portfolio {
@@ -1124,7 +1211,10 @@ mod tests {
             serde_json::to_value(block(portfolio(&Fixture::default(), Market::In, None)).unwrap())
                 .unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["holdings", "totals", "unpriced", "unconverted"]);
+        assert_eq!(
+            keys,
+            ["holdings", "totals", "unpriced", "unconverted", "notes"]
+        );
         let totals: Vec<&str> = v["totals"]
             .as_object()
             .unwrap()
@@ -1149,7 +1239,13 @@ mod tests {
             quote("^NSEI", Some(24800.0), 0.5, "INR"),
             quote("AAPL", Some(150.0), 1.0, "USD"),
         ];
-        let v = block(portfolio_view(&Fixture::default(), &p, &quotes, Market::In));
+        let v = block(portfolio_view(
+            &Fixture::default(),
+            &p,
+            &quotes,
+            &Default::default(),
+            Market::In,
+        ));
         assert_eq!(v.totals.currency.as_deref(), Some("USD"));
         assert_eq!(v.totals.value, 300.0);
     }
@@ -1227,6 +1323,145 @@ mod tests {
         assert_eq!(
             s.alerts.iter().filter(|a| a.status == "triggered").count(),
             1
+        );
+    }
+
+    /// A portfolio of a stock, two funds (AMFI code, IDCW reinvestment
+    /// ISIN), an unknown fund code and two SGBs (one by ISIN).
+    fn fund_fixture() -> Fixture {
+        let mut f = Fixture::default();
+        let mut p = Portfolio::default();
+        p.add("TCS.NS", 10.0, 3500.0);
+        p.add("MF:122639", 100.0, 80.0);
+        p.add("MF:INF879O01308", 10.0, 100.0);
+        p.add("MF:999999", 5.0, 10.0);
+        p.add("SGBNOV26.NS", 2.0, 3183.0);
+        p.add("IN0020180389", 1.0, 3119.0);
+        f.portfolio = p;
+        f.watchlist.add("MF:122639");
+        f.navall = Some(crate::offmarket::tests::navall());
+        f.sgbs = Some(vec![
+            crate::commodity::NseSgb {
+                symbol: "SGBNOV26".into(),
+                isin: Some("IN0020180314".into()),
+                name: None,
+                issue_price: Some(3183.0),
+                price: Some(12_500.0),
+                change_percent: None,
+                volume: None,
+            },
+            crate::commodity::NseSgb {
+                symbol: "SGBDEC26".into(),
+                isin: Some("IN0020180389".into()),
+                name: None,
+                issue_price: Some(3119.0),
+                price: Some(12_400.0),
+                change_percent: None,
+                volume: None,
+            },
+        ]);
+        f
+    }
+
+    fn row<'a>(v: &'a PortfolioView, symbol: &str) -> &'a crate::commands::HoldingRow {
+        v.holdings.iter().find(|h| h.symbol == symbol).unwrap()
+    }
+
+    #[test]
+    fn funds_and_sgbs_are_valued_from_amfi_and_nse() {
+        let f = fund_fixture();
+        let v = block(portfolio(&f, Market::In, None)).unwrap();
+        let fund = row(&v, "MF:122639");
+        assert_eq!(fund.price, Some(90.3546));
+        assert_eq!(fund.value, Some(9035.46));
+        assert_eq!(
+            fund.name.as_deref(),
+            Some("Parag Parikh Flexi Cap Fund - Direct Plan - Growth")
+        );
+        assert_eq!(
+            fund.price_source,
+            Some(crate::offmarket::PriceSource::AmfiNav)
+        );
+        assert_eq!(fund.nav_date, NaiveDate::from_ymd_opt(2026, 10, 19));
+        assert_eq!(fund.currency.as_deref(), Some("INR"));
+        assert_eq!(row(&v, "MF:INF879O01308").price, Some(90.3546));
+        let sgb = row(&v, "SGBNOV26.NS");
+        assert_eq!(sgb.value, Some(25_000.0));
+        assert_eq!(
+            sgb.price_source,
+            Some(crate::offmarket::PriceSource::NseSgb)
+        );
+        assert_eq!(sgb.name.as_deref(), Some("SGB 2018-19 Series III"));
+        assert_eq!(row(&v, "IN0020180389").price, Some(12_400.0));
+        assert_eq!(
+            row(&v, "TCS.NS").price_source,
+            Some(crate::offmarket::PriceSource::Quote)
+        );
+
+        // The unknown code is N/A with a note — never 0.
+        let unknown = row(&v, "MF:999999");
+        assert_eq!((unknown.price, unknown.value), (None, None));
+        assert_eq!(v.unpriced, ["MF:999999"]);
+        assert!(
+            v.notes
+                .iter()
+                .any(|n| n.contains("MF:999999 is not in AMFI's NAV file")),
+            "{:?}",
+            v.notes
+        );
+        assert!(v.notes.iter().any(|n| n.contains("2.5% yearly interest")));
+        // TCS 41,000 + funds 9,035.46 and 903.55 + SGBs 25,000 and 12,400.
+        assert_eq!(v.totals.value, 88_339.01);
+        // Fund codes never go to Yahoo.
+        let asked = f.requested.lock().unwrap();
+        assert!(!asked.iter().any(|s| s.starts_with("MF:")), "{asked:?}");
+    }
+
+    #[test]
+    fn dashboard_snapshot_values_funds_like_the_portfolio_command() {
+        let f = fund_fixture();
+        let cli = block(portfolio(&f, Market::In, None)).unwrap();
+        let s = block(snapshot(&f, Market::In)).unwrap();
+        assert_eq!(s.portfolio.totals.value, cli.totals.value);
+        assert_eq!(s.portfolio.unpriced, cli.unpriced);
+        assert_eq!(s.portfolio.notes, cli.notes);
+        // The watchlist sees the NAV too.
+        let watched = s
+            .watchlist
+            .iter()
+            .find(|w| w.symbol == "MF:122639")
+            .unwrap();
+        assert_eq!(watched.price, Some(90.3546));
+    }
+
+    #[test]
+    fn sgbs_fall_back_to_a_labelled_gold_estimate_when_nse_refuses() {
+        let mut f = fund_fixture();
+        f.sgbs = None;
+        f.navall = None;
+        f.quotes.push(quote("GC=F", Some(4000.0), 0.0, "USD"));
+        f.quotes.push(quote("USDINR=X", Some(95.0), 0.0, "INR"));
+        let v = block(portfolio(&f, Market::In, None)).unwrap();
+        let sgb = row(&v, "SGBNOV26.NS");
+        assert_eq!(
+            sgb.price_source,
+            Some(crate::offmarket::PriceSource::GoldEstimate)
+        );
+        // $4000/oz × ₹95 / 31.1035 g.
+        assert_eq!(sgb.price, Some(12_217.28));
+        assert!(
+            v.notes
+                .iter()
+                .any(|n| n.contains("Estimated") && n.contains("HTTP 403")),
+            "{:?}",
+            v.notes
+        );
+        // AMFI down: every fund unpriced, one note naming them.
+        assert_eq!(v.unpriced, ["MF:122639", "MF:INF879O01308", "MF:999999"]);
+        assert!(
+            v.notes.iter().any(|n| n.contains("HTTP 503")),
+            "{:?}",
+            v.notes
         );
     }
 

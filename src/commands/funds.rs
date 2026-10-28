@@ -168,6 +168,14 @@ pub async fn cmd_mf_search(query: &str, limit: usize, json: bool) -> Result<()> 
     Ok(())
 }
 
+/// One scheme in `mf nav --json`: AMFI's row and its expense ratio.
+#[derive(serde::Serialize)]
+pub(crate) struct NavRow<'a> {
+    #[serde(flatten)]
+    pub(crate) scheme: &'a Scheme,
+    pub(crate) ter: &'a Option<SchemeTer>,
+}
+
 /// `mf nav` — latest NAV from AMFI for one or more scheme codes.
 pub async fn cmd_mf_nav(codes: &[u32], json: bool) -> Result<()> {
     let (schemes, ter) = tokio::join!(funds::load_amfi(), funds::load_ter());
@@ -196,12 +204,6 @@ pub async fn cmd_mf_nav(codes: &[u32], json: bool) -> Result<()> {
         .map(|s| ter.as_ref().and_then(|t| t.for_scheme(s)))
         .collect();
     if json {
-        #[derive(serde::Serialize)]
-        struct NavRow<'a> {
-            #[serde(flatten)]
-            scheme: &'a Scheme,
-            ter: &'a Option<SchemeTer>,
-        }
         let rows: Vec<NavRow> = found
             .iter()
             .zip(&ters)
@@ -371,8 +373,20 @@ pub async fn cmd_mf_history(code: u32, period: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `mf sip` — monthly SIP into a scheme, with XIRR.
-pub async fn cmd_mf_sip(code: u32, amount: f64, period: &str, json: bool) -> Result<()> {
+/// A monthly SIP replayed on a scheme's NAV history.
+pub(crate) struct SipRun {
+    pub(crate) hist: funds::NavHistory,
+    pub(crate) months: Option<u32>,
+    /// First instalment date; later than asked when NAV history is shorter.
+    pub(crate) start: chrono::NaiveDate,
+    /// The history began after the requested start.
+    pub(crate) clipped: bool,
+    pub(crate) result: funds::SipResult,
+}
+
+/// Replay a monthly SIP of `amount` into scheme `code` over `period`
+/// (`5y`, `18mo`, `max`).
+pub(crate) async fn run_sip(code: u32, amount: f64, period: &str) -> Result<SipRun> {
     if !(amount.is_finite() && amount > 0.0) {
         bail!("SIP amount must be a positive number");
     }
@@ -389,15 +403,26 @@ pub async fn cmd_mf_sip(code: u32, amount: f64, period: &str, json: bool) -> Res
         None => first_date,
     };
     let start = wanted_start.max(first_date);
-    let r = funds::simulate_sip(navs, amount, start)
+    let result = funds::simulate_sip(navs, amount, start)
         .context("Not enough NAV history for a SIP over this period")?;
+    Ok(SipRun {
+        hist,
+        months,
+        start,
+        clipped: start > wanted_start,
+        result,
+    })
+}
 
-    if json {
-        let out = serde_json::json!({
+impl SipRun {
+    /// `mf sip --json`.
+    pub(crate) fn json(&self, code: u32, amount: f64) -> serde_json::Value {
+        let r = &self.result;
+        serde_json::json!({
             "code": code,
-            "name": hist.meta.name,
+            "name": self.hist.meta.name,
             "monthly_amount": amount,
-            "period": months_label(months),
+            "period": months_label(self.months),
             "start": r.instalments.first().map(|i| i.date),
             "end": r.end_date,
             "instalments": r.instalments.len(),
@@ -408,10 +433,24 @@ pub async fn cmd_mf_sip(code: u32, amount: f64, period: &str, json: bool) -> Res
             "gain": r.value - r.invested,
             "xirr": r.xirr,
             "history": r.instalments,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        })
+    }
+}
+
+/// `mf sip` — monthly SIP into a scheme, with XIRR.
+pub async fn cmd_mf_sip(code: u32, amount: f64, period: &str, json: bool) -> Result<()> {
+    let run = run_sip(code, amount, period).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&run.json(code, amount))?);
         return Ok(());
     }
+    let SipRun {
+        hist,
+        months,
+        start,
+        clipped,
+        result: r,
+    } = run;
 
     print_header(&format!(
         "SIP: {} — ₹{}/month ({})",
@@ -419,12 +458,12 @@ pub async fn cmd_mf_sip(code: u32, amount: f64, period: &str, json: bool) -> Res
         amount,
         months_label(months)
     ));
-    if start > wanted_start {
+    if clipped {
         println!(
             "  {}",
             format!(
                 "NAV history starts {}; the SIP starts there.",
-                first_date.format("%d %b %Y")
+                start.format("%d %b %Y")
             )
             .yellow()
         );

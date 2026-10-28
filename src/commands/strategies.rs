@@ -798,7 +798,10 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
     match what {
         "intraday" => {
             market.require_bot_support("report intraday")?;
-            println!("  {} Generating intraday report with AI...\n", "⟳".yellow());
+            println!(
+                "  {} Generating intraday market notes with AI...\n",
+                "⟳".yellow()
+            );
             let signals = intraday::scan_intraday(&client, market).await?;
             // Build summary for AI
             let mut data = String::new();
@@ -811,16 +814,14 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                 ));
             }
             let report = ai.generate_intraday_report(&data).await?;
-            print_header("AI Intraday Trading Brief");
+            print_header("AI Intraday Market Notes");
             println!();
-            for line in report.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&report);
             println!();
         }
         "longterm" => {
             println!(
-                "  {} Generating long-term investment memo...\n",
+                "  {} Generating long-term research notes...\n",
                 "⟳".yellow()
             );
             market.require_bot_support("report longterm")?;
@@ -840,11 +841,9 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                 ));
             }
             let report = ai.generate_longterm_report(&data).await?;
-            print_header("AI Long-Term Investment Memo");
+            print_header("AI Long-Term Research Notes");
             println!();
-            for line in report.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&report);
             println!();
         }
         "portfolio" => {
@@ -859,36 +858,41 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                 .iter()
                 .map(|h| h.symbol.clone())
                 .collect();
-            let sym_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            // Funds at their NAV and SGBs from NSE, like `portfolio`; a
+            // missing price is N/A, never 0.
+            let val = super::portfolio::value_holdings(&client, &symbols, market, None).await?;
             let mut data = String::new();
             for h in &portfolio.holdings {
-                let q = quotes
-                    .iter()
-                    .find(|q| q.symbol.as_deref() == Some(&h.symbol));
-                let price = q.and_then(|q| q.regular_market_price).unwrap_or(0.0);
-                let pnl_pct = if h.avg_cost > 0.0 {
-                    ((price / h.avg_cost) - 1.0) * 100.0
-                } else {
-                    0.0
+                let price = val.price(&h.symbol);
+                let pnl = match price {
+                    Some(p) if h.avg_cost > 0.0 => {
+                        format!("{:+.1}%", (p / h.avg_cost - 1.0) * 100.0)
+                    }
+                    _ => "N/A".into(),
                 };
+                let name = val
+                    .mark(&h.symbol)
+                    .and_then(|m| m.name.clone())
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
                 data.push_str(&format!(
-                    "{}: {} shares, avg={:.2}, now={:.2}, P&L={:+.1}%, P/E={}\n",
+                    "{}{}: {} {}, avg={:.2}, now={}, P&L={}, P/E={}\n",
                     h.symbol,
+                    name,
                     h.shares,
+                    crate::offmarket::unit_word(&h.symbol),
                     h.avg_cost,
-                    price,
-                    pnl_pct,
-                    q.and_then(|q| q.trailing_pe)
+                    price.map_or("N/A".into(), |p| format!("{p:.2}")),
+                    pnl,
+                    val.quote(&h.symbol)
+                        .and_then(|q| q.trailing_pe)
                         .map_or("N/A".into(), |v| format!("{:.1}", v)),
                 ));
             }
             let report = ai.generate_portfolio_report(&data).await?;
-            print_header("AI Portfolio Review");
+            print_header("AI Portfolio Notes");
             println!();
-            for line in report.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&report);
             println!();
         }
         "stock" => {
@@ -909,22 +913,16 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
             let report = ai.analyze_stock(&stock_data).await?;
             print_header(&format!("AI Analysis: {}", resolved));
             println!();
-            for line in report.lines() {
-                println!("  {}", line);
-            }
+            print_ai_answer(&report);
             println!();
         }
     }
 
     println!(
         "  {}",
-        format!(
-            "Generated by AI ({}, {}). Not financial advice.",
-            ai.provider().name(),
-            ai.model()
-        )
-        .dimmed()
-        .italic()
+        format!("Generated by {} ({}).", ai.provider().name(), ai.model())
+            .dimmed()
+            .italic()
     );
     println!();
     Ok(())

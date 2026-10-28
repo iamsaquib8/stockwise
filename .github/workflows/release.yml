@@ -57,9 +57,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Linux binaries link against the runner's glibc: 22.04 (glibc
+          # 2.35) keeps them running on Ubuntu 22.04, Debian 12 and RHEL 9.
+          # Built on 24.04 they need glibc 2.39.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -67,6 +70,9 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          # Termux on Android phones (API 24+, the Termux minimum).
+          - os: ubuntu-latest
+            target: aarch64-linux-android
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -75,6 +81,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      # The runner image ships the Android NDK; point cargo and cc at its clang.
+      - name: Configure the Android NDK
+        if: contains(matrix.target, 'android')
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang"
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+          } >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -91,17 +109,28 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           staging="${BIN_NAME}-${TARGET}"
-          mkdir "$staging"
+          mkdir "$staging" dist
           cp "target/${TARGET}/release/${BIN_NAME}" "$staging/"
           cp README.md LICENSE CHANGELOG.md DISCLAIMER.md "$staging/"
           cp -R man "$staging/"
-          tar czf "${staging}.tar.gz" "$staging"
+          tar czf "dist/${staging}.tar.gz" "$staging"
+          cd dist
           if command -v sha256sum >/dev/null; then
             sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           else
             shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           fi
-          echo "ASSET=${staging}.tar.gz" >> "$GITHUB_ENV"
+
+      # stockwise_<arch>.deb and stockwise-<arch>.rpm with man pages and
+      # completions; metadata in Cargo.toml.
+      - uses: taiki-e/install-action@v2
+        if: contains(matrix.target, 'linux-gnu')
+        with:
+          tool: cargo-deb@3.8.0,cargo-generate-rpm@0.21.1
+
+      - name: Package .deb and .rpm
+        if: contains(matrix.target, 'linux-gnu')
+        run: packaging/linux/build-packages.sh "${{ matrix.target }}" dist
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -110,30 +139,26 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           staging="${BIN_NAME}-${TARGET}"
-          mkdir "$staging"
+          mkdir "$staging" dist
           cp "target/${TARGET}/release/${BIN_NAME}.exe" "$staging/"
           cp README.md LICENSE CHANGELOG.md DISCLAIMER.md "$staging/"
           cp -R man "$staging/"
-          7z a "${staging}.zip" "$staging"
+          7z a "dist/${staging}.zip" "$staging"
+          cd dist
           sha256sum "${staging}.zip" > "${staging}.zip.sha256"
-          echo "ASSET=${staging}.zip" >> "$GITHUB_ENV"
 
       - name: Upload artifact (dry run)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
-          path: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+          path: dist/*
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+          files: dist/*
           generate_release_notes: true
 
   publish-crate:
@@ -148,6 +173,108 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
+
+  # PyPI wheels that carry the binary (maturin `bindings = "bin"`, see
+  # pyproject.toml), so `pipx install stockwise` and `uvx stockwise` need no
+  # Rust. Linux wheels are built in manylinux/musllinux containers for broad
+  # glibc/musl compatibility. Manual runs and tags both upload them as
+  # workflow artifacts; pypi-publish uploads tagged ones to PyPI.
+  pypi-wheels:
+    name: wheel ${{ matrix.target }}
+    needs: check-version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+            smoke-test: true
+          # Native arm64 runner: maturin-action then builds in
+          # quay.io/pypa/manylinux2014_aarch64. The x86_64 cross image's gcc
+          # cannot assemble ring ("ARM assembler must define __ARM_ARCH").
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+            smoke-test: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            smoke-test: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            smoke-test: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: stable
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out dist
+      - name: Smoke test
+        if: matrix.smoke-test
+        shell: bash
+        run: |
+          wheel=$(ls dist/*.whl)
+          pipx run --spec "./$wheel" stockwise --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  pypi-sdist:
+    name: sdist
+    needs: check-version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: v1.15.0
+          rust-toolchain: stable
+          command: sdist
+          args: --out dist
+      - name: Check metadata and README rendering
+        run: pipx run twine check --strict dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # Uploads the wheels and sdist with PyPI trusted publishing (OIDC, no API
+  # token). Off until the maintainer adds the trusted publisher on PyPI and
+  # sets the repository variable PYPI_PUBLISH=true (packaging/README.md).
+  pypi-publish:
+    name: publish to PyPI
+    needs: [build, pypi-wheels, pypi-sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_PUBLISH == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/stockwise/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
 
   # Fills the Homebrew, Scoop, winget and AUR templates in packaging/ with this
   # release's checksums. Tags: from the release assets; the Scoop manifest is
@@ -322,6 +449,8 @@ jobs:
       packages: write
     env:
       IMAGE: ghcr.io/iamsaquib8/stockwise
+      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY || 'iamsaquib8/stockwise' }}
+      DESCRIPTION: "Stock market toolkit for your terminal: NSE/BSE and US stocks, funds, F&O, backtests"
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -347,7 +476,7 @@ jobs:
       - name: Create the multi-arch manifest
         working-directory: digests
         run: |
-          args=()
+          args=(--annotation "index:org.opencontainers.image.description=$DESCRIPTION")
           while read -r tag; do args+=(-t "$tag"); done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
           for digest in *; do args+=("$IMAGE@sha256:$digest"); done
           docker buildx imagetools create "${args[@]}"
@@ -356,3 +485,52 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: docker buildx imagetools inspect "$IMAGE:$VERSION"
+
+      # Docker Hub mirror of the same image (same digests, same tags). Needs
+      # the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets; without them the
+      # job only logs a notice.
+      - name: Check for Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are not set; skipping the Docker Hub mirror."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@v4
+        if: steps.dockerhub.outputs.enabled == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Copy the image to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          args=(--annotation "index:org.opencontainers.image.description=$DESCRIPTION")
+          while read -r tag; do args+=(-t "docker.io/$DOCKERHUB_REPOSITORY:${tag##*:}"); done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create "${args[@]}" "$IMAGE:$VERSION"
+          docker buildx imagetools inspect "docker.io/$DOCKERHUB_REPOSITORY:$VERSION"
+
+      - uses: actions/checkout@v7
+        if: steps.dockerhub.outputs.enabled == 'true'
+        with:
+          path: source
+          sparse-checkout: packaging/docker
+
+      # The token needs the Read, Write, Delete scope for this step.
+      - name: Docker Hub description
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_REPOSITORY }}
+          short-description: ${{ env.DESCRIPTION }}
+          readme-filepath: source/packaging/docker/README.md

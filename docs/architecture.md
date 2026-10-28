@@ -20,6 +20,7 @@ src/
     backtests.rs     backtest (single, portfolio, walkforward, strategies)
     strategies.rs    sip, whatif, intraday, longterm, report
     portfolio.rs     portfolio (show, add, sell, lots, actions, list) and valuation in a base currency
+                     (`value_holdings`: market quotes + `offmarket` fund NAVs and SGB prices)
     planning.rs      tax export, portfolio benchmark (history, FX, sectors), goal sip/retire/education
     holdings.rs      watch, alert, import, export, wealth, rebalance, harvest, tax, divcal, pcorr
     imports.rs       Groww / Upstox CSV and CAS (casparser JSON/CSV) import parsers
@@ -31,6 +32,7 @@ src/
     broker_selftest.rs  trade selftest: read-only checks + redacted report for broker test reports
     broker_sync.rs   trade sync (trade book → lots/sales, idempotent) and trade gtt list status changes
     interfaces.rs    tui and serve (behind the `tui` / `server` cargo features)
+    assistant.rs     ask and mcp (the MCP server behind the `mcp` cargo feature)
   views.rs           Data behind quote/history/markets/portfolio/watchlist/alerts as structs,
                      shared by the CLI printers, the TUI and the server; `DataSource` trait
   tui/               `stockwise tui`: app.rs (state + key handling, no I/O), ui.rs (ratatui
@@ -38,6 +40,14 @@ src/
   server/            `stockwise serve`: axum routes, bearer auth, Prometheus metrics; web.rs serves
                      the dashboard (web/, embedded with include_str!) and sets CSP/security headers
   daemon_status.rs   Reads the intraday daemon's daemon_state.json for /metrics
+  tools/             Read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
+                     definitions, JSON schemas from typed Param lists, the result envelope with
+                     the "not financial advice" note and size limit), args.rs (argument checks),
+                     handlers.rs (each tool calls the function behind the command's --json)
+  mcp.rs             `stockwise mcp`: rmcp ServerHandler (tools, resources, prompts), stdio and
+                     Streamable HTTP transports (`mcp` feature)
+  ask.rs             `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
+                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent)
   store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME)
   config.rs          Optional config.toml: defaults for market, AI, cache, data dir, periods
   output.rs          --json / --csv rendering (Format, CsvRow, RFC 4180 quoting)
@@ -63,11 +73,14 @@ src/
   greeks.rs          Black-Scholes pricing, greeks, implied-volatility solver
   payoff.rs          Multi-leg option payoffs: presets, max profit/loss, breakevens, probability of profit
   commodity.rs       Gold/silver spot in ₹ from COMEX × USDINR, futures and ETF lists, SGB tranches
-                     and NSE's SGB list parser (pure, fixture-tested)
+                     and NSE's SGB list (fixture-tested parser; `nse_sgb_list` fetches it)
+  offmarket.rs       Prices for holdings Yahoo doesn't quote: `MF:` funds at AMFI's NAV, SGBs from
+                     NSE's list or estimated from gold spot; used by the shared valuation
   bonds.rs           Bond math: price ↔ YTM (half-yearly, 30/360), accrued interest, duration, T-bills
   gsec.rs            CCIL tenor-wise yields, RBI benchmarks and outstanding G-sec list (HTML parsers)
   pagecache.rs       Cached fetch of public pages (CCIL, RBI, NSE SGB list) with a stale-copy fallback
-  ai.rs              AI: Ollama (default) or opt-in OpenAI / Anthropic / Gemini; prompts, opt-in flag, model checks
+  ai.rs              AI: Ollama (default) or opt-in OpenAI / Anthropic / Gemini; educational prompts
+                     (`ai::prompts`, versioned cache keys), disclaimer, opt-in flag, model checks
   clock.rs           Exchange clock: IST / US Eastern / European / Sydney time, NSE, NYSE and global
                      exchange holidays and half days, lunch breaks, session phases
   daemon.rs          Worker state: positions, risk manager, daemon_state.json, shutdown, retry
@@ -216,19 +229,26 @@ the OS keyring when one is available (`STOCKWISE_KEYRING=off` keeps them in the 
 | `ratatui` | Terminal UI for `tui` (re-exports crossterm; `tui` feature) |
 | `axum` | HTTP server for `serve` (`server` feature) |
 | `wasmi` | WebAssembly interpreter for strategy plugins (optional `wasm-plugins` feature) |
+| `rmcp` | Official Model Context Protocol SDK for `stockwise mcp`, without its macros (`mcp` feature) |
 
-`tui` and `server` are on by default; `cargo build --no-default-features`
-leaves them out. `wasm-plugins` is off by default. CI-style checks should run
-clippy for all three builds.
+`tui`, `server` and `mcp` are on by default (`mcp` needs `server`);
+`cargo build --no-default-features` leaves them out (`ask` still works).
+`wasm-plugins` is off by default. CI-style checks should run clippy for all
+three builds.
 
 ## Releases and packaging
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the five release
-archives (binary, docs, and `man/*.1` from `stockwise man --dir`), publishes the crate,
-renders the Homebrew, Scoop, winget and AUR manifests in `packaging/` with the release's
-checksums, updates the Homebrew tap when its token is configured, and pushes the
-multi-arch `ghcr.io/iamsaquib8/stockwise` image built from `Dockerfile`. `flake.nix`
-builds the same crate with Nix. See [packaging/README.md](../packaging/README.md).
+Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the six release
+archives (binary, docs, and `man/*.1` from `stockwise man --dir`; Linux, macOS, Windows
+and Android for Termux), the `.deb`/`.rpm` packages (`packaging/linux/build-packages.sh`,
+metadata in `Cargo.toml`) and the PyPI wheels (`pyproject.toml`, maturin `bin`),
+publishes the crate, renders the Homebrew, Scoop, winget and AUR manifests in
+`packaging/` with the release's checksums, updates the Homebrew tap and uploads to PyPI
+and Docker Hub when their credentials are configured, and pushes the multi-arch
+`ghcr.io/iamsaquib8/stockwise` image built from `Dockerfile`. `flake.nix` builds the
+same crate with Nix; `packaging/nixpkgs/` and `packaging/termux/` hold the nixpkgs and
+termux-packages recipes. `.github/workflows/stats.yml` archives download counts nightly
+(`scripts/download-stats.py`). See [packaging/README.md](../packaging/README.md).
 
 ## Testing
 

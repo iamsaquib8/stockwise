@@ -5,7 +5,7 @@
 #
 # Environment overrides:
 #   STOCKWISE_VERSION   release tag to install (default: latest), e.g. v0.3.0
-#   STOCKWISE_INSTALL   install directory (default: $HOME/.local/bin)
+#   STOCKWISE_INSTALL   install directory (default: $HOME/.local/bin; $PREFIX/bin on Termux)
 set -eu
 
 REPO="iamsaquib8/stockwise"
@@ -30,7 +30,15 @@ fi
 os=$(uname -s)
 arch=$(uname -m)
 case "$os" in
-  Linux) os_part="unknown-linux-gnu" ;;
+  Linux)
+    # Termux on Android reports Linux too, but needs the Android build.
+    if [ "$(uname -o 2>/dev/null)" = "Android" ]; then
+      os_part="linux-android"
+      [ -n "${STOCKWISE_INSTALL:-}" ] || INSTALL_DIR="${PREFIX:-$HOME/.local}/bin"
+    else
+      os_part="unknown-linux-gnu"
+    fi
+    ;;
   Darwin) os_part="apple-darwin" ;;
   *) die "unsupported OS '$os' — on Windows, download the .zip from https://github.com/$REPO/releases" ;;
 esac
@@ -39,6 +47,9 @@ case "$arch" in
   arm64 | aarch64) arch_part="aarch64" ;;
   *) die "unsupported architecture '$arch' — try: cargo install $BIN" ;;
 esac
+if [ "$os_part" = "linux-android" ] && [ "$arch_part" != "aarch64" ]; then
+  die "no prebuilt Android build for '$arch' — try: pkg install rust && cargo install $BIN"
+fi
 target="${arch_part}-${os_part}"
 asset="${BIN}-${target}.tar.gz"
 

@@ -39,7 +39,7 @@ const AI_CACHE_PREFIX: &str = "stockwise:ai:";
 const AI_CACHE_TTL_SECS: i64 = 3600; // 1 hour for AI responses
 /// Upper bound on a cloud model's answer. The prompts ask for a few
 /// sentences; this only stops a runaway response.
-const CLOUD_MAX_TOKENS: u32 = 16_000;
+pub(crate) const CLOUD_MAX_TOKENS: u32 = 16_000;
 
 /// Where AI requests go. Ollama (local) is the default; the cloud providers
 /// are used only when `STOCKWISE_AI_PROVIDER` names one, and then only for
@@ -178,6 +178,7 @@ pub fn auto_ai_enabled() -> bool {
 
 fn hash_prompt(model: &str, prompt: &str) -> String {
     let mut hasher = DefaultHasher::new();
+    PROMPT_VERSION.hash(&mut hasher);
     model.hash(&mut hasher);
     prompt.hash(&mut hasher);
     format!("{:x}", hasher.finish())
@@ -575,8 +576,89 @@ impl AiClient {
     }
 
     pub async fn analyze_stock(&mut self, data: &StockData) -> Result<String> {
-        let prompt = format!(
-            r#"You are a stock market analyst. Analyze this stock and give a concise investment opinion.
+        self.generate(&prompts::analyze_stock(data)).await
+    }
+
+    pub async fn generate_intraday_report(&mut self, report_data: &str) -> Result<String> {
+        self.generate(&prompts::intraday_report(report_data)).await
+    }
+
+    pub async fn generate_longterm_report(&mut self, report_data: &str) -> Result<String> {
+        self.generate(&prompts::longterm_report(report_data)).await
+    }
+
+    /// Quick 2-3 sentence observation for any data context (fast, for inline use)
+    pub async fn quick_insight(&mut self, context: &str) -> Result<String> {
+        self.generate(&prompts::quick_insight(context)).await
+    }
+
+    /// Technical analysis interpretation
+    pub async fn interpret_technicals(&mut self, data: &str) -> Result<String> {
+        self.generate(&prompts::technicals(data)).await
+    }
+
+    /// Compare two or more stocks
+    pub async fn compare_stocks(&mut self, data: &str) -> Result<String> {
+        self.generate(&prompts::compare(data)).await
+    }
+
+    /// Backtest interpretation
+    pub async fn interpret_backtest(&mut self, data: &str) -> Result<String> {
+        self.generate(&prompts::backtest(data)).await
+    }
+
+    /// Screen results analysis
+    pub async fn analyze_screen(&mut self, data: &str) -> Result<String> {
+        self.generate(&prompts::screen(data)).await
+    }
+
+    pub async fn generate_portfolio_report(&mut self, report_data: &str) -> Result<String> {
+        self.generate(&prompts::portfolio_report(report_data)).await
+    }
+}
+
+/// Bumped whenever the prompts change, and part of every cache key, so an
+/// answer cached under older wording (v1 asked for BUY/HOLD/SELL verdicts)
+/// is never shown again.
+pub const PROMPT_VERSION: u32 = 2;
+
+/// Printed under every AI section.
+pub const DISCLAIMER: &str = "AI-generated educational analysis, not investment advice or a \
+     recommendation to buy, sell or hold. StockWise is not a SEBI-registered investment adviser \
+     or research analyst.";
+
+/// The prompts behind every AI section. Each starts with [`prompts::RULES`]:
+/// the model explains signals, risks and what to watch, in neutral terms,
+/// and never makes a personal buy/sell/hold call — in line with SEBI's
+/// rules for investment advice and research.
+pub mod prompts {
+    use super::StockData;
+
+    /// Common rules every prompt starts with.
+    pub const RULES: &str = "You write short, educational market commentary for StockWise, an \
+open-source tool for individual investors. Rules:
+- Explain what the data shows: signals, trends, valuation context, risks, and what to watch next.
+- Use neutral, conditional language (\"the indicators point to...\", \"a risk is...\", \"if X, then Y\").
+- Never tell the reader to buy, sell, hold, accumulate, trim, enter, exit or avoid anything. Give \
+no price targets, entry or exit levels, stop-losses, position sizes or allocations for the reader, \
+and no ratings such as BUY, SELL or HOLD.
+- Do not pick a single best investment or a winner.
+- Stick to the data given and say when it is missing or too thin to judge. No hype, no guarantees.
+- Do not add a disclaimer; StockWise prints one.
+
+";
+
+    fn with_rules(task: String) -> String {
+        format!("{RULES}{task}")
+    }
+
+    fn num(v: Option<f64>, decimals: usize) -> String {
+        v.map_or("N/A".to_string(), |v| format!("{v:.decimals$}"))
+    }
+
+    pub fn analyze_stock(data: &StockData) -> String {
+        with_rules(format!(
+            r#"Explain this stock's numbers for a reader learning to analyse companies.
 
 Stock: {} ({})
 Price: {:.2} | Change: {:+.2}%
@@ -589,160 +671,211 @@ Dividend Yield: {}%
 RSI: {} | Beta: {}
 Sector: {} | Industry: {}
 
-Give a 3-4 sentence analysis covering:
-1. Current valuation (cheap/fair/expensive)
-2. Momentum and trend
-3. Key risk
-4. Overall verdict (BUY/HOLD/SELL for short-term and long-term)
-
-Be direct and specific. No disclaimers."#,
+In 3-4 sentences cover:
+1. Valuation in context (how the multiples compare with the stock's growth and typical ranges)
+2. What the trend and momentum signals show
+3. The main risks visible in the data
+4. What to watch next, short term and long term"#,
             data.symbol,
             data.name,
             data.price,
             data.change_pct,
-            data.pe.map_or("N/A".to_string(), |v| format!("{:.1}", v)),
-            data.forward_pe
-                .map_or("N/A".to_string(), |v| format!("{:.1}", v)),
-            data.pb.map_or("N/A".to_string(), |v| format!("{:.1}", v)),
+            num(data.pe, 1),
+            num(data.forward_pe, 1),
+            num(data.pb, 1),
             data.week52_low,
             data.week52_high,
             data.market_cap,
-            data.eps_ttm
-                .map_or("N/A".to_string(), |v| format!("{:.2}", v)),
-            data.eps_fwd
-                .map_or("N/A".to_string(), |v| format!("{:.2}", v)),
-            data.div_yield
-                .map_or("N/A".to_string(), |v| format!("{:.2}", v * 100.0)),
+            num(data.eps_ttm, 2),
+            num(data.eps_fwd, 2),
+            num(data.div_yield.map(|v| v * 100.0), 2),
             data.ma50,
             data.ma200,
-            data.rsi.map_or("N/A".to_string(), |v| format!("{:.0}", v)),
-            data.beta.map_or("N/A".to_string(), |v| format!("{:.2}", v)),
+            num(data.rsi, 0),
+            num(data.beta, 2),
             data.sector,
             data.industry,
-        );
-        self.generate(&prompt).await
+        ))
     }
 
-    pub async fn generate_intraday_report(&mut self, report_data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are an expert intraday trader. Based on this scan data, write a concise morning trading brief.
+    pub fn intraday_report(report_data: &str) -> String {
+        with_rules(format!(
+            r#"These are today's intraday scan results. Write market notes for the session.
 
-{}
+{report_data}
 
-Write a 5-7 sentence trading brief covering:
-1. Market regime and overall sentiment today
-2. Top 2-3 actionable trades with entry/exit reasoning
-3. Which sectors to focus on
-4. Key risk to watch today
-5. Overall confidence level
+In 5-7 sentences cover:
+1. The market regime and overall tone in the data
+2. The 2-3 names with the strongest signals, which signals they are, and what would weaken them
+3. Sectors showing unusual strength or weakness
+4. The main risks to watch today
+5. How reliable these signals look (sample size, agreement between strategies)
 
-Be specific with price levels. Write like a professional trading desk note."#,
-            report_data
-        );
-        self.generate(&prompt).await
+Mention price levels only as levels the data shows (recent highs, lows, averages)."#
+        ))
     }
 
-    pub async fn generate_longterm_report(&mut self, report_data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are a long-term investment advisor. Based on this analysis, write an investment memo.
+    pub fn longterm_report(report_data: &str) -> String {
+        with_rules(format!(
+            r#"These are long-term scores for a set of stocks. Write research notes on them.
 
-{}
+{report_data}
 
-Write a concise investment memo covering:
-1. Top 3 stocks to accumulate via SIP and why
-2. Key macro risks to the portfolio
-3. Suggested allocation strategy
-4. 1-year outlook
-5. What to avoid
-
-Write like a fund manager's note to clients. Be specific and actionable."#,
-            report_data
-        );
-        self.generate(&prompt).await
+Cover, concisely:
+1. Which names score highest and which factors drive their scores
+2. Macro and sector risks that could affect the group
+3. How concentrated or diversified the high scorers are (sectors, styles)
+4. What could change the picture over the next year
+5. Red flags or weak spots in the data"#
+        ))
     }
 
-    /// Quick 2-3 sentence insight for any data context (fast, for inline use)
-    pub async fn quick_insight(&mut self, context: &str) -> Result<String> {
-        let prompt = format!(
-            "You are a stock analyst. Given this data, give a 2-3 sentence actionable insight. Be specific with numbers. No disclaimers.\n\n{}",
-            context
-        );
-        self.generate(&prompt).await
+    pub fn quick_insight(context: &str) -> String {
+        with_rules(format!(
+            "In 2-3 sentences, give an educational observation about this data, with specific numbers.\n\n{context}"
+        ))
     }
 
-    /// Technical analysis interpretation
-    pub async fn interpret_technicals(&mut self, data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are a technical analyst. Interpret these indicators together and give a clear trade signal.
+    pub fn technicals(data: &str) -> String {
+        with_rules(format!(
+            r#"Interpret these technical indicators together.
 
-{}
+{data}
 
 In 3-4 sentences:
-1. What do these indicators mean together? (confluent or conflicting?)
-2. What's the most likely price action?
-3. Specific entry/exit suggestion
-Be direct."#,
-            data
-        );
-        self.generate(&prompt).await
+1. Do the indicators agree or conflict, and what does that usually mean?
+2. Which scenarios are possible next (if/then), and which signals would confirm each?
+3. Which levels in the data are worth watching?"#
+        ))
     }
 
-    /// Compare two or more stocks
-    pub async fn compare_stocks(&mut self, data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are an investment analyst. Compare these stocks and pick a winner.
+    pub fn compare(data: &str) -> String {
+        with_rules(format!(
+            r#"Compare these stocks.
 
-{}
+{data}
 
-In 3-4 sentences: Which stock is the best investment right now and why? Be specific about valuation, growth, and risk. Give a clear verdict."#,
-            data
-        );
-        self.generate(&prompt).await
+In 3-4 sentences: how do they differ on valuation, growth and risk, which looks stronger on each measure, and what trade-offs does a reader face between them? Do not name an overall pick."#
+        ))
     }
 
-    /// Backtest interpretation
-    pub async fn interpret_backtest(&mut self, data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are a quantitative analyst. Interpret these backtest results.
+    pub fn backtest(data: &str) -> String {
+        with_rules(format!(
+            r#"Interpret these backtest results.
 
-{}
+{data}
 
-In 3-4 sentences: Is this strategy viable? What market conditions would it work best in? Key risks? Would you deploy real capital on it?"#,
-            data
-        );
-        self.generate(&prompt).await
+In 3-4 sentences: how robust do the results look (number of trades, drawdown, versus the stock's own return over the period)? In which market conditions would the strategy tend to work or fail? What are the key risks, and what would be worth testing next? Remember that past results do not predict future ones."#
+        ))
     }
 
-    /// Screen results analysis
-    pub async fn analyze_screen(&mut self, data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are a stock screener analyst. Analyze these screened stocks.
+    pub fn screen(data: &str) -> String {
+        with_rules(format!(
+            r#"These stocks passed a screen. Explain the results.
 
-{}
+{data}
 
-In 3-4 sentences: Which 2-3 stocks stand out most? Any value traps to avoid? What makes the top picks compelling?"#,
-            data
-        );
-        self.generate(&prompt).await
+In 3-4 sentences: which names stand out on the screened measures and why, which could be value traps or data artefacts, and what a reader should check before relying on the screen?"#
+        ))
     }
 
-    pub async fn generate_portfolio_report(&mut self, report_data: &str) -> Result<String> {
-        let prompt = format!(
-            r#"You are a portfolio analyst. Review this portfolio and give actionable advice.
+    pub fn portfolio_report(report_data: &str) -> String {
+        with_rules(format!(
+            r#"Review this portfolio's data as educational notes for its owner.
 
-{}
+{report_data}
 
-Write a concise portfolio review covering:
-1. Portfolio health assessment
-2. Concentration risk
-3. What to buy more of and why
-4. What to trim/sell and why
-5. Missing exposures (sectors/themes to add)
+Cover, concisely:
+1. Overall picture: gains and losses, and how they are spread
+2. Concentration: the largest positions and how much of the value they are
+3. Holdings whose data stands out (large moves, high valuations, missing prices) and why
+4. Exposures the portfolio has little or none of (sectors, asset types), described, not prescribed
+5. Risks worth understanding and what to watch"#
+        ))
+    }
 
-Be direct and specific with recommendations."#,
-            report_data
-        );
-        self.generate(&prompt).await
+    /// `stockwise ask`: the system prompt of the tool-calling assistant.
+    /// `market` is the `-m` code bare tickers resolve in.
+    pub fn ask(market: &str, today: &str) -> String {
+        with_rules(format!(
+            "You answer the user's question in their terminal with the StockWise tools: they \
+return live (often delayed) market data and the user's own portfolio, watchlist and alerts. \
+Today is {today}. The user's default market is `{market}`: bare tickers such as TCS (TCS.NS) \
+resolve there; pass `market` for other markets (us, crypto, fx, commodity, uk, jp, ...).
+
+Call tools for every number instead of guessing, and keep calls few and targeted. Then answer \
+in plain English, briefly, quoting the figures you used with their currency and date. Say when \
+data is missing or a tool failed. The tools only read data; you cannot place orders."
+        ))
+    }
+
+    /// Every prompt, built from sample data — for tests.
+    #[cfg(test)]
+    pub fn all_for_test() -> Vec<(&'static str, String)> {
+        let data = "TCS.NS: price=4100.00, P/E=30.1, chg=+1.50%";
+        vec![
+            ("analyze_stock", analyze_stock(&StockData::sample())),
+            ("intraday_report", intraday_report(data)),
+            ("longterm_report", longterm_report(data)),
+            ("quick_insight", quick_insight(data)),
+            ("technicals", technicals(data)),
+            ("compare", compare(data)),
+            ("backtest", backtest(data)),
+            ("screen", screen(data)),
+            ("portfolio_report", portfolio_report(data)),
+            ("ask", ask("in", "Monday 26 October 2026")),
+        ]
+    }
+}
+
+/// Raw API access for `stockwise ask`, which builds its own tool-calling
+/// requests (see `ask.rs`).
+impl AiClient {
+    /// POST `body` to `path` on the provider's API with its authentication
+    /// headers, and return the JSON reply. Cloud providers need their key,
+    /// and the first request of a run prints the notice that data is leaving
+    /// the machine.
+    pub(crate) async fn post_api(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        if let Some(e) = &self.config_error {
+            bail!("{}", e);
+        }
+        let url = format!("{}{}", self.base_url, path);
+        let Some(key_env) = self.provider.key_env() else {
+            return self.post_json(&url, &[], body).await;
+        };
+        let key = self.api_key.as_deref().with_context(|| {
+            format!(
+                "{} is selected but {} is not set",
+                self.provider.name(),
+                key_env
+            )
+        })?;
+        notify_cloud_send(self.provider, &self.model);
+        let auth = format!("Bearer {}", key);
+        let headers: Vec<(&str, &str)> = match self.provider {
+            AiProvider::OpenAi => vec![("authorization", &auth)],
+            AiProvider::Anthropic => {
+                let mut h = vec![("x-api-key", key), ("anthropic-version", ANTHROPIC_VERSION)];
+                if self.anthropic_fallbacks() {
+                    h.push(("anthropic-beta", ANTHROPIC_FALLBACK_BETA));
+                }
+                h
+            }
+            AiProvider::Gemini => vec![("x-goog-api-key", key)],
+            AiProvider::Ollama => Vec::new(),
+        };
+        self.post_json(&url, &headers, body).await
+    }
+
+    /// Whether requests to this Claude model ask for server-side refusal
+    /// fallbacks (`fallbacks: "default"`).
+    pub(crate) fn anthropic_fallbacks(&self) -> bool {
+        self.provider == AiProvider::Anthropic
+            && ANTHROPIC_FALLBACK_MODELS.contains(&self.model.as_str())
     }
 }
 
@@ -832,7 +965,7 @@ fn parse_gemini_response(json: &serde_json::Value) -> Result<String> {
 }
 
 /// Strip <think>...</think> tags from qwen3-style thinking models
-fn strip_think_tags(text: &str) -> String {
+pub(crate) fn strip_think_tags(text: &str) -> String {
     let mut result = text.to_string();
     // Remove <think>...</think> blocks (can be multiline). Search for the
     // closing tag *after* the opening one, so a stray "</think>" earlier in the
@@ -901,12 +1034,94 @@ impl StockData {
             industry: q.industry.clone().unwrap_or_default(),
         }
     }
+
+    #[cfg(test)]
+    pub fn sample() -> Self {
+        Self::from_quote(&crate::api::Quote {
+            symbol: Some("TCS.NS".into()),
+            short_name: Some("Tata Consultancy Services".into()),
+            regular_market_price: Some(4100.0),
+            regular_market_change_percent: Some(1.5),
+            trailing_pe: Some(30.1),
+            ..Default::default()
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::Quote;
+
+    /// Phrases that make a prompt ask for a personal call. The shared rules
+    /// name some of them to forbid them, so only each prompt's own part is
+    /// checked.
+    const CALLS: &[&str] = &[
+        "verdict",
+        "buy",
+        "sell",
+        "hold",
+        "accumulate",
+        "actionable",
+        "recommendation",
+        "trim",
+        "winner",
+        "pick a",
+        "entry/exit",
+        "deploy real capital",
+        "what to avoid",
+        "allocation strategy",
+        "no disclaimers",
+    ];
+
+    #[test]
+    fn prompts_ask_for_education_not_calls() {
+        for (name, prompt) in prompts::all_for_test() {
+            let task = prompt
+                .strip_prefix(prompts::RULES)
+                .unwrap_or_else(|| panic!("{name} does not start with the shared rules"))
+                .to_lowercase();
+            let words: Vec<&str> = task.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+            for call in CALLS {
+                let asks = if call.contains([' ', '/']) {
+                    task.contains(call)
+                } else {
+                    words.contains(call)
+                };
+                assert!(!asks, "{name} prompt asks for '{call}':\n{task}");
+            }
+            assert!(task.contains("tcs.ns"), "{name} prompt lost its data");
+        }
+        let rules = prompts::RULES.to_lowercase();
+        for must in [
+            "never tell the reader to buy, sell, hold",
+            "no ratings such as buy, sell or hold",
+            "do not pick a single best investment",
+            "what to watch",
+            "risks",
+        ] {
+            assert!(rules.contains(must), "rules miss '{must}'");
+        }
+    }
+
+    #[test]
+    fn disclaimer_says_it_is_education_not_advice() {
+        let d = DISCLAIMER.to_lowercase();
+        assert!(d.contains("educational") && d.contains("not investment advice"));
+        assert!(d.contains("sebi"));
+        assert!(!DISCLAIMER.contains('\n'), "one line under each AI section");
+    }
+
+    #[test]
+    fn cache_keys_change_with_the_prompt_version() {
+        // v1 answers (BUY/HOLD/SELL verdicts) are cached under keys that
+        // did not include a version; a versioned key never matches them.
+        let mut v1 = DefaultHasher::new();
+        "qwen3:14b".hash(&mut v1);
+        "p".hash(&mut v1);
+        assert_ne!(hash_prompt("qwen3:14b", "p"), format!("{:x}", v1.finish()));
+        const { assert!(PROMPT_VERSION >= 2) };
+    }
 
     #[test]
     fn test_strip_think_tags_basic() {

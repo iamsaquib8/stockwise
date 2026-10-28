@@ -479,6 +479,12 @@
     return el('button', { type: 'button', class: 'link', 'data-symbol': symbol, text: symbol });
   }
 
+  // Mutual funds (MF:<code>) have no chart: show the scheme name instead.
+  function holdingLabel(h) {
+    if (SYMBOL_RE.test(h.symbol)) return symbolButton(h.symbol);
+    return el('span', { title: h.symbol, text: h.name || h.symbol });
+  }
+
   function renderWatchlist() {
     frame($('watchlist'), 'watchlist', (rows) => {
       if (rows.length === 0) {
@@ -617,7 +623,7 @@
       }));
       const rows = sortedHoldings(holdings).map((h) => el('tr', { class: h.symbol === state.symbol ? 'selected' : null },
         HOLDING_COLUMNS.map((c) => {
-          if (c.key === 'symbol') return el('th', { scope: 'row' }, [symbolButton(h.symbol)]);
+          if (c.key === 'symbol') return el('th', { scope: 'row' }, [holdingLabel(h)]);
           const cls = ['num', c.hide || '', c.dir ? direction(h[c.key]) : ''].join(' ').trim();
           return el('td', { class: cls, text: c.show(h) });
         })));
@@ -643,6 +649,11 @@
       if ((p.unconverted || []).length) {
         wrap.append(el('p', { class: 'note-line', text: 'No exchange rate, left out of the totals: ' + p.unconverted.join(', ') }));
       }
+      const navDates = [...new Set(holdings.map((h) => h.nav_date).filter(Boolean))];
+      if (navDates.length) {
+        wrap.append(el('p', { class: 'note-line', text: 'Mutual funds at AMFI\'s end-of-day NAV as of ' + navDates.join(', ') + '.' }));
+      }
+      (p.notes || []).forEach((n) => wrap.append(el('p', { class: 'note-line', text: n })));
       return wrap;
     });
   }

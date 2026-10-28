@@ -72,9 +72,17 @@ async fn lookup_isins(symbols: &[String]) -> Vec<(String, String)> {
             Err(e) => eprintln!("  Warning: share ISINs left blank ({e:#})"),
         }
     }
+    // `MF:<ISIN>` (a CAS or Groww import) already is the ISIN.
+    for sym in symbols {
+        if let Some(id) = crate::offmarket::fund_id(sym)
+            && id.parse::<u32>().is_err()
+        {
+            out.push((sym.clone(), id.to_string()));
+        }
+    }
     let funds: Vec<(&String, u32)> = symbols
         .iter()
-        .filter_map(|s| Some((s, s.strip_prefix("MF:")?.parse().ok()?)))
+        .filter_map(|s| Some((s, crate::offmarket::fund_id(s)?.parse().ok()?)))
         .collect();
     if !funds.is_empty() {
         match crate::funds::load_amfi().await {
@@ -460,6 +468,16 @@ async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Re
 }
 
 /// A fund's NAV history from api.mfapi.in, for `MF:<code>` holdings.
+/// The AMFI scheme code for a fund id: the code itself, or the scheme an
+/// ISIN belongs to (looked up in AMFI's NAV file).
+async fn fund_code(id: &str) -> Option<u32> {
+    if let Ok(code) = id.parse() {
+        return Some(code);
+    }
+    let schemes = crate::funds::load_amfi_shared().await.ok()?;
+    crate::offmarket::find_scheme(&schemes, id).map(|s| s.code)
+}
+
 async fn fund_history(code: u32) -> Result<History> {
     let client = crate::funds::http_client()?;
     let h = crate::funds::load_history(&client, code).await?;
@@ -787,9 +805,11 @@ pub async fn cmd_portfolio_benchmark(
         if !held_between(&portfolio, sym, &first, &last) {
             continue;
         }
-        let hist = match sym.strip_prefix("MF:").map(str::parse::<u32>) {
-            Some(Ok(code)) => fund_history(code).await,
-            Some(Err(_)) => Err(anyhow::anyhow!("not a scheme code")),
+        let hist = match crate::offmarket::fund_id(sym) {
+            Some(id) => match fund_code(id).await {
+                Some(code) => fund_history(code).await,
+                None => Err(anyhow::anyhow!("not in AMFI's NAV file")),
+            },
             None => daily_history(&client, sym, Span::Since(lead_in(&calendar))).await,
         };
         let hist = match hist {
@@ -803,6 +823,7 @@ pub async fn cmd_portfolio_benchmark(
         // that `portfolio actions --apply` hasn't adjusted.
         let mut splits = hist.splits.clone();
         if let Some(since) = earliest_purchase(&portfolio, sym).filter(|d| *d < first.as_str())
+            && !crate::offmarket::is_fund(sym)
             && let Ok((earlier, _, _)) = super::portfolio::fetch_actions(&client, sym, since).await
         {
             for split in earlier {
@@ -1098,14 +1119,24 @@ fn pct_label(x: f64) -> String {
     tf(Msg::GoalPerYear, &[&s])
 }
 
-fn print_goal_json(kind: &str, currency: &str, plan: &impl Serialize) -> Result<()> {
+/// `goal <kind> --json`: the plan rounded to paise/cents, with its kind and
+/// currency.
+pub(crate) fn goal_json(
+    kind: &str,
+    currency: &str,
+    plan: &impl Serialize,
+) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(plan)?;
     round_floats(&mut v, 2);
     if let Some(o) = v.as_object_mut() {
         o.insert("goal".into(), serde_json::json!(kind));
         o.insert("currency".into(), serde_json::json!(currency));
     }
-    output::print_json(&v)
+    Ok(v)
+}
+
+fn print_goal_json(kind: &str, currency: &str, plan: &impl Serialize) -> Result<()> {
+    output::print_json(&goal_json(kind, currency, plan)?)
 }
 
 /// The SIP part shared by every goal: what to invest, the totals, and the

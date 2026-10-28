@@ -30,7 +30,7 @@ body:
     attributes:
       label: StockWise version
       description: Output of `stockwise --version`
-      placeholder: "stockwise 0.5.0"
+      placeholder: "stockwise 0.6.0"
     validations:
       required: true
   - type: dropdown

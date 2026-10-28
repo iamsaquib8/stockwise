@@ -36,6 +36,51 @@ fn calendar_symbols(
     Ok(out)
 }
 
+/// Events in the next `days` days for already-resolved `symbols`, soonest
+/// first (as rows and as events), and notes on sources that could not
+/// answer (for stderr).
+pub(crate) async fn calendar_rows(
+    client: &YahooClient,
+    symbols: &[String],
+    days: u32,
+) -> (Vec<CalendarRow>, Vec<crate::calendar::Event>, Vec<String>) {
+    let mut cal = Calendar::new(client);
+    let pending = cal.nse_to_fetch(symbols);
+    if pending >= 3 {
+        eprintln!(
+            "  {} Reading NSE filings for {} stocks (about {} s; cached for a day)…",
+            "→".dimmed(),
+            pending,
+            pending * 2
+        );
+    }
+    let mut events = Vec::new();
+    for symbol in symbols {
+        events.extend(cal.events_for(symbol).await);
+    }
+    cal.save();
+
+    let now = Utc::now();
+    let today_for = |s: &str| crate::calendar::exchange_today(s, now);
+    let upcoming = crate::calendar::upcoming(events, days, today_for);
+    let rows = crate::calendar::rows(&upcoming, today_for);
+
+    // Only data on stdout with --json/--csv: notes go to stderr.
+    let mut notes = Vec::new();
+    if let Some(why) = cal.nse_note()
+        && crate::calendar::has_indian(symbols)
+    {
+        notes.push(why.to_string());
+    }
+    if !cal.yahoo_missing.is_empty() {
+        notes.push(format!(
+            "Yahoo Finance had no calendar for {}",
+            cal.yahoo_missing.join(", ")
+        ));
+    }
+    (rows, upcoming, notes)
+}
+
 /// `calendar`.
 pub async fn cmd_calendar(
     symbols: &[String],
@@ -57,40 +102,7 @@ pub async fn cmd_calendar(
     }
 
     let client = YahooClient::new().await?;
-    let mut cal = Calendar::new(&client);
-    let pending = cal.nse_to_fetch(&symbols);
-    if pending >= 3 {
-        eprintln!(
-            "  {} Reading NSE filings for {} stocks (about {} s; cached for a day)…",
-            "→".dimmed(),
-            pending,
-            pending * 2
-        );
-    }
-    let mut events = Vec::new();
-    for symbol in &symbols {
-        events.extend(cal.events_for(symbol).await);
-    }
-    cal.save();
-
-    let now = Utc::now();
-    let today_for = |s: &str| crate::calendar::exchange_today(s, now);
-    let upcoming = crate::calendar::upcoming(events, days, today_for);
-    let rows = crate::calendar::rows(&upcoming, today_for);
-
-    // Only data on stdout with --json/--csv: notes go to stderr.
-    let mut notes = Vec::new();
-    if let Some(why) = cal.nse_note()
-        && crate::calendar::has_indian(&symbols)
-    {
-        notes.push(why.to_string());
-    }
-    if !cal.yahoo_missing.is_empty() {
-        notes.push(format!(
-            "Yahoo Finance had no calendar for {}",
-            cal.yahoo_missing.join(", ")
-        ));
-    }
+    let (rows, upcoming, notes) = calendar_rows(&client, &symbols, days).await;
     match fmt {
         Format::Json | Format::Csv => {
             for note in &notes {

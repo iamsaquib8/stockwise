@@ -7,6 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
+### Added
+- A documentation site at <https://iamsaquib8.github.io/stockwise/> with
+  search, a one-page [cheatsheet](docs/cheatsheet.md) (a test checks that every
+  command in it parses) and an honest [comparison](docs/comparison.md) with
+  other tools.
+- `stockwise mcp` — a [Model Context Protocol](https://modelcontextprotocol.io)
+  server for Claude Desktop, Claude Code, Cursor and other AI assistants, on
+  the official Rust SDK (`rmcp`). 24 read-only tools: `quote`, `history`,
+  `technical`, `risk`, `search`, `markets`, `mf_search`, `mf_nav`, `mf_sip`,
+  `options_chain`, `options_pcr`, `options_maxpain`, `options_payoff`,
+  `screen`, `backtest`, `portfolio_summary`, `holdings_lots`, `tax_estimate`,
+  `calendar`, `goal_sip`, `goal_retire`, `goal_education`, `alerts_list` and
+  `watchlist`, each returning the same data as the command's `--json`, with a
+  "not financial advice" note and results kept small. Resources: the
+  portfolio, watchlist and alerts. Prompts: `review_portfolio`,
+  `tax_harvest_check` and `explain_option_chain`. Stdio by default;
+  `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (loopback only,
+  or `--allow-remote` with a `STOCKWISE_API_TOKEN` bearer token, like
+  `serve`). `--list-tools` prints the tools and their JSON schemas. Behind
+  the default-on `mcp` cargo feature.
+- No orders from AI assistants: the MCP server never places, changes or
+  cancels orders and never reads broker credentials. `--allow-orders` only
+  adds `order_preview`, a dry run that checks an order against the last price
+  and returns the `stockwise trade` command for you to run (with its own
+  preview, value cap and typed `yes`).
+- `stockwise ask "question"` — the configured model (local Ollama by default;
+  OpenAI, Anthropic or Gemini when `STOCKWISE_AI_PROVIDER` selects one)
+  calls the same tools through each provider's tool calling and answers in
+  plain English. Model requests, tool calls (12) and tokens are capped
+  (`--max-steps`, `--max-tokens`); the last request runs without tools.
+  `--verbose` shows each tool call, `--json` prints the transcript. A model
+  without tool calling gets an error naming one that has it.
+- Findable by AI assistants: the docs site publishes `llms.txt` (the pages
+  and the cheatsheet's commands), `llms-full.txt` and a Markdown copy of each
+  page; `skills/stockwise/SKILL.md` is an Agent Skill for Claude Code and
+  other agents; `server.json` describes the server for the official MCP
+  registry (`io.github.iamsaquib8/stockwise`: crates.io, PyPI, GHCR), and
+  `packaging/mcpb/` builds a Claude Desktop extension (`.mcpb`).
+- **`pipx install stockwise` / `uvx stockwise`** — PyPI wheels that carry the
+  prebuilt binary (maturin `bindings = "bin"`, no Python code or
+  dependencies) for manylinux and musllinux x86_64/aarch64, macOS x86_64 and
+  arm64 and Windows x86_64, plus an sdist that builds from source. Built on
+  every tag; uploaded with PyPI trusted publishing once the maintainer
+  enables it.
+- **`.deb` and `.rpm` release assets** for x86_64 and arm64
+  (`stockwise_amd64.deb`, `stockwise-x86_64.rpm`, ...), with man pages, bash/
+  zsh/fish completions and docs, and `.sha256` files. Version-less names, so
+  `releases/latest/download/...` links stay stable; `sudo dnf install <URL>`
+  works directly.
+- **Termux on Android**: an `aarch64-linux-android` release archive (NDK, API
+  24), picked by `install.sh` on Termux (installs to `$PREFIX/bin`) and by
+  `cargo binstall`; and a ready-to-submit termux-packages recipe in
+  `packaging/termux/`.
+- **nixpkgs**: a ready-to-submit `packaging/nixpkgs/package.nix`
+  (`buildRustPackage` with `cargoHash`, man pages, completions, version check,
+  update script), built in CI with the flake's nixpkgs.
+- **Docker Hub mirror**: release tags copy the multi-arch GHCR image to
+  `docker.io/iamsaquib8/stockwise` with its description, when Docker Hub
+  credentials are configured. Both registries now carry an OCI description
+  on the multi-arch index.
+- **Download stats without telemetry**: a nightly workflow archives crates.io,
+  GitHub release (per asset), GHCR, Docker Hub, PyPI, Homebrew, AUR and GitHub
+  traffic/referrer numbers to the `stats` branch;
+  `scripts/download-stats.py summary` prints them. Nothing is collected from
+  users.
+- An [Install](docs/install.md) page listing every install path, what it
+  includes and how it updates.
+
+### Changed
+- Mutual funds and Sovereign Gold Bonds are valued in `portfolio` (table,
+  `--json`, `--csv`), `dashboard`, `tui`, `serve` / the web dashboard,
+  `wealth`, `rebalance`, `harvest`, `tax`, `report portfolio` and the long-term
+  daemon. `MF:<AMFI code>` and `MF:<ISIN>` (growth/payout or IDCW-reinvestment
+  ISIN) use AMFI's latest end-of-day NAV, shown as "NAV as of <date>"; SGBs (NSE
+  symbol or tranche ISIN) use NSE's last price, or one gram of gold at spot
+  labelled "estimated" when NSE refuses (the 2.5% interest is left out, and
+  said so). An unknown code stays N/A with a note, never 0. `portfolio --json`
+  rows gain `name`, `price_source` and `nav_date`, and the report a `notes`
+  list. `watch` and `alert` see fund NAVs too, `portfolio sell` defaults to
+  the NAV, and `MF:` symbols are no longer sent to Yahoo.
+- `tax in` counts equity-oriented mutual funds (by AMFI category) at the
+  listed-share rates and names them; debt and other funds and SGBs are left
+  out of the estimate with the rules that apply to them (`equity_funds` and
+  `other_rules` in `--json`), instead of silently getting equity rates.
+- AI sections (`report`, `--ai`) give neutral, educational analysis — signals,
+  risks, what to watch — instead of BUY/HOLD/SELL verdicts, picks or
+  allocation advice, in line with SEBI's adviser, research-analyst and
+  finfluencer rules. Section titles say "notes" and "comparison" rather than
+  "verdict", "memo" or "brief", and every AI section ends with a one-line
+  disclaimer. Cache keys include a prompt version, so answers cached under the
+  old wording are not shown again.
+
+### Fixed
+- `portfolio add MF:120503`, `watch add` and `alert add` stored `MF:120503.NS`
+  (`-USD`, `.L`, ... in other markets), which nothing could price. `PREFIX:ID`
+  symbols are now kept as typed in every market, and symbols stored that way
+  by older versions are repaired when the portfolio, watchlist and alerts load
+  (a holding that then appears twice is merged).
+- `MF:` alerts follow Indian market hours instead of US ones.
+- `portfolio actions` skips funds and SGBs instead of asking Yahoo for them;
+  `portfolio benchmark` and `tax export` handle funds stored as `MF:<ISIN>`;
+  `portfolio sell` without a price refuses an SGB valued only by its gold
+  estimate.
+- `report portfolio` no longer gives the AI a price of 0 for holdings without
+  a live price, and `export portfolio` / `export watchlist` leave a missing
+  price empty instead of writing 0.
+- The rule-based insights in `analyze` were titled "AI Insights"; they are not
+  AI and are now titled "Insights".
+- The Docker image carries the `io.modelcontextprotocol.server.name` label the
+  MCP registry checks.
+- Prebuilt Linux binaries (archives, `install.sh`, `cargo binstall`, Homebrew
+  on Linux, AUR) required glibc 2.39 and failed on Ubuntu 22.04, Debian 12 and
+  RHEL 9 with "version `GLIBC_2.39' not found". They are now built on Ubuntu
+  22.04 and need glibc 2.34 or newer.
+
 ## [0.5.0] - 2026-10-25
 
 Planning, reporting and more markets: tax exports, benchmarks and goal
@@ -629,7 +746,8 @@ Initial development. Not published. Highlights that landed during this phase:
 - Multi-timeframe and braille terminal charts; `-p/--period` flag on chart commands.
 - `deep` command — full report on a single stock in one shot.
 
-[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/iamsaquib8/stockwise/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/iamsaquib8/stockwise/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/iamsaquib8/stockwise/compare/v0.2.0...v0.3.0

@@ -25,7 +25,8 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::Serialize;
 
-fn period_to_interval(period: &str) -> &str {
+/// Bar interval for a look-back period (as `technical` fetches it).
+pub(crate) fn period_to_interval(period: &str) -> &str {
     match period {
         "1d" => "5m",
         "5d" | "1w" => "15m",
@@ -37,6 +38,15 @@ fn period_to_interval(period: &str) -> &str {
     }
 }
 
+/// An AI answer, indented, with the one-line educational disclaimer under
+/// it. Every AI section ends this way.
+fn print_ai_answer(text: &str) {
+    for line in text.lines() {
+        println!("  {}", line);
+    }
+    println!("  {}", crate::ai::DISCLAIMER.dimmed().italic());
+}
+
 fn resolve_symbols(symbols: &[String], market: Market) -> Vec<String> {
     symbols
         .iter()
@@ -45,6 +55,7 @@ fn resolve_symbols(symbols: &[String], market: Market) -> Vec<String> {
 }
 
 mod alerting;
+mod assistant;
 mod backtests;
 mod bonds;
 mod broker_selftest;
@@ -74,6 +85,7 @@ mod worker;
 mod output_tests;
 
 pub use alerting::*;
+pub use assistant::*;
 pub use backtests::*;
 pub use bonds::*;
 pub use broker_selftest::*;

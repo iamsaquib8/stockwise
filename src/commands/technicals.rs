@@ -352,13 +352,9 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market, fmt: Form
             "Stock: {}, Price: {:.2}, RSI: {}, MACD: {}, BB: {}, Trend: {}",
             resolved, current, rsi_val, macd_val, bb_pos, sma_pos
         );
-        print_section("Ollama AI Interpretation");
+        print_section(&format!("AI Interpretation ({})", ai.provider().name()));
         match ai.interpret_technicals(&data).await {
-            Ok(analysis) => {
-                for line in analysis.lines() {
-                    println!("  {}", line);
-                }
-            }
+            Ok(analysis) => print_ai_answer(&analysis),
             Err(_) => {
                 println!("  {}", "AI unavailable.".dimmed());
             }

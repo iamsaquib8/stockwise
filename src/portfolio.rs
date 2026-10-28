@@ -466,6 +466,15 @@ impl Portfolio {
         }
         let upgrade = path.exists() && p.version < SCHEMA_VERSION;
         p.normalize();
+        let repaired = p.repair_symbols();
+        if repaired && !upgrade && path.exists() {
+            // Best effort: a read-only data directory (or `serve`) still
+            // loads, with the repair kept in memory until the next save.
+            if let Err(e) = p.save_repaired(path) {
+                eprintln!("  Warning: repaired fund symbols in memory only ({e:#})");
+            }
+            return Ok(p);
+        }
         if upgrade {
             let bak = backup_path(path);
             if !bak.exists() {
@@ -480,6 +489,17 @@ impl Portfolio {
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
         crate::store::save_to(path, self, false)
+    }
+
+    /// Save symbols repaired on load, keeping the original once as `.bak`.
+    fn save_repaired(&self, path: &Path) -> Result<()> {
+        let bak = backup_path(path);
+        if !bak.exists() {
+            std::fs::copy(path, &bak).with_context(|| {
+                format!("Cannot back up {} before repairing it", path.display())
+            })?;
+        }
+        self.save_to(path)
     }
 
     /// Give every old-format holding a single lot (dated when it was added to
@@ -499,6 +519,51 @@ impl Portfolio {
             h.recompute();
         }
         self.version = SCHEMA_VERSION;
+    }
+
+    /// Undo the market suffix older versions put on namespaced symbols
+    /// (`portfolio add MF:120503` stored `MF:120503.NS`), merging a holding
+    /// that then appears twice. Returns whether anything changed; running it
+    /// again changes nothing.
+    fn repair_symbols(&mut self) -> bool {
+        fn repair(symbol: &mut String) -> bool {
+            match crate::market::repair_namespaced(symbol) {
+                Some(fixed) => {
+                    *symbol = fixed;
+                    true
+                }
+                None => false,
+            }
+        }
+        let mut changed = false;
+        for h in &mut self.holdings {
+            changed |= repair(&mut h.symbol);
+        }
+        for s in &mut self.realized {
+            changed |= repair(&mut s.symbol);
+        }
+        for d in &mut self.dividends {
+            changed |= repair(&mut d.symbol);
+        }
+        if changed {
+            let mut merged: Vec<Holding> = Vec::with_capacity(self.holdings.len());
+            for h in std::mem::take(&mut self.holdings) {
+                match merged.iter_mut().find(|m| m.symbol == h.symbol) {
+                    Some(m) => {
+                        m.lots.extend(h.lots);
+                        if !h.added_at.is_empty()
+                            && (m.added_at.is_empty() || h.added_at < m.added_at)
+                        {
+                            m.added_at = h.added_at;
+                        }
+                        m.recompute();
+                    }
+                    None => merged.push(h),
+                }
+            }
+            self.holdings = merged;
+        }
+        changed
     }
 
     pub fn holding(&self, symbol: &str) -> Option<&Holding> {
@@ -1330,6 +1395,69 @@ mod tests {
         // Loading again changes nothing.
         let again = Portfolio::load_from(&path).unwrap();
         assert_eq!(again.holdings[0].lots, p.holdings[0].lots);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    #[test]
+    fn fund_codes_stored_with_a_market_suffix_are_repaired_on_load() {
+        let dir = temp_dir("repair-mf");
+        let path = dir.join("portfolio.json");
+        let mut old = Portfolio::default();
+        // `portfolio add MF:120503` used to store `MF:120503.NS`; a later CAS
+        // import added the same fund under its real symbol.
+        old.add_lot("MF:120503.NS", lot(10.0, 50.0, "2024-01-10"));
+        old.add_lot("MF:120503", lot(5.0, 60.0, "2023-06-01"));
+        old.add_lot("MF:INF179K01UT0-USD", lot(2.0, 100.0, "2024-03-01"));
+        old.add_lot("TCS.NS", lot(1.0, 3000.0, "2024-01-01"));
+        old.realized.push(Sale {
+            symbol: "MF:118834.NS".into(),
+            qty: 1.0,
+            buy_date: "2023-01-01".into(),
+            buy_price: 10.0,
+            sell_date: "2024-01-01".into(),
+            sell_price: 12.0,
+            buy_date_estimated: false,
+            source: "manual".into(),
+            order_id: None,
+        });
+        old.save_to(&path).unwrap();
+
+        let p = Portfolio::load_from(&path).unwrap();
+        let symbols: Vec<&str> = p.holdings.iter().map(|h| h.symbol.as_str()).collect();
+        assert_eq!(symbols, ["MF:120503", "MF:INF179K01UT0", "TCS.NS"]);
+        let fund = p.holding("MF:120503").unwrap();
+        assert_eq!(fund.shares, 15.0);
+        assert_eq!(fund.lots.len(), 2);
+        assert_eq!(fund.lots[0].date, "2023-06-01", "lots stay oldest first");
+        assert!((fund.avg_cost - 800.0 / 15.0).abs() < 1e-9);
+        assert_eq!(p.realized[0].symbol, "MF:118834");
+
+        // The repair is saved (with a one-time backup) and is idempotent.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("MF:120503.NS"), "{written}");
+        assert!(dir.join("portfolio.json.bak").exists());
+        let again = Portfolio::load_from(&path).unwrap();
+        assert_eq!(again.holdings.len(), 3);
+        assert_eq!(again.holding("MF:120503").unwrap().lots, fund.lots);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_still_loads_from_a_read_only_data_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("repair-ro");
+        let path = dir.join("portfolio.json");
+        let mut old = Portfolio::default();
+        old.add_lot("MF:120503.NS", lot(10.0, 50.0, "2024-01-10"));
+        old.save_to(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let p = Portfolio::load_from(&path);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let p = p.expect("a failed repair save must not fail the load");
+        assert_eq!(p.holdings[0].symbol, "MF:120503");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }
 

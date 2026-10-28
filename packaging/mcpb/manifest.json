@@ -1,0 +1,161 @@
+{
+  "manifest_version": "0.3",
+  "name": "stockwise",
+  "display_name": "StockWise",
+  "version": "0.0.0",
+  "description": "Indian (NSE/BSE) and US stock data, mutual funds, F&O, your portfolio and tax as read-only tools.",
+  "long_description": "StockWise is a stock market toolkit for the terminal. This extension runs its MCP server locally: quotes, price history, technical indicators, risk, Indian mutual funds (AMFI NAVs, SIP returns), F&O option chains and strategy payoffs, screens, backtests, and your own StockWise portfolio, lots, capital-gains estimate, calendar, watchlist and alerts. Every tool only reads data; nothing places orders. Market data comes from Yahoo Finance, NSE/BSE and AMFI; your portfolio stays in local files. Educational information, not financial advice.",
+  "author": {
+    "name": "iamsaquib8",
+    "url": "https://github.com/iamsaquib8"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iamsaquib8/stockwise"
+  },
+  "homepage": "https://iamsaquib8.github.io/stockwise/",
+  "documentation": "https://iamsaquib8.github.io/stockwise/ai.html",
+  "support": "https://github.com/iamsaquib8/stockwise/issues",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/stockwise",
+    "mcp_config": {
+      "command": "${__dirname}/server/stockwise",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "STOCKWISE_MARKET": "${user_config.market}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "quote",
+      "description": "Stock quotes. Live (often delayed) quotes for up to 20 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
+    },
+    {
+      "name": "history",
+      "description": "Price history. OHLCV bars for one ticker over a period (5-minute bars for 1d, daily up to 6mo, weekly to 2y, monthly beyond)."
+    },
+    {
+      "name": "technical",
+      "description": "Technical indicators. Indicators for one ticker: SMA 10/20/50/100/200, EMA 12/26, RSI(14), MACD, Bollinger Bands, ATR, VWAP, and a bullish/bearish tally of the signals."
+    },
+    {
+      "name": "risk",
+      "description": "Risk metrics. Risk of one ticker from daily closes over a period: return, annualized volatility and risk level, Sharpe, Sortino and Calmar ratios, max drawdown (peak, trough, length) and 95%/99% one-day value at risk."
+    },
+    {
+      "name": "search",
+      "description": "Find a ticker. Search tickers by company name (\"tata motors\", \"apple\")."
+    },
+    {
+      "name": "markets",
+      "description": "Market indices. Index levels and day change: the chosen market first (NIFTY 50, SENSEX, BANK NIFTY, India 10Y yield; or S&P 500, Nasdaq, Dow), then the other; optional crypto, FX and one benchmark per global exchange."
+    },
+    {
+      "name": "mf_search",
+      "description": "Find a mutual fund. Search Indian mutual fund schemes (AMFI) by name words, e.g."
+    },
+    {
+      "name": "mf_nav",
+      "description": "Mutual fund NAV and returns. Latest NAV of an Indian mutual fund scheme by AMFI code or ISIN, with its category, fund house and expense ratio (TER) from AMFI."
+    },
+    {
+      "name": "mf_sip",
+      "description": "Mutual fund SIP returns. What a monthly SIP in an Indian mutual fund would have returned over a period: invested, current value, gain and XIRR."
+    },
+    {
+      "name": "options_chain",
+      "description": "Option chain. Option chain for an index or stock (NSE/BSE for India, Yahoo for US): strikes around the money with calls and puts, OI, volume, IV and greeks."
+    },
+    {
+      "name": "options_pcr",
+      "description": "Put/call ratio. Put/call ratio by open interest and volume for an underlying's expiry, with total call and put OI."
+    },
+    {
+      "name": "options_maxpain",
+      "description": "Max pain. Max-pain strike for an underlying's expiry (where option writers lose least) and its distance from the spot."
+    },
+    {
+      "name": "options_payoff",
+      "description": "Option strategy payoff. Payoff of a preset option strategy at expiry from live premiums: max profit and loss, breakevens, probability of profit and a payoff table."
+    },
+    {
+      "name": "screen",
+      "description": "Stock screen. Run a preset screen over the market's popular stocks: undervalued (P/E under 15), growth (forward EPS above trailing), dividend (yield over 2%), momentum (top daily gainers) or bluechip (largest market caps)."
+    },
+    {
+      "name": "backtest",
+      "description": "Backtest a strategy. Backtest a built-in strategy on one ticker's daily history with Indian or US trading costs: total return vs buy-and-hold, CAGR, max drawdown, Sharpe, win rate, trades."
+    },
+    {
+      "name": "portfolio_summary",
+      "description": "Portfolio summary. The user's StockWise portfolio valued at current prices: each holding's quantity, average cost, price, value, P&L and weight, totals and XIRR."
+    },
+    {
+      "name": "holdings_lots",
+      "description": "Holding lots. The user's purchase lots (quantity, price, date, days held, short or long term) for one holding or all, oldest first — what FIFO sales and tax use — and their most recent sales."
+    },
+    {
+      "name": "tax_estimate",
+      "description": "Capital gains estimate. Estimated capital-gains tax for the user's portfolio: realized gains this tax year and unrealized gains by short/long term, with India's set-off rules and the ₹1.25 lakh LTCG exemption (or US/UK rules)."
+    },
+    {
+      "name": "calendar",
+      "description": "Results and dividends calendar. Upcoming results dates, ex-dividend dates and splits for given tickers, or for the user's holdings and watchlist when none are given."
+    },
+    {
+      "name": "goal_sip",
+      "description": "SIP for a goal. Monthly SIP needed to reach a target amount in a number of years at an expected return, optionally stepped up every year, with a year-by-year schedule."
+    },
+    {
+      "name": "goal_retire",
+      "description": "Retirement corpus. Corpus needed to retire on today's monthly expenses (grown by inflation) for a number of years, and the monthly SIP that builds it."
+    },
+    {
+      "name": "goal_education",
+      "description": "Education goal. Future cost of an education from today's cost and education inflation, and the monthly SIP that pays for it."
+    },
+    {
+      "name": "alerts_list",
+      "description": "Price alerts. The user's alerts (price, RSI, moving-average crosses, breakouts, results dates) checked against live data: triggered, waiting, no_price or no_data."
+    },
+    {
+      "name": "watchlist",
+      "description": "Watchlist. The user's watchlist with live prices and day change."
+    }
+  ],
+  "tools_generated": false,
+  "keywords": [
+    "stocks",
+    "nse",
+    "bse",
+    "india",
+    "mutual-funds",
+    "options",
+    "portfolio",
+    "finance"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://iamsaquib8.github.io/stockwise/ai.html#privacy"
+  ],
+  "user_config": {
+    "market": {
+      "type": "string",
+      "title": "Default market",
+      "description": "Market for bare tickers: in (NSE), us, crypto, fx, commodity, uk, de, jp, hk, sg, ca or au.",
+      "default": "in",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  }
+}
