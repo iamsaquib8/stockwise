@@ -27,6 +27,9 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Do this | Command |
 |---|---|
 | Fundamentals in plain English | `stockwise analyze INFY` |
+| Key events & filings timeline | `stockwise events LT` |
+| INDmoney-style impact cards | `stockwise insights LT` |
+| Actionable Buy/Sell verdict | `stockwise verdict LT` |
 | RSI, MACD, Bollinger Bands | `stockwise technical TCS -p 6mo` |
 | Price chart with volume | `stockwise history AAPL -m us -p 1y` |
 | Compare stocks | `stockwise compare TCS INFY WIPRO` |
