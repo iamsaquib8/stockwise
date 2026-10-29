@@ -1,0 +1,15 @@
+date,metric,value
+2026-10-29,crates.downloads,44
+2026-10-29,crates.recent_downloads_90d,24
+2026-10-29,ghcr.pulls,37
+2026-10-29,github.asset.stockwise-aarch64-apple-darwin.tar.gz,2
+2026-10-29,github.asset.stockwise-aarch64-unknown-linux-gnu.tar.gz,3
+2026-10-29,github.asset.stockwise-x86_64-apple-darwin.tar.gz,2
+2026-10-29,github.asset.stockwise-x86_64-pc-windows-msvc.zip,4
+2026-10-29,github.asset.stockwise-x86_64-unknown-linux-gnu.tar.gz,2
+2026-10-29,github.asset.stockwise.json,0
+2026-10-29,github.checksum_downloads,5
+2026-10-29,github.forks,1
+2026-10-29,github.release_downloads,13
+2026-10-29,github.stars,3
+2026-10-29,github.watchers,0
