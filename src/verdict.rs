@@ -466,7 +466,11 @@ pub fn generate_verdict(r: &Research, cards: &[InsightCard]) -> DecisionVerdict 
 
     // Execution Calculations (Targets, Stop-Loss, Entry Zone, Risk/Reward)
     let target_price = r.fin.target_mean;
-    let upside_pct = target_price.map(|t| ((t - price) / price) * 100.0);
+    let upside_pct = if price > 0.0 {
+        target_price.map(|t| ((t - price) / price) * 100.0)
+    } else {
+        None
+    };
 
     // Stop-loss: ATR-based (2x ATR) or 6.5% buffer
     let atr_val = if r.prices.len() >= 20 {
@@ -644,6 +648,8 @@ pub fn print_verdict(v: &DecisionVerdict) {
             "  Target Price:        {}{:.2}  ({})",
             csym, target, upside_str
         );
+    } else if let Some(target) = v.target_price {
+        println!("  Target Price:        {}{:.2}", csym, target);
     }
     println!(
         "  Suggested Entry:     {}{:.2} — {}{:.2}",
@@ -747,6 +753,31 @@ mod tests {
         );
         assert!(matches!(verdict.action, Action::StrongBuy | Action::Buy));
         assert!(verdict.target_price.is_some());
+        assert_eq!(verdict.upside_pct, Some(20.0));
         assert!(verdict.risk_reward.unwrap() > 1.5);
+    }
+
+    #[test]
+    fn test_verdict_unpriced_stock_yields_none_upside_pct() {
+        let mut r = Research::default();
+        r.symbol = "XYZ".into();
+        r.quote.regular_market_price = None;
+        r.fin.target_mean = Some(150.0);
+
+        let verdict = generate_verdict(&r, &[]);
+        assert_eq!(verdict.target_price, Some(150.0));
+        assert_eq!(verdict.upside_pct, None);
+    }
+
+    #[test]
+    fn test_verdict_zero_price_yields_none_upside_pct() {
+        let mut r = Research::default();
+        r.symbol = "ZERO".into();
+        r.quote.regular_market_price = Some(0.0);
+        r.fin.target_mean = Some(150.0);
+
+        let verdict = generate_verdict(&r, &[]);
+        assert_eq!(verdict.target_price, Some(150.0));
+        assert_eq!(verdict.upside_pct, None);
     }
 }
