@@ -1409,26 +1409,6 @@ pub async fn cmd_sectorcmp(sector1: &str, sector2: &str, market: Market) -> Resu
     Ok(())
 }
 
-// ── What-If Calculator ──
-
-pub async fn cmd_ipo() -> Result<()> {
-    let client = YahooClient::new().await?;
-
-    let (yahoo_ipo, google_ipo, google_listing) = tokio::join!(
-        fetch_yahoo_json_news(&client, "IPO initial public offering", 12),
-        fetch_google_news_rss(&client, "IPO stock market listing 2025"),
-        fetch_google_news_rss(&client, "new IPO listing NSE BSE 2025"),
-    );
-
-    let all: Vec<NewsItem> = [yahoo_ipo, google_ipo, google_listing].concat();
-    let collated = collate_news(all);
-
-    print_header("IPO Calendar & News — 3 sources");
-    print_news_items(&collated, 15);
-    println!();
-    Ok(())
-}
-
 // ── Options Overview (Put/Call data from quote) ──
 
 #[cfg(test)]

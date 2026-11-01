@@ -191,6 +191,7 @@ This comes first.
 - Scraping or redistributing licensed data (consensus estimates, paid screener datasets); the
   NSE/BSE website provider stays opt-in because the exchanges' terms restrict automated
   collection
-- IPO grey-market premiums and Account Aggregator integration (needs an RBI licence)
+- A licensed or scraped IPO grey-market premium feed, and Account Aggregator integration (needs an
+  RBI licence); `stockwise ipo` only shows GMP figures that news headlines report, as unofficial
 - AI that trades on its own — any order an AI tool proposes goes through the same preview and
   typed confirmation as a human's

@@ -107,6 +107,14 @@
       "description": "Results and dividends calendar. Upcoming results dates, ex-dividend dates and splits for given tickers, or for the user's holdings and watchlist when none are given."
     },
     {
+      "name": "ipo_board",
+      "description": "Indian IPO board. Indian IPOs from NSE: issues open now, upcoming and recently listed, with price band, lot size, minimum application, live QIB/NII/retail subscription and an IPO-market regime."
+    },
+    {
+      "name": "ipo_analyze",
+      "description": "Indian IPO analysis. Deep analysis of one Indian IPO: issue structure, subscription by category, demand by price, SEBI allotment odds, unofficial GMP and a 6-pillar score with separate listing-gain and long-term verdicts."
+    },
+    {
       "name": "goal_sip",
       "description": "SIP for a goal. Monthly SIP needed to reach a target amount in a number of years at an expected return, optionally stepped up every year, with a year-by-year schedule."
     },

@@ -163,7 +163,7 @@ completions for you.
 |---|---|
 | **Start here** | `quote`, `deep`, `markets`, `dashboard`, `search`, `doctor` |
 | **Analysis** | `analyze`, `technical`, `history`, `chart`, `compare`, `risk`, `correlate`, `timeframes`, `returns`, `patterns`, `support`, `fibs`, `volume`, `gaps`, `stoploss`, `forecast` |
-| **Market** | `movers`, `sectors`, `heatmap`, `sentiment`, `news`, `rotation`, `sectorcmp`, `peers`, `insider`, `ipo`, `earnings`, `surprise`, `matrix`, `picks`, `screen`, `dividends` |
+| **Market** | `movers`, `sectors`, `heatmap`, `sentiment`, `news`, `rotation`, `sectorcmp`, `peers`, `insider`, `ipo` (open/upcoming board, allotment odds, listing and long-term verdicts), `earnings`, `surprise`, `matrix`, `picks`, `screen`, `dividends` |
 | **Funds & F&O** | `mf` (search, nav, history, sip, screen, overlap — with AMFI expense ratios), `options` (chain, pcr, maxpain, payoff, moves; NSE, BSE and US) |
 | **Commodities & bonds** | `commodity` (spot, futures, etfs, sgb), `bonds` (yields, list, calc) |
 | **Strategies & bots** | `backtest`, `sip`, `whatif`, `intraday`, `longterm`, `daemon`, `sim`, `report` |
