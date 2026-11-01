@@ -2942,9 +2942,7 @@ async fn dispatch(
             Some(PortfolioCmd::Show { out: show }) => {
                 commands::cmd_portfolio_show(m, base.as_deref(), out.or(show)).await
             }
-            None => {
-                commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await
-            }
+            None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
             Some(WatchCmd::Add { symbols }) => commands::cmd_watchlist("add", &symbols, m).await,

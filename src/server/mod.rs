@@ -820,7 +820,10 @@ mod tests {
         assert_eq!(v["totals"]["pnl"], 5500.0);
         assert_eq!(v["holdings"][0]["weight_percent"], 84.54);
         assert_eq!(v["unpriced"][0], "DELISTED.NS");
-        assert_eq!(get_json(&app, "/api/portfolio?base=eur").await.0, StatusCode::OK);
+        assert_eq!(
+            get_json(&app, "/api/portfolio?base=eur").await.0,
+            StatusCode::OK
+        );
         for bad in ["euro", "12", "e%20r"] {
             let uri = format!("/api/portfolio?base={bad}");
             assert_eq!(get_json(&app, &uri).await.0, StatusCode::BAD_REQUEST);
