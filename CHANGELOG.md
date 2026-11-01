@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `stockwise portfolio target` and enhanced `rebalance` engine ([#47](https://github.com/iamsaquib8/stockwise/issues/47)):
+  - Target-allocation weights saved in the portfolio by stock (`portfolio target set TCS 25`) or sector (`portfolio target set Technology 30`), with pro-rata sector distribution and automatic normalization.
+  - Inflow-only / buy-only rebalancing via `--inflow <AMOUNT>` (e.g. `rebalance --inflow 50000`): uses continuous water-filling to allocate fresh capital (SIPs, bonuses) exclusively to underweight holdings without issuing any sell orders or triggering capital-gains taxes.
+  - Drift tolerance band (`--drift <PERCENT>` and `portfolio target drift <PERCENT>`): suppresses rebalancing churn for holdings within configurable drift bands (e.g. ±2%).
+  - Full machine-readable `--json` output across `rebalance` and `portfolio target show`.
 - `stockwise ipo` is now an Indian IPO workbench instead of a news search, on NSE's public IPO pages (Mainboard and SME, labelled):
   - **Board** (`stockwise ipo [--board all|mainboard|sme] [--recent N]`): issues open for bidding, upcoming issues and recent listings with price band, lot size, minimum application, issue size, live QIB/NII/retail subscription, a quick signal, an IPO-market regime (share of recent listings above issue price, NIFTY, India VIX) and press headlines.
   - **Deep analysis** (`stockwise ipo <SYMBOL> [--capital 2.5L]`): fresh issue vs offer for sale, anchor and lead managers; subscription by category including the mutual-fund share of QIB bids, bNII/sNII and the retail cut-off share; demand by price across NSE + BSE; and links to the prospectus, anchor report and the registrar's allotment page.

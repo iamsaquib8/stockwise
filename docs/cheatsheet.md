@@ -66,6 +66,9 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Import from your broker | `stockwise import kite holdings.csv` (also `groww`, `upstox`, `indmoney`, `cas`) |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |
 | Splits, bonuses, dividends | `stockwise portfolio actions --apply` |
+| Set target allocation | `stockwise portfolio target set TCS 25` · `stockwise portfolio target show` |
+| Inflow rebalance (buy-only) | `stockwise rebalance --inflow 50000` (buy underweight without selling) |
+| Rebalance with drift band | `stockwise rebalance --drift 2.0` |
 | Capital-gains estimate | `stockwise tax in` |
 | ITR Schedule CG CSV | `stockwise tax export in --out cg.csv` |
 | Everything on one screen | `stockwise dashboard` |
