@@ -158,6 +158,7 @@ This comes first.
   and tax numbers (templates first, the local model optional)
 
 **Everywhere**
+- 📋 **Symbol discovery and smart resolution** ([#54](https://github.com/iamsaquib8/stockwise/issues/54)) — alias dictionary (SBI → SBIN, L&T → LT), company name fuzzy matching, "did-you-mean" interactive suggestions on not-found, and dynamic shell completions for portfolio/watchlist symbols
 - 📋 **Two-way Telegram bot and scheduled digests** — morning and post-market summaries, results
   and ex-dividend dates, GTT changes, and commands from your phone
 - 📋 **More brokers through OpenAlgo** — one REST adapter to the brokers it supports
