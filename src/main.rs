@@ -36,6 +36,7 @@ mod gsec;
 mod i18n;
 mod insights;
 mod intraday;
+mod ipo;
 mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
@@ -392,8 +393,23 @@ enum Commands {
     Peers { symbol: String },
     /// Insider activity and analyst consensus
     Insider { symbol: String },
-    /// IPO calendar and news
-    Ipo,
+    /// Indian IPOs: open and upcoming issues, subscription, allotment odds and a Buy/Skip verdict
+    #[command(after_help = IPO_HELP)]
+    Ipo {
+        /// IPO symbol or company name for the deep analysis (omit for the live board)
+        symbol: Option<String>,
+        /// Mainboard, SME or both
+        #[arg(long, value_enum, ignore_case = true, default_value = "all")]
+        board: IpoBoard,
+        /// Money you could put in, to plan allotment odds: 50k, 2.5L, 12L, ...
+        #[arg(long, value_parser = goal_amount)]
+        capital: Option<f64>,
+        /// Recently closed or listed issues to show on the board
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=30))]
+        recent: u32,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
     /// Earnings overview for your portfolio and watchlist
     Earnings,
     /// Earnings momentum — accelerating vs decelerating
@@ -1137,6 +1153,35 @@ enum SimCmd {
         #[arg(long)]
         text: bool,
     },
+}
+
+const IPO_HELP: &str = "\
+Examples:
+  stockwise ipo                          open, upcoming and recently listed IPOs
+  stockwise ipo --board sme              SME issues only
+  stockwise ipo BCSSL                    subscription, demand by price, dual verdict
+  stockwise ipo BCSSL --capital 2.5L     allotment odds for ₹2.5 lakh across family PANs
+  stockwise ipo --json                   the board as JSON
+
+Data comes from NSE's IPO pages; GMP and broker calls are unofficial press chatter.
+Education, not advice — read the prospectus (RHP) before applying.";
+
+/// Which IPO boards `stockwise ipo` lists.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum IpoBoard {
+    All,
+    Mainboard,
+    Sme,
+}
+
+impl From<IpoBoard> for ipo::BoardFilter {
+    fn from(b: IpoBoard) -> Self {
+        match b {
+            IpoBoard::All => ipo::BoardFilter::All,
+            IpoBoard::Mainboard => ipo::BoardFilter::Mainboard,
+            IpoBoard::Sme => ipo::BoardFilter::Sme,
+        }
+    }
 }
 
 const REPLAY_HELP: &str = "\
@@ -2606,7 +2651,22 @@ async fn dispatch(
         }
         Commands::Peers { symbol } => commands::cmd_peers(&symbol, m).await,
         Commands::Insider { symbol } => commands::cmd_insider(&symbol, m).await,
-        Commands::Ipo => commands::cmd_ipo().await,
+        Commands::Ipo {
+            symbol,
+            board,
+            capital,
+            recent,
+            out,
+        } => {
+            commands::cmd_ipo(
+                symbol.as_deref(),
+                board.into(),
+                capital,
+                recent as usize,
+                out.into(),
+            )
+            .await
+        }
         Commands::Earnings => commands::cmd_earnings(m).await,
         Commands::Surprise => commands::cmd_surprise(m).await,
         Commands::Matrix => commands::cmd_matrix(m).await,

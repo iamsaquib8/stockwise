@@ -541,6 +541,59 @@ pub const TOOLS: &[Tool] = &[
         personal: false,
     },
     Tool {
+        name: "ipo_board",
+        title: "Indian IPO board",
+        description: "Indian IPOs from NSE: issues open for bidding now, upcoming issues and \
+                      recently listed ones, each with price band, lot size, minimum application, \
+                      issue size, live QIB/NII/retail subscription and a quick signal, plus an \
+                      IPO-market regime (share of recent listings above issue price, NIFTY, VIX). \
+                      Mainboard and SME issues are labelled.",
+        params: &[
+            opt(
+                "board",
+                Kind::Enum(&["all", "mainboard", "sme"]),
+                "Which issues to list (default all)",
+            ),
+            opt(
+                "recent",
+                Kind::Integer { min: 1, max: 20 },
+                "Recently closed or listed issues to include (default 6)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "ipo_analyze",
+        title: "Indian IPO analysis",
+        description: "Deep analysis of one Indian IPO by NSE symbol or company name: issue terms \
+                      (fresh issue vs offer for sale, anchor, lead managers), subscription by \
+                      category (QIB with mutual-fund share, bNII, sNII, retail and cut-off bids), \
+                      demand by price, SEBI allotment odds for retail, sNII and bNII (with a \
+                      capital plan when `capital` is given), unofficial GMP from the press, and a \
+                      6-pillar score with separate listing-gain and long-term verdicts.",
+        params: &[
+            req(
+                "symbol",
+                Kind::Str,
+                "NSE IPO symbol (e.g. BCSSL) or part of the company name",
+            ),
+            opt(
+                "board",
+                Kind::Enum(&["all", "mainboard", "sme"]),
+                "Restrict the match to the mainboard or SME (default all)",
+            ),
+            opt(
+                "capital",
+                Kind::Number {
+                    min: 1_000.0,
+                    max: 1e10,
+                },
+                "Rupees available to apply with, to compare retail, sNII and bNII odds",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
         name: "goal_sip",
         title: "SIP for a goal",
         description: "Monthly SIP needed to reach a target amount in a number of years at an \

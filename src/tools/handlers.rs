@@ -59,6 +59,8 @@ pub(super) async fn run<D: DataSource>(
         "holdings_lots" => holdings_lots(src, a, m),
         "tax_estimate" => tax_estimate(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
+        "ipo_board" => ipo_board(src, a).await,
+        "ipo_analyze" => ipo_analyze(src, a).await,
         "goal_sip" => goal_sip(a, m),
         "goal_retire" => goal_retire(a, m),
         "goal_education" => goal_education(a, m),
@@ -239,6 +241,33 @@ async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {
     let mut results = src.search(a.need_str("query")?).await?;
     results.truncate(a.usize_or("limit", 10));
     Ok(json!({ "results": results }))
+}
+
+async fn ipo_board(src: &impl DataSource, a: &Args) -> Result<Value> {
+    let filter = crate::ipo::BoardFilter::from_name(a.str("board"));
+    let view = crate::ipo::fetch_board(src.yahoo().await?, filter, a.usize_or("recent", 6)).await?;
+    Ok(serde_json::to_value(view)?)
+}
+
+async fn ipo_analyze(src: &impl DataSource, a: &Args) -> Result<Value> {
+    let series = match a.str("board") {
+        Some("mainboard") => Some("EQ"),
+        Some("sme") => Some("SME"),
+        _ => None,
+    };
+    let analysis = crate::ipo::fetch_analysis(
+        src.yahoo().await?,
+        a.need_str("symbol")?,
+        series,
+        a.f64("capital"),
+    )
+    .await?;
+    let mut v = serde_json::to_value(analysis)?;
+    // Per-category rows repeat what the summary fields already say.
+    if let Some(sub) = v.get_mut("subscription").and_then(Value::as_object_mut) {
+        sub.remove("categories");
+    }
+    Ok(v)
 }
 
 /// A scheme by AMFI code (`122639`, `MF:122639`) or ISIN.

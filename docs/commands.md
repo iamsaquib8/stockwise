@@ -119,7 +119,7 @@ network, invalid config file), `2` invalid arguments.
 | `sectorcmp <SECTOR1> <SECTOR2>` | Two sectors head to head |
 | `peers <SYMBOL>` | Same-sector peers on P/E, P/B, market cap |
 | `insider <SYMBOL>` | Analyst consensus + insider-related news |
-| `ipo` | IPO calendar and news |
+| `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a quick signal) and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (a family-PAN capital plan with `--capital`), unofficial GMP and broker calls from press headlines, and a 6-pillar score with separate **listing-gain** and **long-term** verdicts |
 | `earnings` | Earnings growth for portfolio and watchlist |
 | `surprise` | Earnings momentum — accelerating vs decelerating |
 | `matrix` | Quality vs growth quadrants |

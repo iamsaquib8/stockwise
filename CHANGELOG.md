@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `stockwise ipo` is now an Indian IPO workbench instead of a news search, on NSE's public IPO pages (Mainboard and SME, labelled):
+  - **Board** (`stockwise ipo [--board all|mainboard|sme] [--recent N]`): issues open for bidding, upcoming issues and recent listings with price band, lot size, minimum application, issue size, live QIB/NII/retail subscription, a quick signal, an IPO-market regime (share of recent listings above issue price, NIFTY, India VIX) and press headlines.
+  - **Deep analysis** (`stockwise ipo <SYMBOL> [--capital 2.5L]`): fresh issue vs offer for sale, anchor and lead managers; subscription by category including the mutual-fund share of QIB bids, bNII/sNII and the retail cut-off share; demand by price across NSE + BSE; and links to the prospectus, anchor report and the registrar's allotment page.
+  - **Dual verdict**: a 6-pillar score (smart money 30%, issue structure 20%, HNI/retail demand 15%, board and lead-manager quality 15%, street signals 10%, IPO regime 10%) that gives a *listing-gain* verdict and a separate *long-term* verdict, with timing guidance (QIBs bid late on the closing day) and the red flags behind them.
+  - **SEBI allotment odds**: retail, sNII and bNII odds from the live subscription, and with `--capital` a plan that compares one PAN against several family PANs. SME issues show their ₹2 lakh-plus minimum and lot-only exit warning.
+  - GMP and broker calls are read from news headlines only, shown as unofficial and left out of the score when no headline reports them.
+  - `--json` on both views; MCP and `stockwise ask` tools `ipo_board` and `ipo_analyze`.
+
 ### Fixed
 - Guard against zero or unavailable price in `verdict` upside percentage calculation, preventing `+inf%` output and invalid JSON serialization on unpriced stocks ([#35](https://github.com/iamsaquib8/stockwise/issues/35)).
 
