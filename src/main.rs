@@ -546,9 +546,9 @@ stockwise options TCS                     expected moves (same as `options moves
     /// Track holdings, lots and P&L (default: show)
     #[command(alias = "p", args_conflicts_with_subcommands = true)]
     Portfolio {
-        /// Currency for totals when holdings mix INR and USD (default: the market's)
-        #[arg(long, global = true, value_enum, ignore_case = true)]
-        base: Option<BaseCurrency>,
+        /// Currency for totals, a 3-letter code such as INR, USD or EUR (default: the market's)
+        #[arg(long, global = true, value_parser = currency_code)]
+        base: Option<String>,
         #[command(subcommand)]
         action: Option<PortfolioCmd>,
         #[command(flatten)]
@@ -976,12 +976,13 @@ fn step_up_pct(s: &str) -> Result<f64, String> {
     percent_between(s, 0.0, 50.0)
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum BaseCurrency {
-    /// Indian rupee
-    Inr,
-    /// US dollar
-    Usd,
+/// A 3-letter currency code, upper-cased.
+fn currency_code(s: &str) -> Result<String, String> {
+    if s.len() == 3 && s.chars().all(|c| c.is_ascii_alphabetic()) {
+        Ok(s.to_uppercase())
+    } else {
+        Err(format!("'{s}' is not a 3-letter currency code"))
+    }
 }
 
 #[derive(Subcommand)]
@@ -2929,7 +2930,6 @@ async fn dispatch(
                 period,
                 out: bench,
             }) => {
-                let base = base.map(|b| value_name(b).to_uppercase());
                 commands::cmd_portfolio_benchmark(
                     benchmark.as_deref(),
                     &period,
@@ -2940,11 +2940,9 @@ async fn dispatch(
                 .await
             }
             Some(PortfolioCmd::Show { out: show }) => {
-                let base = base.map(|b| value_name(b).to_uppercase());
                 commands::cmd_portfolio_show(m, base.as_deref(), out.or(show)).await
             }
             None => {
-                let base = base.map(|b| value_name(b).to_uppercase());
                 commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await
             }
         },
@@ -3990,7 +3988,8 @@ mod tests {
         assert!(
             Cli::try_parse_from(["stockwise", "portfolio", "lots", "TCS", "--lot", "1"]).is_err()
         );
-        assert!(Cli::try_parse_from(["stockwise", "portfolio", "--base", "eur"]).is_err());
+        assert!(Cli::try_parse_from(["stockwise", "portfolio", "--base", "eur"]).is_ok());
+        assert!(Cli::try_parse_from(["stockwise", "portfolio", "--base", "euro"]).is_err());
         assert!(Cli::try_parse_from(["stockwise", "--portfolio", "../x", "portfolio"]).is_err());
     }
 

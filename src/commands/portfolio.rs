@@ -223,11 +223,13 @@ impl Valuation {
 /// invert it. Yahoo quotes the currency that ranks first below as the base of
 /// the pair (EURUSD=X, USDINR=X); other pairs keep `currency` first.
 pub(super) fn fx_pair(currency: &str, base: &str) -> (String, bool) {
+    let (currency, base) = (currency.to_uppercase(), base.to_uppercase());
+    let (currency, base) = (currency.as_str(), base.as_str());
     const QUOTE_ORDER: [&str; 5] = ["EUR", "GBP", "AUD", "NZD", "USD"];
     let rank = |c: &str| {
         QUOTE_ORDER
             .iter()
-            .position(|q| *q == c)
+            .position(|q| q.eq_ignore_ascii_case(c))
             .unwrap_or(QUOTE_ORDER.len())
     };
     if rank(currency) <= rank(base) {
@@ -1522,6 +1524,7 @@ mod tests {
             ("JPY", "USD", "USDJPY=X", true),
             ("GBP", "EUR", "EURGBP=X", true),
             ("EUR", "INR", "EURINR=X", false),
+            ("usd", "eur", "EURUSD=X", true),
         ];
         for (cur, base, sym, invert) in cases {
             assert_eq!(
