@@ -10,7 +10,7 @@ use crate::api::{ChartData, ChartResponse};
 use crate::benchmark::{self, Analysis, HoldingDays};
 use crate::goals::{self, SipPlan};
 use crate::portfolio::{self as pf, Split};
-use crate::tax::Country;
+use crate::tax::{self, Country};
 use crate::tax_export::{self, IndiaSchedule, UsSchedule};
 use chrono::NaiveDate;
 use std::path::Path;
@@ -310,6 +310,174 @@ pub async fn cmd_tax_export(
         tf(Msg::TaxExportWrote, &[&schedule.sales(), &path.display()]).green()
     );
     println!("  {}\n", t(Msg::TaxExportEstimate).yellow().italic());
+    Ok(())
+}
+
+/// Advance tax quarterly instalment estimates under Section 208 and 211 with
+/// Section 234C(1) capital-gains proviso protections.
+pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) -> Result<()> {
+    if paid.is_some_and(|p| p < 0.0) {
+        bail!("Advance tax paid amount cannot be negative");
+    }
+
+    let today = chrono::Local::now().date_naive();
+    let start = match fy {
+        Some(label) => tax_export::parse_tax_year(Country::India, label).with_context(|| {
+            format!(
+                "Invalid financial year '{}': use a format like 2025-26 or AY2026-27",
+                label
+            )
+        })?,
+        None => Country::India.tax_year(today).0,
+    };
+    if start > today {
+        bail!(
+            "{} has not started yet",
+            Country::India.tax_year_label(start)
+        );
+    }
+
+    let portfolio = Portfolio::load()?;
+    let (from, to) = Country::India.tax_year(start);
+
+    let mut advance_sales = Vec::new();
+    for s in &portfolio.realized {
+        let Some(sell_d) = NaiveDate::parse_from_str(&s.sell_date, "%Y-%m-%d").ok() else {
+            continue;
+        };
+        if sell_d < from || sell_d > to {
+            continue;
+        }
+        let Some(scale) =
+            pf::symbol_currency(&s.symbol).and_then(|c| Country::India.currency_scale(c))
+        else {
+            continue;
+        };
+        let is_lt = match NaiveDate::parse_from_str(&s.buy_date, "%Y-%m-%d").ok() {
+            Some(buy_d) => Country::India.is_long_term(buy_d, sell_d),
+            None => false,
+        };
+        advance_sales.push(tax::AdvanceTaxSale::new(sell_d, s.gain() * scale, is_lt));
+    }
+
+    let schedule = tax::compute_advance_tax(&advance_sales, start, today, paid);
+
+    if json {
+        return output::print_json(&schedule);
+    }
+
+    let inr = |amount: f64| {
+        if amount < 0.0 {
+            format!("-₹{}", goals::indian_grouping(-amount))
+        } else {
+            format!("₹{}", goals::indian_grouping(amount))
+        }
+    };
+
+    print_header(&portfolio_title(&format!(
+        "Advance Tax Schedule — {}",
+        schedule.fy_label
+    )));
+    println!(
+        "  {}\n",
+        "Statutory quarterly instalments under Section 208/211 with Section 234C(1) capital-gains proviso."
+            .dimmed()
+    );
+
+    if advance_sales.is_empty() {
+        println!(
+            "  {}\n",
+            "No sales recorded for this financial year. Record one with `stockwise portfolio sell` or import a tradebook."
+                .dimmed()
+        );
+    }
+
+    println!(
+        "  {:<7} {:<11} {:>12} {:>12} {:>12} {:>6} {:>13} {:>13}  {}",
+        "Quarter".bold(),
+        "Due Date".bold(),
+        "Cum. STCG".bold(),
+        "Cum. LTCG".bold(),
+        "Cum. Tax".bold(),
+        "Min %".bold(),
+        "Min Cum. Due".bold(),
+        "Quarter Due".bold(),
+        "Status".bold(),
+    );
+
+    for q in &schedule.quarters {
+        let status_str = match q.status {
+            tax::AdvanceTaxStatus::Paid => "Paid".green(),
+            tax::AdvanceTaxStatus::Pending => "Pending".yellow(),
+            tax::AdvanceTaxStatus::Upcoming => "Upcoming".dimmed(),
+        };
+        println!(
+            "  {:<7} {:<11} {:>12} {:>12} {:>12} {:>5}% {:>13} {:>13}  {}",
+            q.quarter.cyan(),
+            q.due_date.format("%d %b %Y"),
+            inr(q.stcg_cumulative),
+            inr(q.ltcg_cumulative),
+            inr(q.cumulative_tax_estimated),
+            q.required_cumulative_pct as i64,
+            inr(q.min_cumulative_tax_required),
+            inr(q.quarter_tax_payable),
+            status_str,
+        );
+    }
+
+    println!();
+    print_section("Summary & Section 234 Compliance");
+    println!(
+        "  • Realized Capital Gains: {} STCG, {} LTCG",
+        inr(schedule.total_stcg),
+        inr(schedule.total_ltcg)
+    );
+    println!(
+        "  • Total Estimated Tax: {}",
+        inr(schedule.total_tax_estimated)
+    );
+    if schedule.sec_208_applicable {
+        println!(
+            "  • Section 208: {} (estimated tax ≥ ₹10,000 threshold)",
+            "Applicable".green()
+        );
+    } else {
+        println!(
+            "  • Section 208: {} (estimated tax < ₹10,000 threshold — advance tax not mandatory)",
+            "Exempt".cyan()
+        );
+    }
+    println!(
+        "  • Section 234C Proviso: Shortfalls from capital gains realized later in the year are not penalized."
+    );
+
+    if let Some(p) = paid {
+        println!("  • Advance Tax Paid Recorded: {}", inr(p));
+        if schedule.total_sec_234c_interest > 0.0 {
+            println!(
+                "  • Estimated Section 234C Deferment Interest: {}",
+                inr(schedule.total_sec_234c_interest).red().bold()
+            );
+        } else {
+            println!(
+                "  • Estimated Section 234C Interest: {}",
+                "₹0 (no shortfall subject to interest)".green()
+            );
+        }
+        if schedule.sec_234b_applicable {
+            println!(
+                "  • Section 234B: {} (advance tax paid < 90% of assessed tax after 31 March — 1%/month interest applies)",
+                "Applicable".red().bold()
+            );
+        }
+    } else {
+        println!(
+            "  • Section 234B/C Interest: Pass {} to track shortfall and interest.",
+            "`--paid <AMOUNT>`".cyan()
+        );
+    }
+
+    println!("\n  {}\n", tax_export::DISCLAIMER.yellow().italic());
     Ok(())
 }
 

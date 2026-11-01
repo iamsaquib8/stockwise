@@ -71,6 +71,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Rebalance with drift band | `stockwise rebalance --drift 2.0` |
 | Capital-gains estimate | `stockwise tax in` |
 | ITR Schedule CG CSV | `stockwise tax export in --out cg.csv` |
+| Advance tax schedule & 234C estimator | `stockwise tax advance` · `stockwise tax advance --paid 25000` |
 | Everything on one screen | `stockwise dashboard` |
 
 ## Alerts and watchlist

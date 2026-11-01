@@ -3,6 +3,7 @@
 //! for listed shares only; `stockwise tax` labels them as such.
 
 use chrono::{Datelike, Months, NaiveDate};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Country {
@@ -284,6 +285,378 @@ fn uk(b: Buckets) -> Estimate {
     e
 }
 
+// ── Advance Tax (India: Section 208, Section 211, Section 234B/C) ──
+
+/// Statutory threshold under Section 208: advance tax applies if the total
+/// estimated tax payable for the year is ₹10,000 or more.
+pub const ADVANCE_TAX_SEC_208_THRESHOLD: f64 = 10_000.0;
+
+/// Status of an advance tax quarterly instalment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdvanceTaxStatus {
+    Paid,
+    Pending,
+    Upcoming,
+}
+
+impl std::fmt::Display for AdvanceTaxStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Paid => write!(f, "Paid"),
+            Self::Pending => write!(f, "Pending"),
+            Self::Upcoming => write!(f, "Upcoming"),
+        }
+    }
+}
+
+/// A realized capital gains/loss event used for advance tax bucketing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdvanceTaxSale {
+    pub date: NaiveDate,
+    pub gain: f64,
+    pub is_long_term: bool,
+}
+
+impl AdvanceTaxSale {
+    pub fn new(date: NaiveDate, gain: f64, is_long_term: bool) -> Self {
+        Self {
+            date,
+            gain,
+            is_long_term,
+        }
+    }
+}
+
+/// One quarterly instalment under Indian Income Tax Act (Section 211 / Section 234C).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdvanceTaxQuarter {
+    /// Quarter identifier: "Q1", "Q2", "Q3", "Q4".
+    pub quarter: String,
+    /// Statutory due date: 15 Jun, 15 Sep, 15 Dec, 15 Mar.
+    pub due_date: NaiveDate,
+    /// Cut-off date for transactions contributing to this instalment.
+    pub cutoff_date: NaiveDate,
+    /// Net STCG realized in this quarter alone.
+    pub stcg_quarter: f64,
+    /// Net LTCG realized in this quarter alone.
+    pub ltcg_quarter: f64,
+    /// Cumulative STCG realized up to this quarter's cut-off.
+    pub stcg_cumulative: f64,
+    /// Cumulative LTCG realized up to this quarter's cut-off.
+    pub ltcg_cumulative: f64,
+    /// Cumulative tax estimated on realized gains up to this cut-off.
+    pub cumulative_tax_estimated: f64,
+    /// Minimum required cumulative percentage under Section 211 (15%, 45%, 75%, 100%).
+    pub required_cumulative_pct: f64,
+    /// Minimum cumulative tax required by this due date.
+    pub min_cumulative_tax_required: f64,
+    /// Estimated tax payable in this specific quarter.
+    pub quarter_tax_payable: f64,
+    /// Cumulative advance tax paid up to this quarter (if tracked).
+    pub paid: f64,
+    /// Shortfall below the required minimum cumulative tax.
+    pub shortfall: f64,
+    /// Estimated Section 234C interest on shortfall (3% for Q1/Q2/Q3, 1% for Q4).
+    pub sec_234c_interest: f64,
+    /// Status: Paid, Pending, or Upcoming.
+    pub status: AdvanceTaxStatus,
+}
+
+/// Advance tax schedule for an Indian financial year.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdvanceTaxSchedule {
+    /// Financial year label, e.g. "FY 2025-26 (AY 2026-27)".
+    pub fy_label: String,
+    /// Start date of the financial year (1 April).
+    pub fy_start: NaiveDate,
+    /// End date of the financial year (31 March).
+    pub fy_end: NaiveDate,
+    /// Evaluation date.
+    pub as_of: NaiveDate,
+    /// Total net STCG realized across the financial year.
+    pub total_stcg: f64,
+    /// Total net LTCG realized across the financial year.
+    pub total_ltcg: f64,
+    /// Total estimated tax on all realized gains for the FY.
+    pub total_tax_estimated: f64,
+    /// Section 208 applicability threshold (₹10,000).
+    pub sec_208_threshold: f64,
+    /// True if total_tax_estimated >= 10,000.
+    pub sec_208_applicable: bool,
+    /// Total advance tax paid so far.
+    pub total_paid: f64,
+    /// Total Section 234C deferment interest.
+    pub total_sec_234c_interest: f64,
+    /// True if evaluated after 31 March and paid < 90% of total tax.
+    pub sec_234b_applicable: bool,
+    /// Four quarterly instalments.
+    pub quarters: Vec<AdvanceTaxQuarter>,
+}
+
+/// The four advance tax quarterly milestones (due date, cut-off date, quarter name, cumulative rate)
+/// for a financial year starting in `fy_start_year`.
+pub fn advance_tax_cutoffs(fy_start_year: i32) -> [(NaiveDate, NaiveDate, &'static str, f64); 4] {
+    let y = fy_start_year;
+    [
+        (
+            NaiveDate::from_ymd_opt(y, 6, 15).expect("valid date"),
+            NaiveDate::from_ymd_opt(y, 6, 15).expect("valid date"),
+            "Q1",
+            15.0,
+        ),
+        (
+            NaiveDate::from_ymd_opt(y, 9, 15).expect("valid date"),
+            NaiveDate::from_ymd_opt(y, 9, 15).expect("valid date"),
+            "Q2",
+            45.0,
+        ),
+        (
+            NaiveDate::from_ymd_opt(y, 12, 15).expect("valid date"),
+            NaiveDate::from_ymd_opt(y, 12, 15).expect("valid date"),
+            "Q3",
+            75.0,
+        ),
+        (
+            NaiveDate::from_ymd_opt(y + 1, 3, 15).expect("valid date"),
+            NaiveDate::from_ymd_opt(y + 1, 3, 31).expect("valid date"),
+            "Q4",
+            100.0,
+        ),
+    ]
+}
+
+/// Compute quarterly advance tax instalments under Section 208 and 211 of
+/// the Indian Income-tax Act, with Section 234C(1) proviso protections for
+/// capital gains.
+///
+/// The proviso to Section 234C(1) provides that no interest for deferment
+/// of advance tax is charged for shortfalls in earlier quarters if the
+/// shortfall is on account of capital gains realized in subsequent quarters.
+/// Accordingly, each quarter's required cumulative tax is estimated based
+/// only on cumulative gains realized up to that quarter's cut-off date.
+pub fn compute_advance_tax(
+    sales: &[AdvanceTaxSale],
+    fy_start: NaiveDate,
+    as_of: NaiveDate,
+    paid: Option<f64>,
+) -> AdvanceTaxSchedule {
+    let y = if fy_start.month() >= 4 {
+        fy_start.year()
+    } else {
+        fy_start.year() - 1
+    };
+    let fy_start = NaiveDate::from_ymd_opt(y, 4, 1).expect("valid date");
+    let fy_end = NaiveDate::from_ymd_opt(y + 1, 3, 31).expect("valid date");
+    let fy_label = format!(
+        "FY {}-{:02} (AY {}-{:02})",
+        y,
+        (y + 1) % 100,
+        y + 1,
+        (y + 2) % 100
+    );
+
+    struct QuarterMeta {
+        quarter: &'static str,
+        due_date: NaiveDate,
+        period_start: NaiveDate,
+        period_end: NaiveDate,
+        cutoff_date: NaiveDate,
+        req_pct: f64,
+        safe_harbour_pct: f64,
+        interest_rate_pct: f64,
+    }
+
+    let meta = [
+        QuarterMeta {
+            quarter: "Q1",
+            due_date: NaiveDate::from_ymd_opt(y, 6, 15).expect("valid date"),
+            period_start: fy_start,
+            period_end: NaiveDate::from_ymd_opt(y, 6, 15).expect("valid date"),
+            cutoff_date: NaiveDate::from_ymd_opt(y, 6, 15).expect("valid date"),
+            req_pct: 15.0,
+            safe_harbour_pct: 12.0,
+            interest_rate_pct: 3.0,
+        },
+        QuarterMeta {
+            quarter: "Q2",
+            due_date: NaiveDate::from_ymd_opt(y, 9, 15).expect("valid date"),
+            period_start: NaiveDate::from_ymd_opt(y, 6, 16).expect("valid date"),
+            period_end: NaiveDate::from_ymd_opt(y, 9, 15).expect("valid date"),
+            cutoff_date: NaiveDate::from_ymd_opt(y, 9, 15).expect("valid date"),
+            req_pct: 45.0,
+            safe_harbour_pct: 36.0,
+            interest_rate_pct: 3.0,
+        },
+        QuarterMeta {
+            quarter: "Q3",
+            due_date: NaiveDate::from_ymd_opt(y, 12, 15).expect("valid date"),
+            period_start: NaiveDate::from_ymd_opt(y, 9, 16).expect("valid date"),
+            period_end: NaiveDate::from_ymd_opt(y, 12, 15).expect("valid date"),
+            cutoff_date: NaiveDate::from_ymd_opt(y, 12, 15).expect("valid date"),
+            req_pct: 75.0,
+            safe_harbour_pct: 75.0,
+            interest_rate_pct: 3.0,
+        },
+        QuarterMeta {
+            quarter: "Q4",
+            due_date: NaiveDate::from_ymd_opt(y + 1, 3, 15).expect("valid date"),
+            period_start: NaiveDate::from_ymd_opt(y, 12, 16).expect("valid date"),
+            period_end: fy_end,
+            cutoff_date: fy_end,
+            req_pct: 100.0,
+            safe_harbour_pct: 100.0,
+            interest_rate_pct: 1.0,
+        },
+    ];
+
+    let total_paid = paid.unwrap_or(0.0).max(0.0);
+
+    // Compute cumulative taxes and quarter gains
+    let mut quarters_data = Vec::with_capacity(4);
+    let mut prior_max_required = 0.0;
+
+    for m in &meta {
+        let mut q_buckets = Buckets::default();
+        for s in sales
+            .iter()
+            .filter(|s| s.date >= m.period_start && s.date <= m.period_end)
+        {
+            q_buckets.add(s.gain, s.is_long_term);
+        }
+        let stcg_quarter = q_buckets.st_gain - q_buckets.st_loss;
+        let ltcg_quarter = q_buckets.lt_gain - q_buckets.lt_loss;
+
+        let mut cum_buckets = Buckets::default();
+        for s in sales
+            .iter()
+            .filter(|s| s.date >= fy_start && s.date <= m.cutoff_date)
+        {
+            cum_buckets.add(s.gain, s.is_long_term);
+        }
+        let stcg_cumulative = cum_buckets.st_gain - cum_buckets.st_loss;
+        let ltcg_cumulative = cum_buckets.lt_gain - cum_buckets.lt_loss;
+        let est = estimate(Country::India, cum_buckets);
+        let cumulative_tax_estimated = est.total();
+
+        let min_cumulative_tax_required = cumulative_tax_estimated * (m.req_pct / 100.0);
+        let quarter_tax_payable = (min_cumulative_tax_required - prior_max_required).max(0.0);
+        prior_max_required = prior_max_required.max(min_cumulative_tax_required);
+
+        quarters_data.push((
+            stcg_quarter,
+            ltcg_quarter,
+            stcg_cumulative,
+            ltcg_cumulative,
+            cumulative_tax_estimated,
+            min_cumulative_tax_required,
+            quarter_tax_payable,
+        ));
+    }
+
+    let total_tax_estimated = quarters_data[3].4;
+    let sec_208_applicable = total_tax_estimated >= ADVANCE_TAX_SEC_208_THRESHOLD;
+
+    let mut quarters = Vec::with_capacity(4);
+
+    for (i, m) in meta.iter().enumerate() {
+        let (
+            stcg_quarter,
+            ltcg_quarter,
+            stcg_cumulative,
+            ltcg_cumulative,
+            cumulative_tax_estimated,
+            min_cumulative_tax_required,
+            quarter_tax_payable,
+        ) = quarters_data[i];
+
+        let (quarter_paid, shortfall, sec_234c_interest, status) = if let Some(p) = paid {
+            let p = p.max(0.0);
+            let paid_for_q = p.min(min_cumulative_tax_required);
+            let shortfall = (min_cumulative_tax_required - p).max(0.0);
+            let interest = if sec_208_applicable
+                && as_of > m.due_date
+                && p < (m.safe_harbour_pct / 100.0) * cumulative_tax_estimated
+            {
+                shortfall * (m.interest_rate_pct / 100.0)
+            } else {
+                0.0
+            };
+
+            let status = if as_of < m.period_start {
+                if p >= min_cumulative_tax_required && min_cumulative_tax_required > 0.0 {
+                    AdvanceTaxStatus::Paid
+                } else {
+                    AdvanceTaxStatus::Upcoming
+                }
+            } else if as_of > m.due_date {
+                if p >= min_cumulative_tax_required {
+                    AdvanceTaxStatus::Paid
+                } else {
+                    AdvanceTaxStatus::Pending
+                }
+            } else if p >= min_cumulative_tax_required && min_cumulative_tax_required > 0.0 {
+                AdvanceTaxStatus::Paid
+            } else {
+                AdvanceTaxStatus::Pending
+            };
+            (paid_for_q, shortfall, interest, status)
+        } else {
+            let status = if as_of < m.period_start {
+                AdvanceTaxStatus::Upcoming
+            } else if as_of > m.due_date {
+                if m.quarter == "Q4" && as_of <= fy_end {
+                    AdvanceTaxStatus::Pending
+                } else {
+                    AdvanceTaxStatus::Paid
+                }
+            } else {
+                AdvanceTaxStatus::Pending
+            };
+            (0.0, 0.0, 0.0, status)
+        };
+
+        quarters.push(AdvanceTaxQuarter {
+            quarter: m.quarter.to_string(),
+            due_date: m.due_date,
+            cutoff_date: m.cutoff_date,
+            stcg_quarter,
+            ltcg_quarter,
+            stcg_cumulative,
+            ltcg_cumulative,
+            cumulative_tax_estimated,
+            required_cumulative_pct: m.req_pct,
+            min_cumulative_tax_required,
+            quarter_tax_payable,
+            paid: quarter_paid,
+            shortfall,
+            sec_234c_interest,
+            status,
+        });
+    }
+
+    let total_sec_234c_interest = quarters.iter().map(|q| q.sec_234c_interest).sum();
+    let sec_234b_applicable = sec_208_applicable
+        && as_of > fy_end
+        && paid.is_some_and(|p| p < 0.90 * total_tax_estimated);
+
+    AdvanceTaxSchedule {
+        fy_label,
+        fy_start,
+        fy_end,
+        as_of,
+        total_stcg: quarters[3].stcg_cumulative,
+        total_ltcg: quarters[3].ltcg_cumulative,
+        total_tax_estimated,
+        sec_208_threshold: ADVANCE_TAX_SEC_208_THRESHOLD,
+        sec_208_applicable,
+        total_paid,
+        total_sec_234c_interest,
+        sec_234b_applicable,
+        quarters,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +810,192 @@ mod tests {
         assert_eq!(Country::Uk.currency_scale("GBp"), Some(0.01));
         assert_eq!(Country::parse("India"), Some(Country::India));
         assert_eq!(Country::parse("fr"), None);
+    }
+
+    #[test]
+    fn advance_tax_cutoffs_are_correct() {
+        let cutoffs = advance_tax_cutoffs(2025);
+        assert_eq!(cutoffs[0], (d("2025-06-15"), d("2025-06-15"), "Q1", 15.0));
+        assert_eq!(cutoffs[1], (d("2025-09-15"), d("2025-09-15"), "Q2", 45.0));
+        assert_eq!(cutoffs[2], (d("2025-12-15"), d("2025-12-15"), "Q3", 75.0));
+        assert_eq!(cutoffs[3], (d("2026-03-15"), d("2026-03-31"), "Q4", 100.0));
+    }
+
+    #[test]
+    fn advance_tax_quarterly_schedule_bucketing_and_proviso() {
+        // Sales across 4 quarters in FY 2025-26:
+        // Q1 (before 15 Jun): STCG ₹1,00,000 -> Tax @ 20% = ₹20,000
+        // Q2 (16 Jun - 15 Sep): LTCG ₹3,00,000 -> Tax on cumulative LTCG (3L - 1.25L = 1.75L @ 12.5% = ₹21,875)
+        // Q3 (16 Sep - 15 Dec): STCG ₹50,000
+        // Q4 (16 Dec - 31 Mar): LTCG ₹1,00,000
+        let sales = vec![
+            AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false),
+            AdvanceTaxSale::new(d("2025-08-20"), 300_000.0, true),
+            AdvanceTaxSale::new(d("2025-11-15"), 50_000.0, false),
+            AdvanceTaxSale::new(d("2026-01-20"), 100_000.0, true),
+        ];
+
+        let fy_start = d("2025-04-01");
+        let schedule = compute_advance_tax(&sales, fy_start, d("2025-11-01"), None);
+
+        assert_eq!(schedule.fy_label, "FY 2025-26 (AY 2026-27)");
+        assert!(schedule.sec_208_applicable);
+
+        // Q1 checks:
+        let q1 = &schedule.quarters[0];
+        assert_eq!(q1.quarter, "Q1");
+        assert_eq!(q1.due_date, d("2025-06-15"));
+        assert!(close(q1.stcg_cumulative, 100_000.0));
+        assert!(close(q1.ltcg_cumulative, 0.0));
+        assert!(close(q1.cumulative_tax_estimated, 20_000.0));
+        assert!(close(q1.required_cumulative_pct, 15.0));
+        assert!(close(q1.min_cumulative_tax_required, 3_000.0));
+        assert!(close(q1.quarter_tax_payable, 3_000.0));
+        assert_eq!(q1.status, AdvanceTaxStatus::Paid); // Past due date
+
+        // Q2 checks:
+        let q2 = &schedule.quarters[1];
+        assert_eq!(q2.quarter, "Q2");
+        assert_eq!(q2.due_date, d("2025-09-15"));
+        assert!(close(q2.stcg_cumulative, 100_000.0));
+        assert!(close(q2.ltcg_cumulative, 300_000.0));
+        // STCG 20k + LTCG (1.75L * 12.5% = 21,875) = 41,875
+        assert!(close(q2.cumulative_tax_estimated, 41_875.0));
+        assert!(close(q2.required_cumulative_pct, 45.0));
+        assert!(close(q2.min_cumulative_tax_required, 18_843.75));
+        assert!(close(q2.quarter_tax_payable, 15_843.75));
+        assert_eq!(q2.status, AdvanceTaxStatus::Paid); // Past due date
+
+        // Q3 checks:
+        let q3 = &schedule.quarters[2];
+        assert_eq!(q3.quarter, "Q3");
+        assert_eq!(q3.due_date, d("2025-12-15"));
+        assert!(close(q3.stcg_cumulative, 150_000.0));
+        assert!(close(q3.ltcg_cumulative, 300_000.0));
+        // STCG 30k + LTCG 21,875 = 51,875
+        assert!(close(q3.cumulative_tax_estimated, 51_875.0));
+        assert!(close(q3.required_cumulative_pct, 75.0));
+        assert!(close(q3.min_cumulative_tax_required, 38_906.25));
+        assert!(close(q3.quarter_tax_payable, 20_062.50));
+        assert_eq!(q3.status, AdvanceTaxStatus::Pending); // as_of is 2025-11-01 (in Q3)
+
+        // Q4 checks:
+        let q4 = &schedule.quarters[3];
+        assert_eq!(q4.quarter, "Q4");
+        assert_eq!(q4.due_date, d("2026-03-15"));
+        assert!(close(q4.stcg_cumulative, 150_000.0));
+        assert!(close(q4.ltcg_cumulative, 400_000.0));
+        // STCG 30k + LTCG 2.75L * 12.5% (34,375) = 64,375
+        assert!(close(q4.cumulative_tax_estimated, 64_375.0));
+        assert!(close(q4.required_cumulative_pct, 100.0));
+        assert!(close(q4.min_cumulative_tax_required, 64_375.0));
+        assert!(close(q4.quarter_tax_payable, 25_468.75));
+        assert_eq!(q4.status, AdvanceTaxStatus::Upcoming); // Q4 is future relative to 2025-11-01
+
+        // Verify total sum of quarter payables matches total tax
+        let sum_payable: f64 = schedule
+            .quarters
+            .iter()
+            .map(|q| q.quarter_tax_payable)
+            .sum();
+        assert!(close(sum_payable, 64_375.0));
+        assert!(close(schedule.total_tax_estimated, 64_375.0));
+    }
+
+    #[test]
+    fn advance_tax_losses_in_subsequent_quarters() {
+        // Gain in Q1: STCG ₹1,00,000 -> Tax ₹20,000
+        // Loss in Q2: STCL ₹70,000 -> Net cumulative STCG ₹30,000 -> Tax ₹6,000
+        // Min req Q1 = 3,000 (payable = 3,000)
+        // Min req Q2 = 45% * 6,000 = 2,700. Since prior req was 3,000, Q2 payable is 0.0
+        let sales = vec![
+            AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false),
+            AdvanceTaxSale::new(d("2025-07-15"), -70_000.0, false),
+        ];
+
+        let schedule = compute_advance_tax(&sales, d("2025-04-01"), d("2025-10-01"), None);
+        assert!(close(schedule.quarters[0].quarter_tax_payable, 3_000.0));
+        assert!(close(schedule.quarters[1].quarter_tax_payable, 0.0));
+        assert!(close(
+            schedule.quarters[1].min_cumulative_tax_required,
+            2_700.0
+        ));
+    }
+
+    #[test]
+    fn advance_tax_sec_208_threshold_exemption() {
+        // Gain: STCG ₹40,000 -> Tax @ 20% = ₹8,000 (< ₹10,000 threshold)
+        let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 40_000.0, false)];
+        let schedule = compute_advance_tax(&sales, d("2025-04-01"), d("2025-06-01"), None);
+
+        assert!(!schedule.sec_208_applicable);
+        assert!(close(schedule.total_tax_estimated, 8_000.0));
+        assert_eq!(schedule.sec_208_threshold, 10_000.0);
+    }
+
+    #[test]
+    fn advance_tax_status_progression_across_quarters() {
+        let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false)];
+
+        // Before Q1 (e.g. 2025-03-15) -> Q1 upcoming
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-03-15"), None);
+        assert_eq!(s.quarters[0].status, AdvanceTaxStatus::Upcoming);
+
+        // During Q1 (e.g. 2025-05-01) -> Q1 pending
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-05-01"), None);
+        assert_eq!(s.quarters[0].status, AdvanceTaxStatus::Pending);
+        assert_eq!(s.quarters[1].status, AdvanceTaxStatus::Upcoming);
+
+        // During Q2 (e.g. 2025-07-01) -> Q1 paid, Q2 pending
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-07-01"), None);
+        assert_eq!(s.quarters[0].status, AdvanceTaxStatus::Paid);
+        assert_eq!(s.quarters[1].status, AdvanceTaxStatus::Pending);
+
+        // Post FY (e.g. 2026-04-10) -> All paid
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2026-04-10"), None);
+        assert_eq!(s.quarters[0].status, AdvanceTaxStatus::Paid);
+        assert_eq!(s.quarters[1].status, AdvanceTaxStatus::Paid);
+        assert_eq!(s.quarters[2].status, AdvanceTaxStatus::Paid);
+        assert_eq!(s.quarters[3].status, AdvanceTaxStatus::Paid);
+    }
+
+    #[test]
+    fn advance_tax_paid_shortfall_and_234c_interest() {
+        // STCG ₹1,00,000 in Q1 -> Tax ₹20,000 (Min Q1 req ₹3,000, Min Q2 req ₹9,000)
+        let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false)];
+
+        // Evaluation on 2025-10-01 (post Q2). Suppose user paid only ₹2,000 total advance tax:
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-10-01"), Some(2_000.0));
+
+        // Q1 shortfall: 3,000 - 2,000 = 1,000.
+        // Safe harbour 12% = 2,400. Paid (2,000) < 2,400 -> interest 3% on 1,000 = 30.0
+        let q1 = &s.quarters[0];
+        assert_eq!(q1.status, AdvanceTaxStatus::Pending);
+        assert!(close(q1.shortfall, 1_000.0));
+        assert!(close(q1.sec_234c_interest, 30.0));
+
+        // Q2 shortfall: 9,000 - 2,000 = 7,000.
+        // Safe harbour 36% = 7,200. Paid (2,000) < 7,200 -> interest 3% on 7,000 = 210.0
+        let q2 = &s.quarters[1];
+        assert_eq!(q2.status, AdvanceTaxStatus::Pending);
+        assert!(close(q2.shortfall, 7_000.0));
+        assert!(close(q2.sec_234c_interest, 210.0));
+
+        assert!(close(s.total_sec_234c_interest, 240.0));
+
+        // If user paid ₹10,000 total:
+        let s_paid = compute_advance_tax(&sales, d("2025-04-01"), d("2025-10-01"), Some(10_000.0));
+        assert_eq!(s_paid.quarters[0].status, AdvanceTaxStatus::Paid);
+        assert_eq!(s_paid.quarters[1].status, AdvanceTaxStatus::Paid);
+        assert!(close(s_paid.total_sec_234c_interest, 0.0));
+    }
+
+    #[test]
+    fn advance_tax_serialization_roundtrip() {
+        let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false)];
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-10-01"), Some(5_000.0));
+        let json_str = serde_json::to_string(&s).unwrap();
+        let deserialized: AdvanceTaxSchedule = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(s, deserialized);
     }
 }

@@ -361,6 +361,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `harvest` | Tax-loss harvesting candidates |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
+| `tax advance [--fy 2025-26] [--paid N] [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
 | `pcorr` | Correlation between holdings, diversification warnings |
 
@@ -452,6 +453,34 @@ rows are noted because only equity-oriented funds belong in 111A/112A; sales
 in another currency (US shares for `in`) and crypto (taxed at 30% under
 section 115BBH, Schedule VDA) are listed but left out. Years before FY 2024-25
 are noted too: their LTCG exemption was ₹1 lakh.
+
+### Advance tax (India)
+
+Under Section 208 and 211 of the Indian Income-tax Act, any taxpayer whose
+estimated tax liability for the financial year is ₹10,000 or more must pay
+advance tax in four quarterly instalments:
+- **By 15 June**: At least 15% of estimated tax
+- **By 15 September**: At least 45% of estimated tax
+- **By 15 December**: At least 75% of estimated tax
+- **By 15 March**: 100% of estimated tax (capital gains realized between 16 and 31 March are payable by 31 March)
+
+Because capital gains cannot always be predicted in advance, the **proviso to
+Section 234C(1)** specifies that deferment interest is not levied if the shortfall
+is due to capital gains realized after an instalment date, provided the remaining
+tax is paid in subsequent instalments. `stockwise tax advance` groups realized sales
+into the four statutory quarterly cut-offs and calculates cumulative set-offs under
+Indian equity rules (STCG @ 20%, LTCG @ 12.5% above ₹1.25L exemption):
+
+```bash
+stockwise tax advance                             # current FY advance tax schedule
+stockwise tax advance --fy 2025-26                # specific financial year
+stockwise tax advance --paid 25000                # track shortfall and Section 234C interest
+stockwise tax advance --json                      # programmatic JSON output
+```
+
+- **Section 208 Check**: Automatically flags whether advance tax is mandatory (total liability ≥ ₹10,000) or exempt.
+- **Section 234C Deferment Interest**: When `--paid <AMOUNT>` is passed, calculates exact shortfall and 1%/month interest (3% for Q1–Q3, 1% for Q4) on shortfalls below safe-harbour levels (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4).
+- **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
 
 ### Benchmark and attribution
 
@@ -712,6 +741,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `calendar` | `[{date, days_until, when, symbol, event, detail, source, estimate}]` — `when` is `today`, `tomorrow`, `this_week` (within 7 days) or `later`; `event` is `results`, `board_meeting`, `ex_dividend`, `dividend_paid`, `split`, `bonus`, `rights` or `other`; `source` is `yahoo` or `nse`; `estimate` marks Yahoo's unconfirmed earnings dates. Notes (e.g. NSE refused) go to stderr | event |
 | `portfolio benchmark` | `{benchmark: {symbol, name, currency, converted_to_base}, base_currency, period, start, end, trading_days, portfolio_return, benchmark_return, excess_return, portfolio_annualized, benchmark_annualized, metrics: {observations, alpha, beta, tracking_error, information_ratio, correlation}, holdings: [holding], sectors: [{sector, holdings, avg_weight, end_weight, return_pct, contribution, active_contribution}], flagged: [{symbol, reason}], series: [{date, portfolio, benchmark}]}`, holding = `{symbol, sector, avg_weight, end_weight, return_pct, contribution, active_contribution, days_held, days_unpriced, flag}` — returns, weights, `alpha` and `tracking_error` are percentages, contributions are percentage points; annualized returns only for periods over about 13 months; `series` is growth of 100; figures are null when nothing was held | holding |
 | `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], notes: [text]}` (`virtual_digital_assets` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, stcg_tax, ltcg_tax, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, gain_or_loss, date_acquired_estimated}`, summary = `{short_term_proceeds, short_term_cost, short_term_gain, long_term_proceeds, long_term_cost, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}` | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
+| `tax advance` | `{fy_label, fy_start, fy_end, as_of, total_stcg, total_ltcg, total_tax_estimated, sec_208_threshold, sec_208_applicable, total_paid, total_sec_234c_interest, sec_234b_applicable, quarters: [{quarter, due_date, cutoff_date, stcg_quarter, ltcg_quarter, stcg_cumulative, ltcg_cumulative, cumulative_tax_estimated, required_cumulative_pct, min_cumulative_tax_required, quarter_tax_payable, paid, shortfall, sec_234c_interest, status}]}` — `status` is `paid`, `pending` or `upcoming` | quarter row |
 | `goal sip` | `{target, years, annual_return_pct, step_up_pct, savings, savings_future_value, monthly_sip, final_monthly_sip, total_invested, gains, lump_sum_today, schedule: [{year, monthly_sip, invested, value}], goal, currency}` — `goal` is `sip`, `retire` or `education` | — |
 | `goal retire` | `{monthly_expense_today, years_to_retire, years_in_retirement, inflation_pct, return_pre_pct, return_post_pct, monthly_expense_at_retirement, corpus, sip: plan, goal, currency}` — `plan` is the `goal sip` object without `goal`/`currency` | — |
 | `goal education` | `{cost_today, years, inflation_pct, future_cost, sip: plan, goal, currency}` | — |
