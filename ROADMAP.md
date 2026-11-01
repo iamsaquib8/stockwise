@@ -10,6 +10,14 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 
 ## ✅ Shipped
 
+**0.7** — key events timeline, quantified insights and decision engine
+- `stockwise events`: NSE corporate filings + RSS news timeline with regex financial extraction,
+  benchmark-adjusted market reactions and upcoming corporate radar (`-m in` and `-m us`)
+- `stockwise insights`: INDmoney-style positive/negative/neutral impact cards across 9 dimensions,
+  with live NSE XBRL shareholding (FII/DII/promoter/pledges) and US SEC insider & institutional data
+- `stockwise verdict`: 6-pillar 0–100 decision engine with entry zone, stop-loss, target price,
+  risk-reward ratio, multi-horizon guidance and bull vs. bear thesis
+
 **0.6** — AI assistants and more ways to install
 - `stockwise mcp`: 24 read-only tools, resources and prompts for Claude, Cursor and other AI
   assistants (no orders); `stockwise ask` with tool calling; `llms.txt` and an Agent Skill

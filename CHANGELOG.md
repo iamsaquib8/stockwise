@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-10-28
+## [0.7.0] - 2026-11-01
 
 Stock key events timeline, INDmoney-style quantified impact cards, and institutional 6-pillar Buy/Sell decision verdict engine for Indian (NSE/BSE) and US equities.
 
@@ -26,6 +26,9 @@ Stock key events timeline, INDmoney-style quantified impact cards, and instituti
   - Clear actionable verdicts (`STRONG BUY`, `BUY / ACCUMULATE`, `HOLD / NEUTRAL`, `REDUCE / TAKE PROFIT`, `STRONG SELL`).
   - Automated entry zone, stop-loss level, target price, upside %, and risk-reward ratio computation.
   - Multi-horizon guidance (1–4 weeks, 1–6 months, 1–3 years) and synthesized bull vs. bear thesis.
+
+### Fixed
+- Windows main-thread stack overflow (`thread 'main' has overflowed its stack`) by running the CLI entrypoint and Tokio worker threads on an explicit 8 MiB stack and heap-pinning the command dispatch state machine.
 
 ## [0.6.0] - 2026-10-26
 

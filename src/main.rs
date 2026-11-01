@@ -2443,8 +2443,29 @@ fn exit_quietly_on_broken_pipe() {
     }));
 }
 
-#[tokio::main]
-async fn main() {
+/// Windows defaults the main thread to a 1 MiB stack (Linux/macOS use 8 MiB).
+/// Building the full CLI tree and driving the command dispatch state machine
+/// exceeds 1 MiB in unoptimized builds, so run on an explicit 8 MiB stack.
+const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn main() {
+    std::thread::Builder::new()
+        .name("stockwise-main".into())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(MAIN_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime");
+            rt.block_on(Box::pin(async_main()));
+        })
+        .expect("failed to spawn main thread")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+}
+
+async fn async_main() {
     exit_quietly_on_broken_pipe();
     // The language is needed before parsing: the help text is built from it.
     // args_os: a non-UTF-8 argument is clap's to report, not a panic here.
@@ -2499,7 +2520,25 @@ async fn main() {
         std::process::exit(2);
     }
 
-    let result = match cli.command {
+    let result = Box::pin(dispatch(cli.command, m, sources, periods)).await;
+
+    if let Err(e) = result {
+        eprintln!(
+            "\n  {} {:#}\n",
+            colored::Colorize::red(i18n::t(i18n::Msg::ErrorPrefix)),
+            e
+        );
+        std::process::exit(1);
+    }
+}
+
+async fn dispatch(
+    command: Commands,
+    m: Market,
+    sources: config::CliSources,
+    periods: Vec<(String, String)>,
+) -> anyhow::Result<()> {
+    match command {
         Commands::Quote { symbols, out } => commands::cmd_quote(&symbols, m, out.into()).await,
         Commands::Deep { symbol, period } => commands::cmd_deep(&symbol, &period, m).await,
         Commands::Markets {
@@ -3189,15 +3228,6 @@ async fn main() {
             Ok(())
         }
         Commands::Man { dir } => cmd_man(dir.as_deref()),
-    };
-
-    if let Err(e) = result {
-        eprintln!(
-            "\n  {} {:#}\n",
-            colored::Colorize::red(i18n::t(i18n::Msg::ErrorPrefix)),
-            e
-        );
-        std::process::exit(1);
     }
 }
 
