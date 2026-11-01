@@ -93,7 +93,7 @@ This comes first.
 
 ## 🛠️ Now — loose ends (0.6.x)
 
-- 📋 **Direct `.xlsx` imports** — teach the built-in reader dates and sheet selection, and read
+- 📋 **Direct `.xlsx` imports** ([#45](https://github.com/iamsaquib8/stockwise/issues/45)) — teach the built-in reader dates and sheet selection, and read
   Groww, Zerodha Console and Upstox `.xlsx` holdings and tradebook exports without saving as CSV;
   add an Angel One import
 - 🛠️ **Broker integrations verified against live accounts** — the read-only `trade selftest` and the
@@ -111,7 +111,7 @@ This comes first.
   exemption before 31 March, harvest losses with the STCL/LTCL set-off rules, and flag the US
   wash-sale window (30 days either side). Smaller first step: `harvest --json`/`--csv`
   ([#21](https://github.com/iamsaquib8/stockwise/issues/21))
-- 📋 **Advance tax** — quarterly estimates for the 15 Jun, 15 Sep, 15 Dec and 15 Mar instalments
+- 📋 **Advance tax** ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly estimates for the 15 Jun, 15 Sep, 15 Dec and 15 Mar instalments
 - 📋 **Indian ITR toolkit** — 31 Jan 2018 grandfathering from fair market values (flagged only
   today), Schedule FA for foreign holdings (calendar-year peak and closing values in INR),
   Schedule FSI/TR and Form 67 for tax withheld on US dividends, debt funds under Sec. 50AA, SGB
@@ -121,24 +121,24 @@ This comes first.
   REITs/InvITs (split into interest, dividend and capital repayment) and bonds
 
 **Portfolio**
-- 📋 **Target-allocation and inflow-only rebalancing** — saved target weights by stock, sector or
+- 📋 **Target-allocation and inflow-only rebalancing** ([#47](https://github.com/iamsaquib8/stockwise/issues/47)) — saved target weights by stock, sector or
   asset class, drift bands, and "buy-only" rebalancing for new cash or SIP inflows (today
   `rebalance` is equal-weight only)
 - 📋 **Full net worth, SIP tracker and household view** — NPS, PPF, EPF, FDs and cash next to the
   portfolio; saved goals with running SIPs tracked against them; several portfolios (family
   members) rolled into one view
-- 📋 **Portfolio X-Ray** — look-through overlap across stocks, ETFs and funds, plus asset-class,
+- 📋 **Portfolio X-Ray** ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — look-through overlap across stocks, ETFs and funds, plus asset-class,
   market-cap and sector concentration (Indian fund look-through needs AMC monthly disclosures)
 
 **Research**
 - 📋 **Screener queries** — `stockwise screen "roce > 20 and pe < 25"` with custom ratios, the
   NIFTY Midcap 150 / Smallcap 250 / 500 universes ([#16](https://github.com/iamsaquib8/stockwise/issues/16)), and importing your own screener
   exports
-- 📋 **Open-interest analytics** — OI change and build-up, PCR and IV history, IV percentile
+- 📋 **Open-interest analytics** ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — OI change and build-up, PCR and IV history, IV percentile
 - 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates
 - 📋 **Market mood** — a transparent composite of India VIX, breadth and momentum, plus FII/DII
   cash flows
-- 📋 **Open scorecards** — Piotroski F-score, Altman Z and quality/value/momentum, with the formulas
+- 📋 **Open scorecards** ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — Piotroski F-score, Altman Z and quality/value/momentum, with the formulas
   shown
 - 📋 **Mutual fund depth** — rolling returns, category rank and direct-vs-regular cost
 
@@ -154,7 +154,7 @@ This comes first.
   Indian REIT/InvIT list (these already quote by symbol; this adds names, aliases and lists)
 
 **AI**
-- 📋 **`--explain` for beginners** — plain-English notes under technicals, risk metrics, option greeks
+- 📋 **`--explain` for beginners** ([#52](https://github.com/iamsaquib8/stockwise/issues/52)) — plain-English notes under technicals, risk metrics, option greeks
   and tax numbers (templates first, the local model optional)
 
 **Everywhere**
