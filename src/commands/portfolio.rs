@@ -220,12 +220,22 @@ impl Valuation {
 }
 
 /// Yahoo FX symbol giving the rate from `currency` to `base`, and whether to
-/// invert it. USD↔INR always comes from USDINR=X.
+/// invert it. Yahoo quotes the currency that ranks first below as the base of
+/// the pair (EURUSD=X, USDINR=X); other pairs keep `currency` first.
 pub(super) fn fx_pair(currency: &str, base: &str) -> (String, bool) {
-    if currency == "INR" && base == "USD" {
-        ("USDINR=X".into(), true)
-    } else {
+    let (currency, base) = (currency.to_uppercase(), base.to_uppercase());
+    let (currency, base) = (currency.as_str(), base.as_str());
+    const QUOTE_ORDER: [&str; 5] = ["EUR", "GBP", "AUD", "NZD", "USD"];
+    let rank = |c: &str| {
+        QUOTE_ORDER
+            .iter()
+            .position(|q| q.eq_ignore_ascii_case(c))
+            .unwrap_or(QUOTE_ORDER.len())
+    };
+    if rank(currency) <= rank(base) {
         (format!("{}{}=X", currency, base), false)
+    } else {
+        (format!("{}{}=X", base, currency), true)
     }
 }
 
@@ -1495,4 +1505,33 @@ pub fn cmd_portfolio_list() -> Result<()> {
     );
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fx_pair;
+
+    #[test]
+    fn fx_pair_follows_yahoo_quotation() {
+        let cases = [
+            ("INR", "USD", "USDINR=X", true),
+            ("USD", "INR", "USDINR=X", false),
+            ("USD", "EUR", "EURUSD=X", true),
+            ("EUR", "USD", "EURUSD=X", false),
+            ("USD", "GBP", "GBPUSD=X", true),
+            ("USD", "AUD", "AUDUSD=X", true),
+            ("USD", "CAD", "USDCAD=X", false),
+            ("JPY", "USD", "USDJPY=X", true),
+            ("GBP", "EUR", "EURGBP=X", true),
+            ("EUR", "INR", "EURINR=X", false),
+            ("usd", "eur", "EURUSD=X", true),
+        ];
+        for (cur, base, sym, invert) in cases {
+            assert_eq!(
+                fx_pair(cur, base),
+                (sym.to_string(), invert),
+                "{cur}->{base}"
+            );
+        }
+    }
 }

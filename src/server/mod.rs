@@ -257,7 +257,7 @@ async fn search<D: DataSource>(State(st): Shared<D>, Query(p): Query<SearchParam
 #[derive(Deserialize)]
 struct PortfolioParams {
     market: Option<String>,
-    /// Currency for the totals (`portfolio --base`): inr or usd.
+    /// Currency for the totals (`portfolio --base`): a 3-letter currency code.
     base: Option<String>,
 }
 
@@ -269,12 +269,12 @@ async fn portfolio<D: DataSource>(
     let market = st.market_for(p.market.as_deref())?;
     let base = match p.base.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(b) if b.eq_ignore_ascii_case("inr") || b.eq_ignore_ascii_case("usd") => {
+        Some(b) if b.len() == 3 && b.chars().all(|c| c.is_ascii_alphabetic()) => {
             Some(b.to_uppercase())
         }
         Some(b) => {
             return Err(ApiError::BadRequest(format!(
-                "Unknown base currency '{}' (use inr or usd)",
+                "Unknown base currency '{}' (use a 3-letter code such as inr, usd or eur)",
                 b
             )));
         }
@@ -820,6 +820,14 @@ mod tests {
         assert_eq!(v["totals"]["pnl"], 5500.0);
         assert_eq!(v["holdings"][0]["weight_percent"], 84.54);
         assert_eq!(v["unpriced"][0], "DELISTED.NS");
+        assert_eq!(
+            get_json(&app, "/api/portfolio?base=eur").await.0,
+            StatusCode::OK
+        );
+        for bad in ["euro", "12", "e%20r"] {
+            let uri = format!("/api/portfolio?base={bad}");
+            assert_eq!(get_json(&app, &uri).await.0, StatusCode::BAD_REQUEST);
+        }
 
         let (s, v) = get_json(&app, "/api/watchlist").await;
         assert_eq!(s, StatusCode::OK);
