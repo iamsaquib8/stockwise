@@ -6,6 +6,7 @@ use super::*;
 use crate::api::Quote;
 use crate::offmarket::{self, Mark, OffMarket, PriceSource};
 use crate::portfolio::{self as pf, DividendEvent, Fx, Lot, Split};
+use crate::rebalance::{HoldingInput, RebalanceActionType};
 use crate::tax;
 
 // ── Valuation ──
@@ -1504,6 +1505,389 @@ pub fn cmd_portfolio_list() -> Result<()> {
             .dimmed()
     );
     println!();
+    Ok(())
+}
+
+// ── Target Allocations & Rebalance ──
+
+/// Set a target weight for a symbol or sector.
+pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> Result<()> {
+    if !(0.0..=100.0).contains(&percentage) {
+        bail!(
+            "Target percentage must be between 0 and 100, got {}",
+            percentage
+        );
+    }
+    let mut p = Portfolio::load()?;
+
+    // Resolve key:
+    // 1. If it matches an existing holding (exact or bare): use holding's exact symbol.
+    // 2. If it contains '.' or ':', keep as given (e.g. TCS.NS or MF:122639).
+    // 3. If it looks like a short uppercase ticker: resolve symbol for current market.
+    // 4. Otherwise (e.g. "Technology", "Financial Services"): keep as sector key.
+    let resolved_key = if let Some(h) = p.holdings.iter().find(|h| {
+        h.symbol.eq_ignore_ascii_case(key)
+            || h.symbol
+                .split_once('.')
+                .is_some_and(|(bare, _)| bare.eq_ignore_ascii_case(key))
+    }) {
+        h.symbol.clone()
+    } else if key.contains('.') || key.contains(':') {
+        key.trim().to_uppercase()
+    } else if key
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+        && key.len() <= 10
+    {
+        market::resolve_symbol(key, market)
+    } else {
+        key.trim().to_string()
+    };
+
+    p.set_target(resolved_key.clone(), percentage);
+    p.save()?;
+
+    let total: f64 = p.targets.values().sum();
+    println!(
+        "\n  {} Target for {} set to {:.1}%",
+        "✓".green(),
+        resolved_key.cyan(),
+        percentage
+    );
+    println!(
+        "  Total saved targets: {:.1}% ({} target{})",
+        total,
+        p.targets.len(),
+        if p.targets.len() == 1 { "" } else { "s" }
+    );
+    if total > 100.0 + 1e-6 {
+        println!(
+            "  {}",
+            format!(
+                "Note: Targets sum to {:.1}% (exceeds 100%). Weights will be normalized during rebalancing.",
+                total
+            )
+            .yellow()
+        );
+    } else if total < 100.0 - 1e-6 {
+        let remaining = 100.0 - total;
+        println!(
+            "  {}",
+            format!(
+                "Note: Remaining {:.1}% will be distributed among untargeted holdings during rebalancing.",
+                remaining
+            )
+            .dimmed()
+        );
+    }
+    println!();
+    Ok(())
+}
+
+/// Show saved target allocations and drift tolerance.
+pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
+    let p = Portfolio::load()?;
+    let _ = market;
+    if json {
+        let targets_list: Vec<serde_json::Value> = p
+            .targets
+            .iter()
+            .map(|(k, &v)| {
+                serde_json::json!({
+                    "key": k,
+                    "target_pct": v,
+                })
+            })
+            .collect();
+        let total: f64 = p.targets.values().sum();
+        let out = serde_json::json!({
+            "targets": targets_list,
+            "total_target_pct": total,
+            "drift_tolerance_pct": p.drift_tolerance,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    print_header("Portfolio Target Allocations");
+    if p.targets.is_empty() {
+        println!(
+            "  {}",
+            "No target allocations saved. Rebalancing defaults to equal weight across all holdings."
+                .dimmed()
+        );
+        println!(
+            "\n  {} Set a target with: stockwise portfolio target set <SYMBOL|SECTOR> <PERCENT>",
+            "Tip:".yellow()
+        );
+        println!();
+        return Ok(());
+    }
+
+    let kw = p
+        .targets
+        .keys()
+        .map(|k| k.len())
+        .max()
+        .unwrap_or(12)
+        .max(12);
+    println!();
+    println!("  {:<kw$} {:>10}", "Target Key".bold(), "Weight%".bold());
+    println!("  {}", "─".repeat(kw + 13).dimmed());
+
+    for (k, &pct) in &p.targets {
+        println!("  {:<kw$} {:>9.1}%", k.cyan(), pct);
+    }
+    println!("  {}", "─".repeat(kw + 13).dimmed());
+    let total: f64 = p.targets.values().sum();
+    println!("  {:<kw$} {:>9.1}%", "Total".bold(), total);
+    println!();
+
+    if let Some(drift) = p.drift_tolerance {
+        println!(
+            "  Drift Tolerance: ±{:.1}% (rebalancing ignores drifts within this band)",
+            drift
+        );
+    } else {
+        println!("  Drift Tolerance: Not set (default: 0.0%)");
+    }
+    println!();
+    Ok(())
+}
+
+/// Remove a target weight by symbol or sector.
+pub fn cmd_portfolio_target_remove(key: &str) -> Result<()> {
+    let mut p = Portfolio::load()?;
+    if p.remove_target(key) {
+        p.save()?;
+        println!("\n  {} Removed target for {}\n", "✓".green(), key.cyan());
+    } else {
+        println!("\n  {} No target found matching '{}'\n", "✗".red(), key);
+    }
+    Ok(())
+}
+
+/// Clear all saved target weights.
+pub fn cmd_portfolio_target_clear() -> Result<()> {
+    let mut p = Portfolio::load()?;
+    p.clear_targets();
+    p.save()?;
+    println!(
+        "\n  {} Cleared all target allocations. Rebalancing will use equal weight.\n",
+        "✓".green()
+    );
+    Ok(())
+}
+
+/// Set default drift tolerance band in percent.
+pub fn cmd_portfolio_target_drift(percentage: f64) -> Result<()> {
+    if !(0.0..=50.0).contains(&percentage) {
+        bail!(
+            "Drift tolerance must be between 0.0% and 50.0%, got {}",
+            percentage
+        );
+    }
+    let mut p = Portfolio::load()?;
+    p.set_drift_tolerance(Some(percentage));
+    p.save()?;
+    println!(
+        "\n  {} Default drift tolerance set to ±{:.1}%\n",
+        "✓".green(),
+        percentage
+    );
+    Ok(())
+}
+
+/// Rebalance portfolio towards target allocations or equal weight.
+///
+/// Supports:
+/// - Target weights saved in portfolio or passed on CLI (`targets`)
+/// - Inflow-only mode (`--inflow <cash>`) to invest fresh capital without selling
+/// - Drift tolerance band (`--drift <pct>`) to suppress minor churn
+/// - Machine-readable JSON output (`--json`)
+pub async fn cmd_rebalance(
+    targets: &[(String, f64)],
+    inflow: Option<f64>,
+    drift: Option<f64>,
+    json: bool,
+    market: Market,
+) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.holdings.is_empty() {
+        if json {
+            let plan = crate::rebalance::RebalancePlan::empty(market_currency(market));
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            println!("\n  {}", "Portfolio is empty.".dimmed());
+        }
+        return Ok(());
+    }
+
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    let client = YahooClient::new().await?;
+    let val = value_holdings(&client, &symbols, market, None).await?;
+
+    let mut holding_inputs = Vec::with_capacity(portfolio.holdings.len());
+    for h in &portfolio.holdings {
+        let Some(price) = val.price(&h.symbol) else {
+            let why = val
+                .off
+                .notes
+                .iter()
+                .find(|n| n.symbols.contains(&h.symbol))
+                .map(|n| format!(" ({})", n.text))
+                .unwrap_or_default();
+            bail!(
+                "No live price for {} — fix or remove it before rebalancing{}",
+                h.symbol,
+                why
+            );
+        };
+        let Some(price_base) = val.to_base(&h.symbol, price) else {
+            bail!(
+                "No exchange rate for {} — can't weigh it against your other holdings",
+                h.symbol
+            );
+        };
+        let value = h.shares * price_base;
+        let sector = val.quote(&h.symbol).and_then(|q| q.sector.clone());
+        let is_fund = crate::offmarket::is_fund(&h.symbol);
+        holding_inputs.push(HoldingInput {
+            symbol: h.symbol.clone(),
+            shares: h.shares,
+            value,
+            price: price_base,
+            sector,
+            is_fund,
+        });
+    }
+
+    // Build configured targets map
+    let mut configured_targets = std::collections::BTreeMap::new();
+    if !targets.is_empty() {
+        for (k, pct) in targets {
+            configured_targets.insert(k.clone(), *pct);
+        }
+    } else {
+        configured_targets = portfolio.targets.clone();
+    }
+
+    let drift_tolerance = drift.or(portfolio.drift_tolerance).unwrap_or(0.0);
+    let plan = crate::rebalance::compute_rebalance_plan(
+        &holding_inputs,
+        &configured_targets,
+        inflow,
+        drift_tolerance,
+        val.base(),
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        return Ok(());
+    }
+
+    let cur = Some(val.base());
+    let csym = market::currency_symbol(cur);
+
+    if let Some(cash) = inflow {
+        print_header(&format!(
+            "Portfolio Rebalance (Inflow: {}{:.2})",
+            csym, cash
+        ));
+        print_kv("Current Value", &format!("{}{:.2}", csym, plan.total_value));
+        print_kv(
+            "Projected Value",
+            &format!("{}{:.2}", csym, plan.projected_value),
+        );
+    } else {
+        print_header("Portfolio Rebalance");
+        print_kv("Total Value", &format!("{}{:.2}", csym, plan.total_value));
+    }
+
+    if drift_tolerance > 0.0 {
+        print_kv("Drift Tolerance", &format!("±{:.1}%", drift_tolerance));
+    }
+
+    for warning in &plan.warnings {
+        println!("  {} {}", "ℹ".cyan(), warning.dimmed());
+    }
+
+    let sw = plan
+        .items
+        .iter()
+        .map(|it| it.symbol.len() + 1)
+        .max()
+        .unwrap_or(12)
+        .max(12);
+
+    println!();
+    if inflow.is_some() {
+        println!(
+            "  {:<sw$} {:>10} {:>7} {:>7} {:>10} {:>12} {:>16}",
+            "Symbol".bold(),
+            "Current".bold(),
+            "Now%".bold(),
+            "Target%".bold(),
+            "Projected%".bold(),
+            "Allocation".bold(),
+            "Action".bold()
+        );
+        println!("  {}", "─".repeat(68 + sw).dimmed());
+
+        for it in &plan.items {
+            let action_styled = match it.action_type {
+                RebalanceActionType::Buy => it.action_display.green().to_string(),
+                RebalanceActionType::Sell => it.action_display.red().to_string(),
+                RebalanceActionType::Ok => it.action_display.dimmed().to_string(),
+            };
+            println!(
+                "  {:<sw$} {:>10} {:>6.1}% {:>6.1}% {:>9.1}% {:>12} {:>16}",
+                it.symbol.cyan(),
+                format!("{}{:.2}", csym, it.current_value),
+                it.current_pct,
+                it.target_pct,
+                it.projected_pct,
+                format!("{}{:.2}", csym, it.diff_value),
+                action_styled
+            );
+        }
+    } else {
+        println!(
+            "  {:<sw$} {:>10} {:>8} {:>8} {:>16}",
+            "Symbol".bold(),
+            "Current".bold(),
+            "Now%".bold(),
+            "Target%".bold(),
+            "Action".bold()
+        );
+        println!("  {}", "─".repeat(48 + sw).dimmed());
+
+        for it in &plan.items {
+            let action_styled = match it.action_type {
+                RebalanceActionType::Buy => it.action_display.green().to_string(),
+                RebalanceActionType::Sell => it.action_display.red().to_string(),
+                RebalanceActionType::Ok => it.action_display.green().to_string(),
+            };
+            println!(
+                "  {:<sw$} {:>10} {:>7.1}% {:>7.1}% {:>16}",
+                it.symbol.cyan(),
+                format!("{}{:.2}", csym, it.current_value),
+                it.current_pct,
+                it.target_pct,
+                action_styled
+            );
+        }
+    }
+
+    println!();
+    val.print_price_notes();
+    if !val.off.marks.is_empty() {
+        println!();
+    }
     Ok(())
 }
 

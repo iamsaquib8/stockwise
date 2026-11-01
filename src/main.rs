@@ -49,6 +49,7 @@ mod payoff;
 mod portfolio;
 mod practice;
 mod providers;
+mod rebalance;
 mod research;
 #[cfg(feature = "server")]
 mod server;
@@ -627,8 +628,21 @@ stockwise options TCS                     expected moves (same as `options moves
 
     /// Snapshot portfolio value over time (run daily)
     Wealth,
-    /// Trades to rebalance your portfolio to equal weight
-    Rebalance,
+    /// Trades to rebalance your portfolio to targets or equal weight
+    Rebalance {
+        /// Cash inflow for buy-only rebalancing without selling
+        #[arg(long)]
+        inflow: Option<f64>,
+        /// Drift tolerance band percentage (e.g. 2.0 for +/-2%)
+        #[arg(long)]
+        drift: Option<f64>,
+        /// One-off target weights (e.g. TCS:25 RELIANCE:35 or TCS=25,INFY=25)
+        #[arg(num_args = 0..)]
+        targets: Vec<String>,
+        /// Print rebalance plan as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Tax-loss harvesting opportunities
     Harvest,
     /// Capital-gains tax estimate; `tax export` writes an ITR Schedule CG / Form 8949 CSV
@@ -850,6 +864,56 @@ enum PortfolioCmd {
         period: String,
         #[command(flatten)]
         out: TableOutput,
+    },
+    /// Target allocation weights and drift tolerance for rebalancing
+    Target {
+        #[command(subcommand)]
+        action: Option<TargetCmd>,
+    },
+    /// Trades to rebalance your portfolio to targets or equal weight
+    Rebalance {
+        /// Cash inflow for buy-only rebalancing without selling
+        #[arg(long)]
+        inflow: Option<f64>,
+        /// Drift tolerance band percentage (e.g. 2.0 for +/-2%)
+        #[arg(long)]
+        drift: Option<f64>,
+        /// One-off target weights (e.g. TCS:25 RELIANCE:35 or TCS=25,INFY=25)
+        #[arg(num_args = 0..)]
+        targets: Vec<String>,
+        /// Print rebalance plan as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TargetCmd {
+    /// Set a target weight for a symbol or sector
+    Set {
+        /// Symbol (e.g. TCS) or sector (e.g. Technology)
+        key: String,
+        /// Target weight percentage (0 to 100)
+        percentage: f64,
+    },
+    /// Show current target allocations and drift tolerance
+    Show {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a target weight
+    #[command(alias = "rm")]
+    Remove {
+        /// Symbol or sector to remove
+        key: String,
+    },
+    /// Clear all target weights
+    Clear,
+    /// Set default drift tolerance percentage (e.g. 2.0 for +/-2%)
+    Drift {
+        /// Drift tolerance percentage
+        percentage: f64,
     },
 }
 
@@ -3002,6 +3066,27 @@ async fn dispatch(
             Some(PortfolioCmd::Show { out: show }) => {
                 commands::cmd_portfolio_show(m, base.as_deref(), out.or(show)).await
             }
+            Some(PortfolioCmd::Target { action }) => match action {
+                Some(TargetCmd::Set { key, percentage }) => {
+                    commands::cmd_portfolio_target_set(&key, percentage, m)
+                }
+                Some(TargetCmd::Show { json }) => commands::cmd_portfolio_target_show(m, json),
+                Some(TargetCmd::Remove { key }) => commands::cmd_portfolio_target_remove(&key),
+                Some(TargetCmd::Clear) => commands::cmd_portfolio_target_clear(),
+                Some(TargetCmd::Drift { percentage }) => {
+                    commands::cmd_portfolio_target_drift(percentage)
+                }
+                None => commands::cmd_portfolio_target_show(m, false),
+            },
+            Some(PortfolioCmd::Rebalance {
+                inflow,
+                drift,
+                targets,
+                json,
+            }) => {
+                let parsed = crate::rebalance::parse_targets(&targets)?;
+                commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
+            }
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
@@ -3052,7 +3137,15 @@ async fn dispatch(
             replace,
         } => commands::cmd_import(&value_name(source), &file, replace, m).await,
         Commands::Wealth => commands::cmd_wealth(m).await,
-        Commands::Rebalance => commands::cmd_rebalance(&[], m).await,
+        Commands::Rebalance {
+            inflow,
+            drift,
+            targets,
+            json,
+        } => {
+            let parsed = crate::rebalance::parse_targets(&targets)?;
+            commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
+        }
         Commands::Harvest => commands::cmd_harvest(m).await,
         Commands::Tax {
             action,

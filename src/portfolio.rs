@@ -11,6 +11,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -399,6 +400,12 @@ pub struct Portfolio {
     /// Broker fills applied by `trade sync`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub broker_fills: Vec<SyncedFill>,
+    /// Target allocation weights by symbol or sector (key -> percentage).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, f64>,
+    /// Drift tolerance band in percent (e.g. 2.0 = +/-2%).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_tolerance: Option<f64>,
 }
 
 impl Default for Portfolio {
@@ -409,6 +416,8 @@ impl Default for Portfolio {
             realized: Vec::new(),
             dividends: Vec::new(),
             broker_fills: Vec::new(),
+            targets: BTreeMap::new(),
+            drift_tolerance: None,
         }
     }
 }
@@ -450,6 +459,38 @@ impl Portfolio {
     /// `load_named` call read.
     pub fn save(&self) -> Result<()> {
         self.save_to(&crate::store::path(&file_name(active()))?)
+    }
+
+    /// Set a target weight for a symbol or sector.
+    pub fn set_target(&mut self, key: impl Into<String>, percentage: f64) {
+        self.targets.insert(key.into(), percentage);
+    }
+
+    /// Remove a target weight by symbol or sector (exact or case-insensitive).
+    pub fn remove_target(&mut self, key: &str) -> bool {
+        if self.targets.remove(key).is_some() {
+            return true;
+        }
+        let matching = self
+            .targets
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(key))
+            .cloned();
+        if let Some(k) = matching {
+            self.targets.remove(&k).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Clear all configured target weights.
+    pub fn clear_targets(&mut self) {
+        self.targets.clear();
+    }
+
+    /// Set or clear the default drift tolerance band in percent.
+    pub fn set_drift_tolerance(&mut self, tolerance: Option<f64>) {
+        self.drift_tolerance = tolerance;
     }
 
     /// Load `path`, upgrading an old-format file in place: the original is
@@ -2147,5 +2188,46 @@ mod tests {
         assert_eq!(old.holdings[0].lots[0].order_id, None);
         // Manual lots don't grow an order_id key on save.
         assert!(!serde_json::to_string(&old).unwrap().contains("order_id"));
+    }
+
+    #[test]
+    fn targets_and_drift_tolerance_methods_and_serialization() {
+        let mut p = Portfolio::default();
+        p.set_target("TCS.NS", 25.0);
+        p.set_target("Technology", 35.0);
+        p.set_drift_tolerance(Some(2.5));
+
+        assert_eq!(p.targets.len(), 2);
+        assert_eq!(p.targets.get("TCS.NS"), Some(&25.0));
+        assert_eq!(p.targets.get("Technology"), Some(&35.0));
+        assert_eq!(p.drift_tolerance, Some(2.5));
+
+        // Serialize and deserialize round-trip
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("targets"));
+        assert!(json.contains("drift_tolerance"));
+
+        let mut back: Portfolio = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.targets, p.targets);
+        assert_eq!(back.drift_tolerance, Some(2.5));
+
+        // Case-insensitive removal
+        assert!(back.remove_target("tcs.ns"));
+        assert_eq!(back.targets.len(), 1);
+        assert!(!back.remove_target("UNKNOWN"));
+
+        // Clear targets
+        back.clear_targets();
+        assert!(back.targets.is_empty());
+
+        // Old JSON without targets loads with empty targets and None drift
+        let old: Portfolio = serde_json::from_str(r#"{"version":2,"holdings":[]}"#).unwrap();
+        assert!(old.targets.is_empty());
+        assert_eq!(old.drift_tolerance, None);
+
+        // When empty, targets and drift_tolerance are omitted from JSON
+        let empty_json = serde_json::to_string(&old).unwrap();
+        assert!(!empty_json.contains("targets"));
+        assert!(!empty_json.contains("drift_tolerance"));
     }
 }

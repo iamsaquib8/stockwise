@@ -121,7 +121,7 @@ This comes first.
   REITs/InvITs (split into interest, dividend and capital repayment) and bonds
 
 **Portfolio**
-- 📋 **Target-allocation and inflow-only rebalancing** ([#47](https://github.com/iamsaquib8/stockwise/issues/47)) — saved target weights by stock, sector or
+- ✅ **Target-allocation and inflow-only rebalancing** ([#47](https://github.com/iamsaquib8/stockwise/issues/47)) — saved target weights by stock, sector or
   asset class, drift bands, and "buy-only" rebalancing for new cash or SIP inflows (today
   `rebalance` is equal-weight only)
 - 📋 **Full net worth, SIP tracker and household view** — NPS, PPF, EPF, FDs and cash next to the

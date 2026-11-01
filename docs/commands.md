@@ -349,6 +349,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio list` | Your portfolios: the default one and every named one |
 | `portfolio benchmark [NIFTY\|SENSEX\|SP500\|...] [-p 1y] [--base inr\|usd] [--json\|--csv]` | Time-weighted return against an index over the period, from the lots held each day: alpha, beta, tracking error, and attribution by holding and sector (see [below](#benchmark-and-attribution)) |
 | `portfolio remove <SYMBOL>` | Remove a holding and its lots without recording a sale |
+| `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...>` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
 | `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
@@ -356,7 +357,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace]` | Import broker holdings, a lot list, a tradebook or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
-| `rebalance` | Trades to reach equal weight (fund units to three decimals) |
+| `rebalance [--inflow N] [--drift N] [--json]` (or `portfolio rebalance`) | Trades to rebalance to targets (or equal weight); `--inflow` buys underweight assets with new cash without selling; `--drift` ignores minor deviations |
 | `harvest` | Tax-loss harvesting candidates |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
