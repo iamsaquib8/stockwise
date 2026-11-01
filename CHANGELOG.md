@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Guard against zero or unavailable price in `verdict` upside percentage calculation, preventing `+inf%` output and invalid JSON serialization on unpriced stocks ([#35](https://github.com/iamsaquib8/stockwise/issues/35)).
+
 ## [0.7.0] - 2026-11-01
 
 Stock key events timeline, INDmoney-style quantified impact cards, and institutional 6-pillar Buy/Sell decision verdict engine for Indian (NSE/BSE) and US equities.
