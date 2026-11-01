@@ -1524,7 +1524,11 @@ mod tests {
             ("EUR", "INR", "EURINR=X", false),
         ];
         for (cur, base, sym, invert) in cases {
-            assert_eq!(fx_pair(cur, base), (sym.to_string(), invert), "{cur}->{base}");
+            assert_eq!(
+                fx_pair(cur, base),
+                (sym.to_string(), invert),
+                "{cur}->{base}"
+            );
         }
     }
 }
