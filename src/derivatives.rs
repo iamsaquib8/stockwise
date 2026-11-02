@@ -15,7 +15,7 @@ use crate::greeks::{self, BsInput, Greeks, OptionKind};
 use crate::market::{self, Market};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -33,13 +33,62 @@ pub enum ChainSource {
     Yahoo,
 }
 
+/// Classification of open-interest and price changes for a derivative contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[allow(clippy::enum_variant_names)]
+pub enum Buildup {
+    /// Price up, OI up: Aggressive long positioning / bullish continuation.
+    #[serde(rename = "long_buildup")]
+    LongBuildup,
+    /// Price up, OI down: Short covering rally.
+    #[serde(rename = "short_covering")]
+    ShortCovering,
+    /// Price down, OI up: Aggressive short positioning / bearish continuation.
+    #[serde(rename = "short_buildup")]
+    ShortBuildup,
+    /// Price down, OI down: Long unwinding / decline.
+    #[serde(rename = "long_unwinding")]
+    LongUnwinding,
+}
+
+impl Buildup {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::LongBuildup => "LB",
+            Self::ShortCovering => "SC",
+            Self::ShortBuildup => "SB",
+            Self::LongUnwinding => "LU",
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::LongBuildup => "Long Build-up",
+            Self::ShortCovering => "Short Covering",
+            Self::ShortBuildup => "Short Build-up",
+            Self::LongUnwinding => "Long Unwinding",
+        }
+    }
+
+    pub fn sentiment(&self) -> &'static str {
+        match self {
+            Self::LongBuildup => "Bullish",
+            Self::ShortCovering => "Mildly Bullish",
+            Self::ShortBuildup => "Bearish",
+            Self::LongUnwinding => "Mildly Bearish",
+        }
+    }
+}
+
 /// One call or put at one strike. Missing fields stay `None`; NSE reports
 /// "no trade" as 0, which the parser turns into `None` for prices and IV.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Contract {
     pub last: Option<f64>,
     pub bid: Option<f64>,
     pub ask: Option<f64>,
+    pub price_change: Option<f64>,
     pub volume: Option<u64>,
     pub open_interest: Option<u64>,
     pub oi_change: Option<i64>,
@@ -53,6 +102,23 @@ impl Contract {
         match (self.bid, self.ask) {
             (Some(b), Some(a)) if b > 0.0 && a >= b => Some((a + b) / 2.0),
             _ => self.last.filter(|p| *p > 0.0),
+        }
+    }
+
+    /// Classifies open-interest build-up from price change and OI change.
+    pub fn buildup(&self) -> Option<Buildup> {
+        let p = self.price_change?;
+        let o = self.oi_change?;
+        if p > 0.0 && o > 0 {
+            Some(Buildup::LongBuildup)
+        } else if p > 0.0 && o < 0 {
+            Some(Buildup::ShortCovering)
+        } else if p < 0.0 && o > 0 {
+            Some(Buildup::ShortBuildup)
+        } else if p < 0.0 && o < 0 {
+            Some(Buildup::LongUnwinding)
+        } else {
+            None
         }
     }
 }
@@ -244,6 +310,7 @@ fn yahoo_contract(c: &Value) -> Contract {
         last: pos(c, "lastPrice"),
         bid: pos(c, "bid"),
         ask: pos(c, "ask"),
+        price_change: f(c, "change"),
         volume: count(c, "volume"),
         open_interest: count(c, "openInterest"),
         oi_change: None,
@@ -384,6 +451,7 @@ fn nse_contract(c: &Value) -> Contract {
         last: pos(c, "lastPrice"),
         bid: pos(c, "buyPrice1").or_else(|| pos(c, "bidprice")),
         ask: pos(c, "sellPrice1").or_else(|| pos(c, "askPrice")),
+        price_change: f(c, "change"),
         volume: count(c, "totalTradedVolume"),
         open_interest: count(c, "openInterest"),
         oi_change: f(c, "changeinOpenInterest").map(|x| x as i64),
@@ -496,6 +564,7 @@ fn bse_contract(row: &Value, prefix: &str) -> Contract {
         last: positive("Last_Trd_Price"),
         bid: positive("BidPrice"),
         ask: positive("OfferPrice"),
+        price_change: num("Change"),
         volume: num("Vol_Traded").map(|x| x.max(0.0) as u64),
         open_interest: num("Open_Interest").map(|x| x.max(0.0) as u64),
         oi_change: num("Absolute_Change_OI").map(|x| x as i64),
@@ -677,6 +746,156 @@ pub fn top_oi(rows: &[ChainRow], kind: OptionKind, n: usize) -> Vec<(f64, u64)> 
     v
 }
 
+/// Detailed information for a top open-interest strike level.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TopOiStrike {
+    pub strike: f64,
+    pub open_interest: u64,
+    pub share_pct: f64,
+    pub oi_change: Option<i64>,
+    pub price_change: Option<f64>,
+    pub last_price: Option<f64>,
+    pub buildup: Option<Buildup>,
+}
+
+/// Aggregated build-up statistics across contracts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuildupCount {
+    pub long_buildup_oi: u64,
+    pub short_covering_oi: u64,
+    pub short_buildup_oi: u64,
+    pub long_unwinding_oi: u64,
+    pub neutral_oi: u64,
+    pub long_buildup_count: usize,
+    pub short_covering_count: usize,
+    pub short_buildup_count: usize,
+    pub long_unwinding_count: usize,
+}
+
+impl BuildupCount {
+    pub fn dominant_sentiment(&self) -> &'static str {
+        let bullish = self.long_buildup_oi + self.short_covering_oi;
+        let bearish = self.short_buildup_oi + self.long_unwinding_oi;
+        if bullish == 0 && bearish == 0 {
+            "Neutral"
+        } else if bullish > (bearish as f64 * 1.3) as u64 {
+            "Bullish"
+        } else if bearish > (bullish as f64 * 1.3) as u64 {
+            "Bearish"
+        } else {
+            "Neutral / Mixed"
+        }
+    }
+}
+
+/// Breakdown of build-up categories across calls and puts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuildupBreakdown {
+    pub calls: BuildupCount,
+    pub puts: BuildupCount,
+}
+
+/// The `n` strikes with the most open interest on one side, with full price/OI details.
+pub fn top_oi_details(rows: &[ChainRow], kind: OptionKind, n: usize) -> Vec<TopOiStrike> {
+    let total_oi: u64 = rows
+        .iter()
+        .filter_map(|r| match kind {
+            OptionKind::Call => r.call.as_ref(),
+            OptionKind::Put => r.put.as_ref(),
+        })
+        .filter_map(|c| c.open_interest)
+        .sum();
+
+    let mut list: Vec<TopOiStrike> = rows
+        .iter()
+        .filter_map(|r| {
+            let c = match kind {
+                OptionKind::Call => r.call.as_ref(),
+                OptionKind::Put => r.put.as_ref(),
+            }?;
+            let oi = c.open_interest.filter(|x| *x > 0)?;
+            let share_pct = if total_oi > 0 {
+                (oi as f64 / total_oi as f64) * 100.0
+            } else {
+                0.0
+            };
+            Some(TopOiStrike {
+                strike: r.strike,
+                open_interest: oi,
+                share_pct,
+                oi_change: c.oi_change,
+                price_change: c.price_change,
+                last_price: c.last,
+                buildup: c.buildup(),
+            })
+        })
+        .collect();
+
+    list.sort_by(|a, b| {
+        b.open_interest
+            .cmp(&a.open_interest)
+            .then(a.strike.total_cmp(&b.strike))
+    });
+    list.truncate(n);
+    list
+}
+
+/// Summarize open-interest build-up categories across calls and puts.
+pub fn buildup_breakdown(rows: &[ChainRow]) -> BuildupBreakdown {
+    let mut out = BuildupBreakdown::default();
+    for r in rows {
+        if let Some(ref c) = r.call {
+            let oi = c.open_interest.unwrap_or(0);
+            match c.buildup() {
+                Some(Buildup::LongBuildup) => {
+                    out.calls.long_buildup_oi += oi;
+                    out.calls.long_buildup_count += 1;
+                }
+                Some(Buildup::ShortCovering) => {
+                    out.calls.short_covering_oi += oi;
+                    out.calls.short_covering_count += 1;
+                }
+                Some(Buildup::ShortBuildup) => {
+                    out.calls.short_buildup_oi += oi;
+                    out.calls.short_buildup_count += 1;
+                }
+                Some(Buildup::LongUnwinding) => {
+                    out.calls.long_unwinding_oi += oi;
+                    out.calls.long_unwinding_count += 1;
+                }
+                None => {
+                    out.calls.neutral_oi += oi;
+                }
+            }
+        }
+        if let Some(ref p) = r.put {
+            let oi = p.open_interest.unwrap_or(0);
+            match p.buildup() {
+                Some(Buildup::LongBuildup) => {
+                    out.puts.long_buildup_oi += oi;
+                    out.puts.long_buildup_count += 1;
+                }
+                Some(Buildup::ShortCovering) => {
+                    out.puts.short_covering_oi += oi;
+                    out.puts.short_covering_count += 1;
+                }
+                Some(Buildup::ShortBuildup) => {
+                    out.puts.short_buildup_oi += oi;
+                    out.puts.short_buildup_count += 1;
+                }
+                Some(Buildup::LongUnwinding) => {
+                    out.puts.long_unwinding_oi += oi;
+                    out.puts.long_unwinding_count += 1;
+                }
+                None => {
+                    out.puts.neutral_oi += oi;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// What option buyers would collect if the underlying settled at `strike`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PainPoint {
@@ -742,6 +961,8 @@ pub struct ContractView {
     pub iv: Option<f64>,
     pub iv_from: Option<&'static str>,
     pub greeks: Option<Greeks>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buildup: Option<Buildup>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -783,6 +1004,7 @@ pub fn contract_view(c: &Contract, kind: OptionKind, strike: f64, a: &Assumption
         iv,
         iv_from,
         greeks,
+        buildup: c.buildup(),
     }
 }
 
@@ -1519,5 +1741,133 @@ mod tests {
         assert_eq!(near_the_money(&rows, Some(141.0), 0).len(), 10);
         assert_eq!(near_the_money(&rows, None, 2).len(), 10);
         assert_eq!(near_the_money(&rows, Some(50.0), 1).len(), 2);
+    }
+
+    #[test]
+    fn buildup_classification_all_four_quadrants() {
+        // Price up, OI up -> Long Build-up (LB)
+        let lb = Contract {
+            price_change: Some(15.5),
+            oi_change: Some(1200),
+            ..Default::default()
+        };
+        assert_eq!(lb.buildup(), Some(Buildup::LongBuildup));
+        assert_eq!(lb.buildup().unwrap().code(), "LB");
+        assert_eq!(lb.buildup().unwrap().sentiment(), "Bullish");
+
+        // Price up, OI down -> Short Covering (SC)
+        let sc = Contract {
+            price_change: Some(8.0),
+            oi_change: Some(-500),
+            ..Default::default()
+        };
+        assert_eq!(sc.buildup(), Some(Buildup::ShortCovering));
+        assert_eq!(sc.buildup().unwrap().code(), "SC");
+        assert_eq!(sc.buildup().unwrap().sentiment(), "Mildly Bullish");
+
+        // Price down, OI up -> Short Build-up (SB)
+        let sb = Contract {
+            price_change: Some(-12.0),
+            oi_change: Some(2500),
+            ..Default::default()
+        };
+        assert_eq!(sb.buildup(), Some(Buildup::ShortBuildup));
+        assert_eq!(sb.buildup().unwrap().code(), "SB");
+        assert_eq!(sb.buildup().unwrap().sentiment(), "Bearish");
+
+        // Price down, OI down -> Long Unwinding (LU)
+        let lu = Contract {
+            price_change: Some(-6.5),
+            oi_change: Some(-800),
+            ..Default::default()
+        };
+        assert_eq!(lu.buildup(), Some(Buildup::LongUnwinding));
+        assert_eq!(lu.buildup().unwrap().code(), "LU");
+        assert_eq!(lu.buildup().unwrap().sentiment(), "Mildly Bearish");
+
+        // Neutral / unchanged / missing fields -> None
+        let flat_price = Contract {
+            price_change: Some(0.0),
+            oi_change: Some(500),
+            ..Default::default()
+        };
+        assert_eq!(flat_price.buildup(), None);
+
+        let flat_oi = Contract {
+            price_change: Some(5.0),
+            oi_change: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(flat_oi.buildup(), None);
+
+        let missing = Contract {
+            price_change: None,
+            oi_change: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(missing.buildup(), None);
+    }
+
+    #[test]
+    fn top_oi_details_and_buildup_breakdown() {
+        let rows = vec![
+            ChainRow {
+                strike: 24000.0,
+                call: Some(Contract {
+                    open_interest: Some(50000),
+                    oi_change: Some(5000),
+                    price_change: Some(25.0),
+                    last: Some(250.0),
+                    ..Default::default()
+                }),
+                put: Some(Contract {
+                    open_interest: Some(10000),
+                    oi_change: Some(-1000),
+                    price_change: Some(15.0),
+                    last: Some(80.0),
+                    ..Default::default()
+                }),
+            },
+            ChainRow {
+                strike: 24500.0,
+                call: Some(Contract {
+                    open_interest: Some(80000),
+                    oi_change: Some(10000),
+                    price_change: Some(-30.0),
+                    last: Some(120.0),
+                    ..Default::default()
+                }),
+                put: Some(Contract {
+                    open_interest: Some(70000),
+                    oi_change: Some(8000),
+                    price_change: Some(-20.0),
+                    last: Some(150.0),
+                    ..Default::default()
+                }),
+            },
+        ];
+
+        let top_calls = top_oi_details(&rows, OptionKind::Call, 2);
+        assert_eq!(top_calls.len(), 2);
+        assert_eq!(top_calls[0].strike, 24500.0);
+        assert_eq!(top_calls[0].open_interest, 80000);
+        assert_eq!(top_calls[0].buildup, Some(Buildup::ShortBuildup));
+        assert!((top_calls[0].share_pct - 61.538).abs() < 0.01);
+
+        assert_eq!(top_calls[1].strike, 24000.0);
+        assert_eq!(top_calls[1].open_interest, 50000);
+        assert_eq!(top_calls[1].buildup, Some(Buildup::LongBuildup));
+
+        let top_puts = top_oi_details(&rows, OptionKind::Put, 2);
+        assert_eq!(top_puts.len(), 2);
+        assert_eq!(top_puts[0].strike, 24500.0);
+        assert_eq!(top_puts[0].open_interest, 70000);
+        assert_eq!(top_puts[0].buildup, Some(Buildup::ShortBuildup));
+
+        let breakdown = buildup_breakdown(&rows);
+        assert_eq!(breakdown.calls.long_buildup_oi, 50000);
+        assert_eq!(breakdown.calls.short_buildup_oi, 80000);
+        assert_eq!(breakdown.puts.short_covering_oi, 10000);
+        assert_eq!(breakdown.puts.short_buildup_oi, 70000);
     }
 }

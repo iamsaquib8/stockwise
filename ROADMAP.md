@@ -134,7 +134,7 @@ This comes first.
 - 📋 **Screener queries** — `stockwise screen "roce > 20 and pe < 25"` with custom ratios, the
   NIFTY Midcap 150 / Smallcap 250 / 500 universes ([#16](https://github.com/iamsaquib8/stockwise/issues/16)), and importing your own screener
   exports
-- 📋 **Open-interest analytics** ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — OI change and build-up, PCR and IV history, IV percentile
+- ✅ **Open-interest analytics** ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — institutional build-up classification (LB/SC/SB/LU), PCR & Max Pain tracking, and top resistance/support walls
 - 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates
 - 📋 **Market mood** — a transparent composite of India VIX, breadth and momentum, plus FII/DII
   cash flows

@@ -110,11 +110,12 @@ fn print_side(
 ) {
     print_section(title);
     println!(
-        "  {:>10} {:>9} {:>8} {:>8} {:>8} {:>7} {:>7} {:>8} {:>8} {:>7} {:>7}",
+        "  {:>10} {:>9} {:>8} {:>8} {:>4} {:>8} {:>7} {:>7} {:>8} {:>8} {:>7} {:>7}",
         "Strike".bold(),
         "LTP".bold(),
         "OI".bold(),
         if oi_change { "ΔOI" } else { "" }.bold(),
+        if oi_change { "Type" } else { "" }.bold(),
         "Volume".bold(),
         "IV".bold(),
         "Delta".bold(),
@@ -123,7 +124,7 @@ fn print_side(
         "Vega".bold(),
         "Rho".bold()
     );
-    println!("  {}", "─".repeat(100).dimmed());
+    println!("  {}", "─".repeat(105).dimmed());
     for (strike, view) in rows {
         let strike_txt = format!("{:>10.2}", strike);
         let strike_cell = if Some(*strike) == atm {
@@ -137,7 +138,7 @@ fn print_side(
         };
         let c = &v.contract;
         let g = v.greeks;
-        let oi_change = match c.oi_change {
+        let oi_change_str = match c.oi_change {
             Some(x) if oi_change => {
                 let s = format!("{:>8}", format!("{:+}", x));
                 if x >= 0 {
@@ -148,12 +149,21 @@ fn print_side(
             }
             _ => format!("{:>8}", ""),
         };
+        let buildup_str = match (c.buildup(), oi_change) {
+            (Some(derivatives::Buildup::LongBuildup), true) => "  LB".green().to_string(),
+            (Some(derivatives::Buildup::ShortCovering), true) => "  SC".cyan().to_string(),
+            (Some(derivatives::Buildup::ShortBuildup), true) => "  SB".red().to_string(),
+            (Some(derivatives::Buildup::LongUnwinding), true) => "  LU".yellow().to_string(),
+            _ if oi_change => format!("{:>4}", "—".dimmed()),
+            _ => format!("{:>4}", ""),
+        };
         println!(
-            "  {} {} {} {} {} {} {} {} {} {} {}",
+            "  {} {} {} {} {} {} {} {} {} {} {} {}",
             strike_cell,
             opt_num(c.last, 2, 9),
             opt_count(c.open_interest, 8),
-            oi_change,
+            oi_change_str,
+            buildup_str,
             opt_count(c.volume, 8),
             match v.iv {
                 Some(iv) => format!("{:>6.1}%", iv * 100.0),
@@ -263,6 +273,21 @@ pub async fn cmd_options_chain(
     if let Some(lot) = chain.lot_size {
         print_kv("Lot size", &lot.to_string());
     }
+    let pcr = derivatives::pcr(&chain.rows);
+    if let Some(oi_pcr) = pcr.oi_ratio {
+        let vol_str = pcr
+            .volume_ratio
+            .map(|v| format!(" | PCR (Vol): {:.2}", v))
+            .unwrap_or_default();
+        print_kv(
+            "Put/Call Ratio",
+            &format!("{:.2} ({}){}", oi_pcr, pcr_reading(oi_pcr), vol_str),
+        );
+    }
+    if let Ok(mp) = max_pain_of(&chain) {
+        let cur = chain.currency.as_deref();
+        print_kv("Max pain strike", &format_price(mp.strike, cur));
+    }
     if chain.underlying.is_none() || years <= 0.0 {
         println!(
             "\n  {}",
@@ -304,6 +329,13 @@ pub async fn cmd_options_chain(
         println!(
             "  {}",
             "US equity options are American-style; these greeks are the European approximation."
+                .dimmed()
+        );
+    }
+    if oi_change {
+        println!(
+            "  {}",
+            "Build-up types: LB (Long Build-up), SC (Short Covering), SB (Short Build-up), LU (Long Unwinding)"
                 .dimmed()
         );
     }
@@ -486,6 +518,209 @@ pub async fn cmd_options_maxpain(
     println!(
         "\n  {}",
         "Payout = Σ open interest × intrinsic value (in underlying points). Max pain assumes open\n  interest stays where it is; it describes positioning and is not a price forecast."
+            .dimmed()
+    );
+    println!();
+    Ok(())
+}
+
+/// `options oi <symbol>` — open-interest analytics, concentration levels (support/resistance), PCR and build-up breakdown.
+pub async fn cmd_options_oi(
+    symbol: &str,
+    expiry: Option<chrono::NaiveDate>,
+    top: usize,
+    market: Market,
+    json: bool,
+) -> Result<()> {
+    let chain = derivatives::fetch_chain(symbol, market, expiry).await?;
+    let pcr = derivatives::pcr(&chain.rows);
+    let mp = max_pain_of(&chain).ok();
+    let top_calls = derivatives::top_oi_details(&chain.rows, OptionKind::Call, top);
+    let top_puts = derivatives::top_oi_details(&chain.rows, OptionKind::Put, top);
+    let breakdown = derivatives::buildup_breakdown(&chain.rows);
+
+    if json {
+        let out = serde_json::json!({
+            "symbol": chain.symbol,
+            "source": chain.source,
+            "underlying": chain.underlying,
+            "currency": chain.currency,
+            "expiry": chain.expiry,
+            "expiries": chain.expiries,
+            "lot_size": chain.lot_size,
+            "pcr": pcr,
+            "pcr_sentiment": pcr.oi_ratio.map(pcr_reading),
+            "max_pain": mp.as_ref().map(|m| m.strike),
+            "top_calls": top_calls,
+            "top_puts": top_puts,
+            "breakdown": breakdown,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let cur = chain.currency.as_deref();
+    chain_header("Open Interest Analytics", &chain);
+
+    print_section("Summary & Sentiment");
+    print_kv(
+        "PCR (OI)",
+        &pcr.oi_ratio
+            .map(|r| format!("{} — {}", format!("{:.2}", r).bold(), pcr_reading(r)))
+            .unwrap_or_else(|| "N/A".dimmed().to_string()),
+    );
+    print_kv(
+        "PCR (Volume)",
+        &pcr.volume_ratio
+            .map(|r| format!("{:.2}", r))
+            .unwrap_or_else(|| "N/A".dimmed().to_string()),
+    );
+    if let Some(ref m) = mp {
+        let dist = chain
+            .underlying
+            .map(|s| {
+                let diff = (m.strike - s) / s * 100.0;
+                format!(" ({:+.2}% vs spot)", diff)
+            })
+            .unwrap_or_default();
+        print_kv(
+            "Max Pain Strike",
+            &format!("{}{}", format_price(m.strike, cur).bold().yellow(), dist),
+        );
+    }
+    print_kv(
+        "Total Open Interest",
+        &format!(
+            "Calls: {}  |  Puts: {}",
+            format_volume(pcr.call_oi).cyan(),
+            format_volume(pcr.put_oi).cyan()
+        ),
+    );
+    print_kv(
+        "Chain Sentiment",
+        &format!(
+            "Calls: {}  |  Puts: {}",
+            match breakdown.calls.dominant_sentiment() {
+                "Bullish" => "Bullish".green(),
+                "Bearish" => "Bearish".red(),
+                _ => "Neutral / Mixed".yellow(),
+            },
+            match breakdown.puts.dominant_sentiment() {
+                "Bullish" => "Bullish".green(),
+                "Bearish" => "Bearish".red(),
+                _ => "Neutral / Mixed".yellow(),
+            }
+        ),
+    );
+
+    let print_top_table = |title: &str, items: &[derivatives::TopOiStrike], role: &str| {
+        print_section(&format!("{title} — {role}"));
+        if items.is_empty() {
+            println!("  {}", "No open interest recorded for this side.".dimmed());
+            return;
+        }
+        println!(
+            "  {:>10} {:>10} {:>8} {:>10} {:>6} {:>10}",
+            "Strike".bold(),
+            "OI".bold(),
+            "Share".bold(),
+            "ΔOI".bold(),
+            "Type".bold(),
+            "LTP".bold()
+        );
+        println!("  {}", "─".repeat(60).dimmed());
+        for item in items {
+            let oi_chg = match item.oi_change {
+                Some(x) => {
+                    let s = format!("{:+}", x);
+                    if x >= 0 {
+                        format!("{:>10}", s.green())
+                    } else {
+                        format!("{:>10}", s.red())
+                    }
+                }
+                None => format!("{:>10}", "—".dimmed()),
+            };
+            let type_str = match item.buildup {
+                Some(derivatives::Buildup::LongBuildup) => "    LB".green().to_string(),
+                Some(derivatives::Buildup::ShortCovering) => "    SC".cyan().to_string(),
+                Some(derivatives::Buildup::ShortBuildup) => "    SB".red().to_string(),
+                Some(derivatives::Buildup::LongUnwinding) => "    LU".yellow().to_string(),
+                None => format!("{:>6}", "—".dimmed()),
+            };
+            println!(
+                "  {:>10} {:>10} {:>7.1}% {} {} {:>10}",
+                format_price(item.strike, cur).bold(),
+                format_volume(item.open_interest),
+                item.share_pct,
+                oi_chg,
+                type_str,
+                item.last_price
+                    .map(|p| format_price(p, cur))
+                    .unwrap_or_else(|| "—".into())
+            );
+        }
+    };
+
+    print_top_table(
+        "Top Call Open Interest",
+        &top_calls,
+        "Major Resistance Walls",
+    );
+    print_top_table("Top Put Open Interest", &top_puts, "Major Support Walls");
+
+    print_section("Build-up Breakdown");
+    println!(
+        "  {:<16} {:>12} {:>8} {:>12} {:>8}",
+        "Build-up Type".bold(),
+        "Call OI".bold(),
+        "Strikes".bold(),
+        "Put OI".bold(),
+        "Strikes".bold(),
+    );
+    println!("  {}", "─".repeat(60).dimmed());
+    let row = |name: &str, call_oi: u64, call_count: usize, put_oi: u64, put_count: usize| {
+        println!(
+            "  {:<16} {:>12} {:>8} {:>12} {:>8}",
+            name,
+            format_volume(call_oi),
+            call_count,
+            format_volume(put_oi),
+            put_count,
+        );
+    };
+    row(
+        "Long Build-up",
+        breakdown.calls.long_buildup_oi,
+        breakdown.calls.long_buildup_count,
+        breakdown.puts.long_buildup_oi,
+        breakdown.puts.long_buildup_count,
+    );
+    row(
+        "Short Covering",
+        breakdown.calls.short_covering_oi,
+        breakdown.calls.short_covering_count,
+        breakdown.puts.short_covering_oi,
+        breakdown.puts.short_covering_count,
+    );
+    row(
+        "Short Build-up",
+        breakdown.calls.short_buildup_oi,
+        breakdown.calls.short_buildup_count,
+        breakdown.puts.short_buildup_oi,
+        breakdown.puts.short_buildup_count,
+    );
+    row(
+        "Long Unwinding",
+        breakdown.calls.long_unwinding_oi,
+        breakdown.calls.long_unwinding_count,
+        breakdown.puts.long_unwinding_oi,
+        breakdown.puts.long_unwinding_count,
+    );
+
+    println!(
+        "\n  {}",
+        "Descriptive institutional positioning. LB: Price↑ OI↑, SC: Price↑ OI↓, SB: Price↓ OI↑, LU: Price↓ OI↓"
             .dimmed()
     );
     println!();
