@@ -9,16 +9,25 @@ pub fn sma(data: &[f64], period: usize) -> Option<f64> {
 
 /// Calculate Exponential Moving Average
 pub fn ema(data: &[f64], period: usize) -> Option<f64> {
+    ema_iter(data, period).and_then(Iterator::last)
+}
+
+/// Returns iterator over exponential moving average values for `period-1..data.len()` range.
+pub fn ema_iter(data: &[f64], period: usize) -> Option<impl Iterator<Item = f64>> {
     if data.len() < period {
         return None;
     }
+
     let multiplier = 2.0 / (period as f64 + 1.0);
     // Start with SMA of first `period` values
     let mut ema_val = data[..period].iter().sum::<f64>() / period as f64;
-    for &price in &data[period..] {
-        ema_val = (price - ema_val) * multiplier + ema_val;
-    }
-    Some(ema_val)
+
+    Some(
+        std::iter::once(ema_val).chain(data[period..].iter().map(move |&price| {
+            ema_val = (price - ema_val) * multiplier + ema_val;
+            ema_val
+        })),
+    )
 }
 
 /// Calculate RSI (Relative Strength Index)
@@ -64,24 +73,24 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
 /// Calculate MACD (Moving Average Convergence Divergence)
 /// Returns (macd_line, signal_line, histogram)
 pub fn macd(data: &[f64]) -> Option<(f64, f64, f64)> {
-    let ema12 = ema(data, 12)?;
-    let ema26 = ema(data, 26)?;
-    let macd_line = ema12 - ema26;
-
     // For signal line, we need MACD history
     if data.len() < 35 {
+        let ema26 = ema(data, 26)?;
+        let ema12 = ema(data, 12)?;
+        let macd_line = ema12 - ema26;
         return Some((macd_line, 0.0, macd_line));
     }
 
-    let mut macd_history = Vec::new();
-    for i in 26..=data.len() {
-        let slice = &data[..i];
-        if let (Some(e12), Some(e26)) = (ema(slice, 12), ema(slice, 26)) {
-            macd_history.push(e12 - e26);
-        }
-    }
+    let ema26_iter = ema_iter(data, 26)?;
+    let ema12_iter = ema_iter(data, 12)?.skip(26 - 12);
+
+    let macd_history: Vec<f64> = ema12_iter
+        .zip(ema26_iter)
+        .map(|(ema12, ema26)| ema12 - ema26)
+        .collect();
 
     let signal = ema(&macd_history, 9).unwrap_or(0.0);
+    let macd_line = macd_history.last().copied().expect("shouldn't be empty");
     let histogram = macd_line - signal;
 
     Some((macd_line, signal, histogram))
