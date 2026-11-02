@@ -111,7 +111,7 @@ This comes first.
   exemption before 31 March, harvest losses with the STCL/LTCL set-off rules, and flag the US
   wash-sale window (30 days either side). Smaller first step: `harvest --json`/`--csv`
   ([#21](https://github.com/iamsaquib8/stockwise/issues/21))
-- 📋 **Advance tax** ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly estimates for the 15 Jun, 15 Sep, 15 Dec and 15 Mar instalments
+- ✅ **Advance tax** ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly estimates for the 15 Jun, 15 Sep, 15 Dec and 15 Mar instalments
 - 📋 **Indian ITR toolkit** — 31 Jan 2018 grandfathering from fair market values (flagged only
   today), Schedule FA for foreign holdings (calendar-year peak and closing values in INR),
   Schedule FSI/TR and Form 67 for tax withheld on US dividends, debt funds under Sec. 50AA, SGB

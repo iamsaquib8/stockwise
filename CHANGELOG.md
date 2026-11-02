@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `stockwise tax advance` ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly advance tax instalment schedule and interest estimator under Indian Income-tax Act (Section 208, 211, 234B/C):
+  - Statutory quarterly schedule for the 15 Jun (15%), 15 Sep (45%), 15 Dec (75%), and 15 Mar (100%) instalment deadlines.
+  - Capital-gains quarterly bucketing and cumulative set-off rules under Section 234C(1) proviso, protecting taxpayers from deferment interest on gains realized later in the year.
+  - Section 208 threshold check (advance tax applies only when estimated tax liability ≥ ₹10,000).
+  - Status tracking (`Paid`, `Pending`, `Upcoming`) based on evaluation date and optional `--paid <AMOUNT>` flag.
+  - Section 234C deferment interest calculator (3% for Q1–Q3, 1% for Q4 on shortfalls below safe-harbour levels) and Section 234B assessment-year interest check.
+  - Full machine-readable `--json` output and support for arbitrary financial years via `--fy <YEAR>` (e.g. `2025-26`, `AY2026-27`).
 - `stockwise portfolio target` and enhanced `rebalance` engine ([#47](https://github.com/iamsaquib8/stockwise/issues/47)):
   - Target-allocation weights saved in the portfolio by stock (`portfolio target set TCS 25`) or sector (`portfolio target set Technology 30`), with pro-rata sector distribution and automatic normalization.
   - Inflow-only / buy-only rebalancing via `--inflow <AMOUNT>` (e.g. `rebalance --inflow 50000`): uses continuous water-filling to allocate fresh capital (SIPs, bonuses) exclusively to underweight holdings without issuing any sell orders or triggering capital-gains taxes.

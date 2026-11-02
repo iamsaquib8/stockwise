@@ -652,7 +652,9 @@ stockwise options TCS                     expected moves (same as `options moves
         after_help = "Examples:\n  \
 stockwise tax in                                  this tax year's estimate\n  \
 stockwise tax export in --fy 2025-26 --out cg.csv ITR Schedule CG / 112A CSV\n  \
-stockwise tax export us --fy 2025 --json          Form 8949 rows as JSON"
+stockwise tax export us --fy 2025 --json          Form 8949 rows as JSON\n  \
+stockwise tax advance                             advance tax quarterly instalments (in)\n  \
+stockwise tax advance --fy 2025-26 --paid 25000   track shortfall and 234C interest"
     )]
     Tax {
         #[command(subcommand)]
@@ -938,6 +940,22 @@ tradebook and CAS imports) — verify it with your broker's tax P&L before filin
         #[arg(long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
         /// JSON instead of CSV
+        #[arg(long)]
+        json: bool,
+    },
+    /// Advance tax quarterly instalment schedule under Section 211 / 234C (India)
+    #[command(
+        after_help = "Calculates quarterly instalments (15 Jun, 15 Sep, 15 Dec, 15 Mar) \
+under Section 208 and 211, with Section 234C(1) capital-gains proviso protections."
+    )]
+    Advance {
+        /// Financial year: 2025-26 or AY2026-27 [default: current FY]
+        #[arg(long, value_name = "YEAR")]
+        fy: Option<String>,
+        /// Total advance tax paid so far for this financial year
+        #[arg(long, value_name = "AMOUNT")]
+        paid: Option<f64>,
+        /// JSON output
         #[arg(long)]
         json: bool,
     },
@@ -3165,6 +3183,9 @@ async fn dispatch(
                 };
                 commands::cmd_tax_export(&country, fy.as_deref(), out.as_deref(), json).await
             }
+            Some(TaxCmd::Advance { fy, paid, json }) => {
+                commands::cmd_tax_advance(fy.as_deref(), paid, json).await
+            }
             None => {
                 let country = country.expect("clap requires COUNTRY without a subcommand");
                 commands::cmd_tax(&value_name(country), m, out.into()).await
@@ -4330,6 +4351,39 @@ mod tests {
         };
         assert!(country.is_none());
         assert_eq!(fy.as_deref(), Some("2025-26"));
+
+        let cli = Cli::try_parse_from(["stockwise", "tax", "advance"]).unwrap();
+        let Commands::Tax {
+            action: Some(TaxCmd::Advance { fy, paid, json }),
+            country,
+            ..
+        } = cli.command
+        else {
+            panic!("expected tax advance");
+        };
+        assert!(country.is_none() && fy.is_none() && paid.is_none() && !json);
+
+        let cli = Cli::try_parse_from([
+            "stockwise",
+            "tax",
+            "advance",
+            "--fy",
+            "2025-26",
+            "--paid",
+            "25000",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::Tax {
+            action: Some(TaxCmd::Advance { fy, paid, json }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected tax advance with flags");
+        };
+        assert_eq!(fy.as_deref(), Some("2025-26"));
+        assert_eq!(paid, Some(25000.0));
+        assert!(json);
     }
 
     #[test]
