@@ -50,9 +50,8 @@ fn ema_unchecked(
     let mut ema_val = data
         .by_ref()
         .take(period)
-        .map(|x| {
+        .inspect(|&x| {
             last_price = x;
-            x
         })
         .sum::<f64>()
         / period as f64;
