@@ -138,8 +138,7 @@ This comes first.
 - 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates
 - 📋 **Market mood** — a transparent composite of India VIX, breadth and momentum, plus FII/DII
   cash flows
-- 📋 **Open scorecards** ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — Piotroski F-score, Altman Z and quality/value/momentum, with the formulas
-  shown
+- ✅ **Open scorecards** ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — transparent Piotroski 9-point F-score and Altman Z-score breakdown with formulas shown
 - 📋 **Mutual fund depth** — rolling returns, category rank and direct-vs-regular cost
 
 **Markets**

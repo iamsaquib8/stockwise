@@ -90,6 +90,7 @@ network, invalid config file), `2` invalid arguments.
 | `events <SYMBOL> [--days N] [--ai]` (`ev`) | Unified timeline of material corporate events, exchange filings, earnings results, and excess market reaction vs NIFTY/S&P 500 |
 | `insights <SYMBOL>` | INDmoney-style categorized impact cards (Growth, Valuation, Margins, Ownership, etc.) with quantified metrics and XBRL shareholding patterns |
 | `verdict <SYMBOL>` (`decision`, `signal`, `buysell`) | Institutional 6-pillar decision score (0–100), clear Buy/Sell signal, target price, entry zone, stop-loss, and risk/reward |
+| `score <SYMBOL> [--json]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards: Piotroski 9-point F-Score (out of 9) and Altman Z-Score with full formula breakdown and distress zones |
 | `technical <SYMBOL> [-p] [--json]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |

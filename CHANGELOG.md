@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `stockwise score` / `stockwise scorecard` / `stockwise fundamental score` ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — transparent accounting scorecards for Piotroski 9-Point F-Score and Altman Z-Score:
+  - **Piotroski 9-Point F-Score**:
+    - Complete evaluation across Profitability (Positive Net Income, Positive ROA, Operating Cash Flow > 0, Cash Flow > Net Income), Leverage/Liquidity (Lower Debt Ratio YoY, Higher Current Ratio YoY, No Common Share Dilution), and Operating Efficiency (Gross Margin Expansion YoY, Higher Asset Turnover YoY).
+    - Transparent criteria table showing exact formulas, actual company values (YoY comparisons, margin delta in bps, debt-free badges), pass/fail signal (+1 / 0), and category subtotals.
+    - Institutional rating classification: `Very Strong` (8–9), `Moderate / Stable` (5–7), `Weak / High Risk` (0–4).
+  - **Altman Z-Score Discriminant Model**:
+    - Full 5-factor breakdown: Working Capital / Assets ($X_1$), Retained Earnings / Assets ($X_2$), EBIT / Assets ($X_3$), Market Cap / Liabilities ($X_4$), and Sales Turnover ($X_5$).
+    - Weighted contribution per factor, overall Z-score, and distress zone classification: `Safe Zone` ($Z > 2.99$), `Grey Zone` ($1.81 \le Z \le 2.99$), and `Distress Zone` ($Z < 1.81$).
+    - Emerging-market and service non-manufacturing $Z''$-score model ($6.56 X_1 + 3.26 X_2 + 6.72 X_3 + 1.05 X_4$).
+    - Automatic detection and advisory notes for financial institutions (banks and lending institutions with deposit leverage).
+  - Full machine-readable `--json` output and CLI aliases (`scorecard`, `score`, `f-score`, `z-score`).
 - `stockwise options oi` / `stockwise fno oi` ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — open-interest analytics, institutional build-up classification, and PCR tracking:
   - Classifies price and open-interest changes across strikes into the 4 standard institutional build-up regimes:
     - **Long Build-up (`LB`)**: Price ↑, OI ↑ (Aggressive long buying / bullish continuation).

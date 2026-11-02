@@ -123,6 +123,14 @@ pub struct Period {
     pub cash: Option<f64>,
     pub interest_expense: Option<f64>,
     pub ebit: Option<f64>,
+    pub total_assets: Option<f64>,
+    pub gross_profit: Option<f64>,
+    pub current_assets: Option<f64>,
+    pub current_liabilities: Option<f64>,
+    pub retained_earnings: Option<f64>,
+    pub working_capital: Option<f64>,
+    pub shares_outstanding: Option<f64>,
+    pub total_liabilities: Option<f64>,
 }
 
 impl Period {
@@ -135,6 +143,37 @@ impl Period {
     pub fn op_margin(&self) -> Option<f64> {
         match (self.operating_income, self.revenue) {
             (Some(o), Some(r)) if r > 0.0 => Some(o / r),
+            _ => None,
+        }
+    }
+    pub fn gross_margin(&self) -> Option<f64> {
+        match (self.gross_profit, self.revenue) {
+            (Some(gp), Some(r)) if r > 0.0 => Some(gp / r),
+            _ => None,
+        }
+    }
+    pub fn current_ratio(&self) -> Option<f64> {
+        match (self.current_assets, self.current_liabilities) {
+            (Some(ca), Some(cl)) if cl > 0.0 => Some(ca / cl),
+            _ => None,
+        }
+    }
+    pub fn working_capital(&self) -> Option<f64> {
+        self.working_capital
+            .or(match (self.current_assets, self.current_liabilities) {
+                (Some(ca), Some(cl)) => Some(ca - cl),
+                _ => None,
+            })
+    }
+    pub fn asset_turnover(&self) -> Option<f64> {
+        match (self.revenue, self.total_assets) {
+            (Some(rev), Some(assets)) if assets > 0.0 => Some(rev / assets),
+            _ => None,
+        }
+    }
+    pub fn roa(&self) -> Option<f64> {
+        match (self.net_income, self.total_assets) {
+            (Some(ni), Some(assets)) if assets > 0.0 => Some(ni / assets),
             _ => None,
         }
     }
@@ -492,6 +531,14 @@ fn set_period_field(p: &mut Period, field: &str, v: f64) {
         "CashAndCashEquivalents" => p.cash = Some(v),
         "InterestExpense" => p.interest_expense = Some(v),
         "EBIT" => p.ebit = Some(v),
+        "TotalAssets" => p.total_assets = Some(v),
+        "GrossProfit" => p.gross_profit = Some(v),
+        "CurrentAssets" => p.current_assets = Some(v),
+        "CurrentLiabilities" => p.current_liabilities = Some(v),
+        "RetainedEarnings" => p.retained_earnings = Some(v),
+        "WorkingCapital" => p.working_capital = Some(v),
+        "OrdinarySharesNumber" | "ShareIssued" => p.shares_outstanding = Some(v),
+        "TotalLiabilitiesNetMinorityInterest" | "TotalLiabilities" => p.total_liabilities = Some(v),
         _ => {}
     }
 }
@@ -509,6 +556,15 @@ pub const TIMESERIES_FIELDS: &[&str] = &[
     "CashAndCashEquivalents",
     "InterestExpense",
     "EBIT",
+    "TotalAssets",
+    "GrossProfit",
+    "CurrentAssets",
+    "CurrentLiabilities",
+    "RetainedEarnings",
+    "WorkingCapital",
+    "OrdinarySharesNumber",
+    "ShareIssued",
+    "TotalLiabilitiesNetMinorityInterest",
 ];
 
 /// Parse fundamentals-timeseries results into (quarterly, annual) periods, oldest first.
@@ -601,6 +657,58 @@ pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
         }
     }
     quarters.sort_by_key(|p| p.end);
+}
+
+/// Merge `balanceSheetHistory` into annual periods (fills gaps in assets, liabilities, working capital, retained earnings).
+pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
+    let Some(hist) = summary
+        .get("balanceSheetHistory")
+        .and_then(|m| m.get("balanceSheetStatements"))
+        .and_then(|h| h.as_array())
+    else {
+        return;
+    };
+    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0);
+    for item in hist {
+        let Some(end) =
+            raw(item, "endDate").and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
+        else {
+            continue;
+        };
+        let end = end.date_naive();
+        let assets = nz(raw(item, "totalAssets"));
+        let liab =
+            nz(raw(item, "totalLiab").or_else(|| raw(item, "totalLiabilitiesNetMinorityInterest")));
+        let ca = nz(raw(item, "totalCurrentAssets"));
+        let cl = nz(raw(item, "totalCurrentLiabilities"));
+        let re = nz(raw(item, "retainedEarnings"));
+        let eq = nz(raw(item, "totalStockholderEquity"));
+        let debt = nz(raw(item, "shortLongTermDebt").or_else(|| raw(item, "longTermDebt")));
+
+        match annual.iter_mut().find(|p| p.end.year() == end.year()) {
+            Some(p) => {
+                p.total_assets = p.total_assets.or(assets);
+                p.total_liabilities = p.total_liabilities.or(liab);
+                p.current_assets = p.current_assets.or(ca);
+                p.current_liabilities = p.current_liabilities.or(cl);
+                p.retained_earnings = p.retained_earnings.or(re);
+                p.equity = p.equity.or(eq);
+                p.total_debt = p.total_debt.or(debt);
+            }
+            None => annual.push(Period {
+                end,
+                total_assets: assets,
+                total_liabilities: liab,
+                current_assets: ca,
+                current_liabilities: cl,
+                retained_earnings: re,
+                equity: eq,
+                total_debt: debt,
+                ..Default::default()
+            }),
+        }
+    }
+    annual.sort_by_key(|p| p.end);
 }
 
 pub fn parse_fin(summary: &Value, quote: &Quote) -> Fin {
@@ -1158,6 +1266,8 @@ const SUMMARY_MODULES: &[&str] = &[
     "netSharePurchaseActivity",
     "majorHoldersBreakdown",
     "incomeStatementHistoryQuarterly",
+    "balanceSheetHistory",
+    "balanceSheetHistoryQuarterly",
 ];
 
 async fn fetch_google_news(
@@ -1366,8 +1476,9 @@ pub async fn fetch(
     let pit = soft(pit, "NSE insider trades", &mut warnings);
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
-    let (mut quarters, annual) = parse_timeseries(&timeseries);
+    let (mut quarters, mut annual) = parse_timeseries(&timeseries);
     merge_income_statement(&mut quarters, &summary);
+    merge_balance_sheet(&mut annual, &summary);
 
     let now = Utc::now().timestamp();
     let cutoff = now - days * 86_400;
