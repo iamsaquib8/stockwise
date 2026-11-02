@@ -335,7 +335,9 @@ async fn research<D: DataSource>(
             .await
             .map_err(ApiError::from_data)?;
         if r.price().is_none() && r.quote.symbol.is_none() {
-            return Err(ApiError::NotFound(format!("No research data for {resolved}")));
+            return Err(ApiError::NotFound(format!(
+                "No research data for {resolved}"
+            )));
         }
         r
     } else {
@@ -345,7 +347,9 @@ async fn research<D: DataSource>(
             .await
             .map_err(ApiError::from_data)?;
         let Some(q) = quotes.into_iter().next() else {
-            return Err(ApiError::NotFound(format!("No research data for {resolved}")));
+            return Err(ApiError::NotFound(format!(
+                "No research data for {resolved}"
+            )));
         };
         let chart = st.source.chart(&resolved, "1y", "1d").await.ok();
         let name = q
@@ -958,7 +962,13 @@ mod tests {
         let (s, v) = get_json(&app, "/api/portfolios").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v["active"], "default");
-        assert!(v["portfolios"].as_array().unwrap().iter().any(|x| x == "default"));
+        assert!(
+            v["portfolios"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x == "default")
+        );
 
         let (s, v) = get_json(&app, "/api/research/TCS").await;
         assert_eq!(s, StatusCode::OK);

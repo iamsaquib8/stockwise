@@ -724,13 +724,18 @@ pub fn print_verdict_with(v: &DecisionVerdict, explain: bool) {
     }
 
     if explain {
-        println!("\n  {}", "HOW TO READ THIS VERDICT (--explain)".bold().cyan());
+        println!(
+            "\n  {}",
+            "HOW TO READ THIS VERDICT (--explain)".bold().cyan()
+        );
         println!("  {}", subline.dimmed());
         println!(
             "  • {} (0–100): Weighted composite across Valuation (20%), Growth (20%),",
             "Overall Score".bold()
         );
-        println!("    Profitability (20%), Balance Sheet (15%), Smart Money (15%), and Technicals (10%).");
+        println!(
+            "    Profitability (20%), Balance Sheet (15%), Smart Money (15%), and Technicals (10%)."
+        );
         println!(
             "  • {}: Price range near support / moving averages where risk-reward is optimal.",
             "Suggested Entry".bold()

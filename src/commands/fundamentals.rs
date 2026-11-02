@@ -20,7 +20,11 @@ fn print_unified_research_footer(
         if let Some(z) = sc.altman.z_score {
             print_kv(
                 "Altman Z-Score",
-                &format!("{:.2} ({})", z, sc.altman.zone_label.as_deref().unwrap_or("—")),
+                &format!(
+                    "{:.2} ({})",
+                    z,
+                    sc.altman.zone_label.as_deref().unwrap_or("—")
+                ),
             );
         }
 
@@ -1185,12 +1189,16 @@ pub async fn cmd_fundamental_score(
                 "  • {}: Tests 9 binary criteria across Profitability (4),",
                 "Piotroski F-Score (0–9)".bold()
             );
-            println!("    Leverage/Liquidity (3), and Operating Efficiency (2). 7–9 = Strong, 0–3 = Weak.");
+            println!(
+                "    Leverage/Liquidity (3), and Operating Efficiency (2). 7–9 = Strong, 0–3 = Weak."
+            );
             println!(
                 "  • {}: Combines working capital, retained earnings, EBIT,",
                 "Altman Z-Score".bold()
             );
-            println!("    market cap, and sales relative to assets/liabilities to measure bankruptcy risk.");
+            println!(
+                "    market cap, and sales relative to assets/liabilities to measure bankruptcy risk."
+            );
             println!("    Z > 2.99 = Safe Zone, 1.81–2.99 = Grey Zone, < 1.81 = Distress Zone.\n");
         }
     }

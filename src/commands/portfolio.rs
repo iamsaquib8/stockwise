@@ -668,7 +668,9 @@ pub(crate) async fn load_portfolio_report_named(
             let norm = pf::normalize_name(Some(name))?;
             match norm {
                 None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
-                Some(n) => Portfolio::load_named(Some(&n)).map_err(|e| e.context(views::LocalData))?,
+                Some(n) => {
+                    Portfolio::load_named(Some(&n)).map_err(|e| e.context(views::LocalData))?
+                }
             }
         }
     };

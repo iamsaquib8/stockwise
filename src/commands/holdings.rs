@@ -546,7 +546,10 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
                     "    1. Open {} → Portfolio → Holdings",
                     "pro.upstox.com".cyan()
                 );
-                println!("    2. Click {} and save the .xlsx or .csv file", "Download".bold());
+                println!(
+                    "    2. Click {} and save the .xlsx or .csv file",
+                    "Download".bold()
+                );
                 println!("    3. Run: stockwise import upstox <path-to-file.xlsx>");
             }
             "cas" => {
@@ -1225,8 +1228,8 @@ pub(crate) fn compute_harvest(
         };
 
         if pnl < 0.0 || losing_st > 0.0 || losing_lt > 0.0 {
-            let tax_saved = losing_st * (country.st_rate() / 100.0)
-                + losing_lt * (country.lt_rate() / 100.0);
+            let tax_saved =
+                losing_st * (country.st_rate() / 100.0) + losing_lt * (country.lt_rate() / 100.0);
             total_st_loss += losing_st;
             total_lt_loss += losing_lt;
             total_tax_saved += tax_saved;
@@ -1377,10 +1380,7 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             "Unused LTCG Exemption",
             &format!(
                 "{}{:.0} of {}{:.0} remaining this FY",
-                csym,
-                summary.ltcg_exemption_remaining,
-                csym,
-                summary.ltcg_exemption_limit
+                csym, summary.ltcg_exemption_remaining, csym, summary.ltcg_exemption_limit
             )
             .bold()
             .to_string(),

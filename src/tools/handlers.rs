@@ -46,10 +46,7 @@ pub(super) async fn run<D: DataSource>(
             Ok(chain_within(&chain, a.usize_or("strikes", 6), budget))
         }
         "options_pcr" => Ok(commands::pcr_json(&chain(a, m).await?)),
-        "options_oi" => Ok(commands::oi_json(
-            &chain(a, m).await?,
-            a.usize_or("top", 5),
-        )),
+        "options_oi" => Ok(commands::oi_json(&chain(a, m).await?, a.usize_or("top", 5))),
         "options_maxpain" => {
             let mut v = commands::maxpain_view(&chain(a, m).await?)?;
             centre_curve(&mut v, 8);

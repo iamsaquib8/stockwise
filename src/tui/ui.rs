@@ -729,7 +729,10 @@ const HELP: &[(&str, &str)] = &[
     ("↑ ↓  j k", "move the selection; the chart follows it"),
     ("g  G", "first / last row"),
     ("Tab", "switch between watchlist and portfolio"),
-    ("d  Enter", "inspect selected symbol (position, range, alerts)"),
+    (
+        "d  Enter",
+        "inspect selected symbol (position, range, alerts)",
+    ),
     ("s", "cycle sort order (symbol, change%, value, P&L%)"),
     ("1-6  [ ]", "chart period: 1d 5d 1mo 6mo 1y 5y"),
     ("/  a", "search a company and add it to the watchlist"),
@@ -797,7 +800,10 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 _ => None,
             };
             lines.push(Line::from(vec![
-                Span::styled(format!(" {:<11} ", format!("{} Range:", c.period)), theme.dim),
+                Span::styled(
+                    format!(" {:<11} ", format!("{} Range:", c.period)),
+                    theme.dim,
+                ),
                 Span::raw(format!(
                     "{} – {}  (",
                     format_price(lo, cur),
@@ -841,11 +847,8 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 ]));
             }
         }
-        let sym_alerts: Vec<&AlertCheckRow> = snap
-            .alerts
-            .iter()
-            .filter(|a| a.symbol == symbol)
-            .collect();
+        let sym_alerts: Vec<&AlertCheckRow> =
+            snap.alerts.iter().filter(|a| a.symbol == symbol).collect();
         if !sym_alerts.is_empty() {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
@@ -869,8 +872,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        " Esc / d / Enter close · 1-6 change chart period · CLI: stockwise verdict "
-            .to_string()
+        " Esc / d / Enter close · 1-6 change chart period · CLI: stockwise verdict ".to_string()
             + short(&symbol),
         theme.dim,
     ));

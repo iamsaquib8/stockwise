@@ -410,7 +410,10 @@ async fn portfolio_tools_never_value_missing_prices() {
     let mut f = Fixture::default();
     f.portfolio.remove("DELISTED.NS");
     let c = ToolContext::new(LongCharts(f), Market::In);
-    let reb = c.call("rebalance", &json!({"inflow": 10000})).await.unwrap();
+    let reb = c
+        .call("rebalance", &json!({"inflow": 10000}))
+        .await
+        .unwrap();
     assert_eq!(reb["data"]["inflow"], 10000.0);
     assert_eq!(reb["data"]["items"].as_array().unwrap().len(), 2);
 }

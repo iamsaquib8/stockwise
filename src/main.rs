@@ -2581,40 +2581,97 @@ fn curated_quickstart_help() -> String {
         (
             "Stock Research & Verdicts",
             &[
-                ("quote <SYM>", "Live price, 52W range, valuation & circuit limits"),
-                ("verdict <SYM>", "6-pillar Buy/Hold/Sell score (0–100), entry/stop/target"),
-                ("insights <SYM>", "9-dimension fundamental cards & shareholding split"),
-                ("score <SYM>", "Piotroski 9-Point F-Score & Altman Z-Score breakdown"),
-                ("events <SYM>", "Corporate filings, dividends, splits & price reaction"),
-                ("deep <SYM>", "All-in-one deep dive (fundamentals + technicals + verdict)"),
+                (
+                    "quote <SYM>",
+                    "Live price, 52W range, valuation & circuit limits",
+                ),
+                (
+                    "verdict <SYM>",
+                    "6-pillar Buy/Hold/Sell score (0–100), entry/stop/target",
+                ),
+                (
+                    "insights <SYM>",
+                    "9-dimension fundamental cards & shareholding split",
+                ),
+                (
+                    "score <SYM>",
+                    "Piotroski 9-Point F-Score & Altman Z-Score breakdown",
+                ),
+                (
+                    "events <SYM>",
+                    "Corporate filings, dividends, splits & price reaction",
+                ),
+                (
+                    "deep <SYM>",
+                    "All-in-one deep dive (fundamentals + technicals + verdict)",
+                ),
             ],
         ),
         (
             "Markets, F&O & IPOs",
             &[
-                ("markets", "Global, US & Indian indices (--global, --crypto, --fx)"),
-                ("options oi <SYM>", "Option chain OI walls, PCR, Max Pain & LB/SC/SB/LU build-up"),
-                ("ipo", "Indian Mainboard & SME IPO board, GMP & dual verdict"),
-                ("screen <TYPE>", "Screen by undervalued, growth, dividend, momentum, bluechip"),
+                (
+                    "markets",
+                    "Global, US & Indian indices (--global, --crypto, --fx)",
+                ),
+                (
+                    "options oi <SYM>",
+                    "Option chain OI walls, PCR, Max Pain & LB/SC/SB/LU build-up",
+                ),
+                (
+                    "ipo",
+                    "Indian Mainboard & SME IPO board, GMP & dual verdict",
+                ),
+                (
+                    "screen <TYPE>",
+                    "Screen by undervalued, growth, dividend, momentum, bluechip",
+                ),
             ],
         ),
         (
             "Portfolio, Rebalancing & Tax",
             &[
-                ("portfolio", "Live holdings, FIFO lots, XIRR & multi-currency valuation"),
-                ("import <BROKER>", "Import CSV/.xlsx from Zerodha, Groww, Upstox, Angel, CAS"),
-                ("rebalance", "Target allocation drift & inflow-only (--inflow) rebalance"),
-                ("tax [in|us|uk]", "Capital gains estimate, `tax export` & `tax advance` (234C)"),
-                ("harvest", "Lot-level tax-loss & ₹1.25L LTCG exemption harvesting"),
+                (
+                    "portfolio",
+                    "Live holdings, FIFO lots, XIRR & multi-currency valuation",
+                ),
+                (
+                    "import <BROKER>",
+                    "Import CSV/.xlsx from Zerodha, Groww, Upstox, Angel, CAS",
+                ),
+                (
+                    "rebalance",
+                    "Target allocation drift & inflow-only (--inflow) rebalance",
+                ),
+                (
+                    "tax [in|us|uk]",
+                    "Capital gains estimate, `tax export` & `tax advance` (234C)",
+                ),
+                (
+                    "harvest",
+                    "Lot-level tax-loss & ₹1.25L LTCG exemption harvesting",
+                ),
             ],
         ),
         (
             "Interactive & AI Surfaces",
             &[
-                ("tui", "Full-screen terminal workstation (Watchlist, Portfolio, Charts)"),
-                ("serve --open", "Local Web UI research & portfolio workbench"),
-                ("ask \"<QUERY>\"", "Ask an AI agent grounded in live StockWise tools"),
-                ("mcp", "Model Context Protocol server for Claude / Cursor / IDEs"),
+                (
+                    "tui",
+                    "Full-screen terminal workstation (Watchlist, Portfolio, Charts)",
+                ),
+                (
+                    "serve --open",
+                    "Local Web UI research & portfolio workbench",
+                ),
+                (
+                    "ask \"<QUERY>\"",
+                    "Ask an AI agent grounded in live StockWise tools",
+                ),
+                (
+                    "mcp",
+                    "Model Context Protocol server for Claude / Cursor / IDEs",
+                ),
             ],
         ),
     ];
@@ -2711,7 +2768,9 @@ fn parse_bare_symbol_invocation(
                     .is_some_and(|b| b.eq_ignore_ascii_case(&sym))
         });
     let typed_like_ticker = sym == upper
-        && sym.chars().any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && sym
+            .chars()
+            .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         && (sym.len() >= 2 || sym.chars().all(|c| c.is_ascii_uppercase()));
 
     if is_known_alias || typed_like_ticker {
@@ -2988,8 +3047,13 @@ async fn dispatch(
                 json: sub_json,
                 explain: sub_explain,
             }) => {
-                commands::cmd_fundamental_score(&symbol, m, sub_json || json, sub_explain || explain)
-                    .await
+                commands::cmd_fundamental_score(
+                    &symbol,
+                    m,
+                    sub_json || json,
+                    sub_explain || explain,
+                )
+                .await
             }
             None => {
                 let Some(symbol) = symbol else {
@@ -5034,8 +5098,16 @@ mod tests {
             }
             _ => panic!("expected options oi"),
         }
-        let (action, ..) =
-            options_cmd(&["stockwise", "fno", "oi", "BANKNIFTY", "-n", "3", "--json", "--explain"]);
+        let (action, ..) = options_cmd(&[
+            "stockwise",
+            "fno",
+            "oi",
+            "BANKNIFTY",
+            "-n",
+            "3",
+            "--json",
+            "--explain",
+        ]);
         match action {
             Some(OptionsCmd::Oi {
                 symbol,
