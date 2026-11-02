@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `stockwise options oi` / `stockwise fno oi` ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — open-interest analytics, institutional build-up classification, and PCR tracking:
+  - Classifies price and open-interest changes across strikes into the 4 standard institutional build-up regimes:
+    - **Long Build-up (`LB`)**: Price ↑, OI ↑ (Aggressive long buying / bullish continuation).
+    - **Short Covering (`SC`)**: Price ↑, OI ↓ (Short sellers closing positions / short squeeze).
+    - **Short Build-up (`SB`)**: Price ↓, OI ↑ (Aggressive call/put writing / bearish continuation).
+    - **Long Unwinding (`LU`)**: Price ↓, OI ↓ (Long holders booking profits/cutting losses).
+  - Dedicated `oi` command (`stockwise fno oi <SYMBOL> [-n TOP] [--json]`) showing Put-Call Ratio (OI & Volume) with market sentiment interpretation, Max Pain strike and distance from spot, top Call resistance walls and Put support walls (with strike, OI, % share, ΔOI, build-up type, and LTP), and aggregate build-up volume breakdown across calls and puts.
+  - Enhanced `stockwise options chain` / `stockwise fno chain` with a `Type` column displaying color-coded build-up badges (`LB`, `SC`, `SB`, `LU`) alongside strike OI change, top-level PCR and Max Pain metrics in the header, and an institutional build-up interpretation legend in the footer.
+  - Full machine-readable `--json` output across both table views and programmatic analytics.
 - `stockwise tax advance` ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly advance tax instalment schedule and interest estimator under Indian Income-tax Act (Section 208, 211, 234B/C):
   - Statutory quarterly schedule for the 15 Jun (15%), 15 Sep (45%), 15 Dec (75%), and 15 Mar (100%) instalment deadlines.
   - Capital-gains quarterly bucketing and cumulative set-off rules under Section 234C(1) proviso, protecting taxpayers from deferment interest on gains realized later in the year.

@@ -445,6 +445,7 @@ enum Commands {
 
     /// Option chains with greeks, PCR, max pain and payoffs; `options SYMBOL` shows expected moves
     #[command(
+        alias = "fno",
         args_conflicts_with_subcommands = true,
         subcommand_negates_reqs = true,
         after_help = "Examples:\n  \
@@ -453,6 +454,7 @@ stockwise options chain SENSEX            BSE index options (also BANKEX, SENSEX
 stockwise options chain AAPL -m us -n 5   US options from Yahoo, 5 strikes each side\n  \
 stockwise options pcr BANKNIFTY           put/call ratio and open-interest walls\n  \
 stockwise options maxpain RELIANCE -e 2026-10-27\n  \
+stockwise options oi NIFTY                open-interest analytics and institutional build-up\n  \
 stockwise options payoff NIFTY --strategy iron-condor --width 200\n  \
 stockwise options payoff NIFTY --leg \"buy call 24500\" --leg \"sell call 24800\" --today\n  \
 stockwise options TCS                     expected moves (same as `options moves TCS`)"
@@ -1742,6 +1744,20 @@ enum OptionsCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Open-interest analytics: PCR, Max Pain, top resistance/support walls, and institutional build-up classification
+    #[command(alias = "open-interest")]
+    Oi {
+        symbol: String,
+        /// Expiry date (default: nearest)
+        #[arg(short, long, value_parser = expiry_date)]
+        expiry: Option<chrono::NaiveDate>,
+        /// Top N open-interest strikes to display (default: 5)
+        #[arg(short = 'n', long, default_value_t = 5)]
+        top: usize,
+        /// Print JSON instead of formatted tables
+        #[arg(long)]
+        json: bool,
+    },
     /// Max pain: the expiry price at which option buyers collect least
     #[command(alias = "max-pain")]
     Maxpain {
@@ -2863,6 +2879,12 @@ async fn dispatch(
                 expiry,
                 json,
             }) => commands::cmd_options_pcr(&symbol, expiry, m, json).await,
+            Some(OptionsCmd::Oi {
+                symbol,
+                expiry,
+                top,
+                json,
+            }) => commands::cmd_options_oi(&symbol, expiry, top, m, json).await,
             Some(OptionsCmd::Maxpain {
                 symbol,
                 expiry,
@@ -4682,6 +4704,39 @@ mod tests {
         assert!(matches!(action, Some(OptionsCmd::Maxpain { .. })));
         let (action, ..) = options_cmd(&["stockwise", "options", "pcr", "AAPL", "--json"]);
         assert!(matches!(action, Some(OptionsCmd::Pcr { json: true, .. })));
+        let (action, ..) = options_cmd(&["stockwise", "options", "oi", "NIFTY"]);
+        match action {
+            Some(OptionsCmd::Oi {
+                symbol,
+                expiry,
+                top,
+                json,
+            }) => {
+                assert_eq!(symbol, "NIFTY");
+                assert_eq!(expiry, None);
+                assert_eq!(top, 5);
+                assert!(!json);
+            }
+            _ => panic!("expected options oi"),
+        }
+        let (action, ..) =
+            options_cmd(&["stockwise", "fno", "oi", "BANKNIFTY", "-n", "3", "--json"]);
+        match action {
+            Some(OptionsCmd::Oi {
+                symbol,
+                expiry,
+                top,
+                json,
+            }) => {
+                assert_eq!(symbol, "BANKNIFTY");
+                assert_eq!(expiry, None);
+                assert_eq!(top, 3);
+                assert!(json);
+            }
+            _ => panic!("expected fno oi"),
+        }
+        let (action, ..) = options_cmd(&["stockwise", "options", "open-interest", "RELIANCE"]);
+        assert!(matches!(action, Some(OptionsCmd::Oi { symbol, .. }) if symbol == "RELIANCE"));
 
         let (action, ..) = options_cmd(&[
             "stockwise",

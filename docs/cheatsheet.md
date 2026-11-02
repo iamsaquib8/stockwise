@@ -50,6 +50,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Rank a category by return | `stockwise mf screen flexi cap` |
 | Option chain with greeks | `stockwise options chain NIFTY` |
 | Put/call ratio, max pain | `stockwise options pcr BANKNIFTY` · `stockwise options maxpain NIFTY` |
+| OI build-up & resistance/support walls | `stockwise fno oi NIFTY` · `stockwise options oi BANKNIFTY -n 5` |
 | Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --width 200` |
 | Gold and silver in ₹/10 g | `stockwise commodity spot` |
 | Sovereign Gold Bonds | `stockwise commodity sgb` |
