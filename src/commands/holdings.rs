@@ -536,19 +536,18 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
             "groww" => {
                 println!("    1. Open {} → Stocks → Holdings", "groww.in".cyan());
                 println!(
-                    "    2. Click {} to get the holdings statement",
+                    "    2. Click {} to get the holdings statement (.xlsx or .csv)",
                     "Download".bold()
                 );
-                println!("    3. Open the .xlsx file and save it as CSV");
-                println!("    4. Run: stockwise import groww <path-to-file.csv>");
+                println!("    3. Run: stockwise import groww <path-to-file.xlsx>");
             }
             "upstox" => {
                 println!(
                     "    1. Open {} → Portfolio → Holdings",
                     "pro.upstox.com".cyan()
                 );
-                println!("    2. Click {} and save the CSV file", "Download".bold());
-                println!("    3. Run: stockwise import upstox <path-to-file.csv>");
+                println!("    2. Click {} and save the .xlsx or .csv file", "Download".bold());
+                println!("    3. Run: stockwise import upstox <path-to-file.xlsx>");
             }
             "cas" => {
                 println!(
@@ -570,8 +569,14 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         bail!("File not found: {}", file);
     }
 
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", file))?;
+    let raw_bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", file))?;
+    let content = if raw_bytes.starts_with(b"PK\x03\x04") {
+        crate::xlsx::workbook_to_csv(&raw_bytes)
+            .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?
+    } else {
+        String::from_utf8(raw_bytes)
+            .with_context(|| format!("{} is not valid UTF-8 text or an .xlsx workbook", file))?
+    };
     match source {
         "groww" => {
             return super::imports::import_rows(
@@ -608,8 +613,6 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         bail!("{} is empty or has no data rows", file);
     }
 
-    let header = lines[0].to_lowercase();
-    let cols = parse_csv_header(&header);
     // Column names per format, most specific first (matched as substrings).
     let (sym_names, qty_names, price_names, expected): (&[&str], &[&str], &[&str], &str) =
         match source {
@@ -628,7 +631,7 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
                     "buy avg.",
                     "price",
                 ],
-                "Kite CSV columns. Expected: Instrument, Qty., Avg. cost",
+                "Kite CSV/Excel columns. Expected: Instrument, Qty., Avg. cost",
             ),
             // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, ...
             "indmoney" => (
@@ -649,7 +652,7 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
                     "avg. buy price",
                     "average cost",
                 ],
-                "IndMoney CSV columns. Expected: Symbol/Stock Name, Quantity, Avg Buy Price",
+                "IndMoney CSV/Excel columns. Expected: Symbol/Stock Name, Quantity, Avg Buy Price",
             ),
             // "csv" or any unrecognized format: generic columns.
             _ => (
@@ -673,15 +676,23 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
                     "price",
                     "cost",
                 ],
-                "CSV columns. Your CSV needs Symbol, Quantity and Average Price columns",
+                "CSV/Excel columns. Your file needs Symbol, Quantity and Average Price columns",
             ),
         };
-    let (Some(si), Some(qi), Some(pi)) = (
-        find_col(&cols, sym_names),
-        find_col(&cols, qty_names),
-        find_col(&cols, price_names),
-    ) else {
-        bail!("Could not detect {}. Found: {}", expected, header);
+    // Scan the first 40 lines for the header row so .xlsx exports with account preamble work seamlessly.
+    let found_header = lines.iter().take(40).enumerate().find_map(|(idx, line)| {
+        let c = parse_csv_header(&line.to_lowercase());
+        let si = find_col(&c, sym_names)?;
+        let qi = find_col(&c, qty_names)?;
+        let pi = find_col(&c, price_names)?;
+        Some((idx, c, si, qi, pi))
+    });
+    let Some((header_idx, cols, si, qi, pi)) = found_header else {
+        bail!(
+            "Could not detect {}. Found: {}",
+            expected,
+            lines[0].to_lowercase()
+        );
     };
     // Optional: a purchase/trade date per row, and buy/sell for tradebooks.
     let date_col = find_col_exact(
@@ -723,7 +734,7 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
 
     let mut rows = Vec::new();
     let mut bad_dates = Vec::new();
-    for line in &lines[1..] {
+    for line in &lines[header_idx + 1..] {
         let fields = parse_csv_row(line);
         if fields.len() <= si.max(qi).max(pi) {
             continue;
@@ -1113,11 +1124,184 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
 
 // ── Earnings Calendar ──
 
-pub async fn cmd_harvest(market: Market) -> Result<()> {
+/// One tax-loss or tax-gain harvesting candidate row for `harvest --json/--csv`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HarvestRow {
+    pub(crate) symbol: String,
+    pub(crate) shares: f64,
+    pub(crate) avg_cost: f64,
+    pub(crate) price: f64,
+    pub(crate) pnl: f64,
+    pub(crate) pnl_pct: f64,
+    pub(crate) st_pnl: f64,
+    pub(crate) lt_pnl: f64,
+    pub(crate) estimated_tax_saved: f64,
+    pub(crate) harvest_type: &'static str,
+}
+
+impl CsvRow for HarvestRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "symbol",
+        "shares",
+        "avg_cost",
+        "price",
+        "pnl",
+        "pnl_pct",
+        "st_pnl",
+        "lt_pnl",
+        "estimated_tax_saved",
+        "harvest_type",
+    ];
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HarvestSummary {
+    pub(crate) country: &'static str,
+    pub(crate) currency: &'static str,
+    pub(crate) total_st_loss_harvestable: f64,
+    pub(crate) total_lt_loss_harvestable: f64,
+    pub(crate) estimated_loss_tax_saved: f64,
+    pub(crate) ltcg_exemption_limit: f64,
+    pub(crate) ltcg_exemption_remaining: f64,
+    pub(crate) loss_candidates: Vec<HarvestRow>,
+    pub(crate) gain_harvest_candidates: Vec<HarvestRow>,
+    pub(crate) unpriced: Vec<String>,
+}
+
+pub(crate) fn compute_harvest(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    market: Market,
+    today: chrono::NaiveDate,
+) -> HarvestSummary {
+    let country = match market {
+        Market::Us => Country::Us,
+        _ => Country::India,
+    };
+    let report = tax_report(country, portfolio, val, today);
+    let realized_est = tax::estimate(country, report.realized);
+    let exemption_limit = country.exemption();
+    let exemption_remaining = (exemption_limit - realized_est.exemption_used).max(0.0);
+
+    let parse_date = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+    let mut loss_candidates = Vec::new();
+    let mut gain_harvest_candidates = Vec::new();
+    let mut total_st_loss = 0.0;
+    let mut total_lt_loss = 0.0;
+    let mut total_tax_saved = 0.0;
+
+    for h in &portfolio.holdings {
+        let Some(price) = val.price(&h.symbol) else {
+            continue;
+        };
+        let scale = val
+            .currency(&h.symbol)
+            .and_then(|cur| country.currency_scale(&cur))
+            .unwrap_or(1.0);
+        let mut st_pnl = 0.0;
+        let mut lt_pnl = 0.0;
+        let mut losing_st = 0.0;
+        let mut losing_lt = 0.0;
+        for l in &h.lots {
+            let gain = l.qty * (price - l.price) * scale;
+            let long = parse_date(&l.date).is_some_and(|d| country.is_long_term(d, today));
+            if long {
+                lt_pnl += gain;
+                if gain < 0.0 {
+                    losing_lt += -gain;
+                }
+            } else {
+                st_pnl += gain;
+                if gain < 0.0 {
+                    losing_st += -gain;
+                }
+            }
+        }
+        let pnl = (price - h.avg_cost) * h.shares * scale;
+        let pnl_pct = if h.avg_cost > 0.0 {
+            ((price / h.avg_cost) - 1.0) * 100.0
+        } else {
+            0.0
+        };
+
+        if pnl < 0.0 || losing_st > 0.0 || losing_lt > 0.0 {
+            let tax_saved = losing_st * (country.st_rate() / 100.0)
+                + losing_lt * (country.lt_rate() / 100.0);
+            total_st_loss += losing_st;
+            total_lt_loss += losing_lt;
+            total_tax_saved += tax_saved;
+            loss_candidates.push(HarvestRow {
+                symbol: h.symbol.clone(),
+                shares: round(h.shares, 4),
+                avg_cost: round(h.avg_cost, 2),
+                price: round(price, 2),
+                pnl: round(pnl, 2),
+                pnl_pct: round(pnl_pct, 2),
+                st_pnl: round(st_pnl, 2),
+                lt_pnl: round(lt_pnl, 2),
+                estimated_tax_saved: round(tax_saved, 2),
+                harvest_type: "tax_loss",
+            });
+        } else if exemption_limit > 0.0 && lt_pnl > 0.0 {
+            let tax_free_gain = lt_pnl.min(exemption_remaining);
+            let tax_saved = tax_free_gain * (country.lt_rate() / 100.0);
+            gain_harvest_candidates.push(HarvestRow {
+                symbol: h.symbol.clone(),
+                shares: round(h.shares, 4),
+                avg_cost: round(h.avg_cost, 2),
+                price: round(price, 2),
+                pnl: round(pnl, 2),
+                pnl_pct: round(pnl_pct, 2),
+                st_pnl: round(st_pnl, 2),
+                lt_pnl: round(lt_pnl, 2),
+                estimated_tax_saved: round(tax_saved, 2),
+                harvest_type: "ltcg_exemption_step_up",
+            });
+        }
+    }
+
+    HarvestSummary {
+        country: match country {
+            Country::India => "in",
+            Country::Us => "us",
+            Country::Uk => "uk",
+        },
+        currency: match country {
+            Country::India => "INR",
+            Country::Us => "USD",
+            Country::Uk => "GBP",
+        },
+        total_st_loss_harvestable: round(total_st_loss, 2),
+        total_lt_loss_harvestable: round(total_lt_loss, 2),
+        estimated_loss_tax_saved: round(total_tax_saved, 2),
+        ltcg_exemption_limit: round(exemption_limit, 2),
+        ltcg_exemption_remaining: round(exemption_remaining, 2),
+        loss_candidates,
+        gain_harvest_candidates,
+        unpriced: report.unpriced,
+    }
+}
+
+pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.is_empty() {
-        println!("\n  {}", "Portfolio is empty.".dimmed());
-        return Ok(());
+        return match fmt {
+            Format::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "loss_candidates": [],
+                        "gain_harvest_candidates": [],
+                    }))?
+                );
+                Ok(())
+            }
+            Format::Csv => output::print_csv::<HarvestRow>(&[]),
+            Format::Table => {
+                println!("\n  {}", "Portfolio is empty.".dimmed());
+                Ok(())
+            }
+        };
     }
 
     let symbols: Vec<String> = portfolio
@@ -1127,75 +1311,108 @@ pub async fn cmd_harvest(market: Market) -> Result<()> {
         .collect();
     let client = YahooClient::new().await?;
     let val = value_holdings(&client, &symbols, market, None).await?;
+    let today = chrono::Local::now().date_naive();
+    let summary = compute_harvest(&portfolio, &val, market, today);
 
-    print_header("Tax-Loss Harvesting Opportunities");
-    let mut found = false;
-
-    println!(
-        "  {:<14} {:>10} {:>10} {:>12} {:>10}",
-        "Symbol".bold(),
-        "Avg Cost".bold(),
-        "Price".bold(),
-        "Loss".bold(),
-        "Loss %".bold()
-    );
-    println!("  {}", "─".repeat(60).dimmed());
-
-    for h in &portfolio.holdings {
-        // Never suggest selling something just because its price is missing.
-        let Some(price) = val.price(&h.symbol) else {
-            continue;
-        };
-        let cur = val.currency(&h.symbol);
-        let csym = market::currency_symbol(cur.as_deref());
-        let pnl = (price - h.avg_cost) * h.shares;
-        let pnl_pct = if h.avg_cost > 0.0 {
-            ((price / h.avg_cost) - 1.0) * 100.0
-        } else {
-            0.0
-        };
-
-        if pnl < 0.0 {
-            found = true;
-            println!(
-                "  {:<14} {:>10} {:>10} {:>12} {:>10}",
-                h.symbol.cyan(),
-                format!("{}{:.2}", csym, h.avg_cost),
-                format!("{}{:.2}", csym, price),
-                format!("-{}{:.2}", csym, pnl.abs()).red(),
-                format!("{:.2}%", pnl_pct).red(),
-            );
+    match fmt {
+        Format::Json => return output::print_json(&summary),
+        Format::Csv => {
+            let mut all = summary.loss_candidates.clone();
+            all.extend(summary.gain_harvest_candidates.clone());
+            return output::print_csv(&all);
         }
+        Format::Table => {}
     }
 
-    if !found {
+    let csym = market::currency_symbol(Some(summary.currency));
+    print_header("Tax-Loss & LTCG Exemption Harvesting");
+
+    print_section("Loss Harvesting Candidates (STCG / LTCG Offset)");
+    if summary.loss_candidates.is_empty() {
         println!(
-            "\n  {} No losing positions — nothing to harvest!",
+            "  {} No losing positions — nothing to loss-harvest!",
             "✓".green()
         );
     } else {
         println!(
-            "\n  {} Sell these positions to realize losses and offset capital gains.",
-            "→".yellow()
+            "  {:<14} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
+            "Symbol".bold(),
+            "Avg Cost".bold(),
+            "Price".bold(),
+            "ST P&L".bold(),
+            "LT P&L".bold(),
+            "Total P&L".bold(),
+            "Est. Saved".bold()
         );
+        println!("  {}", "─".repeat(87).dimmed());
+
+        for r in &summary.loss_candidates {
+            println!(
+                "  {:<14} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
+                r.symbol.cyan(),
+                format!("{}{:.2}", csym, r.avg_cost),
+                format!("{}{:.2}", csym, r.price),
+                signed_tax_money(csym, r.st_pnl),
+                signed_tax_money(csym, r.lt_pnl),
+                format!("-{}{:.2}", csym, r.pnl.abs()).red(),
+                format!("{}{:.0}", csym, r.estimated_tax_saved).green(),
+            );
+        }
         println!(
-            "  {}",
-            "Consult a tax advisor. Wash sale rules may apply."
-                .dimmed()
-                .italic()
+            "\n  {} Harvestable losses: ST {}{:.0} | LT {}{:.0} → Est. tax offset: {}",
+            "→".yellow(),
+            csym,
+            summary.total_st_loss_harvestable,
+            csym,
+            summary.total_lt_loss_harvestable,
+            format!("{}{:.0}", csym, summary.estimated_loss_tax_saved)
+                .green()
+                .bold()
         );
     }
-    let unpriced: Vec<&str> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.as_str())
-        .filter(|s| val.price(s).is_none())
-        .collect();
-    if !unpriced.is_empty() {
+
+    if summary.ltcg_exemption_limit > 0.0 {
+        print_section("Tax-Gain Harvesting (Section 112A ₹1.25L Annual LTCG Exemption)");
+        print_kv(
+            "Unused LTCG Exemption",
+            &format!(
+                "{}{:.0} of {}{:.0} remaining this FY",
+                csym,
+                summary.ltcg_exemption_remaining,
+                csym,
+                summary.ltcg_exemption_limit
+            )
+            .bold()
+            .to_string(),
+        );
+        if !summary.gain_harvest_candidates.is_empty() && summary.ltcg_exemption_remaining > 0.0 {
+            println!(
+                "  {}",
+                "Long-term winners you can sell & re-buy to step up cost basis tax-free:".dimmed()
+            );
+            for r in &summary.gain_harvest_candidates {
+                println!(
+                    "  • {:<12} LTCG: {:>10} (saves up to {}{:.0} at 12.5%)",
+                    r.symbol.cyan().bold(),
+                    format!("+{}{:.0}", csym, r.lt_pnl).green(),
+                    csym,
+                    r.estimated_tax_saved
+                );
+            }
+        }
+    }
+
+    println!(
+        "\n  {}",
+        "Consult a tax advisor. Wash-sale rules (US 30-day rule) and brokerage charges apply."
+            .dimmed()
+            .italic()
+    );
+    if !summary.unpriced.is_empty() {
         println!(
             "  {} No live price for {} — not checked.",
             "!".yellow(),
-            unpriced.join(", ")
+            summary.unpriced.join(", ")
         );
     }
     println!();

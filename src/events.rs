@@ -17,7 +17,8 @@ use chrono::{DateTime, Datelike, NaiveDate, Timelike};
 use colored::Colorize;
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     Results,
     Orders,
@@ -75,7 +76,7 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Reaction {
     pub session: NaiveDate,
     pub stock: f64,
@@ -86,7 +87,7 @@ pub struct Reaction {
     pub since: Option<f64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Event {
     /// Time of first report
     pub ts: i64,
@@ -107,13 +108,13 @@ pub struct Event {
     pub link: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Upcoming {
     pub ts: i64,
     pub label: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Digest {
     pub positive: usize,
     pub negative: usize,

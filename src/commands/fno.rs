@@ -524,6 +524,30 @@ pub async fn cmd_options_maxpain(
     Ok(())
 }
 
+/// `options oi --json`.
+pub(crate) fn oi_json(chain: &OptionChain, top: usize) -> serde_json::Value {
+    let pcr = derivatives::pcr(&chain.rows);
+    let mp = max_pain_of(chain).ok();
+    let top_calls = derivatives::top_oi_details(&chain.rows, OptionKind::Call, top);
+    let top_puts = derivatives::top_oi_details(&chain.rows, OptionKind::Put, top);
+    let breakdown = derivatives::buildup_breakdown(&chain.rows);
+    serde_json::json!({
+        "symbol": chain.symbol,
+        "source": chain.source,
+        "underlying": chain.underlying,
+        "currency": chain.currency,
+        "expiry": chain.expiry,
+        "expiries": chain.expiries,
+        "lot_size": chain.lot_size,
+        "pcr": pcr,
+        "pcr_sentiment": pcr.oi_ratio.map(pcr_reading),
+        "max_pain": mp.as_ref().map(|m| m.strike),
+        "top_calls": top_calls,
+        "top_puts": top_puts,
+        "breakdown": breakdown,
+    })
+}
+
 /// `options oi <symbol>` — open-interest analytics, concentration levels (support/resistance), PCR and build-up breakdown.
 pub async fn cmd_options_oi(
     symbol: &str,
@@ -531,6 +555,7 @@ pub async fn cmd_options_oi(
     top: usize,
     market: Market,
     json: bool,
+    explain: bool,
 ) -> Result<()> {
     let chain = derivatives::fetch_chain(symbol, market, expiry).await?;
     let pcr = derivatives::pcr(&chain.rows);
@@ -540,21 +565,7 @@ pub async fn cmd_options_oi(
     let breakdown = derivatives::buildup_breakdown(&chain.rows);
 
     if json {
-        let out = serde_json::json!({
-            "symbol": chain.symbol,
-            "source": chain.source,
-            "underlying": chain.underlying,
-            "currency": chain.currency,
-            "expiry": chain.expiry,
-            "expiries": chain.expiries,
-            "lot_size": chain.lot_size,
-            "pcr": pcr,
-            "pcr_sentiment": pcr.oi_ratio.map(pcr_reading),
-            "max_pain": mp.as_ref().map(|m| m.strike),
-            "top_calls": top_calls,
-            "top_puts": top_puts,
-            "breakdown": breakdown,
-        });
+        let out = oi_json(&chain, top);
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -723,6 +734,25 @@ pub async fn cmd_options_oi(
         "Descriptive institutional positioning. LB: Price↑ OI↑, SC: Price↑ OI↓, SB: Price↓ OI↑, LU: Price↓ OI↓"
             .dimmed()
     );
+    if explain {
+        print_section("How to Read Open Interest (--explain)");
+        println!(
+            "  • {} — Put OI ÷ Call OI. Above 1.3 suggests heavy put writing (supportive / bullish floor); below 0.7 suggests heavy call writing (overhead resistance).",
+            "PCR (OI)".bold()
+        );
+        println!(
+            "  • {} — The strike where option writers pay out the least total intrinsic value at expiry; spot often gravitates toward it near expiry.",
+            "Max Pain".bold()
+        );
+        println!(
+            "  • {} — Large Call OI strikes act as resistance (call writers defend them); large Put OI strikes act as support (put writers defend them).",
+            "OI Walls".bold()
+        );
+        println!(
+            "  • {} — LB (Price↑ OI↑: fresh longs), SC (Price↑ OI↓: shorts exiting), SB (Price↓ OI↑: fresh shorts written), LU (Price↓ OI↓: longs exiting).",
+            "Build-up".bold()
+        );
+    }
     println!();
     Ok(())
 }

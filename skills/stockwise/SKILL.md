@@ -49,11 +49,19 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 | Find a mutual fund | `stockwise mf search parag flexi direct --json` |
 | Fund NAV and expense ratio | `stockwise mf nav 122639 --json` |
 | Past SIP returns (XIRR) | `stockwise mf sip 122639 5000 -p 5y --json` |
-| Option chain with greeks | `stockwise options chain NIFTY --json` |
+|Option chain with greeks | `stockwise options chain NIFTY --json` |
+| Open interest build-up & walls | `stockwise options oi NIFTY --json` |
 | Put/call ratio, max pain | `stockwise options pcr NIFTY --json` · `stockwise options maxpain NIFTY --json` |
 | Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --json` |
+| 6-pillar investment verdict | `stockwise verdict TCS --json` |
+| Piotroski & Altman scorecards | `stockwise scorecard TCS --json` |
+| Categorized insights & shareholding | `stockwise insights TCS --json` |
+| Corporate events & filings timeline | `stockwise events TCS --json` |
 | The user's portfolio | `stockwise portfolio --json` |
+| Portfolio rebalancing plan | `stockwise rebalance --inflow 50000 --json` |
 | Capital-gains estimate | `stockwise tax in --json` |
+| Advance tax schedule & 234C | `stockwise tax advance --json` |
+| Tax-loss & 112A LTCG harvest | `stockwise harvest --json` |
 | Results and dividend dates | `stockwise calendar --json` |
 | Watchlist, alerts | `stockwise watch --json` · `stockwise alert check --json` |
 | SIP for a goal | `stockwise goal sip --target 1cr --years 15 --json` |

@@ -47,6 +47,22 @@
       "description": "Risk metrics. Risk of one ticker from daily closes over a period: return, annualized volatility and risk level, Sharpe, Sortino and Calmar ratios, max drawdown (peak, trough, length) and 95%/99% one-day value at risk."
     },
     {
+      "name": "verdict",
+      "description": "6-Pillar Buy/Sell verdict. Quantitative 6-pillar Buy/Hold/Sell verdict for one ticker with composite score, risk level, target prices, stop-loss and bullish/bearish reasons."
+    },
+    {
+      "name": "scorecard",
+      "description": "Piotroski F-Score & Altman Z-Score. Audit-grade accounting scorecards for one ticker with every criterion's formula and pass/fail."
+    },
+    {
+      "name": "insights",
+      "description": "Fundamental & ownership insights. Categorized positive, negative and neutral impact cards plus shareholding breakdown (Promoter, FII, DII, Public) for one ticker."
+    },
+    {
+      "name": "events",
+      "description": "Corporate events & disclosures. Recent and upcoming corporate events for one ticker with 1-day and 5-day price reaction."
+    },
+    {
       "name": "search",
       "description": "Find a ticker. Search tickers by company name (\"tata motors\", \"apple\")."
     },
@@ -75,6 +91,10 @@
       "description": "Put/call ratio. Put/call ratio by open interest and volume for an underlying's expiry, with total call and put OI."
     },
     {
+      "name": "options_oi",
+      "description": "Open-interest analytics & build-up. Put/Call Ratio, Max Pain strike, top Call resistance and Put support OI walls, and institutional build-up classification."
+    },
+    {
       "name": "options_maxpain",
       "description": "Max pain. Max-pain strike for an underlying's expiry (where option writers lose least) and its distance from the spot."
     },
@@ -101,6 +121,18 @@
     {
       "name": "tax_estimate",
       "description": "Capital gains estimate. Estimated capital-gains tax for the user's portfolio: realized gains this tax year and unrealized gains by short/long term, with India's set-off rules and the ₹1.25 lakh LTCG exemption (or US/UK rules)."
+    },
+    {
+      "name": "tax_advance",
+      "description": "Indian advance tax schedule. Quarterly Indian advance tax schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Section 208/211 with Section 234C(1) capital-gains proviso protections."
+    },
+    {
+      "name": "harvest",
+      "description": "Tax-loss & LTCG exemption harvesting. Lot-level tax-loss harvesting candidates plus unused Section 112A ₹1.25L annual LTCG tax-gain harvesting capacity."
+    },
+    {
+      "name": "rebalance",
+      "description": "Portfolio rebalance plan. Rebalance plan for the user's portfolio against target weights or equal weight, with drift tolerance and inflow-only support."
     },
     {
       "name": "calendar",

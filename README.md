@@ -33,9 +33,10 @@ account, no browser tabs.
 </p>
 
 ```bash
-stockwise quote RELIANCE TCS            # Indian stocks are the default
-stockwise quote AAPL NVDA -m us         # US stocks
+stockwise RELIANCE                      # bare symbol → instant quote + scorecard + verdict
+stockwise quote AAPL NVDA -m us         # US stocks (also SBI → SBIN.NS, NIFTY → ^NSEI)
 stockwise deep HDFCBANK                 # everything about one stock
+stockwise verdict TCS --explain         # 6-pillar verdict with plain-English notes
 stockwise backtest INFY -s macd         # test a strategy, after STT and brokerage
 stockwise sip NIFTYBEES 5000 -p 5y      # what a ₹5,000/month SIP became (XIRR)
 ```
@@ -161,10 +162,10 @@ completions for you.
 
 | | Commands |
 |---|---|
-| **Start here** | `quote`, `deep`, `markets`, `dashboard`, `search`, `doctor` |
-| **Analysis** | `analyze`, `technical`, `history`, `chart`, `compare`, `risk`, `correlate`, `timeframes`, `returns`, `patterns`, `support`, `fibs`, `volume`, `gaps`, `stoploss`, `forecast` |
+| **Start here** | `quote`, `deep`, `verdict`, `score`, `markets`, `dashboard`, `search`, `doctor` |
+| **Analysis** | `analyze`, `events`, `insights`, `technical`, `history`, `chart`, `compare`, `risk`, `correlate`, `timeframes`, `returns`, `patterns`, `support`, `fibs`, `volume`, `gaps`, `stoploss`, `forecast` |
 | **Market** | `movers`, `sectors`, `heatmap`, `sentiment`, `news`, `rotation`, `sectorcmp`, `peers`, `insider`, `ipo` (open/upcoming board, allotment odds, listing and long-term verdicts), `earnings`, `surprise`, `matrix`, `picks`, `screen`, `dividends` |
-| **Funds & F&O** | `mf` (search, nav, history, sip, screen, overlap — with AMFI expense ratios), `options` (chain, pcr, maxpain, payoff, moves; NSE, BSE and US) |
+| **Funds & F&O** | `mf` (search, nav, history, sip, screen, overlap — with AMFI expense ratios), `options` (chain, oi, pcr, maxpain, payoff, moves; NSE, BSE and US) |
 | **Commodities & bonds** | `commodity` (spot, futures, etfs, sgb), `bonds` (yields, list, calc) |
 | **Strategies & bots** | `backtest`, `sip`, `whatif`, `intraday`, `longterm`, `daemon`, `sim`, `report` |
 | **Portfolio** | `portfolio`, `watch`, `alert`, `calendar`, `import`, `export`, `wealth`, `rebalance`, `harvest`, `tax`, `divcal`, `pcorr` |
@@ -178,11 +179,13 @@ has every option.
 ### Track a portfolio
 
 ```bash
-stockwise import kite ~/Downloads/holdings.csv   # also groww, upstox, cas; or: portfolio add TCS 10 3500 --date 2023-04-12
+stockwise import kite ~/Downloads/holdings.xlsx  # CSV or .xlsx from kite, groww, upstox, indmoney, cas
 stockwise portfolio                              # live P&L, XIRR + allocation
 stockwise portfolio sell TCS 5 3900              # FIFO sale, realized P&L kept for tax
 stockwise portfolio actions --apply              # splits, bonuses and dividends since you bought
+stockwise harvest                                # lot-level STCL/LTCL & Sec 112A ₹1.25L LTCG harvesting
 stockwise tax in                                 # LTCG/STCG per lot, set-off, realized vs unrealized
+stockwise tax advance --paid 25000               # quarterly advance tax schedule & Sec 234C interest
 stockwise tax export in --fy 2025-26 > cg.csv    # ITR Schedule CG / 112A CSV of your sales
 stockwise portfolio benchmark NIFTY -p 1y        # time-weighted return vs the index, alpha/beta, attribution
 stockwise --portfolio us portfolio add AAPL 3 190 -m us   # a second, named portfolio

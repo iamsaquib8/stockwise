@@ -30,6 +30,10 @@ pub(super) async fn run<D: DataSource>(
         "history" => history(src, a, m, budget).await,
         "technical" => technical(src, a, m).await,
         "risk" => risk(src, a, m).await,
+        "verdict" => verdict(src, a, m).await,
+        "scorecard" => scorecard(src, a, m).await,
+        "insights" => insights(src, a, m).await,
+        "events" => events(src, a, m).await,
         "search" => search(src, a).await,
         "markets" => Ok(json!({
             "indices": views::markets(src, m, a.bool("crypto"), a.bool("fx"), a.bool("global")).await?
@@ -42,6 +46,10 @@ pub(super) async fn run<D: DataSource>(
             Ok(chain_within(&chain, a.usize_or("strikes", 6), budget))
         }
         "options_pcr" => Ok(commands::pcr_json(&chain(a, m).await?)),
+        "options_oi" => Ok(commands::oi_json(
+            &chain(a, m).await?,
+            a.usize_or("top", 5),
+        )),
         "options_maxpain" => {
             let mut v = commands::maxpain_view(&chain(a, m).await?)?;
             centre_curve(&mut v, 8);
@@ -58,6 +66,9 @@ pub(super) async fn run<D: DataSource>(
         }
         "holdings_lots" => holdings_lots(src, a, m),
         "tax_estimate" => tax_estimate(src, a, m).await,
+        "tax_advance" => tax_advance(src, a),
+        "harvest" => harvest(src, m).await,
+        "rebalance" => rebalance(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
         "ipo_board" => ipo_board(src, a).await,
         "ipo_analyze" => ipo_analyze(src, a).await,
@@ -235,6 +246,52 @@ async fn risk(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     }
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     Ok(commands::risk_json(&resolved, cur, period, &closes))
+}
+
+async fn verdict(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let resolved = symbol(a, m)?;
+    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, 60).await?;
+    let cards = crate::insights::generate_rich_insights(&r);
+    let v = crate::verdict::generate_verdict(&r, &cards);
+    Ok(serde_json::to_value(v)?)
+}
+
+async fn scorecard(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let resolved = symbol(a, m)?;
+    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, 60).await?;
+    let report = crate::scorecard::generate_scorecard_report(&r);
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn insights(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let resolved = symbol(a, m)?;
+    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, 60).await?;
+    let cards = crate::insights::generate_rich_insights(&r);
+    Ok(json!({
+        "symbol": r.symbol,
+        "name": r.name,
+        "currency": r.currency,
+        "price": r.price(),
+        "shareholding": r.holdings,
+        "insights": cards,
+    }))
+}
+
+async fn events(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let resolved = symbol(a, m)?;
+    let days = a.i64("days").unwrap_or(90);
+    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, days).await?;
+    let evts = crate::events::build_events(&r);
+    let upcoming = crate::events::upcoming(&r);
+    let digest = crate::events::digest(&evts);
+    Ok(json!({
+        "symbol": r.symbol,
+        "name": r.name,
+        "days": days,
+        "digest": digest,
+        "upcoming": upcoming,
+        "events": evts,
+    }))
 }
 
 async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {
@@ -533,6 +590,31 @@ async fn tax_estimate(src: &impl DataSource, a: &Args, m: Market) -> Result<Valu
     let today = chrono::Local::now().date_naive();
     let report = commands::tax_report(country, &p, &val, today);
     Ok(commands::tax_json(country, &report, today))
+}
+
+fn tax_advance(src: &impl DataSource, a: &Args) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let schedule = commands::advance_tax_schedule(&p, a.str("fy"), a.f64("paid"))?;
+    Ok(serde_json::to_value(schedule)?)
+}
+
+async fn harvest(src: &impl DataSource, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let val = commands::tax_valuation(src, &p, m).await?;
+    let today = chrono::Local::now().date_naive();
+    let summary = commands::compute_harvest(&p, &val, m, today);
+    Ok(serde_json::to_value(summary)?)
+}
+
+async fn rebalance(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    if p.holdings.is_empty() {
+        let plan = crate::rebalance::RebalancePlan::empty(commands::market_currency(m));
+        return Ok(serde_json::to_value(plan)?);
+    }
+    let (plan, _) =
+        commands::rebalance_plan(src, &p, &[], a.f64("inflow"), a.f64("drift"), m).await?;
+    Ok(serde_json::to_value(plan)?)
 }
 
 async fn calendar(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {

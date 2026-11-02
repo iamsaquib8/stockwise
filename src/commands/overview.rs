@@ -117,14 +117,44 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     let client = YahooClient::new().await?;
     // Yahoo silently drops unknown symbols; name them instead.
     let views::QuoteSet { quotes, missing } = views::quotes(&client, &resolved).await?;
+    let suggestions = if !missing.is_empty() {
+        let mut s_list = Vec::new();
+        for m in &missing {
+            for (sym, name) in market::suggest_symbols(m, 3) {
+                let item = format!("{sym} ({name})");
+                if !s_list.contains(&item) {
+                    s_list.push(item);
+                }
+            }
+        }
+        if s_list.is_empty()
+            && missing.len() == 1
+            && let Ok(found) = client.search(&missing[0]).await
+        {
+            for q in found.into_iter().take(3) {
+                let Some(sym) = q.symbol else { continue };
+                let name = q.long_name.or(q.short_name).unwrap_or_default();
+                if name.is_empty() {
+                    s_list.push(sym);
+                } else {
+                    s_list.push(format!("{sym} ({name})"));
+                }
+            }
+        }
+        s_list
+    } else {
+        Vec::new()
+    };
     let missing_err = || {
-        anyhow::anyhow!(
-            "{}",
-            tf(
-                Msg::NoQuoteFor,
-                &[&missing.join(", "), &market::not_found_hint(market)]
-            )
-        )
+        let base = tf(
+            Msg::NoQuoteFor,
+            &[&missing.join(", "), &market::not_found_hint(market)],
+        );
+        if suggestions.is_empty() {
+            anyhow::anyhow!("{base}")
+        } else {
+            anyhow::anyhow!("{base}\n  Did you mean: {}", suggestions.join(", "))
+        }
     };
 
     if quotes.is_empty() {
@@ -230,12 +260,66 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             println!("\n  {}", tf(Msg::DataFrom, &[source]).dimmed());
         }
     }
+    if quotes.len() == 1
+        && let Some(sym) = quotes[0].symbol.as_deref()
+        && market::AssetClass::of(sym) == market::AssetClass::Stock
+    {
+        let bare = sym.strip_suffix(".NS").unwrap_or(sym);
+        println!();
+        print_hint(&format!(
+            "Next: stockwise verdict {bare} · stockwise insights {bare} · stockwise score {bare} · stockwise chart {bare}"
+        ));
+    }
     println!();
     if missing.is_empty() {
         Ok(())
     } else {
         Err(missing_err())
     }
+}
+
+/// Smart stock snapshot invoked when a user passes a bare symbol (`stockwise RELIANCE`).
+/// Displays the live quote followed by a compact 6-pillar Verdict & Technicals snapshot.
+pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Result<()> {
+    let resolved = market::resolve_symbol(symbol, market);
+    if !fmt.is_table() || market::AssetClass::of(&resolved) != market::AssetClass::Stock {
+        return cmd_quote(&[symbol.to_string()], market, fmt).await;
+    }
+    cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
+    if let Ok(client) = YahooClient::new().await
+        && let Ok(bundle) = crate::research::fetch(&client, &resolved, market, 30).await
+    {
+        let cards = crate::insights::generate_rich_insights(&bundle);
+        let v = crate::verdict::generate_verdict(&bundle, &cards);
+        let csym = market::currency_symbol(Some(v.currency.as_str()));
+        print_section("Quick Research Snapshot (6-Pillar Verdict)");
+        print_kv(
+            "Verdict",
+            &format!(
+                "{}  (Score: {:.0}/100 · Confidence: {:.0}%)",
+                v.action.badge(),
+                v.overall_score,
+                v.confidence,
+            ),
+        );
+        let (lo, hi) = v.entry_zone;
+        if lo > 0.0 && hi > 0.0 {
+            print_kv("Entry Zone", &format!("{csym}{lo:.2} – {csym}{hi:.2}"));
+        }
+        if v.stop_loss > 0.0 {
+            let tgt = v
+                .target_price
+                .map(|t| format!(" / Target: {}", format!("{csym}{t:.2}").green()))
+                .unwrap_or_default();
+            print_kv(
+                "Stop Loss",
+                &format!("{}{}", format!("{csym}{:.2}", v.stop_loss).red(), tgt),
+            );
+        }
+        println!("  {}", v.action.summary_tagline().dimmed());
+        println!();
+    }
+    Ok(())
 }
 
 /// `markets --csv` columns; the rows come from [`views::market_sections`].

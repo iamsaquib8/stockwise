@@ -298,7 +298,7 @@ pub struct Calendar {
 }
 
 /// Quarterly shareholding pattern (percent, 0–100). Indian stocks only.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Holding {
     pub date: NaiveDate,
     pub promoter: Option<f64>,

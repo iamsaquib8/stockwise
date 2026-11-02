@@ -7,7 +7,8 @@ use colored::Colorize;
 // Rich Insight Cards (INDmoney style + quantitative upgrade)
 // ───────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Impact {
     Positive,
     Negative,
@@ -32,7 +33,8 @@ impl Impact {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InsightCategory {
     Ownership,
     Growth,
@@ -61,7 +63,7 @@ impl InsightCategory {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct InsightCard {
     pub impact: Impact,
     pub category: InsightCategory,

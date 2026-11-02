@@ -52,6 +52,15 @@ pub fn parse_trade_date(raw: &str, month_first: bool) -> Option<NaiveDate> {
             return Some(d);
         }
     }
+    // Excel serial dates (e.g. 45366 for 2024-03-15) from .xlsx tradebooks.
+    if let Ok(serial) = s.parse::<f64>() {
+        let days = serial.floor() as i64;
+        if (30_000..=60_000).contains(&days)
+            && let Some(epoch) = NaiveDate::from_ymd_opt(1899, 12, 30)
+        {
+            return epoch.checked_add_signed(chrono::Duration::days(days));
+        }
+    }
     let parts: Vec<&str> = s.split(['/', '-', '.']).collect();
     if parts.len() != 3 || parts[2].len() != 4 {
         return None;

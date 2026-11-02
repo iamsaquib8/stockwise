@@ -8,7 +8,8 @@ use crate::insights::{Impact, InsightCard};
 use crate::research::Research;
 use colored::Colorize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     StrongBuy,
     Buy,
@@ -45,7 +46,7 @@ impl Action {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct PillarScore {
     pub name: &'static str,
     pub score: f64,  // 0 to 100
@@ -54,7 +55,7 @@ pub struct PillarScore {
     pub summary: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct DecisionVerdict {
     pub symbol: String,
     pub name: String,
@@ -616,6 +617,12 @@ fn score_bar(score: f64) -> String {
 
 /// Print the comprehensive Decision & Verdict card in the terminal
 pub fn print_verdict(v: &DecisionVerdict) {
+    print_verdict_with(v, false);
+}
+
+/// Print the Decision & Verdict card, optionally including a beginner-friendly
+/// `--explain` breakdown of the 6 pillars and execution rules.
+pub fn print_verdict_with(v: &DecisionVerdict, explain: bool) {
     let csym = if v.currency == "INR" { "₹" } else { "$" };
     let border = "═".repeat(64);
     let subline = "─".repeat(64);
@@ -714,6 +721,28 @@ pub fn print_verdict(v: &DecisionVerdict) {
 
     if let Some(cat) = &v.next_catalyst {
         println!("\n  {} Next Catalyst: {}", "◆".magenta().bold(), cat.bold());
+    }
+
+    if explain {
+        println!("\n  {}", "HOW TO READ THIS VERDICT (--explain)".bold().cyan());
+        println!("  {}", subline.dimmed());
+        println!(
+            "  • {} (0–100): Weighted composite across Valuation (20%), Growth (20%),",
+            "Overall Score".bold()
+        );
+        println!("    Profitability (20%), Balance Sheet (15%), Smart Money (15%), and Technicals (10%).");
+        println!(
+            "  • {}: Price range near support / moving averages where risk-reward is optimal.",
+            "Suggested Entry".bold()
+        );
+        println!(
+            "  • {}: Price level that invalidates the setup; exit if daily close breaks below.",
+            "Stop-Loss".bold()
+        );
+        println!(
+            "  • {}: Upside gain divided by stop-loss risk. Aim for ≥ 1 : 2.0 on swing trades.",
+            "Risk / Reward".bold()
+        );
     }
 
     println!("\n  {}\n", "Disclaimer: For informational & educational purposes only. Always manage your own portfolio risk.".dimmed().italic());

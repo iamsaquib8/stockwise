@@ -162,8 +162,7 @@ fn parse_stock_export(content: &str, layout: &StockLayout, market: Market) -> Re
         .collect();
     let Some((h, cols)) = find_header(&lines, &[&any_symbol, layout.qty, layout.avg]) else {
         bail!(
-            "Could not detect {} columns. Expected: {}. If you downloaded an .xlsx file, open it \
-             and save it as CSV first.",
+            "Could not detect {} CSV/Excel columns. Expected: {}.",
             layout.broker,
             layout.expected
         );
@@ -1095,5 +1094,12 @@ X AMC,1,P,X Fund,,INF000000001,1,2024-05-01,Purchase,1000,10,100,110,PURCHASE,\n
     fn pdf_input_explains_casparser() {
         let err = parse_cas("%PDF-1.7 ...").unwrap_err().to_string();
         assert!(err.contains("casparser"), "{err}");
+    }
+
+    #[test]
+    fn excel_serial_dates_parse_in_tradebooks() {
+        // 45366 in Excel's 1900 epoch (1899-12-30 + 45366) = 2024-03-15.
+        let d = pf::parse_trade_date("45366", false).unwrap();
+        assert_eq!(d.to_string(), "2024-03-15");
     }
 }

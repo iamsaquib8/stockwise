@@ -653,7 +653,25 @@ pub(crate) async fn load_portfolio_report(
     market: Market,
     base: Option<&str>,
 ) -> Result<PortfolioReport> {
-    let portfolio = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    load_portfolio_report_named(src, market, base, None).await
+}
+
+pub(crate) async fn load_portfolio_report_named(
+    src: &impl views::DataSource,
+    market: Market,
+    base: Option<&str>,
+    portfolio_name: Option<&str>,
+) -> Result<PortfolioReport> {
+    let portfolio = match portfolio_name {
+        None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
+        Some(name) => {
+            let norm = pf::normalize_name(Some(name))?;
+            match norm {
+                None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
+                Some(n) => Portfolio::load_named(Some(&n)).map_err(|e| e.context(views::LocalData))?,
+            }
+        }
+    };
     let symbols: Vec<String> = portfolio
         .holdings
         .iter()
@@ -1698,38 +1716,21 @@ pub fn cmd_portfolio_target_drift(percentage: f64) -> Result<()> {
     Ok(())
 }
 
-/// Rebalance portfolio towards target allocations or equal weight.
-///
-/// Supports:
-/// - Target weights saved in portfolio or passed on CLI (`targets`)
-/// - Inflow-only mode (`--inflow <cash>`) to invest fresh capital without selling
-/// - Drift tolerance band (`--drift <pct>`) to suppress minor churn
-/// - Machine-readable JSON output (`--json`)
-pub async fn cmd_rebalance(
+/// Compute a rebalance plan using `src` (either live Yahoo or test fixtures).
+pub(crate) async fn rebalance_plan(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
     targets: &[(String, f64)],
     inflow: Option<f64>,
     drift: Option<f64>,
-    json: bool,
     market: Market,
-) -> Result<()> {
-    let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() {
-        if json {
-            let plan = crate::rebalance::RebalancePlan::empty(market_currency(market));
-            println!("{}", serde_json::to_string_pretty(&plan)?);
-        } else {
-            println!("\n  {}", "Portfolio is empty.".dimmed());
-        }
-        return Ok(());
-    }
-
+) -> Result<(crate::rebalance::RebalancePlan, Valuation)> {
     let symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let client = YahooClient::new().await?;
-    let val = value_holdings(&client, &symbols, market, None).await?;
+    let val = value_holdings(src, &symbols, market, None).await?;
 
     let mut holding_inputs = Vec::with_capacity(portfolio.holdings.len());
     for h in &portfolio.holdings {
@@ -1766,7 +1767,6 @@ pub async fn cmd_rebalance(
         });
     }
 
-    // Build configured targets map
     let mut configured_targets = std::collections::BTreeMap::new();
     if !targets.is_empty() {
         for (k, pct) in targets {
@@ -1784,6 +1784,37 @@ pub async fn cmd_rebalance(
         drift_tolerance,
         val.base(),
     )?;
+    Ok((plan, val))
+}
+
+/// Rebalance portfolio towards target allocations or equal weight.
+///
+/// Supports:
+/// - Target weights saved in portfolio or passed on CLI (`targets`)
+/// - Inflow-only mode (`--inflow <cash>`) to invest fresh capital without selling
+/// - Drift tolerance band (`--drift <pct>`) to suppress minor churn
+/// - Machine-readable JSON output (`--json`)
+pub async fn cmd_rebalance(
+    targets: &[(String, f64)],
+    inflow: Option<f64>,
+    drift: Option<f64>,
+    json: bool,
+    market: Market,
+) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.holdings.is_empty() {
+        if json {
+            let plan = crate::rebalance::RebalancePlan::empty(market_currency(market));
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            println!("\n  {}", "Portfolio is empty.".dimmed());
+        }
+        return Ok(());
+    }
+
+    let client = YahooClient::new().await?;
+    let (plan, val) = rebalance_plan(&client, &portfolio, targets, inflow, drift, market).await?;
+    let drift_tolerance = plan.drift_tolerance;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&plan)?);

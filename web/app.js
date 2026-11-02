@@ -221,6 +221,8 @@
     symbol: null,
     period: DEFAULT_PERIOD,
     base: '',
+    portfolioName: '',
+    portfolios: null,
     data: { indices: null, watchlist: null, portfolio: null, alerts: null },
     errors: { indices: null, watchlist: null, portfolio: null, alerts: null },
     sort: { key: null, dir: -1 },
@@ -228,6 +230,10 @@
     quote: null,
     chartError: null,
     chartSeq: 0,
+    research: null,
+    researchError: null,
+    researchSeq: 0,
+    researchTab: 'verdict',
     timer: null,
     refreshing: false,
     needsToken: false,
@@ -293,9 +299,11 @@
     for (const k of Object.keys(state.data)) state.data[k] = null;
     state.hist = null;
     state.quote = null;
+    state.research = null;
     renderAll();
     renderQuote();
     renderChart();
+    renderResearch();
     openLogin('');
   }
 
@@ -314,7 +322,30 @@
   }
 
   function portfolioPath() {
-    return '/api/portfolio' + (state.base ? '?' + query({ base: state.base }) : '');
+    const params = {};
+    if (state.base) params.base = state.base;
+    if (state.portfolioName) params.portfolio = state.portfolioName;
+    const qs = query(params);
+    return '/api/portfolio' + (qs ? '?' + qs : '');
+  }
+
+  async function loadPortfolios() {
+    try {
+      const res = await api('/api/portfolios');
+      if (res && Array.isArray(res.portfolios)) {
+        state.portfolios = res.portfolios;
+        const wrap = $('portfolio-pick-wrap');
+        const sel = $('portfolio-pick');
+        if (wrap && sel) {
+          wrap.hidden = res.portfolios.length <= 1;
+          sel.replaceChildren(...res.portfolios.map((name) =>
+            el('option', { value: name === 'default' ? '' : name, text: name })));
+          sel.value = state.portfolioName;
+        }
+      }
+    } catch {
+      // Optional endpoint; ignore if unavailable.
+    }
   }
 
   async function refreshAll(withChart) {
@@ -327,6 +358,7 @@
       loadSection('watchlist', '/api/watchlist'),
       loadSection('portfolio', portfolioPath()),
       loadSection('alerts', '/api/alerts'),
+      loadPortfolios(),
     ]);
     state.refreshing = false;
     $('refresh').removeAttribute('aria-busy');
@@ -352,6 +384,7 @@
     // Intraday charts move; longer ones are reloaded only when asked.
     const intraday = state.period === '1d' || state.period === '5d';
     await loadChart(withChart || intraday || !state.hist);
+    if (withChart || !state.research) loadResearch();
     schedule();
   }
 
@@ -387,9 +420,12 @@
     state.symbol = symbol;
     state.hist = null;
     state.quote = null;
+    state.research = null;
+    state.researchError = null;
     writeHash();
     renderAll();
     loadChart(true);
+    loadResearch();
     if (scroll) {
       const card = $('chart-card');
       const r = card.getBoundingClientRect();
@@ -938,6 +974,277 @@
     }
   }
 
+  // ── Research Workbench ──
+
+  const VERDICT_LABELS = {
+    strong_buy: ['▲▲ STRONG BUY', 'up'],
+    buy: ['▲ BUY / ACCUMULATE', 'up'],
+    hold: ['● HOLD / ACCUMULATE ON DIPS', ''],
+    reduce: ['▼ REDUCE / TAKE PROFIT', 'down'],
+    strong_sell: ['▼▼ SELL / AVOID', 'down'],
+  };
+
+  async function loadResearch() {
+    const symbol = state.symbol;
+    const panel = $('research-panel');
+    if (!panel) return;
+    if (!symbol || symbol.startsWith('^')) {
+      state.research = null;
+      state.researchError = null;
+      renderResearch();
+      return;
+    }
+    const seq = ++state.researchSeq;
+    panel.classList.add('stale');
+    try {
+      const data = await api('/api/research/' + encodeURIComponent(symbol) + '?' + query(EXACT));
+      if (seq !== state.researchSeq) return;
+      state.research = data;
+      state.researchError = null;
+    } catch (e) {
+      if (seq !== state.researchSeq) return;
+      if (e instanceof AuthError) {
+        if (getToken()) setToken(null);
+        openLogin(e.message);
+        return;
+      }
+      state.research = null;
+      state.researchError = e.message || 'Could not load research';
+    }
+    panel.classList.remove('stale');
+    renderResearch();
+  }
+
+  function renderVerdictTab(r) {
+    const v = r.verdict || {};
+    const cur = r.currency || v.currency;
+    const [badgeText, badgeCls] = VERDICT_LABELS[v.action] || [String(v.action || DASH), ''];
+    const wrap = el('div', { class: 'research-body' });
+
+    const rrText = isNum(v.risk_reward) ? '1 : ' + v.risk_reward.toFixed(1) : DASH;
+    const targetText = isNum(v.target_price)
+      ? fmtMoney(v.target_price, cur) + (isNum(v.upside_pct) ? ' (' + fmtPct(v.upside_pct, 1) + ')' : '')
+      : DASH;
+    const entryText = Array.isArray(v.entry_zone) && isNum(v.entry_zone[0]) && isNum(v.entry_zone[1])
+      ? fmtMoney(v.entry_zone[0], cur) + ' – ' + fmtMoney(v.entry_zone[1], cur)
+      : DASH;
+    const stopText = isNum(v.stop_loss)
+      ? fmtMoney(v.stop_loss, cur) + (isNum(v.risk_pct) ? ' (-' + v.risk_pct.toFixed(1) + '%)' : '')
+      : DASH;
+
+    wrap.append(el('div', { class: 'stats' }, [
+      stat('Action', badgeText, null,
+        el('div', { class: 'delta ' + badgeCls, text: 'Confidence ' + (isNum(v.confidence) ? v.confidence.toFixed(0) + '%' : DASH) })),
+      stat('Composite Score', isNum(v.overall_score) ? v.overall_score.toFixed(0) + ' / 100' : DASH, '6-pillar weighted score'),
+      stat('12M Fair Value', targetText, 'Implied upside/downside'),
+      stat('Entry Zone', entryText, 'Recommended accumulation range'),
+      stat('Stop Loss', stopText, 'Downside risk guardrail'),
+      stat('Risk / Reward', rrText, 'Upside vs stop-loss distance'),
+    ]));
+
+    const pillars = v.pillars || [];
+    if (pillars.length) {
+      wrap.append(el('div', { class: 'pillars' }, pillars.map((p) => {
+        const sc = isNum(p.score) ? p.score : 0;
+        const tone = sc >= 65 ? 'up' : sc < 45 ? 'down' : '';
+        const fill = el('div', { class: 'pillar-fill ' + tone });
+        fill.style.width = Math.max(0, Math.min(100, sc)).toFixed(0) + '%';
+        return el('div', { class: 'pillar-card' }, [
+          el('div', { class: 'pillar-top' }, [
+            el('strong', { text: p.name }),
+            el('span', { class: 'badge ' + tone, text: p.grade + ' · ' + sc.toFixed(0) + '/100' }),
+          ]),
+          el('div', { class: 'pillar-bar' }, [fill]),
+          el('p', { class: 'small muted', text: p.summary || '' }),
+        ]);
+      })));
+    }
+
+    const bulls = v.bull_points || [];
+    const bears = v.bear_points || [];
+    if (bulls.length || bears.length) {
+      wrap.append(el('div', { class: 'thesis-grid' }, [
+        el('div', { class: 'thesis-col' }, [
+          el('h3', { class: 'small up', text: '▲ Bullish Catalysts' }),
+          bulls.length
+            ? el('ul', { class: 'thesis-list' }, bulls.map((b) => el('li', { text: b })))
+            : el('p', { class: 'small muted', text: 'No major bullish catalysts flagged.' }),
+        ]),
+        el('div', { class: 'thesis-col' }, [
+          el('h3', { class: 'small down', text: '▼ Key Risks & Watchpoints' }),
+          bears.length
+            ? el('ul', { class: 'thesis-list' }, bears.map((b) => el('li', { text: b })))
+            : el('p', { class: 'small muted', text: 'No major structural red flags.' }),
+        ]),
+      ]));
+    }
+
+    if (v.short_term || v.medium_term || v.long_term) {
+      wrap.append(el('div', { class: 'horizons small' }, [
+        v.short_term ? el('p', {}, [el('strong', { text: 'Short-term (1–4w): ' }), v.short_term]) : null,
+        v.medium_term ? el('p', {}, [el('strong', { text: 'Medium-term (1–6m): ' }), v.medium_term]) : null,
+        v.long_term ? el('p', {}, [el('strong', { text: 'Long-term (1–3y+): ' }), v.long_term]) : null,
+      ]));
+    }
+    return wrap;
+  }
+
+  function renderScorecardTab(r) {
+    const sc = r.scorecard || {};
+    const pio = sc.piotroski || {};
+    const alt = sc.altman || {};
+    const wrap = el('div', { class: 'research-body' });
+
+    const zVal = isNum(alt.z_score) ? alt.z_score.toFixed(2) : (isNum(alt.z_double_prime) ? alt.z_double_prime.toFixed(2) + " (Z'')" : DASH);
+    wrap.append(el('div', { class: 'stats' }, [
+      stat('Piotroski F-Score', (pio.score != null ? pio.score : DASH) + ' / ' + (pio.max_score || 9), pio.rating_label || '',
+        el('div', { class: 'delta ' + (pio.score >= 7 ? 'up' : pio.score <= 3 ? 'down' : ''), text: pio.rating_label || '' })),
+      stat('Profitability', (pio.profitability_score != null ? pio.profitability_score : DASH) + ' / 4', 'ROA, OCF, ΔROA, Accruals'),
+      stat('Leverage & Liquidity', (pio.leverage_score != null ? pio.leverage_score : DASH) + ' / 3', 'ΔLeverage, ΔCurrent Ratio, Dilution'),
+      stat('Operating Efficiency', (pio.efficiency_score != null ? pio.efficiency_score : DASH) + ' / 2', 'ΔGross Margin, ΔAsset Turnover'),
+      stat('Altman Z-Score', zVal, alt.formula_str || '',
+        el('div', { class: 'delta', text: alt.zone_label || (alt.is_financial ? 'Financial sector' : 'N/A') })),
+    ]));
+
+    const criteria = pio.criteria || [];
+    if (criteria.length) {
+      wrap.append(el('div', { class: 'scroll' }, [el('table', {}, [
+        el('caption', { class: 'sr-only', text: 'Piotroski 9-point F-score criteria breakdown' }),
+        el('thead', {}, [el('tr', {}, [
+          el('th', { scope: 'col', text: '#' }),
+          el('th', { scope: 'col', text: 'Category' }),
+          el('th', { scope: 'col', text: 'Criterion' }),
+          el('th', { scope: 'col', class: 'num', text: 'Metric' }),
+          el('th', { scope: 'col', text: 'Result' }),
+          el('th', { scope: 'col', class: 'opt', text: 'Audit Explanation' }),
+        ])]),
+        el('tbody', {}, criteria.map((c) => el('tr', {}, [
+          el('td', { text: c.id }),
+          el('td', { class: 'muted', text: c.category }),
+          el('th', { scope: 'row', title: c.formula || '', text: c.name }),
+          el('td', { class: 'num', text: c.formatted_value || DASH }),
+          el('td', {}, [el('span', { class: 'badge ' + (c.passed ? 'triggered' : 'no_price'), text: c.passed ? 'PASS (+1)' : 'FAIL (0)' })]),
+          el('td', { class: 'small muted opt', text: c.explanation || '' }),
+        ]))),
+      ])]));
+    }
+    if (alt.note) {
+      wrap.append(el('p', { class: 'note-line', text: alt.note }));
+    }
+    return wrap;
+  }
+
+  function renderInsightsTab(r) {
+    const cards = r.insights || [];
+    const sh = r.shareholding || [];
+    const wrap = el('div', { class: 'research-body' });
+
+    if (sh.length) {
+      const latest = sh[sh.length - 1];
+      wrap.append(el('div', { class: 'stats' }, [
+        stat('Shareholding Quarter', latest.date || DASH, 'Latest NSE pattern'),
+        stat('Promoter', isNum(latest.promoter) ? latest.promoter.toFixed(2) + '%' : DASH),
+        stat('FII / FPI', isNum(latest.fii) ? latest.fii.toFixed(2) + '%' : DASH),
+        stat('DII', isNum(latest.dii) ? latest.dii.toFixed(2) + '%' : DASH),
+        stat('Mutual Funds', isNum(latest.mf) ? latest.mf.toFixed(2) + '%' : DASH),
+        stat('Retail / Public', isNum(latest.retail) ? latest.retail.toFixed(2) + '%' : DASH),
+      ]));
+    }
+
+    if (!cards.length) {
+      wrap.append(el('p', { class: 'empty', text: 'No structured insights available for ' + r.symbol + '.' }));
+      return wrap;
+    }
+
+    wrap.append(el('div', { class: 'pillars' }, cards.map((c) => {
+      const tone = c.impact === 'positive' ? 'up' : c.impact === 'negative' ? 'down' : '';
+      const icon = c.impact === 'positive' ? '▲ ' : c.impact === 'negative' ? '▼ ' : '● ';
+      return el('div', { class: 'pillar-card' }, [
+        el('div', { class: 'pillar-top' }, [
+          el('strong', { class: tone, text: icon + c.title }),
+          c.metric ? el('span', { class: 'badge', text: c.metric }) : null,
+        ]),
+        el('p', { class: 'small muted', text: c.description || '' }),
+      ]);
+    })));
+    return wrap;
+  }
+
+  function renderEventsTab(r) {
+    const evts = r.events || [];
+    const upcoming = r.upcoming || [];
+    const digest = r.digest || {};
+    const wrap = el('div', { class: 'research-body' });
+
+    if (upcoming.length || isNum(digest.positive)) {
+      wrap.append(el('div', { class: 'stats' }, [
+        stat('Positive Events', String(digest.positive || 0)),
+        stat('Neutral Events', String(digest.neutral || 0)),
+        stat('Negative Events', String(digest.negative || 0)),
+        upcoming.length ? stat('Next Catalyst', upcoming[0].label || DASH) : null,
+      ]));
+    }
+
+    if (!evts.length) {
+      wrap.append(el('p', { class: 'empty', text: 'No corporate events or filings in the lookback window for ' + r.symbol + '.' }));
+      return wrap;
+    }
+
+    wrap.append(el('ul', { class: 'alerts' }, evts.slice(0, 12).map((e) => {
+      const d = e.ts ? new Date(e.ts * 1000).toISOString().slice(0, 10) : '';
+      const tone = e.sentiment > 0.15 ? 'up' : e.sentiment < -0.15 ? 'down' : '';
+      const rx = e.reaction && isNum(e.reaction.stock)
+        ? ' · reaction ' + fmtPct(e.reaction.stock * 100, 1)
+        : '';
+      return el('li', {}, [
+        el('div', {}, [
+          el('strong', { class: tone, text: e.headline }),
+          el('div', { class: 'cond', text: [d, e.official ? 'Official Filing' : (e.publishers || [])[0], (e.figures || []).join(', ')].filter(Boolean).join(' · ') + rx }),
+        ]),
+        el('span', { class: 'badge', text: String(e.kind || 'news').replace(/_/g, ' ') }),
+      ]);
+    })));
+    return wrap;
+  }
+
+  function renderResearch() {
+    const panel = $('research-panel');
+    if (!panel) return;
+    const tabs = $('research-tabs');
+    if (tabs) {
+      tabs.querySelectorAll('[role="tab"]').forEach((b) => {
+        const active = b.getAttribute('data-tab') === state.researchTab;
+        b.setAttribute('aria-selected', String(active));
+      });
+    }
+    panel.setAttribute('aria-labelledby', 'tab-' + state.researchTab);
+
+    if (!state.symbol || state.symbol.startsWith('^')) {
+      $('research-title').textContent = 'Research Workbench';
+      $('research-sub').textContent = '6-pillar verdict, Piotroski & Altman scorecards, insights and corporate events';
+      panel.replaceChildren(el('p', { class: 'empty', text: 'Select a company symbol from the watchlist, portfolio or search to inspect its research workbench.' }));
+      return;
+    }
+
+    $('research-title').textContent = 'Research Workbench — ' + state.symbol;
+    if (state.researchError) {
+      panel.replaceChildren(el('p', { class: 'empty error', text: 'Could not load research: ' + state.researchError }));
+      return;
+    }
+    if (!state.research) {
+      panel.replaceChildren(el('p', { class: 'empty', text: 'Loading research for ' + state.symbol + '…' }));
+      return;
+    }
+    const r = state.research;
+    const subParts = [r.name, r.sector, r.industry].filter(Boolean);
+    if (subParts.length) $('research-sub').textContent = subParts.join(' · ');
+
+    if (state.researchTab === 'scorecard') panel.replaceChildren(renderScorecardTab(r));
+    else if (state.researchTab === 'insights') panel.replaceChildren(renderInsightsTab(r));
+    else if (state.researchTab === 'events') panel.replaceChildren(renderEventsTab(r));
+    else panel.replaceChildren(renderVerdictTab(r));
+  }
+
   // ── Search ──
 
   const search = { seq: 0, timer: null, results: [], active: -1, pending: null };
@@ -1068,6 +1375,60 @@
       }
       renderPortfolio();
     });
+    const pfPick = $('portfolio-pick');
+    if (pfPick) {
+      pfPick.addEventListener('change', async (ev) => {
+        state.portfolioName = ev.target.value;
+        try {
+          await loadSection('portfolio', portfolioPath());
+        } catch (e) {
+          if (e instanceof AuthError) openLogin(e.message);
+        }
+        renderPortfolio();
+      });
+    }
+    const rTabs = $('research-tabs');
+    if (rTabs) {
+      rTabs.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-tab]');
+        if (!btn) return;
+        state.researchTab = btn.getAttribute('data-tab');
+        renderResearch();
+      });
+      rTabs.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+        const btns = Array.from(rTabs.querySelectorAll('button[data-tab]'));
+        const idx = btns.findIndex((b) => b.getAttribute('data-tab') === state.researchTab);
+        if (idx < 0) return;
+        ev.preventDefault();
+        const next = btns[(idx + (ev.key === 'ArrowRight' ? 1 : btns.length - 1)) % btns.length];
+        state.researchTab = next.getAttribute('data-tab');
+        next.focus();
+        renderResearch();
+      });
+    }
+    document.addEventListener('keydown', (ev) => {
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      const tag = (ev.target && ev.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || ($('login') && $('login').open)) return;
+      if (ev.key === '/') {
+        ev.preventDefault();
+        $('search').focus();
+        $('search').select();
+      } else if (ev.key === 'r' || ev.key === 'R') {
+        ev.preventDefault();
+        if (!state.needsToken) refreshAll(true);
+      } else if (ev.key >= '1' && ev.key <= '8') {
+        const entry = PERIODS[Number(ev.key) - 1];
+        if (entry && state.period !== entry[0]) {
+          state.period = entry[0];
+          state.hist = null;
+          writeHash();
+          buildPeriods();
+          loadChart(true);
+        }
+      }
+    });
     for (const id of ['indices', 'watchlist', 'portfolio', 'alerts']) $(id).addEventListener('click', onSymbolClick);
 
     const chart = $('chart');
@@ -1099,14 +1460,17 @@
       if (state.symbol + state.period !== before) {
         buildPeriods();
         state.hist = null;
+        state.research = null;
         renderAll();
         loadChart(true);
+        loadResearch();
       }
     });
 
     renderAll();
     renderQuote();
     renderChart();
+    renderResearch();
     refreshAll(true);
   }
 

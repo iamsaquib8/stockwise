@@ -224,8 +224,10 @@ pub fn route(symbol: &str, market: Market) -> Route {
     let nse = match upper.as_str() {
         "^NSEI" | "NIFTY50" | "NIFTY 50" => "NIFTY".to_string(),
         "^NSEBANK" | "BANKNIFTY" | "NIFTYBANK" | "NIFTY BANK" => "BANKNIFTY".to_string(),
-        s if s.ends_with(".NS") => s.trim_end_matches(".NS").to_string(),
-        s if !s.contains(['.', '^', '=']) => s.to_string(),
+        s if s.ends_with(".NS") => {
+            market::normalize_india_ticker(s.trim_end_matches(".NS")).to_string()
+        }
+        s if !s.contains(['.', '^', '=']) => market::normalize_india_ticker(s).to_string(),
         _ => return Route::Yahoo(market::resolve_symbol(&upper, market)),
     };
     let index = NSE_INDICES.contains(&nse.as_str());

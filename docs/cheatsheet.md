@@ -12,7 +12,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 
 | Do this | Command |
 |---|---|
-| Quote Indian stocks | `stockwise quote RELIANCE TCS` |
+| Quote Indian stocks | `stockwise quote RELIANCE TCS` (or bare `stockwise RELIANCE`) |
 | Quote US stocks | `stockwise quote AAPL NVDA -m us` |
 | Everything about one stock | `stockwise deep HDFCBANK` |
 | Indian and US indices | `stockwise markets` |
@@ -29,11 +29,11 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Fundamentals in plain English | `stockwise analyze INFY` |
 | Key events & filings timeline | `stockwise events LT` |
 | INDmoney-style impact cards | `stockwise insights LT` |
-| Actionable Buy/Sell verdict | `stockwise verdict LT` |
-| Piotroski F-score & Altman Z-score | `stockwise score INFY` · `stockwise scorecard TCS --json` |
+| Actionable Buy/Sell verdict | `stockwise verdict LT` · `stockwise verdict LT --explain` |
+| Piotroski F-score & Altman Z-score | `stockwise score INFY --explain` · `stockwise scorecard TCS --json` |
 | Open and upcoming IPOs | `stockwise ipo` |
 | One IPO: verdict and allotment odds | `stockwise ipo BCSSL --capital 2.5L` |
-| RSI, MACD, Bollinger Bands | `stockwise technical TCS -p 6mo` |
+| RSI, MACD, Bollinger Bands | `stockwise technical TCS -p 6mo --explain` |
 | Price chart with volume | `stockwise history AAPL -m us -p 1y` |
 | Compare stocks | `stockwise compare TCS INFY WIPRO` |
 | Volatility, Sharpe, drawdown | `stockwise risk HDFCBANK` |
@@ -65,12 +65,13 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Sell (oldest lots first) | `stockwise portfolio sell TCS 5 3900` |
 | Holdings, P&L and XIRR | `stockwise portfolio` |
 | Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
-| Import from your broker | `stockwise import kite holdings.csv` (also `groww`, `upstox`, `indmoney`, `cas`) |
+| Import from your broker | `stockwise import kite holdings.xlsx` (CSV or `.xlsx`; also `groww`, `upstox`, `indmoney`, `cas`) |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |
 | Splits, bonuses, dividends | `stockwise portfolio actions --apply` |
 | Set target allocation | `stockwise portfolio target set TCS 25` · `stockwise portfolio target show` |
 | Inflow rebalance (buy-only) | `stockwise rebalance --inflow 50000` (buy underweight without selling) |
 | Rebalance with drift band | `stockwise rebalance --drift 2.0` |
+| Tax-loss & LTCG exemption harvest | `stockwise harvest` · `stockwise harvest --json` |
 | Capital-gains estimate | `stockwise tax in` |
 | ITR Schedule CG CSV | `stockwise tax export in --out cg.csv` |
 | Advance tax schedule & 234C estimator | `stockwise tax advance` · `stockwise tax advance --paid 25000` |

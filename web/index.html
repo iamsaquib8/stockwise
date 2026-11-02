@@ -16,12 +16,12 @@
 <header class="top">
   <div class="brand">
     <img src="/assets/favicon.svg" alt="" width="24" height="24">
-    <span>StockWise</span>
+    <h1 class="brand-title">StockWise</h1>
     <span class="tag" title="This page cannot place orders or change your data">read-only</span>
   </div>
   <form id="search-form" class="search" role="search" autocomplete="off" method="dialog">
     <label for="search" class="sr-only">Search a company or ticker</label>
-    <input id="search" type="search" placeholder="Search a company or ticker" maxlength="100"
+    <input id="search" type="search" placeholder="Search a company or ticker (press /)" maxlength="100"
            spellcheck="false" autocapitalize="off" role="combobox" aria-autocomplete="list"
            aria-expanded="false" aria-controls="search-results">
     <ul id="search-results" class="search-results" role="listbox" aria-label="Search results" hidden></ul>
@@ -62,16 +62,41 @@
     <div id="watchlist" aria-busy="true"></div>
   </section>
 
+  <section id="research-card" class="card full" aria-labelledby="research-title">
+    <div class="card-head">
+      <div>
+        <h2 id="research-title">Research Workbench</h2>
+        <p id="research-sub" class="muted small">6-pillar verdict, Piotroski &amp; Altman scorecards, insights and corporate events</p>
+      </div>
+      <div id="research-tabs" class="tabs" role="tablist" aria-label="Research views">
+        <button id="tab-verdict" type="button" role="tab" data-tab="verdict" aria-selected="true" aria-controls="research-panel">Verdict</button>
+        <button id="tab-scorecard" type="button" role="tab" data-tab="scorecard" aria-selected="false" aria-controls="research-panel">Scorecards</button>
+        <button id="tab-insights" type="button" role="tab" data-tab="insights" aria-selected="false" aria-controls="research-panel">Insights</button>
+        <button id="tab-events" type="button" role="tab" data-tab="events" aria-selected="false" aria-controls="research-panel">Events</button>
+      </div>
+    </div>
+    <div id="research-panel" role="tabpanel" aria-labelledby="tab-verdict" aria-live="polite">
+      <p class="empty">Select an equity symbol to load its 6-pillar verdict, accounting scorecards, insights and corporate events.</p>
+    </div>
+  </section>
+
   <section class="card wide" aria-labelledby="portfolio-title">
     <div class="card-head">
       <h2 id="portfolio-title">Portfolio</h2>
-      <label class="base small">Totals in
-        <select id="base">
-          <option value="">holdings' currency</option>
-          <option value="inr">INR</option>
-          <option value="usd">USD</option>
-        </select>
-      </label>
+      <div class="card-controls">
+        <label id="portfolio-pick-wrap" class="base small" hidden>Book
+          <select id="portfolio-pick">
+            <option value="">default</option>
+          </select>
+        </label>
+        <label class="base small">Totals in
+          <select id="base">
+            <option value="">holdings' currency</option>
+            <option value="inr">INR</option>
+            <option value="usd">USD</option>
+          </select>
+        </label>
+      </div>
     </div>
     <div id="portfolio" aria-busy="true"></div>
   </section>
@@ -84,6 +109,7 @@
 
 <footer class="foot muted small">
   <p>Prices from Yahoo Finance, refreshed every 30 seconds while this tab is visible; they may be delayed.
+  Shortcuts: press <code>/</code> to search, <code>1</code>–<code>8</code> for chart periods, <code>r</code> to refresh.
   Read-only: nothing on this page trades or changes your data. Not investment advice.</p>
 </footer>
 
