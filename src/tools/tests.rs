@@ -104,6 +104,14 @@ fn tool_names_are_unique_and_valid() {
         "goal_education",
         "alerts_list",
         "watchlist",
+        "verdict",
+        "scorecard",
+        "insights",
+        "events",
+        "options_oi",
+        "tax_advance",
+        "harvest",
+        "rebalance",
     ] {
         assert!(names.contains(&wanted), "missing tool {wanted}");
     }
@@ -389,6 +397,25 @@ async fn portfolio_tools_never_value_missing_prices() {
     assert!(tax["if_sold_today"]["short_term_gains"].as_f64().unwrap() > 0.0);
     assert_eq!(tax["unpriced"], json!(["DELISTED.NS"]));
     assert!(tax["ltcg_exemption_left"].is_number());
+
+    let adv = data("tax_advance", json!({"paid": 5000})).await;
+    assert!(adv["quarters"].as_array().unwrap().len() == 4);
+    assert_eq!(adv["total_paid"], 5000.0);
+
+    let harv = data("harvest", json!({})).await;
+    assert_eq!(harv["country"], "in");
+    assert_eq!(harv["unpriced"], json!(["DELISTED.NS"]));
+
+    // Rebalance on a portfolio without unpriced holdings succeeds and computes weights.
+    let mut f = Fixture::default();
+    f.portfolio.remove("DELISTED.NS");
+    let c = ToolContext::new(LongCharts(f), Market::In);
+    let reb = c
+        .call("rebalance", &json!({"inflow": 10000}))
+        .await
+        .unwrap();
+    assert_eq!(reb["data"]["inflow"], 10000.0);
+    assert_eq!(reb["data"]["items"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]

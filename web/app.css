@@ -209,6 +209,12 @@ button.link:hover {
   font-size: 1.1rem;
 }
 
+.brand-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
 .tag {
   font-size: 0.75rem;
   font-weight: 600;
@@ -825,3 +831,105 @@ dialog .actions {
     border: 1px solid CanvasText;
   }
 }
+
+/* ── Research Workbench & Controls ── */
+
+.card.full {
+  grid-column: 1 / -1;
+}
+
+.card-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tabs button[aria-selected="true"] {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.pillars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.pillar-card {
+  padding: 12px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.pillar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pillar-bar {
+  height: 6px;
+  background: var(--grid);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.pillar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.pillar-fill.up {
+  background: var(--up);
+}
+
+.pillar-fill.down {
+  background: var(--down);
+}
+
+.thesis-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.thesis-col h3 {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.thesis-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.9rem;
+  color: var(--text-2);
+}
+
+.thesis-list li {
+  margin-bottom: 4px;
+}
+
+.horizons {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--grid);
+  color: var(--text-2);
+}
+

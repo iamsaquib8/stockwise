@@ -249,6 +249,60 @@ pub fn read_first_sheet(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
     Ok(sheet_rows(&xml, &shared))
 }
 
+/// Every worksheet in the `.xlsx` workbook, in central-directory order.
+pub fn read_all_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>> {
+    let entries = central_directory(bytes)?;
+    let shared = match entries.iter().find(|e| e.name == "xl/sharedStrings.xml") {
+        Some(e) => shared_strings(&String::from_utf8_lossy(&extract(bytes, e)?)),
+        None => Vec::new(),
+    };
+    let mut sheets = Vec::new();
+    for e in entries
+        .iter()
+        .filter(|e| e.name.starts_with("xl/worksheets/") && e.name.ends_with(".xml"))
+    {
+        let xml = String::from_utf8_lossy(&extract(bytes, e)?).into_owned();
+        let rows = sheet_rows(&xml, &shared);
+        if !rows.is_empty() {
+            sheets.push(rows);
+        }
+    }
+    if sheets.is_empty() {
+        bail!("spreadsheet has no worksheet");
+    }
+    Ok(sheets)
+}
+
+/// Convert an `.xlsx` workbook's worksheets into RFC-4180 CSV lines so that
+/// every broker CSV parser (`groww`, `upstox`, `kite`, `indmoney`, `csv`)
+/// can import `.xlsx` files directly without manual conversion.
+pub fn workbook_to_csv(bytes: &[u8]) -> Result<String> {
+    let sheets = read_all_sheets(bytes)?;
+    let mut out = String::new();
+    for sheet in sheets {
+        for row in sheet {
+            if row.iter().all(|c| c.trim().is_empty()) {
+                continue;
+            }
+            for (i, cell) in row.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let clean = cell.replace(['\r', '\n'], " ");
+                if clean.contains(',') || clean.contains('"') {
+                    out.push('"');
+                    out.push_str(&clean.replace('"', "\"\""));
+                    out.push('"');
+                } else {
+                    out.push_str(&clean);
+                }
+            }
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +347,13 @@ mod tests {
         assert!(rows[2].is_empty());
         assert_eq!(column_index("AA10"), Some(26));
         assert_eq!(unescape("a & b &unknown; &#x41;"), "a & b &unknown; A");
+    }
+
+    #[test]
+    fn converts_workbook_to_rfc4180_csv() {
+        let csv = workbook_to_csv(include_bytes!("fixtures/amfi_ter_360one.xlsx")).unwrap();
+        let first_line = csv.lines().next().unwrap();
+        assert!(first_line.starts_with("NSDL Scheme Code,"));
+        assert!(csv.contains("360 ONE Balanced Hybrid Fund"));
     }
 }

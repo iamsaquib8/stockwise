@@ -185,6 +185,8 @@ enum Commands {
         symbol: String,
         #[arg(short, long, default_value = "3mo", value_parser = PERIODS)]
         period: String,
+        #[command(flatten)]
+        out: JsonOutput,
     },
 
     /// Major market indices (US + India)
@@ -220,7 +222,11 @@ enum Commands {
     // ── Analysis ──
     /// Fundamental analysis with plain-English insights
     #[command(alias = "a")]
-    Analyze { symbol: String },
+    Analyze {
+        symbol: String,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
 
     /// Key events timeline, corporate disclosures & market reaction
     #[command(alias = "ev")]
@@ -230,14 +236,27 @@ enum Commands {
         days: i64,
         #[arg(long)]
         ai: bool,
+        #[command(flatten)]
+        out: TableOutput,
     },
 
     /// INDmoney-style categorized impact cards (Growth, Valuation, Margins, Ownership, etc.)
-    Insights { symbol: String },
+    Insights {
+        symbol: String,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
 
     /// Definitive Buy/Sell verdict, multi-pillar scoring, targets & stop-loss
     #[command(alias = "decision", alias = "signal", alias = "buysell")]
-    Verdict { symbol: String },
+    Verdict {
+        symbol: String,
+        /// Explain each of the 6 scoring pillars and how the composite score works
+        #[arg(long)]
+        explain: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
 
     /// Fundamental accounting scorecards: Piotroski 9-Point F-Score and Altman Z-Score with full formula breakdown
     #[command(
@@ -259,6 +278,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         symbol: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Explain how to interpret the Piotroski 9-point F-Score and Altman Z-Score
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Technical analysis (RSI, MACD, Bollinger Bands, ...)
@@ -267,6 +289,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         symbol: String,
         #[arg(short, long, default_value = "3mo", value_parser = PERIODS)]
         period: String,
+        /// Explain what RSI, MACD, Bollinger Bands, ADX and Stochastic measure
+        #[arg(long)]
+        explain: bool,
         #[command(flatten)]
         out: JsonOutput,
     },
@@ -668,8 +693,11 @@ stockwise options TCS                     expected moves (same as `options moves
         #[arg(long)]
         json: bool,
     },
-    /// Tax-loss harvesting opportunities
-    Harvest,
+    /// Tax-loss and LTCG exemption harvesting opportunities
+    Harvest {
+        #[command(flatten)]
+        out: TableOutput,
+    },
     /// Capital-gains tax estimate; `tax export` writes an ITR Schedule CG / Form 8949 CSV
     #[command(
         args_conflicts_with_subcommands = true,
@@ -1542,6 +1570,9 @@ enum FundamentalCmd {
         symbol: String,
         #[arg(long)]
         json: bool,
+        /// Explain how to interpret the Piotroski 9-point F-Score and Altman Z-Score
+        #[arg(long)]
+        explain: bool,
     },
 }
 
@@ -1790,6 +1821,9 @@ enum OptionsCmd {
         /// Print JSON instead of formatted tables
         #[arg(long)]
         json: bool,
+        /// Explain how to interpret PCR, Max Pain, OI Walls and LB/SC/SB/LU build-up
+        #[arg(long)]
+        explain: bool,
     },
     /// Max pain: the expiry price at which option buyers collect least
     #[command(alias = "max-pain")]
@@ -2527,6 +2561,225 @@ fn build_cli() -> clap::Command {
     cmd.help_template(template)
 }
 
+/// Curated quick-start overview printed when `stockwise` is run with no arguments.
+fn curated_quickstart_help() -> String {
+    use colored::Colorize;
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\n  {} — {}\n",
+        "StockWise".bold().cyan(),
+        "Terminal Stock Research, Portfolio, F&O & Tax Workbench".dimmed()
+    ));
+    out.push_str(&format!("  {}\n\n", "─".repeat(66).dimmed()));
+    out.push_str(&format!(
+        "  {}  {}\n",
+        "Quick Lookup:".bold().yellow(),
+        "stockwise <SYMBOL>  (e.g. `stockwise RELIANCE` or `stockwise AAPL -m us`)"
+    ));
+
+    let sections: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Stock Research & Verdicts",
+            &[
+                (
+                    "quote <SYM>",
+                    "Live price, 52W range, valuation & circuit limits",
+                ),
+                (
+                    "verdict <SYM>",
+                    "6-pillar Buy/Hold/Sell score (0–100), entry/stop/target",
+                ),
+                (
+                    "insights <SYM>",
+                    "9-dimension fundamental cards & shareholding split",
+                ),
+                (
+                    "score <SYM>",
+                    "Piotroski 9-Point F-Score & Altman Z-Score breakdown",
+                ),
+                (
+                    "events <SYM>",
+                    "Corporate filings, dividends, splits & price reaction",
+                ),
+                (
+                    "deep <SYM>",
+                    "All-in-one deep dive (fundamentals + technicals + verdict)",
+                ),
+            ],
+        ),
+        (
+            "Markets, F&O & IPOs",
+            &[
+                (
+                    "markets",
+                    "Global, US & Indian indices (--global, --crypto, --fx)",
+                ),
+                (
+                    "options oi <SYM>",
+                    "Option chain OI walls, PCR, Max Pain & LB/SC/SB/LU build-up",
+                ),
+                (
+                    "ipo",
+                    "Indian Mainboard & SME IPO board, GMP & dual verdict",
+                ),
+                (
+                    "screen <TYPE>",
+                    "Screen by undervalued, growth, dividend, momentum, bluechip",
+                ),
+            ],
+        ),
+        (
+            "Portfolio, Rebalancing & Tax",
+            &[
+                (
+                    "portfolio",
+                    "Live holdings, FIFO lots, XIRR & multi-currency valuation",
+                ),
+                (
+                    "import <BROKER>",
+                    "Import CSV/.xlsx from Zerodha, Groww, Upstox, Angel, CAS",
+                ),
+                (
+                    "rebalance",
+                    "Target allocation drift & inflow-only (--inflow) rebalance",
+                ),
+                (
+                    "tax [in|us|uk]",
+                    "Capital gains estimate, `tax export` & `tax advance` (234C)",
+                ),
+                (
+                    "harvest",
+                    "Lot-level tax-loss & ₹1.25L LTCG exemption harvesting",
+                ),
+            ],
+        ),
+        (
+            "Interactive & AI Surfaces",
+            &[
+                (
+                    "tui",
+                    "Full-screen terminal workstation (Watchlist, Portfolio, Charts)",
+                ),
+                (
+                    "serve --open",
+                    "Local Web UI research & portfolio workbench",
+                ),
+                (
+                    "ask \"<QUERY>\"",
+                    "Ask an AI agent grounded in live StockWise tools",
+                ),
+                (
+                    "mcp",
+                    "Model Context Protocol server for Claude / Cursor / IDEs",
+                ),
+            ],
+        ),
+    ];
+
+    for (title, rows) in sections {
+        out.push_str(&format!("\n  {}\n", title.bold().underline()));
+        for (cmd, desc) in *rows {
+            out.push_str(&format!("    {:<20} {}\n", cmd.cyan().bold(), desc));
+        }
+    }
+    out.push_str(&format!(
+        "\n  {}\n",
+        "Run `stockwise --help` (or `stockwise --help-all`) for all 75+ commands, or `stockwise doctor` to check setup."
+            .dimmed()
+    ));
+    out
+}
+
+/// Detect whether raw CLI arguments represent a bare symbol invocation such as
+/// `stockwise RELIANCE`, `stockwise AAPL -m us`, or `stockwise NIFTY --json`.
+fn parse_bare_symbol_invocation(
+    args: &[String],
+    default_market: Market,
+) -> Option<(String, Market, Format)> {
+    if args.len() < 2 {
+        return None;
+    }
+    let cmd = Cli::command();
+    let mut market = default_market;
+    let mut fmt = Format::Table;
+    let mut symbol: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "-m" || a == "--market" {
+            let val = args.get(i + 1)?;
+            market = Market::from_str(val, true).ok()?;
+            i += 2;
+        } else if let Some(val) = a.strip_prefix("--market=") {
+            market = Market::from_str(val, true).ok()?;
+            i += 1;
+        } else if a == "--json" {
+            if fmt == Format::Csv {
+                return None;
+            }
+            fmt = Format::Json;
+            i += 1;
+        } else if a == "--csv" {
+            if fmt == Format::Json {
+                return None;
+            }
+            fmt = Format::Csv;
+            i += 1;
+        } else if a.starts_with('-') {
+            return None;
+        } else if symbol.is_none() {
+            symbol = Some(a.to_string());
+            i += 1;
+        } else {
+            // More than one positional token — let clap handle subcommands/errors.
+            return None;
+        }
+    }
+
+    let sym = symbol?;
+    // Reject if it matches any known subcommand or alias (case-insensitive).
+    let lower = sym.to_ascii_lowercase();
+    for sc in cmd.get_subcommands() {
+        if sc.get_name().eq_ignore_ascii_case(&lower)
+            || sc
+                .get_all_aliases()
+                .any(|al| al.eq_ignore_ascii_case(&lower))
+        {
+            return None;
+        }
+    }
+    // Accept if the user typed an uppercase/numeric/suffixed ticker (e.g. RELIANCE, TCS.NS, ^NSEI, 500325)
+    // OR if it resolves to a known index alias / colloquial alias / directory ticker.
+    let valid_chars = sym.len() <= 20
+        && sym
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '^' | '&' | '=' | ':'));
+    if !valid_chars {
+        return None;
+    }
+    let upper = sym.to_ascii_uppercase();
+    let is_known_alias = market::resolve_index_alias(&upper, market).is_some()
+        || market::normalize_india_ticker(&upper) != upper
+        || market::SYMBOL_DIRECTORY.iter().any(|(s, _)| {
+            s.eq_ignore_ascii_case(&sym)
+                || s.split('.')
+                    .next()
+                    .is_some_and(|b| b.eq_ignore_ascii_case(&sym))
+        });
+    let typed_like_ticker = sym == upper
+        && sym
+            .chars()
+            .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && (sym.len() >= 2 || sym.chars().all(|c| c.is_ascii_uppercase()));
+
+    if is_known_alias || typed_like_ticker {
+        Some((sym, market, fmt))
+    } else {
+        None
+    }
+}
+
 /// Commands that take `-p/--period`, with their current default period.
 fn period_defaults(cmd: &clap::Command) -> Vec<(String, String)> {
     cmd.get_subcommands()
@@ -2663,9 +2916,46 @@ async fn async_main() {
         config::get().lang.as_deref(),
     );
     i18n::set_lang(lang, source);
-    let cmd = with_config_defaults(build_cli(), config::get());
+    let mut cmd = with_config_defaults(build_cli(), config::get());
+    if args.len() == 1 {
+        print!("{}", curated_quickstart_help());
+        return;
+    }
+    if args.iter().any(|a| a == "--help-all") {
+        let _ = cmd.print_long_help();
+        println!();
+        return;
+    }
     let periods = period_defaults(&cmd);
-    let matches = cmd.get_matches();
+    let matches = match cmd.try_get_matches_from_mut(&args) {
+        Ok(m) => m,
+        Err(e) => {
+            let default_market = config::get()
+                .market
+                .as_deref()
+                .and_then(|m| Market::from_str(m, true).ok())
+                .or_else(|| {
+                    std::env::var("STOCKWISE_MARKET")
+                        .ok()
+                        .and_then(|m| Market::from_str(&m, true).ok())
+                })
+                .unwrap_or(Market::In);
+            if matches!(e.kind(), clap::error::ErrorKind::InvalidSubcommand)
+                && let Some((sym, m, fmt)) = parse_bare_symbol_invocation(&args, default_market)
+            {
+                if let Err(err) = commands::cmd_smart_overview(&sym, m, fmt).await {
+                    eprintln!(
+                        "\n  {} {:#}\n",
+                        colored::Colorize::red(i18n::t(i18n::Msg::ErrorPrefix)),
+                        err
+                    );
+                    std::process::exit(1);
+                }
+                return;
+            }
+            e.exit();
+        }
+    };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // A broken config file stops everything except the commands that help fix it.
@@ -2718,7 +3008,11 @@ async fn dispatch(
 ) -> anyhow::Result<()> {
     match command {
         Commands::Quote { symbols, out } => commands::cmd_quote(&symbols, m, out.into()).await,
-        Commands::Deep { symbol, period } => commands::cmd_deep(&symbol, &period, m).await,
+        Commands::Deep {
+            symbol,
+            period,
+            out,
+        } => commands::cmd_deep(&symbol, &period, m, out.json).await,
         Commands::Markets {
             out,
             crypto,
@@ -2729,31 +3023,51 @@ async fn dispatch(
         Commands::Search { query, out } => commands::cmd_search(&query, out.into()).await,
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
 
-        Commands::Analyze { symbol } => commands::cmd_analyze(&symbol, m).await,
-        Commands::Events { symbol, days, ai } => commands::cmd_events(&symbol, days, ai, m).await,
-        Commands::Insights { symbol } => commands::cmd_insights(&symbol, m).await,
-        Commands::Verdict { symbol } => commands::cmd_verdict(&symbol, m).await,
+        Commands::Analyze { symbol, out } => commands::cmd_analyze(&symbol, m, out.json).await,
+        Commands::Events {
+            symbol,
+            days,
+            ai,
+            out,
+        } => commands::cmd_events(&symbol, days, ai, m, out.into()).await,
+        Commands::Insights { symbol, out } => commands::cmd_insights(&symbol, m, out.json).await,
+        Commands::Verdict {
+            symbol,
+            explain,
+            out,
+        } => commands::cmd_verdict(&symbol, m, out.json, explain).await,
         Commands::Fundamental {
             action,
             symbol,
             json,
+            explain,
         } => match action {
             Some(FundamentalCmd::Score {
                 symbol,
                 json: sub_json,
-            }) => commands::cmd_fundamental_score(&symbol, m, sub_json || json).await,
+                explain: sub_explain,
+            }) => {
+                commands::cmd_fundamental_score(
+                    &symbol,
+                    m,
+                    sub_json || json,
+                    sub_explain || explain,
+                )
+                .await
+            }
             None => {
                 let Some(symbol) = symbol else {
                     anyhow::bail!("A symbol is required. Usage: `stockwise score <SYMBOL>`");
                 };
-                commands::cmd_fundamental_score(&symbol, m, json).await
+                commands::cmd_fundamental_score(&symbol, m, json, explain).await
             }
         },
         Commands::Technical {
             symbol,
             period,
+            explain,
             out,
-        } => commands::cmd_technical(&symbol, &period, m, out.into()).await,
+        } => commands::cmd_technical(&symbol, &period, m, out.into(), explain).await,
         Commands::History {
             symbol,
             period,
@@ -2934,7 +3248,8 @@ async fn dispatch(
                 expiry,
                 top,
                 json,
-            }) => commands::cmd_options_oi(&symbol, expiry, top, m, json).await,
+                explain,
+            }) => commands::cmd_options_oi(&symbol, expiry, top, m, json, explain).await,
             Some(OptionsCmd::Maxpain {
                 symbol,
                 expiry,
@@ -3236,7 +3551,7 @@ async fn dispatch(
             let parsed = crate::rebalance::parse_targets(&targets)?;
             commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
         }
-        Commands::Harvest => commands::cmd_harvest(m).await,
+        Commands::Harvest { out } => commands::cmd_harvest(m, out.into()).await,
         Commands::Tax {
             action,
             country,
@@ -3744,7 +4059,9 @@ mod tests {
             let args = shell_words(&span);
             if let Err(e) = Cli::try_parse_from(&args) {
                 use clap::error::ErrorKind;
-                if !matches!(e.kind(), ErrorKind::DisplayVersion | ErrorKind::DisplayHelp) {
+                if !matches!(e.kind(), ErrorKind::DisplayVersion | ErrorKind::DisplayHelp)
+                    && parse_bare_symbol_invocation(&args, Market::In).is_none()
+                {
                     panic!("{file}: `{span}` does not parse:\n{e}");
                 }
             }
@@ -4563,6 +4880,16 @@ mod tests {
             vec!["stockwise", "tax", "in", "--csv"],
             vec!["stockwise", "sim", "history", "--json"],
             vec!["stockwise", "config", "show", "--json"],
+            vec!["stockwise", "verdict", "TCS", "--json"],
+            vec!["stockwise", "verdict", "TCS", "--explain"],
+            vec!["stockwise", "insights", "TCS", "--json"],
+            vec!["stockwise", "events", "TCS", "--json"],
+            vec!["stockwise", "events", "TCS", "--csv"],
+            vec!["stockwise", "analyze", "TCS", "--json"],
+            vec!["stockwise", "deep", "TCS", "--json"],
+            vec!["stockwise", "technical", "TCS", "--explain"],
+            vec!["stockwise", "harvest", "--json"],
+            vec!["stockwise", "harvest", "--csv"],
         ] {
             assert!(parses(&args), "{args:?} should parse");
         }
@@ -4761,27 +5088,39 @@ mod tests {
                 expiry,
                 top,
                 json,
+                explain,
             }) => {
                 assert_eq!(symbol, "NIFTY");
                 assert_eq!(expiry, None);
                 assert_eq!(top, 5);
                 assert!(!json);
+                assert!(!explain);
             }
             _ => panic!("expected options oi"),
         }
-        let (action, ..) =
-            options_cmd(&["stockwise", "fno", "oi", "BANKNIFTY", "-n", "3", "--json"]);
+        let (action, ..) = options_cmd(&[
+            "stockwise",
+            "fno",
+            "oi",
+            "BANKNIFTY",
+            "-n",
+            "3",
+            "--json",
+            "--explain",
+        ]);
         match action {
             Some(OptionsCmd::Oi {
                 symbol,
                 expiry,
                 top,
                 json,
+                explain,
             }) => {
                 assert_eq!(symbol, "BANKNIFTY");
                 assert_eq!(expiry, None);
                 assert_eq!(top, 3);
                 assert!(json);
+                assert!(explain);
             }
             _ => panic!("expected fno oi"),
         }
@@ -5096,26 +5435,30 @@ mod tests {
                 action,
                 symbol,
                 json,
+                explain,
             } => {
                 assert!(
-                    matches!(action, Some(FundamentalCmd::Score { symbol, json: true }) if symbol == "TCS")
+                    matches!(action, Some(FundamentalCmd::Score { symbol, json: true, explain: false }) if symbol == "TCS")
                 );
                 assert_eq!(symbol, None);
                 assert!(!json);
+                assert!(!explain);
             }
             _ => panic!("expected fundamental score"),
         }
 
-        let cli = Cli::try_parse_from(["stockwise", "score", "RELIANCE"]).unwrap();
+        let cli = Cli::try_parse_from(["stockwise", "score", "RELIANCE", "--explain"]).unwrap();
         match cli.command {
             Commands::Fundamental {
                 action,
                 symbol,
                 json,
+                explain,
             } => {
                 assert!(action.is_none());
                 assert_eq!(symbol.as_deref(), Some("RELIANCE"));
                 assert!(!json);
+                assert!(explain);
             }
             _ => panic!("expected score command"),
         }
@@ -5126,10 +5469,12 @@ mod tests {
                 action,
                 symbol,
                 json,
+                explain,
             } => {
                 assert!(action.is_none());
                 assert_eq!(symbol.as_deref(), Some("INFY"));
                 assert!(json);
+                assert!(!explain);
             }
             _ => panic!("expected scorecard command"),
         }
@@ -5145,5 +5490,39 @@ mod tests {
         assert_eq!(value_name(TaxCountry::In), "in");
         assert_eq!(value_name(AlertWhen::Above), "above");
         assert_eq!(value_name(DaemonMode::Longterm), "longterm");
+    }
+
+    #[test]
+    fn bare_symbol_and_quickstart_help_work() {
+        let help = curated_quickstart_help();
+        assert!(help.contains("StockWise"));
+        assert!(help.contains("verdict <SYM>"));
+        assert!(help.contains("--help-all"));
+
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "RELIANCE"]), Market::In),
+            Some(("RELIANCE".into(), Market::In, Format::Table))
+        );
+        assert_eq!(
+            parse_bare_symbol_invocation(
+                &s(&["stockwise", "AAPL", "-m", "us", "--json"]),
+                Market::In
+            ),
+            Some(("AAPL".into(), Market::Us, Format::Json))
+        );
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "nifty"]), Market::In),
+            Some(("nifty".into(), Market::In, Format::Table))
+        );
+        // Subcommands and lowercase typos must not be treated as bare tickers.
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "quote"]), Market::In),
+            None
+        );
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "growht"]), Market::In),
+            None
+        );
     }
 }

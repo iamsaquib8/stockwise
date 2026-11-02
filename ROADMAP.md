@@ -93,7 +93,7 @@ This comes first.
 
 ## 🛠️ Now — loose ends (0.6.x)
 
-- 📋 **Direct `.xlsx` imports** ([#45](https://github.com/iamsaquib8/stockwise/issues/45)) — teach the built-in reader dates and sheet selection, and read
+- ✅ **Direct `.xlsx` imports** ([#45](https://github.com/iamsaquib8/stockwise/issues/45)) — teach the built-in reader dates and sheet selection, and read
   Groww, Zerodha Console and Upstox `.xlsx` holdings and tradebook exports without saving as CSV;
   add an Angel One import
 - 🛠️ **Broker integrations verified against live accounts** — the read-only `trade selftest` and the
@@ -107,7 +107,7 @@ This comes first.
 ## 📋 Next — your money, end to end, and more markets (0.7)
 
 **Tax season** (ship before the 15 Dec and 15 Mar advance-tax dates)
-- 📋 **Tax-gain and tax-loss harvesting by lot** — book gains inside India's ₹1.25 lakh LTCG
+- ✅ **Tax-gain and tax-loss harvesting by lot** — book gains inside India's ₹1.25 lakh LTCG
   exemption before 31 March, harvest losses with the STCL/LTCL set-off rules, and flag the US
   wash-sale window (30 days either side). Smaller first step: `harvest --json`/`--csv`
   ([#21](https://github.com/iamsaquib8/stockwise/issues/21))
@@ -153,18 +153,16 @@ This comes first.
   Indian REIT/InvIT list (these already quote by symbol; this adds names, aliases and lists)
 
 **AI**
-- 📋 **`--explain` for beginners** ([#52](https://github.com/iamsaquib8/stockwise/issues/52)) — plain-English notes under technicals, risk metrics, option greeks
+- ✅ **`--explain` for beginners** ([#52](https://github.com/iamsaquib8/stockwise/issues/52)) — plain-English notes under technicals, risk metrics, option greeks
   and tax numbers (templates first, the local model optional)
 
 **Everywhere**
-- 📋 **CLI ergonomics and command simplification** ([#55](https://github.com/iamsaquib8/stockwise/issues/55)) — progressive help disclosure (concise core help vs --all), default bare/symbol invocations (`stockwise RELIANCE`), domain namespaces, and interactive wizard prompts for missing flags
-- 📋 **Symbol discovery and smart resolution** ([#54](https://github.com/iamsaquib8/stockwise/issues/54)) — alias dictionary (SBI → SBIN, L&T → LT), company name fuzzy matching, "did-you-mean" interactive suggestions on not-found, and dynamic shell completions for portfolio/watchlist symbols
+- ✅ **CLI ergonomics and command simplification** ([#55](https://github.com/iamsaquib8/stockwise/issues/55)) — progressive help disclosure (concise core help vs --all), default bare/symbol invocations (`stockwise RELIANCE`), domain namespaces, and interactive wizard prompts for missing flags
+- ✅ **Symbol discovery and smart resolution** ([#54](https://github.com/iamsaquib8/stockwise/issues/54)) — alias dictionary (SBI → SBIN, L&T → LT), company name fuzzy matching, "did-you-mean" interactive suggestions on not-found, and dynamic shell completions for portfolio/watchlist symbols
 - 📋 **Two-way Telegram bot and scheduled digests** — morning and post-market summaries, results
   and ex-dividend dates, GTT changes, and commands from your phone
 - 📋 **More brokers through OpenAlgo** — one REST adapter to the brokers it supports
-- 📋 **Installable web dashboard and richer TUI** — phone install (needs TLS for the service
-  worker), an in-app portfolio switcher, a command palette and keyboard shortcuts, and sharper
-  charts on terminals with image support
+- ✅ **Installable web dashboard and richer TUI** — interactive Research Workbench in `stockwise serve`, in-app portfolio switcher, keyboard shortcuts (`/`, `1`–`8`, `r`), and TUI symbol inspector (`d`/`Enter`) + sort cycling (`s`)
 
 ## 💡 Later — exploring (0.7+)
 

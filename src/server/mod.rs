@@ -259,9 +259,11 @@ struct PortfolioParams {
     market: Option<String>,
     /// Currency for the totals (`portfolio --base`): a 3-letter currency code.
     base: Option<String>,
+    /// Named portfolio (`--portfolio NAME`), or empty/default.
+    portfolio: Option<String>,
 }
 
-/// `GET /api/portfolio?base=usd` — the `portfolio --json` object.
+/// `GET /api/portfolio?base=usd&portfolio=retirement` — the `portfolio --json` object.
 async fn portfolio<D: DataSource>(
     State(st): Shared<D>,
     Query(p): Query<PortfolioParams>,
@@ -279,11 +281,125 @@ async fn portfolio<D: DataSource>(
             )));
         }
     };
+    let pf_name = match p.portfolio.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(n) => {
+            crate::portfolio::normalize_name(Some(n))
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            Some(n)
+        }
+    };
     json(
-        views::portfolio(&st.source, market, base.as_deref())
+        views::portfolio_named(&st.source, market, base.as_deref(), pf_name)
             .await
             .map_err(ApiError::from_data)?,
     )
+}
+
+/// `GET /api/portfolios` — active portfolio name and all available named portfolios.
+async fn portfolios() -> ApiResult {
+    let active = crate::portfolio::active().unwrap_or("default");
+    let mut names = vec!["default".to_string()];
+    if let Ok(extra) = crate::portfolio::list_names() {
+        for n in extra {
+            if !names.iter().any(|x| x.eq_ignore_ascii_case(&n)) {
+                names.push(n);
+            }
+        }
+    }
+    json(serde_json::json!({
+        "active": active,
+        "portfolios": names,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ResearchParams {
+    market: Option<String>,
+    days: Option<i64>,
+}
+
+/// `GET /api/research/{symbol}?market=in&days=90` — unified research workbench
+/// payload (verdict, Piotroski & Altman scorecards, insights, shareholding, events).
+async fn research<D: DataSource>(
+    State(st): Shared<D>,
+    Path(symbol): Path<String>,
+    Query(p): Query<ResearchParams>,
+) -> ApiResult {
+    let market = st.market_for(p.market.as_deref())?;
+    check_symbol(&symbol)?;
+    let days = p.days.unwrap_or(90).clamp(1, 365);
+    let resolved = market::resolve_symbol(&symbol, market);
+    let r = if let Ok(client) = st.source.yahoo().await {
+        let r = crate::research::fetch(client, &resolved, market, days)
+            .await
+            .map_err(ApiError::from_data)?;
+        if r.price().is_none() && r.quote.symbol.is_none() {
+            return Err(ApiError::NotFound(format!(
+                "No research data for {resolved}"
+            )));
+        }
+        r
+    } else {
+        let quotes = st
+            .source
+            .quotes(&[&resolved])
+            .await
+            .map_err(ApiError::from_data)?;
+        let Some(q) = quotes.into_iter().next() else {
+            return Err(ApiError::NotFound(format!(
+                "No research data for {resolved}"
+            )));
+        };
+        let chart = st.source.chart(&resolved, "1y", "1d").await.ok();
+        let name = q
+            .long_name
+            .clone()
+            .or_else(|| q.short_name.clone())
+            .unwrap_or_else(|| resolved.clone());
+        let short_name = crate::research::clean_company_name(&name);
+        crate::research::Research {
+            symbol: resolved.clone(),
+            base: resolved
+                .trim_end_matches(".NS")
+                .trim_end_matches(".BO")
+                .to_string(),
+            is_india: resolved.ends_with(".NS") || resolved.ends_with(".BO"),
+            name,
+            short_name,
+            currency: q.currency.clone(),
+            quote: q,
+            prices: chart
+                .as_ref()
+                .map(crate::research::Series::from_chart)
+                .unwrap_or_default(),
+            days,
+            now: chrono::Utc::now().timestamp(),
+            ..Default::default()
+        }
+    };
+    let cards = crate::insights::generate_rich_insights(&r);
+    let verdict = crate::verdict::generate_verdict(&r, &cards);
+    let scorecard = crate::scorecard::generate_scorecard_report(&r);
+    let evts = crate::events::build_events(&r);
+    let upcoming = crate::events::upcoming(&r);
+    let digest = crate::events::digest(&evts);
+    json(serde_json::json!({
+        "symbol": r.symbol,
+        "name": r.name,
+        "currency": r.currency,
+        "price": r.price(),
+        "sector": r.sector,
+        "industry": r.industry,
+        "verdict": verdict,
+        "scorecard": scorecard,
+        "insights": cards,
+        "shareholding": r.holdings,
+        "events": evts,
+        "upcoming": upcoming,
+        "digest": digest,
+        "warnings": r.warnings,
+    }))
 }
 
 /// `GET /api/watchlist` — watched symbols with live prices.
@@ -463,9 +579,11 @@ pub fn router<D: DataSource + 'static>(state: Arc<AppState<D>>) -> Router {
     let protected = Router::new()
         .route("/api/quote", get(quote::<D>))
         .route("/api/history/{symbol}", get(history::<D>))
+        .route("/api/research/{symbol}", get(research::<D>))
         .route("/api/markets", get(markets::<D>))
         .route("/api/search", get(search::<D>))
         .route("/api/portfolio", get(portfolio::<D>))
+        .route("/api/portfolios", get(portfolios))
         .route("/api/watchlist", get(watchlist::<D>))
         .route("/api/alerts", get(alerts::<D>))
         .route("/metrics", get(prometheus::<D>))
@@ -631,8 +749,8 @@ pub async fn run(bind: &str, allow_remote: bool, market: Market, open: bool) -> 
     );
     println!(
         "\n  {}\n  {}\n  {}\n",
-        "/api/quote?symbols=  /api/history/{symbol}?period=  /api/markets  /api/search?q=".dimmed(),
-        "/api/portfolio  /api/watchlist  /api/alerts  /healthz  /metrics".dimmed(),
+        "/api/quote?symbols=  /api/history/{symbol}?period=  /api/research/{symbol}  /api/markets  /api/search?q=".dimmed(),
+        "/api/portfolio  /api/portfolios  /api/watchlist  /api/alerts  /healthz  /metrics".dimmed(),
         "No trading endpoints. Press Ctrl+C to stop.".dimmed()
     );
     if open {
@@ -840,6 +958,28 @@ mod tests {
         assert_eq!(v[1]["status"], "waiting");
         assert_eq!(v[2]["status"], "no_price");
         assert!(v[2]["price"].is_null());
+
+        let (s, v) = get_json(&app, "/api/portfolios").await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["active"], "default");
+        assert!(
+            v["portfolios"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x == "default")
+        );
+
+        let (s, v) = get_json(&app, "/api/research/TCS").await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["symbol"], "TCS.NS");
+        assert_eq!(v["price"], 4100.0);
+        assert!(v["verdict"]["pillars"].is_array());
+        assert!(v["scorecard"]["piotroski"]["criteria"].is_array());
+        assert_eq!(
+            get_json(&app, "/api/research/NOPE").await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

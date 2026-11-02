@@ -313,9 +313,12 @@ pub async fn cmd_tax_export(
     Ok(())
 }
 
-/// Advance tax quarterly instalment estimates under Section 208 and 211 with
-/// Section 234C(1) capital-gains proviso protections.
-pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) -> Result<()> {
+/// Compute the Indian advance tax schedule for `portfolio`'s realized sales.
+pub(crate) fn advance_tax_schedule(
+    portfolio: &Portfolio,
+    fy: Option<&str>,
+    paid: Option<f64>,
+) -> Result<tax::AdvanceTaxSchedule> {
     if paid.is_some_and(|p| p < 0.0) {
         bail!("Advance tax paid amount cannot be negative");
     }
@@ -337,7 +340,6 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
         );
     }
 
-    let portfolio = Portfolio::load()?;
     let (from, to) = Country::India.tax_year(start);
 
     let mut advance_sales = Vec::new();
@@ -360,7 +362,14 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
         advance_sales.push(tax::AdvanceTaxSale::new(sell_d, s.gain() * scale, is_lt));
     }
 
-    let schedule = tax::compute_advance_tax(&advance_sales, start, today, paid);
+    Ok(tax::compute_advance_tax(&advance_sales, start, today, paid))
+}
+
+/// Advance tax quarterly instalment estimates under Section 208 and 211 with
+/// Section 234C(1) capital-gains proviso protections.
+pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let schedule = advance_tax_schedule(&portfolio, fy, paid)?;
 
     if json {
         return output::print_json(&schedule);
@@ -384,7 +393,7 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
             .dimmed()
     );
 
-    if advance_sales.is_empty() {
+    if schedule.total_stcg == 0.0 && schedule.total_ltcg == 0.0 {
         println!(
             "  {}\n",
             "No sales recorded for this financial year. Record one with `stockwise portfolio sell` or import a tradebook."

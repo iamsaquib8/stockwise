@@ -566,10 +566,70 @@ pub fn repair_namespaced(symbol: &str) -> Option<String> {
     namespaced(&upper).filter(|fixed| *fixed != symbol)
 }
 
+/// Common Indian market ticker aliases, colloquial names, and post-merger/demerger
+/// renames mapped to their canonical NSE symbol.
+pub fn normalize_india_ticker(upper: &str) -> &str {
+    match upper {
+        "SBI" | "STATEBANK" => "SBIN",
+        "TATAMOTORS" | "TATA MOTORS" | "TATAMOTOR" => "TMPV",
+        "ZOMATO" => "ETERNAL",
+        "L&T" | "LARSEN" => "LT",
+        "HDFC" => "HDFCBANK",
+        "ICICI" => "ICICIBANK",
+        "KOTAK" => "KOTAKBANK",
+        "AXIS" => "AXISBANK",
+        "AIRTEL" | "BHARTI" => "BHARTIARTL",
+        "BAJAJ" => "BAJFINANCE",
+        "LIC" => "LICI",
+        "MCDOWELL" | "MCDOWELL-N" => "UNITDSPR",
+        "MINDTREE" | "LTIMINDTREE" => "LTIM",
+        "ADANIPORT" => "ADANIPORTS",
+        other => other,
+    }
+}
+
+/// Resolve well-known index names (`NIFTY`, `BANKNIFTY`, `SENSEX`, `SP500`,
+/// `NASDAQ`, `DOW`, `INDIAVIX`, etc.) directly to their Yahoo Finance index symbols.
+pub fn resolve_index_alias(upper: &str, market: Market) -> Option<&'static str> {
+    let key: String = upper
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '_' | '-'))
+        .collect();
+    match key.as_str() {
+        "NIFTY" | "NIFTY50" if market == Market::In => Some("^NSEI"),
+        "BANKNIFTY" | "NIFTYBANK" if market == Market::In => Some("^NSEBANK"),
+        "SENSEX" | "BSESENSEX" if market == Market::In => Some("^BSESN"),
+        "FINNIFTY" | "NIFTYFIN" | "NIFTYFINSERVICE" if market == Market::In => {
+            Some("NIFTY_FIN_SERVICE.NS")
+        }
+        "INDIAVIX" if market == Market::In => Some("^INDIAVIX"),
+        "NIFTY500" if market == Market::In => Some("^CRSLDX"),
+        "NIFTYIT" | "CNXIT" if market == Market::In => Some("^CNXIT"),
+        "MIDCPNIFTY" | "NIFTYMIDSELECT" if market == Market::In => Some("NIFTY_MID_SELECT.NS"),
+        "SP500" | "S&P500" | "SPX" => Some("^GSPC"),
+        "NASDAQ" | "IXIC" => Some("^IXIC"),
+        "NASDAQ100" | "NDX" => Some("^NDX"),
+        "DOW" | "DJIA" | "DOWJONES" => Some("^DJI"),
+        "RUSSELL2000" | "RUT" => Some("^RUT"),
+        "FTSE" | "FTSE100" => Some("^FTSE"),
+        "NIKKEI" | "NIKKEI225" | "N225" => Some("^N225"),
+        "DAX" => Some("^GDAXI"),
+        "HANGSENG" | "HSI" => Some("^HSI"),
+        "VIX" if market == Market::In => Some("^INDIAVIX"),
+        "VIX" if market == Market::Us => Some("^VIX"),
+        _ => None,
+    }
+}
+
 fn resolve_symbol_in(symbol: &str, market: Market, crypto_quote: &str) -> String {
     let upper = symbol.trim().to_uppercase();
     if let Some(ns) = namespaced(&upper) {
         return ns;
+    }
+    if matches!(market, Market::In | Market::Us | Market::Global(_))
+        && let Some(idx) = resolve_index_alias(&upper, market)
+    {
+        return idx.to_string();
     }
     let explicit = upper.contains('.')
         || upper.starts_with('^')
@@ -577,12 +637,26 @@ fn resolve_symbol_in(symbol: &str, market: Market, crypto_quote: &str) -> String
         || upper.ends_with("-USD")
         || upper.ends_with("-INR");
     match market {
-        Market::Us => upper,
-        Market::In if explicit => upper,
+        Market::Us => {
+            if let Some(base) = upper.strip_suffix(".A") {
+                format!("{base}-A")
+            } else if let Some(base) = upper.strip_suffix(".B") {
+                format!("{base}-B")
+            } else {
+                upper
+            }
+        }
+        Market::In if explicit => {
+            if let Some(base) = upper.strip_suffix(".NS") {
+                format!("{}.NS", normalize_india_ticker(base))
+            } else {
+                upper
+            }
+        }
         Market::In if !upper.is_empty() && upper.chars().all(|c| c.is_ascii_digit()) => {
             format!("{}.BO", upper)
         }
-        Market::In => format!("{}.NS", upper),
+        Market::In => format!("{}.NS", normalize_india_ticker(&upper)),
         Market::Crypto if upper.contains('-') || explicit => upper,
         Market::Crypto => format!("{}-{}", upper, crypto_quote),
         Market::Fx if upper.contains('=') || upper.starts_with('^') => upper,
@@ -610,6 +684,121 @@ pub fn commodity_future(name: &str) -> Option<&'static str> {
         "SILVER" | "XAG" | "XAGUSD" => Some("SI=F"),
         _ => None,
     }
+}
+
+/// Built-in symbol directory for instant offline "Did you mean?" suggestions.
+pub const SYMBOL_DIRECTORY: &[(&str, &str)] = &[
+    // India (NSE)
+    ("RELIANCE.NS", "Reliance Industries"),
+    ("TCS.NS", "Tata Consultancy Services"),
+    ("HDFCBANK.NS", "HDFC Bank"),
+    ("INFY.NS", "Infosys"),
+    ("ICICIBANK.NS", "ICICI Bank"),
+    ("HINDUNILVR.NS", "Hindustan Unilever"),
+    ("SBIN.NS", "State Bank of India"),
+    ("BHARTIARTL.NS", "Bharti Airtel"),
+    ("ITC.NS", "ITC Limited"),
+    ("KOTAKBANK.NS", "Kotak Mahindra Bank"),
+    ("LT.NS", "Larsen & Toubro"),
+    ("AXISBANK.NS", "Axis Bank"),
+    ("ASIANPAINT.NS", "Asian Paints"),
+    ("MARUTI.NS", "Maruti Suzuki"),
+    ("TITAN.NS", "Titan Company"),
+    ("SUNPHARMA.NS", "Sun Pharma"),
+    ("TMPV.NS", "Tata Motors Passenger Vehicles"),
+    ("BAJFINANCE.NS", "Bajaj Finance"),
+    ("BAJAJ-AUTO.NS", "Bajaj Auto"),
+    ("WIPRO.NS", "Wipro"),
+    ("HCLTECH.NS", "HCL Technologies"),
+    ("ONGC.NS", "ONGC"),
+    ("NTPC.NS", "NTPC"),
+    ("POWERGRID.NS", "Power Grid Corp"),
+    ("TATASTEEL.NS", "Tata Steel"),
+    ("ADANIENT.NS", "Adani Enterprises"),
+    ("ADANIPORTS.NS", "Adani Ports"),
+    ("ULTRACEMCO.NS", "UltraTech Cement"),
+    ("JSWSTEEL.NS", "JSW Steel"),
+    ("TECHM.NS", "Tech Mahindra"),
+    ("INDUSINDBK.NS", "IndusInd Bank"),
+    ("DRREDDY.NS", "Dr. Reddy's Laboratories"),
+    ("ETERNAL.NS", "Eternal (Zomato)"),
+    ("LICI.NS", "Life Insurance Corp (LIC)"),
+    ("LTIM.NS", "LTIMindtree"),
+    ("M&M.NS", "Mahindra & Mahindra"),
+    ("^NSEI", "NIFTY 50 Index"),
+    ("^NSEBANK", "NIFTY Bank Index"),
+    ("^BSESN", "BSE SENSEX Index"),
+    // US
+    ("AAPL", "Apple Inc. (-m us)"),
+    ("MSFT", "Microsoft Corp. (-m us)"),
+    ("GOOG", "Alphabet Inc. (-m us)"),
+    ("AMZN", "Amazon.com Inc. (-m us)"),
+    ("NVDA", "NVIDIA Corp. (-m us)"),
+    ("META", "Meta Platforms (-m us)"),
+    ("TSLA", "Tesla Inc. (-m us)"),
+    ("BRK-B", "Berkshire Hathaway B (-m us)"),
+    ("JPM", "JPMorgan Chase (-m us)"),
+    ("NFLX", "Netflix Inc. (-m us)"),
+    ("AMD", "Advanced Micro Devices (-m us)"),
+    ("^GSPC", "S&P 500 Index"),
+    ("^IXIC", "NASDAQ Composite"),
+    ("^DJI", "Dow Jones Industrial Average"),
+];
+
+/// Suggest up to `limit` symbols from the built-in directory whose ticker or
+/// company name matches `query` by substring, prefix, or small edit distance.
+pub fn suggest_symbols(query: &str, limit: usize) -> Vec<(&'static str, &'static str)> {
+    let q = query
+        .trim()
+        .to_uppercase()
+        .trim_end_matches(".NS")
+        .trim_end_matches(".BO")
+        .to_string();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, &'static str, &'static str)> = Vec::new();
+    for &(sym, name) in SYMBOL_DIRECTORY {
+        let bare = sym.split('.').next().unwrap_or(sym).trim_start_matches('^');
+        let name_upper = name.to_uppercase();
+        let score = if bare == q {
+            0
+        } else if bare.starts_with(&q) || q.starts_with(bare) {
+            1
+        } else if bare.contains(&q) || name_upper.contains(&q) {
+            2
+        } else {
+            let d = levenshtein(bare, &q);
+            if d <= 2 && bare.len() >= 3 {
+                2 + d
+            } else {
+                continue;
+            }
+        };
+        scored.push((score, sym, name));
+    }
+    scored.sort_by_key(|(s, sym, _)| (*s, *sym));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, sym, name)| (sym, name))
+        .collect()
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Hint shown when a symbol is not found, pointing at the most common cause:
@@ -1471,5 +1660,43 @@ mod tests {
             Some(Msg::SessionCrypto)
         );
         assert_eq!(session_note(AssetClass::Stock, tuesday), None);
+    }
+
+    #[test]
+    fn resolves_index_and_colloquial_aliases() {
+        assert_eq!(resolve_symbol("NIFTY", Market::In), "^NSEI");
+        assert_eq!(resolve_symbol("nifty 50", Market::In), "^NSEI");
+        assert_eq!(resolve_symbol("BANKNIFTY", Market::In), "^NSEBANK");
+        assert_eq!(resolve_symbol("SENSEX", Market::In), "^BSESN");
+        assert_eq!(resolve_symbol("INDIAVIX", Market::In), "^INDIAVIX");
+        assert_eq!(resolve_symbol("SP500", Market::Us), "^GSPC");
+        assert_eq!(resolve_symbol("NASDAQ", Market::Us), "^IXIC");
+        assert_eq!(resolve_symbol("DOW", Market::Us), "^DJI");
+        assert_eq!(resolve_symbol("VIX", Market::Us), "^VIX");
+
+        // Colloquial Indian tickers and renames/demergers
+        assert_eq!(resolve_symbol("SBI", Market::In), "SBIN.NS");
+        assert_eq!(resolve_symbol("TATAMOTORS", Market::In), "TMPV.NS");
+        assert_eq!(resolve_symbol("TATAMOTORS.NS", Market::In), "TMPV.NS");
+        assert_eq!(resolve_symbol("ZOMATO", Market::In), "ETERNAL.NS");
+        assert_eq!(resolve_symbol("L&T", Market::In), "LT.NS");
+        assert_eq!(resolve_symbol("ICICI", Market::In), "ICICIBANK.NS");
+        assert_eq!(resolve_symbol("AIRTEL", Market::In), "BHARTIARTL.NS");
+
+        // US share-class dot notation
+        assert_eq!(resolve_symbol("BRK.B", Market::Us), "BRK-B");
+        assert_eq!(resolve_symbol("brk.a", Market::Us), "BRK-A");
+    }
+
+    #[test]
+    fn suggest_symbols_finds_typos_and_company_names() {
+        let rel = suggest_symbols("RELIANC", 3);
+        assert!(rel.iter().any(|(s, _)| *s == "RELIANCE.NS"));
+
+        let sbi = suggest_symbols("State Bank", 3);
+        assert!(sbi.iter().any(|(s, _)| *s == "SBIN.NS"));
+
+        let aapl = suggest_symbols("AAPL.NS", 3);
+        assert!(aapl.iter().any(|(s, _)| *s == "AAPL"));
     }
 }

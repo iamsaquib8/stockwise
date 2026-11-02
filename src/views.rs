@@ -626,6 +626,16 @@ pub async fn portfolio(
     crate::commands::load_portfolio_report(src, market, base).await
 }
 
+/// `portfolio --json` for a specific named portfolio (`None` = active/default).
+pub async fn portfolio_named(
+    src: &impl DataSource,
+    market: Market,
+    base: Option<&str>,
+    portfolio_name: Option<&str>,
+) -> Result<PortfolioView> {
+    crate::commands::load_portfolio_report_named(src, market, base, portfolio_name).await
+}
+
 /// `watch --json`: one row per watched symbol, in watchlist order.
 pub async fn watchlist(src: &impl DataSource) -> Result<Vec<WatchRow>> {
     let wl = local(src.watchlist())?;

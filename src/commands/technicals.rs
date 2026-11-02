@@ -105,7 +105,13 @@ pub(crate) fn technical_json(
     })
 }
 
-pub async fn cmd_technical(symbol: &str, period: &str, market: Market, fmt: Format) -> Result<()> {
+pub async fn cmd_technical(
+    symbol: &str,
+    period: &str,
+    market: Market,
+    fmt: Format,
+    explain: bool,
+) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
 
@@ -359,6 +365,26 @@ pub async fn cmd_technical(symbol: &str, period: &str, market: Market, fmt: Form
                 println!("  {}", "AI unavailable.".dimmed());
             }
         }
+    }
+
+    if explain {
+        print_section("How to Read Technical Indicators (--explain)");
+        println!(
+            "  • {}: Momentum oscillator (0–100). <30 = Oversold (bounce potential), >70 = Overbought.",
+            "RSI (14)".bold()
+        );
+        println!(
+            "  • {}: Trend-following momentum. Positive histogram = bullish momentum; negative = bearish.",
+            "MACD".bold()
+        );
+        println!(
+            "  • {}: Price above 50 & 200 SMA indicates an established uptrend.",
+            "SMA 50 / 200".bold()
+        );
+        println!(
+            "  • {}: Volatility envelope (±2σ around 20-day SMA); extremes often mean-revert.",
+            "Bollinger Bands".bold()
+        );
     }
 
     println!(

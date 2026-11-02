@@ -2,11 +2,114 @@
 
 use super::*;
 
-pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
+fn print_unified_research_footer(
+    r_opt: Option<&crate::research::Research>,
+    q: &crate::api::Quote,
+    csym: &str,
+) {
+    if let Some(r) = r_opt {
+        let sc = scorecard::generate_scorecard_report(r);
+        print_section("Accounting Scorecards (Piotroski & Altman)");
+        print_kv(
+            "Piotroski F-Score",
+            &format!(
+                "{}/{} ({})",
+                sc.piotroski.score, sc.piotroski.max_score, sc.piotroski.rating_label
+            ),
+        );
+        if let Some(z) = sc.altman.z_score {
+            print_kv(
+                "Altman Z-Score",
+                &format!(
+                    "{:.2} ({})",
+                    z,
+                    sc.altman.zone_label.as_deref().unwrap_or("—")
+                ),
+            );
+        }
+
+        let cards = insights::generate_rich_insights(r);
+        print_section("Key Insights");
+        if cards.is_empty() {
+            for insight in insights::generate_insights(q) {
+                println!("  {} {}", "→".cyan(), insight);
+            }
+        } else {
+            for c in cards.iter().take(6) {
+                let metric = c
+                    .metric
+                    .as_deref()
+                    .map(|m| format!(" [{m}]"))
+                    .unwrap_or_default();
+                println!(
+                    "  {} {}: {}{}",
+                    c.impact.icon(),
+                    c.title.bold(),
+                    c.description,
+                    metric.cyan()
+                );
+            }
+        }
+
+        let v = crate::verdict::generate_verdict(r, &cards);
+        println!();
+        println!("{}", "─".repeat(60).dimmed());
+        println!(
+            "  VERDICT: {}  (Score: {:.0}/100 · Confidence: {:.0}%)",
+            v.action.badge(),
+            v.overall_score,
+            v.confidence
+        );
+        println!(
+            "  Entry: {csym}{:.2}–{csym}{:.2}  |  Stop-Loss: {csym}{:.2}{}",
+            v.entry_zone.0,
+            v.entry_zone.1,
+            v.stop_loss,
+            v.target_price
+                .map(|t| format!("  |  Target: {csym}{t:.2}"))
+                .unwrap_or_default()
+        );
+        println!("  {}", v.action.summary_tagline().dimmed());
+        println!("{}", "─".repeat(60).dimmed());
+    } else {
+        print_section("Insights");
+        for insight in insights::generate_insights(q) {
+            println!("  {} {}", "→".cyan(), insight);
+        }
+        println!();
+        println!("{}", "─".repeat(60).dimmed());
+        println!("{}", insights::overall_verdict(q));
+        println!("{}", "─".repeat(60).dimmed());
+    }
+}
+
+pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&[&resolved]).await?;
     let q = quotes.first().context("No data found for this symbol")?;
+    let r_opt = crate::research::fetch(&client, symbol, market, 60)
+        .await
+        .ok();
+
+    if json {
+        let cards = r_opt
+            .as_ref()
+            .map(insights::generate_rich_insights)
+            .unwrap_or_default();
+        let verdict = r_opt
+            .as_ref()
+            .map(|r| crate::verdict::generate_verdict(r, &cards));
+        let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
+        let out = serde_json::json!({
+            "symbol": resolved,
+            "quote": q,
+            "verdict": verdict,
+            "scorecard": scorecard,
+            "insights": cards,
+        });
+        return output::print_json(&out);
+    }
 
     let name = q
         .long_name
@@ -125,17 +228,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
         print_kv("Volatility", &risk);
     }
 
-    // Insights
-    print_section("Insights");
-    for insight in insights::generate_insights(q) {
-        println!("  {} {}", "→".cyan(), insight);
-    }
-
-    // Verdict
-    println!();
-    println!("{}", "─".repeat(60).dimmed());
-    println!("{}", insights::overall_verdict(q));
-    println!("{}", "─".repeat(60).dimmed());
+    print_unified_research_footer(r_opt.as_ref(), q, csym);
 
     // AI-powered analysis (with --ai, if the provider is available)
     let mut ai = crate::ai::AiClient::connect().await;
@@ -150,6 +243,11 @@ pub async fn cmd_analyze(symbol: &str, market: Market) -> Result<()> {
         }
     }
 
+    let bare = resolved.strip_suffix(".NS").unwrap_or(&resolved);
+    println!();
+    print_hint(&format!(
+        "Drill down: stockwise verdict {bare} · stockwise score {bare} · stockwise insights {bare} · stockwise events {bare}"
+    ));
     println!(
         "\n  {}",
         "Disclaimer: This is not financial advice. Do your own research."
@@ -673,7 +771,7 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
 
 // ── IPO Calendar ──
 
-pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> {
+pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     let cur_ref = &resolved;
@@ -681,6 +779,30 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
     // ── 1. Quote + Fundamentals ──
     let quotes = client.get_quote(&[cur_ref.as_str()]).await?;
     let q = quotes.first().context("Symbol not found")?;
+    let r_opt = crate::research::fetch(&client, symbol, market, 60)
+        .await
+        .ok();
+
+    if json {
+        let cards = r_opt
+            .as_ref()
+            .map(insights::generate_rich_insights)
+            .unwrap_or_default();
+        let verdict = r_opt
+            .as_ref()
+            .map(|r| crate::verdict::generate_verdict(r, &cards));
+        let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
+        let out = serde_json::json!({
+            "symbol": resolved,
+            "period": period,
+            "quote": q,
+            "verdict": verdict,
+            "scorecard": scorecard,
+            "insights": cards,
+        });
+        return output::print_json(&out);
+    }
+
     let cur = q.currency.as_deref();
     let csym = market::currency_symbol(cur);
     let name = q
@@ -1015,15 +1137,8 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
         }
     }
 
-    // ── 3. Rule-based insights ──
-    print_section("Insights");
-    for insight in insights::generate_insights(q) {
-        println!("  {} {}", "→".cyan(), insight);
-    }
-    println!();
-    println!("{}", "─".repeat(60).dimmed());
-    println!("{}", insights::overall_verdict(q));
-    println!("{}", "─".repeat(60).dimmed());
+    // ── 3. Unified Scorecards, Rich Insights & 6-Pillar Verdict ──
+    print_unified_research_footer(r_opt.as_ref(), q, csym);
 
     // ── 4. AI Analysis ──
     let mut ai = crate::ai::AiClient::connect().await;
@@ -1038,6 +1153,11 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
         }
     }
 
+    let bare = resolved.strip_suffix(".NS").unwrap_or(&resolved);
+    println!();
+    print_hint(&format!(
+        "Drill down: stockwise verdict {bare} · stockwise score {bare} · stockwise insights {bare} · stockwise events {bare}"
+    ));
     println!(
         "\n  {}",
         "Not financial advice. Do your own research."
@@ -1049,7 +1169,12 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
 }
 
 /// Transparent accounting scorecards: Piotroski 9-Point F-Score and Altman Z-Score
-pub async fn cmd_fundamental_score(symbol: &str, market: Market, json: bool) -> Result<()> {
+pub async fn cmd_fundamental_score(
+    symbol: &str,
+    market: Market,
+    json: bool,
+    explain: bool,
+) -> Result<()> {
     let client = YahooClient::new().await?;
     let r = crate::research::fetch(&client, symbol, market, 60).await?;
     let report = scorecard::generate_scorecard_report(&r);
@@ -1058,6 +1183,24 @@ pub async fn cmd_fundamental_score(symbol: &str, market: Market, json: bool) -> 
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         scorecard::print_scorecard_report(&report);
+        if explain {
+            print_section("How to Read Accounting Scorecards (--explain)");
+            println!(
+                "  • {}: Tests 9 binary criteria across Profitability (4),",
+                "Piotroski F-Score (0–9)".bold()
+            );
+            println!(
+                "    Leverage/Liquidity (3), and Operating Efficiency (2). 7–9 = Strong, 0–3 = Weak."
+            );
+            println!(
+                "  • {}: Combines working capital, retained earnings, EBIT,",
+                "Altman Z-Score".bold()
+            );
+            println!(
+                "    market cap, and sales relative to assets/liabilities to measure bankruptcy risk."
+            );
+            println!("    Z > 2.99 = Safe Zone, 1.81–2.99 = Grey Zone, < 1.81 = Distress Zone.\n");
+        }
     }
     Ok(())
 }

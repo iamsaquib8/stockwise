@@ -217,6 +217,14 @@ pub fn print_kv(key: &str, value: &str) {
     println!("  {} {}", pad_end(key, 28).dimmed(), value);
 }
 
+/// Print a non-intrusive next-step hint in interactive table mode unless
+/// `STOCKWISE_NO_HINTS` is set.
+pub fn print_hint(text: &str) {
+    if std::env::var_os("STOCKWISE_NO_HINTS").is_none() {
+        println!("  {} {}", "💡".dimmed(), text.dimmed());
+    }
+}
+
 pub fn rating_bar(score: f64, max: f64) -> String {
     let normalized = ((score / max) * 10.0).round() as usize;
     let filled = "█".repeat(normalized.min(10));

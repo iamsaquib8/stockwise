@@ -52,7 +52,40 @@ pub struct Search {
 pub enum Mode {
     Normal,
     Help,
+    Detail,
     Search(Search),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Default,
+    Symbol,
+    ChangePct,
+    Value,
+    PnlPct,
+}
+
+impl SortBy {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Default => Self::Symbol,
+            Self::Symbol => Self::ChangePct,
+            Self::ChangePct => Self::Value,
+            Self::Value => Self::PnlPct,
+            Self::PnlPct => Self::Default,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default order",
+            Self::Symbol => "symbol (A–Z)",
+            Self::ChangePct => "day change %",
+            Self::Value => "holding value",
+            Self::PnlPct => "P&L %",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +160,7 @@ pub struct App {
     pub chart_error: Option<String>,
     pub chart_loading: bool,
     pub mode: Mode,
+    pub sort: SortBy,
     pub status: Option<Status>,
     pub quit: bool,
 }
@@ -148,6 +182,7 @@ impl App {
             chart_error: None,
             chart_loading: false,
             mode: Mode::Normal,
+            sort: SortBy::Default,
             status: None,
             quit: false,
         }
@@ -258,6 +293,7 @@ impl App {
                             self.focus = Focus::Portfolio;
                         }
                         self.snapshot = Some(snap);
+                        self.apply_sort();
                         self.last_refresh = Some(chrono::Local::now());
                         if self.status.as_ref().is_some_and(|s| s.error) {
                             self.status = None;
@@ -348,6 +384,25 @@ impl App {
                 self.mode = Mode::Normal;
                 Vec::new()
             }
+            Mode::Detail => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('q') => {
+                    self.mode = Mode::Normal;
+                    Vec::new()
+                }
+                KeyCode::Char(c @ '1'..='6') => {
+                    self.period = c as usize - '1' as usize;
+                    self.chart_effect(false)
+                }
+                KeyCode::Char('[') => {
+                    self.period = (self.period + CHART_PERIODS.len() - 1) % CHART_PERIODS.len();
+                    self.chart_effect(false)
+                }
+                KeyCode::Char(']') => {
+                    self.period = (self.period + 1) % CHART_PERIODS.len();
+                    self.chart_effect(false)
+                }
+                _ => Vec::new(),
+            },
             Mode::Search(_) => self.on_search_key(key),
             Mode::Normal => self.on_normal_key(key),
         }
@@ -366,6 +421,18 @@ impl App {
             KeyCode::Char('?') | KeyCode::F(1) => {
                 self.mode = Mode::Help;
                 Vec::new()
+            }
+            KeyCode::Char('d') | KeyCode::Enter => {
+                if self.selected_symbol().is_some() {
+                    self.mode = Mode::Detail;
+                }
+                Vec::new()
+            }
+            KeyCode::Char('s') => {
+                self.sort = self.sort.next();
+                self.apply_sort();
+                self.info(format!("Sorted by {}", self.sort.label()));
+                self.chart_effect(false)
             }
             KeyCode::Char('/') | KeyCode::Char('a') => {
                 self.mode = Mode::Search(Search::default());
@@ -428,6 +495,47 @@ impl App {
         };
         *sel = sel.saturating_add_signed(delta).min(len - 1);
         self.chart_effect(false)
+    }
+
+    fn apply_sort(&mut self) {
+        let Some(snap) = &mut self.snapshot else {
+            return;
+        };
+        let cmp_desc = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        match self.sort {
+            SortBy::Default => {}
+            SortBy::Symbol => {
+                snap.watchlist.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+                snap.portfolio
+                    .holdings
+                    .sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            }
+            SortBy::ChangePct => {
+                snap.watchlist
+                    .sort_by(|a, b| cmp_desc(a.change_percent, b.change_percent));
+                snap.portfolio
+                    .holdings
+                    .sort_by(|a, b| cmp_desc(a.pnl_percent, b.pnl_percent));
+            }
+            SortBy::Value => {
+                snap.watchlist.sort_by(|a, b| cmp_desc(a.price, b.price));
+                snap.portfolio
+                    .holdings
+                    .sort_by(|a, b| cmp_desc(a.value, b.value));
+            }
+            SortBy::PnlPct => {
+                snap.watchlist
+                    .sort_by(|a, b| cmp_desc(a.change_percent, b.change_percent));
+                snap.portfolio
+                    .holdings
+                    .sort_by(|a, b| cmp_desc(a.pnl_percent, b.pnl_percent));
+            }
+        }
     }
 
     fn on_search_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -819,5 +927,28 @@ pub(crate) mod tests {
         app.update(Msg::Snapshot(Ok(snap)));
         assert_eq!(app.focus, Focus::Portfolio);
         assert_eq!(app.selected_symbol().as_deref(), Some("TCS.NS"));
+    }
+
+    #[test]
+    fn detail_modal_and_sort_cycling() {
+        let mut app = loaded();
+        app.update(key(KeyCode::Char('d')));
+        assert_eq!(app.mode, Mode::Detail);
+        // 'q' closes the detail modal without quitting the app.
+        app.update(key(KeyCode::Char('q')));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(!app.quit);
+
+        // 's' cycles sort order.
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::Symbol);
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::ChangePct);
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::Value);
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::PnlPct);
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::Default);
     }
 }

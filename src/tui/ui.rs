@@ -154,6 +154,7 @@ pub fn render(f: &mut Frame, app: &App, theme: &Theme) {
 
     match &app.mode {
         Mode::Help => render_help(f, area, app, theme),
+        Mode::Detail => render_detail(f, area, app, theme),
         Mode::Search(_) => render_search(f, area, app, theme),
         Mode::Normal => {}
     }
@@ -728,6 +729,11 @@ const HELP: &[(&str, &str)] = &[
     ("↑ ↓  j k", "move the selection; the chart follows it"),
     ("g  G", "first / last row"),
     ("Tab", "switch between watchlist and portfolio"),
+    (
+        "d  Enter",
+        "inspect selected symbol (position, range, alerts)",
+    ),
+    ("s", "cycle sort order (symbol, change%, value, P&L%)"),
     ("1-6  [ ]", "chart period: 1d 5d 1mo 6mo 1y 5y"),
     ("/  a", "search a company and add it to the watchlist"),
     ("x  Del", "remove the selected watchlist symbol"),
@@ -735,6 +741,143 @@ const HELP: &[(&str, &str)] = &[
     ("?", "show or hide this help"),
     ("q  Ctrl+C", "quit"),
 ];
+
+fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let Some(symbol) = app.selected_symbol() else {
+        return;
+    };
+    let title = format!(" Inspect · {} ", short(&symbol));
+    let inner = popup(f, area, 66, 17, &title, theme);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(snap) = &app.snapshot {
+        let wl = snap.watchlist.iter().find(|r| r.symbol == symbol);
+        let hold = snap.portfolio.holdings.iter().find(|h| h.symbol == symbol);
+        let idx = snap.indices.iter().find(|i| i.symbol == symbol);
+        let cur = hold
+            .and_then(|h| h.currency.as_deref())
+            .or_else(|| wl.and_then(|w| w.currency.as_deref()))
+            .or_else(|| idx.and_then(|i| i.currency.as_deref()));
+        let price = hold
+            .and_then(|h| h.price)
+            .or_else(|| wl.and_then(|w| w.price))
+            .or_else(|| idx.and_then(|i| i.price));
+        let day_chg = wl
+            .and_then(|w| w.change_percent)
+            .or_else(|| idx.and_then(|i| i.change_percent));
+
+        lines.push(Line::from(vec![
+            Span::styled(" Symbol:     ", theme.dim),
+            Span::styled(symbol.clone(), theme.title),
+            if let Some(name) = hold.and_then(|h| h.name.as_deref()) {
+                Span::styled(format!(" ({})", name), theme.dim)
+            } else {
+                Span::raw("")
+            },
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Live Price: ", theme.dim),
+            Span::raw(price_text(price, cur)),
+            Span::raw("  "),
+            pct_span(day_chg, theme),
+        ]));
+        if let Some(w) = wl
+            && let Some(vol) = w.volume
+        {
+            lines.push(Line::from(vec![
+                Span::styled(" Day Volume: ", theme.dim),
+                Span::raw(crate::display::format_volume(vol)),
+            ]));
+        }
+        if let Some(c) = app
+            .chart
+            .as_ref()
+            .filter(|c| c.symbol == symbol && !c.closes.is_empty())
+        {
+            let lo = c.closes.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = c.closes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let ret = match (c.closes.first(), c.closes.last()) {
+                (Some(f), Some(l)) if *f > 0.0 => Some((l - f) / f * 100.0),
+                _ => None,
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {:<11} ", format!("{} Range:", c.period)),
+                    theme.dim,
+                ),
+                Span::raw(format!(
+                    "{} – {}  (",
+                    format_price(lo, cur),
+                    format_price(hi, cur)
+                )),
+                pct_span(ret, theme),
+                Span::raw(")"),
+            ]));
+        }
+        if let Some(h) = hold {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(" Portfolio Position", theme.accent));
+            lines.push(Line::from(vec![
+                Span::styled(" Shares:     ", theme.dim),
+                Span::raw(format!(
+                    "{} @ avg {}",
+                    h.shares,
+                    format_price(h.avg_cost, cur)
+                )),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(" Cost / Val: ", theme.dim),
+                Span::raw(format!(
+                    "{} → {}",
+                    format_price(h.cost_basis, cur),
+                    price_text(h.value, cur)
+                )),
+            ]));
+            if let (Some(pnl), Some(pct)) = (h.pnl, h.pnl_percent) {
+                lines.push(Line::from(vec![
+                    Span::styled(" Unrealized: ", theme.dim),
+                    Span::styled(
+                        format!("{} ({:+.2}%)", signed_money(pnl, cur), pct),
+                        theme.signed(pnl),
+                    ),
+                    if let Some(w) = h.weight_percent {
+                        Span::styled(format!(" · weight {:.1}%", w), theme.dim)
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
+            }
+        }
+        let sym_alerts: Vec<&AlertCheckRow> =
+            snap.alerts.iter().filter(|a| a.symbol == symbol).collect();
+        if !sym_alerts.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!(" Active Alerts ({})", sym_alerts.len()),
+                theme.accent,
+            ));
+            for a in sym_alerts.into_iter().take(2) {
+                lines.push(Line::from(vec![
+                    Span::raw("  • "),
+                    Span::styled(
+                        format!("{} ({})", alert_label(a), a.status),
+                        if triggered(a) {
+                            theme.warn
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                ]));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        " Esc / d / Enter close · 1-6 change chart period · CLI: stockwise verdict ".to_string()
+            + short(&symbol),
+        theme.dim,
+    ));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
 
 fn render_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner = popup(f, area, 66, HELP.len() as u16 + 7, " Keys ", theme);

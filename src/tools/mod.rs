@@ -239,6 +239,51 @@ pub const TOOLS: &[Tool] = &[
         personal: false,
     },
     Tool {
+        name: "verdict",
+        title: "6-Pillar Buy/Sell verdict",
+        description: "Quantitative 6-pillar Buy/Hold/Sell verdict for one ticker (Technical Trend, \
+                      Valuation, Profitability & Quality, Financial Health, Growth & Momentum, \
+                      Institutional & Analyst), with composite score (0-100), risk level, target \
+                      prices, stop-loss and bullish/bearish reasons.",
+        params: &[SYMBOL, MARKET],
+        personal: false,
+    },
+    Tool {
+        name: "scorecard",
+        title: "Piotroski F-Score & Altman Z-Score",
+        description: "Audit-grade accounting scorecards for one ticker: Piotroski 9-Point F-Score \
+                      (Profitability, Leverage/Liquidity, Operating Efficiency) and Altman Z-Score \
+                      (Safe, Grey, Distress zones) with every criterion's formula and pass/fail.",
+        params: &[SYMBOL, MARKET],
+        personal: false,
+    },
+    Tool {
+        name: "insights",
+        title: "Fundamental & ownership insights",
+        description: "Categorized positive, negative and neutral impact cards (Valuation, Growth, \
+                      Margins, Balance Sheet, Ownership, Technical, Dividend, Risk) plus \
+                      shareholding breakdown (Promoter, FII, DII, Public) for one ticker.",
+        params: &[SYMBOL, MARKET],
+        personal: false,
+    },
+    Tool {
+        name: "events",
+        title: "Corporate events & disclosures",
+        description: "Recent and upcoming corporate events for one ticker: quarterly results, \
+                      dividends, splits, bonuses, board meetings and exchange disclosures, with \
+                      1-day and 5-day price reaction around each event.",
+        params: &[
+            SYMBOL,
+            opt(
+                "days",
+                Kind::Integer { min: 7, max: 365 },
+                "Look-back window in days for past events (default 90)",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
         name: "search",
         title: "Find a ticker",
         description: "Search tickers by company name (\"tata motors\", \"apple\"). Use before \
@@ -364,6 +409,33 @@ pub const TOOLS: &[Tool] = &[
                 "expiry",
                 Kind::Str,
                 "Expiry date YYYY-MM-DD (default nearest)",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "options_oi",
+        title: "Open-interest analytics & build-up",
+        description: "Open-interest analytics for an index or F&O stock: Put/Call Ratio (OI & \
+                      volume), Max Pain strike, top Call resistance and Put support OI walls, and \
+                      institutional build-up classification (Long Build-up, Short Covering, \
+                      Short Build-up, Long Unwinding).",
+        params: &[
+            req(
+                "symbol",
+                Kind::Str,
+                "Underlying, e.g. NIFTY, BANKNIFTY, RELIANCE, or AAPL with market=us",
+            ),
+            opt(
+                "expiry",
+                Kind::Str,
+                "Expiry date YYYY-MM-DD (default nearest)",
+            ),
+            opt(
+                "top",
+                Kind::Integer { min: 1, max: 15 },
+                "Top N open-interest strikes per side (default 5)",
             ),
             MARKET,
         ],
@@ -518,6 +590,65 @@ pub const TOOLS: &[Tool] = &[
                       rules and the ₹1.25 lakh LTCG exemption (or US/UK rules). An estimate to \
                       check against the broker's tax P&L.",
         params: &[COUNTRY],
+        personal: true,
+    },
+    Tool {
+        name: "tax_advance",
+        title: "Indian advance tax schedule",
+        description: "Quarterly Indian advance tax schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) from \
+                      the user's realized capital gains under Section 208/211, with Section \
+                      234C(1) capital-gains proviso protections and shortfall interest estimate.",
+        params: &[
+            opt(
+                "fy",
+                Kind::Str,
+                "Indian financial year, e.g. 2025-26 or AY2026-27 (default current FY)",
+            ),
+            opt(
+                "paid",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e11,
+                },
+                "Advance tax already paid for this financial year in INR (default 0)",
+            ),
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "harvest",
+        title: "Tax-loss & LTCG exemption harvesting",
+        description: "Lot-level tax-loss harvesting candidates (short-term and long-term \
+                      unrealized losses and estimated tax offset) plus unused Section 112A ₹1.25L \
+                      annual LTCG tax-gain harvesting capacity for the user's portfolio.",
+        params: &[MARKET],
+        personal: true,
+    },
+    Tool {
+        name: "rebalance",
+        title: "Portfolio rebalance plan",
+        description: "Rebalance plan for the user's portfolio against their saved target weights \
+                      (or equal weight): current vs target weight, drift tolerance band, and \
+                      buy/sell trade sizing (or buy-only allocation when `inflow` is provided).",
+        params: &[
+            opt(
+                "inflow",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1e11,
+                },
+                "Fresh cash inflow for buy-only rebalancing without selling",
+            ),
+            opt(
+                "drift",
+                Kind::Number {
+                    min: 0.0,
+                    max: 50.0,
+                },
+                "Drift tolerance band in percent, e.g. 2.0 for +/-2%",
+            ),
+            MARKET,
+        ],
         personal: true,
     },
     Tool {
