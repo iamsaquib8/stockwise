@@ -14,7 +14,7 @@ pub fn ema(data: &[f64], period: usize) -> Option<f64> {
 
 /// Returns iterator over exponential moving average values for `period-1..data.len()` range.
 pub fn ema_iter(data: &[f64], period: usize) -> Option<impl Iterator<Item = f64>> {
-    if data.len() < period {
+    if data.len() < period || period == 0 {
         return None;
     }
 
