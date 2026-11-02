@@ -1047,3 +1047,17 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market) -> Result<()> 
     println!();
     Ok(())
 }
+
+/// Transparent accounting scorecards: Piotroski 9-Point F-Score and Altman Z-Score
+pub async fn cmd_fundamental_score(symbol: &str, market: Market, json: bool) -> Result<()> {
+    let client = YahooClient::new().await?;
+    let r = crate::research::fetch(&client, symbol, market, 60).await?;
+    let report = scorecard::generate_scorecard_report(&r);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        scorecard::print_scorecard_report(&report);
+    }
+    Ok(())
+}

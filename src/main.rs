@@ -51,6 +51,7 @@ mod practice;
 mod providers;
 mod rebalance;
 mod research;
+mod scorecard;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
@@ -237,6 +238,28 @@ enum Commands {
     /// Definitive Buy/Sell verdict, multi-pillar scoring, targets & stop-loss
     #[command(alias = "decision", alias = "signal", alias = "buysell")]
     Verdict { symbol: String },
+
+    /// Fundamental accounting scorecards: Piotroski 9-Point F-Score and Altman Z-Score with full formula breakdown
+    #[command(
+        alias = "scorecard",
+        alias = "score",
+        alias = "f-score",
+        alias = "z-score",
+        args_conflicts_with_subcommands = true,
+        after_help = "Examples:\n  \
+stockwise fundamental score TCS          Piotroski F-Score and Altman Z-Score for TCS\n  \
+stockwise score RELIANCE                 instant scorecard with full formula breakdown\n  \
+stockwise scorecard INFY --json          machine-readable JSON output\n  \
+stockwise score AAPL -m us               US equities support with SEC / Yahoo statements"
+    )]
+    Fundamental {
+        #[command(subcommand)]
+        action: Option<FundamentalCmd>,
+        /// Symbol to score (when no subcommand is specified, e.g. `stockwise score TCS`)
+        symbol: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Technical analysis (RSI, MACD, Bollinger Bands, ...)
     #[command(alias = "t")]
@@ -1512,6 +1535,16 @@ Examples:
   stockwise bonds calc --coupon 7.1 --maturity 2034-04-08 --price 99.5
   stockwise bonds calc --tbill --maturity 2027-01-14 --price 98.6";
 
+#[derive(Subcommand, Debug, Clone)]
+enum FundamentalCmd {
+    /// Calculate Piotroski 9-Point F-Score and Altman Z-Score with full formula breakdown
+    Score {
+        symbol: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum CommodityCmd {
     /// Gold and silver spot: USD per troy ounce and ₹ per gram, 10 g and kg (before duty and GST)
@@ -2331,6 +2364,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "events",
             "insights",
             "verdict",
+            "fundamental",
             "technical",
             "history",
             "chart",
@@ -2699,6 +2733,22 @@ async fn dispatch(
         Commands::Events { symbol, days, ai } => commands::cmd_events(&symbol, days, ai, m).await,
         Commands::Insights { symbol } => commands::cmd_insights(&symbol, m).await,
         Commands::Verdict { symbol } => commands::cmd_verdict(&symbol, m).await,
+        Commands::Fundamental {
+            action,
+            symbol,
+            json,
+        } => match action {
+            Some(FundamentalCmd::Score {
+                symbol,
+                json: sub_json,
+            }) => commands::cmd_fundamental_score(&symbol, m, sub_json || json).await,
+            None => {
+                let Some(symbol) = symbol else {
+                    anyhow::bail!("A symbol is required. Usage: `stockwise score <SYMBOL>`");
+                };
+                commands::cmd_fundamental_score(&symbol, m, json).await
+            }
+        },
         Commands::Technical {
             symbol,
             period,
@@ -5035,6 +5085,54 @@ mod tests {
             panic!("expected trade");
         };
         assert_eq!(broker, brokers::BrokerKind::Angel);
+    }
+
+    #[test]
+    fn fundamental_score_cli_parses() {
+        let cli =
+            Cli::try_parse_from(["stockwise", "fundamental", "score", "TCS", "--json"]).unwrap();
+        match cli.command {
+            Commands::Fundamental {
+                action,
+                symbol,
+                json,
+            } => {
+                assert!(
+                    matches!(action, Some(FundamentalCmd::Score { symbol, json: true }) if symbol == "TCS")
+                );
+                assert_eq!(symbol, None);
+                assert!(!json);
+            }
+            _ => panic!("expected fundamental score"),
+        }
+
+        let cli = Cli::try_parse_from(["stockwise", "score", "RELIANCE"]).unwrap();
+        match cli.command {
+            Commands::Fundamental {
+                action,
+                symbol,
+                json,
+            } => {
+                assert!(action.is_none());
+                assert_eq!(symbol.as_deref(), Some("RELIANCE"));
+                assert!(!json);
+            }
+            _ => panic!("expected score command"),
+        }
+
+        let cli = Cli::try_parse_from(["stockwise", "scorecard", "INFY", "--json"]).unwrap();
+        match cli.command {
+            Commands::Fundamental {
+                action,
+                symbol,
+                json,
+            } => {
+                assert!(action.is_none());
+                assert_eq!(symbol.as_deref(), Some("INFY"));
+                assert!(json);
+            }
+            _ => panic!("expected scorecard command"),
+        }
     }
 
     #[test]

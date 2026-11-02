@@ -16,6 +16,7 @@ use crate::longterm;
 use crate::market::{self, Market};
 use crate::output::{self, CsvRow, Format, round, round_opt};
 use crate::portfolio::Portfolio;
+use crate::scorecard;
 use crate::simulator::{SimHistory, SimSession, SimTrade};
 use crate::technical;
 use crate::views;
