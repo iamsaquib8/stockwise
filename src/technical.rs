@@ -30,6 +30,42 @@ pub fn ema_iter(data: &[f64], period: usize) -> Option<impl Iterator<Item = f64>
     )
 }
 
+/// It is a logical error to call this function when `data` does not have exactly `data_len` items.
+///
+/// # Returns
+///
+/// Returns `(ema, data.last().unwrap())`.
+fn ema_unchecked(
+    data_len: usize,
+    mut data: impl Iterator<Item = f64>,
+    period: usize,
+) -> Option<(f64, f64)> {
+    if data_len < period || data_len == 0 {
+        return None;
+    }
+
+    let multiplier = 2.0 / (period as f64 + 1.0);
+    let mut last_price = 0.0;
+    // Start with SMA of first `period` values
+    let mut ema_val = data
+        .by_ref()
+        .take(period)
+        .map(|x| {
+            last_price = x;
+            x
+        })
+        .sum::<f64>()
+        / period as f64;
+
+    let iter = data.map(|price| {
+        last_price = price;
+        ema_val = (price - ema_val) * multiplier + ema_val;
+        ema_val
+    });
+
+    Some((iter.last().unwrap_or(ema_val), last_price))
+}
+
 /// Calculate RSI (Relative Strength Index)
 pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
     if data.len() < period + 1 {
@@ -84,13 +120,12 @@ pub fn macd(data: &[f64]) -> Option<(f64, f64, f64)> {
     let ema26_iter = ema_iter(data, 26)?;
     let ema12_iter = ema_iter(data, 12)?.skip(26 - 12);
 
-    let macd_history: Vec<f64> = ema12_iter
+    let macd_history = ema12_iter
         .zip(ema26_iter)
-        .map(|(ema12, ema26)| ema12 - ema26)
-        .collect();
+        .map(|(ema12, ema26)| ema12 - ema26);
 
-    let signal = ema(&macd_history, 9).unwrap_or(0.0);
-    let macd_line = macd_history.last().copied().expect("shouldn't be empty");
+    let (signal, macd_line) =
+        ema_unchecked(data.len() - 26 + 1, macd_history, 9).expect("shouldn't be empty");
     let histogram = macd_line - signal;
 
     Some((macd_line, signal, histogram))
