@@ -19,7 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install
 sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm
 
 # With Rust (1.97+)
-cargo install --locked --git https://github.com/iamsaquib8/stockwise --tag v0.8.0
+cargo binstall stockwise            # prebuilt binary
+cargo install --locked stockwise    # build from source
 ```
 
 Windows: `scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json`
