@@ -121,8 +121,7 @@ Portfolio, watchlist and alerts persist in the `stockwise-data` volume.
 
 ```bash
 cargo binstall stockwise    # prebuilt binary via cargo-binstall
-cargo install stockwise     # or build from source (Rust 1.97+)
-cargo install --locked --git https://github.com/iamsaquib8/stockwise --tag v0.8.0  # this exact release
+cargo install --locked stockwise  # or build from source (Rust 1.97+)
 ```
 
 **Coming soon** — prepared, waiting on a one-time publishing step:

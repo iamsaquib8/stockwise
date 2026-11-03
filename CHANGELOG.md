@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Guard against zero or unavailable price in `verdict` upside percentage calculation, preventing `+inf%` output and invalid JSON serialization on unpriced stocks ([#35](https://github.com/iamsaquib8/stockwise/issues/35)).
 - Portfolio totals in a base currency other than USD or INR used the wrong side of the FX pair. Conversions now follow Yahoo's quotation direction ([#32](https://github.com/iamsaquib8/stockwise/issues/32)). Thanks [@AndreIsraelAO](https://github.com/AndreIsraelAO).
 - The EMA no longer divides by zero when asked for a period of 0.
+- Percent returns in `markets`, technicals and risk metrics no longer show `+inf%` when the first price is zero or negative ([#59](https://github.com/iamsaquib8/stockwise/issues/59)). Thanks [@ShahadatTest](https://github.com/ShahadatTest).
 
 ### Known issues
 These are open and planned for the next release. Check the linked issues before relying on the numbers involved.
@@ -191,7 +192,7 @@ Not released separately: these changes first shipped in 0.7.0.
   `--json`, `--csv`), `dashboard`, `tui`, `serve` / the web dashboard,
   `wealth`, `rebalance`, `harvest`, `tax`, `report portfolio` and the long-term
   daemon. `MF:<AMFI code>` and `MF:<ISIN>` (growth/payout or IDCW-reinvestment
-  ISIN) use AMFI's latest end-of-day NAV, shown as "NAV as of <date>"; SGBs (NSE
+  ISIN) use AMFI's latest end-of-day NAV, shown as "NAV as of &lt;date&gt;"; SGBs (NSE
   symbol or tranche ISIN) use NSE's last price, or one gram of gold at spot
   labelled "estimated" when NSE refuses (the 2.5% interest is left out, and
   said so). An unknown code stays N/A with a note, never 0. `portfolio --json`

@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://github.com/iamsaquib8/stockwise
 TERMUX_PKG_DESCRIPTION="Stock market toolkit for the terminal: NSE/BSE and US stocks, funds, F&O, backtests"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@iamsaquib8"
-TERMUX_PKG_VERSION="0.5.0"
+TERMUX_PKG_VERSION="0.8.0"
 TERMUX_PKG_SRCURL=https://github.com/iamsaquib8/stockwise/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=06da52fff2625c2781dc2cc16ce0c3bcf1c16851187d030298f17b5359a94f33
+TERMUX_PKG_SHA256=9300175c48334ad140220fa76f1221a57e784261d5c55063a6cd92b7ef5e05de
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_BUILD_IN_SRC=true
 

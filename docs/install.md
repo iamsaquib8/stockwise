@@ -28,7 +28,7 @@ These work today with the [latest release](https://github.com/iamsaquib8/stockwi
 | Nix | `nix profile install github:iamsaquib8/stockwise` | ✓ | `nix profile upgrade stockwise` |
 | Windows | `scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json` | — | `scoop update stockwise` |
 | Docker | `docker run --rm -it -v stockwise-data:/data ghcr.io/iamsaquib8/stockwise quote TCS` | — | `docker pull` |
-| Rust | `cargo install --locked --git https://github.com/iamsaquib8/stockwise --tag v0.8.0`, or `cargo install stockwise` / `cargo binstall stockwise` once crates.io has the release | — | run it again |
+| Rust | `cargo binstall stockwise` (prebuilt) or `cargo install --locked stockwise` | — | run it again |
 | Any | archives from the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest) | man pages included | download again |
 
 ### Coming soon

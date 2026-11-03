@@ -406,7 +406,7 @@ same way in `portfolio`, `dashboard`, `tui`, `serve`, `wealth`, `rebalance`,
   `MF:<ISIN>` (the growth/payout or IDCW-reinvestment ISIN, as `import cas` and
   Groww imports store them) — at the latest NAV in AMFI's
   [NAVAll.txt](https://portal.amfiindia.com/spages/NAVAll.txt) (cached 12
-  hours). NAVs are end of day: the table says "NAV as of <date>" for each fund,
+  hours). NAVs are end of day: the table says "NAV as of &lt;date&gt;" for each fund,
   and `--json` rows carry `name`, `price_source: "amfi_nav"` and `nav_date`. A
   code or ISIN that isn't in AMFI's file, or a scheme AMFI lists without a NAV,
   stays N/A with a note (find codes with `mf search`) — never 0. A scheme whose
