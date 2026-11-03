@@ -646,7 +646,7 @@ pub async fn cmd_multitimeframe(symbol: &str, market: Market) -> Result<()> {
             continue;
         }
 
-        let ret = (closes.last().unwrap() / closes[0] - 1.0) * 100.0;
+        let ret = technical::percent_change(closes[0], *closes.last().unwrap());
         let vol =
             technical::annualized_volatility_with(&closes, technical::periods_per_year(interval))
                 .map(|v| format!("{:.1}%", v * 100.0))

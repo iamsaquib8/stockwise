@@ -182,6 +182,18 @@ pub fn macd_signal(histogram: f64) -> &'static str {
 
 // ── Risk & Statistical Functions ──
 
+/// Percent change from `start` to `end`.
+///
+/// Returns `0.0` when `start` is not positive so callers never print `+inf%`
+/// or NaN from a zero/negative initial price (#59).
+pub fn percent_change(start: f64, end: f64) -> f64 {
+    if start > 0.0 {
+        (end / start - 1.0) * 100.0
+    } else {
+        0.0
+    }
+}
+
 /// Daily returns from price series
 pub fn daily_returns(prices: &[f64]) -> Vec<f64> {
     prices
@@ -875,6 +887,15 @@ mod tests {
         let prices = vec![100.0, 0.0, 50.0, 55.0];
         let returns = daily_returns(&prices);
         assert!(returns.iter().all(|r| r.is_finite()));
+    }
+
+    #[test]
+    fn percent_change_guards_non_positive_start() {
+        assert!((percent_change(100.0, 110.0) - 10.0).abs() < 1e-9);
+        assert_eq!(percent_change(0.0, 50.0), 0.0);
+        assert_eq!(percent_change(-1.0, 50.0), 0.0);
+        assert!(percent_change(0.0, 50.0).is_finite());
+        assert!(!percent_change(0.0, 1.0).is_infinite());
     }
 
     #[test]

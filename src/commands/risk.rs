@@ -488,7 +488,7 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
 
     let current = *closes.last().unwrap();
     let projected_end = *forecast.last().unwrap();
-    let change_pct = ((projected_end / current) - 1.0) * 100.0;
+    let change_pct = technical::percent_change(current, projected_end);
 
     print_header(&format!("Forecast: {} — {} day projection", resolved, days));
 
