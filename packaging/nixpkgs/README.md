@@ -1,7 +1,7 @@
 # nixpkgs
 
 `package.nix` is a ready-to-submit nixpkgs expression for the released
-`v0.5.0` tag (`rustPlatform.buildRustPackage` with `cargoHash`, man pages and
+`v0.8.0` tag (`rustPlatform.buildRustPackage` with `cargoHash`, man pages and
 shell completions, `versionCheckHook`, `nix-update-script`). The flake in the
 repository root stays the way to build from a checkout; this file is only for
 nixpkgs. The `nix` job in `.github/workflows/packaging.yml` builds it with the
@@ -25,7 +25,7 @@ flake's nixpkgs on every packaging change.
    nix fmt pkgs/by-name/st/stockwise/package.nix
    ```
 
-4. Commit as `stockwise: init at 0.5.0` and open a pull request against
+4. Commit as `stockwise: init at 0.8.0` and open a pull request against
    `master`, filling in the template (tested platforms, `nixpkgs-review`
    result). Reviews can take a few weeks.
 

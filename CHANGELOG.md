@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Guard against zero or unavailable price in `verdict` upside percentage calculation, preventing `+inf%` output and invalid JSON serialization on unpriced stocks ([#35](https://github.com/iamsaquib8/stockwise/issues/35)).
 - Portfolio totals in a base currency other than USD or INR used the wrong side of the FX pair. Conversions now follow Yahoo's quotation direction ([#32](https://github.com/iamsaquib8/stockwise/issues/32)). Thanks [@AndreIsraelAO](https://github.com/AndreIsraelAO).
 - The EMA no longer divides by zero when asked for a period of 0.
+- Percent returns in `markets`, technicals and risk metrics no longer show `+inf%` when the first price is zero or negative ([#59](https://github.com/iamsaquib8/stockwise/issues/59)). Thanks [@ShahadatTest](https://github.com/ShahadatTest).
 
 ### Known issues
 These are open and planned for the next release. Check the linked issues before relying on the numbers involved.
