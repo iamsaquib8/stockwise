@@ -27,8 +27,10 @@ impl CsvRow for MoverRow {
     ];
 }
 
-/// Top and bottom `n` by today's change. Quotes without a price or change
-/// are left out rather than ranked as 0%.
+/// Top `n` risers and fallers by today's change. Only stocks with a positive
+/// change enter the gainers list and only negative changes enter losers, so a
+/// broad up day never pads "Top Losers" with rising names (and vice versa).
+/// Quotes without a price or change are left out rather than ranked as 0%.
 pub(crate) fn mover_rows(quotes: &[crate::api::Quote], n: usize) -> (Vec<MoverRow>, Vec<MoverRow>) {
     let mut ranked: Vec<(&crate::api::Quote, f64, f64)> = quotes
         .iter()
@@ -46,6 +48,7 @@ pub(crate) fn mover_rows(quotes: &[crate::api::Quote], n: usize) -> (Vec<MoverRo
     };
     let gainers = ranked
         .iter()
+        .filter(|(_, _, pct)| *pct > 0.0)
         .take(n)
         .enumerate()
         .map(|(i, r)| row("gainer", i + 1, r))
@@ -53,6 +56,7 @@ pub(crate) fn mover_rows(quotes: &[crate::api::Quote], n: usize) -> (Vec<MoverRo
     let losers = ranked
         .iter()
         .rev()
+        .filter(|(_, _, pct)| *pct < 0.0)
         .take(n)
         .enumerate()
         .map(|(i, r)| row("loser", i + 1, r))
@@ -129,8 +133,15 @@ pub async fn cmd_movers(
         Format::Table => {}
     }
 
-    for (title, rows) in [("Top Gainers", &gainers), ("Top Losers", &losers)] {
+    for (title, rows, empty) in [
+        ("Top Gainers", &gainers, "No stocks rose today"),
+        ("Top Losers", &losers, "No stocks fell today"),
+    ] {
         print_header(&format!("{} — {}", title, scope));
+        if rows.is_empty() {
+            println!("  {}", empty.dimmed());
+            continue;
+        }
         println!(
             "  {:<14} {:>10} {:>10} {:>14}",
             "Symbol".bold(),
