@@ -192,7 +192,7 @@ Not released separately: these changes first shipped in 0.7.0.
   `--json`, `--csv`), `dashboard`, `tui`, `serve` / the web dashboard,
   `wealth`, `rebalance`, `harvest`, `tax`, `report portfolio` and the long-term
   daemon. `MF:<AMFI code>` and `MF:<ISIN>` (growth/payout or IDCW-reinvestment
-  ISIN) use AMFI's latest end-of-day NAV, shown as "NAV as of <date>"; SGBs (NSE
+  ISIN) use AMFI's latest end-of-day NAV, shown as "NAV as of &lt;date&gt;"; SGBs (NSE
   symbol or tranche ISIN) use NSE's last price, or one gram of gold at spot
   labelled "estimated" when NSE refuses (the 2.5% interest is left out, and
   said so). An unknown code stays N/A with a note, never 0. `portfolio --json`
