@@ -820,37 +820,7 @@ async fn fund_profile(
     symbol: &str,
     market: Market,
 ) -> Result<funds::FundProfile> {
-    if !symbol.is_empty() && symbol.chars().all(|c| c.is_ascii_digit()) {
-        bail!(
-            "{} looks like an AMFI scheme code. AMFI publishes NAVs, not portfolios, so StockWise \
-             has no holdings for Indian mutual funds. Overlap works for funds Yahoo Finance has \
-             holdings for — mainly US ETFs and mutual funds (e.g. `mf overlap SPY QQQ -m us`)",
-            symbol
-        );
-    }
-    let resolved = market::resolve_symbol(symbol, market);
-    let url = crate::api::build_url(
-        "https://query2.finance.yahoo.com/v10/finance/quoteSummary",
-        Some(&resolved),
-        &[
-            ("modules", "topHoldings,fundProfile,price"),
-            ("crumb", client.crumb()),
-        ],
-    );
-    let no_data = || {
-        format!(
-            "No fund holdings for {} on Yahoo Finance. Holdings exist for US ETFs and mutual funds \
-             (e.g. SPY, QQQ, VFIAX with -m us); NSE-listed ETFs such as NIFTYBEES have none{}",
-            resolved,
-            if market == Market::In {
-                " — for US funds add `-m us`"
-            } else {
-                ""
-            }
-        )
-    };
-    let v = client.raw_get(&url).await.with_context(no_data)?;
-    funds::parse_fund_profile(&resolved, &v).with_context(no_data)
+    funds::fetch_fund_profile(client, symbol, market).await
 }
 
 /// `mf overlap` — shared top holdings and sector overlap of two funds/ETFs.

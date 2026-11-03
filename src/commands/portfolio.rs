@@ -4,10 +4,12 @@
 
 use super::*;
 use crate::api::Quote;
+use crate::funds;
 use crate::offmarket::{self, Mark, OffMarket, PriceSource};
 use crate::portfolio::{self as pf, DividendEvent, Fx, Lot, Split};
 use crate::rebalance::{HoldingInput, RebalanceActionType};
 use crate::tax;
+use crate::xray::{self, XrayInputHolding};
 
 // ── Valuation ──
 
@@ -1921,6 +1923,371 @@ pub async fn cmd_rebalance(
     if !val.off.marks.is_empty() {
         println!();
     }
+    Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+/// `portfolio xray` — look-through overlap across stocks, ETFs, and funds,
+/// plus asset-class, market-cap, and sector concentration.
+pub async fn cmd_portfolio_xray(
+    portfolio_name: Option<&str>,
+    market: Market,
+    base: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let active_name = portfolio_name.or(pf::active());
+    let portfolio = Portfolio::load_named(active_name)?;
+    if portfolio.holdings.is_empty() {
+        if json {
+            let report = xray::compute_xray(
+                active_name.unwrap_or("default"),
+                market_currency(market),
+                &[],
+                &std::collections::HashMap::new(),
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
+        return Ok(());
+    }
+
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    let client = YahooClient::new().await?;
+    let val = value_holdings(&client, &symbols, market, base).await?;
+
+    let mut fund_profiles = std::collections::HashMap::new();
+    for h in &portfolio.holdings {
+        let is_fund = offmarket::is_fund(&h.symbol);
+        let quote = val.quote(&h.symbol);
+        let quote_type = quote.and_then(|q| q.quote_type.as_deref());
+        let is_etf = quote_type == Some("ETF") || quote_type == Some("MUTUALFUND");
+
+        if is_fund || is_etf || (!offmarket::is_sgb(&h.symbol) && quote_type.is_none()) {
+            if let Some(fp) = funds::load_fund_disclosure(&h.symbol) {
+                fund_profiles.insert(h.symbol.clone(), fp);
+            } else if let Ok(fp) = funds::fetch_fund_profile(&client, &h.symbol, market).await {
+                fund_profiles.insert(h.symbol.clone(), fp);
+            }
+        }
+    }
+
+    let mut input_holdings = Vec::with_capacity(portfolio.holdings.len());
+    for h in &portfolio.holdings {
+        let price = val.price(&h.symbol).unwrap_or(0.0);
+        let price_base = val.to_base(&h.symbol, price).unwrap_or(price);
+        let value = h.shares * price_base;
+
+        let quote = val.quote(&h.symbol);
+        let mut sector = quote.and_then(|q| q.sector.clone());
+        let is_fund = offmarket::is_fund(&h.symbol) || fund_profiles.contains_key(&h.symbol);
+        let is_sgb = offmarket::is_sgb(&h.symbol);
+        if sector.is_none() && !is_fund && !is_sgb && !offmarket::is_off_market(&h.symbol) {
+            let url = crate::api::build_url(
+                "https://query2.finance.yahoo.com/v10/finance/quoteSummary",
+                Some(&h.symbol),
+                &[("modules", "assetProfile"), ("crumb", client.crumb())],
+            );
+            if let Ok(v) = client.raw_get(&url).await {
+                sector = v
+                    .pointer("/quoteSummary/result/0/assetProfile/sector")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
+            }
+        }
+        let market_cap = quote.and_then(|q| q.market_cap);
+        let currency = val.currency(&h.symbol);
+        let fund_category = val
+            .off
+            .mark(&h.symbol)
+            .and_then(|m| m.category.clone())
+            .or_else(|| {
+                fund_profiles
+                    .get(&h.symbol)
+                    .and_then(|fp| fp.category.clone())
+            });
+
+        let name = val
+            .name(&h.symbol)
+            .or_else(|| fund_profiles.get(&h.symbol).and_then(|fp| fp.name.clone()))
+            .or_else(|| quote.and_then(|q| q.long_name.clone().or_else(|| q.short_name.clone())));
+
+        input_holdings.push(XrayInputHolding {
+            symbol: h.symbol.clone(),
+            name,
+            shares: h.shares,
+            price: price_base,
+            value,
+            sector,
+            market_cap,
+            currency,
+            is_fund,
+            is_sgb,
+            fund_category,
+        });
+    }
+
+    let p_name = active_name.unwrap_or("default");
+    let report = xray::compute_xray(p_name, val.base(), &input_holdings, &fund_profiles);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    print_header(&portfolio_title("Portfolio X-Ray"));
+    println!(
+        "  {} {}   {} {}",
+        "Total Portfolio Value:".dimmed(),
+        format_price(report.total_value, Some(val.base())).bold(),
+        "Base Currency:".dimmed(),
+        val.base().cyan()
+    );
+    println!();
+
+    // Concentration Alerts
+    if !report.concentrations_above_10pct.is_empty() {
+        println!(
+            "  {} {}",
+            "!".red().bold(),
+            format!(
+                "High Concentration Risk: {} holding(s) exceed the 10.0% portfolio risk threshold!",
+                report.concentrations_above_10pct.len()
+            )
+            .red()
+            .bold()
+        );
+        for c in &report.concentrations_above_10pct {
+            let via_str = if !c.via_funds.is_empty() {
+                let f_items: Vec<String> = c
+                    .via_funds
+                    .iter()
+                    .map(|f| format!("{}: {:.2}%", f.fund_symbol, f.effective_weight_pct))
+                    .collect();
+                format!(" (via funds: {})", f_items.join(", "))
+            } else {
+                String::new()
+            };
+            println!(
+                "    • {:<12} {:>6.2}% effective  [Direct: {:>5.2}%, Funds: {:>5.2}%]{}",
+                c.symbol.bold().yellow(),
+                c.effective_weight_pct,
+                c.direct_weight_pct,
+                c.fund_weight_pct,
+                via_str.dimmed()
+            );
+        }
+        println!();
+    } else {
+        println!(
+            "  {} {}",
+            "✓".green().bold(),
+            "No individual company exceeds the 10.0% concentration threshold (well-diversified)."
+                .green()
+        );
+        println!();
+    }
+
+    // Top Effective Exposures
+    print_section("Top Effective Stock Exposures (Look-Through)");
+    println!(
+        "  {:<12} {:<24} {:>12} {:>12} {:>12} {:>9}  {}",
+        "Symbol".bold(),
+        "Company".bold(),
+        "Direct".bold(),
+        "Via Funds".bold(),
+        "Total Value".bold(),
+        "Weight".bold(),
+        "Contributing Funds".bold()
+    );
+    println!("  {}", "─".repeat(95).dimmed());
+
+    for c in report.effective_holdings.iter().take(15) {
+        let sym_display = if c.is_concentrated {
+            format!("{} *", c.symbol).bold().yellow()
+        } else {
+            c.symbol.cyan()
+        };
+        let name_display = truncate(c.name.as_deref().unwrap_or("—"), 24);
+        let via_display = if c.via_funds.is_empty() {
+            "—".dimmed().to_string()
+        } else {
+            let f_list: Vec<&str> = c.via_funds.iter().map(|f| f.fund_symbol.as_str()).collect();
+            truncate(&f_list.join(", "), 20)
+        };
+
+        println!(
+            "  {:<12} {:<24} {:>12} {:>12} {:>12} {:>8.2}%  {}",
+            sym_display,
+            name_display,
+            format_price(c.direct_value, Some(val.base())),
+            format_price(c.fund_value, Some(val.base())),
+            format_price(c.total_value, Some(val.base())).bold(),
+            c.effective_weight_pct,
+            via_display
+        );
+    }
+    if report.effective_holdings.len() > 15 {
+        println!(
+            "  {}",
+            format!(
+                "... and {} more positions (use --json for full list)",
+                report.effective_holdings.len() - 15
+            )
+            .dimmed()
+        );
+    }
+    if report.effective_holdings.iter().any(|h| h.is_concentrated) {
+        println!(
+            "  {}",
+            "* Exceeds 10.0% concentration limit".yellow().dimmed()
+        );
+    }
+    println!();
+
+    // Asset Class Split
+    print_section("Asset Class Allocation");
+    println!(
+        "  {:<20} {:>14} {:>10}",
+        "Asset Class".bold(),
+        "Value".bold(),
+        "Weight".bold()
+    );
+    println!("  {}", "─".repeat(46).dimmed());
+    let classes = [
+        (
+            "Equity",
+            report.asset_class_split.equity_value,
+            report.asset_class_split.equity_pct,
+        ),
+        (
+            "Debt",
+            report.asset_class_split.debt_value,
+            report.asset_class_split.debt_pct,
+        ),
+        (
+            "Gold / Commodity",
+            report.asset_class_split.commodity_value,
+            report.asset_class_split.commodity_pct,
+        ),
+        (
+            "Cash / Liquid",
+            report.asset_class_split.cash_value,
+            report.asset_class_split.cash_pct,
+        ),
+    ];
+    for (name, val_amt, pct_amt) in classes {
+        if val_amt > 0.0 || pct_amt > 0.0 {
+            println!(
+                "  {:<20} {:>14} {:>9.2}%",
+                name,
+                format_price(val_amt, Some(val.base())),
+                pct_amt
+            );
+        }
+    }
+    println!();
+
+    // Market Cap Breakdown
+    print_section("Market Cap Breakdown (Equity)");
+    println!(
+        "  {:<20} {:>14} {:>10}",
+        "Market Cap".bold(),
+        "Value".bold(),
+        "Weight".bold()
+    );
+    println!("  {}", "─".repeat(46).dimmed());
+    let mc_rows = [
+        (
+            "Large Cap",
+            report.market_cap_breakdown.large_cap_value,
+            report.market_cap_breakdown.large_cap_pct,
+        ),
+        (
+            "Mid Cap",
+            report.market_cap_breakdown.mid_cap_value,
+            report.market_cap_breakdown.mid_cap_pct,
+        ),
+        (
+            "Small Cap",
+            report.market_cap_breakdown.small_cap_value,
+            report.market_cap_breakdown.small_cap_pct,
+        ),
+        (
+            "Unclassified",
+            report.market_cap_breakdown.unclassified_value,
+            report.market_cap_breakdown.unclassified_pct,
+        ),
+    ];
+    for (name, val_amt, pct_amt) in mc_rows {
+        if val_amt > 0.0 || pct_amt > 0.0 {
+            println!(
+                "  {:<20} {:>14} {:>9.2}%",
+                name,
+                format_price(val_amt, Some(val.base())),
+                pct_amt
+            );
+        }
+    }
+    println!();
+
+    // Sector Concentration
+    print_section("Sector Concentration");
+    println!(
+        "  {:<28} {:>14} {:>10}",
+        "Sector".bold(),
+        "Value".bold(),
+        "Weight".bold()
+    );
+    println!("  {}", "─".repeat(54).dimmed());
+    for s in &report.sector_allocation {
+        if s.value > 0.0 {
+            println!(
+                "  {:<28} {:>14} {:>9.2}%",
+                truncate(&s.sector, 28),
+                format_price(s.value, Some(val.base())),
+                s.weight_pct
+            );
+        }
+    }
+    println!();
+
+    // Funds Analyzed
+    if !report.funds_analyzed.is_empty() {
+        print_section("Funds & ETFs Analyzed");
+        for f in &report.funds_analyzed {
+            if f.look_through_available {
+                println!(
+                    "  • {:<12} {:<30} (look-through: {} holdings, {:.1}% coverage)",
+                    f.symbol.cyan(),
+                    truncate(f.name.as_deref().unwrap_or("—"), 30),
+                    f.holdings_count,
+                    f.coverage_pct
+                );
+            } else {
+                println!(
+                    "  • {:<12} {:<30} (categorized by scheme profile)",
+                    f.symbol.cyan(),
+                    truncate(f.name.as_deref().unwrap_or("—"), 30).dimmed()
+                );
+            }
+        }
+        println!();
+    }
+
+    val.print_price_notes();
     Ok(())
 }
 

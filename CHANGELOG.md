@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `stockwise portfolio xray` / `portfolio x-ray` ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — Portfolio X-Ray for look-through overlap across direct stocks, mutual funds, and ETFs:
+  - **Look-Through Constituent Aggregation**:
+    - Decomposes mutual funds and ETFs into underlying company constituents using Yahoo `topHoldings` and AMC disclosure files (`disclosures/<symbol>.json`).
+    - Calculates true effective company exposure across wrappers:
+      $\text{Weight}_{\text{effective}}(S) = \frac{\text{DirectValue}(S) + \sum_{F} \text{FundValue}(F) \times w_{F}(S)}{\text{TotalPortfolioValue}}$
+    - Canonical ticker normalization across Indian (`.NS`, `.BO`) and international symbols.
+    - Top effective stock exposures table displaying Direct Value, Fund Value, Total Value, Effective Weight, and contributing funds.
+  - **Risk Concentration Alerts**:
+    - Automatic detection and highlighted warning banners for any company exceeding 10.0% of total portfolio value (high concentration risk).
+    - Clear attribution of direct vs fund look-through weighting contributing to the concentration breach.
+  - **Macro Allocation Breakdown**:
+    - Broad Asset Class Split: % Equity vs % Debt vs % Gold/Commodity vs % Cash/Liquid.
+    - Market Cap Split: % Large Cap vs % Mid Cap vs % Small Cap (with market-appropriate thresholds for INR and USD).
+    - Sector Concentration: Exposure aggregated across standardized GICS sectors from direct equity sectors and fund sector weightings.
+  - Full machine-readable `--json` output and CLI aliases (`xray`, `x-ray`).
 - `stockwise score` / `stockwise scorecard` / `stockwise fundamental score` ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — transparent accounting scorecards for Piotroski 9-Point F-Score and Altman Z-Score:
   - **Piotroski 9-Point F-Score**:
     - Complete evaluation across Profitability (Positive Net Income, Positive ROA, Operating Cash Flow > 0, Cash Flow > Net Income), Leverage/Liquidity (Lower Debt Ratio YoY, Higher Current Ratio YoY, No Common Share Dilution), and Operating Efficiency (Gross Margin Expansion YoY, Higher Asset Turnover YoY).
