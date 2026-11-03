@@ -69,6 +69,7 @@ mod views;
 mod watchlist;
 mod wealth;
 mod xlsx;
+mod xray;
 
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -937,6 +938,13 @@ enum PortfolioCmd {
         #[arg(num_args = 0..)]
         targets: Vec<String>,
         /// Print rebalance plan as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Portfolio X-Ray: look-through overlap, market-cap and sector concentration
+    #[command(alias = "x-ray")]
+    Xray {
+        /// Print X-Ray report as JSON
         #[arg(long)]
         json: bool,
     },
@@ -3492,6 +3500,9 @@ async fn dispatch(
                 let parsed = crate::rebalance::parse_targets(&targets)?;
                 commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
             }
+            Some(PortfolioCmd::Xray { json }) => {
+                commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await
+            }
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
@@ -4539,6 +4550,8 @@ mod tests {
             vec!["stockwise", "portfolio", "list"],
             vec!["stockwise", "portfolio", "--base", "usd"],
             vec!["stockwise", "portfolio", "show", "--base", "INR"],
+            vec!["stockwise", "portfolio", "xray"],
+            vec!["stockwise", "portfolio", "x-ray", "--json"],
             vec!["stockwise", "--portfolio", "long-term", "portfolio"],
             vec!["stockwise", "tax", "in", "--portfolio", "us"],
             vec!["stockwise", "import", "csv", "tradebook.csv", "--replace"],
@@ -4947,6 +4960,27 @@ mod tests {
         assert_eq!(out.or(show), Format::Csv);
         assert_eq!(Format::from(JsonOutput { json: true }), Format::Json);
         assert_eq!(Format::from(TableOutput::default()), Format::Table);
+    }
+
+    #[test]
+    fn portfolio_xray_subcommand_parses() {
+        let cli = Cli::try_parse_from(["stockwise", "portfolio", "xray", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Portfolio {
+                action: Some(PortfolioCmd::Xray { json: true }),
+                ..
+            }
+        ));
+
+        let cli_alias = Cli::try_parse_from(["stockwise", "portfolio", "x-ray"]).unwrap();
+        assert!(matches!(
+            cli_alias.command,
+            Commands::Portfolio {
+                action: Some(PortfolioCmd::Xray { json: false }),
+                ..
+            }
+        ));
     }
 
     #[test]

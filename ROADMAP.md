@@ -127,7 +127,7 @@ This comes first.
 - 📋 **Full net worth, SIP tracker and household view** — NPS, PPF, EPF, FDs and cash next to the
   portfolio; saved goals with running SIPs tracked against them; several portfolios (family
   members) rolled into one view
-- 📋 **Portfolio X-Ray** ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — look-through overlap across stocks, ETFs and funds, plus asset-class,
+- ✅ **Portfolio X-Ray** ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — look-through overlap across stocks, ETFs and funds, plus asset-class,
   market-cap and sector concentration (Indian fund look-through needs AMC monthly disclosures)
 
 **Research**

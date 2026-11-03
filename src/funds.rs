@@ -870,7 +870,7 @@ pub fn simulate_sip(navs: &[(NaiveDate, f64)], amount: f64, start: NaiveDate) ->
 
 // ── Holdings overlap (Yahoo topHoldings) ──
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Holding {
     pub symbol: Option<String>,
     pub name: Option<String>,
@@ -879,7 +879,7 @@ pub struct Holding {
 }
 
 impl Holding {
-    fn key(&self) -> Option<String> {
+    pub fn key(&self) -> Option<String> {
         self.symbol
             .as_deref()
             .or(self.name.as_deref())
@@ -887,7 +887,7 @@ impl Holding {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FundProfile {
     pub symbol: String,
     pub name: Option<String>,
@@ -911,6 +911,13 @@ fn raw(v: Option<&Value>) -> Option<f64> {
 pub fn parse_fund_profile(symbol: &str, v: &Value) -> Result<FundProfile> {
     let r = v
         .pointer("/quoteSummary/result/0")
+        .or_else(|| {
+            if v.get("topHoldings").is_some() || v.get("fundProfile").is_some() {
+                Some(v)
+            } else {
+                None
+            }
+        })
         .with_context(|| format!("Yahoo Finance has no fund data for {symbol}"))?;
     let th = r.get("topHoldings");
     let holdings: Vec<Holding> = th
@@ -1032,6 +1039,73 @@ pub fn overlap(a: &FundProfile, b: &FundProfile) -> Overlap {
         common,
         sector_overlap,
     }
+}
+
+/// Load custom fund disclosure if available from `disclosures/<symbol>.json`.
+pub fn load_fund_disclosure(symbol: &str) -> Option<FundProfile> {
+    let clean = symbol.trim().replace(':', "_");
+    let candidates = [
+        format!("disclosures/{clean}.json"),
+        format!("disclosures/{symbol}.json"),
+        format!("disclosures/{}.json", clean.trim_start_matches("MF_")),
+    ];
+    for filename in candidates {
+        if let Ok(path) = store::path(&filename)
+            && path.exists()
+            && let Ok(data) = std::fs::read_to_string(&path)
+            && let Ok(mut profile) = serde_json::from_str::<FundProfile>(&data)
+        {
+            if profile.symbol.is_empty() {
+                profile.symbol = symbol.to_string();
+            }
+            return Some(profile);
+        }
+    }
+    None
+}
+
+/// Fetch a fund profile with top holdings and sector weights.
+/// Checks local disclosures first, then queries Yahoo Finance `quoteSummary`
+/// with modules `topHoldings,fundProfile,price`.
+pub async fn fetch_fund_profile(
+    client: &crate::api::YahooClient,
+    symbol: &str,
+    market: crate::market::Market,
+) -> Result<FundProfile> {
+    if let Some(profile) = load_fund_disclosure(symbol) {
+        return Ok(profile);
+    }
+    if !symbol.is_empty() && symbol.chars().all(|c| c.is_ascii_digit()) {
+        bail!(
+            "{} looks like an AMFI scheme code. AMFI publishes NAVs, not portfolios, so StockWise \
+             has no holdings for Indian mutual funds. Overlap works for funds Yahoo Finance has \
+             holdings for — mainly US ETFs and mutual funds (e.g. `mf overlap SPY QQQ -m us`)",
+            symbol
+        );
+    }
+    let resolved = crate::market::resolve_symbol(symbol, market);
+    let url = crate::api::build_url(
+        "https://query2.finance.yahoo.com/v10/finance/quoteSummary",
+        Some(&resolved),
+        &[
+            ("modules", "topHoldings,fundProfile,price"),
+            ("crumb", client.crumb()),
+        ],
+    );
+    let no_data = || {
+        format!(
+            "No fund holdings for {} on Yahoo Finance. Holdings exist for US ETFs and mutual funds \
+             (e.g. SPY, QQQ, VFIAX with -m us); NSE-listed ETFs such as NIFTYBEES have none{}",
+            resolved,
+            if market == crate::market::Market::In {
+                " — for US funds add `-m us`"
+            } else {
+                ""
+            }
+        )
+    };
+    let v = client.raw_get(&url).await.with_context(no_data)?;
+    parse_fund_profile(&resolved, &v).with_context(no_data)
 }
 
 // ── Fetching and caching ──

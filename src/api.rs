@@ -230,6 +230,8 @@ pub struct QuoteResponseInner {
 #[serde(default)]
 pub struct Quote {
     pub symbol: Option<String>,
+    #[serde(rename = "quoteType")]
+    pub quote_type: Option<String>,
     #[serde(rename = "shortName")]
     pub short_name: Option<String>,
     #[serde(rename = "longName")]
