@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-03
+
 ### Added
 - `stockwise portfolio xray` / `portfolio x-ray` ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — Portfolio X-Ray for look-through overlap across direct stocks, mutual funds, and ETFs:
   - **Look-Through Constituent Aggregation**:
@@ -63,8 +65,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - GMP and broker calls are read from news headlines only, shown as unofficial and left out of the score when no headline reports them.
   - `--json` on both views; MCP and `stockwise ask` tools `ipo_board` and `ipo_analyze`.
 
+- Faster everyday use ([#54](https://github.com/iamsaquib8/stockwise/issues/54), [#55](https://github.com/iamsaquib8/stockwise/issues/55)):
+  - `stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise` prints a quick start.
+  - Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical), `c` (compare), `p` (portfolio), `w` (watch).
+  - Common names resolve to NSE symbols (`SBI` → `SBIN`, `L&T` → `LT`, and index names), and `quote` suggests close matches for a mistyped symbol.
+- `--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners ([#52](https://github.com/iamsaquib8/stockwise/issues/52)).
+- `harvest --json` / `--csv` and lot-level loss and gain candidates ([#21](https://github.com/iamsaquib8/stockwise/issues/21)).
+- Broker `.xlsx` exports import directly, reading every sheet and Excel date cells ([#45](https://github.com/iamsaquib8/stockwise/issues/45)).
+- Eight more read-only MCP and `ask` tools: `verdict`, `scorecard`, `insights`, `events`, `options_oi`, `tax_advance`, `harvest` and `rebalance`.
+- Web dashboard: a research workbench, a portfolio switcher and keyboard shortcuts. TUI: a stock inspector and a sort key.
+- `--base` accepts any three-letter currency code.
+
+### Changed
+- MACD is computed in one pass instead of recomputing the EMAs for every bar, so long histories no longer slow it down ([#29](https://github.com/iamsaquib8/stockwise/issues/29)). Thanks [@immconcon](https://github.com/immconcon).
+
 ### Fixed
 - Guard against zero or unavailable price in `verdict` upside percentage calculation, preventing `+inf%` output and invalid JSON serialization on unpriced stocks ([#35](https://github.com/iamsaquib8/stockwise/issues/35)).
+- Portfolio totals in a base currency other than USD or INR used the wrong side of the FX pair. Conversions now follow Yahoo's quotation direction ([#32](https://github.com/iamsaquib8/stockwise/issues/32)). Thanks [@AndreIsraelAO](https://github.com/AndreIsraelAO).
+- The EMA no longer divides by zero when asked for a period of 0.
+
+### Known issues
+These are open and planned for the next release. Check the linked issues before relying on the numbers involved.
+- Importing a second tradebook or holdings file from a broker can replace earlier lots ([#83](https://github.com/iamsaquib8/stockwise/issues/83), [#85](https://github.com/iamsaquib8/stockwise/issues/85)), and same-day trades are booked as capital gains ([#84](https://github.com/iamsaquib8/stockwise/issues/84)). Back up `portfolio.json` before importing.
+- `tax` treats gold, silver, liquid and international ETFs as listed shares ([#87](https://github.com/iamsaquib8/stockwise/issues/87)).
+- The SIP projection in `longterm` overstates the corpus ([#67](https://github.com/iamsaquib8/stockwise/issues/67)).
+- Statements reported in USD (for example INFY) are shown in ₹ in `research` scorecards ([#207](https://github.com/iamsaquib8/stockwise/issues/207)).
 
 ## [0.7.0] - 2026-11-01
 
@@ -90,6 +115,8 @@ Stock key events timeline, INDmoney-style quantified impact cards, and instituti
 - Windows main-thread stack overflow (`thread 'main' has overflowed its stack`) by running the CLI entrypoint and Tokio worker threads on an explicit 8 MiB stack and heap-pinning the command dispatch state machine.
 
 ## [0.6.0] - 2026-10-26
+
+Not released separately: these changes first shipped in 0.7.0.
 
 ### Added
 - A documentation site at <https://iamsaquib8.github.io/stockwise/> with
@@ -429,6 +456,8 @@ minimum Rust version is now 1.97. Command-line forms from 0.4 keep working.
   session storage, sending it only as an `Authorization` header.
 
 ## [0.4.0] - 2026-10-21
+
+Not released separately: these changes first shipped in 0.5.0.
 
 Everything on the 0.3 roadmap: new markets and asset classes, a lot-based
 portfolio with Indian tax rules, more brokers, a backtesting engine, a
@@ -828,11 +857,12 @@ Initial development. Not published. Highlights that landed during this phase:
 - Multi-timeframe and braille terminal charts; `-p/--period` flag on chart commands.
 - `deep` command — full report on a single stock in one shot.
 
-[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.7.0...HEAD
-[0.7.0]: https://github.com/iamsaquib8/stockwise/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/iamsaquib8/stockwise/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/iamsaquib8/stockwise/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/iamsaquib8/stockwise/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/iamsaquib8/stockwise/releases/tag/v0.2.0
-[0.1.0]: https://github.com/iamsaquib8/stockwise/commits/master
+[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/iamsaquib8/stockwise/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.7.0
+[0.6.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...d9f52f2
+[0.5.0]: https://github.com/iamsaquib8/stockwise/compare/v0.3.0...v0.5.0
+[0.4.0]: https://github.com/iamsaquib8/stockwise/compare/v0.3.0...c2d75af
+[0.3.0]: https://github.com/iamsaquib8/stockwise/compare/5bbf8ec...v0.3.0
+[0.2.0]: https://github.com/iamsaquib8/stockwise/tree/5bbf8ec
+[0.1.0]: https://github.com/iamsaquib8/stockwise/commits/5bbf8ec

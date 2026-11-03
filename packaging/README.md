@@ -35,8 +35,8 @@ with `_` for `-`, e.g. `@SHA256_AARCH64_APPLE_DARWIN@`). Lines starting with
 `#:` are template notes and are dropped from the output.
 
 ```bash
-gh release download v0.3.0 -R iamsaquib8/stockwise --pattern '*.sha256' --dir sums
-packaging/render.sh 0.3.0 sums dist
+gh release download v0.8.0 -R iamsaquib8/stockwise --pattern '*.sha256' --dir sums
+packaging/render.sh 0.8.0 sums dist
 ```
 
 Every tagged release also uploads the rendered set as the `packaging-manifests`

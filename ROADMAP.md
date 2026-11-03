@@ -10,6 +10,15 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 
 ## ✅ Shipped
 
+**0.8** — portfolio depth, tax season and an easier start
+- Portfolio X-Ray (look-through overlap across stocks, funds and ETFs), target allocations with
+  drift bands and inflow-only rebalancing, and lot-level `harvest` with `--json`/`--csv`
+- Advance tax instalments (Section 211/234C); open-interest analytics and build-up; transparent
+  Piotroski F-score and Altman Z scorecards; an Indian IPO workbench
+- Direct `.xlsx` broker imports; `stockwise SYMBOL`, short command names and name aliases;
+  `--explain` on `verdict`, `technical`, `score` and `options oi`
+- Eight more MCP/`ask` tools; a research workbench in the web dashboard; TUI stock inspector
+
 **0.7** — key events timeline, quantified insights and decision engine
 - `stockwise events`: NSE corporate filings + RSS news timeline with regex financial extraction,
   benchmark-adjusted market reactions and upcoming corporate radar (`-m in` and `-m us`)
@@ -18,7 +27,7 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 - `stockwise verdict`: 6-pillar 0–100 decision engine with entry zone, stop-loss, target price,
   risk-reward ratio, multi-horizon guidance and bull vs. bear thesis
 
-**0.6** — AI assistants and more ways to install
+**0.6** — AI assistants and more ways to install (first released in 0.7.0)
 - `stockwise mcp`: 24 read-only tools, resources and prompts for Claude, Cursor and other AI
   assistants (no orders); `stockwise ask` with tool calling; `llms.txt` and an Agent Skill
 - Install: PyPI wheels (`pipx`/`uvx`, published once enabled), `.deb`/`.rpm`, a Termux build,
@@ -68,7 +77,7 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 - Daemon workers, paper-trading simulator, Angel One live trading
 - Broker import (Kite, INDmoney, CSV), Redis cache, braille charts
 
-## 🚀 Reach — get StockWise to more people (0.6.x)
+## 🚀 Reach — get StockWise to more people (0.8.x)
 
 StockWise has the features; most people who would use it haven't found it yet.
 This comes first.
@@ -91,11 +100,8 @@ This comes first.
   that runs on bundled historical data
 - 📋 **Daily replay challenge** with a shareable image card, built on the simulator's scoring
 
-## 🛠️ Now — loose ends (0.6.x)
+## 🛠️ Now — loose ends (0.8.x)
 
-- ✅ **Direct `.xlsx` imports** ([#45](https://github.com/iamsaquib8/stockwise/issues/45)) — teach the built-in reader dates and sheet selection, and read
-  Groww, Zerodha Console and Upstox `.xlsx` holdings and tradebook exports without saving as CSV;
-  add an Angel One import
 - 🛠️ **Broker integrations verified against live accounts** — the read-only `trade selftest` and the
   [verification criteria](docs/brokers.md#help-verify-a-broker) are ready; we need 3 reports per
   broker plus one small live order a tester places themselves
@@ -104,14 +110,13 @@ This comes first.
 - 📋 **Check the NSE/BSE parsers against live responses** and add SENSEX from BSE (the endpoints are
   unofficial; licensed exchange feeds stay out of scope)
 
-## 📋 Next — your money, end to end, and more markets (0.7)
+## 📋 Next — your money, end to end, and more markets (0.9)
 
 **Tax season** (ship before the 15 Dec and 15 Mar advance-tax dates)
-- ✅ **Tax-gain and tax-loss harvesting by lot** — book gains inside India's ₹1.25 lakh LTCG
+- 🛠️ **Tax-gain and tax-loss harvesting by lot** — book gains inside India's ₹1.25 lakh LTCG
   exemption before 31 March, harvest losses with the STCL/LTCL set-off rules, and flag the US
   wash-sale window (30 days either side). Smaller first step: `harvest --json`/`--csv`
-  ([#21](https://github.com/iamsaquib8/stockwise/issues/21))
-- ✅ **Advance tax** ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly estimates for the 15 Jun, 15 Sep, 15 Dec and 15 Mar instalments
+  ([#21](https://github.com/iamsaquib8/stockwise/issues/21)) 🛠️ Shipped as lot-level `harvest` candidates; still to do: FIFO, set-off rules and the shared exemption ([#91](https://github.com/iamsaquib8/stockwise/issues/91)).
 - 📋 **Indian ITR toolkit** — 31 Jan 2018 grandfathering from fair market values (flagged only
   today), Schedule FA for foreign holdings (calendar-year peak and closing values in INR),
   Schedule FSI/TR and Form 67 for tax withheld on US dividends, debt funds under Sec. 50AA, SGB
@@ -121,24 +126,17 @@ This comes first.
   REITs/InvITs (split into interest, dividend and capital repayment) and bonds
 
 **Portfolio**
-- ✅ **Target-allocation and inflow-only rebalancing** ([#47](https://github.com/iamsaquib8/stockwise/issues/47)) — saved target weights by stock, sector or
-  asset class, drift bands, and "buy-only" rebalancing for new cash or SIP inflows (today
-  `rebalance` is equal-weight only)
 - 📋 **Full net worth, SIP tracker and household view** — NPS, PPF, EPF, FDs and cash next to the
   portfolio; saved goals with running SIPs tracked against them; several portfolios (family
   members) rolled into one view
-- ✅ **Portfolio X-Ray** ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — look-through overlap across stocks, ETFs and funds, plus asset-class,
-  market-cap and sector concentration (Indian fund look-through needs AMC monthly disclosures)
 
 **Research**
 - 📋 **Screener queries** — `stockwise screen "roce > 20 and pe < 25"` with custom ratios, the
   NIFTY Midcap 150 / Smallcap 250 / 500 universes ([#16](https://github.com/iamsaquib8/stockwise/issues/16)), and importing your own screener
   exports
-- ✅ **Open-interest analytics** ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — institutional build-up classification (LB/SC/SB/LU), PCR & Max Pain tracking, and top resistance/support walls
 - 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates
 - 📋 **Market mood** — a transparent composite of India VIX, breadth and momentum, plus FII/DII
   cash flows
-- ✅ **Open scorecards** ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — transparent Piotroski 9-point F-score and Altman Z-score breakdown with formulas shown
 - 📋 **Mutual fund depth** — rolling returns, category rank and direct-vs-regular cost
 
 **Markets**
@@ -153,18 +151,17 @@ This comes first.
   Indian REIT/InvIT list (these already quote by symbol; this adds names, aliases and lists)
 
 **AI**
-- ✅ **`--explain` for beginners** ([#52](https://github.com/iamsaquib8/stockwise/issues/52)) — plain-English notes under technicals, risk metrics, option greeks
-  and tax numbers (templates first, the local model optional)
+- 🛠️ **`--explain` for beginners** ([#52](https://github.com/iamsaquib8/stockwise/issues/52)) — plain-English notes under technicals, risk metrics, option greeks
+  and tax numbers (templates first, the local model optional) 🛠️ Shipped for `verdict`, `technical`, `score` and `options oi`; still to do: `risk`, option greeks and `tax`.
 
 **Everywhere**
-- ✅ **CLI ergonomics and command simplification** ([#55](https://github.com/iamsaquib8/stockwise/issues/55)) — progressive help disclosure (concise core help vs --all), default bare/symbol invocations (`stockwise RELIANCE`), domain namespaces, and interactive wizard prompts for missing flags
-- ✅ **Symbol discovery and smart resolution** ([#54](https://github.com/iamsaquib8/stockwise/issues/54)) — alias dictionary (SBI → SBIN, L&T → LT), company name fuzzy matching, "did-you-mean" interactive suggestions on not-found, and dynamic shell completions for portfolio/watchlist symbols
+- 🛠️ **CLI ergonomics and command simplification** ([#55](https://github.com/iamsaquib8/stockwise/issues/55)) — progressive help disclosure (concise core help vs --all), default bare/symbol invocations (`stockwise RELIANCE`), domain namespaces, and interactive wizard prompts for missing flags 🛠️ Shipped: short names, `stockwise SYMBOL` and a quick start; next: the [simplification plan for 1.0](https://github.com/iamsaquib8/stockwise/issues/205).
+- 🛠️ **Symbol discovery and smart resolution** ([#54](https://github.com/iamsaquib8/stockwise/issues/54)) — alias dictionary (SBI → SBIN, L&T → LT), company name fuzzy matching, "did-you-mean" interactive suggestions on not-found, and dynamic shell completions for portfolio/watchlist symbols 🛠️ Shipped: name aliases and suggestions in `quote`; still to do: suggestions everywhere, a picker and symbol completion.
 - 📋 **Two-way Telegram bot and scheduled digests** — morning and post-market summaries, results
   and ex-dividend dates, GTT changes, and commands from your phone
 - 📋 **More brokers through OpenAlgo** — one REST adapter to the brokers it supports
-- ✅ **Installable web dashboard and richer TUI** — interactive Research Workbench in `stockwise serve`, in-app portfolio switcher, keyboard shortcuts (`/`, `1`–`8`, `r`), and TUI symbol inspector (`d`/`Enter`) + sort cycling (`s`)
 
-## 💡 Later — exploring (0.7+)
+## 💡 Later — exploring (0.9+)
 
 - 💡 **Options strategy backtests** on end-of-day chains
 - 💡 **Trade journal, position sizer and two-leg (OCO) GTTs** — notes and tags on lots and sales,
