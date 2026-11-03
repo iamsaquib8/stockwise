@@ -550,7 +550,7 @@ pub async fn cmd_sentiment() -> Result<()> {
             .map(|c| c.iter().filter_map(|v| *v).collect())
             .unwrap_or_default();
         if closes.len() > 5 {
-            let monthly_ret = (closes.last().unwrap() / closes[0] - 1.0) * 100.0;
+            let monthly_ret = technical::percent_change(closes[0], *closes.last().unwrap());
             let trend_score = (50.0 + monthly_ret * 5.0).clamp(0.0, 100.0);
             score = (score + trend_score) / 2.0;
             factors.push(format!("1M trend: {:+.2}%", monthly_ret));
