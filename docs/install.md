@@ -14,40 +14,43 @@ curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install
 The installer picks the right build for your system, checks its SHA-256
 against the release, and installs to `~/.local/bin` (`$PREFIX/bin` on
 Termux). `STOCKWISE_INSTALL=/usr/local/bin` changes the directory and
-`STOCKWISE_VERSION=v0.5.0` pins a version.
+`STOCKWISE_VERSION=v0.8.0` pins a version.
 
 ## Every option
 
+These work today with the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest):
+
 | Platform | Command | Man pages and completions | Updates |
 |----------|---------|:---:|---------|
-| macOS, Linux | `brew install iamsaquib8/tap/stockwise` ¹ | ✓ | `brew upgrade` |
-| Any (Python) | `pipx install stockwise` or `uv tool install stockwise` ² | — | `pipx upgrade stockwise` / `uv tool upgrade stockwise` |
-| Any (Python), no install | `uvx stockwise quote RELIANCE` ² | — | always the latest |
-| Debian 12+, Ubuntu 22.04+ | `curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb` ² | ✓ | download the new `.deb` |
-| Fedora, RHEL 9+ | `sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm` ² | ✓ | run the same command again |
-| Arch Linux | `yay -S stockwise-bin` ¹ | ✓ | `yay -Syu` |
+| macOS, Linux, Termux | the quick install above | — | run it again |
+| Debian 12+, Ubuntu 22.04+ | `curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb` | ✓ | download the new `.deb` |
+| Fedora, RHEL 9+ | `sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm` | ✓ | run the same command again |
 | Nix | `nix profile install github:iamsaquib8/stockwise` | ✓ | `nix profile upgrade stockwise` |
-| NixOS / nixpkgs | `nix profile install nixpkgs#stockwise` ³ | ✓ | with your channel |
-| Android (Termux) | the quick install above ² | — | run it again |
-| Android (Termux) | `pkg install stockwise` ³ | ✓ | `pkg upgrade` |
 | Windows | `scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json` | — | `scoop update stockwise` |
-| Windows | `winget install iamsaquib8.StockWise` ¹ | — | `winget upgrade` |
 | Docker | `docker run --rm -it -v stockwise-data:/data ghcr.io/iamsaquib8/stockwise quote TCS` | — | `docker pull` |
-| Docker Hub | `docker run --rm -it -v stockwise-data:/data iamsaquib8/stockwise quote TCS` ¹ | — | `docker pull` |
-| Rust | `cargo binstall stockwise` (prebuilt) or `cargo install stockwise` | — | run it again |
+| Rust | `cargo install --locked --git https://github.com/iamsaquib8/stockwise --tag v0.8.0`, or `cargo install stockwise` / `cargo binstall stockwise` once crates.io has the release | — | run it again |
 | Any | archives from the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest) | man pages included | download again |
 
-¹ Needs a one-time publishing step by the maintainer (tap repository,
-AUR/winget submission, Docker Hub credentials); see
-[packaging](https://github.com/iamsaquib8/stockwise/blob/master/packaging/README.md).
-² 0.6.0 and later; PyPI also needs its one-time trusted-publisher setup.
-³ Prepared and waiting to be submitted to nixpkgs and termux-packages.
+### Coming soon
+
+Prepared, each waiting on a one-time publishing step by the maintainer (see
+[packaging](https://github.com/iamsaquib8/stockwise/blob/master/packaging/README.md)):
+
+| Platform | Command |
+|----------|---------|
+| Any (Python) | `pipx install stockwise`, `uv tool install stockwise` or `uvx stockwise quote RELIANCE` |
+| macOS, Linux | `brew install iamsaquib8/tap/stockwise` |
+| Windows | `winget install iamsaquib8.StockWise` |
+| Arch Linux | `yay -S stockwise-bin` |
+| Docker Hub | `docker run --rm -it -v stockwise-data:/data iamsaquib8/stockwise quote TCS` |
+| NixOS / nixpkgs | `nix profile install nixpkgs#stockwise` |
+| Android (Termux) | `pkg install stockwise` |
 
 On ARM Linux, use `stockwise_arm64.deb` or `stockwise-aarch64.rpm`. The Linux
 binaries (archives, quick install, `.deb`/`.rpm`) need glibc 2.34 or newer:
-Ubuntu 22.04, Debian 12, RHEL 9 and later. The PyPI wheels are built for
-manylinux (glibc 2.17+) and musllinux, so `pipx` also works on older and
-Alpine systems.
+Ubuntu 22.04, Debian 12, RHEL 9 and later. Once PyPI is live, its wheels
+(manylinux, glibc 2.17+, and musllinux) will also cover older and Alpine
+systems.
 
 Where completions are not installed for you:
 

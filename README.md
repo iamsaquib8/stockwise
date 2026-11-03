@@ -83,28 +83,12 @@ stockwise sip NIFTYBEES 5000 -p 5y      # what a ₹5,000/month SIP became (XIRR
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 ```
 
-Installs to `~/.local/bin` (`$PREFIX/bin` on Termux, 0.6.0 and later;
-override with `STOCKWISE_INSTALL=/usr/local/bin`) and verifies the release
-checksum. Every
+Installs to `~/.local/bin` (`$PREFIX/bin` on Termux; override with
+`STOCKWISE_INSTALL=/usr/local/bin`) and verifies the release checksum. Every
 [release](https://github.com/iamsaquib8/stockwise/releases/latest) also has
 `.tar.gz` / `.zip` archives with the binary and man pages.
 
-**With Python tools** — any OS, no Rust needed (0.6.0 and later)
-
-```bash
-pipx install stockwise                  # or: uv tool install stockwise
-uvx stockwise quote RELIANCE TCS        # run it once without installing
-```
-
-**Package managers**
-
-```bash
-brew install iamsaquib8/tap/stockwise            # macOS/Linux, Homebrew (after the tap is published)
-yay -S stockwise-bin                             # Arch Linux, AUR (after the package is published)
-nix profile install github:iamsaquib8/stockwise  # Nix flake (try it: nix run github:iamsaquib8/stockwise)
-```
-
-**Debian, Ubuntu, Fedora, RHEL** — `.deb` / `.rpm` for x86_64 and arm64 (0.6.0 and later; glibc 2.34+: Debian 12, Ubuntu 22.04, RHEL 9 and newer)
+**Debian, Ubuntu, Fedora, RHEL** — `.deb` / `.rpm` for x86_64 and arm64 (glibc 2.34+: Debian 12, Ubuntu 22.04, RHEL 9 and newer)
 
 ```bash
 curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb
@@ -117,7 +101,12 @@ On ARM use `stockwise_arm64.deb` / `stockwise-aarch64.rpm`.
 
 ```powershell
 scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json
-winget install iamsaquib8.StockWise        # after the manifest is accepted into winget-pkgs
+```
+
+**Nix**
+
+```bash
+nix profile install github:iamsaquib8/stockwise  # or try it: nix run github:iamsaquib8/stockwise
 ```
 
 **Docker** (linux/amd64 and linux/arm64)
@@ -126,21 +115,20 @@ winget install iamsaquib8.StockWise        # after the manifest is accepted into
 docker run --rm -it -v stockwise-data:/data ghcr.io/iamsaquib8/stockwise quote RELIANCE TCS
 ```
 
-Portfolio, watchlist and alerts persist in the `stockwise-data` volume. The
-same image is mirrored to Docker Hub as `iamsaquib8/stockwise` (once the mirror
-is set up).
+Portfolio, watchlist and alerts persist in the `stockwise-data` volume.
 
 **With Rust**
 
 ```bash
 cargo binstall stockwise    # prebuilt binary via cargo-binstall
 cargo install stockwise     # or build from source (Rust 1.97+)
+cargo install --locked --git https://github.com/iamsaquib8/stockwise --tag v0.8.0  # this exact release
 ```
 
-On the way: `pkg install stockwise` in Termux and `nix profile install
-nixpkgs#stockwise`, once the [prepared packages](packaging/README.md) are
-submitted and accepted. Every option, with what it includes and how it
-updates: [Install](docs/install.md).
+**Coming soon** — prepared, waiting on a one-time publishing step:
+`pipx install stockwise` / `uvx stockwise` (PyPI), `brew install iamsaquib8/tap/stockwise`,
+`winget install iamsaquib8.StockWise`, `yay -S stockwise-bin` (AUR), Docker Hub,
+nixpkgs and `pkg install stockwise` on Termux. See [Install](docs/install.md).
 
 Then:
 
@@ -150,8 +138,8 @@ stockwise completions zsh > ~/.zfunc/_stockwise           # optional: tab comple
 stockwise man --dir ~/.local/share/man/man1               # optional: man stockwise
 ```
 
-Homebrew, AUR, Nix and the `.deb`/`.rpm` packages install the man pages and
-completions for you.
+Nix and the `.deb`/`.rpm` packages install the man pages and completions for
+you.
 
 ## Tour
 

@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 #
 # Environment overrides:
-#   STOCKWISE_VERSION   release tag to install (default: latest), e.g. v0.3.0
+#   STOCKWISE_VERSION   release tag to install (default: latest), e.g. v0.8.0
 #   STOCKWISE_INSTALL   install directory (default: $HOME/.local/bin; $PREFIX/bin on Termux)
 set -eu
 

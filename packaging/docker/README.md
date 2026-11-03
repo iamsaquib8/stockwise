@@ -18,7 +18,7 @@ docker run --rm -it -v stockwise-data:/data iamsaquib8/stockwise tui
 - Portfolio, watchlist, alerts and history live in `/data`; mount a volume to
   keep them.
 - Runs as a non-root user on a distroless base (no shell).
-- Tags: `latest`, `<major>.<minor>` and the exact version, e.g. `0.5.0`.
+- Tags: `latest`, `<major>.<minor>` and the exact version, e.g. `0.8.0`.
 - The web dashboard and JSON API listen outside the container only with a
   bearer token:
   `docker run --rm -p 8787:8787 -e STOCKWISE_API_TOKEN=<secret> -v stockwise-data:/data iamsaquib8/stockwise serve --bind 0.0.0.0:8787 --allow-remote`

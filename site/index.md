@@ -15,19 +15,18 @@ API keys, no account.
 # macOS / Linux / Termux on Android
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
 
-# With Python tools (any OS; 0.6.0 and later)
-pipx install stockwise      # or: uvx stockwise quote RELIANCE
+# Debian/Ubuntu, Fedora/RHEL: .deb and .rpm from the latest release
+sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm
 
 # With Rust (1.97+)
-cargo binstall stockwise    # prebuilt binary
-cargo install stockwise     # build from source
+cargo install --locked --git https://github.com/iamsaquib8/stockwise --tag v0.8.0
 ```
 
 Windows: `scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json`
 or the `.zip` from the
 [latest release](https://github.com/iamsaquib8/stockwise/releases/latest).
 Docker: `docker run --rm ghcr.io/iamsaquib8/stockwise quote RELIANCE`.
-Homebrew, `.deb`/`.rpm`, AUR, Nix and the rest: [Install](install.md).
+Nix, `.deb`/`.rpm` and what's coming next (PyPI, Homebrew, AUR, winget): [Install](install.md).
 
 Then run `stockwise doctor` to check your setup.
 

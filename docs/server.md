@@ -134,7 +134,7 @@ curl -s localhost:8787/api/alerts | jq '.[] | select(.status == "triggered")'
 ## Prometheus metrics
 
 ```
-stockwise_build_info{version="0.3.0"} 1
+stockwise_build_info{version="0.8.0"} 1
 stockwise_uptime_seconds 3600.1
 stockwise_http_requests_total{method="GET",route="/api/quote",status="200"} 42
 stockwise_http_request_duration_seconds_bucket{route="/api/quote",le="0.25"} 40
