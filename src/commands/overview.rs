@@ -287,7 +287,14 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
     }
     cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
     if let Ok(client) = YahooClient::new().await
-        && let Ok(bundle) = crate::research::fetch(&client, &resolved, market, 30).await
+        && let Ok(bundle) = crate::research::fetch(
+            &client,
+            &resolved,
+            market,
+            30,
+            crate::research::Needs::VERDICT,
+        )
+        .await
     {
         let cards = crate::insights::generate_rich_insights(&bundle);
         let v = crate::verdict::generate_verdict(&bundle, &cards);

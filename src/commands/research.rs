@@ -35,7 +35,7 @@ pub async fn cmd_events(
     fmt: Format,
 ) -> Result<()> {
     let client = YahooClient::new().await?;
-    let r = research::fetch(&client, symbol, market, days).await?;
+    let r = research::fetch(&client, symbol, market, days, research::Needs::ALL).await?;
     let mut evts = events::build_events(&r);
 
     if use_ai && fmt.is_table() {
@@ -115,7 +115,7 @@ pub async fn cmd_events(
 
 pub async fn cmd_insights(symbol: &str, market: Market, json: bool) -> Result<()> {
     let client = YahooClient::new().await?;
-    let r = research::fetch(&client, symbol, market, 60).await?;
+    let r = research::fetch(&client, symbol, market, 60, research::Needs::VERDICT).await?;
     let cards = insights::generate_rich_insights(&r);
 
     if json {
@@ -144,7 +144,7 @@ pub async fn cmd_insights(symbol: &str, market: Market, json: bool) -> Result<()
 
 pub async fn cmd_verdict(symbol: &str, market: Market, json: bool, explain: bool) -> Result<()> {
     let client = YahooClient::new().await?;
-    let r = research::fetch(&client, symbol, market, 60).await?;
+    let r = research::fetch(&client, symbol, market, 60, research::Needs::VERDICT).await?;
     let cards = insights::generate_rich_insights(&r);
     let decision = verdict::generate_verdict(&r, &cards);
 

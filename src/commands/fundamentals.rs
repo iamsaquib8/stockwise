@@ -88,9 +88,10 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
     let client = YahooClient::new().await?;
     let quotes = client.get_quote(&[&resolved]).await?;
     let q = quotes.first().context("No data found for this symbol")?;
-    let r_opt = crate::research::fetch(&client, symbol, market, 60)
-        .await
-        .ok();
+    let r_opt =
+        crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::VERDICT)
+            .await
+            .ok();
 
     if json {
         let cards = r_opt
@@ -779,7 +780,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     // ── 1. Quote + Fundamentals ──
     let quotes = client.get_quote(&[cur_ref.as_str()]).await?;
     let q = quotes.first().context("Symbol not found")?;
-    let r_opt = crate::research::fetch(&client, symbol, market, 60)
+    let r_opt = crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::ALL)
         .await
         .ok();
 
@@ -1176,7 +1177,14 @@ pub async fn cmd_fundamental_score(
     explain: bool,
 ) -> Result<()> {
     let client = YahooClient::new().await?;
-    let r = crate::research::fetch(&client, symbol, market, 60).await?;
+    let r = crate::research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        crate::research::Needs::STATEMENTS,
+    )
+    .await?;
     let report = scorecard::generate_scorecard_report(&r);
 
     if json {
