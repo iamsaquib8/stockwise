@@ -331,9 +331,10 @@ async fn research<D: DataSource>(
     let days = p.days.unwrap_or(90).clamp(1, 365);
     let resolved = market::resolve_symbol(&symbol, market);
     let r = if let Ok(client) = st.source.yahoo().await {
-        let r = crate::research::fetch(client, &resolved, market, days)
-            .await
-            .map_err(ApiError::from_data)?;
+        let r =
+            crate::research::fetch(client, &resolved, market, days, crate::research::Needs::ALL)
+                .await
+                .map_err(ApiError::from_data)?;
         if r.price().is_none() && r.quote.symbol.is_none() {
             return Err(ApiError::NotFound(format!(
                 "No research data for {resolved}"

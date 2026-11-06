@@ -247,7 +247,14 @@ async fn risk(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
 
 async fn verdict(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let resolved = symbol(a, m)?;
-    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, 60).await?;
+    let r = crate::research::fetch(
+        src.yahoo().await?,
+        &resolved,
+        m,
+        60,
+        crate::research::Needs::VERDICT,
+    )
+    .await?;
     let cards = crate::insights::generate_rich_insights(&r);
     let v = crate::verdict::generate_verdict(&r, &cards);
     Ok(serde_json::to_value(v)?)
@@ -255,14 +262,28 @@ async fn verdict(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
 
 async fn scorecard(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let resolved = symbol(a, m)?;
-    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, 60).await?;
+    let r = crate::research::fetch(
+        src.yahoo().await?,
+        &resolved,
+        m,
+        60,
+        crate::research::Needs::STATEMENTS,
+    )
+    .await?;
     let report = crate::scorecard::generate_scorecard_report(&r);
     Ok(serde_json::to_value(report)?)
 }
 
 async fn insights(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let resolved = symbol(a, m)?;
-    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, 60).await?;
+    let r = crate::research::fetch(
+        src.yahoo().await?,
+        &resolved,
+        m,
+        60,
+        crate::research::Needs::VERDICT,
+    )
+    .await?;
     let cards = crate::insights::generate_rich_insights(&r);
     Ok(json!({
         "symbol": r.symbol,
@@ -277,7 +298,14 @@ async fn insights(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
 async fn events(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let resolved = symbol(a, m)?;
     let days = a.i64("days").unwrap_or(90);
-    let r = crate::research::fetch(src.yahoo().await?, &resolved, m, days).await?;
+    let r = crate::research::fetch(
+        src.yahoo().await?,
+        &resolved,
+        m,
+        days,
+        crate::research::Needs::ALL,
+    )
+    .await?;
     let evts = crate::events::build_events(&r);
     let upcoming = crate::events::upcoming(&r);
     let digest = crate::events::digest(&evts);

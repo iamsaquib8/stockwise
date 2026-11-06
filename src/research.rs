@@ -415,6 +415,136 @@ impl Series {
     }
 }
 
+/// Granular specification of what data sources are needed for a [`Research`] snapshot.
+///
+/// Many commands only need a subset of the full snapshot (e.g. `score` only reads financial
+/// statements; `verdict` and `insights` only read statements, prices, and shareholding).
+/// Selective fetching avoids slow and unused network calls (such as NSE announcements/filings
+/// and Google/Yahoo RSS feeds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Needs {
+    /// Financial statements, fundamentals time series, and quote summary modules.
+    pub statements: bool,
+    /// Historical price series and chart data for the target stock.
+    pub prices: bool,
+    /// Shareholding pattern (NSE) and insider transactions (Yahoo & NSE PIT).
+    pub ownership: bool,
+    /// Google News and Yahoo RSS headlines.
+    pub news: bool,
+    /// Official exchange announcements and filings (NSE).
+    pub filings: bool,
+    /// Exchange corporate actions and dividends (NSE).
+    pub corporate_actions: bool,
+}
+
+impl Needs {
+    /// Fetch all sources (used for `events`, `deep`, and full web research).
+    pub const ALL: Self = Self {
+        statements: true,
+        prices: true,
+        ownership: true,
+        news: true,
+        filings: true,
+        corporate_actions: true,
+    };
+
+    /// Only financial statements and fundamentals time series (used for `score` / `scorecard`).
+    pub const STATEMENTS: Self = Self {
+        statements: true,
+        prices: false,
+        ownership: false,
+        news: false,
+        filings: false,
+        corporate_actions: false,
+    };
+
+    /// Statements, price history, and ownership data (used for `verdict`, `insights`, and bare snapshot).
+    pub const VERDICT: Self = Self {
+        statements: true,
+        prices: true,
+        ownership: true,
+        news: false,
+        filings: false,
+        corporate_actions: false,
+    };
+
+    /// Event timeline sources (price action, ownership, news, filings, corporate actions).
+    pub const EVENTS: Self = Self {
+        statements: false,
+        prices: true,
+        ownership: true,
+        news: true,
+        filings: true,
+        corporate_actions: true,
+    };
+
+    /// Empty set of needs (only resolves quote).
+    pub const NONE: Self = Self {
+        statements: false,
+        prices: false,
+        ownership: false,
+        news: false,
+        filings: false,
+        corporate_actions: false,
+    };
+
+    pub fn with_statements(mut self, val: bool) -> Self {
+        self.statements = val;
+        self
+    }
+
+    pub fn with_prices(mut self, val: bool) -> Self {
+        self.prices = val;
+        self
+    }
+
+    pub fn with_ownership(mut self, val: bool) -> Self {
+        self.ownership = val;
+        self
+    }
+
+    pub fn with_news(mut self, val: bool) -> Self {
+        self.news = val;
+        self
+    }
+
+    pub fn with_filings(mut self, val: bool) -> Self {
+        self.filings = val;
+        self
+    }
+
+    pub fn with_corporate_actions(mut self, val: bool) -> Self {
+        self.corporate_actions = val;
+        self
+    }
+}
+
+impl Default for Needs {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl std::ops::BitOr for Needs {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self {
+            statements: self.statements || rhs.statements,
+            prices: self.prices || rhs.prices,
+            ownership: self.ownership || rhs.ownership,
+            news: self.news || rhs.news,
+            filings: self.filings || rhs.filings,
+            corporate_actions: self.corporate_actions || rhs.corporate_actions,
+        }
+    }
+}
+
+impl std::ops::BitOrAssign for Needs {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = *self | rhs;
+    }
+}
+
 /// Everything we know about one stock.
 #[derive(Clone, Debug, Default)]
 pub struct Research {
@@ -1388,12 +1518,24 @@ fn soft<T: Default>(r: Result<T>, what: &str, warnings: &mut Vec<String>) -> T {
     }
 }
 
-/// Fetch a full research snapshot. `days` is the news/event lookback window.
+/// Fetch a full research snapshot (`Needs::ALL`). `days` is the news/event lookback window.
+pub async fn fetch_all(
+    client: &YahooClient,
+    symbol: &str,
+    market: Market,
+    days: i64,
+) -> Result<Research> {
+    fetch(client, symbol, market, days, Needs::ALL).await
+}
+
+/// Fetch a research snapshot according to the specified data [`Needs`].
+/// `days` is the news/event lookback window.
 pub async fn fetch(
     client: &YahooClient,
     symbol: &str,
     market: Market,
     days: i64,
+    needs: Needs,
 ) -> Result<Research> {
     let symbol = market::resolve_symbol(symbol, market);
     let quote = client
@@ -1427,33 +1569,126 @@ pub async fn fetch(
 
     let nse = nse_sym.as_deref();
     let (summary, timeseries, prices, bench, gnews, yrss, filings, holdings, pit, corp) = tokio::join!(
-        client.quote_summary(&symbol, SUMMARY_MODULES),
-        client.fundamentals_timeseries(&symbol, &ts_refs, 365 * 5),
-        client.get_chart(&symbol, "2y", "1d"),
-        client.get_chart(bench_sym, "2y", "1d"),
-        fetch_google_news(client, &short_name, is_india, days),
-        fetch_yahoo_rss(client, &symbol),
         async {
+            if needs.statements || needs.ownership || needs.prices {
+                client.quote_summary(&symbol, SUMMARY_MODULES).await
+            } else {
+                Ok(Value::Null)
+            }
+        },
+        async {
+            if needs.statements {
+                client
+                    .fundamentals_timeseries(&symbol, &ts_refs, 365 * 5)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        async {
+            if needs.prices {
+                client
+                    .get_chart(&symbol, "2y", "1d")
+                    .await
+                    .map(|c| Series::from_chart(&c))
+            } else {
+                Ok(Series::default())
+            }
+        },
+        async {
+            if needs.prices && (needs.news || needs.filings || needs.corporate_actions) {
+                client
+                    .get_chart(bench_sym, "2y", "1d")
+                    .await
+                    .map(|c| Series::from_chart(&c))
+            } else {
+                Ok(Series::default())
+            }
+        },
+        async {
+            if needs.news {
+                fetch_google_news(client, &short_name, is_india, days).await
+            } else {
+                Ok(vec![])
+            }
+        },
+        async {
+            if needs.news {
+                fetch_yahoo_rss(client, &symbol).await
+            } else {
+                Ok(vec![])
+            }
+        },
+        async {
+            if !needs.filings {
+                return Ok(vec![]);
+            }
             match nse {
-                Some(s) => fetch_nse_filings(client, s, days).await,
+                Some(s) => {
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        fetch_nse_filings(client, s, days),
+                    )
+                    .await
+                    {
+                        Ok(res) => res,
+                        Err(_) => anyhow::bail!("timed out after 3s"),
+                    }
+                }
                 None => Ok(vec![]),
             }
         },
         async {
+            if !needs.ownership {
+                return Ok(vec![]);
+            }
             match nse {
-                Some(s) => fetch_nse_holdings(client, s).await,
+                Some(s) => {
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        fetch_nse_holdings(client, s),
+                    )
+                    .await
+                    {
+                        Ok(res) => res,
+                        Err(_) => anyhow::bail!("timed out after 3s"),
+                    }
+                }
                 None => Ok(vec![]),
             }
         },
         async {
+            if !needs.ownership {
+                return Ok(vec![]);
+            }
             match nse {
-                Some(s) => fetch_nse_pit(client, s).await,
+                Some(s) => {
+                    match tokio::time::timeout(Duration::from_secs(3), fetch_nse_pit(client, s))
+                        .await
+                    {
+                        Ok(res) => res,
+                        Err(_) => anyhow::bail!("timed out after 3s"),
+                    }
+                }
                 None => Ok(vec![]),
             }
         },
         async {
+            if !needs.corporate_actions {
+                return Ok(vec![]);
+            }
             match nse {
-                Some(s) => fetch_nse_corp_actions(client, s).await,
+                Some(s) => {
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        fetch_nse_corp_actions(client, s),
+                    )
+                    .await
+                    {
+                        Ok(res) => res,
+                        Err(_) => anyhow::bail!("timed out after 3s"),
+                    }
+                }
                 None => Ok(vec![]),
             }
         },
@@ -1462,13 +1697,8 @@ pub async fn fetch(
     let mut warnings = Vec::new();
     let summary = soft(summary, "Yahoo fundamentals", &mut warnings);
     let timeseries = soft(timeseries, "Yahoo financial statements", &mut warnings);
-    let prices = prices.map(|c| Series::from_chart(&c));
     let prices = soft(prices, "Price history", &mut warnings);
-    let bench = soft(
-        bench.map(|c| Series::from_chart(&c)),
-        "Benchmark history",
-        &mut warnings,
-    );
+    let bench = soft(bench, "Benchmark history", &mut warnings);
     let gnews = soft(gnews, "Google News", &mut warnings);
     let yrss = soft(yrss, "Yahoo RSS", &mut warnings);
     let filings = soft(filings, "NSE filings", &mut warnings);
@@ -1476,23 +1706,38 @@ pub async fn fetch(
     let pit = soft(pit, "NSE insider trades", &mut warnings);
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
-    let (mut quarters, mut annual) = parse_timeseries(&timeseries);
-    merge_income_statement(&mut quarters, &summary);
-    merge_balance_sheet(&mut annual, &summary);
+    let (quarters, annual) = if needs.statements {
+        let (mut q, mut a) = parse_timeseries(&timeseries);
+        merge_income_statement(&mut q, &summary);
+        merge_balance_sheet(&mut a, &summary);
+        (q, a)
+    } else {
+        (vec![], vec![])
+    };
 
     let now = Utc::now().timestamp();
     let cutoff = now - days * 86_400;
     let aliases = company_aliases(&short_name, &base);
-    let mut news: Vec<Headline> = gnews
-        .into_iter()
-        .chain(yrss.into_iter().filter(|h| mentions_company(h, &aliases)))
-        .filter(|h| h.ts >= cutoff && h.ts <= now + 3600 && !is_noise_headline(&h.title))
-        .collect();
-    news.sort_by_key(|h| std::cmp::Reverse(h.ts));
+    let news: Vec<Headline> = if needs.news {
+        let mut n: Vec<Headline> = gnews
+            .into_iter()
+            .chain(yrss.into_iter().filter(|h| mentions_company(h, &aliases)))
+            .filter(|h| h.ts >= cutoff && h.ts <= now + 3600 && !is_noise_headline(&h.title))
+            .collect();
+        n.sort_by_key(|h| std::cmp::Reverse(h.ts));
+        n
+    } else {
+        vec![]
+    };
 
-    let mut insiders = parse_yahoo_insiders(&summary);
-    insiders.extend(pit);
-    insiders.sort_by_key(|t| std::cmp::Reverse(t.ts));
+    let insiders = if needs.ownership {
+        let mut ins = parse_yahoo_insiders(&summary);
+        ins.extend(pit);
+        ins.sort_by_key(|t| std::cmp::Reverse(t.ts));
+        ins
+    } else {
+        vec![]
+    };
 
     let profile = summary.get("assetProfile");
     let sector = profile
@@ -1698,5 +1943,247 @@ mod tests {
             s.index_on_or_after(NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn test_needs_struct_and_bitor() {
+        assert_eq!(
+            Needs::STATEMENTS | Needs::EVENTS,
+            Needs::ALL,
+            "STATEMENTS | EVENTS should cover all needs"
+        );
+        let st = Needs::STATEMENTS;
+        assert!(!st.prices);
+        assert!(!st.news);
+        assert!(!st.filings);
+        assert!(!st.ownership);
+        assert!(!st.corporate_actions);
+        assert!(st.statements);
+
+        let custom = Needs::NONE.with_prices(true).with_filings(true);
+        assert!(custom.prices);
+        assert!(custom.filings);
+        assert!(!custom.statements);
+        assert!(!custom.news);
+        assert!(!custom.ownership);
+        assert!(!custom.corporate_actions);
+
+        let mut a = Needs::STATEMENTS;
+        a |= Needs::NONE.with_news(true);
+        assert!(a.statements);
+        assert!(a.news);
+        assert!(!a.prices);
+    }
+
+    #[tokio::test]
+    async fn test_score_needs_makes_no_news_or_nse_calls() {
+        let server = crate::testutil::MockServer::start(vec![
+            // 1. Quote response for TCS.NS
+            (
+                200,
+                serde_json::json!({
+                    "quoteResponse": {
+                        "result": [{
+                            "symbol": "TCS.NS",
+                            "longName": "Tata Consultancy Services Limited",
+                            "currency": "INR",
+                            "regularMarketPrice": 3800.0,
+                            "marketCap": 13800000000000.0
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+            // 2. quoteSummary
+            (
+                200,
+                serde_json::json!({
+                    "quoteSummary": {
+                        "result": [{
+                            "financialData": {
+                                "currentPrice": { "raw": 3800.0 },
+                                "profitMargins": { "raw": 0.18 }
+                            },
+                            "defaultKeyStatistics": {
+                                "sharesOutstanding": { "raw": 3610000000.0 }
+                            }
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+            // 3. fundamentals-timeseries
+            (
+                200,
+                serde_json::json!({
+                    "timeseries": {
+                        "result": []
+                    }
+                })
+                .to_string(),
+            ),
+        ])
+        .await;
+
+        let server_url = server.url.clone();
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "test_crumb",
+            move |url: &str| {
+                if let Ok(parsed) = reqwest::Url::parse(url) {
+                    if let Some(q) = parsed.query() {
+                        format!("{}{}?{}", server_url, parsed.path(), q)
+                    } else {
+                        format!("{}{}", server_url, parsed.path())
+                    }
+                } else {
+                    url.to_string()
+                }
+            },
+        );
+
+        let res = fetch(&client, "TCS", Market::In, 60, Needs::STATEMENTS)
+            .await
+            .expect("fetch with Needs::STATEMENTS must succeed");
+
+        assert_eq!(res.symbol, "TCS.NS");
+        assert_eq!(res.short_name, "Tata Consultancy Services");
+
+        let requests = server.requests();
+        // Exactly 3 calls: quote, quoteSummary, fundamentals timeseries.
+        assert_eq!(
+            requests.len(),
+            3,
+            "Expected exactly 3 calls for Needs::STATEMENTS (quote, quoteSummary, timeseries)"
+        );
+
+        // Verify none of the calls were for chart, RSS, news, or NSE
+        for req in &requests {
+            assert!(
+                !req.target.contains("rss"),
+                "Should not make RSS requests: {}",
+                req.target
+            );
+            assert!(
+                !req.target.contains("chart"),
+                "Should not make chart requests: {}",
+                req.target
+            );
+            assert!(
+                !req.target.contains("corporate"),
+                "Should not make NSE corporate requests: {}",
+                req.target
+            );
+            assert!(
+                !req.target.contains("news.google"),
+                "Should not make Google news requests: {}",
+                req.target
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verdict_needs_makes_no_news_or_filings_calls() {
+        let server = crate::testutil::MockServer::start(vec![
+            // 1. Quote
+            (
+                200,
+                serde_json::json!({
+                    "quoteResponse": {
+                        "result": [{
+                            "symbol": "TCS.NS",
+                            "longName": "Tata Consultancy Services Limited",
+                            "currency": "INR",
+                            "regularMarketPrice": 3800.0
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+            // 2. quoteSummary
+            (
+                200,
+                serde_json::json!({
+                    "quoteSummary": {
+                        "result": [{
+                            "financialData": { "currentPrice": { "raw": 3800.0 } }
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+            // 3. fundamentals-timeseries
+            (
+                200,
+                serde_json::json!({ "timeseries": { "result": [] } }).to_string(),
+            ),
+            // 4. chart for TCS.NS
+            (
+                200,
+                serde_json::json!({
+                    "chart": {
+                        "result": [{
+                            "meta": { "currency": "INR", "symbol": "TCS.NS" },
+                            "timestamp": [1700000000],
+                            "indicators": { "quote": [{ "close": [3800.0] }] }
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+            // 5. NSE holdings
+            (200, "[]".to_string()),
+            // 6. NSE pit
+            (200, "[]".to_string()),
+        ])
+        .await;
+
+        let server_url = server.url.clone();
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "test_crumb",
+            move |url: &str| {
+                if let Ok(parsed) = reqwest::Url::parse(url) {
+                    if let Some(q) = parsed.query() {
+                        format!("{}{}?{}", server_url, parsed.path(), q)
+                    } else {
+                        format!("{}{}", server_url, parsed.path())
+                    }
+                } else {
+                    url.to_string()
+                }
+            },
+        );
+
+        let res = fetch(&client, "TCS", Market::In, 60, Needs::VERDICT)
+            .await
+            .expect("fetch with Needs::VERDICT must succeed");
+
+        assert_eq!(res.symbol, "TCS.NS");
+        let requests = server.requests();
+
+        // Verify no bench, news, filings, or corp actions were requested
+        for req in &requests {
+            assert!(
+                !req.target.contains("%5ENSEI") && !req.target.contains("^NSEI"),
+                "Should not request benchmark chart: {}",
+                req.target
+            );
+            assert!(
+                !req.target.contains("rss"),
+                "Should not request RSS: {}",
+                req.target
+            );
+            assert!(
+                !req.target.contains("corporate-announcements"),
+                "Should not request NSE filings: {}",
+                req.target
+            );
+            assert!(
+                !req.target.contains("corporates-corporateActions"),
+                "Should not request NSE corp actions: {}",
+                req.target
+            );
+        }
     }
 }

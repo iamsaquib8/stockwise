@@ -155,6 +155,14 @@ impl HybridCache {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        Self {
+            redis: None,
+            memory: HashMap::new(),
+        }
+    }
+
     fn has_redis(&self) -> bool {
         self.redis.is_some()
     }
@@ -476,6 +484,8 @@ pub struct YahooClient {
     provider: Option<providers::Provider>,
     /// NSE, for index members when the provider isn't NSE-backed.
     nse: std::sync::OnceLock<providers::nse::Nse>,
+    #[cfg(test)]
+    pub(crate) url_rewrite: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>,
 }
 
 impl YahooClient {
@@ -594,7 +604,40 @@ impl YahooClient {
             cache,
             provider,
             nse: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            url_rewrite: None,
         })
+    }
+
+    #[cfg(test)]
+    pub fn for_tests_with_client(client: reqwest::Client, crumb: &str) -> Self {
+        Self {
+            client,
+            crumb: crumb.to_string(),
+            cookie: String::new(),
+            last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
+            provider: None,
+            nse: std::sync::OnceLock::new(),
+            url_rewrite: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_tests_with_rewrite<F>(client: reqwest::Client, crumb: &str, rewrite: F) -> Self
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        Self {
+            client,
+            crumb: crumb.to_string(),
+            cookie: String::new(),
+            last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
+            provider: None,
+            nse: std::sync::OnceLock::new(),
+            url_rewrite: Some(std::sync::Arc::new(rewrite)),
+        }
     }
 
     /// Rate-limited GET with retry and caching (Redis + in-memory)
@@ -641,6 +684,9 @@ impl YahooClient {
         // (the std Mutex is released before the await, never held across it).
         let sleep_until = {
             let mut last = self.last_request.lock().unwrap();
+            #[cfg(test)]
+            let min_interval = Duration::from_millis(0);
+            #[cfg(not(test))]
             let min_interval = Duration::from_millis(MIN_REQUEST_INTERVAL_MS);
             let next = (*last + min_interval).max(Instant::now());
             *last = next;
@@ -661,11 +707,22 @@ impl YahooClient {
                 })
                 .unwrap_or(false);
 
+        #[cfg(test)]
+        let url_to_fetch = if let Some(ref rw) = self.url_rewrite {
+            rw(url)
+        } else {
+            url.to_string()
+        };
+        #[cfg(test)]
+        let url_to_fetch = url_to_fetch.as_str();
+        #[cfg(not(test))]
+        let url_to_fetch = url;
+
         // Fetch with retry + exponential backoff
         let mut last_status = None;
         for attempt in 0..MAX_RETRIES {
             let last_attempt = attempt == MAX_RETRIES - 1;
-            let mut req = self.client.get(url);
+            let mut req = self.client.get(url_to_fetch);
             if is_yahoo {
                 req = req.header(header::COOKIE, &self.cookie);
             }
