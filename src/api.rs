@@ -38,6 +38,17 @@ fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Do not render a provider URL from reqwest errors: Yahoo query strings may
+/// contain the per-session `crumb` credential.
+fn fetch_failure_message(url: &str, error: reqwest::Error) -> String {
+    format!(
+        "Request to {} failed after {} attempts: {}",
+        host_of(url),
+        MAX_RETRIES,
+        error.without_url()
+    )
+}
+
 /// Redis URL: `STOCKWISE_REDIS_URL`, then `redis_url` in the config file,
 /// then local Redis. An empty env var has always meant "off", so it counts
 /// as set.
@@ -699,12 +710,7 @@ impl YahooClient {
                 Err(_e) if !last_attempt => {
                     tokio::time::sleep(retry_delay(attempt, None, 500)).await;
                 }
-                Err(e) => bail!(
-                    "Request to {} failed after {} attempts: {}",
-                    host_of(url),
-                    MAX_RETRIES,
-                    e
-                ),
+                Err(e) => bail!("{}", fetch_failure_message(url, e)),
             }
         }
         match last_status {
@@ -1155,6 +1161,29 @@ mod tests {
         assert_eq!(a, b);
         assert!(!a.contains("crumb"));
         assert!(a.contains("symbols=AAPL"));
+    }
+
+    #[tokio::test]
+    async fn failed_request_does_not_expose_crumb_in_error_text() {
+        // Port 0 cannot accept a TCP connection; this produces a real
+        // reqwest transport error with the original URL attached, offline.
+        let url = "http://127.0.0.1:0/v7/finance/quote?crumb=SYNTHETIC_SECRET";
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .expect_err("port 0 must reject the request");
+        assert!(
+            error.url().is_some(),
+            "regression requires an error carrying the URL"
+        );
+        let message = fetch_failure_message(url, error);
+        assert!(message.contains("127.0.0.1"));
+        assert!(!message.contains("SYNTHETIC_SECRET"));
+        assert!(!message.contains("crumb="));
     }
 
     #[test]
