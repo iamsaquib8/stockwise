@@ -1973,12 +1973,49 @@ pub async fn cmd_portfolio_xray(
         let is_fund = offmarket::is_fund(&h.symbol);
         let quote = val.quote(&h.symbol);
         let quote_type = quote.and_then(|q| q.quote_type.as_deref());
-        let is_etf = quote_type == Some("ETF") || quote_type == Some("MUTUALFUND");
+        let is_name_etf = quote.is_some_and(|q| {
+            let matches_etf = |s: &str| s.to_ascii_uppercase().contains(" ETF");
+            q.short_name.as_deref().is_some_and(matches_etf)
+                || q.long_name.as_deref().is_some_and(matches_etf)
+        });
+        let is_etf = quote_type == Some("ETF")
+            || quote_type == Some("MUTUALFUND")
+            || xray::is_known_etf(&h.symbol)
+            || is_name_etf;
 
         if is_fund || is_etf || (!offmarket::is_sgb(&h.symbol) && quote_type.is_none()) {
             if let Some(fp) = funds::load_fund_disclosure(&h.symbol) {
                 fund_profiles.insert(h.symbol.clone(), fp);
             } else if let Ok(fp) = funds::fetch_fund_profile(&client, &h.symbol, market).await {
+                fund_profiles.insert(h.symbol.clone(), fp);
+            } else if let Some(index) = xray::index_for_etf(&h.symbol)
+                && let Ok(constituents) = client.index_constituents(index).await
+                && !constituents.is_empty()
+            {
+                let weight = 1.0 / constituents.len() as f64;
+                let holdings = constituents
+                    .into_iter()
+                    .map(|sym| funds::Holding {
+                        symbol: Some(sym),
+                        name: None,
+                        weight,
+                    })
+                    .collect();
+                let fp = funds::FundProfile {
+                    symbol: h.symbol.clone(),
+                    name: val
+                        .name(&h.symbol)
+                        .or_else(|| {
+                            quote.and_then(|q| q.long_name.clone().or_else(|| q.short_name.clone()))
+                        })
+                        .or_else(|| xray::default_etf_name(&h.symbol).map(str::to_string)),
+                    family: None,
+                    category: Some(index.to_string()),
+                    expense_ratio: None,
+                    currency: val.currency(&h.symbol),
+                    holdings,
+                    sectors: Vec::new(),
+                };
                 fund_profiles.insert(h.symbol.clone(), fp);
             }
         }
@@ -1991,9 +2028,24 @@ pub async fn cmd_portfolio_xray(
         let value = h.shares * price_base;
 
         let quote = val.quote(&h.symbol);
-        let mut sector = quote.and_then(|q| q.sector.clone());
-        let is_fund = offmarket::is_fund(&h.symbol) || fund_profiles.contains_key(&h.symbol);
+        let quote_type = quote.and_then(|q| q.quote_type.as_deref());
+        let is_name_etf = quote.is_some_and(|q| {
+            let matches_etf = |s: &str| s.to_ascii_uppercase().contains(" ETF");
+            q.short_name.as_deref().is_some_and(matches_etf)
+                || q.long_name.as_deref().is_some_and(matches_etf)
+        });
+        let is_etf = quote_type == Some("ETF")
+            || quote_type == Some("MUTUALFUND")
+            || xray::is_known_etf(&h.symbol)
+            || is_name_etf;
+        let is_fund =
+            offmarket::is_fund(&h.symbol) || fund_profiles.contains_key(&h.symbol) || is_etf;
         let is_sgb = offmarket::is_sgb(&h.symbol);
+
+        let mut sector = quote.and_then(|q| q.sector.clone());
+        if sector.is_none() && is_etf {
+            sector = xray::default_etf_sector(&h.symbol).map(str::to_string);
+        }
         if sector.is_none() && !is_fund && !is_sgb && !offmarket::is_off_market(&h.symbol) {
             let url = crate::api::build_url(
                 "https://query2.finance.yahoo.com/v10/finance/quoteSummary",
@@ -2017,12 +2069,26 @@ pub async fn cmd_portfolio_xray(
                 fund_profiles
                     .get(&h.symbol)
                     .and_then(|fp| fp.category.clone())
+            })
+            .or_else(|| {
+                if is_etf {
+                    xray::default_etf_category(&h.symbol).map(str::to_string)
+                } else {
+                    None
+                }
             });
 
         let name = val
             .name(&h.symbol)
             .or_else(|| fund_profiles.get(&h.symbol).and_then(|fp| fp.name.clone()))
-            .or_else(|| quote.and_then(|q| q.long_name.clone().or_else(|| q.short_name.clone())));
+            .or_else(|| quote.and_then(|q| q.long_name.clone().or_else(|| q.short_name.clone())))
+            .or_else(|| {
+                if is_etf {
+                    xray::default_etf_name(&h.symbol).map(str::to_string)
+                } else {
+                    None
+                }
+            });
 
         input_holdings.push(XrayInputHolding {
             symbol: h.symbol.clone(),
@@ -2277,10 +2343,16 @@ pub async fn cmd_portfolio_xray(
                     f.coverage_pct
                 );
             } else {
+                let note = if xray::is_known_etf(&f.symbol) {
+                    "(categorized by ETF profile)"
+                } else {
+                    "(categorized by scheme profile)"
+                };
                 println!(
-                    "  • {:<12} {:<30} (categorized by scheme profile)",
+                    "  • {:<12} {:<30} {}",
                     f.symbol.cyan(),
-                    truncate(f.name.as_deref().unwrap_or("—"), 30).dimmed()
+                    truncate(f.name.as_deref().unwrap_or("—"), 30).dimmed(),
+                    note.dimmed()
                 );
             }
         }
