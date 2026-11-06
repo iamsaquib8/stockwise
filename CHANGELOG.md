@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
+- `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):
+  - Retain ETF classification even when Yahoo Finance returns no `topHoldings` or fund profile modules for NSE-listed instruments.
+  - Automatically map common Indian index ETFs to their benchmark indices (`NIFTY 50`, `NIFTY NEXT 50`, `NIFTY BANK`, `NIFTY MIDCAP 150`, etc.) and attempt look-through to underlying index constituents via NSE.
+  - Omit profile-less ETFs from single-stock concentration risk alerts, categorizing them properly under "Funds & ETFs Analyzed" with `(categorized by ETF profile)`.
+  - Accurately categorize asset classes (`Equity`, `Commodity` for Gold/Silver ETFs, `Cash` for Liquid ETFs) and market caps (`Large Cap` for Nifty 50/Next 50, `Mid Cap` for Midcap 150) instead of flagging them as `Unclassified`.
 
 ## [0.8.0] - 2026-11-03
 

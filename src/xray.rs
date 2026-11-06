@@ -158,13 +158,146 @@ pub fn canonical_ticker(symbol: &str) -> String {
     }
 }
 
+/// Returns the benchmark index tracked by known Indian ETFs, if applicable.
+pub fn index_for_etf(symbol: &str) -> Option<&'static str> {
+    let clean = canonical_ticker(symbol);
+    match clean.as_str() {
+        "NIFTYBEES" | "SETFNIF50" | "HDFCNIFETF" | "ICICINIFTY" | "NIFTYETF" => Some("NIFTY 50"),
+        "JUNIORBEES" | "SETFNN50" | "NEXT50" | "NEXT50ETF" => Some("NIFTY NEXT 50"),
+        "BANKBEES" | "SETFBANK" | "HDFCBANKETF" | "KOTAKBKETF" => Some("NIFTY BANK"),
+        "MID150BEES" | "MIDCAPETF" => Some("NIFTY MIDCAP 150"),
+        "ITBEES" | "SETFIT" => Some("NIFTY IT"),
+        "AUTOBEES" => Some("NIFTY AUTO"),
+        "PHARMABEES" => Some("NIFTY PHARMA"),
+        "PSUBNKBEES" => Some("NIFTY PSU BANK"),
+        "INFRABEES" => Some("NIFTY INFRA"),
+        "CPSEETF" => Some("NIFTY CPSE"),
+        _ => None,
+    }
+}
+
+/// Check if a symbol represents a known ETF.
+pub fn is_known_etf(symbol: &str) -> bool {
+    let clean = canonical_ticker(symbol);
+    if index_for_etf(&clean).is_some() {
+        return true;
+    }
+    clean.ends_with("BEES")
+        || clean.ends_with("ETF")
+        || clean.starts_with("SETF")
+        || matches!(
+            clean.as_str(),
+            "GOLDBEES"
+                | "SILVERBEES"
+                | "LIQUIDBEES"
+                | "GOLD1"
+                | "SILVER1"
+                | "GOLDIETF"
+                | "SILVERIETF"
+                | "HDFCGOLD"
+                | "HDFCSILVER"
+                | "SETFGOLD"
+                | "GOLDCASE"
+                | "MON100"
+                | "MAFANG"
+        )
+}
+
+/// Default human-readable name for known ETFs when quote data is missing or incomplete.
+pub fn default_etf_name(symbol: &str) -> Option<&'static str> {
+    let clean = canonical_ticker(symbol);
+    match clean.as_str() {
+        "NIFTYBEES" => Some("Nippon India ETF Nifty 50 BeES"),
+        "JUNIORBEES" => Some("Nippon India ETF Nifty Next 50 BeES"),
+        "BANKBEES" => Some("Nippon India ETF Nifty Bank BeES"),
+        "MID150BEES" => Some("Nippon India ETF Nifty Midcap 150 BeES"),
+        "ITBEES" => Some("Nippon India ETF Nifty IT BeES"),
+        "AUTOBEES" => Some("Nippon India ETF Nifty Auto BeES"),
+        "PHARMABEES" => Some("Nippon India ETF Nifty Pharma BeES"),
+        "PSUBNKBEES" => Some("Nippon India ETF Nifty PSU Bank BeES"),
+        "INFRABEES" => Some("Nippon India ETF Nifty Infrastructure BeES"),
+        "CPSEETF" => Some("CPSE ETF"),
+        "GOLDBEES" => Some("Nippon India ETF Gold BeES"),
+        "SILVERBEES" => Some("Nippon India ETF Silver BeES"),
+        "LIQUIDBEES" => Some("Nippon India ETF Liquid BeES"),
+        "SETFNIF50" => Some("SBI Nifty 50 ETF"),
+        "SETFNN50" => Some("SBI Nifty Next 50 ETF"),
+        "SETFBANK" => Some("SBI Nifty Bank ETF"),
+        "SETFGOLD" => Some("SBI Gold ETF"),
+        _ => None,
+    }
+}
+
+/// Default category for known ETFs.
+pub fn default_etf_category(symbol: &str) -> Option<&'static str> {
+    let clean = canonical_ticker(symbol);
+    match clean.as_str() {
+        "NIFTYBEES" | "SETFNIF50" | "HDFCNIFETF" | "ICICINIFTY" | "NIFTYETF" => {
+            Some("Equity Scheme - Large Cap (NIFTY 50)")
+        }
+        "JUNIORBEES" | "SETFNN50" | "NEXT50" | "NEXT50ETF" => {
+            Some("Equity Scheme - Large & Mid Cap (NIFTY NEXT 50)")
+        }
+        "BANKBEES" | "SETFBANK" | "HDFCBANKETF" | "KOTAKBKETF" => {
+            Some("Equity Scheme - Sectoral / Banking (NIFTY BANK)")
+        }
+        "MID150BEES" | "MIDCAPETF" => Some("Equity Scheme - Mid Cap (NIFTY MIDCAP 150)"),
+        "ITBEES" | "SETFIT" => Some("Equity Scheme - Sectoral / Technology (NIFTY IT)"),
+        "AUTOBEES" => Some("Equity Scheme - Sectoral / Auto (NIFTY AUTO)"),
+        "PHARMABEES" => Some("Equity Scheme - Sectoral / Pharma (NIFTY PHARMA)"),
+        "PSUBNKBEES" => Some("Equity Scheme - Sectoral / PSU Bank (NIFTY PSU BANK)"),
+        "INFRABEES" => Some("Equity Scheme - Sectoral / Infrastructure (NIFTY INFRA)"),
+        "CPSEETF" => Some("Equity Scheme - Thematic / CPSE"),
+        "GOLDBEES" | "SETFGOLD" | "HDFCGOLD" | "GOLDIETF" | "GOLD1" | "GOLDCASE" => {
+            Some("Commodity - Gold")
+        }
+        "SILVERBEES" | "SILVERIETF" | "HDFCSILVER" | "SILVER1" => Some("Commodity - Silver"),
+        "LIQUIDBEES" => Some("Debt Scheme - Liquid / Overnight"),
+        _ => {
+            if clean.ends_with("BEES") || clean.ends_with("ETF") {
+                Some("Exchange Traded Fund")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Default economic sector for known ETFs when constituent look-through is not available.
+pub fn default_etf_sector(symbol: &str) -> Option<&'static str> {
+    let clean = canonical_ticker(symbol);
+    match clean.as_str() {
+        "BANKBEES" | "SETFBANK" | "HDFCBANKETF" | "KOTAKBKETF" | "PSUBNKBEES" => {
+            Some("Financial Services")
+        }
+        "ITBEES" | "SETFIT" => Some("Technology"),
+        "AUTOBEES" => Some("Consumer Cyclical"),
+        "PHARMABEES" => Some("Healthcare"),
+        "INFRABEES" => Some("Industrials"),
+        "CPSEETF" => Some("Energy"),
+        "GOLDBEES" | "SETFGOLD" | "HDFCGOLD" | "GOLDIETF" | "GOLD1" | "GOLDCASE" | "SILVERBEES"
+        | "SILVERIETF" | "HDFCSILVER" | "SILVER1" => Some("Precious Metals"),
+        "LIQUIDBEES" => Some("Cash / Liquid"),
+        "NIFTYBEES" | "SETFNIF50" | "HDFCNIFETF" | "ICICINIFTY" | "NIFTYETF" | "JUNIORBEES"
+        | "SETFNN50" | "NEXT50" | "NEXT50ETF" | "MID150BEES" | "MIDCAPETF" => {
+            Some("Broad Market / Index")
+        }
+        _ => None,
+    }
+}
+
 /// Standardize sector names to canonical GICS sectors or broad categories.
 pub fn normalize_sector(raw: Option<&str>) -> String {
     let s = match raw {
         Some(s) if !s.trim().is_empty() => s.trim().to_ascii_lowercase(),
         _ => return "Unclassified".to_string(),
     };
-    if s.contains("tech") || s.contains("software") || s.contains("information") {
+    if s.contains("tech")
+        || s.contains("software")
+        || s.contains("information")
+        || s == "it"
+        || s.contains("nifty it")
+    {
         "Technology".to_string()
     } else if s.contains("finan") || s.contains("bank") || s.contains("insur") {
         "Financial Services".to_string()
@@ -174,10 +307,18 @@ pub fn normalize_sector(raw: Option<&str>) -> String {
         "Consumer Cyclical".to_string()
     } else if s.contains("defensive") || s.contains("staple") || s.contains("fmcg") {
         "Consumer Defensive".to_string()
-    } else if s.contains("energy") || s.contains("oil") || s.contains("gas") || s.contains("petro")
+    } else if s.contains("energy")
+        || s.contains("oil")
+        || s.contains("gas")
+        || s.contains("petro")
+        || s.contains("cpse")
     {
         "Energy".to_string()
-    } else if s.contains("industr") || s.contains("capital goods") || s.contains("engineering") {
+    } else if s.contains("industr")
+        || s.contains("capital goods")
+        || s.contains("engineering")
+        || s.contains("infra")
+    {
         "Industrials".to_string()
     } else if s.contains("basic")
         || s.contains("material")
@@ -194,6 +335,14 @@ pub fn normalize_sector(raw: Option<&str>) -> String {
         "Real Estate".to_string()
     } else if s.contains("gold") || s.contains("silver") || s.contains("precious") {
         "Precious Metals".to_string()
+    } else if s.contains("liquid") || s.contains("cash") || s.contains("overnight") {
+        "Cash / Liquid".to_string()
+    } else if s.contains("index")
+        || s.contains("broad")
+        || s.contains("nifty")
+        || s.contains("sensex")
+    {
+        "Broad Market / Index".to_string()
     } else {
         let mut chars = s.chars();
         match chars.next() {
@@ -240,7 +389,12 @@ pub fn classify_market_cap(market_cap: Option<f64>, currency: Option<&str>) -> M
 pub fn classify_fund_market_cap(category: Option<&str>, name: Option<&str>) -> (f64, f64, f64) {
     let text = format!("{} {}", category.unwrap_or(""), name.unwrap_or("")).to_ascii_lowercase();
 
-    if text.contains("large & mid") || text.contains("large and mid") {
+    if text.contains("large & mid")
+        || text.contains("large and mid")
+        || text.contains("next 50")
+        || text.contains("next50")
+        || text.contains("junior")
+    {
         (0.50, 0.50, 0.0)
     } else if text.contains("flexi cap")
         || text.contains("multi cap")
@@ -254,6 +408,10 @@ pub fn classify_fund_market_cap(category: Option<&str>, name: Option<&str>) -> (
         || text.contains("large growth")
         || text.contains("large value")
         || text.contains("nifty 50")
+        || text.contains("nifty50")
+        || text.contains("nifty bees")
+        || text.contains("niftybees")
+        || text.contains("bank")
         || text.contains("s&p 500")
         || text.contains("sp500")
         || text.contains("mega")
@@ -265,6 +423,8 @@ pub fn classify_fund_market_cap(category: Option<&str>, name: Option<&str>) -> (
         || text.contains("midcap")
         || text.contains("mid blend")
         || text.contains("mid growth")
+        || text.contains("mid 150")
+        || text.contains("mid150")
     {
         (0.0, 1.00, 0.0)
     } else if text.contains("small cap")
@@ -296,6 +456,15 @@ pub fn classify_asset_class(
         return AssetClassType::Commodity;
     }
     let cat_lower = category.unwrap_or("").to_ascii_lowercase();
+    if cat_lower.contains("liquid")
+        || cat_lower.contains("overnight")
+        || cat_lower.contains("money market")
+        || sym_upper == "CASH"
+        || sym_upper == "LIQUID"
+        || sym_upper.contains("LIQUID")
+    {
+        return AssetClassType::Cash;
+    }
     if cat_lower.contains("debt")
         || cat_lower.contains("bond")
         || cat_lower.contains("gilt")
@@ -303,14 +472,6 @@ pub fn classify_asset_class(
         || cat_lower.contains("treasury")
     {
         return AssetClassType::Debt;
-    }
-    if cat_lower.contains("liquid")
-        || cat_lower.contains("overnight")
-        || cat_lower.contains("money market")
-        || sym_upper == "CASH"
-        || sym_upper == "LIQUID"
-    {
-        return AssetClassType::Cash;
     }
     if cat_lower.contains("commodity") || cat_lower.contains("precious") {
         return AssetClassType::Commodity;
@@ -376,9 +537,15 @@ pub fn compute_xray(
     let mut funds_analyzed = Vec::new();
 
     for h in holdings {
-        let is_fund = h.is_fund || fund_profiles.contains_key(&h.symbol);
-        let asset_class =
-            classify_asset_class(&h.symbol, is_fund, h.is_sgb, h.fund_category.as_deref());
+        let is_fund = h.is_fund || is_known_etf(&h.symbol) || fund_profiles.contains_key(&h.symbol);
+        let category = h.fund_category.as_deref().or_else(|| {
+            if is_known_etf(&h.symbol) {
+                default_etf_category(&h.symbol)
+            } else {
+                None
+            }
+        });
+        let asset_class = classify_asset_class(&h.symbol, is_fund, h.is_sgb, category);
 
         match asset_class {
             AssetClassType::Equity => {
@@ -417,7 +584,14 @@ pub fn compute_xray(
                 name: h
                     .name
                     .clone()
-                    .or_else(|| profile_opt.and_then(|p| p.name.clone())),
+                    .or_else(|| profile_opt.and_then(|p| p.name.clone()))
+                    .or_else(|| {
+                        if is_known_etf(&h.symbol) {
+                            default_etf_name(&h.symbol).map(str::to_string)
+                        } else {
+                            None
+                        }
+                    }),
                 look_through_available,
                 holdings_count,
                 coverage_pct,
@@ -466,33 +640,82 @@ pub fn compute_xray(
                         let sec_name = normalize_sector(Some(sec));
                         *sector_values.entry(sec_name).or_default() += h.value * w;
                     }
-                } else if let Some(cat) = &h.fund_category {
-                    let sec_name = normalize_sector(Some(cat));
+                } else if asset_class == AssetClassType::Equity {
+                    let sec_source = h
+                        .fund_category
+                        .as_deref()
+                        .or(profile.category.as_deref())
+                        .or(h.sector.as_deref())
+                        .or_else(|| {
+                            if is_known_etf(&h.symbol) {
+                                default_etf_sector(&h.symbol)
+                            } else {
+                                None
+                            }
+                        });
+                    let sec_name = normalize_sector(sec_source);
                     *sector_values.entry(sec_name).or_default() += h.value;
-                } else {
-                    *sector_values.entry("Unclassified".to_string()).or_default() += h.value;
                 }
 
                 // Market cap breakdown for the fund
                 if asset_class == AssetClassType::Equity {
+                    let cat_source = h
+                        .fund_category
+                        .as_deref()
+                        .or(profile.category.as_deref())
+                        .or_else(|| {
+                            if is_known_etf(&h.symbol) {
+                                default_etf_category(&h.symbol)
+                            } else {
+                                None
+                            }
+                        });
+                    let name_source = h.name.as_deref().or(profile.name.as_deref()).or_else(|| {
+                        if is_known_etf(&h.symbol) {
+                            default_etf_name(&h.symbol)
+                        } else {
+                            None
+                        }
+                    });
                     let (large_p, mid_p, small_p) =
-                        classify_fund_market_cap(h.fund_category.as_deref(), h.name.as_deref());
+                        classify_fund_market_cap(cat_source, name_source);
                     large_cap_val += h.value * large_p;
                     mid_cap_val += h.value * mid_p;
                     small_cap_val += h.value * small_p;
                 }
             } else {
                 // Fund without constituent look-through
-                if let Some(cat) = &h.fund_category {
-                    let sec_name = normalize_sector(Some(cat));
-                    *sector_values.entry(sec_name).or_default() += h.value;
-                } else {
-                    *sector_values.entry("Unclassified".to_string()).or_default() += h.value;
-                }
-
                 if asset_class == AssetClassType::Equity {
+                    let sec_source =
+                        h.fund_category
+                            .as_deref()
+                            .or(h.sector.as_deref())
+                            .or_else(|| {
+                                if is_known_etf(&h.symbol) {
+                                    default_etf_sector(&h.symbol)
+                                } else {
+                                    None
+                                }
+                            });
+                    let sec_name = normalize_sector(sec_source);
+                    *sector_values.entry(sec_name).or_default() += h.value;
+
+                    let cat_source = h.fund_category.as_deref().or_else(|| {
+                        if is_known_etf(&h.symbol) {
+                            default_etf_category(&h.symbol)
+                        } else {
+                            None
+                        }
+                    });
+                    let name_source = h.name.as_deref().or_else(|| {
+                        if is_known_etf(&h.symbol) {
+                            default_etf_name(&h.symbol)
+                        } else {
+                            None
+                        }
+                    });
                     let (large_p, mid_p, small_p) =
-                        classify_fund_market_cap(h.fund_category.as_deref(), h.name.as_deref());
+                        classify_fund_market_cap(cat_source, name_source);
                     large_cap_val += h.value * large_p;
                     mid_cap_val += h.value * mid_p;
                     small_cap_val += h.value * small_p;
@@ -1144,5 +1367,286 @@ mod tests {
         assert_eq!(hdfc.total_value, 154000.0);
         assert_eq!(hdfc.effective_weight_pct, 77.0);
         assert!(hdfc.is_concentrated);
+    }
+
+    #[test]
+    fn test_xray_indian_etf_niftybees_without_profile() {
+        // Issue #220: NIFTYBEES without a profile must NOT be flagged as single-stock concentration risk,
+        // must be listed under funds analyzed with look_through_available: false,
+        // and must categorize market cap as Large Cap (not Unclassified).
+        let holdings = vec![
+            XrayInputHolding {
+                symbol: "NIFTYBEES.NS".to_string(),
+                name: None,
+                shares: 100.0,
+                price: 250.0,
+                value: 25000.0, // 50% of portfolio
+                sector: None,
+                market_cap: None,
+                currency: Some("INR".to_string()),
+                is_fund: false, // tests that is_known_etf identifies it even if caller missed is_fund
+                is_sgb: false,
+                fund_category: None,
+            },
+            XrayInputHolding {
+                symbol: "TCS.NS".to_string(),
+                name: Some("Tata Consultancy Services".to_string()),
+                shares: 5.0,
+                price: 5000.0,
+                value: 25000.0, // 50% of portfolio
+                sector: Some("Technology".to_string()),
+                market_cap: Some(1_400_000_000_000.0),
+                currency: Some("INR".to_string()),
+                is_fund: false,
+                is_sgb: false,
+                fund_category: None,
+            },
+        ];
+
+        let fund_profiles = HashMap::new();
+        let report = compute_xray("etf_test", "INR", &holdings, &fund_profiles);
+        assert_eq!(report.total_value, 50000.0);
+
+        // 1. NIFTYBEES is NOT flagged as a concentrated single-stock risk!
+        // Only TCS should be flagged.
+        assert_eq!(report.concentrations_above_10pct.len(), 1);
+        assert_eq!(report.concentrations_above_10pct[0].symbol, "TCS.NS");
+        assert!(
+            !report
+                .concentrations_above_10pct
+                .iter()
+                .any(|c| canonical_ticker(&c.symbol) == "NIFTYBEES")
+        );
+
+        // 2. NIFTYBEES is listed under funds analyzed
+        assert_eq!(report.funds_analyzed.len(), 1);
+        let fund = &report.funds_analyzed[0];
+        assert_eq!(fund.symbol, "NIFTYBEES.NS");
+        assert!(!fund.look_through_available);
+        assert_eq!(fund.holdings_count, 0);
+        assert_eq!(fund.coverage_pct, 0.0);
+        assert_eq!(fund.name.as_deref(), Some("Nippon India ETF Nifty 50 BeES"));
+
+        // 3. Asset class is 100% Equity
+        assert_eq!(report.asset_class_split.equity_value, 50000.0);
+        assert_eq!(report.asset_class_split.equity_pct, 100.0);
+
+        // 4. Market cap is 100% Large Cap (0% Unclassified)
+        assert_eq!(report.market_cap_breakdown.large_cap_value, 50000.0);
+        assert_eq!(report.market_cap_breakdown.large_cap_pct, 100.0);
+        assert_eq!(report.market_cap_breakdown.unclassified_value, 0.0);
+        assert_eq!(report.market_cap_breakdown.unclassified_pct, 0.0);
+
+        // 5. Sector allocation includes Technology (TCS) and Broad Market / Index (NIFTYBEES)
+        assert_eq!(report.sector_allocation.len(), 2);
+        let bm = report
+            .sector_allocation
+            .iter()
+            .find(|s| s.sector == "Broad Market / Index")
+            .unwrap();
+        assert_eq!(bm.value, 25000.0);
+        assert_eq!(bm.weight_pct, 50.0);
+    }
+
+    #[test]
+    fn test_xray_indian_etf_bankbees_without_profile() {
+        let holdings = vec![XrayInputHolding {
+            symbol: "BANKBEES.NS".to_string(),
+            name: None,
+            shares: 100.0,
+            price: 500.0,
+            value: 50000.0,
+            sector: None,
+            market_cap: None,
+            currency: Some("INR".to_string()),
+            is_fund: true,
+            is_sgb: false,
+            fund_category: None,
+        }];
+
+        let report = compute_xray("bank_test", "INR", &holdings, &HashMap::new());
+        assert_eq!(report.total_value, 50000.0);
+        assert!(report.concentrations_above_10pct.is_empty());
+
+        assert_eq!(report.funds_analyzed.len(), 1);
+        assert!(!report.funds_analyzed[0].look_through_available);
+        assert_eq!(
+            report.funds_analyzed[0].name.as_deref(),
+            Some("Nippon India ETF Nifty Bank BeES")
+        );
+
+        assert_eq!(report.market_cap_breakdown.large_cap_pct, 100.0);
+        assert_eq!(report.sector_allocation.len(), 1);
+        assert_eq!(report.sector_allocation[0].sector, "Financial Services");
+    }
+
+    #[test]
+    fn test_xray_indian_etf_with_index_constituents() {
+        let mut fund_profiles = HashMap::new();
+        // Simulate index constituents returned by client.index_constituents("NIFTY 50")
+        fund_profiles.insert(
+            "NIFTYBEES.NS".to_string(),
+            FundProfile {
+                symbol: "NIFTYBEES.NS".to_string(),
+                name: Some("Nippon India ETF Nifty 50 BeES".to_string()),
+                family: None,
+                category: Some("NIFTY 50".to_string()),
+                expense_ratio: None,
+                currency: Some("INR".to_string()),
+                holdings: vec![
+                    FundConstituent {
+                        symbol: Some("RELIANCE.NS".to_string()),
+                        name: Some("Reliance Industries Ltd".to_string()),
+                        weight: 0.10, // 10%
+                    },
+                    FundConstituent {
+                        symbol: Some("TCS.NS".to_string()),
+                        name: Some("Tata Consultancy Services".to_string()),
+                        weight: 0.08, // 8%
+                    },
+                ],
+                sectors: vec![],
+            },
+        );
+
+        let holdings = vec![
+            XrayInputHolding {
+                symbol: "RELIANCE.NS".to_string(),
+                name: Some("Reliance Industries Ltd".to_string()),
+                shares: 10.0,
+                price: 2500.0,
+                value: 25000.0, // Direct: 25%
+                sector: Some("Energy".to_string()),
+                market_cap: Some(2_000_000_000_000.0),
+                currency: Some("INR".to_string()),
+                is_fund: false,
+                is_sgb: false,
+                fund_category: None,
+            },
+            XrayInputHolding {
+                symbol: "NIFTYBEES.NS".to_string(),
+                name: Some("Nippon India ETF Nifty 50 BeES".to_string()),
+                shares: 300.0,
+                price: 250.0,
+                value: 75000.0, // Fund: 75%
+                sector: None,
+                market_cap: None,
+                currency: Some("INR".to_string()),
+                is_fund: true,
+                is_sgb: false,
+                fund_category: Some("NIFTY 50".to_string()),
+            },
+        ];
+
+        let report = compute_xray("overlap_test", "INR", &holdings, &fund_profiles);
+        assert_eq!(report.total_value, 100000.0);
+
+        // Funds analyzed: look-through available with 2 holdings
+        assert_eq!(report.funds_analyzed.len(), 1);
+        assert!(report.funds_analyzed[0].look_through_available);
+        assert_eq!(report.funds_analyzed[0].holdings_count, 2);
+
+        // RELIANCE combined exposure:
+        // Direct: 25,000 (25.0%) + via NIFTYBEES (75,000 * 0.10 = 7,500, 7.5%) = 32,500 (32.5%)
+        let rel = report
+            .effective_holdings
+            .iter()
+            .find(|h| canonical_ticker(&h.symbol) == "RELIANCE")
+            .unwrap();
+        assert_eq!(rel.direct_value, 25000.0);
+        assert_eq!(rel.fund_value, 7500.0);
+        assert_eq!(rel.total_value, 32500.0);
+        assert_eq!(rel.effective_weight_pct, 32.5);
+        assert!(rel.is_concentrated);
+
+        // NIFTYBEES itself is not a direct holding in companies
+        assert!(
+            !report
+                .effective_holdings
+                .iter()
+                .any(|h| canonical_ticker(&h.symbol) == "NIFTYBEES")
+        );
+    }
+
+    #[test]
+    fn test_xray_indian_commodity_and_cash_etfs() {
+        let holdings = vec![
+            XrayInputHolding {
+                symbol: "GOLDBEES.NS".to_string(),
+                name: None,
+                shares: 100.0,
+                price: 50.0,
+                value: 5000.0,
+                sector: None,
+                market_cap: None,
+                currency: Some("INR".to_string()),
+                is_fund: true,
+                is_sgb: false,
+                fund_category: None,
+            },
+            XrayInputHolding {
+                symbol: "LIQUIDBEES.NS".to_string(),
+                name: None,
+                shares: 10.0,
+                price: 1000.0,
+                value: 10000.0,
+                sector: None,
+                market_cap: None,
+                currency: Some("INR".to_string()),
+                is_fund: true,
+                is_sgb: false,
+                fund_category: None,
+            },
+        ];
+
+        let report = compute_xray("macro_etf_test", "INR", &holdings, &HashMap::new());
+        assert_eq!(report.total_value, 15000.0);
+
+        assert_eq!(report.asset_class_split.commodity_value, 5000.0);
+        assert_eq!(report.asset_class_split.commodity_pct, 33.33);
+        assert_eq!(report.asset_class_split.cash_value, 10000.0);
+        assert_eq!(report.asset_class_split.cash_pct, 66.67);
+
+        assert_eq!(report.funds_analyzed.len(), 2);
+        assert!(report.concentrations_above_10pct.is_empty());
+    }
+
+    #[test]
+    fn test_known_etf_helpers() {
+        assert!(is_known_etf("NIFTYBEES"));
+        assert!(is_known_etf("NIFTYBEES.NS"));
+        assert!(is_known_etf("BANKBEES.NS"));
+        assert!(is_known_etf("JUNIORBEES"));
+        assert!(is_known_etf("GOLDBEES"));
+        assert!(is_known_etf("SILVERBEES"));
+        assert!(is_known_etf("LIQUIDBEES"));
+        assert!(is_known_etf("SETFNIF50"));
+        assert!(is_known_etf("MYFUND_ETF"));
+        assert!(!is_known_etf("RELIANCE.NS"));
+        assert!(!is_known_etf("AAPL"));
+
+        assert_eq!(index_for_etf("NIFTYBEES.NS"), Some("NIFTY 50"));
+        assert_eq!(index_for_etf("JUNIORBEES.NS"), Some("NIFTY NEXT 50"));
+        assert_eq!(index_for_etf("BANKBEES"), Some("NIFTY BANK"));
+        assert_eq!(index_for_etf("MID150BEES.NS"), Some("NIFTY MIDCAP 150"));
+        assert_eq!(index_for_etf("GOLDBEES"), None);
+
+        assert_eq!(
+            default_etf_name("NIFTYBEES"),
+            Some("Nippon India ETF Nifty 50 BeES")
+        );
+        assert_eq!(
+            default_etf_name("BANKBEES"),
+            Some("Nippon India ETF Nifty Bank BeES")
+        );
+        assert_eq!(
+            default_etf_category("NIFTYBEES"),
+            Some("Equity Scheme - Large Cap (NIFTY 50)")
+        );
+        assert_eq!(default_etf_sector("BANKBEES"), Some("Financial Services"));
+        assert_eq!(
+            default_etf_sector("NIFTYBEES"),
+            Some("Broad Market / Index")
+        );
     }
 }
