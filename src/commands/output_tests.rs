@@ -398,10 +398,7 @@ fn movers_never_mix_rising_and_falling_sides() {
     let (gainers, losers) = mover_rows(&down_day, 10);
     assert!(gainers.is_empty(), "no positive changes → no gainers");
     assert_eq!(
-        losers
-            .iter()
-            .map(|r| r.symbol.as_str())
-            .collect::<Vec<_>>(),
+        losers.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>(),
         ["DN3", "DN2", "DN1"]
     );
     assert!(losers.iter().all(|r| r.change_percent < 0.0));
