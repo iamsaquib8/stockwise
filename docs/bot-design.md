@@ -29,7 +29,7 @@ Two persistent background workers that run throughout the day:
 │  9:00  Pre-market: scan overnight gaps, sector heat  │
 │  9:15  Market open: lock initial positions            │
 │  9:15–10:00  Aggressive phase: momentum entries       │
-│  10:00–2:00  Monitoring: trail stops, book T1 profits │
+│  10:00–2:00  Monitoring: trail exit levels, book level 1 │
 │  2:00–3:00  Wind-down: no new entries, tighten stops  │
 │  3:15  Square off: close all intraday positions       │
 │  3:30  EOD: settle, record P&L, update sim history    │
@@ -70,21 +70,21 @@ MARKET OPEN (9:15 – 9:30)
 ├── Run 9-strategy engine on all candidates
 ├── Filter by confidence (HIGH/MEDIUM only)
 ├── Size positions via Kelly criterion
-├── Lock trades (entry, T1, T2, stop-loss, trailing stop)
-├── Place orders via Angel One (or record in simulator)
-└── Print trade plan
+├── Lock paper positions (opening price, level 1, level 2, exit level, trailing exit level)
+├── Record them in the simulator (the daemon never places orders)
+└── Print the positions
 
 MONITORING LOOP (9:30 – 3:00, every 60s)
 ├── Fetch live prices for all open positions
 ├── For each position:
-│   ├── If price >= T1: book 50%, move stop to entry (breakeven)
-│   ├── If price >= T2: book remaining, position closed
-│   ├── If price <= stop: exit, record loss
-│   ├── Update trailing stop (max of previous, price - 1.5*ATR)
+│   ├── If price >= level 1: book 50%, move exit level to the opening price
+│   ├── If price >= level 2: book remaining, position closed
+│   ├── If price <= exit level: close, record loss
+│   ├── Update trailing exit level (max of previous, price - 1.5*ATR)
 │   └── Log P&L snapshot
 ├── Check for new signals (only in first 2 hours)
 ├── Print status table every 5 minutes
-└── Alert on any triggered stop or target
+└── Notify when level 1, level 2 or the exit level is reached
 
 WIND-DOWN (3:00 – 3:15)
 ├── No new entries
@@ -123,7 +123,7 @@ POST-MARKET (3:30+)
           ┌────▼─────┐
       ┌──►│ WATCHING  │◄──── main loop (60s ticks)
       │   └────┬─────┘
-      │        │ T1 hit / stop hit
+      │        │ level 1 / exit level
       │   ┌────▼─────┐
       └───┤ MANAGING  │ partial exits, trail stops
           └────┬─────┘
@@ -285,7 +285,7 @@ Signal Generated ──► Confirmation Check ──► Angel One API
 webhooks), email (SMTP via lettre + rustls) and the desktop (notify-rust,
 behind the `desktop-notify` feature). Channels are configured with
 environment variables; `stockwise notify test` checks them. The daemon sends
-entries, exits (T1, target, stop, square-off), the kill switch and the
+openings, closings (level 1, level 2, exit level, square-off), the kill switch and the
 end-of-day summary; `alert watch` sends each trigger once. See
 [bots.md](bots.md#notifications).
 

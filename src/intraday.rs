@@ -16,13 +16,24 @@ pub enum Direction {
 impl std::fmt::Display for Direction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Direction::Long => write!(f, "BUY"),
-            Direction::Short => write!(f, "SELL"),
+            Direction::Long => write!(f, "long"),
+            Direction::Short => write!(f, "short"),
         }
     }
 }
 
 impl Direction {
+    /// True for a stored direction string. Files written before 0.8.1 hold
+    /// `BUY` / `SELL`; newer ones hold `long` / `short`. Anything else is short.
+    pub fn is_long_str(s: &str) -> bool {
+        s.eq_ignore_ascii_case("long") || s.eq_ignore_ascii_case("buy")
+    }
+
+    /// `long` or `short` for a stored direction string, old spelling or new.
+    pub fn label_of(s: &str) -> &'static str {
+        if Self::is_long_str(s) { "long" } else { "short" }
+    }
+
     /// Which way the signal leans, for screens that only describe data.
     pub fn lean(&self) -> &'static str {
         match self {
@@ -994,8 +1005,14 @@ mod tests {
 
     #[test]
     fn test_direction_display() {
-        assert_eq!(format!("{}", Direction::Long), "BUY");
-        assert_eq!(format!("{}", Direction::Short), "SELL");
+        assert_eq!(format!("{}", Direction::Long), "long");
+        assert_eq!(format!("{}", Direction::Short), "short");
+        // Stored strings from before 0.8.1 still read the same way.
+        for (s, long) in [("BUY", true), ("SELL", false), ("long", true), ("short", false)] {
+            assert_eq!(Direction::is_long_str(s), long, "{s}");
+        }
+        assert_eq!(Direction::label_of("BUY"), "long");
+        assert_eq!(Direction::label_of("SELL"), "short");
     }
 
     #[test]

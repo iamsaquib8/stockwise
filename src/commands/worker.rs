@@ -344,7 +344,7 @@ async fn report(events: &[Event], market: Market, notifier: &Notifier) {
         .filter(|e| matches!(e, Event::Entered { .. }))
         .count();
     if entries > 0 {
-        println!("  {} {} positions entered:\n", "✓".green().bold(), entries);
+        println!("  {} {} paper positions opened:\n", "✓".green().bold(), entries);
     }
     for e in events {
         match e {
@@ -357,9 +357,9 @@ async fn report(events: &[Event], market: Market, notifier: &Notifier) {
                 target2,
                 stop,
             } => println!(
-                "    {} {} {} × {} @ {}{:.2}  T1:{}{:.2}  T2:{}{:.2}  SL:{}{:.2}",
+                "    {} {} {} × {} @ {}{:.2}  level 1:{}{:.2}  level 2:{}{:.2}  exit level:{}{:.2}",
                 "→".green(),
-                direction,
+                crate::intraday::Direction::label_of(direction),
                 symbol.cyan(),
                 qty,
                 csym,
@@ -406,7 +406,7 @@ fn events_message(events: &[Event], csym: &str) -> Option<Message> {
     let title = if events.iter().any(|e| matches!(e, Event::KillSwitch { .. })) {
         "StockWise daemon: kill switch triggered".to_string()
     } else if entries > 0 {
-        format!("StockWise daemon: entered {} paper positions", entries)
+        format!("StockWise daemon: opened {} paper positions", entries)
     } else if events.len() == 1 {
         format!("StockWise daemon: {}", first.text(csym))
     } else {
@@ -450,8 +450,8 @@ fn print_eod_table(state: &DaemonState, market: Market) {
     println!(
         "  {:<14} {:>10} {:>10} {:>12} {:>12}",
         "Symbol".bold(),
-        "Entry".bold(),
-        "Exit".bold(),
+        "Opened".bold(),
+        "Closed".bold(),
         "P&L".bold(),
         "Status".bold()
     );
@@ -505,7 +505,7 @@ fn eod_message(state: &DaemonState, market: Market, title: &str) -> Message {
         body.push_str(&format!(
             "\n{} {} → {}{:.2} {} ({})",
             p.symbol,
-            p.direction,
+            crate::intraday::Direction::label_of(&p.direction),
             csym,
             p.current_price,
             crate::daemon::signed_money(csym, p.pnl),
@@ -1011,7 +1011,7 @@ mod tests {
         let msg = events_message(std::slice::from_ref(&closed), "₹").unwrap();
         assert_eq!(
             msg.title,
-            "StockWise daemon: STOPPED TCS.NS at ₹98.00 (P&L -₹20)"
+            "StockWise daemon: EXIT LEVEL reached TCS.NS at ₹98.00 (P&L -₹20)"
         );
         assert!(msg.body.is_empty());
 

@@ -123,9 +123,9 @@ pub async fn cmd_sim(
                 "  {:<14} {:>6} {:>10} {:>10} {:>10} {:>6}",
                 "Symbol".bold(),
                 "Qty".bold(),
-                "Entry".bold(),
-                "Target".bold(),
-                "Stop".bold(),
+                "Opened".bold(),
+                "Level 2".bold(),
+                "Exit level".bold(),
                 "Score".bold()
             );
             println!("  {}", "─".repeat(60).dimmed());
@@ -194,7 +194,7 @@ pub async fn cmd_sim(
                     "  {:<14} {:>6} {:>10} {:>10} {:>12} {:>10}",
                     "Symbol".bold(),
                     "Qty".bold(),
-                    "Entry".bold(),
+                    "Opened".bold(),
                     "Now".bold(),
                     "P&L".bold(),
                     "Status".bold()
@@ -208,7 +208,7 @@ pub async fn cmd_sim(
                         .find(|q| q.symbol.as_deref() == Some(&t.symbol))
                         .and_then(|q| q.regular_market_price)
                         .unwrap_or(t.entry_price);
-                    let is_long = t.direction == "BUY";
+                    let is_long = crate::intraday::Direction::is_long_str(&t.direction);
                     let pnl = if is_long {
                         (current - t.entry_price) * t.qty as f64
                     } else {
@@ -231,11 +231,11 @@ pub async fn cmd_sim(
                         current <= t.target1
                     };
                     let status = if hit_t2 {
-                        "TARGET HIT".green().bold().to_string()
+                        "LEVEL 2".green().bold().to_string()
                     } else if hit_stop {
-                        "STOPPED".red().bold().to_string()
+                        "EXIT LEVEL".red().bold().to_string()
                     } else if hit_t1 {
-                        "T1 hit".green().to_string()
+                        "LEVEL 1".green().to_string()
                     } else {
                         "Open".yellow().to_string()
                     };
@@ -678,8 +678,8 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
         println!(
             "  {:<14} {:>10} {:>10} {:>12}  {}",
             "Symbol".bold(),
-            "Entry".bold(),
-            "Exit".bold(),
+            "Opened".bold(),
+            "Closed".bold(),
             "P&L".bold(),
             "Result".bold()
         );
@@ -704,11 +704,11 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             }
             let at = clock::local(market, r.exit_time).format("%H:%M");
             let result = match r.status {
-                PositionStatus::T2Hit => format!("TARGET {}", at).green().bold().to_string(),
+                PositionStatus::T2Hit => format!("LEVEL 2 {}", at).green().bold().to_string(),
                 PositionStatus::StopHit if r.t1_booked => {
-                    format!("T1, then stop {}", at).yellow().to_string()
+                    format!("LEVEL 1, then exit level {}", at).yellow().to_string()
                 }
-                PositionStatus::StopHit => format!("STOPPED {}", at).red().to_string(),
+                PositionStatus::StopHit => format!("EXIT LEVEL {}", at).red().to_string(),
                 _ => format!("Exit {}", at).dimmed().to_string(),
             };
             let pnl_str = if r.pnl >= 0.0 {
