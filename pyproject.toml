@@ -14,7 +14,7 @@ build-backend = "maturin"
 [project]
 name = "stockwise"
 dynamic = ["version"]
-description = "Stock market toolkit for your terminal — NSE/BSE and US stocks, mutual funds, F&O, crypto and FX: quotes, charts, screeners, backtests, SIP/XIRR, paper trading, portfolio and tax."
+description = "Stock market toolkit for your terminal — NSE/BSE and US stocks, mutual funds, F&O, crypto and FX: quotes, charts, backtests, portfolio with lots and XIRR, Indian capital-gains tax, paper trading and an MCP server for AI assistants."
 readme = "packaging/pypi/README.md"
 license = "MIT"
 license-files = ["LICENSE"]

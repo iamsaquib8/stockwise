@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `events` / `deep` (`Needs::ALL`): fetches full research snapshot.
   - Enforced a bounded 3-second timeout (`tokio::time::timeout`) on all NSE endpoints (filings, shareholding, insider trading, corporate actions) so slow or unresponsive NSE calls log to warnings and degrade gracefully rather than hanging the CLI.
 
+### Changed
+- The crates.io and PyPI description and keywords now mention portfolio, tax and the MCP server.
+
 ### Fixed
 - Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
 - `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):
