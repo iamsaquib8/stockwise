@@ -1020,7 +1020,8 @@ mod tests {
         let yes = |_: &str| -> Result<bool> { Ok(true) };
         let guard = Guard {
             limits: brokers::OrderLimits {
-                max_order_value: None,
+                // --yes needs a cap; the read-only wrapper must still refuse.
+                max_order_value: Some(50_000.0),
                 enable_orders: true,
             },
             last_price: Some(1300.0),

@@ -52,11 +52,17 @@ steps:
 3. **Preview.** Instrument and broker token, side, quantity, order type,
    product (delivery / CNC), last price, estimated value.
 4. **`max_order_value`.** If set in the broker's config file, any order whose
-   estimated value is higher is refused (also on `--dry-run`).
+   estimated value is higher is refused (also on `--dry-run`). With a cap set,
+   an order whose value can't be estimated (a MARKET order without a last
+   price) is refused too. Without a cap the preview says so, and `--yes`
+   (step 7) is refused.
 5. **`--dry-run`** stops here: nothing is sent.
 6. **Opt-in for experimental paths** (`"enable_orders": true`, below).
 7. **Typed confirmation.** You type `yes`. Without a terminal (scripts, cron)
-   the order is refused unless you pass `--yes`.
+   the order is refused unless you pass `--yes`. `--yes` also needs
+   `max_order_value` in the broker's config file, because it removes the last
+   guard against a wrong quantity; without a cap, the order is refused before
+   StockWise logs in to the broker. `--dry-run` is not affected.
 
 If the network fails while an order is in flight, StockWise says the order
 state is **unknown** — check the broker app or `stockwise trade orders` before
