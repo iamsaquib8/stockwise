@@ -916,10 +916,33 @@ pub async fn cmd_portfolio_add(
         Some(d) => pf::parse_date(d)?.to_string(),
         None => pf::today(),
     };
-    let resolved = market::resolve_symbol(symbol, market);
-    let mut portfolio = Portfolio::load()?;
-    portfolio.add_lot(&resolved, Lot::new(shares, cost, &date, "manual"));
-    portfolio.save()?;
+    // A purchase of a merged-away ticker (HDFC, MINDTREE) before its merger
+    // is recorded in the acquirer's shares, at the same cost and date.
+    let (mut symbol, mut shares, mut cost) = (symbol.to_string(), shares, cost);
+    if market == Market::In
+        && let Some(swap) = pf::merger_swap(&symbol, Some(&date), shares, cost)
+    {
+        println!(
+            "  {} {} was merged into {}: recorded as {} {} at {} each ({} for {}, same total cost)",
+            "·".dimmed(),
+            swap.merger.old,
+            swap.merger.new,
+            swap.qty,
+            swap.merger.new,
+            format_price(
+                swap.price,
+                pf::symbol_currency(&market::resolve_symbol(&swap.symbol, market))
+            ),
+            swap.merger.new_shares,
+            swap.merger.old_shares
+        );
+        (symbol, shares, cost) = (swap.symbol, swap.qty, swap.price);
+    }
+    let resolved = market::resolve_symbol(&symbol, market);
+    let holding = Portfolio::update(|p| {
+        p.add_lot(&resolved, Lot::new(shares, cost, &date, "manual"));
+        Ok(p.holding(&resolved).cloned())
+    })?;
     let cur = pf::symbol_currency(&resolved);
     let units = offmarket::unit_word(&resolved);
     println!(
@@ -931,7 +954,7 @@ pub async fn cmd_portfolio_add(
         format_price(cost, cur),
         date
     );
-    if let Some(h) = portfolio.holding(&resolved)
+    if let Some(h) = &holding
         && h.lots.len() > 1
     {
         println!(
@@ -954,12 +977,14 @@ pub async fn cmd_portfolio_add(
 }
 
 pub async fn cmd_portfolio_remove(symbol: &str, market: Market) -> Result<()> {
-    let mut portfolio = Portfolio::load()?;
+    let portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
-    if !portfolio.remove(&resolved) {
-        bail!("{} is not in your portfolio", resolved);
-    }
-    portfolio.save()?;
+    Portfolio::update(|p| {
+        if !p.remove(&resolved) {
+            bail!("{} is not in your portfolio", resolved);
+        }
+        Ok(())
+    })?;
     println!("  {} Removed {} from portfolio", "✓".green(), resolved);
     println!(
         "  {}",
@@ -976,7 +1001,7 @@ pub async fn cmd_portfolio_sell(
     date: Option<&str>,
     market: Market,
 ) -> Result<()> {
-    let mut portfolio = Portfolio::load()?;
+    let portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
     if portfolio.holding(&resolved).is_none() {
         bail!("{} is not in your portfolio", resolved);
@@ -1058,8 +1083,10 @@ pub async fn cmd_portfolio_sell(
             })?
         }
     };
-    let sales = portfolio.sell_fifo(&resolved, shares, price, &date, "manual")?;
-    portfolio.save()?;
+    // The checks above ran on the portfolio as loaded; sell from the file as
+    // it is now, so a change made meanwhile is kept (and a sale that no
+    // longer fits is refused).
+    let sales = Portfolio::update(|p| p.sell_fifo(&resolved, shares, price, &date, "manual"))?;
 
     let cur = cur.as_deref();
     println!(
@@ -1108,8 +1135,10 @@ pub async fn cmd_portfolio_lots(
     let resolved = held_symbol(&portfolio, symbol, market);
     if let (Some(n), Some(d)) = (fix_lot, fix_date) {
         let d = pf::parse_date(d)?.to_string();
-        portfolio.set_lot_date(&resolved, n, &d)?;
-        portfolio.save()?;
+        portfolio = Portfolio::update(|p| {
+            p.set_lot_date(&resolved, n, &d)?;
+            Ok(p.clone())
+        })?;
         println!(
             "  {} Lot #{} of {} now dated {}",
             "✓".green(),
@@ -1175,6 +1204,9 @@ pub async fn cmd_portfolio_lots(
                 l.date.clone()
             };
             let mut source = l.source.clone();
+            if let Some(account) = l.account_key() {
+                source.push_str(&format!(" [{account}]"));
+            }
             if !l.adjustments.is_empty() {
                 source.push_str(&format!(" (adjusted ×{})", l.adjustments.len()));
             }
@@ -1241,7 +1273,13 @@ pub async fn cmd_portfolio_lots(
                 format_price(s.buy_price, cur),
                 format_price(s.sell_price, cur),
                 signed_money(s.gain(), cur),
-                if long { "LT" } else { "ST" },
+                if s.is_intraday() {
+                    "Intra"
+                } else if long {
+                    "LT"
+                } else {
+                    "ST"
+                },
             );
         }
         let total: f64 = sales.iter().map(|s| s.gain()).sum();
@@ -1281,6 +1319,8 @@ pub async fn cmd_portfolio_actions(
     apply: bool,
     market: Market,
 ) -> Result<()> {
+    // `portfolio` is a working copy for the report; `--apply` re-applies the
+    // fetched actions to the saved file under a lock (see `plan`).
     let mut portfolio = Portfolio::load()?;
     // Fully sold symbols too: dividends received before the sale count.
     let history = portfolio.symbols_with_history();
@@ -1322,6 +1362,7 @@ pub async fn cmd_portfolio_actions(
         (0usize, 0usize, Vec::<(String, f64)>::new());
     // Already applied or recorded by an earlier --apply: counted, not listed.
     let (mut done_splits, mut done_divs) = (0usize, 0usize);
+    let mut plan = Vec::new();
     let mut failed = Vec::new();
     for sym in &targets {
         let first = portfolio
@@ -1418,12 +1459,15 @@ pub async fn cmd_portfolio_actions(
             }
         }
         if apply {
+            // Applied here too, so later symbols and dividends see the
+            // adjusted lots; applied again to the saved file below.
             for split in &splits {
                 portfolio.apply_split(sym, split);
             }
             for ev in &divs {
                 portfolio.record_dividend(sym, ev, &splits, cur);
             }
+            plan.push((sym.clone(), splits, divs, currency.clone()));
         }
     }
 
@@ -1451,7 +1495,19 @@ pub async fn cmd_portfolio_actions(
             earlier
         );
     } else if apply {
-        portfolio.save()?;
+        // The network work is done: apply it to the file as it is now. Both
+        // steps are idempotent, so a lot already adjusted is skipped.
+        Portfolio::update(|p| {
+            for (sym, splits, divs, currency) in &plan {
+                for split in splits {
+                    p.apply_split(sym, split);
+                }
+                for ev in divs {
+                    p.record_dividend(sym, ev, splits, currency.as_deref());
+                }
+            }
+            Ok(())
+        })?;
         println!(
             "  {} Adjusted {} lot(s) for splits/bonuses and recorded {} dividend(s){}.",
             "✓".green().bold(),
@@ -1566,8 +1622,10 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
         key.trim().to_string()
     };
 
-    p.set_target(resolved_key.clone(), percentage);
-    p.save()?;
+    p = Portfolio::update(|p| {
+        p.set_target(resolved_key.clone(), percentage);
+        Ok(p.clone())
+    })?;
 
     let total: f64 = p.targets.values().sum();
     println!(
@@ -1679,9 +1737,7 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
 
 /// Remove a target weight by symbol or sector.
 pub fn cmd_portfolio_target_remove(key: &str) -> Result<()> {
-    let mut p = Portfolio::load()?;
-    if p.remove_target(key) {
-        p.save()?;
+    if Portfolio::update(|p| Ok(p.remove_target(key)))? {
         println!("\n  {} Removed target for {}\n", "✓".green(), key.cyan());
     } else {
         println!("\n  {} No target found matching '{}'\n", "✗".red(), key);
@@ -1691,9 +1747,10 @@ pub fn cmd_portfolio_target_remove(key: &str) -> Result<()> {
 
 /// Clear all saved target weights.
 pub fn cmd_portfolio_target_clear() -> Result<()> {
-    let mut p = Portfolio::load()?;
-    p.clear_targets();
-    p.save()?;
+    Portfolio::update(|p| {
+        p.clear_targets();
+        Ok(())
+    })?;
     println!(
         "\n  {} Cleared all target allocations. Rebalancing will use equal weight.\n",
         "✓".green()
@@ -1709,9 +1766,10 @@ pub fn cmd_portfolio_target_drift(percentage: f64) -> Result<()> {
             percentage
         );
     }
-    let mut p = Portfolio::load()?;
-    p.set_drift_tolerance(Some(percentage));
-    p.save()?;
+    Portfolio::update(|p| {
+        p.set_drift_tolerance(Some(percentage));
+        Ok(())
+    })?;
     println!(
         "\n  {} Default drift tolerance set to ±{:.1}%\n",
         "✓".green(),

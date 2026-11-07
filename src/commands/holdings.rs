@@ -737,6 +737,7 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
 
     let mut rows = Vec::new();
     let mut bad_dates = Vec::new();
+    let mut merged: Vec<(&'static pf::Merger, usize)> = Vec::new();
     for line in &lines[header_idx + 1..] {
         let fields = parse_csv_row(line);
         if fields.len() <= si.max(qi).max(pi) {
@@ -746,8 +747,8 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         if symbol_raw.is_empty() {
             continue;
         }
-        let qty = number(field(&fields, qi));
-        let price = number(field(&fields, pi));
+        let mut qty = number(field(&fields, qi));
+        let mut price = number(field(&fields, pi));
         // "NaN"/"inf" parse as f64 but can't be saved as JSON.
         if !(qty.is_finite() && qty > 0.0 && price.is_finite() && price > 0.0) {
             continue;
@@ -768,6 +769,21 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
                 "sell" | "s" | "sold"
             )
         });
+        // A merged-away ticker (HDFC, MINDTREE) is restated in the acquirer's
+        // shares, keeping the cost and date; a plain rename only maps the name.
+        let mut symbol_raw = symbol_raw;
+        if market == Market::In
+            && let Some(swap) = pf::merger_swap(&symbol_raw, date.as_deref(), qty, price)
+        {
+            match merged
+                .iter_mut()
+                .find(|(m, _)| std::ptr::eq(*m, swap.merger))
+            {
+                Some((_, n)) => *n += 1,
+                None => merged.push((swap.merger, 1)),
+            }
+            (symbol_raw, qty, price) = (swap.symbol, swap.qty, swap.price);
+        }
         rows.push(ImportRow {
             symbol: market::resolve_symbol(&symbol_raw, market),
             qty,
@@ -788,6 +804,18 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         );
     }
 
+    for (m, n) in &merged {
+        println!(
+            "  {} {} row(s) of {} dated up to {} restated as {} at {} for {} (quantity and price adjusted; cost and dates unchanged)",
+            "·".dimmed(),
+            n,
+            m.old,
+            m.through,
+            m.new,
+            m.new_shares,
+            m.old_shares
+        );
+    }
     apply_import_rows(source, file, rows, side_col.is_some(), replace).await
 }
 
@@ -802,7 +830,7 @@ pub(super) async fn apply_import_rows(
     tradebook: bool,
     replace: bool,
 ) -> Result<()> {
-    let mut portfolio = Portfolio::load()?;
+    let portfolio = Portfolio::load()?;
     let dated = |sym: &str| {
         rows.iter()
             .any(|r| r.symbol == sym && (r.date.is_some() || r.sell))
@@ -852,15 +880,23 @@ pub(super) async fn apply_import_rows(
         .filter(|r| !blocked.iter().any(|(s, _)| *s == r.symbol))
         .collect();
 
-    let outcomes = portfolio.apply_import(
-        &rows,
-        ImportOptions {
-            source: &format!("import:{}", source),
-            replace,
-            tradebook,
-            splits: &splits,
-        },
-    );
+    // The splits and pending-split checks above took time: apply the rows to
+    // the file as it is now, under a lock, so a change saved meanwhile (a
+    // `portfolio add`, a sync) is kept.
+    let (outcomes, current) = Portfolio::update(|p| {
+        let outcomes = p.apply_import(
+            &rows,
+            ImportOptions {
+                source: &format!("import:{}", source),
+                replace,
+                tradebook,
+                splits: &splits,
+                account: None,
+            },
+        );
+        Ok((outcomes, p.clone()))
+    })?;
+    let portfolio = current;
     let updated = outcomes
         .iter()
         .filter(|(_, o)| {
@@ -870,9 +906,6 @@ pub(super) async fn apply_import_rows(
             )
         })
         .count();
-    if updated > 0 {
-        portfolio.save()?;
-    }
 
     let mut undated = false;
     for (sym, outcome) in &outcomes {
@@ -928,15 +961,17 @@ pub(super) async fn apply_import_rows(
                 );
             }
             ImportOutcome::Unmatched { unmatched } => println!(
-                "  {} {} — skipped: sells of {} shares have no earlier buy in this file. Import a \
-                 tradebook that covers every buy, or record the sale with `stockwise portfolio sell`.",
+                "  {} {} — not applied yet: sells of {} shares have no earlier buy in the trades \
+                 imported so far. Import the earlier tradebook (the trades from this file are kept), \
+                 or use --replace to rebuild from this file alone.",
                 "!".yellow(),
                 sym,
                 unmatched
             ),
             ImportOutcome::WouldReplace => println!(
                 "  {} {} — skipped: it has lots or sales from elsewhere (manual entries, another \
-                 import) that this file would replace. Re-run with --replace to rebuild it from the file.",
+                 import, or a tradebook imported by an older version) that this file would replace. \
+                 Re-run with --replace to rebuild it from this file.",
                 "!".yellow(),
                 sym
             ),
@@ -1020,7 +1055,6 @@ pub(super) fn find_col(cols: &[String], names: &[&str]) -> Option<usize> {
 
 pub async fn cmd_wealth(market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
-    let mut history = WealthHistory::load()?;
 
     if portfolio.holdings.is_empty() {
         println!("\n  {}", "Portfolio is empty. Add holdings first.".dimmed());
@@ -1056,8 +1090,10 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
     }
 
     // Save today's snapshot
-    history.add_snapshot(total_value, total_cost, portfolio.holdings.len());
-    history.save()?;
+    let history = WealthHistory::update(|h| {
+        h.add_snapshot(total_value, total_cost, portfolio.holdings.len());
+        Ok(h.clone())
+    })?;
 
     let cur = Some(val.base());
     let csym = market::currency_symbol(cur);
@@ -1169,6 +1205,10 @@ pub(crate) struct HarvestSummary {
     pub(crate) loss_candidates: Vec<HarvestRow>,
     pub(crate) gain_harvest_candidates: Vec<HarvestRow>,
     pub(crate) unpriced: Vec<String>,
+    /// India: holdings left out because they are not taxed like listed
+    /// shares (non-equity ETFs, debt and other funds, SGBs), so neither the
+    /// ₹1.25 lakh exemption nor the 111A/112A rates apply to them.
+    pub(crate) other_rules: Vec<OtherRulesRow>,
 }
 
 pub(crate) fn compute_harvest(
@@ -1193,10 +1233,20 @@ pub(crate) fn compute_harvest(
     let mut total_lt_loss = 0.0;
     let mut total_tax_saved = 0.0;
 
+    let mut other_rules = Vec::new();
     for h in &portfolio.holdings {
         let Some(price) = val.price(&h.symbol) else {
             continue;
         };
+        if country == Country::India
+            && let IndiaRules::Other(reason) = india_rules(&h.symbol, val)
+        {
+            other_rules.push(OtherRulesRow {
+                symbol: h.symbol.clone(),
+                reason,
+            });
+            continue;
+        }
         let scale = val
             .currency(&h.symbol)
             .and_then(|cur| country.currency_scale(&cur))
@@ -1282,6 +1332,7 @@ pub(crate) fn compute_harvest(
         loss_candidates,
         gain_harvest_candidates,
         unpriced: report.unpriced,
+        other_rules,
     }
 }
 
@@ -1408,6 +1459,15 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             .dimmed()
             .italic()
     );
+    if !summary.other_rules.is_empty() {
+        println!(
+            "  {} Not checked — taxed under other rules than listed shares (no ₹1.25 lakh exemption):",
+            "!".yellow()
+        );
+        for o in &summary.other_rules {
+            println!("    {} {}", o.symbol.cyan(), o.reason.dimmed());
+        }
+    }
     if !summary.unpriced.is_empty() {
         println!(
             "  {} No live price for {} — not checked.",
@@ -1557,12 +1617,17 @@ pub(crate) struct TaxReport {
     pub(crate) equity_funds: Vec<String>,
     /// Left out: taxed under other rules than listed shares.
     pub(crate) other_rules: Vec<OtherRulesRow>,
+    /// India: sales bought and sold on one day. Speculative business income
+    /// at slab rates, kept out of `realized` (Sec. 111A/112A).
+    pub(crate) intraday: Vec<TaxSaleRow>,
+    pub(crate) intraday_gain: f64,
 }
 
 /// Whether Indian capital-gains tax treats `symbol` like a listed share
 /// (Sec. 111A/112A): shares and equity-oriented funds do; debt and other
 /// funds, funds of unknown category and SGBs don't (the reason says how
-/// they are taxed instead).
+/// they are taxed instead). Gold, silver, liquid, debt and international
+/// ETFs are not listed shares either.
 enum IndiaRules {
     Listed,
     EquityFund,
@@ -1592,6 +1657,9 @@ fn india_rules(symbol: &str, val: &Valuation) -> IndiaRules {
                     .into(),
             ),
         };
+    }
+    if let Some(kind) = offmarket::non_equity_etf(symbol) {
+        return IndiaRules::Other(format!("{} — {}", kind.name(), kind.rule()));
     }
     if offmarket::is_sgb(symbol) {
         return IndiaRules::Other(
@@ -1626,6 +1694,8 @@ pub(crate) fn tax_report(
         other_currency: Vec::new(),
         equity_funds: Vec::new(),
         other_rules: Vec::new(),
+        intraday: Vec::new(),
+        intraday_gain: 0.0,
     };
     // Sort a symbol into listed-share rules or not (India only); true when
     // it counts.
@@ -1670,8 +1740,7 @@ pub(crate) fn tax_report(
             _ => false,
         };
         let gain = s.gain() * scale;
-        r.realized.add(gain, long);
-        r.sales.push(TaxSaleRow {
+        let row = TaxSaleRow {
             symbol: s.symbol.clone(),
             qty: s.qty,
             bought: s.buy_date.clone(),
@@ -1679,7 +1748,18 @@ pub(crate) fn tax_report(
             sold: s.sell_date.clone(),
             gain: round(gain, 2),
             term: terms.then_some(if long { "long" } else { "short" }),
-        });
+        };
+        // India: a same-day buy and sell is speculative income at slab rates.
+        if country == Country::India && s.is_intraday() {
+            r.intraday_gain += gain;
+            r.intraday.push(TaxSaleRow {
+                term: Some("intraday"),
+                ..row
+            });
+            continue;
+        }
+        r.realized.add(gain, long);
+        r.sales.push(row);
     }
 
     for h in &portfolio.holdings {
@@ -1765,6 +1845,8 @@ pub(crate) fn tax_json(
         "other_currency": report.other_currency,
         "equity_funds": report.equity_funds,
         "other_rules": report.other_rules,
+        "intraday_sales": report.intraday,
+        "intraday_gain": round(report.intraday_gain, 2),
     })
 }
 
@@ -1872,6 +1954,32 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
                 },
             );
         }
+    }
+
+    if !report.intraday.is_empty() {
+        println!(
+            "\n  {:<14} {:>9} {:<12} {:>12}  {}",
+            "Intraday".bold(),
+            "Qty".bold(),
+            "Sold".bold(),
+            "Gain".bold(),
+            "(bought and sold the same day)".dimmed()
+        );
+        for s in &report.intraday {
+            println!(
+                "  {:<14} {:>9.2} {:<12} {:>12}",
+                s.symbol.cyan(),
+                s.qty,
+                s.sold,
+                signed_tax_money(c, s.gain),
+            );
+        }
+        println!(
+            "  {} Intraday net {} is speculative business income taxed at your slab rate (Sec. 43(5)); \
+             it is not in the estimates below. Speculative losses can only be set off against speculative gains.",
+            "·".dimmed(),
+            signed_tax_money(c, report.intraday_gain),
+        );
     }
 
     // ── Unrealized: every open lot at today's price ──

@@ -393,6 +393,15 @@ forward. Holdings in another currency (e.g. US shares in `tax in`) are listed
 but not included. It is an estimate — no cess, surcharge, grandfathering or
 brought-forward losses.
 
+Same-day trades (India): a buy and sell of one share on the same day net
+against each other first, in a tradebook import and in `trade sync` fills. The
+matched quantity is recorded as an intraday sale (priced at that day's average
+buy and sell) and the older lots are left alone. `tax in`, `tax export in` and
+`tax advance` keep intraday results out of Sec. 111A/112A and show them
+separately as speculative business income at your slab rate (losses can only
+be set off against speculative gains). Without a date-time column a delivery
+buy and sell of held shares on one day cannot be told apart from intraday.
+
 Mutual funds and SGBs in `tax in`: equity-oriented funds — by their AMFI
 category: equity schemes (ELSS included), arbitrage, aggressive hybrid and
 equity savings funds, and Nifty/Sensex index funds — are counted like listed
@@ -401,7 +410,15 @@ rate for units bought from 1 Apr 2023, at 12.5% after 24 months for older
 units), funds not found in AMFI's file, and SGBs (tax-free when RBI redeems
 them; sold on the exchange, 12.5% after 12 months without the ₹1.25 lakh
 exemption) are left out and listed with the rule that applies (`other_rules`
-in `--json`).
+in `--json`). So are exchange-traded gold, silver and international ETFs (12.5%
+after 12 months with no exemption, slab rate before) and liquid and debt ETFs
+(slab rate at any holding period). StockWise knows them from a built-in list of
+NSE symbols (`GOLDBEES`, `SILVERBEES`, `LIQUIDBEES`, `MON100`, Bharat Bond
+`EBBETF…`, ...) and from `…BEES` names that say gold, silver, liquid, gilt,
+Nasdaq or Hang Seng; an ETF it does not know is counted like a listed share, as
+are equity ETFs such as `NIFTYBEES`. `harvest` skips the same holdings (they
+are listed under "Not checked") and `tax export in` and `tax advance` leave
+their sales out.
 
 ### Mutual funds and SGBs
 
@@ -558,11 +575,37 @@ counted twice). A file with a date column (`Date`, `Purchase Date`,
 rebuilt from it. With a buy/sell column (`trade_type`, `Type`, `Side`) it is a
 tradebook — such as Zerodha Console's — sells come out FIFO as realized sales,
 and splits and bonuses are applied as they happened (this needs a network
-connection). A symbol is left unchanged when its sells have no earlier buy in
-the file, or when it already has lots or sales from elsewhere (manual entries,
-another import) — `--replace` rebuilds it from the file anyway. Dates may be
+connection). StockWise keeps the trades of each tradebook import and merges the
+next file with them, so several yearly tradebooks (Console allows 365 days per
+download) can be imported one after another, in any order, and re-importing a
+file changes nothing. A symbol is left unchanged when its sells have no earlier
+buy yet (the trades are kept; import the earlier tradebook to finish), or when
+it already has lots or sales from elsewhere (manual entries, another import,
+or a tradebook imported before StockWise kept trades) — `--replace` rebuilds it
+from this file alone anyway. A file of dated buys only (no buy/sell column) is
+the symbol's whole list of lots and replaces them. Dates may be
 `YYYY-MM-DD`, `DD-MM-YYYY`, `DD/MM/YYYY` (`MM/DD/YYYY` with `-m us`) or
 `15-Mar-2024`; a file with an unrecognized date is refused.
+
+**Mergers.** A dated row (or `portfolio add --date`) for a ticker that was
+merged away is restated in the acquirer's shares, keeping the date and the
+total cost: HDFC up to the 13 Jul 2023 record date becomes HDFCBANK at 42 shares
+for every 25, and Mindtree up to 24 Nov 2022 becomes LTIM at 73 for every 100
+(quantity × ratio, price ÷ ratio). Rows without a date, and plain renames such
+as ZOMATO → ETERNAL, are mapped to the new name only. Fractional shares from
+the swap are kept as a fraction (the cash paid for them is not recorded).
+Existing lots already imported under the new name are not corrected — re-import
+the tradebook with `--replace`.
+
+**Accounts.** Each lot and sale carries the demat account it came from, named
+after the broker: `import kite` and `trade … --broker zerodha` are `zerodha`,
+`import groww` is `groww`, and so on. A holdings file or tradebook only
+matches, rebuilds or sells the lots of its own account, so the same stock held
+at two brokers is two sets of lots in one holding (`portfolio lots` shows the
+account). Lots entered by hand or saved by an older version, with no account of
+their own, count as the account of their `source`, or — for manual lots — join
+the first broker that syncs the symbol. Totals and tax span all accounts.
+`portfolio sell` works on the whole holding, oldest lot first.
 
 **Groww, Upstox, CAS.** Groww and Upstox exports are snapshots (quantity
 sync, like Kite). A CAS whose transactions cover a fund's whole balance
@@ -752,12 +795,12 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `calendar` | `[{date, days_until, when, symbol, event, detail, source, estimate}]` — `when` is `today`, `tomorrow`, `this_week` (within 7 days) or `later`; `event` is `results`, `board_meeting`, `ex_dividend`, `dividend_paid`, `split`, `bonus`, `rights` or `other`; `source` is `yahoo` or `nse`; `estimate` marks Yahoo's unconfirmed earnings dates. Notes (e.g. NSE refused) go to stderr | event |
 | `portfolio benchmark` | `{benchmark: {symbol, name, currency, converted_to_base}, base_currency, period, start, end, trading_days, portfolio_return, benchmark_return, excess_return, portfolio_annualized, benchmark_annualized, metrics: {observations, alpha, beta, tracking_error, information_ratio, correlation}, holdings: [holding], sectors: [{sector, holdings, avg_weight, end_weight, return_pct, contribution, active_contribution}], flagged: [{symbol, reason}], series: [{date, portfolio, benchmark}]}`, holding = `{symbol, sector, avg_weight, end_weight, return_pct, contribution, active_contribution, days_held, days_unpriced, flag}` — returns, weights, `alpha` and `tracking_error` are percentages, contributions are percentage points; annualized returns only for periods over about 13 months; `series` is growth of 100; figures are null when nothing was held | holding |
 | `portfolio xray` | `{portfolio_name, base_currency, total_value, effective_holdings: [{symbol, name, direct_value, direct_weight_pct, fund_value, fund_weight_pct, total_value, effective_weight_pct, is_concentrated, via_funds: [{fund_symbol, value, weight_in_fund_pct, effective_weight_pct}]}], concentrations_above_10pct: [effective_holding], market_cap_breakdown: {large_cap_value, large_cap_pct, mid_cap_value, mid_cap_pct, small_cap_value, small_cap_pct, unclassified_value, unclassified_pct}, sector_allocation: [{sector, value, weight_pct}], asset_class_split: {equity_value, equity_pct, debt_value, debt_pct, commodity_value, commodity_pct, cash_value, cash_pct}, funds_analyzed: [{symbol, name, look_through_available, holdings_count, coverage_pct}]}` | effective holding |
-| `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], notes: [text]}` (`virtual_digital_assets` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, stcg_tax, ltcg_tax, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, gain_or_loss, date_acquired_estimated}`, summary = `{short_term_proceeds, short_term_cost, short_term_gain, long_term_proceeds, long_term_cost, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}` | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
+| `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], intraday_sales, intraday_gain, other_rules: [symbol], notes: [text]}` (`virtual_digital_assets`, `intraday_sales`, `intraday_gain` and `other_rules` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, stcg_tax, ltcg_tax, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, gain_or_loss, date_acquired_estimated}`, summary = `{short_term_proceeds, short_term_cost, short_term_gain, long_term_proceeds, long_term_cost, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}` | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
 | `tax advance` | `{fy_label, fy_start, fy_end, as_of, total_stcg, total_ltcg, total_tax_estimated, sec_208_threshold, sec_208_applicable, total_paid, total_sec_234c_interest, sec_234b_applicable, quarters: [{quarter, due_date, cutoff_date, stcg_quarter, ltcg_quarter, stcg_cumulative, ltcg_cumulative, cumulative_tax_estimated, required_cumulative_pct, min_cumulative_tax_required, quarter_tax_payable, paid, shortfall, sec_234c_interest, status}]}` — `status` is `paid`, `pending` or `upcoming` | quarter row |
 | `goal sip` | `{target, years, annual_return_pct, step_up_pct, savings, savings_future_value, monthly_sip, final_monthly_sip, total_invested, gains, lump_sum_today, schedule: [{year, monthly_sip, invested, value}], goal, currency}` — `goal` is `sip`, `retire` or `education` | — |
 | `goal retire` | `{monthly_expense_today, years_to_retire, years_in_retirement, inflation_pct, return_pre_pct, return_post_pct, monthly_expense_at_retirement, corpus, sip: plan, goal, currency}` — `plan` is the `goal sip` object without `goal`/`currency` | — |
 | `goal education` | `{cost_today, years, inflation_pct, future_cost, sip: plan, goal, currency}` | — |
-| `tax` | `{country, tax_year, currency, sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], holdings: [{symbol, cost, value, short_term_gain, long_term_gain, estimated_dates}], realized: estimate, if_sold_today: estimate, ltcg_exemption_left, unpriced: [symbol], other_currency: [symbol], equity_funds: [symbol], other_rules: [{symbol, reason}]}`, estimate = `{short_term_gains, short_term_losses, long_term_gains, long_term_losses, taxable_short_term, taxable_long_term, exemption_used, short_term_tax, long_term_tax, total_tax, loss_carried_forward}` — `term` is `short`, `long`, or null (UK); `ltcg_exemption_left` is India only; `equity_funds` (counted at listed-share rates) and `other_rules` (left out: debt/other funds, SGBs) are filled for India | open holding |
+| `tax` | `{country, tax_year, currency, sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], holdings: [{symbol, cost, value, short_term_gain, long_term_gain, estimated_dates}], realized: estimate, if_sold_today: estimate, ltcg_exemption_left, unpriced: [symbol], other_currency: [symbol], equity_funds: [symbol], other_rules: [{symbol, reason}], intraday_sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], intraday_gain}`, estimate = `{short_term_gains, short_term_losses, long_term_gains, long_term_losses, taxable_short_term, taxable_long_term, exemption_used, short_term_tax, long_term_tax, total_tax, loss_carried_forward}` — `term` is `short`, `long`, or null (UK); `ltcg_exemption_left` is India only; `equity_funds` (counted at listed-share rates), `other_rules` (left out: debt/other funds, SGBs) and `intraday_sales` (bought and sold on one day: slab-rate speculative income, left out of every estimate) are filled for India | open holding |
 | `sim history` | `{stats: {days, winning_days, day_win_rate_percent, total_pnl, avg_daily_pnl, best_day, worst_day, trades, winning_trades, losing_trades, trade_win_rate_percent, sharpe, max_win_streak, max_loss_streak}, confidence, sessions: [{date, market, capital, target_percent, settled, trades, pnl, pnl_percent, wins, losses}]}` — `confidence` is `high`, `moderate`, `low`, or null before 5 settled days | — |
 | `trade selftest` | `{stockwise, os, date, market, broker, broker_name, experimental, account, secrets, orders_enabled, max_order_value_set, amounts_redacted, read_only, checks: [{name, status, detail}], shapes: [{endpoint, status, rows, missing, unknown, error}], summary: {pass, warn, fail, skip}}` — `status` is `pass`, `warn`, `fail` or `skip`; `account` is the last 2 characters only | — |
 | `trade sync` | `{broker, experimental, portfolio, since, applied, orders: [{symbol, order_id, side, date, time, qty, price, fills, result, sales?, held?}], already_synced, skipped: [{order_id, symbol, reason}], open_orders: [{order_id, symbol, side, status, qty, filled_qty}], quantity_check: [{symbol, portfolio_qty, broker_qty}], gtt_changes: [change], notes}` — `result` is `lot`, `sold` (with `sales`) or `unmatched` (with `held`); `applied` is true only when `--apply` wrote something | — |

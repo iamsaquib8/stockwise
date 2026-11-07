@@ -815,7 +815,7 @@ async fn print_holdings(kind: BrokerKind, holdings: &[brokers::Holding]) -> Resu
     }
 
     // Also sync to stockwise portfolio.
-    let mut portfolio = Portfolio::load()?;
+    let portfolio = Portfolio::load()?;
     let snapshot: Vec<(String, f64, f64)> = holdings
         .iter()
         .filter_map(|h| {
@@ -836,20 +836,24 @@ async fn print_holdings(kind: BrokerKind, holdings: &[brokers::Holding]) -> Resu
     let wanted: Vec<(String, f64)> = snapshot.iter().map(|(s, q, _)| (s.clone(), *q)).collect();
     let blocked = super::portfolio::blocked_by_pending_splits(&portfolio, &wanted).await;
     let source = format!("broker:{}", kind.id());
-    let mut reduced = Vec::new();
-    for (resolved, qty, avg) in &snapshot {
-        if blocked.iter().any(|(s, _)| s == resolved) {
-            continue;
+    // The checks above ran on the portfolio as loaded: sync the file as it is
+    // now, under a lock.
+    let reduced = Portfolio::update(|p| {
+        let mut reduced = Vec::new();
+        for (resolved, qty, avg) in &snapshot {
+            if blocked.iter().any(|(s, _)| s == resolved) {
+                continue;
+            }
+            // Keep existing lots and their purchase dates; only the quantity
+            // follows the broker.
+            if let crate::portfolio::SyncChange::Reduced(n) =
+                p.sync_quantity(resolved, *qty, *avg, &source)
+            {
+                reduced.push(format!("{} (-{})", resolved, n));
+            }
         }
-        // Keep existing lots and their purchase dates; only the quantity
-        // follows the broker.
-        if let crate::portfolio::SyncChange::Reduced(n) =
-            portfolio.sync_quantity(resolved, *qty, *avg, &source)
-        {
-            reduced.push(format!("{} (-{})", resolved, n));
-        }
-    }
-    portfolio.save()?;
+        Ok(reduced)
+    })?;
     println!(
         "\n  {} Holdings synced to StockWise portfolio.",
         "✓".green()

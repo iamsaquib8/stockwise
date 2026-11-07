@@ -924,6 +924,7 @@ mod tests {
                 replace: false,
                 tradebook: false,
                 splits: &[],
+                account: None,
             },
         );
         skipped
