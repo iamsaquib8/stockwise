@@ -692,11 +692,16 @@ pub async fn alert_data(
         let on_symbol = || alerts.iter().filter(|a| a.symbol == symbol);
         let quote = find_quote(quotes, symbol);
         let today = crate::calendar::exchange_today(symbol, now);
+        let traded = quote
+            .and_then(|q| q.regular_market_time)
+            .and_then(|t| DateTime::from_timestamp(t, 0))
+            .map(|t| crate::calendar::exchange_today(symbol, t));
         let mut d = MarketData {
             price: quote.and_then(|q| q.regular_market_price),
             currency: quote.and_then(|q| q.currency.clone()),
             change_percent: quote.and_then(|q| q.regular_market_change_percent),
             today: Some(today),
+            traded,
             ..Default::default()
         };
         let bars_needed = on_symbol().map(Alert::bars_needed).max().unwrap_or(0);
@@ -707,10 +712,6 @@ pub async fn alert_data(
         {
             let mut bars = crate::backtest::Bars::from_chart(&chart);
             if let Some(q) = quote {
-                let traded = q
-                    .regular_market_time
-                    .and_then(|t| DateTime::from_timestamp(t, 0))
-                    .map(|t| crate::calendar::exchange_today(symbol, t));
                 crate::alerts::patch_live_bar(&mut bars, q, today, traded);
             }
             d.bars = Some(bars);

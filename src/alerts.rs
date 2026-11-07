@@ -170,6 +170,19 @@ pub struct MarketData {
     pub next_results: Option<NaiveDate>,
     /// The exchange's current session date (for `results-in`).
     pub today: Option<NaiveDate>,
+    /// The session date of the quote itself (its trade time in the
+    /// exchange's time zone). Before the open, on weekends and on holidays
+    /// it is an earlier date than `today`, and the day change and volume in
+    /// the quote still describe that earlier session.
+    pub traded: Option<NaiveDate>,
+}
+
+impl MarketData {
+    /// The quote describes a session before today's, so a per-session
+    /// reading (day change, volume) would repeat an old move.
+    fn quote_is_from_an_earlier_session(&self) -> bool {
+        matches!((self.traded, self.today), (Some(t), Some(d)) if t < d)
+    }
 }
 
 /// The outcome of one evaluation.
@@ -228,6 +241,11 @@ impl Alert {
             reference: None,
         };
         let bars = || data.bars.as_ref().filter(|b| !b.is_empty());
+        // Today's change and volume mean nothing until today's session has
+        // traded: no reading, so Friday's move is not announced again.
+        if self.condition.per_session() && data.quote_is_from_an_earlier_session() {
+            return None;
+        }
         match self.condition {
             AlertCondition::Above => data.price.filter(valid).map(|p| level(p, p >= target)),
             AlertCondition::Below => data.price.filter(valid).map(|p| level(p, p <= target)),
