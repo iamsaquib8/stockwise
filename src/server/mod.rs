@@ -1112,6 +1112,7 @@ mod tests {
         let f = Fixture {
             daemon: vec![DaemonStatus {
                 market: "IN".into(),
+                currency: "INR".into(),
                 updated_at: chrono::Utc::now().timestamp(),
                 open_positions: 3,
                 day_pnl: 420.5,
@@ -1145,7 +1146,7 @@ mod tests {
         assert!(text.contains("stockwise_daemon_up{market=\"IN\"} 1"));
         assert!(text.contains("stockwise_daemon_up{market=\"US\"} 0"));
         assert!(text.contains("stockwise_daemon_open_positions{market=\"IN\"} 3"));
-        assert!(text.contains("stockwise_daemon_day_pnl{market=\"IN\"} 420.5"));
+        assert!(text.contains("stockwise_daemon_day_pnl{market=\"IN\",currency=\"INR\"} 420.5"));
         assert!(text.contains("stockwise_daemon_kill_switch{market=\"IN\"} 0"));
         assert!(text.contains("stockwise_upstream_errors_total "));
         assert!(text.contains("stockwise_cache_hits_total{layer=\"memory\"} "));

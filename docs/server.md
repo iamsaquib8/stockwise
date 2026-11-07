@@ -146,11 +146,12 @@ stockwise_cache_misses_total 57
 stockwise_daemon_up{market="IN"} 1
 stockwise_daemon_up{market="US"} 0
 stockwise_daemon_status_age_seconds{market="IN"} 41
+stockwise_daemon_last_update_timestamp_seconds{market="IN"} 1792560600
 stockwise_daemon_open_positions{market="IN"} 3
-stockwise_daemon_day_pnl{market="IN"} 412.5
-stockwise_daemon_realized_pnl{market="IN"} 120
-stockwise_daemon_unrealized_pnl{market="IN"} 292.5
-stockwise_daemon_capital{market="IN"} 25000
+stockwise_daemon_day_pnl{market="IN",currency="INR"} 412.5
+stockwise_daemon_realized_pnl{market="IN",currency="INR"} 120
+stockwise_daemon_unrealized_pnl{market="IN",currency="INR"} 292.5
+stockwise_daemon_capital{market="IN",currency="INR"} 25000
 stockwise_daemon_kill_switch{market="IN"} 0
 stockwise_daemon_settled{market="IN"} 0
 ```
@@ -167,6 +168,18 @@ against the same data directory (`STOCKWISE_HOME`). Every daemon gauge has a
 state is less than 45 minutes old (while the market is closed the daemon
 saves at least every 30 minutes); the other `stockwise_daemon_*` gauges appear
 once a daemon has run. The daemon paper-trades only.
+
+The money gauges (`day_pnl`, `realized_pnl`, `unrealized_pnl`, `capital`) also
+carry a `currency` label (`INR` for `IN`, `USD` for `US`, the exchange's
+currency for the others): the values are in each market's own currency, so
+`sum()` them by `currency`, never across it. A settled day (the session is over
+and recorded in `sim history`, including one the daemon handed to `sim settle`
+after missing the square-off) reports `stockwise_daemon_open_positions 0` and
+`stockwise_daemon_unrealized_pnl 0`, with `stockwise_daemon_settled 1`.
+`stockwise_daemon_last_update_timestamp_seconds` is the Unix time of the last
+save; `time() - stockwise_daemon_last_update_timestamp_seconds` gives the age
+in a query, and `stockwise_daemon_status_age_seconds` is the same figure
+computed at scrape time.
 
 ```yaml
 # prometheus.yml

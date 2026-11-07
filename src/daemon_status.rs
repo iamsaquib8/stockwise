@@ -24,6 +24,9 @@ const STATE_MARKETS: [&str; 9] = ["IN", "US", "UK", "DE", "JP", "HK", "SG", "CA"
 pub struct DaemonStatus {
     /// `IN` or `US`.
     pub market: String,
+    /// ISO code of the currency of the money fields: `INR` for `IN`, `USD`
+    /// for `US` (empty if the market is unknown).
+    pub currency: String,
     /// Unix seconds of the last save.
     pub updated_at: i64,
     pub capital: f64,
@@ -69,23 +72,41 @@ struct RawState {
     settled: bool,
 }
 
+/// ISO currency code of a market's paper money (`IN` → `INR`).
+fn currency_code(market: &str) -> &'static str {
+    use crate::market::Market;
+    use clap::ValueEnum;
+    match Market::from_str(market, true) {
+        Ok(Market::In) => "INR",
+        Ok(Market::Us) => "USD",
+        Ok(Market::Global(x)) => x.info().currency,
+        _ => "",
+    }
+}
+
 impl DaemonStatus {
     /// Parse the daemon's saved state. Open positions are those still `Open`
-    /// or partly booked (`T1Hit`).
+    /// or partly booked (`T1Hit`), unless the day is `settled`: then the
+    /// session is over (a missed square-off is handed to `sim settle` with
+    /// its rows still marked `Open`), so nothing is open and nothing is
+    /// unrealized.
     pub fn from_state_json(json: &str) -> Option<Self> {
         let raw: RawState = serde_json::from_str(json).ok()?;
         let open: Vec<&RawPosition> = raw
             .positions
             .iter()
-            .filter(|p| p.status == "Open" || p.status == "T1Hit")
+            .filter(|p| !raw.settled && (p.status == "Open" || p.status == "T1Hit"))
             .collect();
-        let unrealized: f64 = open.iter().map(|p| p.pnl).sum();
+        // fold from +0.0: an empty f64 sum is -0.0, which prints as `-0`.
+        let unrealized = open.iter().fold(0.0, |acc, p| acc + p.pnl);
+        let market = if raw.market.is_empty() {
+            "IN".to_string()
+        } else {
+            raw.market.to_ascii_uppercase()
+        };
         Some(Self {
-            market: if raw.market.is_empty() {
-                "IN".into()
-            } else {
-                raw.market.to_ascii_uppercase()
-            },
+            currency: currency_code(&market).to_string(),
+            market,
             updated_at: raw.updated_at.timestamp(),
             capital: raw.capital,
             open_positions: open.len(),
@@ -150,6 +171,31 @@ mod tests {
         assert!(!s.settled);
         assert_eq!(s.market, "IN");
         assert_eq!(s.updated_at, 1_792_560_600);
+    }
+
+    #[test]
+    fn settled_day_reports_nothing_open() {
+        // A missed square-off is handed to `sim settle` and the state is
+        // marked settled, but the rows keep their `Open`/`T1Hit` status.
+        let json = STATE.replace(r#""settled": false"#, r#""settled": true"#);
+        let s = DaemonStatus::from_state_json(&json).unwrap();
+        assert!(s.settled);
+        assert_eq!(s.open_positions, 0);
+        assert_eq!(s.unrealized_pnl, 0.0);
+        assert_eq!(s.realized_pnl, -50.0);
+        assert_eq!(s.day_pnl, -50.0);
+    }
+
+    #[test]
+    fn currency_follows_the_market() {
+        let us = STATE.replace(r#""market": "IN""#, r#""market": "US""#);
+        assert_eq!(
+            DaemonStatus::from_state_json(STATE).unwrap().currency,
+            "INR"
+        );
+        assert_eq!(DaemonStatus::from_state_json(&us).unwrap().currency, "USD");
+        let uk = STATE.replace(r#""market": "IN""#, r#""market": "UK""#);
+        assert_eq!(DaemonStatus::from_state_json(&uk).unwrap().currency, "GBP");
     }
 
     #[test]
