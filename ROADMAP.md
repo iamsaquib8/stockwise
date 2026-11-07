@@ -180,7 +180,8 @@ Done when: 1.0 is tagged, the stability page is published, and the launch posts 
 
 ## 💡 After 1.0
 
-Planned, but only once the four jobs are solid. Ordered roughly by demand. Most of these live in
+Planned, but only once the four jobs are solid. Ordered roughly by demand. Items marked "idea" live in
+[Discussions](https://github.com/iamsaquib8/stockwise/discussions/categories/ideas): upvote the ones you want. Most of these live in
 [#282](https://github.com/iamsaquib8/stockwise/issues/282) (more markets and deeper research) and [#280](https://github.com/iamsaquib8/stockwise/issues/280) (dashboards, alerts and practice).
 
 **Your money**
@@ -195,14 +196,14 @@ Planned, but only once the four jobs are solid. Ordered roughly by demand. Most 
 - 📋 **Alerts that run in the background** as an OS service ([#252](https://github.com/iamsaquib8/stockwise/issues/252))
 - 📋 **A local price-history store** so charts and backtests work offline and fast ([#251](https://github.com/iamsaquib8/stockwise/issues/251))
 - 📋 **Two-way Telegram bot and scheduled digests** ([#265](https://github.com/iamsaquib8/stockwise/issues/265))
-- 📋 **More install and launcher options** — mise/aqua ([#238](https://github.com/iamsaquib8/stockwise/issues/238)), a signed APT/RPM repository
-  ([#239](https://github.com/iamsaquib8/stockwise/issues/239)), a GitHub Action ([#241](https://github.com/iamsaquib8/stockwise/issues/241)), a Raycast extension ([#243](https://github.com/iamsaquib8/stockwise/issues/243))
+- 📋 **More install and launcher options** — mise/aqua ([idea #285](https://github.com/iamsaquib8/stockwise/discussions/285)), a signed APT/RPM repository
+  ([idea #286](https://github.com/iamsaquib8/stockwise/discussions/286)), a GitHub Action ([idea #287](https://github.com/iamsaquib8/stockwise/discussions/287)), a Raycast extension ([idea #288](https://github.com/iamsaquib8/stockwise/discussions/288))
 
 **Research**
 - 📋 **Screener queries** ([#266](https://github.com/iamsaquib8/stockwise/issues/266)) — `stockwise screen "roce > 20 and pe < 25"`, the NIFTY Midcap 150 /
   Smallcap 250 / 500 universes ([#16](https://github.com/iamsaquib8/stockwise/issues/16))
-- 📋 **Market mood** ([#249](https://github.com/iamsaquib8/stockwise/issues/249)) and **mutual fund depth** — rolling returns, category rank,
-  direct-vs-regular cost ([#250](https://github.com/iamsaquib8/stockwise/issues/250))
+- 📋 **Market mood** ([idea #290](https://github.com/iamsaquib8/stockwise/discussions/290)) and **mutual fund depth** — rolling returns, category rank,
+  direct-vs-regular cost ([idea #291](https://github.com/iamsaquib8/stockwise/discussions/291))
 - 📋 **`--explain` everywhere** — `risk`, option greeks and `tax` ([#52](https://github.com/iamsaquib8/stockwise/issues/52))
 - 📋 **Symbol discovery** — suggestions in every command, a picker and symbol completion ([#54](https://github.com/iamsaquib8/stockwise/issues/54))
 
@@ -213,8 +214,8 @@ Planned, but only once the four jobs are solid. Ordered roughly by demand. Most 
   cross-rates ([#18](https://github.com/iamsaquib8/stockwise/issues/18)), an Indian REIT/InvIT list
 
 **Practice and trading**
-- 📋 **Daily replay challenge** with a shareable card ([#244](https://github.com/iamsaquib8/stockwise/issues/244))
-- 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates ([#268](https://github.com/iamsaquib8/stockwise/issues/268))
+- 📋 **Daily replay challenge** with a shareable card ([idea #289](https://github.com/iamsaquib8/stockwise/discussions/289))
+- 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates ([idea #292](https://github.com/iamsaquib8/stockwise/discussions/292))
 - 🛠️ **Broker integrations verified against live accounts** ([#269](https://github.com/iamsaquib8/stockwise/issues/269), help wanted) — `trade selftest` and the
   [verification criteria](docs/brokers.md#help-verify-a-broker) are ready; we need 3 reports per
   broker plus one small live order a tester places themselves
@@ -223,12 +224,12 @@ Planned, but only once the four jobs are solid. Ordered roughly by demand. Most 
 - 📋 **More brokers through OpenAlgo** — one REST adapter to the brokers it supports ([#270](https://github.com/iamsaquib8/stockwise/issues/270))
 
 **Exploring**
-- 💡 Options strategy backtests on end-of-day chains ([#273](https://github.com/iamsaquib8/stockwise/issues/273))
+- 💡 Options strategy backtests on end-of-day chains ([idea #293](https://github.com/iamsaquib8/stockwise/discussions/293))
 - 💡 Trade journal and two-leg (OCO) GTTs; position sizing in `stoploss` ([#22](https://github.com/iamsaquib8/stockwise/issues/22))
-- 💡 Ownership signals — shareholding and pledge changes, alerts on phrases in filings ([#274](https://github.com/iamsaquib8/stockwise/issues/274))
-- 💡 An assistant pane in the TUI and web dashboard ([#275](https://github.com/iamsaquib8/stockwise/issues/275))
-- 💡 Gulf exchanges; MCX futures and live G-sec prices via optional broker feeds ([#276](https://github.com/iamsaquib8/stockwise/issues/276))
-- 💡 WASM plugins for importers and data providers — kept experimental until someone uses them ([#277](https://github.com/iamsaquib8/stockwise/issues/277))
+- 💡 Ownership signals — shareholding and pledge changes, alerts on phrases in filings ([idea #294](https://github.com/iamsaquib8/stockwise/discussions/294))
+- 💡 An assistant pane in the TUI and web dashboard ([idea #295](https://github.com/iamsaquib8/stockwise/discussions/295))
+- 💡 Gulf exchanges; MCX futures and live G-sec prices via optional broker feeds ([idea #296](https://github.com/iamsaquib8/stockwise/discussions/296))
+- 💡 WASM plugins for importers and data providers — kept experimental until someone uses them ([idea #297](https://github.com/iamsaquib8/stockwise/discussions/297))
 
 ## Non-goals
 
