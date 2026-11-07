@@ -367,9 +367,10 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         period: String,
     },
 
-    /// Fibonacci retracement levels
+    /// Fibonacci retracement levels (last 21, 63 and 126 trading days)
     Fibs {
         symbol: String,
+        /// Ignored: `fibs` always reads a year of daily bars
         #[arg(short, long, default_value = "1mo", value_parser = PERIODS)]
         period: String,
     },

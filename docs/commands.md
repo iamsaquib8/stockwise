@@ -106,7 +106,7 @@ prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), 
 | `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns. The annualized figure (CAGR) uses the calendar time between the first and last bar, and is shown only for spans of a year or more (`null` otherwise) |
 | `patterns <SYMBOL> [-p]` | Candlestick patterns (doji, hammer, engulfing, morning star) |
 | `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) from the last completed daily session (named on screen), whatever `-p` is, + Fibonacci levels |
-| `fibs <SYMBOL> [-p]` | Fibonacci retracement with a "you are here" marker |
+| `fibs <SYMBOL>` | Fibonacci retracement with a "you are here" marker, for the last 21, 63 and 126 trading days (1, 3 and 6 months of daily bars). Always reads a year of daily bars; `-p` is accepted but ignored |
 | `volume <SYMBOL> [-p]` (`vol`) | OBV, A/D line, volume ratio, volume bars |
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
 | `stoploss <SYMBOL> [-e PRICE] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, R:R targets |
