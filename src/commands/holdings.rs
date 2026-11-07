@@ -737,6 +737,7 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
 
     let mut rows = Vec::new();
     let mut bad_dates = Vec::new();
+    let mut merged: Vec<(&'static pf::Merger, usize)> = Vec::new();
     for line in &lines[header_idx + 1..] {
         let fields = parse_csv_row(line);
         if fields.len() <= si.max(qi).max(pi) {
@@ -746,8 +747,8 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         if symbol_raw.is_empty() {
             continue;
         }
-        let qty = number(field(&fields, qi));
-        let price = number(field(&fields, pi));
+        let mut qty = number(field(&fields, qi));
+        let mut price = number(field(&fields, pi));
         // "NaN"/"inf" parse as f64 but can't be saved as JSON.
         if !(qty.is_finite() && qty > 0.0 && price.is_finite() && price > 0.0) {
             continue;
@@ -768,6 +769,21 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
                 "sell" | "s" | "sold"
             )
         });
+        // A merged-away ticker (HDFC, MINDTREE) is restated in the acquirer's
+        // shares, keeping the cost and date; a plain rename only maps the name.
+        let mut symbol_raw = symbol_raw;
+        if market == Market::In
+            && let Some(swap) = pf::merger_swap(&symbol_raw, date.as_deref(), qty, price)
+        {
+            match merged
+                .iter_mut()
+                .find(|(m, _)| std::ptr::eq(*m, swap.merger))
+            {
+                Some((_, n)) => *n += 1,
+                None => merged.push((swap.merger, 1)),
+            }
+            (symbol_raw, qty, price) = (swap.symbol, swap.qty, swap.price);
+        }
         rows.push(ImportRow {
             symbol: market::resolve_symbol(&symbol_raw, market),
             qty,
@@ -788,6 +804,18 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         );
     }
 
+    for (m, n) in &merged {
+        println!(
+            "  {} {} row(s) of {} dated up to {} restated as {} at {} for {} (quantity and price adjusted; cost and dates unchanged)",
+            "·".dimmed(),
+            n,
+            m.old,
+            m.through,
+            m.new,
+            m.new_shares,
+            m.old_shares
+        );
+    }
     apply_import_rows(source, file, rows, side_col.is_some(), replace).await
 }
 

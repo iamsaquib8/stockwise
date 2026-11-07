@@ -916,7 +916,29 @@ pub async fn cmd_portfolio_add(
         Some(d) => pf::parse_date(d)?.to_string(),
         None => pf::today(),
     };
-    let resolved = market::resolve_symbol(symbol, market);
+    // A purchase of a merged-away ticker (HDFC, MINDTREE) before its merger
+    // is recorded in the acquirer's shares, at the same cost and date.
+    let (mut symbol, mut shares, mut cost) = (symbol.to_string(), shares, cost);
+    if market == Market::In
+        && let Some(swap) = pf::merger_swap(&symbol, Some(&date), shares, cost)
+    {
+        println!(
+            "  {} {} was merged into {}: recorded as {} {} at {} each ({} for {}, same total cost)",
+            "·".dimmed(),
+            swap.merger.old,
+            swap.merger.new,
+            swap.qty,
+            swap.merger.new,
+            format_price(
+                swap.price,
+                pf::symbol_currency(&market::resolve_symbol(&swap.symbol, market))
+            ),
+            swap.merger.new_shares,
+            swap.merger.old_shares
+        );
+        (symbol, shares, cost) = (swap.symbol, swap.qty, swap.price);
+    }
+    let resolved = market::resolve_symbol(&symbol, market);
     let mut portfolio = Portfolio::load()?;
     portfolio.add_lot(&resolved, Lot::new(shares, cost, &date, "manual"));
     portfolio.save()?;

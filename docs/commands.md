@@ -572,6 +572,16 @@ the symbol's whole list of lots and replaces them. Dates may be
 `YYYY-MM-DD`, `DD-MM-YYYY`, `DD/MM/YYYY` (`MM/DD/YYYY` with `-m us`) or
 `15-Mar-2024`; a file with an unrecognized date is refused.
 
+**Mergers.** A dated row (or `portfolio add --date`) for a ticker that was
+merged away is restated in the acquirer's shares, keeping the date and the
+total cost: HDFC up to the 13 Jul 2023 record date becomes HDFCBANK at 42 shares
+for every 25, and Mindtree up to 24 Nov 2022 becomes LTIM at 73 for every 100
+(quantity × ratio, price ÷ ratio). Rows without a date, and plain renames such
+as ZOMATO → ETERNAL, are mapped to the new name only. Fractional shares from
+the swap are kept as a fraction (the cash paid for them is not recorded).
+Existing lots already imported under the new name are not corrected — re-import
+the tradebook with `--replace`.
+
 **Accounts.** Each lot and sale carries the demat account it came from, named
 after the broker: `import kite` and `trade … --broker zerodha` are `zerodha`,
 `import groww` is `groww`, and so on. A holdings file or tradebook only

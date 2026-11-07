@@ -80,6 +80,76 @@ fn date_of(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
+/// A merger that paid shareholders of `old` with `new_shares` of `new` for
+/// every `old_shares` held. Trades in `old` up to `through` (the record date)
+/// are in old shares.
+#[derive(Debug, PartialEq)]
+pub struct Merger {
+    pub old: &'static str,
+    pub new: &'static str,
+    pub new_shares: f64,
+    pub old_shares: f64,
+    /// Last day a trade in `old` can be dated, `YYYY-MM-DD`.
+    pub through: &'static str,
+}
+
+/// Mergers whose old ticker an import must convert (not just rename): the
+/// shares received keep the original cost and purchase date (Sec. 47(vii),
+/// 49(2) of the Income-tax Act); only the quantity changes.
+pub const MERGERS: &[Merger] = &[
+    // HDFC Ltd into HDFC Bank, effective 1 Jul 2023, record date 13 Jul 2023:
+    // 42 HDFC Bank shares for every 25 HDFC.
+    Merger {
+        old: "HDFC",
+        new: "HDFCBANK",
+        new_shares: 42.0,
+        old_shares: 25.0,
+        through: "2023-07-13",
+    },
+    // Mindtree into LTIMindtree, effective 14 Nov 2022, record date 24 Nov 2022:
+    // 73 LTIMindtree (LTI) shares for every 100 Mindtree.
+    Merger {
+        old: "MINDTREE",
+        new: "LTIM",
+        new_shares: 73.0,
+        old_shares: 100.0,
+        through: "2022-11-24",
+    },
+];
+
+/// A trade in an old ticker restated in the shares of the company that took
+/// it over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergerSwap {
+    /// The new ticker, with the exchange suffix the old one had.
+    pub symbol: String,
+    pub qty: f64,
+    pub price: f64,
+    pub merger: &'static Merger,
+}
+
+/// Restate a dated trade in a merged-away ticker (`HDFC`, `MINDTREE.NS`) as
+/// the acquirer's shares: quantity × ratio, price ÷ ratio, so the cost is
+/// unchanged. `None` when the symbol is not a merged one, the row has no
+/// date, or it is dated after the merger (a plain rename then).
+pub fn merger_swap(symbol: &str, date: Option<&str>, qty: f64, price: f64) -> Option<MergerSwap> {
+    let date = date?;
+    let upper = symbol.trim().to_uppercase();
+    let (base, suffix) = match upper.rsplit_once('.') {
+        Some((b, s)) if s == "NS" || s == "BO" => (b, format!(".{s}")),
+        _ => (upper.as_str(), String::new()),
+    };
+    let merger = MERGERS
+        .iter()
+        .find(|m| m.old == base && date <= m.through)?;
+    Some(MergerSwap {
+        symbol: format!("{}{}", merger.new, suffix),
+        qty: qty * merger.new_shares / merger.old_shares,
+        price: price * merger.old_shares / merger.new_shares,
+        merger,
+    })
+}
+
 /// One purchase.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lot {
@@ -2865,6 +2935,76 @@ mod tests {
         ] {
             assert_eq!(account_of_source(none), None, "{none}");
         }
+    }
+
+    #[test]
+    fn hdfc_trades_before_the_merger_become_hdfc_bank_shares_at_the_same_cost() {
+        // The repro from the issue: 25 HDFC at 2600 on 2023-03-01.
+        let swap = merger_swap("HDFC", Some("2023-03-01"), 25.0, 2600.0).unwrap();
+        assert_eq!(swap.symbol, "HDFCBANK");
+        assert_eq!(swap.qty, 42.0);
+        assert!(
+            (swap.price - 65_000.0 / 42.0).abs() < 1e-9 && (swap.price - 1547.62).abs() < 0.005
+        );
+        assert!((swap.qty * swap.price - 65_000.0).abs() < 1e-6);
+        // The record date itself is still old shares; the day after is not a trade of HDFC.
+        assert!(merger_swap("HDFC.NS", Some("2023-07-13"), 25.0, 2600.0).is_some());
+        assert_eq!(
+            merger_swap("hdfc.ns", Some("2023-03-01"), 1.0, 1.0)
+                .unwrap()
+                .symbol,
+            "HDFCBANK.NS"
+        );
+        assert!(merger_swap("HDFC", Some("2023-07-14"), 25.0, 2600.0).is_none());
+        // Without a date there is nothing to convert at.
+        assert!(merger_swap("HDFC", None, 25.0, 2600.0).is_none());
+        // HDFC Bank itself and look-alikes are untouched.
+        assert!(merger_swap("HDFCBANK", Some("2023-03-01"), 1.0, 1.0).is_none());
+        assert!(merger_swap("HDFCLIFE.NS", Some("2023-03-01"), 1.0, 1.0).is_none());
+
+        // Through an import: one lot of 42 HDFCBANK, same total cost, same date.
+        let mut p = Portfolio::default();
+        let rows = [trade(
+            &swap.symbol,
+            "2023-03-01",
+            false,
+            swap.qty,
+            swap.price,
+        )];
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        let h = p.holding("HDFCBANK").unwrap();
+        assert_eq!((h.shares, h.lots[0].date.as_str()), (42.0, "2023-03-01"));
+        assert!((h.cost_basis() - 65_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mindtree_converts_at_73_for_100() {
+        let swap = merger_swap("MINDTREE", Some("2022-06-01"), 100.0, 3000.0).unwrap();
+        assert_eq!(swap.symbol, "LTIM");
+        assert_eq!(swap.qty, 73.0);
+        assert!((swap.price - 3000.0 * 100.0 / 73.0).abs() < 1e-9);
+        assert!((swap.qty * swap.price - 300_000.0).abs() < 1e-6);
+        assert!(merger_swap("MINDTREE.NS", Some("2022-11-24"), 1.0, 1.0).is_some());
+        assert!(merger_swap("MINDTREE.NS", Some("2022-11-25"), 1.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn a_sell_after_the_merger_matches_the_converted_lot() {
+        // Bought 25 HDFC in 2023-03 (→ 42 HDFCBANK); sold 10 HDFCBANK in 2024.
+        let buy = merger_swap("HDFC", Some("2023-03-01"), 25.0, 2600.0).unwrap();
+        let rows = [
+            trade("HDFCBANK", "2023-03-01", false, buy.qty, buy.price),
+            trade("HDFCBANK", "2024-02-01", true, 10.0, 1500.0),
+        ];
+        let mut p = Portfolio::default();
+        let out = p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert!(
+            matches!(out[0].1, ImportOutcome::Lots { sales: 1, .. }),
+            "{:?}",
+            out
+        );
+        assert_eq!(p.holding("HDFCBANK").unwrap().shares, 32.0);
+        assert_eq!(p.realized[0].buy_date, "2023-03-01");
     }
 
     #[test]
