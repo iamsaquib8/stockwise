@@ -881,9 +881,14 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
             .map(|r| r.badge())
             .unwrap_or_else(|| report.piotroski.rating_label.yellow().to_string());
         println!(
-            "  Piotroski F-Score:   {}/{} evaluated  {}  {}",
+            "  Piotroski F-Score:   {}/{}{}  {}  {}",
             report.piotroski.score,
             report.piotroski.evaluated,
+            if report.piotroski.evaluated < report.piotroski.max_score {
+                " evaluated"
+            } else {
+                ""
+            },
             score_bar(report.piotroski.score, report.piotroski.evaluated),
             rating
         );
