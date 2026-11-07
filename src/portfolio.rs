@@ -293,22 +293,72 @@ pub struct ImportRow {
     pub sell: bool,
 }
 
+/// A trade from an imported tradebook, kept so the next file for the same
+/// broker is merged with it instead of replacing it. Quantities are as
+/// traded (before any split).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedTrade {
+    pub symbol: String,
+    /// The import source, e.g. `import:kite`.
+    pub source: String,
+    pub sell: bool,
+    pub qty: f64,
+    pub price: f64,
+    /// `YYYY-MM-DD`; `None` for a row without a date (treated as today).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+impl ImportedTrade {
+    fn same_trade(&self, other: &Self) -> bool {
+        self.sell == other.sell
+            && self.qty == other.qty
+            && self.price == other.price
+            && self.date == other.date
+    }
+}
+
+/// `stored` plus the trades of `incoming` it does not have yet. A trade
+/// counts as many times as it appears, so two identical fills in one file
+/// stay two, while a trade in both files (a re-import, or two overlapping
+/// downloads) is counted once.
+fn merge_trades(stored: &[ImportedTrade], incoming: &[ImportedTrade]) -> Vec<ImportedTrade> {
+    let mut out = stored.to_vec();
+    let mut seen: Vec<&ImportedTrade> = Vec::new();
+    for t in incoming {
+        if seen.iter().any(|s| s.same_trade(t)) {
+            continue;
+        }
+        seen.push(t);
+        let have = stored.iter().filter(|s| s.same_trade(t)).count();
+        let want = incoming.iter().filter(|s| s.same_trade(t)).count();
+        for _ in have..want {
+            out.push(t.clone());
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportOutcome {
     /// No dates in the file: existing lots kept, quantity matched.
     Synced(SyncChange),
-    /// Dated rows: the symbol's lots rebuilt from the file.
+    /// Dated rows: the symbol's lots rebuilt from the trades imported so far
+    /// (this file merged with earlier files from the same source).
     Lots {
         lots: usize,
         sales: usize,
         /// Splits applied while replaying a tradebook.
         splits: usize,
     },
-    /// Left unchanged: sells of `unmatched` shares had no earlier buy in the
-    /// file, so it is not the symbol's whole history.
+    /// Left unchanged: sells of `unmatched` shares have no earlier buy in the
+    /// trades imported so far. The trades are kept, so importing the earlier
+    /// tradebook completes the history.
     Unmatched { unmatched: f64 },
-    /// Left unchanged: the holding has lots or sales from elsewhere that
-    /// rebuilding it from this file would replace (allowed with `replace`).
+    /// Left unchanged: the holding has lots or sales from elsewhere (manual
+    /// entries, another source, or an import made before StockWise kept
+    /// imported trades) that rebuilding it would replace (allowed with
+    /// `replace`).
     WouldReplace,
 }
 
@@ -409,6 +459,9 @@ pub struct Portfolio {
     /// Broker fills applied by `trade sync`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub broker_fills: Vec<SyncedFill>,
+    /// Trades from imported tradebooks, so the next file is merged with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<ImportedTrade>,
     /// Target allocation weights by symbol or sector (key -> percentage).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, f64>,
@@ -425,6 +478,7 @@ impl Default for Portfolio {
             realized: Vec::new(),
             dividends: Vec::new(),
             broker_fills: Vec::new(),
+            imported: Vec::new(),
             targets: BTreeMap::new(),
             drift_tolerance: None,
         }
@@ -452,6 +506,99 @@ fn take_fifo(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64)>, f64
     }
     lots.retain(|l| l.qty > EPS);
     (taken, if remaining > EPS { remaining } else { 0.0 })
+}
+
+/// The lots and sales a list of trades produces.
+struct Replay {
+    lots: Vec<Lot>,
+    sales: Vec<Sale>,
+    /// Shares sold with no earlier buy.
+    unmatched: f64,
+    /// Splits applied while replaying.
+    splits: usize,
+}
+
+/// Replay `trades` (oldest first) for one symbol: buys become lots, sells
+/// come out FIFO, and `splits` are applied as they happen.
+fn replay_trades(
+    sym: &str,
+    trades: &[ImportedTrade],
+    source: &str,
+    splits: &[Split],
+    today: &str,
+) -> Replay {
+    let mut applied: Vec<String> = Vec::new();
+    let apply_until = |lots: &mut Vec<Lot>, date: &str, applied: &mut Vec<String>| {
+        for split in splits.iter().filter(|s| s.date.as_str() <= date) {
+            for lot in lots.iter_mut().filter(|l| split.pending_for(l)) {
+                lot.qty *= split.ratio();
+                lot.price /= split.ratio();
+                lot.adjustments.push(split.id());
+                if !applied.contains(&split.id()) {
+                    applied.push(split.id());
+                }
+            }
+        }
+    };
+    let mut lots: Vec<Lot> = Vec::new();
+    let mut sales = Vec::new();
+    let mut unmatched = 0.0;
+    for t in trades {
+        let date = t.date.clone().unwrap_or_else(|| today.to_string());
+        apply_until(&mut lots, &date, &mut applied);
+        if t.sell {
+            let (taken, left) = take_fifo(&mut lots, t.qty, &date);
+            sales.extend(
+                taken
+                    .iter()
+                    .map(|(lot, q)| Sale::from_lot(sym, lot, *q, &date, t.price, source)),
+            );
+            unmatched += left;
+        } else {
+            let mut lot = Lot::new(t.qty, t.price, date, source);
+            lot.date_estimated = t.date.is_none();
+            lots.push(lot);
+            lots.sort_by(|a, b| a.date.cmp(&b.date));
+        }
+    }
+    // Bring the remaining lots up to today's share count.
+    apply_until(&mut lots, "9999-12-31", &mut applied);
+    Replay {
+        lots,
+        sales,
+        unmatched,
+        splits: applied.len(),
+    }
+}
+
+/// Whether the lots and sales already recorded equal what a replay produced
+/// (to the precision a CSV carries).
+fn same_state(
+    old_lots: &[&Lot],
+    new_lots: &[Lot],
+    old_sales: &[&Sale],
+    new_sales: &[Sale],
+) -> bool {
+    let n = |x: f64| format!("{:.6}", x);
+    let lot_key = |l: &Lot| format!("{}|{}|{}", l.date, n(l.qty), n(l.price));
+    let sale_key = |s: &Sale| {
+        format!(
+            "{}|{}|{}|{}|{}",
+            s.buy_date,
+            s.sell_date,
+            n(s.qty),
+            n(s.buy_price),
+            n(s.sell_price)
+        )
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    sorted(old_lots.iter().map(|l| lot_key(l)).collect())
+        == sorted(new_lots.iter().map(lot_key).collect())
+        && sorted(old_sales.iter().map(|s| sale_key(s)).collect())
+            == sorted(new_sales.iter().map(sale_key).collect())
 }
 
 impl Portfolio {
@@ -780,13 +927,19 @@ impl Portfolio {
     }
 
     /// Apply import rows symbol by symbol. A symbol whose rows have no dates
-    /// (a holdings snapshot) keeps its lots and only syncs the quantity. A
-    /// symbol with dated rows or sells (a lot list or tradebook) is rebuilt
-    /// from the file: buys become lots, sells come out FIFO and are recorded
-    /// as realized; for a tradebook, splits are applied as they happen. A
-    /// symbol is left alone when a sell has no earlier buy in the file, or
-    /// (without `replace`) when the rebuild would drop lots or sales from
-    /// another source. Re-importing the same file changes nothing.
+    /// (a holdings snapshot) keeps its lots and only syncs the quantity.
+    ///
+    /// A symbol with a tradebook (a buy/sell column, or any sell) is rebuilt
+    /// from every trade imported for it so far: the file's trades are merged
+    /// with those kept from earlier files of the same source (a trade in both
+    /// is counted once), so yearly tradebooks can be imported in any order,
+    /// and re-importing a file changes nothing. Buys become lots, sells come
+    /// out FIFO and are recorded as realized; with `tradebook`, splits are
+    /// applied as they happen. A symbol is left alone when a sell has no
+    /// earlier buy yet (the trades are kept for the next file), or (without
+    /// `replace`) when the rebuild would drop lots or sales from elsewhere.
+    /// A file of dated buys only (a lot list) is the whole state: it
+    /// replaces the symbol's lots.
     pub fn apply_import(
         &mut self,
         rows: &[ImportRow],
@@ -802,7 +955,7 @@ impl Portfolio {
         }
         let mut out = Vec::new();
         for sym in order {
-            let mut group: Vec<&ImportRow> = rows
+            let group: Vec<&ImportRow> = rows
                 .iter()
                 .filter(|r| r.symbol.to_uppercase() == sym)
                 .collect();
@@ -816,14 +969,44 @@ impl Portfolio {
                 }
                 continue;
             }
+            let ledger = opts.tradebook || group.iter().any(|r| r.sell);
+            let incoming: Vec<ImportedTrade> = group
+                .iter()
+                .map(|r| ImportedTrade {
+                    symbol: sym.clone(),
+                    source: source.to_string(),
+                    sell: r.sell,
+                    qty: r.qty,
+                    price: r.price,
+                    date: r.date.clone(),
+                })
+                .collect();
+            let stored: Vec<ImportedTrade> = if ledger && !opts.replace {
+                self.imported
+                    .iter()
+                    .filter(|t| t.symbol == sym && t.source == source)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut trades = if ledger {
+                merge_trades(&stored, &incoming)
+            } else {
+                incoming
+            };
             let today = today();
-            // Buys before sells on the same day.
-            group.sort_by(|a, b| {
-                let da = a.date.as_deref().unwrap_or(&today);
-                let db = b.date.as_deref().unwrap_or(&today);
-                da.cmp(db).then(a.sell.cmp(&b.sell))
+            let day = |t: &ImportedTrade| t.date.clone().unwrap_or_else(|| today.clone());
+            // Oldest first; buys before sells on the same day. The rest of
+            // the key makes the order the same whichever file came first.
+            trades.sort_by(|a, b| {
+                day(a)
+                    .cmp(&day(b))
+                    .then(a.sell.cmp(&b.sell))
+                    .then(a.price.total_cmp(&b.price))
+                    .then(a.qty.total_cmp(&b.qty))
             });
-            let first = group[0].date.clone().unwrap_or_else(|| today.clone());
+            let first = day(&trades[0]);
             let foreign_lots = self
                 .holding(&sym)
                 .is_some_and(|h| h.lots.iter().any(|l| l.source != source));
@@ -844,59 +1027,66 @@ impl Portfolio {
             } else {
                 &[]
             };
-            let mut applied = Vec::new();
-            let apply_until = |lots: &mut Vec<Lot>, date: &str, applied: &mut Vec<String>| {
-                for split in splits.iter().filter(|s| s.date.as_str() <= date) {
-                    for lot in lots.iter_mut().filter(|l| split.pending_for(l)) {
-                        lot.qty *= split.ratio();
-                        lot.price /= split.ratio();
-                        lot.adjustments.push(split.id());
-                        if !applied.contains(&split.id()) {
-                            applied.push(split.id());
-                        }
-                    }
-                }
-            };
-            let mut lots: Vec<Lot> = Vec::new();
-            let mut sales = Vec::new();
-            let mut unmatched = 0.0;
-            for r in group {
-                let date = r.date.clone().unwrap_or_else(|| today.clone());
-                apply_until(&mut lots, &date, &mut applied);
-                if r.sell {
-                    let (taken, left) = take_fifo(&mut lots, r.qty, &date);
-                    sales.extend(
-                        taken
-                            .iter()
-                            .map(|(lot, q)| Sale::from_lot(&sym, lot, *q, &date, r.price, source)),
-                    );
-                    unmatched += left;
-                } else {
-                    let mut lot = Lot::new(r.qty, r.price, date, source);
-                    lot.date_estimated = r.date.is_none();
-                    lots.push(lot);
-                    lots.sort_by(|a, b| a.date.cmp(&b.date));
-                }
+            let replay = replay_trades(&sym, &trades, source, splits, &today);
+
+            // Lots and sales this source recorded before StockWise kept its
+            // trades: rebuilding from one file must reproduce them, or an
+            // earlier file would be lost.
+            let own_lots: Vec<&Lot> = self
+                .holding(&sym)
+                .map(|h| h.lots.iter().filter(|l| l.source == source).collect())
+                .unwrap_or_default();
+            let own_sales: Vec<&Sale> = self
+                .realized
+                .iter()
+                .filter(|s| s.symbol == sym && s.source == source)
+                .collect();
+            let known = self
+                .imported
+                .iter()
+                .any(|t| t.symbol == sym && t.source == source);
+            if ledger
+                && !opts.replace
+                && !known
+                && (!own_lots.is_empty() || !own_sales.is_empty())
+                && !same_state(&own_lots, &replay.lots, &own_sales, &replay.sales)
+            {
+                out.push((sym, ImportOutcome::WouldReplace));
+                continue;
             }
-            // Bring the remaining lots up to today's share count.
-            apply_until(&mut lots, "9999-12-31", &mut applied);
-            // A sell with no earlier buy means the file doesn't cover this
-            // symbol's whole history: leave the holding as it is.
-            if unmatched > EPS {
-                out.push((sym, ImportOutcome::Unmatched { unmatched }));
+
+            if ledger {
+                // Keep the trades even when a sell has no buy yet: the
+                // earlier tradebook completes them.
+                self.imported
+                    .retain(|t| t.symbol != sym || (!opts.replace && t.source != source));
+                self.imported.extend(trades);
+            } else {
+                self.imported
+                    .retain(|t| t.symbol != sym || t.source != source);
+            }
+            // A sell with no earlier buy means the trades so far don't cover
+            // this symbol's whole history: leave the holding as it is.
+            if replay.unmatched > EPS {
+                out.push((
+                    sym,
+                    ImportOutcome::Unmatched {
+                        unmatched: replay.unmatched,
+                    },
+                ));
                 continue;
             }
             self.realized
                 .retain(|s| s.symbol != sym || (s.source != source && s.sell_date < first));
-            let (n, n_sales) = (lots.len(), sales.len());
-            self.realized.extend(sales);
-            self.replace_lots(&sym, lots);
+            let (n, n_sales) = (replay.lots.len(), replay.sales.len());
+            self.realized.extend(replay.sales);
+            self.replace_lots(&sym, replay.lots);
             out.push((
                 sym,
                 ImportOutcome::Lots {
                     lots: n,
                     sales: n_sales,
-                    splits: applied.len(),
+                    splits: replay.splits,
                 },
             ));
         }
@@ -1783,6 +1973,218 @@ mod tests {
         p.apply_import(&rows, tradebook);
         assert_eq!(p.holding("RELIANCE.NS").unwrap().shares, 5.0);
         assert_eq!(p.realized.len(), 1);
+    }
+
+    fn trade(sym: &str, date: &str, sell: bool, qty: f64, price: f64) -> ImportRow {
+        ImportRow {
+            symbol: sym.into(),
+            qty,
+            price,
+            date: Some(date.into()),
+            sell,
+        }
+    }
+
+    fn tradebook_opts(source: &str) -> ImportOptions<'_> {
+        ImportOptions {
+            tradebook: true,
+            ..opts(source)
+        }
+    }
+
+    /// Lots and sales as comparable text, to compare two portfolios.
+    fn state(p: &Portfolio) -> (Vec<String>, Vec<String>) {
+        let mut lots = Vec::new();
+        for h in &p.holdings {
+            for l in &h.lots {
+                lots.push(format!(
+                    "{} {} {} {} {}",
+                    h.symbol, l.date, l.qty, l.price, l.source
+                ));
+            }
+        }
+        let sales = p
+            .realized
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {} {} {} {} {} {}",
+                    s.symbol, s.qty, s.buy_date, s.buy_price, s.sell_date, s.sell_price, s.source
+                )
+            })
+            .collect();
+        (lots, sales)
+    }
+
+    #[test]
+    fn a_second_tradebook_is_merged_not_replacing_the_first() {
+        // The repro from the issue: one tradebook per year.
+        let y2024 = vec![trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0)];
+        let y2025 = vec![
+            trade("TCS.NS", "2025-02-01", false, 5.0, 4000.0),
+            trade("TCS.NS", "2025-03-01", true, 3.0, 4100.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&y2024, tradebook_opts("import:kite"));
+        let out = p.apply_import(&y2025, tradebook_opts("import:kite"));
+        assert_eq!(
+            out[0].1,
+            ImportOutcome::Lots {
+                lots: 2,
+                sales: 1,
+                splits: 0
+            }
+        );
+        let h = p.holding("TCS.NS").unwrap();
+        // 10 + 5 - 3 = 12 shares; the sale came out of the 2024 lot (FIFO).
+        assert_eq!(h.shares, 12.0);
+        assert_eq!(
+            (h.lots[0].qty, h.lots[0].date.as_str()),
+            (7.0, "2024-01-10")
+        );
+        assert_eq!((h.lots[1].qty, h.lots[1].price), (5.0, 4000.0));
+        assert_eq!(p.realized.len(), 1);
+        let sale = &p.realized[0];
+        assert_eq!(
+            (sale.qty, sale.buy_date.as_str(), sale.buy_price),
+            (3.0, "2024-01-10", 3500.0)
+        );
+        // Cost 7*3500 + 5*4000 = 44,500; gain on the sale 3 * 600.
+        assert_eq!(h.cost_basis(), 44_500.0);
+        assert_eq!(sale.gain(), 1800.0);
+    }
+
+    #[test]
+    fn tradebooks_give_the_same_portfolio_in_any_order_or_combined() {
+        let y2023 = vec![
+            trade("TCS.NS", "2023-02-01", false, 4.0, 3300.0),
+            trade("INFY.NS", "2023-03-01", false, 20.0, 1400.0),
+        ];
+        let y2024 = vec![
+            trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0),
+            trade("TCS.NS", "2024-06-03", true, 6.0, 3900.0),
+            trade("INFY.NS", "2024-07-01", true, 5.0, 1500.0),
+        ];
+        let y2025 = vec![
+            trade("TCS.NS", "2025-02-01", false, 5.0, 4000.0),
+            trade("TCS.NS", "2025-03-01", true, 3.0, 4100.0),
+            trade("INFY.NS", "2025-03-05", true, 15.0, 1700.0),
+        ];
+        let import = |files: &[&Vec<ImportRow>]| {
+            let mut p = Portfolio::default();
+            for f in files {
+                p.apply_import(f, tradebook_opts("import:kite"));
+            }
+            state(&p)
+        };
+        let combined: Vec<ImportRow> = [&y2023, &y2024, &y2025]
+            .iter()
+            .flat_map(|f| f.iter().cloned())
+            .collect();
+        let want = import(&[&combined]);
+        assert_eq!(want.1.len(), 5, "{:?}", want);
+        for order in [
+            [&y2023, &y2024, &y2025],
+            [&y2025, &y2024, &y2023],
+            [&y2024, &y2025, &y2023],
+            [&y2025, &y2023, &y2024],
+        ] {
+            assert_eq!(import(&order), want);
+        }
+        // Importing every file twice changes nothing.
+        assert_eq!(
+            import(&[&y2023, &y2024, &y2025, &y2023, &y2025, &y2024]),
+            want
+        );
+    }
+
+    #[test]
+    fn a_tradebook_that_sells_before_its_buys_waits_for_the_earlier_file() {
+        let early = vec![trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0)];
+        let late = vec![trade("TCS.NS", "2025-03-01", true, 3.0, 4100.0)];
+        let mut p = Portfolio::default();
+        let out = p.apply_import(&late, tradebook_opts("import:kite"));
+        assert_eq!(out[0].1, ImportOutcome::Unmatched { unmatched: 3.0 });
+        assert!(p.holding("TCS.NS").is_none() && p.realized.is_empty());
+        let out = p.apply_import(&early, tradebook_opts("import:kite"));
+        assert!(matches!(out[0].1, ImportOutcome::Lots { sales: 1, .. }));
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 7.0);
+    }
+
+    #[test]
+    fn overlapping_tradebooks_count_a_trade_once_but_keep_equal_fills() {
+        let fills = vec![
+            trade("TCS.NS", "2024-01-10", false, 5.0, 3500.0),
+            trade("TCS.NS", "2024-01-10", false, 5.0, 3500.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&fills, tradebook_opts("import:kite"));
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 10.0);
+        // A later download that repeats those two fills and adds one more.
+        let mut overlap = fills.clone();
+        overlap.push(trade("TCS.NS", "2024-02-01", false, 1.0, 3600.0));
+        p.apply_import(&overlap, tradebook_opts("import:kite"));
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 11.0);
+        p.apply_import(&fills, tradebook_opts("import:kite"));
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 11.0);
+    }
+
+    #[test]
+    fn replace_rebuilds_from_the_file_alone() {
+        let y2024 = vec![trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0)];
+        let y2025 = vec![trade("TCS.NS", "2025-02-01", false, 5.0, 4000.0)];
+        let mut p = Portfolio::default();
+        p.apply_import(&y2024, tradebook_opts("import:kite"));
+        let replace = ImportOptions {
+            replace: true,
+            ..tradebook_opts("import:kite")
+        };
+        p.apply_import(&y2025, replace);
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 5.0);
+        // The earlier trades are gone from the kept list too.
+        p.apply_import(&y2025, tradebook_opts("import:kite"));
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 5.0);
+    }
+
+    #[test]
+    fn an_import_made_before_trades_were_kept_is_not_overwritten() {
+        // Lots and a sale from an earlier version's import of the 2024 file.
+        let y2024 = vec![
+            trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0),
+            trade("TCS.NS", "2024-06-01", true, 4.0, 3900.0),
+        ];
+        let mut old = Portfolio::default();
+        old.apply_import(&y2024, tradebook_opts("import:kite"));
+        old.imported.clear();
+        let y2025 = vec![trade("TCS.NS", "2025-02-01", false, 5.0, 4000.0)];
+
+        // A different file can't be told apart from a wrong one: refuse.
+        let mut p = old.clone();
+        let out = p.apply_import(&y2025, tradebook_opts("import:kite"));
+        assert_eq!(out[0].1, ImportOutcome::WouldReplace);
+        assert_eq!(state(&p), state(&old));
+
+        // The same file is recognised and its trades kept, so the next file merges.
+        let out = p.apply_import(&y2024, tradebook_opts("import:kite"));
+        assert!(matches!(out[0].1, ImportOutcome::Lots { .. }));
+        assert_eq!(state(&p), state(&old));
+        p.apply_import(&y2025, tradebook_opts("import:kite"));
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 11.0);
+        assert_eq!(p.realized.len(), 1);
+    }
+
+    #[test]
+    fn old_files_without_kept_trades_still_load() {
+        let p: Portfolio = serde_json::from_str(r#"{"version":2,"holdings":[]}"#).unwrap();
+        assert!(p.imported.is_empty());
+        let mut q = Portfolio::default();
+        q.apply_import(
+            &[trade("TCS.NS", "2024-01-10", false, 1.0, 1.0)],
+            tradebook_opts("import:kite"),
+        );
+        let json = serde_json::to_string(&q).unwrap();
+        let back: Portfolio = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.imported, q.imported);
     }
 
     #[test]

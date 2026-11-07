@@ -870,7 +870,12 @@ pub(super) async fn apply_import_rows(
             )
         })
         .count();
-    if updated > 0 {
+    // Trades a sell has no buy for yet are kept for the next file, so that
+    // outcome is saved too.
+    let kept_trades = outcomes
+        .iter()
+        .any(|(_, o)| matches!(o, ImportOutcome::Unmatched { .. }));
+    if updated > 0 || kept_trades {
         portfolio.save()?;
     }
 
@@ -928,15 +933,17 @@ pub(super) async fn apply_import_rows(
                 );
             }
             ImportOutcome::Unmatched { unmatched } => println!(
-                "  {} {} — skipped: sells of {} shares have no earlier buy in this file. Import a \
-                 tradebook that covers every buy, or record the sale with `stockwise portfolio sell`.",
+                "  {} {} — not applied yet: sells of {} shares have no earlier buy in the trades \
+                 imported so far. Import the earlier tradebook (the trades from this file are kept), \
+                 or use --replace to rebuild from this file alone.",
                 "!".yellow(),
                 sym,
                 unmatched
             ),
             ImportOutcome::WouldReplace => println!(
                 "  {} {} — skipped: it has lots or sales from elsewhere (manual entries, another \
-                 import) that this file would replace. Re-run with --replace to rebuild it from the file.",
+                 import, or a tradebook imported by an older version) that this file would replace. \
+                 Re-run with --replace to rebuild it from this file.",
                 "!".yellow(),
                 sym
             ),

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enforced a bounded 3-second timeout (`tokio::time::timeout`) on all NSE endpoints (filings, shareholding, insider trading, corporate actions) so slow or unresponsive NSE calls log to warnings and degrade gracefully rather than hanging the CLI.
 
 ### Fixed
+- `import`: a second tradebook for the same broker is merged with the first instead of replacing its lots and sales, so yearly Zerodha Console files can be imported in any order and re-importing a file changes nothing ([#83](https://github.com/iamsaquib8/stockwise/issues/83)).
 - Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
 - `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):
   - Retain ETF classification even when Yahoo Finance returns no `topHoldings` or fund profile modules for NSE-listed instruments.

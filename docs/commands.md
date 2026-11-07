@@ -551,9 +551,15 @@ counted twice). A file with a date column (`Date`, `Purchase Date`,
 rebuilt from it. With a buy/sell column (`trade_type`, `Type`, `Side`) it is a
 tradebook — such as Zerodha Console's — sells come out FIFO as realized sales,
 and splits and bonuses are applied as they happened (this needs a network
-connection). A symbol is left unchanged when its sells have no earlier buy in
-the file, or when it already has lots or sales from elsewhere (manual entries,
-another import) — `--replace` rebuilds it from the file anyway. Dates may be
+connection). StockWise keeps the trades of each tradebook import and merges the
+next file with them, so several yearly tradebooks (Console allows 365 days per
+download) can be imported one after another, in any order, and re-importing a
+file changes nothing. A symbol is left unchanged when its sells have no earlier
+buy yet (the trades are kept; import the earlier tradebook to finish), or when
+it already has lots or sales from elsewhere (manual entries, another import,
+or a tradebook imported before StockWise kept trades) — `--replace` rebuilds it
+from this file alone anyway. A file of dated buys only (no buy/sell column) is
+the symbol's whole list of lots and replaces them. Dates may be
 `YYYY-MM-DD`, `DD-MM-YYYY`, `DD/MM/YYYY` (`MM/DD/YYYY` with `-m us`) or
 `15-Mar-2024`; a file with an unrecognized date is refused.
 
