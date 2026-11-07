@@ -803,9 +803,13 @@ pub fn check_paise(name: &str, v: f64) -> Result<()> {
 /// and last price, since it fills at market after triggering.
 pub fn estimate_value(kind: &OrderKind, qty: u32, last: Option<f64>) -> Option<f64> {
     let per_share = match *kind {
-        OrderKind::Market => last?,
+        // A zero, negative or non-finite last price is no estimate: a cap
+        // must not pass a market order as worth nothing.
+        OrderKind::Market => last.filter(|p| p.is_finite() && *p > 0.0)?,
         OrderKind::Limit { price } | OrderKind::StopLimit { price, .. } => price,
-        OrderKind::StopMarket { trigger } => last.map_or(trigger, |l| l.max(trigger)),
+        OrderKind::StopMarket { trigger } => last
+            .filter(|l| l.is_finite())
+            .map_or(trigger, |l| l.max(trigger)),
     };
     Some(per_share * qty as f64)
 }
@@ -949,6 +953,10 @@ mod tests {
             Some(1000.0)
         );
         assert_eq!(estimate_value(&OrderKind::Market, 10, None), None);
+        // A halted stock (price 0), a negative or a NaN price is no estimate.
+        for bad in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(estimate_value(&OrderKind::Market, 10, Some(bad)), None, "{bad}");
+        }
         assert_eq!(
             estimate_value(&OrderKind::Limit { price: 50.0 }, 2, None),
             Some(100.0)
