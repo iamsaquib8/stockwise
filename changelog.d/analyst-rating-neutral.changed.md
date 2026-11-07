@@ -1,0 +1,1 @@
+- `analyze`, `insider` and `deep`: the analysts' rating is shown as "mean rating 1.8/5 (1 = most positive)" instead of Strong Buy / Buy / Hold / Sell, and the price target line is now "Analyst Mean Price Estimate". `verdict` words the same figure as an analyst mean price estimate above or below the current price.

@@ -154,7 +154,7 @@ Ollama (AI insights) ────┘         │                    │
 
 | Rule | Implementation |
 |------|---------------|
-| Max 1% risk per trade | Kelly sizing capped, stop-loss enforced |
+| Max 1% risk per trade | Kelly sizing capped, exit level enforced |
 | Max 30% capital in one stock | Position size limit |
 | Max 5 concurrent positions | Hard limit in trade manager |
 | Total allocation ≤ capital | Plans are shrunk or dropped, best first, until they fit |
@@ -184,18 +184,16 @@ PORTFOLIO CHECK (4:02 PM)
 ├── Calculate current allocation %
 ├── Compare to target allocation
 ├── Flag: over-allocated (>25% in one stock)
-├── Flag: under-allocated (should add more)
-├── Flag: tax-loss harvesting opportunities
-└── Generate rebalance suggestions
+├── Show the tax position of each lot (gains and losses)
+└── Show the drift from the target allocation, without suggesting trades
 
 ALERT CHECK (4:04 PM)
 ├── Check all price alerts
-├── Check if any holding hit 52-week low (accumulate signal)
-├── Check if any holding hit 52-week high (trim signal)
+├── Report any holding at its 52-week low or high
 └── Check earnings growth deceleration warnings
 
 REPORT (4:05 PM)
-├── Generate AI investment memo via Ollama
+├── Generate an AI summary of the data via Ollama
 ├── Save report to reports/ folder with date
 ├── Print summary to terminal
 └── Snapshot portfolio value in wealth_history.json
@@ -203,36 +201,39 @@ REPORT (4:05 PM)
 WEEKLY DEEP SCAN (Sundays)
 ├── Run full 6-pillar scoring on extended universe (50+ stocks)
 ├── Cross-check with backtest results (which strategies work on which stocks)
-├── Sector rotation analysis (which sectors to overweight/underweight)
-├── Generate weekly investment newsletter via AI
-└── Update SIP allocation recommendations
+├── Sector performance comparison (which sectors led and lagged)
+├── Generate a weekly data summary via AI
+└── Update the score history
 ```
 
-### Decision Matrix
+### Score bands
+
+StockWise shows scores and the data behind them. It never turns a score into a
+buy, sell or hold call, an allocation or an order (see [DISCLAIMER.md](../DISCLAIMER.md)).
 
 ```
-Score > 75 + Moat Wide     → STRONG BUY (allocate 25% of monthly SIP)
-Score > 65 + Moat Narrow   → BUY (allocate 20%)
-Score > 55                 → HOLD (keep existing, don't add)
-Score > 45                 → WATCH (on watchlist, don't buy yet)
-Score < 45                 → AVOID
-Score < 35 + Holding       → CONSIDER SELLING (check tax impact first)
+Pillar score 65 and above   → "Strong" band
+Pillar score 45 to 64       → "Moderate" band
+Pillar score below 45       → "Weak" band
 ```
 
-### SIP Strategy
+The composite and the pillar bands come from `stockwise verdict`; the
+`--explain` flag lists the weights and rules. The moat rating, the holding
+status and the tax impact of an existing position are shown next to the score
+as separate facts.
+
+### SIP review (planned, reporting only)
 
 ```
 Every month (1st trading day):
-├── Check this month's SIP budget
-├── Get latest scores for top 5 stocks
-├── Allocate budget by score weight
-├── For each stock:
-│   ├── If price < 200-day MA: invest 120% of allocation (buy the dip)
-│   ├── If price > 200-day MA by 20%+: invest 80% (don't chase)
-│   └── Else: invest 100% as planned
-├── Place orders via Angel One
-└── Record in portfolio.json
+├── Read the user's own SIP list and this month's budget
+├── Show the latest scores for each stock on the list
+├── Show each price's distance from its 200-day average
+└── Record what the user bought (via `portfolio add` or `trade sync`)
 ```
+
+The review never splits the budget, never suggests an amount and never places
+orders.
 
 ---
 

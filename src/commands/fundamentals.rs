@@ -184,16 +184,15 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_section("Analyst Ratings");
     }
     if let Some(rec) = q.recommendation_mean {
-        print_kv("Consensus", &sentiment_label(rec));
         print_kv(
-            "Rating Score",
-            &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)),
+            "Analyst Rating",
+            &format!("{}  {}", mean_rating_text(rec), rating_bar(5.0 - rec, 4.0)),
         );
     }
     if let Some(target) = q.target_mean_price {
         let upside = q.regular_market_price.map(|p| ((target - p) / p) * 100.0);
         print_kv(
-            "Price Target",
+            "Analyst Mean Price Estimate",
             &format!(
                 "{}{:.2} ({})",
                 csym,
@@ -759,7 +758,7 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
 
     // Show what we have from the quote
     if let Some(rec) = q.recommendation_mean {
-        print_kv("Analyst Consensus", &sentiment_label(rec));
+        print_kv("Analyst Rating", &mean_rating_text(rec));
     }
     if let Some(n) = q.number_of_analyst_opinions {
         print_kv("# Analysts", &n.to_string());
@@ -1003,10 +1002,9 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         print_section("Analyst Ratings");
     }
     if let Some(rec) = q.recommendation_mean {
-        print_kv("Consensus", &sentiment_label(rec));
         print_kv(
-            "Score",
-            &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)),
+            "Analyst Rating",
+            &format!("{}  {}", mean_rating_text(rec), rating_bar(5.0 - rec, 4.0)),
         );
     }
     if let Some(target) = q.target_mean_price {
@@ -1019,7 +1017,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         } else {
             format!("{:.1}%", upside).red().to_string()
         };
-        print_kv("Price Target", &format!("{}{:.2} ({})", csym, target, u));
+        print_kv("Analyst Mean Price Estimate", &format!("{}{:.2} ({})", csym, target, u));
     }
     if let Some(n) = q.number_of_analyst_opinions {
         print_kv("# Analysts", &n.to_string());
