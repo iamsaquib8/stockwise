@@ -434,6 +434,10 @@ impl AdvancePayment {
     }
 }
 
+/// Half a paisa: payments are compared with estimates computed in floating
+/// point, so a payment equal to the tax must count as covering it.
+const PAISA: f64 = 0.005;
+
 /// Interest under Sec. 234C is charged on the shortfall rounded down to a
 /// multiple of ₹100 (Rule 119A of the Income-tax Rules).
 fn round_down_100(amount: f64) -> f64 {
@@ -467,7 +471,9 @@ pub struct AdvanceTaxQuarter {
     pub quarter_tax_payable: f64,
     /// Advance tax paid on or before this quarter's due date (cumulative).
     pub paid: f64,
-    /// Shortfall below the required minimum cumulative tax.
+    /// Shortfall below the required minimum cumulative tax that bears
+    /// interest. For Q4 this leaves out tax on gains after 15 March that is
+    /// paid by 31 March (Sec. 234C(1) proviso).
     pub shortfall: f64,
     /// Estimated Section 234C interest on shortfall (3% for Q1/Q2/Q3, 1% for Q4).
     pub sec_234c_interest: f64,
@@ -550,7 +556,9 @@ pub fn advance_tax_cutoffs(fy_start_year: i32) -> [(NaiveDate, NaiveDate, &'stat
 /// of advance tax is charged for shortfalls in earlier quarters if the
 /// shortfall is on account of capital gains realized in subsequent quarters.
 /// Accordingly, each quarter's required cumulative tax is estimated based
-/// only on cumulative gains realized up to that quarter's cut-off date.
+/// only on cumulative gains realized up to that quarter's cut-off date. For
+/// Q4 (due 15 March) the requirement on 15 March is the tax on gains up to
+/// 15 March, and payments up to 31 March count against gains after it.
 pub fn compute_advance_tax(
     sales: &[AdvanceTaxSale],
     fy_start: NaiveDate,
@@ -655,6 +663,19 @@ pub fn compute_advance_tax(
         let est = estimate(Country::India, cum_buckets);
         let cumulative_tax_estimated = est.total();
 
+        // What is due on the due date itself: the tax on gains up to that
+        // day. It is the same as the cut-off figure except for Q4, whose
+        // cut-off (31 Mar) is after its due date (15 Mar).
+        let mut due_buckets = Buckets::default();
+        for s in sales
+            .iter()
+            .filter(|s| s.date >= fy_start && s.date <= m.due_date)
+        {
+            due_buckets.add(s.gain, s.is_long_term);
+        }
+        let tax_at_due = estimate(Country::India, due_buckets).total();
+        let required_at_due = tax_at_due * (m.req_pct / 100.0);
+
         let min_cumulative_tax_required = cumulative_tax_estimated * (m.req_pct / 100.0);
         let quarter_tax_payable = (min_cumulative_tax_required - prior_max_required).max(0.0);
         prior_max_required = prior_max_required.max(min_cumulative_tax_required);
@@ -667,6 +688,8 @@ pub fn compute_advance_tax(
             cumulative_tax_estimated,
             min_cumulative_tax_required,
             quarter_tax_payable,
+            tax_at_due,
+            required_at_due,
         ));
     }
 
@@ -684,6 +707,8 @@ pub fn compute_advance_tax(
             cumulative_tax_estimated,
             min_cumulative_tax_required,
             quarter_tax_payable,
+            tax_at_due,
+            required_at_due,
         ) = quarters_data[i];
 
         let paid_by_due: f64 = payments
@@ -691,17 +716,37 @@ pub fn compute_advance_tax(
             .filter(|p| p.counts_by(m.due_date))
             .map(|p| p.amount)
             .sum();
-        let shortfall = (min_cumulative_tax_required - paid_by_due).max(0.0);
+        let paid_by_cutoff: f64 = payments
+            .iter()
+            .filter(|p| p.counts_by(m.cutoff_date))
+            .map(|p| p.amount)
+            .sum();
+        // Sec. 234C(1) proviso (second): for the last instalment, a shortfall
+        // caused by capital gains arising after 15 March carries no interest
+        // if the tax on them is paid by 31 March. So the 15 March requirement
+        // is the tax on gains up to 15 March, and payments up to 31 March
+        // count against the later gains. When those are not paid in full by
+        // 31 March, the whole shortfall at 15 March bears interest.
+        let late_gains_unpaid = m.cutoff_date > m.due_date
+            && as_of > m.cutoff_date
+            && paid_by_cutoff + PAISA < min_cumulative_tax_required;
+        let (basis_required, basis_tax) = if late_gains_unpaid {
+            (min_cumulative_tax_required, cumulative_tax_estimated)
+        } else {
+            (required_at_due, tax_at_due)
+        };
+        let shortfall = (basis_required - paid_by_due).max(0.0);
         // Interest runs from the due date, so it is known only once that day has passed.
         let sec_234c_interest = if sec_208_applicable
             && as_of > m.due_date
-            && paid_by_due < (m.safe_harbour_pct / 100.0) * cumulative_tax_estimated
+            && paid_by_due < (m.safe_harbour_pct / 100.0) * basis_tax
         {
             round_down_100(shortfall) * (m.interest_rate_pct / 100.0)
         } else {
             0.0
         };
-        let covered = paid_by_due >= min_cumulative_tax_required;
+        let covered = paid_by_due + PAISA >= required_at_due
+            && paid_by_cutoff + PAISA >= min_cumulative_tax_required;
         let status = if as_of < m.period_start {
             if covered && min_cumulative_tax_required > 0.0 {
                 AdvanceTaxStatus::Paid
@@ -1162,6 +1207,61 @@ mod tests {
                 .take(3)
                 .all(|q| q.status == AdvanceTaxStatus::Paid)
         );
+    }
+
+    #[test]
+    fn q4_gain_after_15_march_paid_by_31_march_has_no_234c_interest() {
+        // Sec. 234C(1) proviso. STCG ₹10,00,000 sold on 20 Mar 2026:
+        // tax 2,00,000 + 4% cess 8,000 = ₹2,08,000, paid on 25 Mar. Nothing
+        // had arisen by 15 Mar, so nothing was due then.
+        let sales = vec![AdvanceTaxSale::new(d("2026-03-20"), 1_000_000.0, false)];
+        let paid = [AdvancePayment {
+            date: Some(d("2026-03-25")),
+            amount: 208_000.0,
+        }];
+        for as_of in ["2026-03-26", "2026-04-10"] {
+            let s = compute_advance_tax(&sales, d("2025-04-01"), d(as_of), &paid);
+            let q4 = &s.quarters[3];
+            assert!(close(s.total_tax_estimated, 208_000.0), "{as_of}");
+            assert!(close(q4.sec_234c_interest, 0.0), "{as_of}");
+            assert!(close(q4.shortfall, 0.0), "{as_of}");
+            assert_eq!(q4.status, AdvanceTaxStatus::Paid, "{as_of}");
+            assert!(close(s.total_sec_234c_interest, 0.0));
+        }
+        // Paid on 1 Apr instead: too late for the proviso, so the whole
+        // ₹2,08,000 was short on 15 Mar: 1% = ₹2,080, and Q4 is overdue.
+        let late = [AdvancePayment {
+            date: Some(d("2026-04-01")),
+            amount: 208_000.0,
+        }];
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2026-04-10"), &late);
+        assert!(close(s.quarters[3].sec_234c_interest, 2_080.0));
+        assert_eq!(s.quarters[3].status, AdvanceTaxStatus::Overdue);
+        // Before 31 Mar is over, the late gains can still be paid: no interest yet.
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2026-03-26"), &[]);
+        assert!(close(s.quarters[3].sec_234c_interest, 0.0));
+        assert_eq!(s.quarters[3].status, AdvanceTaxStatus::Pending);
+    }
+
+    #[test]
+    fn q4_proviso_covers_only_gains_after_15_march() {
+        // ₹5,00,000 STCG on 10 Mar (tax 1,00,000 + 4,000 cess = ₹1,04,000, due
+        // by 15 Mar) and ₹5,00,000 on 20 Mar (another ₹1,04,000). Everything is
+        // paid on 25 Mar: the second half is protected, the first is not.
+        let sales = vec![
+            AdvanceTaxSale::new(d("2026-03-10"), 500_000.0, false),
+            AdvanceTaxSale::new(d("2026-03-20"), 500_000.0, false),
+        ];
+        let paid = [AdvancePayment {
+            date: Some(d("2026-03-25")),
+            amount: 208_000.0,
+        }];
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2026-04-10"), &paid);
+        let q4 = &s.quarters[3];
+        assert!(close(q4.shortfall, 104_000.0));
+        // 1% of ₹1,04,000.
+        assert!(close(q4.sec_234c_interest, 1_040.0));
+        assert_eq!(q4.status, AdvanceTaxStatus::Overdue);
     }
 
     #[test]
