@@ -1321,4 +1321,35 @@ X AMC,1,P,X Fund,,INF000000001,1,2024-05-01,Purchase,1000,10,100,110,PURCHASE,\n
             "{err:#}"
         );
     }
+
+    #[test]
+    fn two_sheet_workbook_imports_only_the_holdings_sheet() {
+        // Tab 1 is a mutual-fund sheet (Fund, Units, NAV, ISIN), tab 2 the stocks.
+        let sheets =
+            crate::xlsx::read_workbook(include_bytes!("../fixtures/holdings_two_sheets.xlsx"))
+                .unwrap();
+        for source in ["kite", "groww", "upstox", "indmoney", "csv"] {
+            let chosen = crate::xlsx::pick_sheet(&sheets, None, |csv| {
+                super::holdings::sheet_has_header(source, csv)
+            })
+            .unwrap();
+            assert_eq!(chosen.name, "Equity", "{source}");
+        }
+        let csv = crate::xlsx::pick_sheet(&sheets, None, |c| {
+            super::holdings::sheet_has_header("groww", c)
+        })
+        .unwrap()
+        .to_csv();
+        let parsed = parse_groww(&csv, Market::In).unwrap();
+        // INFY only: the fund on the other sheet is not read with these columns.
+        assert_eq!(parsed.rows.len(), 1, "{:?}", parsed.rows);
+        assert_eq!(parsed.rows[0].symbol, "INFY.NS");
+        assert_eq!(
+            (parsed.rows[0].qty, parsed.rows[0].avg_cost),
+            (10.0, Some(1500.0))
+        );
+        // `--sheet` picks the other one by name; the importer then reports its own error.
+        let funds = crate::xlsx::pick_sheet(&sheets, Some("mutual funds"), |_| false).unwrap();
+        assert!(parse_groww(&funds.to_csv(), Market::In).is_err());
+    }
 }

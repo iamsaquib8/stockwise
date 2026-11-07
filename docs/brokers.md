@@ -391,6 +391,11 @@ skipped. A holdings export is a snapshot: existing lots and their dates are
 kept and only the quantity follows the file, so re-importing never doubles a
 holding. `trade holdings` syncs broker holdings the same way.
 
+An `.xlsx` workbook may have several sheets (a mutual-fund tab, a summary).
+StockWise reads only one: the first, in tab order, whose header has the columns
+the importer needs. It prints the sheet it used and the ones it skipped; choose
+another with `--sheet NAME`.
+
 - **Groww** exports holdings as `.xlsx` with no ticker column: import the file
   as it is, and StockWise looks up each ISIN's NSE ticker (Yahoo search, one exact
   result only). Mutual-fund ISINs that don't trade on an exchange become

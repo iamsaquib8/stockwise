@@ -674,6 +674,10 @@ stockwise options TCS                     expected moves (same as `options moves
         /// sales recorded another way (manual entries, another import)
         #[arg(long)]
         replace: bool,
+        /// For an .xlsx workbook with several sheets: the sheet to read
+        /// (default: the first whose header fits the importer)
+        #[arg(long, value_name = "NAME")]
+        sheet: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -3550,7 +3554,8 @@ async fn dispatch(
             source,
             file,
             replace,
-        } => commands::cmd_import(&value_name(source), &file, replace, m).await,
+            sheet,
+        } => commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await,
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance {
             inflow,
@@ -4554,6 +4559,7 @@ mod tests {
             vec!["stockwise", "--portfolio", "long-term", "portfolio"],
             vec!["stockwise", "tax", "in", "--portfolio", "us"],
             vec!["stockwise", "import", "csv", "tradebook.csv", "--replace"],
+            vec!["stockwise", "import", "kite", "h.xlsx", "--sheet", "Equity"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} should parse");
         }
