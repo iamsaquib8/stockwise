@@ -1045,6 +1045,34 @@ fn india_tax_commands_classify_the_same_portfolio_alike() {
     assert!(skipped.contains(&"BTC-INR"), "harvest leaves out crypto");
 }
 
+#[tokio::test]
+async fn harvest_counts_the_sale_of_a_fund_no_longer_held() {
+    use crate::views::fixtures::Fixture;
+    // PPFAS Flexi Cap (equity fund, AMFI 122639): 100 units bought at 100 in
+    // January 2024, all sold at 180 on 2026-06-10, so it is no longer held.
+    // Long term: gain 100 × (180 - 100) = ₹8,000 of the ₹1,25,000 exemption.
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(10.0, 3500.0, "2024-01-10", "manual"));
+    p.add_lot("MF:122639", Lot::new(100.0, 100.0, "2024-01-10", "manual"));
+    p.sell_fifo("MF:122639", 100.0, 180.0, "2026-06-10", "manual")
+        .unwrap();
+    assert!(p.holding("MF:122639").is_none());
+    let mut src = Fixture::default();
+    src.navall = Some(crate::offmarket::tests::navall());
+
+    let (h, _) = super::holdings::harvest_summary(&src, &p, Market::In, day("2026-11-01"))
+        .await
+        .unwrap();
+    assert_eq!(h.ltcg_exemption_limit, 125_000.0);
+    assert_eq!(h.ltcg_exemption_remaining, 117_000.0);
+
+    // Valuing only what is held (the old `harvest`) loses the mark, so the
+    // sale drops out and the whole exemption looks unused.
+    let held = valued(&p, vec![quote("TCS.NS", Some(4100.0), None)]);
+    let old = super::holdings::compute_harvest(&p, &held, Market::In, day("2026-11-01"));
+    assert_eq!(old.ltcg_exemption_remaining, 125_000.0);
+}
+
 /// Hand-calculated `harvest` cases (India, today is 2026-11-01).
 mod harvest_math {
     use super::*;

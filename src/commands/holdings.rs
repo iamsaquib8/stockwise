@@ -1346,6 +1346,21 @@ struct HarvestSale {
     lt: f64,
 }
 
+/// `harvest` for `portfolio`: valued like `tax in`, so a fund sold in full
+/// (no longer held, but with realized gains) still has its AMFI mark and
+/// lands in the same Sec. 111A/112A totals. Returns the valuation too, for
+/// its price notes.
+pub(crate) async fn harvest_summary(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    market: Market,
+    today: chrono::NaiveDate,
+) -> Result<(HarvestSummary, Valuation)> {
+    let val = tax_valuation(src, portfolio, market).await?;
+    let summary = compute_harvest(portfolio, &val, market, today);
+    Ok((summary, val))
+}
+
 pub(crate) fn compute_harvest(
     portfolio: &Portfolio,
     val: &Valuation,
@@ -1597,15 +1612,9 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
         };
     }
 
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    let client = YahooClient::new().await?;
-    let val = value_holdings(&client, &symbols, market, None).await?;
     let today = chrono::Local::now().date_naive();
-    let summary = compute_harvest(&portfolio, &val, market, today);
+    let (summary, val) =
+        harvest_summary(&views::LiveSource::new(), &portfolio, market, today).await?;
 
     match fmt {
         Format::Json => return output::print_json(&summary),
