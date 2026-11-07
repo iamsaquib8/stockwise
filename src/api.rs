@@ -613,27 +613,18 @@ pub struct SearchResult {
 // ── Client ──
 
 /// Yahoo's two-step handshake: a cookie from `cookie_url`, then a crumb for it
-/// from `crumb_url`. Each step is tried up to `MAX_RETRIES` times.
+/// from `crumb_url`. Each step is tried up to `MAX_RETRIES` times. The cookie
+/// is kept by the client's cookie store (which sends it to `yahoo.com` hosts
+/// only) and replaces the previous one when the handshake is run again.
 async fn open_session(
     client: &reqwest::Client,
     cookie_url: String,
     crumb_url: String,
-) -> Result<YahooSession> {
+) -> Result<String> {
     // Step 1: Get cookies — retry up to 3 times
-    let mut cookie_str = String::new();
     for attempt in 0..MAX_RETRIES {
         match client.get(&cookie_url).send().await {
-            Ok(resp) => {
-                let cookies: Vec<String> = resp
-                    .headers()
-                    .get_all(header::SET_COOKIE)
-                    .iter()
-                    .filter_map(|v: &header::HeaderValue| v.to_str().ok())
-                    .map(|v: &str| v.split(';').next().unwrap_or("").to_string())
-                    .collect();
-                cookie_str = cookies.join("; ");
-                break;
-            }
+            Ok(_) => break,
             Err(_e) if attempt < MAX_RETRIES - 1 => {
                 let delay = Duration::from_millis(500 * 2u64.pow(attempt));
                 tokio::time::sleep(delay).await;
@@ -649,12 +640,7 @@ async fn open_session(
     // Step 2: Get crumb — retry
     let mut crumb = String::new();
     for attempt in 0..MAX_RETRIES {
-        match client
-            .get(&crumb_url)
-            .header(header::COOKIE, &cookie_str)
-            .send()
-            .await
-        {
+        match client.get(&crumb_url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 crumb = resp.text().await.context("Failed to read crumb")?;
                 // A real crumb is a short token; anything else is an error page.
@@ -691,17 +677,21 @@ async fn open_session(
             ),
         }
     }
-    Ok(YahooSession {
-        crumb,
-        cookie: cookie_str,
-    })
+    Ok(crumb)
 }
 
-/// Yahoo session credentials for the endpoints that need a crumb.
+/// The crumb for the endpoints that need one, and which handshake it came
+/// from. (The cookie that goes with it lives in the client's cookie store.)
 struct YahooSession {
     crumb: String,
-    cookie: String,
+    /// 1 for the first handshake, one more for each renewal.
+    generation: u64,
+    opened: Instant,
 }
+
+/// A crumb the server refused (HTTP 401) is renewed, but a new handshake is
+/// not started more often than this.
+const CRUMB_RENEW_AFTER: Duration = Duration::from_secs(60);
 
 /// Stands in for the crumb in URLs built before the session exists. `fetch`
 /// swaps in the real crumb, opening the session first if needed.
@@ -739,8 +729,11 @@ fn no_history_message(symbol: &str) -> String {
 pub struct YahooClient {
     client: reqwest::Client,
     /// Opened on the first request that needs it (quotes, quoteSummary,
-    /// fundamentals, options). Chart and search never do.
-    session: tokio::sync::OnceCell<YahooSession>,
+    /// fundamentals, options; chart and search never do) and renewed after
+    /// an HTTP 401. Held across the handshake, so concurrent callers wait
+    /// for one handshake instead of each starting their own.
+    session: tokio::sync::Mutex<Option<YahooSession>>,
+    crumb_renew_after: Duration,
     last_request: Mutex<Instant>,
     cache: SharedCache,
     /// Opt-in alternative provider (`STOCKWISE_DATA_PROVIDER`). Quotes,
@@ -786,8 +779,9 @@ impl YahooClient {
 
         Ok(Self {
             client,
-            session: tokio::sync::OnceCell::new(),
+            session: tokio::sync::Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            crumb_renew_after: CRUMB_RENEW_AFTER,
             cache,
             provider,
             nse: std::sync::OnceLock::new(),
@@ -796,19 +790,51 @@ impl YahooClient {
         })
     }
 
-    /// The Yahoo session, opened on first use. A failed handshake is not
-    /// remembered, so the next crumb request tries again; requests that need
-    /// no crumb never see the error.
-    async fn session(&self) -> Result<&YahooSession> {
-        self.session
-            .get_or_try_init(|| {
-                open_session(
-                    &self.client,
-                    self.handshake_url("https://fc.yahoo.com"),
-                    self.handshake_url("https://query2.finance.yahoo.com/v1/test/getcrumb"),
-                )
-            })
-            .await
+    /// The current crumb and its generation, opening the session on first
+    /// use. A failed handshake is not remembered, so the next crumb request
+    /// tries again; requests that need no crumb never see the error.
+    async fn crumb_now(&self) -> Result<(String, u64)> {
+        let mut slot = self.session.lock().await;
+        if let Some(s) = slot.as_ref() {
+            return Ok((s.crumb.clone(), s.generation));
+        }
+        let crumb = self.handshake().await?;
+        *slot = Some(YahooSession {
+            crumb: crumb.clone(),
+            generation: 1,
+            opened: Instant::now(),
+        });
+        Ok((crumb, 1))
+    }
+
+    /// A new crumb after the server refused the one of generation `seen`
+    /// (HTTP 401): a fresh handshake, unless another request has renewed it
+    /// meanwhile (its crumb is used) or the last handshake was under a minute
+    /// ago (`None`: the 401 stands).
+    async fn renew_crumb(&self, seen: u64) -> Result<Option<String>> {
+        let mut slot = self.session.lock().await;
+        let generation = match slot.as_ref() {
+            Some(s) if s.generation != seen => return Ok(Some(s.crumb.clone())),
+            Some(s) if s.opened.elapsed() < self.crumb_renew_after => return Ok(None),
+            Some(s) => s.generation + 1,
+            None => 1,
+        };
+        let crumb = self.handshake().await?;
+        *slot = Some(YahooSession {
+            crumb: crumb.clone(),
+            generation,
+            opened: Instant::now(),
+        });
+        Ok(Some(crumb))
+    }
+
+    async fn handshake(&self) -> Result<String> {
+        open_session(
+            &self.client,
+            self.handshake_url("https://fc.yahoo.com"),
+            self.handshake_url("https://query2.finance.yahoo.com/v1/test/getcrumb"),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -828,11 +854,13 @@ impl YahooClient {
     pub fn for_tests_with_client(client: reqwest::Client, crumb: &str) -> Self {
         Self {
             client,
-            session: tokio::sync::OnceCell::new_with(Some(YahooSession {
+            session: tokio::sync::Mutex::new(Some(YahooSession {
                 crumb: crumb.to_string(),
-                cookie: String::new(),
+                generation: 1,
+                opened: Instant::now(),
             })),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            crumb_renew_after: CRUMB_RENEW_AFTER,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
@@ -848,9 +876,13 @@ impl YahooClient {
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
         Self {
-            client: reqwest::Client::new(),
-            session: tokio::sync::OnceCell::new(),
+            client: reqwest::Client::builder()
+                .cookie_store(true)
+                .build()
+                .expect("HTTP client builds"),
+            session: tokio::sync::Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            crumb_renew_after: Duration::ZERO,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider,
             nse: std::sync::OnceLock::new(),
@@ -865,11 +897,13 @@ impl YahooClient {
     {
         Self {
             client,
-            session: tokio::sync::OnceCell::new_with(Some(YahooSession {
+            session: tokio::sync::Mutex::new(Some(YahooSession {
                 crumb: crumb.to_string(),
-                cookie: String::new(),
+                generation: 1,
+                opened: Instant::now(),
             })),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            crumb_renew_after: CRUMB_RENEW_AFTER,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
@@ -879,21 +913,18 @@ impl YahooClient {
 
     /// Rate-limited GET with retry and caching (Redis + in-memory)
     async fn fetch(&self, url: &str, cache_ttl: Duration) -> Result<String> {
-        self.fetch_with(url, cache_ttl, &[], true).await
+        self.fetch_with(url, cache_ttl, &[]).await
     }
 
     /// Rate-limited GET with retry and caching, with optional extra headers.
-    /// `yahoo_auth` controls whether the Yahoo session cookie is sent — it is
-    /// disabled for third-party hosts (e.g. NSE) so we don't leak it.
     pub async fn fetch_with(
         &self,
         url: &str,
         cache_ttl: Duration,
         extra_headers: &[(&str, &str)],
-        yahoo_auth: bool,
     ) -> Result<String> {
         let result = self
-            .fetch_uncounted_with(url, cache_ttl, extra_headers, yahoo_auth)
+            .fetch_uncounted_with(url, cache_ttl, extra_headers)
             .await;
         if result.is_err() {
             count(&STATS.errors);
@@ -906,7 +937,6 @@ impl YahooClient {
         url: &str,
         cache_ttl: Duration,
         extra_headers: &[(&str, &str)],
-        yahoo_auth: bool,
     ) -> Result<String> {
         // Check cache first (Redis → memory)
         {
@@ -934,44 +964,34 @@ impl YahooClient {
             tokio::time::sleep(sleep_until - now).await;
         }
 
-        // Yahoo session cookies go to Yahoo only (news also comes from Google).
-        let is_yahoo = yahoo_auth
-            && reqwest::Url::parse(url)
-                .ok()
-                .and_then(|u| {
-                    u.host_str()
-                        .map(|h| h == "yahoo.com" || h.ends_with(".yahoo.com"))
-                })
-                .unwrap_or(false);
-
-        // Open the Yahoo session only for URLs that carry the crumb.
-        let with_crumb;
-        let url = if url.contains(CRUMB_PLACEHOLDER) {
-            with_crumb = url.replace(CRUMB_PLACEHOLDER, &self.session().await?.crumb);
-            with_crumb.as_str()
+        // Open the Yahoo session only for URLs that carry the crumb. The
+        // cookie that goes with it is the client's cookie store's business:
+        // it sends Yahoo's cookies to yahoo.com hosts and nowhere else.
+        let template = url;
+        let mut crumb_generation = None;
+        let mut live = if template.contains(CRUMB_PLACEHOLDER) {
+            let (crumb, generation) = self.crumb_now().await?;
+            crumb_generation = Some(generation);
+            template.replace(CRUMB_PLACEHOLDER, &crumb)
         } else {
-            url
+            template.to_string()
         };
-
-        #[cfg(test)]
-        let url_to_fetch = if let Some(ref rw) = self.url_rewrite {
-            rw(url)
-        } else {
-            url.to_string()
-        };
-        #[cfg(test)]
-        let url_to_fetch = url_to_fetch.as_str();
-        #[cfg(not(test))]
-        let url_to_fetch = url;
+        let mut renewed = false;
 
         // Fetch with retry + exponential backoff
         let mut last_status = None;
-        for attempt in 0..MAX_RETRIES {
+        let mut attempt = 0;
+        while attempt < MAX_RETRIES {
+            let url = live.as_str();
+            #[cfg(test)]
+            let url_to_fetch = match &self.url_rewrite {
+                Some(rw) => rw(url),
+                None => url.to_string(),
+            };
+            #[cfg(not(test))]
+            let url_to_fetch = url;
             let last_attempt = attempt == MAX_RETRIES - 1;
             let mut req = self.client.get(url_to_fetch);
-            if is_yahoo && let Some(session) = self.session.get() {
-                req = req.header(header::COOKIE, &session.cookie);
-            }
             for (k, v) in extra_headers {
                 req = req.header(*k, *v);
             }
@@ -1006,6 +1026,23 @@ impl YahooClient {
                             break;
                         }
                         tokio::time::sleep(retry_delay(attempt, None, 500)).await;
+                    } else if status.as_u16() == 401
+                        && !renewed
+                        && let Some(generation) = crumb_generation
+                    {
+                        // Yahoo ended the session: one fresh handshake, then
+                        // the same request again with the new crumb. (A
+                        // failed handshake leaves the 401 as the answer.)
+                        renewed = true;
+                        if let Ok(Some(crumb)) = self.renew_crumb(generation).await {
+                            live = template.replace(CRUMB_PLACEHOLDER, &crumb);
+                            continue;
+                        }
+                        return Err(HttpStatusError {
+                            host: host_of(url).to_string(),
+                            status,
+                        }
+                        .into());
                     } else {
                         return Err(HttpStatusError {
                             host: host_of(url).to_string(),
@@ -1019,6 +1056,7 @@ impl YahooClient {
                 }
                 Err(e) => bail!("{}", fetch_failure_message(url, e)),
             }
+            attempt += 1;
         }
         match last_status {
             Some(s) if s.as_u16() == 429 => {
@@ -1283,7 +1321,7 @@ impl YahooClient {
     }
 
     /// GET from NSE India (JSON APIs + archives). NSE rejects requests without
-    /// a browser-like Referer, and must not receive the Yahoo cookie.
+    /// a browser-like Referer. (The cookie store keeps Yahoo's cookie to yahoo.com.)
     pub async fn nse_get_text(&self, url: &str, ttl: Duration) -> Result<String> {
         self.fetch_with(
             url,
@@ -1293,7 +1331,6 @@ impl YahooClient {
                 ("Accept", "application/json, text/plain, */*"),
                 ("Accept-Language", "en-US,en;q=0.9"),
             ],
-            false,
         )
         .await
     }
@@ -1631,10 +1668,190 @@ mod tests {
         assert_eq!(handshakes, 1, "second crumb request reuses the session");
     }
 
+    fn cookie_response(cookie: &str) -> (u16, Vec<(String, String)>, String) {
+        (
+            200,
+            vec![("set-cookie".into(), format!("{cookie}; Path=/"))],
+            String::new(),
+        )
+    }
+
+    // #155: Yahoo ends the session in a long-running process.
+    #[tokio::test]
+    async fn a_401_renews_the_crumb_and_retries_once() {
+        let summary = r#"{"quoteSummary":{"result":[{"financialData":{}}]}}"#;
+        let server = crate::testutil::MockServer::start_with_headers(vec![
+            cookie_response("A3=old"),
+            (200, Vec::new(), "OLDCRUMB".into()),
+            (
+                401,
+                Vec::new(),
+                r#"{"finance":{"error":"Invalid Crumb"}}"#.into(),
+            ),
+            cookie_response("A3=new"),
+            (200, Vec::new(), "NEWCRUMB".into()),
+            (200, Vec::new(), summary.into()),
+        ])
+        .await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+        client
+            .quote_summary("TCS.NS", &["financialData"])
+            .await
+            .expect("the retry with the new crumb succeeds");
+        let reqs = server.requests();
+        let targets: Vec<&str> = reqs
+            .iter()
+            .map(|r| r.target.split('?').next().unwrap())
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                "/",
+                "/v1/test/getcrumb",
+                "/v10/finance/quoteSummary/TCS.NS",
+                "/",
+                "/v1/test/getcrumb",
+                "/v10/finance/quoteSummary/TCS.NS"
+            ]
+        );
+        assert!(reqs[2].target.contains("crumb=OLDCRUMB"));
+        assert!(
+            reqs[5].target.contains("crumb=NEWCRUMB"),
+            "{}",
+            reqs[5].target
+        );
+        // The cookie store sends the cookie, and the new one replaced the old.
+        assert_eq!(reqs[2].header("cookie"), Some("A3=old"));
+        assert_eq!(reqs[5].header("cookie"), Some("A3=new"));
+        // Later crumb requests reuse the renewed session.
+        client
+            .quote_summary("INFY.NS", &["financialData"])
+            .await
+            .unwrap();
+        assert_eq!(server.requests().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn a_401_that_survives_the_renewal_is_an_error_after_one_retry() {
+        let server = crate::testutil::MockServer::start_with_headers(vec![
+            cookie_response("A3=a"),
+            (200, Vec::new(), "CRUMB1".into()),
+            (401, Vec::new(), String::new()),
+            cookie_response("A3=b"),
+            (200, Vec::new(), "CRUMB2".into()),
+            (401, Vec::new(), String::new()),
+        ])
+        .await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+        let err = client
+            .quote_summary("TCS.NS", &["financialData"])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 401"), "{err:#}");
+        // Handshake, 401, handshake, 401: one renewal, no loop.
+        let n = server.requests().len();
+        assert_eq!(
+            n,
+            6,
+            "{:?}",
+            server
+                .requests()
+                .iter()
+                .map(|r| &r.target)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_crumb_is_not_renewed_more_than_once_a_minute() {
+        let server = crate::testutil::MockServer::start_with_headers(vec![
+            cookie_response("A3=a"),
+            (200, Vec::new(), "CRUMB1".into()),
+            (401, Vec::new(), String::new()),
+        ])
+        .await;
+        let mut client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+        client.crumb_renew_after = CRUMB_RENEW_AFTER;
+        let err = client
+            .quote_summary("TCS.NS", &["financialData"])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 401"), "{err:#}");
+        assert_eq!(
+            server.requests().len(),
+            3,
+            "handshake, then the one refused call"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_401s_share_one_new_handshake() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // `/` hands out cookie n; the crumb is "C<n>"; only crumb C2 works.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let homes = Arc::new(AtomicUsize::new(0));
+        let counter = homes.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let line = head.lines().next().unwrap_or("").to_string();
+                    let reply = if line.starts_with("GET / ") {
+                        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                        format!(
+                            "HTTP/1.1 200 X\r\nset-cookie: A3={n}; Path=/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                    } else if line.contains("getcrumb") {
+                        let crumb = format!("C{}", counter.load(Ordering::SeqCst));
+                        format!(
+                            "HTTP/1.1 200 X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{crumb}",
+                            crumb.len()
+                        )
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        if line.contains("crumb=C2") {
+                            let body = r#"{"quoteSummary":{"result":[{"financialData":{}}]}}"#;
+                            format!(
+                                "HTTP/1.1 200 X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                        } else {
+                            "HTTP/1.1 401 X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                                .to_string()
+                        }
+                    };
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        let client = YahooClient::lazy_for_tests(None, to_server(&url));
+        let modules = ["financialData"];
+        let (a, b, c, d) = tokio::join!(
+            client.quote_summary("AAA.NS", &modules),
+            client.quote_summary("BBB.NS", &modules),
+            client.quote_summary("CCC.NS", &modules),
+            client.quote_summary("DDD.NS", &modules),
+        );
+        for r in [a, b, c, d] {
+            r.expect("succeeds after the shared renewal");
+        }
+        assert_eq!(
+            homes.load(Ordering::SeqCst),
+            2,
+            "the first handshake and one renewal for four callers"
+        );
+    }
+
     #[tokio::test]
     async fn new_sends_no_request_and_opens_no_session() {
         let client = YahooClient::new().await.unwrap();
-        assert!(client.session.get().is_none());
+        assert!(client.session.lock().await.is_none());
     }
 
     #[tokio::test]

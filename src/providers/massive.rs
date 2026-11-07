@@ -6,7 +6,7 @@
 //! A quote is the latest daily aggregate bar with the change against the
 //! bar before it (the real-time snapshot endpoint is paid).
 
-use super::{Auth, Bar, Http, ProviderError, Series, num, quote_from_bars};
+use super::{Auth, Bar, Http, ProviderError, Series, num, quote_from_bars, trade_time};
 use crate::api::{Quote, SearchResult};
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -119,7 +119,11 @@ impl Massive {
                 Duration::from_secs(300),
             )
             .await?;
-        Ok(quote_from_bars(&series))
+        Ok(quote_from_bars(&series).map(|mut q| {
+            // The latest bar's day, not today: free plans are end-of-day.
+            q.regular_market_time = series.bars.last().and_then(|b| trade_time(symbol, b.date));
+            q
+        }))
     }
 
     pub async fn daily(&self, symbol: &str, start: Option<NaiveDate>) -> Result<Series> {
@@ -256,6 +260,9 @@ mod tests {
         let q = p.quotes(&["AAPL"]).await.unwrap();
         assert_eq!(q[0].regular_market_price, Some(74.3575));
         assert_eq!(q[0].data_source.as_deref(), Some("Massive (Polygon.io)"));
+        // The quote is dated by its bar (Fri 3 Jan 2020, closed 16:00 ET),
+        // not by when it was asked for.
+        assert_eq!(q[0].regular_market_time, Some(1_578_085_200));
         let req = &server.requests()[0];
         assert!(req.target.starts_with("/v2/aggs/ticker/AAPL/range/1/day/"));
         assert!(!req.target.contains("ms-secret"));

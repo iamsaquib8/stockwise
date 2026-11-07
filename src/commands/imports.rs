@@ -545,6 +545,27 @@ pub(super) fn parse_cas_json(content: &str) -> Result<Parsed> {
     Ok(out)
 }
 
+/// The Yahoo ticker for a demat CAS equity: any `.NS` / `.BO` suffix the
+/// statement already carries is dropped first, then a BSE listing (`exchange`
+/// BSE, or a `.BO` suffix) gets `.BO`, a numeric BSE scrip code (`500325`)
+/// gets `.BO`, and everything else is an NSE ticker (`.NS`).
+fn demat_symbol(symbol: &str, exchange: Option<&str>) -> String {
+    let upper = symbol.trim().to_uppercase();
+    let (plain, has_bo) = match upper.strip_suffix(".BO") {
+        Some(base) => (base, true),
+        None => (upper.as_str(), false),
+    };
+    let plain = crate::brokers::plain_symbol(plain);
+    if plain.is_empty() {
+        return String::new();
+    }
+    if has_bo || exchange.is_some_and(|x| x.trim().eq_ignore_ascii_case("BSE")) {
+        format!("{plain}.BO")
+    } else {
+        market::resolve_symbol(&plain, Market::In)
+    }
+}
+
 /// NSDL / CDSL (demat) CAS from casparser: `accounts[].equities[]` and
 /// `accounts[].mutual_funds[]`. Equities carry no purchase cost, so they
 /// only update quantities of holdings you already track.
@@ -564,14 +585,10 @@ fn parse_demat_accounts(accounts: &[serde_json::Value]) -> Parsed {
             if qty <= 0.0 {
                 continue;
             }
-            // casparser back-fills the NSE ticker when it knows it.
-            let symbol = match (json_str(e.get("symbol")), json_str(e.get("exchange"))) {
-                (Some(s), Some(x)) if x.eq_ignore_ascii_case("BSE") => {
-                    format!("{}.BO", s.to_uppercase())
-                }
-                (Some(s), _) => format!("{}.NS", s.to_uppercase()),
-                (None, _) => String::new(),
-            };
+            // casparser back-fills the ticker when it knows it.
+            let symbol = json_str(e.get("symbol"))
+                .map(|s| demat_symbol(&s, json_str(e.get("exchange")).as_deref()))
+                .unwrap_or_default();
             if symbol.is_empty() && isin.is_none() {
                 continue;
             }
@@ -1240,6 +1257,40 @@ X AMC,1,P,X Fund,,INF000000001,1,2024-05-01,Purchase,1000,10,100,110,PURCHASE,\n
         assert!((avg - 1500.0).abs() < 1e-9);
         assert!(portfolio.holding("RELIANCE.NS").is_none());
         assert!(portfolio.holding("MF:122639").is_some());
+    }
+
+    #[test]
+    fn demat_cas_tickers_get_one_correct_suffix() {
+        let sym = |s: &str, x: Option<&str>| demat_symbol(s, x);
+        // Plain tickers are NSE; an explicit BSE exchange is BSE.
+        assert_eq!(sym("tcs", Some("NSE")), "TCS.NS");
+        assert_eq!(sym("TCS", None), "TCS.NS");
+        assert_eq!(sym("ABCBSE", Some("bse")), "ABCBSE.BO");
+        // Numeric scrip codes are BSE, whatever the exchange field says.
+        assert_eq!(sym("500325", None), "500325.BO");
+        assert_eq!(sym("500325", Some("NSE")), "500325.BO");
+        assert_eq!(sym("500325", Some("BSE")), "500325.BO");
+        // An existing suffix is not doubled.
+        assert_eq!(sym("TCS.NS", None), "TCS.NS");
+        assert_eq!(sym("TCS.NS", Some("NSE")), "TCS.NS");
+        assert_eq!(sym("500325.BO", None), "500325.BO");
+        assert_eq!(sym("500325.NS", None), "500325.BO");
+        assert_eq!(sym("RELIANCE.BO", Some("NSE")), "RELIANCE.BO");
+        assert_eq!(sym("M&M", None), "M&M.NS");
+        assert_eq!(sym("  ", None), "");
+    }
+
+    #[test]
+    fn demat_cas_json_with_bse_codes_and_suffixed_tickers() {
+        let json = r#"{"accounts":[{"equities":[
+            {"isin":"INE002A01018","name":"RELIANCE","num_shares":"8","symbol":"500325"},
+            {"isin":"INE467B01029","name":"TCS","num_shares":"3","symbol":"TCS.NS","exchange":"NSE"},
+            {"isin":"INE000000001","name":"BSE ONLY","num_shares":"5","symbol":"532540.BO"},
+            {"isin":"INE000000002","name":"EXPLICIT BSE","num_shares":"2","symbol":"ABCD","exchange":"BSE"}
+        ],"mutual_funds":[]}]}"#;
+        let p = parse_cas(json).unwrap();
+        let symbols: Vec<&str> = p.rows.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(symbols, ["500325.BO", "TCS.NS", "532540.BO", "ABCD.BO"]);
     }
 
     #[test]

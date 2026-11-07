@@ -1040,6 +1040,48 @@ mod tests {
         assert!(v["longName"].is_null());
     }
 
+    // #158: a quote merged from an end-of-day provider keeps the provider's
+    // trade date, so an alert check does not add a bar for today.
+    #[test]
+    fn alert_data_adds_no_bar_for_an_end_of_day_quote_dated_before_today() {
+        use crate::alerts::AlertCondition as C;
+        // The fixture chart ends on Sat 18 Nov 2023; "now" is Mon 20 Nov,
+        // 10:00 in New York, with Yahoo's live quote timed just now.
+        let now = DateTime::parse_from_rfc3339("2023-11-20T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let friday = NaiveDate::from_ymd_opt(2023, 11, 17).unwrap();
+        let yahoo = Quote {
+            regular_market_time: Some(now.timestamp()),
+            ..quote("AAPL", Some(190.0), 1.0, "USD")
+        };
+        let provider = Quote {
+            regular_market_price: Some(189.0),
+            regular_market_time: crate::providers::trade_time("AAPL", friday),
+            data_source: Some("Massive".into()),
+            ..Default::default()
+        };
+        let merged = crate::providers::merge_quote(provider, Some(yahoo.clone()));
+
+        let mut f = Fixture::default();
+        f.alerts = AlertStore::default();
+        f.alerts.add("AAPL", C::BreakoutHigh, 3.0);
+        f.quotes = vec![merged.clone()];
+        let bars_len = |q: &Quote| {
+            let data = block(alert_data(
+                &f,
+                &f.alerts.alerts,
+                std::slice::from_ref(q),
+                now,
+            ));
+            data["AAPL"].bars.as_ref().unwrap().len()
+        };
+        // The chart's five bars stay five: Friday's close is not today's bar.
+        assert_eq!(bars_len(&merged), 5);
+        // Control: with Yahoo's own time, today's trade does add a bar.
+        assert_eq!(bars_len(&yahoo), 6);
+    }
+
     #[test]
     fn technical_alerts_read_daily_bars() {
         use crate::alerts::AlertCondition as C;

@@ -1175,13 +1175,14 @@ pub(crate) fn is_fresh(path: &Path, max_age: Duration) -> bool {
 
 /// Write via a temp file and rename, so a crash never leaves half a cache.
 pub(crate) fn write_atomic(path: &Path, data: &str) -> Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data).with_context(|| format!("Cannot write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("Cannot replace {}", path.display()))
+    crate::pagecache::write_atomic(path, data)
+        .with_context(|| format!("Cannot write {}", path.display()))
 }
 
 /// Cached copy of `url` if younger than `max_age`; otherwise download it.
-/// When the download fails, a stale copy is used with a warning on stderr.
+/// When the download fails, or succeeds with a page that fails `validate`
+/// (a maintenance page served with HTTP 200), a stale copy is used with a
+/// warning on stderr.
 pub(crate) async fn cached_text(
     client: &reqwest::Client,
     name: &str,
@@ -1189,30 +1190,50 @@ pub(crate) async fn cached_text(
     source: &str,
     validate: impl Fn(&str) -> bool,
 ) -> Result<String> {
-    let path = cache_path(name)?;
-    if is_fresh(&path, CACHE_MAX_AGE)
-        && let Ok(text) = std::fs::read_to_string(&path)
+    cached_text_at(client, &cache_path(name)?, url, source, validate).await
+}
+
+async fn cached_text_at(
+    client: &reqwest::Client,
+    path: &Path,
+    url: &str,
+    source: &str,
+    validate: impl Fn(&str) -> bool,
+) -> Result<String> {
+    if is_fresh(path, CACHE_MAX_AGE)
+        && let Ok(text) = std::fs::read_to_string(path)
         && validate(&text)
     {
         return Ok(text);
     }
-    match get_text(client, url, source).await {
+    // Why the download is not used; the saved copy takes over when it is valid.
+    let err = match get_text(client, url, source).await {
         Ok(text) if validate(&text) => {
             // Caching is best-effort: a read-only data dir still works.
-            let _ = write_atomic(&path, &text);
+            let _ = write_atomic(path, &text);
+            return Ok(text);
+        }
+        Ok(_) => anyhow::anyhow!("{source} returned an unexpected response"),
+        Err(e) => e,
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) if validate(&text) => {
+            let saved = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%d %b %Y"));
+            match saved {
+                Ok(date) => eprintln!(
+                    "  Warning: {err:#}; using the copy saved {date} from {}",
+                    path.display()
+                ),
+                Err(_) => eprintln!(
+                    "  Warning: {err:#}; using cached data from {}",
+                    path.display()
+                ),
+            }
             Ok(text)
         }
-        Ok(_) => bail!("{source} returned an unexpected response"),
-        Err(e) => match std::fs::read_to_string(&path) {
-            Ok(text) if validate(&text) => {
-                eprintln!(
-                    "  Warning: {e:#}; using cached data from {}",
-                    path.display()
-                );
-                Ok(text)
-            }
-            _ => Err(e),
-        },
+        _ => Err(err),
     }
 }
 
@@ -1748,5 +1769,94 @@ HDFC Mutual Fund
         );
         back.reindex();
         assert!(back.find("Parag Parikh Flexi Cap Fund").is_some());
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sw-funds-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Write `text` to `path` and date it a day ago, so it counts as stale.
+    fn write_stale(path: &Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        let day_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(day_ago)
+            .unwrap();
+    }
+
+    fn is_navall(t: &str) -> bool {
+        t.to_lowercase().contains("scheme code")
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_page_falls_back_to_the_saved_file() {
+        let dir = scratch_dir("fallback");
+        let path = dir.join("amfi_navall.txt");
+        write_stale(&path, NAVALL);
+        let server = crate::testutil::MockServer::start(vec![(
+            200,
+            "<html>Under maintenance</html>".into(),
+        )])
+        .await;
+        let client = http_client().unwrap();
+        let text = cached_text_at(&client, &path, &server.url, "AMFI", is_navall)
+            .await
+            .unwrap();
+        assert_eq!(text, NAVALL);
+        assert_eq!(server.requests().len(), 1, "AMFI was asked once");
+        // The bad page did not replace the saved file.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NAVALL);
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_page_without_a_saved_file_is_an_error() {
+        let dir = scratch_dir("nofile");
+        let path = dir.join("amfi_navall.txt");
+        let server = crate::testutil::MockServer::start(vec![(200, String::new())]).await;
+        let client = http_client().unwrap();
+        let err = cached_text_at(&client, &path, &server.url, "AMFI", is_navall)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("AMFI returned an unexpected response"),
+            "{err:#}"
+        );
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_page_with_an_invalid_saved_file_is_an_error() {
+        let dir = scratch_dir("badfile");
+        let path = dir.join("amfi_navall.txt");
+        write_stale(&path, "<html>old error page</html>");
+        let server =
+            crate::testutil::MockServer::start(vec![(200, "<html>maintenance</html>".into())])
+                .await;
+        let client = http_client().unwrap();
+        let err = cached_text_at(&client, &path, &server.url, "AMFI", is_navall)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unexpected response"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_valid_download_replaces_the_stale_file() {
+        let dir = scratch_dir("fresh");
+        let path = dir.join("amfi_navall.txt");
+        write_stale(&path, LEGACY);
+        let server = crate::testutil::MockServer::start(vec![(200, NAVALL.into())]).await;
+        let client = http_client().unwrap();
+        let text = cached_text_at(&client, &path, &server.url, "AMFI", is_navall)
+            .await
+            .unwrap();
+        assert_eq!(text, NAVALL);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NAVALL);
     }
 }
