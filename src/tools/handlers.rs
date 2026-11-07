@@ -721,6 +721,18 @@ fn goal_education(a: &Args, m: Market) -> Result<Value> {
     commands::goal_json("education", commands::market_currency(m), &plan)
 }
 
+/// The symbol as a shell word. `&` (M&M, J&KBANK) is a command separator in
+/// bash and zsh and a parse error in PowerShell, so such symbols go in single
+/// quotes, which all of them accept. The symbol is already limited to
+/// letters, digits, `&` and `-`, so nothing inside the quotes needs escaping.
+fn shell_symbol(sym: &str) -> String {
+    if sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        sym.to_string()
+    } else {
+        format!("'{sym}'")
+    }
+}
+
 /// A dry-run check of an order the user is considering. Sends nothing and
 /// never reads broker credentials: it prices the order from the last quote
 /// and returns the `stockwise trade` command, whose own preview, value cap
@@ -764,7 +776,7 @@ async fn order_preview(src: &impl DataSource, a: &Args) -> Result<Value> {
     let mut command = format!(
         "stockwise trade {} {} {} --broker {}",
         if side == Side::Buy { "buy" } else { "sell" },
-        sym,
+        shell_symbol(&sym),
         qty,
         broker
     );
