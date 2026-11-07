@@ -760,7 +760,7 @@ pub fn explain_lines(v: &DecisionVerdict) -> Vec<String> {
             weights.join(", ")
         ),
         format!(
-            "  A pillar with no data is left out and the other weights are rescaled. The composite is shown only when pillars with data hold at least {:.0}% of the weight.",
+            "  A pillar with no data is left out and the other weights are rescaled. The composite is shown only when pillars with data make up at least {:.0}% of the weight.",
             MIN_COMPOSITE_WEIGHT * 100.0
         ),
         "• Pillar score: 50 is neutral. Each rule moves it up or down by a fixed amount, e.g. a low PEG adds 25, and the result is kept between 10 and 95.".to_string(),
