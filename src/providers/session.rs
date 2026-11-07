@@ -191,13 +191,22 @@ pub enum DiskCache {
     Off,
 }
 
+/// The session cookies' load: when, and a counter that tells a request which
+/// cookies it was sent with.
+#[derive(Clone, Copy, Debug, Default)]
+struct CookieState {
+    at: Option<Instant>,
+    /// 0 before the first load, then one more per load.
+    generation: u64,
+}
+
 /// One site's session: cookies, spacing, cache and refusal state.
 pub struct Session {
     site: Site,
     client: reqwest::Client,
     limiter: Limiter,
-    /// When the session cookies were last fetched.
-    cookies: tokio::sync::Mutex<Option<Instant>>,
+    /// When the session cookies were last fetched, and which load that was.
+    cookies: tokio::sync::Mutex<CookieState>,
     cache: OnceLock<SharedCache>,
     disk: DiskCache,
     blocked_until: Mutex<Option<Instant>>,
@@ -218,7 +227,7 @@ impl Session {
                 .build()
                 .expect("HTTP client builds"),
             limiter,
-            cookies: tokio::sync::Mutex::new(None),
+            cookies: tokio::sync::Mutex::new(CookieState::default()),
             cache: OnceLock::new(),
             disk: DiskCache::DataDir,
             blocked_until: Mutex::new(None),
@@ -301,16 +310,21 @@ impl Session {
         Ok(url)
     }
 
-    /// Load the home page for session cookies, once (or again when `renew`
-    /// and the last load is older than `RENEW_AFTER`).
-    async fn ensure_cookies(&self, renew: bool) -> Result<(), FetchError> {
+    /// Load the home page for session cookies, once. After a 401, `expired`
+    /// is the cookie generation the failed request was sent with: when
+    /// another task has loaded newer cookies since, they are reused (the
+    /// caller just retries); only one task renews, the rest wait on the lock.
+    /// A request that already carried the newest cookies and still got a 401
+    /// is a real refusal, and a renewal is not repeated within `renew_after`.
+    async fn ensure_cookies(&self, expired: Option<u64>) -> Result<(), FetchError> {
         let Some(home) = &self.site.home else {
             return Ok(());
         };
         let mut loaded = self.cookies.lock().await;
-        match *loaded {
-            Some(_) if !renew => return Ok(()),
-            Some(at) if at.elapsed() < self.renew_after => {
+        match (loaded.at, expired) {
+            (Some(_), None) => return Ok(()),
+            (Some(_), Some(seen)) if loaded.generation != seen => return Ok(()),
+            (Some(at), Some(_)) if at.elapsed() < self.renew_after => {
                 return Err(FetchError::Blocked(format!(
                     "{} ended the session and would not renew it",
                     self.site.name
@@ -343,7 +357,8 @@ impl Session {
             )));
         }
         // Any other answer: carry on; the API call says whether it worked.
-        *loaded = Some(Instant::now());
+        loaded.at = Some(Instant::now());
+        loaded.generation += 1;
         Ok(())
     }
 
@@ -403,10 +418,13 @@ impl Session {
                 name
             )));
         }
-        self.ensure_cookies(false).await?;
+        self.ensure_cookies(None).await?;
         let mut renewed = false;
         let mut attempt = 0;
         loop {
+            // Which cookies this request goes out with (a renewal in flight
+            // makes this wait until it is done).
+            let generation = self.cookies.lock().await.generation;
             self.limiter.wait().await;
             STATS.requests.fetch_add(1, Ordering::Relaxed);
             let mut req = self
@@ -451,7 +469,7 @@ impl Session {
                 Verdict::Ok => return Ok(body),
                 Verdict::Expired if self.site.home.is_some() && !renewed => {
                     renewed = true;
-                    self.ensure_cookies(true).await?;
+                    self.ensure_cookies(Some(generation)).await?;
                 }
                 Verdict::Expired => {
                     return Err(FetchError::Blocked(format!(
@@ -526,10 +544,7 @@ impl Session {
             Ok(text) if valid(&text) => {
                 if let Some(p) = &disk {
                     // Best effort: a read-only data directory still works.
-                    let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
-                    if std::fs::write(&tmp, &text).is_ok() {
-                        let _ = std::fs::rename(&tmp, p);
-                    }
+                    let _ = crate::pagecache::write_atomic(p, &text);
                 }
                 Ok(text)
             }
@@ -549,6 +564,7 @@ impl Session {
 mod tests {
     use super::*;
     use crate::testutil::MockServer;
+    use std::sync::Arc;
 
     fn site(base: &str, home: bool) -> Site {
         Site {
@@ -710,6 +726,74 @@ mod tests {
         let err = s.get_json("/api/a", &[], Duration::ZERO).await.unwrap_err();
         assert!(matches!(err, FetchError::Blocked(_)), "{err:?}");
         assert_eq!(server.requests().len(), 2);
+    }
+
+    /// A tiny site: `/` hands out a new session cookie each time; `/api`
+    /// accepts only the second session onwards (the first one has "expired"),
+    /// after a short pause so concurrent callers all meet the 401.
+    async fn expiring_site() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let homes = Arc::new(AtomicUsize::new(0));
+        let counter = homes.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let reply = if head.starts_with("GET / ") {
+                        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                        format!(
+                            "HTTP/1.1 200 X\r\nset-cookie: sid={n}; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi"
+                        )
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        if head.contains("sid=2") {
+                            "HTTP/1.1 200 X\r\ncontent-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}"
+                                .to_string()
+                        } else {
+                            "HTTP/1.1 401 X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                                .to_string()
+                        }
+                    };
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (url, homes)
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_on_an_expired_session_renew_it_once() {
+        let (url, homes) = expiring_site().await;
+        let mut s = Session::for_tests(site(&url, true), DiskCache::Off);
+        // A renewal spacing the callers' 401s fall inside: a second task
+        // that finds the cookies already renewed must reuse them, not treat
+        // that as a refusal and lock the provider out.
+        s.renew_after = Duration::from_millis(300);
+        s.ensure_cookies(None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let s = &s;
+        let (a, b, c, d) = tokio::join!(
+            s.get_json("/api/a", &[], Duration::ZERO),
+            s.get_json("/api/b", &[], Duration::ZERO),
+            s.get_json("/api/c", &[], Duration::ZERO),
+            s.get_json("/api/d", &[], Duration::ZERO),
+        );
+        for r in [a, b, c, d] {
+            assert_eq!(r.expect("request succeeds after the renewal")["ok"], 1);
+        }
+        assert!(!s.is_blocked(), "no false lockout");
+        assert_eq!(
+            homes.load(Ordering::SeqCst),
+            2,
+            "the first load plus one renewal for all four callers"
+        );
     }
 
     #[tokio::test]
