@@ -952,10 +952,15 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value, factor: Op
         let cl = nz(raw(item, "totalCurrentLiabilities"));
         let re = nz(raw(item, "retainedEarnings"));
         let eq = nz(raw(item, "totalStockholderEquity"));
-        // A reported 0 is real: a debt-free year, not missing data.
-        let debt = raw(item, "shortLongTermDebt")
-            .or_else(|| raw(item, "longTermDebt"))
-            .map(|x| x * factor);
+        // `shortLongTermDebt` is only the current portion: total debt is
+        // that plus `longTermDebt`. A reported 0 is real (a debt-free year)
+        // only when both are given; one key alone at 0 says nothing.
+        let debt = match (raw(item, "shortLongTermDebt"), raw(item, "longTermDebt")) {
+            (Some(short), Some(long)) => Some(short + long),
+            (Some(x), None) | (None, Some(x)) => (x != 0.0).then_some(x),
+            (None, None) => None,
+        }
+        .map(|x| x * factor);
 
         match annual.iter_mut().find(|p| p.end.year() == end.year()) {
             Some(p) => {
@@ -2188,6 +2193,42 @@ mod tests {
         assert_eq!(a[0].total_assets, Some(17.0e9 * 90.0));
         assert_eq!(a[0].equity, Some(11.0e9 * 90.0));
         assert_eq!(a[0].total_liabilities, Some(6.0e9 * 90.0));
+    }
+
+    #[test]
+    fn total_debt_adds_the_current_portion_to_long_term_debt() {
+        let debt = |item: Value| {
+            let mut stmt = json!({"endDate": {"raw": 1790726400}, "totalAssets": {"raw": 100.0}});
+            stmt.as_object_mut()
+                .unwrap()
+                .extend(item.as_object().unwrap().clone());
+            let summary = json!({"balanceSheetHistory": {"balanceSheetStatements": [stmt]}});
+            let mut a = vec![];
+            merge_balance_sheet(&mut a, &summary, Some(1.0));
+            a[0].total_debt
+        };
+        // The review's case: nothing due this year, 5000 long term.
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 0.0}, "longTermDebt": {"raw": 5000.0}})),
+            Some(5000.0)
+        );
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 200.0}, "longTermDebt": {"raw": 5000.0}})),
+            Some(5200.0)
+        );
+        // Both reported as 0: really debt-free.
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 0.0}, "longTermDebt": {"raw": 0.0}})),
+            Some(0.0)
+        );
+        // One key alone counts when it is a number, not when it is 0.
+        assert_eq!(debt(json!({"longTermDebt": {"raw": 700.0}})), Some(700.0));
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 300.0}})),
+            Some(300.0)
+        );
+        assert_eq!(debt(json!({"shortLongTermDebt": {"raw": 0.0}})), None);
+        assert_eq!(debt(json!({})), None);
     }
 
     #[test]
