@@ -123,10 +123,11 @@ response for a test fixture, are in
 ## Limits and fallback
 
 - Each command spends at most a small allowance of provider requests —
-  5 for Alpha Vantage and Massive, 8 for Twelve Data — so one scan can't burn
+  4 for Alpha Vantage, 5 for Massive, 8 for Twelve Data — so one scan can't burn
   a day's allowance or wait a minute for the next slot. The allowance comes
   back after a window: a minute for Massive and Twelve Data, 4 h 48 min for
-  Alpha Vantage (5 a window is its 25 a day). A long-running `serve`, `tui`,
+  Alpha Vantage (4 a window: two windows can touch, so 5 could reach 29 in a
+  day against its limit of 25). A long-running `serve`, `tui`,
   `mcp` or daemon therefore keeps using the provider instead of dropping to
   Yahoo after the first few requests.
 - If a provider reports a rate limit, refuses the key, or can't be reached, StockWise prints one
@@ -134,6 +135,16 @@ response for a test fixture, are in
   after a rate limit, 3 minutes after a network error, an hour after a refused
   key) and uses Yahoo meanwhile. A later pause prints its own notice.
   `--json` output on stdout is unaffected.
+- Yahoo's cookie-and-crumb handshake, which quotes, fundamentals and options
+  need, is tried once per call. When it fails, the failure is remembered for
+  45 seconds and later calls get the same error at once, so a command that makes
+  dozens of fundamentals calls doesn't repeat six requests and their waits for
+  each. Charts and search need no crumb and are unaffected.
+- When AMFI's NAV file or a scheme's NAV history can't be downloaded, `mf`
+  commands use the saved copy only if it is at most 7 days old; `mf nav` and
+  `mf history` then say so under the table and add a `stale` entry (source,
+  reason, day saved) to `--json`. An older copy is an error that says how old
+  it is.
 - A provider's quote is dated by its own trading day (Alpha Vantage's "latest
   trading day", Twelve Data's timestamp, the day of Massive's latest bar), so
   an end-of-day quote from yesterday is never taken for today's trade.

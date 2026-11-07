@@ -1108,7 +1108,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         // Bars with a missing close (today's, while the market is open) are
         // dropped from `closes` only, so index each series from its own end.
         // Levels come from the last completed session, not today's live bar.
-        if let Some(p) = chart.prior_session(chrono::Utc::now(), market) {
+        if let Some(p) = chart.prior_session(
+            chrono::Utc::now(),
+            market::market_of_symbol(&resolved, market),
+        ) {
             let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(p.high, p.low, p.close);
             print_section(&format!(
                 "Support & Resistance (from the {} session)",

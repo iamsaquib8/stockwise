@@ -869,9 +869,21 @@ pub fn parse_timeseries(results: &[Value], fx: &StatementFx) -> (Vec<Period>, Ve
     (q.into_values().collect(), a.into_values().collect())
 }
 
+/// Multiplier that takes `quoteSummary` statement amounts (reported in the
+/// company's `financialCurrency`) into the quote currency. `None` means the
+/// currencies differ and no rate is known, so the amounts must be left out.
+pub fn summary_factor(fin_ccy: Option<&str>, fx: &StatementFx) -> Option<f64> {
+    fin_ccy.map_or(Some(1.0), |c| fx.factor(c))
+}
+
 /// Merge `incomeStatementHistoryQuarterly` into timeseries quarters (fills gaps,
-/// usually the most recent quarter which the timeseries lags on).
-pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
+/// usually the most recent quarter which the timeseries lags on). `factor`
+/// converts the amounts into the quote currency (see [`summary_factor`]); with
+/// no factor nothing is merged.
+pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value, factor: Option<f64>) {
+    let Some(factor) = factor else {
+        return;
+    };
     let Some(hist) = summary
         .get("incomeStatementHistoryQuarterly")
         .and_then(|m| m.get("incomeStatementHistory"))
@@ -879,7 +891,7 @@ pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
     else {
         return;
     };
-    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0);
+    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| x * factor);
     for item in hist {
         let Some(end) =
             raw(item, "endDate").and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
@@ -912,7 +924,12 @@ pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
 }
 
 /// Merge `balanceSheetHistory` into annual periods (fills gaps in assets, liabilities, working capital, retained earnings).
-pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
+/// `factor` converts the amounts into the quote currency (see
+/// [`summary_factor`]); with no factor nothing is merged.
+pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value, factor: Option<f64>) {
+    let Some(factor) = factor else {
+        return;
+    };
     let Some(hist) = summary
         .get("balanceSheetHistory")
         .and_then(|m| m.get("balanceSheetStatements"))
@@ -920,7 +937,7 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
     else {
         return;
     };
-    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0);
+    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| x * factor);
     for item in hist {
         let Some(end) =
             raw(item, "endDate").and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
@@ -935,8 +952,15 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
         let cl = nz(raw(item, "totalCurrentLiabilities"));
         let re = nz(raw(item, "retainedEarnings"));
         let eq = nz(raw(item, "totalStockholderEquity"));
-        // A reported 0 is real: a debt-free year, not missing data.
-        let debt = raw(item, "shortLongTermDebt").or_else(|| raw(item, "longTermDebt"));
+        // `shortLongTermDebt` is only the current portion: total debt is
+        // that plus `longTermDebt`. A reported 0 is real (a debt-free year)
+        // only when both are given; one key alone at 0 says nothing.
+        let debt = match (raw(item, "shortLongTermDebt"), raw(item, "longTermDebt")) {
+            (Some(short), Some(long)) => Some(short + long),
+            (Some(x), None) | (None, Some(x)) => (x != 0.0).then_some(x),
+            (None, None) => None,
+        }
+        .map(|x| x * factor);
 
         match annual.iter_mut().find(|p| p.end.year() == end.year()) {
             Some(p) => {
@@ -1619,21 +1643,68 @@ async fn fetch_nse_filings(client: &YahooClient, sym: &str, days: i64) -> Result
     Ok(parse_nse_filings(&v))
 }
 
-async fn fetch_nse_holdings(client: &YahooClient, sym: &str) -> Result<Vec<Holding>> {
+/// How long the NSE shareholding fetch may take. Each request (the master
+/// list, then one XBRL file per quarter, all through the shared 200 ms
+/// limiter) gets `per_request`; `overall` ends the whole read. Quarters read
+/// by then are kept.
+#[derive(Clone, Copy, Debug)]
+struct HoldingsBudget {
+    per_request: Duration,
+    overall: Duration,
+}
+
+const HOLDINGS_BUDGET: HoldingsBudget = HoldingsBudget {
+    per_request: Duration::from_secs(3),
+    overall: Duration::from_secs(8),
+};
+
+/// Quarters of shareholding wanted: enough for QoQ and YoY changes.
+const HOLDING_QUARTERS: usize = 5;
+/// Filings asked for at most, whatever fails: the quarters wanted plus a few
+/// spare for ones that do not load or parse.
+const MAX_XBRL_REQUESTS: usize = HOLDING_QUARTERS + 3;
+
+/// Shareholding quarters, and a note when fewer than wanted were read
+/// because the budget ran out.
+#[derive(Debug, Default)]
+struct HoldingsRead {
+    holdings: Vec<Holding>,
+    note: Option<String>,
+}
+
+async fn fetch_nse_holdings(
+    client: &YahooClient,
+    sym: &str,
+    budget: HoldingsBudget,
+) -> Result<HoldingsRead> {
+    let deadline = tokio::time::Instant::now() + budget.overall;
     let url = format!(
         "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities&symbol={}",
         url_encode(sym)
     );
-    let master = client
-        .nse_get_json(&url, Duration::from_secs(6 * 3600))
-        .await?;
+    let master = match tokio::time::timeout(
+        budget.per_request.min(budget.overall),
+        client.nse_get_json(&url, Duration::from_secs(6 * 3600)),
+    )
+    .await
+    {
+        Ok(res) => res?,
+        Err(_) => anyhow::bail!(
+            "the list of filings timed out after {}s",
+            budget.per_request.min(budget.overall).as_secs_f64()
+        ),
+    };
     let entries = master.as_array().cloned().unwrap_or_default();
-    // Latest 5 quarters → QoQ and YoY changes. Revised filings repeat a date;
+    // Latest quarters → QoQ and YoY changes. Revised filings repeat a date;
     // keep the first (most recent) per quarter.
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    let mut timed_out = false;
+    let mut requests = 0;
     for e in entries {
-        if out.len() >= 5 {
+        // Filings that do not load or parse are skipped, but only so far: a
+        // long list of dead links must not turn into dozens of requests.
+        if out.len() >= HOLDING_QUARTERS || requests >= MAX_XBRL_REQUESTS {
             break;
         }
         let Some(date) = text(&e, "date").and_then(|d| parse_nse_date(&d)) else {
@@ -1646,17 +1717,47 @@ async fn fetch_nse_holdings(client: &YahooClient, sym: &str) -> Result<Vec<Holdi
             continue;
         }
         let promoter_hint = nse_num(&e, "pr_and_prgrp");
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            timed_out = true;
+            break;
+        }
+        requests += 1;
         // Filed XBRL never changes — cache for a week.
-        if let Ok(xml) = client
-            .nse_get_text(&xbrl, Duration::from_secs(7 * 86_400))
-            .await
-            && let Some(h) = holding_from_xbrl(&xml, date, promoter_hint)
+        match tokio::time::timeout(
+            budget.per_request.min(left),
+            client.nse_get_text(&xbrl, Duration::from_secs(7 * 86_400)),
+        )
+        .await
         {
-            out.push(h);
+            Ok(Ok(xml)) => {
+                if let Some(h) = holding_from_xbrl(&xml, date, promoter_hint) {
+                    out.push(h);
+                }
+            }
+            Ok(Err(_)) => {}
+            Err(_) => timed_out = true,
         }
     }
     out.sort_by_key(|h| h.date);
-    Ok(out)
+    let note = (timed_out && out.len() < HOLDING_QUARTERS).then(|| {
+        format!(
+            "NSE shareholding was slow: read {} of {} quarters within {}s",
+            out.len(),
+            HOLDING_QUARTERS,
+            budget.overall.as_secs_f64()
+        )
+    });
+    if out.is_empty() && timed_out {
+        anyhow::bail!(
+            "timed out: no quarter read within {}s",
+            budget.overall.as_secs_f64()
+        );
+    }
+    Ok(HoldingsRead {
+        holdings: out,
+        note,
+    })
 }
 
 async fn fetch_nse_pit(client: &YahooClient, sym: &str) -> Result<Vec<InsiderTxn>> {
@@ -1821,21 +1922,12 @@ pub async fn fetch(
         },
         async {
             if !needs.ownership {
-                return Ok(vec![]);
+                return Ok(HoldingsRead::default());
             }
             match nse {
-                Some(s) => {
-                    match tokio::time::timeout(
-                        Duration::from_secs(3),
-                        fetch_nse_holdings(client, s),
-                    )
-                    .await
-                    {
-                        Ok(res) => res,
-                        Err(_) => anyhow::bail!("timed out after 3s"),
-                    }
-                }
-                None => Ok(vec![]),
+                // Times each request itself and keeps what it has read.
+                Some(s) => fetch_nse_holdings(client, s, HOLDINGS_BUDGET).await,
+                None => Ok(HoldingsRead::default()),
             }
         },
         async {
@@ -1884,6 +1976,8 @@ pub async fn fetch(
     let yrss = soft(yrss, "Yahoo RSS", &mut warnings);
     let filings = soft(filings, "NSE filings", &mut warnings);
     let holdings = soft(holdings, "NSE shareholding", &mut warnings);
+    warnings.extend(holdings.note);
+    let holdings = holdings.holdings;
     let pit = soft(pit, "NSE insider trades", &mut warnings);
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
@@ -1895,8 +1989,9 @@ pub async fn fetch(
 
     let (quarters, annual) = if needs.statements {
         let (mut q, mut a) = parse_timeseries(&timeseries, &fx);
-        merge_income_statement(&mut q, &summary);
-        merge_balance_sheet(&mut a, &summary);
+        let factor = summary_factor(fin_ccy.as_deref(), &fx);
+        merge_income_statement(&mut q, &summary, factor);
+        merge_balance_sheet(&mut a, &summary, factor);
         (q, a)
     } else {
         (vec![], vec![])
@@ -2027,7 +2122,7 @@ mod tests {
             {"endDate": {"raw": 1790726400}, "totalRevenue": {"raw": 120.0}, "netIncome": {"raw": 12.0}},
             {"endDate": {"raw": 1782777600}, "totalRevenue": {"raw": 999.0}, "netIncome": {"raw": 11.0}}
         ]}});
-        merge_income_statement(&mut q, &summary);
+        merge_income_statement(&mut q, &summary, Some(1.0));
         assert_eq!(q.len(), 3);
         assert_eq!(q[2].revenue, Some(120.0)); // new latest quarter appended
         assert_eq!(q[1].revenue, Some(110.0)); // existing value preserved
@@ -2063,6 +2158,103 @@ mod tests {
         assert!((a[0].eps.unwrap() - 72.0).abs() < 1e-9);
         // Share counts are not money.
         assert_eq!(a[0].shares_outstanding, Some(4_050_000_000.0));
+    }
+
+    /// Infosys: statements in USD, share in INR. The newest quarter only
+    /// comes from `quoteSummary` and must be converted like the others.
+    fn infy_summary() -> Value {
+        json!({
+            "financialData": {"financialCurrency": "USD"},
+            "incomeStatementHistoryQuarterly": {"incomeStatementHistory": [
+                {"endDate": {"raw": 1790726400}, "totalRevenue": {"raw": 5.08e9},
+                 "netIncome": {"raw": 0.8e9}, "operatingIncome": {"raw": 1.1e9}}
+            ]},
+            "balanceSheetHistory": {"balanceSheetStatements": [
+                {"endDate": {"raw": 1790726400}, "totalAssets": {"raw": 17.0e9},
+                 "totalLiab": {"raw": 6.0e9}, "totalStockholderEquity": {"raw": 11.0e9},
+                 "shortLongTermDebt": {"raw": 0.1e9}, "longTermDebt": {"raw": 0.5e9}}
+            ]}
+        })
+    }
+
+    #[test]
+    fn summary_amounts_convert_like_the_timeseries() {
+        let ts = vec![json!({"meta": {"type": ["quarterlyTotalRevenue"]},
+            "quarterlyTotalRevenue": [usd_item("2026-03-31", 4.9e9), usd_item("2026-06-30", 5.0e9)]})];
+        let fx = StatementFx::new(Some("INR"), [("USD".to_string(), 90.0)]);
+        let summary = infy_summary();
+        let factor = summary_factor(financial_currency(&summary).as_deref(), &fx);
+        assert_eq!(factor, Some(90.0));
+        let (mut q, mut a) = parse_timeseries(&ts, &fx);
+        merge_income_statement(&mut q, &summary, factor);
+        merge_balance_sheet(&mut a, &summary, factor);
+        assert_eq!(q.len(), 3);
+        assert_eq!(
+            q[2].revenue,
+            Some(5.08e9 * 90.0),
+            "newest quarter is in INR"
+        );
+        let qoq = q[2].revenue.unwrap() / q[1].revenue.unwrap() - 1.0;
+        assert!((qoq - 0.016).abs() < 1e-9, "QoQ growth is small, got {qoq}");
+        assert_eq!(q[2].operating_income, Some(1.1e9 * 90.0));
+        assert_eq!(a[0].total_assets, Some(17.0e9 * 90.0));
+        assert_eq!(a[0].equity, Some(11.0e9 * 90.0));
+        assert_eq!(a[0].total_liabilities, Some(6.0e9 * 90.0));
+    }
+
+    #[test]
+    fn total_debt_adds_the_current_portion_to_long_term_debt() {
+        let debt = |item: Value| {
+            let mut stmt = json!({"endDate": {"raw": 1790726400}, "totalAssets": {"raw": 100.0}});
+            stmt.as_object_mut()
+                .unwrap()
+                .extend(item.as_object().unwrap().clone());
+            let summary = json!({"balanceSheetHistory": {"balanceSheetStatements": [stmt]}});
+            let mut a = vec![];
+            merge_balance_sheet(&mut a, &summary, Some(1.0));
+            a[0].total_debt
+        };
+        // The review's case: nothing due this year, 5000 long term.
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 0.0}, "longTermDebt": {"raw": 5000.0}})),
+            Some(5000.0)
+        );
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 200.0}, "longTermDebt": {"raw": 5000.0}})),
+            Some(5200.0)
+        );
+        // Both reported as 0: really debt-free.
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 0.0}, "longTermDebt": {"raw": 0.0}})),
+            Some(0.0)
+        );
+        // One key alone counts when it is a number, not when it is 0.
+        assert_eq!(debt(json!({"longTermDebt": {"raw": 700.0}})), Some(700.0));
+        assert_eq!(
+            debt(json!({"shortLongTermDebt": {"raw": 300.0}})),
+            Some(300.0)
+        );
+        assert_eq!(debt(json!({"shortLongTermDebt": {"raw": 0.0}})), None);
+        assert_eq!(debt(json!({})), None);
+    }
+
+    #[test]
+    fn summary_amounts_without_a_rate_are_left_out() {
+        let summary = infy_summary();
+        let fx = StatementFx::new(Some("INR"), []);
+        let factor = summary_factor(financial_currency(&summary).as_deref(), &fx);
+        assert_eq!(factor, None);
+        let (mut q, mut a) = (vec![], vec![]);
+        merge_income_statement(&mut q, &summary, factor);
+        merge_balance_sheet(&mut a, &summary, factor);
+        assert!(
+            q.is_empty() && a.is_empty(),
+            "no raw USD figure is shown as INR"
+        );
+        // Same currency, or no currency stated: taken as they are.
+        let same = StatementFx::new(Some("USD"), []);
+        assert_eq!(summary_factor(Some("USD"), &same), Some(1.0));
+        assert_eq!(summary_factor(None, &fx), Some(1.0));
     }
 
     #[test]
@@ -2114,6 +2306,131 @@ mod tests {
         assert!((h.retail.unwrap() - 18.96).abs() < 1e-6);
         assert_eq!(h.promoter, Some(0.0));
         assert_eq!(h.pledged, Some(false));
+    }
+
+    const XBRL: &str = r#"<in-bse-shp:ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="InstitutionsForeign_ContextI" decimals="INF" unitRef="pure">0.1921</in-bse-shp:ShareholdingAsAPercentageOfTotalNumberOfShares>"#;
+
+    /// NSE stand-in: the master list names five quarters; filings whose path
+    /// is in `slow` take 5 s to answer, the others answer at once.
+    async fn nse_holdings_server(slow: &'static [&'static str]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let dates = ["30-SEP-2026", "30-JUN-2026", "31-MAR-2026", "31-DEC-2025"];
+        let master: Vec<Value> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                json!({"date": d, "pr_and_prgrp": "50.0",
+                       "xbrl": format!("https://nsearchives.nseindia.com/x/q{i}.xml")})
+            })
+            .collect();
+        let master = Value::Array(master).to_string();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (master, slow) = (master.clone(), slow);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    if slow.iter().any(|p| target.ends_with(p)) {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    let body = if target.contains("holdings-master") {
+                        master
+                    } else {
+                        XBRL.to_string()
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        url
+    }
+
+    fn nse_client(server: &str) -> YahooClient {
+        let base = server.to_string();
+        YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+            let u = reqwest::Url::parse(url).unwrap();
+            format!("{base}{}", u.path()) + &u.query().map_or(String::new(), |q| format!("?{q}"))
+        })
+    }
+
+    #[tokio::test]
+    async fn a_slow_filing_costs_one_quarter_not_all_of_them() {
+        let server = nse_holdings_server(&["q1.xml"]).await;
+        let budget = HoldingsBudget {
+            per_request: Duration::from_millis(300),
+            overall: Duration::from_secs(4),
+        };
+        let r = fetch_nse_holdings(&nse_client(&server), "TCS", budget)
+            .await
+            .unwrap();
+        assert_eq!(r.holdings.len(), 3, "the other three quarters are kept");
+        let note = r.note.expect("a short read is reported");
+        assert!(note.contains("read 3 of 5 quarters"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn the_overall_deadline_returns_the_quarters_read_so_far() {
+        // From the second filing on, every answer takes too long.
+        let server = nse_holdings_server(&["q1.xml", "q2.xml", "q3.xml"]).await;
+        let budget = HoldingsBudget {
+            per_request: Duration::from_secs(10),
+            overall: Duration::from_millis(600),
+        };
+        let started = std::time::Instant::now();
+        let r = fetch_nse_holdings(&nse_client(&server), "TCS", budget)
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(r.holdings.len(), 1);
+        assert!(r.note.unwrap().contains("read 1 of 5 quarters"));
+    }
+
+    #[tokio::test]
+    async fn a_list_of_dead_filings_is_not_asked_for_in_full() {
+        let months = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let master: Vec<Value> = (2020..2022)
+            .flat_map(|y| months.iter().map(move |m| (y, m)))
+            .enumerate()
+            .map(|(i, (y, m))| {
+                json!({"date": format!("28-{m}-{y}"),
+                       "xbrl": format!("https://nsearchives.nseindia.com/x/q{i}.xml")})
+            })
+            .collect();
+        let server = crate::testutil::MockServer::start(vec![
+            (200, Value::Array(master).to_string()),
+            (200, "not xbrl".into()),
+        ])
+        .await;
+        let r = fetch_nse_holdings(&nse_client(&server.url), "TCS", HOLDINGS_BUDGET)
+            .await
+            .unwrap();
+        assert!(r.holdings.is_empty());
+        // The master list and then no more than MAX_XBRL_REQUESTS filings.
+        assert_eq!(server.requests().len(), 1 + MAX_XBRL_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn nothing_read_before_the_deadline_is_an_error() {
+        let server = nse_holdings_server(&["q0.xml", "q1.xml", "q2.xml", "q3.xml"]).await;
+        let budget = HoldingsBudget {
+            per_request: Duration::from_millis(200),
+            overall: Duration::from_millis(500),
+        };
+        let err = fetch_nse_holdings(&nse_client(&server), "TCS", budget)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no quarter read"), "{err:#}");
     }
 
     #[test]
