@@ -596,6 +596,9 @@ stockwise options TCS                     expected moves (same as `options moves
         mode: DaemonMode,
         /// Paper capital for intraday mode (default 25000)
         amount: Option<f64>,
+        /// Intraday: stop after one session instead of waiting for the next
+        #[arg(long)]
+        once: bool,
     },
 
     /// Paper-trading simulator — practise without real money
@@ -3372,8 +3375,8 @@ async fn dispatch(
             strategy,
         } => commands::cmd_intraday(amount, target, strategy.as_deref(), m).await,
         Commands::Longterm { amount } => commands::cmd_longterm(amount, m).await,
-        Commands::Daemon { mode, amount } => {
-            commands::cmd_daemon(&value_name(mode), amount, m).await
+        Commands::Daemon { mode, amount, once } => {
+            commands::cmd_daemon(&value_name(mode), amount, m, once).await
         }
         Commands::Sim { action } => match action {
             Some(SimCmd::Reset { yes }) => commands::cmd_sim_reset(yes),
@@ -5557,6 +5560,23 @@ mod tests {
         assert_eq!(value_name(TaxCountry::In), "in");
         assert_eq!(value_name(AlertWhen::Above), "above");
         assert_eq!(value_name(DaemonMode::Longterm), "longterm");
+    }
+
+    #[test]
+    fn daemon_once_flag_parses() {
+        let once = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Commands::Daemon { once, .. } => once,
+            _ => panic!("not a daemon command"),
+        };
+        assert!(!once(&["stockwise", "daemon", "intraday", "25000"]));
+        assert!(once(&["stockwise", "daemon", "intraday", "--once"]));
+        assert!(once(&[
+            "stockwise",
+            "daemon",
+            "intraday",
+            "25000",
+            "--once"
+        ]));
     }
 
     #[test]

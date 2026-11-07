@@ -8,13 +8,13 @@ use chrono::{DateTime, Datelike, Utc};
 use std::collections::HashMap;
 use std::time::Duration;
 
-pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Result<()> {
+pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: bool) -> Result<()> {
     // Both loops follow exchange sessions; crypto and FX have none.
     market.require_bot_support("daemon")?;
     let csym = market.currency_symbol();
 
     match mode {
-        "intraday" => return run_intraday(amount, market).await,
+        "intraday" => return run_intraday(amount, market, once).await,
 
         "longterm" => {
             print_header("Long-Term Daemon — Daily Run");
@@ -752,7 +752,7 @@ async fn stop_intraday(state: &mut DaemonState, market: Market, notifier: &Notif
     Ok(())
 }
 
-async fn run_intraday(amount: Option<f64>, market: Market) -> Result<()> {
+async fn run_intraday(amount: Option<f64>, market: Market, once: bool) -> Result<()> {
     let csym = currency(market);
     let code = market_code(market);
     let notifier = Notifier::from_env();
@@ -918,11 +918,24 @@ async fn run_intraday(amount: Option<f64>, market: Market) -> Result<()> {
                         _ = eod_ai_report(&state, market) => {}
                         _ = shutdown.wait() => {}
                     }
+                    if once {
+                        println!(
+                            "\n  {} Daemon complete for today. Exiting (--once).",
+                            "✓".green().bold()
+                        );
+                        return Ok(());
+                    }
+                    // The state is settled now, so the next ticks only wait;
+                    // the day rollover above starts a fresh state for the
+                    // next trading day (weekends and holidays are `Closed`).
+                    let next = clock::next_open(market, Utc::now())
+                        .map(|t| clock::format_local(market, t))
+                        .unwrap_or_else(|| "unknown".into());
                     println!(
-                        "\n  {} Daemon complete for today. Exiting.",
-                        "✓".green().bold()
+                        "\n  {} Session complete. Waiting for the next one ({}). Ctrl+C to stop.",
+                        "✓".green().bold(),
+                        next
                     );
-                    return Ok(());
                 }
                 t.wait
             }
@@ -1010,6 +1023,76 @@ mod tests {
         assert!(msg.title.contains("kill switch"));
         assert_eq!(msg.body.lines().count(), 2);
         assert!(events_message(&[], "₹").is_none());
+    }
+
+    #[tokio::test]
+    async fn settled_session_keeps_waiting_for_the_next_one() {
+        // Friday 2026-10-23 15:25 IST is post-market (close 15:30 - 10 min).
+        let now = clock::at(
+            Market::In,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+            chrono::NaiveTime::from_hms_opt(15, 25, 0).unwrap(),
+        );
+        assert_eq!(clock::market_phase(Market::In, now), Phase::PostMarket);
+        let mut state = DaemonState::new(
+            clock::session_date(Market::In, now),
+            "IN",
+            DEFAULT_CAPITAL,
+            TARGET_PCT,
+            now,
+        );
+        let mut feed = Feed::default();
+        let mut scanned = false;
+
+        // No trades today: the post-market tick settles the day and is `done`
+        // (with `--once` the loop exits here).
+        let t = tick(
+            &mut state,
+            Phase::PostMarket,
+            Market::In,
+            &mut feed,
+            &mut scanned,
+            now,
+        )
+        .await
+        .unwrap();
+        assert!(t.done);
+        assert!(state.settled);
+
+        // Without `--once` the loop goes on: a settled state never reports
+        // `done` again and sleeps (bounded) until the next session.
+        let t = tick(
+            &mut state,
+            Phase::PostMarket,
+            Market::In,
+            &mut feed,
+            &mut scanned,
+            now,
+        )
+        .await
+        .unwrap();
+        assert!(!t.done);
+        assert!(t.events.is_empty());
+        assert_eq!(t.wait, Duration::from_secs(1800));
+
+        // The weekend that follows is `Closed` all day; the next wake-up is
+        // before Monday's pre-market, never a busy loop.
+        let sat = clock::at(
+            Market::In,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 24).unwrap(),
+            chrono::NaiveTime::from_hms_opt(11, 0, 0).unwrap(),
+        );
+        assert_eq!(clock::market_phase(Market::In, sat), Phase::Closed);
+        let mon_open = clock::next_open(Market::In, sat).unwrap();
+        assert_eq!(
+            clock::session_date(Market::In, mon_open).to_string(),
+            "2026-10-26"
+        );
+
+        // Monday morning a fresh state is not settled and enters the normal flow.
+        let monday = clock::session_date(Market::In, mon_open);
+        let fresh = DaemonState::new(monday, "IN", state.capital, state.target_pct, mon_open);
+        assert!(!fresh.settled);
     }
 
     #[test]
