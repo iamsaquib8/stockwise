@@ -1205,6 +1205,10 @@ pub(crate) struct HarvestSummary {
     pub(crate) loss_candidates: Vec<HarvestRow>,
     pub(crate) gain_harvest_candidates: Vec<HarvestRow>,
     pub(crate) unpriced: Vec<String>,
+    /// India: holdings left out because they are not taxed like listed
+    /// shares (non-equity ETFs, debt and other funds, SGBs), so neither the
+    /// ₹1.25 lakh exemption nor the 111A/112A rates apply to them.
+    pub(crate) other_rules: Vec<OtherRulesRow>,
 }
 
 pub(crate) fn compute_harvest(
@@ -1229,10 +1233,20 @@ pub(crate) fn compute_harvest(
     let mut total_lt_loss = 0.0;
     let mut total_tax_saved = 0.0;
 
+    let mut other_rules = Vec::new();
     for h in &portfolio.holdings {
         let Some(price) = val.price(&h.symbol) else {
             continue;
         };
+        if country == Country::India
+            && let IndiaRules::Other(reason) = india_rules(&h.symbol, val)
+        {
+            other_rules.push(OtherRulesRow {
+                symbol: h.symbol.clone(),
+                reason,
+            });
+            continue;
+        }
         let scale = val
             .currency(&h.symbol)
             .and_then(|cur| country.currency_scale(&cur))
@@ -1318,6 +1332,7 @@ pub(crate) fn compute_harvest(
         loss_candidates,
         gain_harvest_candidates,
         unpriced: report.unpriced,
+        other_rules,
     }
 }
 
@@ -1444,6 +1459,15 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             .dimmed()
             .italic()
     );
+    if !summary.other_rules.is_empty() {
+        println!(
+            "  {} Not checked — taxed under other rules than listed shares (no ₹1.25 lakh exemption):",
+            "!".yellow()
+        );
+        for o in &summary.other_rules {
+            println!("    {} {}", o.symbol.cyan(), o.reason.dimmed());
+        }
+    }
     if !summary.unpriced.is_empty() {
         println!(
             "  {} No live price for {} — not checked.",
@@ -1602,7 +1626,8 @@ pub(crate) struct TaxReport {
 /// Whether Indian capital-gains tax treats `symbol` like a listed share
 /// (Sec. 111A/112A): shares and equity-oriented funds do; debt and other
 /// funds, funds of unknown category and SGBs don't (the reason says how
-/// they are taxed instead).
+/// they are taxed instead). Gold, silver, liquid, debt and international
+/// ETFs are not listed shares either.
 enum IndiaRules {
     Listed,
     EquityFund,
@@ -1632,6 +1657,9 @@ fn india_rules(symbol: &str, val: &Valuation) -> IndiaRules {
                     .into(),
             ),
         };
+    }
+    if let Some(kind) = offmarket::non_equity_etf(symbol) {
+        return IndiaRules::Other(format!("{} — {}", kind.name(), kind.rule()));
     }
     if offmarket::is_sgb(symbol) {
         return IndiaRules::Other(

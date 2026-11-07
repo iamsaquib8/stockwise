@@ -265,6 +265,83 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
     assert_eq!((s.total_stcg, s.total_ltcg), (0.0, 0.0));
 }
 
+/// The issue's repro for each ETF: 1000 units bought 2026-05-04 at 60, 600 sold
+/// 2026-09-10 at 75 (₹9,000 gain), 400 still held and priced at 80.
+fn etf_portfolio(symbol: &str) -> Portfolio {
+    let mut p = Portfolio::default();
+    p.add_lot(symbol, Lot::new(1000.0, 60.0, "2026-05-04", "manual"));
+    p.sell_fifo(symbol, 600.0, 75.0, "2026-09-10", "manual")
+        .unwrap();
+    p
+}
+
+#[test]
+fn tax_in_leaves_gold_and_liquid_etfs_out_of_111a_and_112a() {
+    for symbol in ["GOLDBEES.NS", "SILVERBEES.NS", "LIQUIDBEES.NS", "MON100.NS"] {
+        let p = etf_portfolio(symbol);
+        let quotes = vec![quote(symbol, Some(80.0), None)];
+        let r = tax_report(Country::India, &p, &valued(&p, quotes), day("2026-11-01"));
+        assert!(r.sales.is_empty(), "{symbol}");
+        assert!(r.holdings.is_empty(), "{symbol}");
+        assert_eq!(r.realized.st_gain + r.realized.lt_gain, 0.0, "{symbol}");
+        assert_eq!(r.other_rules.len(), 1, "{symbol}");
+        assert_eq!(r.other_rules[0].symbol, symbol);
+        assert!(r.other_rules[0].reason.contains("ETF"), "{symbol}");
+    }
+    // An equity ETF is still a listed share: ₹9,000 short-term at 20%.
+    let p = etf_portfolio("NIFTYBEES.NS");
+    let quotes = vec![quote("NIFTYBEES.NS", Some(80.0), None)];
+    let r = tax_report(Country::India, &p, &valued(&p, quotes), day("2026-11-01"));
+    assert!(r.other_rules.is_empty());
+    assert_eq!(r.realized.st_gain, 9_000.0);
+    assert_eq!(tax::estimate(Country::India, r.realized).st_tax, 1_800.0);
+}
+
+#[test]
+fn harvest_does_not_offer_non_equity_etfs_for_the_exemption() {
+    // Held since 2024: a long-term gain a listed share could harvest tax-free.
+    let mut p = Portfolio::default();
+    for sym in ["GOLDBEES.NS", "NIFTYBEES.NS", "LIQUIDBEES.NS"] {
+        p.add_lot(sym, Lot::new(100.0, 50.0, "2024-01-10", "manual"));
+    }
+    let quotes = vec![
+        quote("GOLDBEES.NS", Some(80.0), None),
+        quote("NIFTYBEES.NS", Some(80.0), None),
+        quote("LIQUIDBEES.NS", Some(40.0), None),
+    ];
+    let h =
+        super::holdings::compute_harvest(&p, &valued(&p, quotes), Market::In, day("2026-11-01"));
+    let names = |rows: &[super::holdings::HarvestRow]| {
+        rows.iter().map(|r| r.symbol.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(names(&h.gain_harvest_candidates), ["NIFTYBEES.NS"]);
+    // The liquid ETF's loss is not a 111A/112A loss either.
+    assert!(h.loss_candidates.is_empty());
+    let mut left_out: Vec<&str> = h.other_rules.iter().map(|o| o.symbol.as_str()).collect();
+    left_out.sort();
+    assert_eq!(left_out, ["GOLDBEES.NS", "LIQUIDBEES.NS"]);
+}
+
+#[test]
+fn tax_export_and_advance_tax_skip_non_equity_etfs() {
+    let mut p = etf_portfolio("GOLDBEES.NS");
+    p.add_lot(
+        "NIFTYBEES.NS",
+        Lot::new(100.0, 60.0, "2026-05-04", "manual"),
+    );
+    p.sell_fifo("NIFTYBEES.NS", 100.0, 75.0, "2026-09-10", "manual")
+        .unwrap();
+    let schedule = crate::tax_export::india_schedule(&p.realized, day("2026-04-01"), |_| None);
+    assert_eq!(schedule.sales.len(), 1);
+    assert_eq!(schedule.sales[0].symbol, "NIFTYBEES.NS");
+    assert_eq!(schedule.other_rules, ["GOLDBEES.NS"]);
+    assert_eq!(schedule.summary.stcg_gains, 1_500.0);
+    assert!(schedule.notes.iter().any(|n| n.contains("GOLDBEES.NS")));
+    // Only the NIFTYBEES gain is in the advance-tax base.
+    let adv = super::planning::advance_tax_schedule(&p, Some("2026-27"), None).unwrap();
+    assert_eq!((adv.total_stcg, adv.total_ltcg), (1_500.0, 0.0));
+}
+
 #[test]
 fn movers_leave_out_quotes_without_a_change() {
     let quotes = [
@@ -763,6 +840,7 @@ fn goal_and_tax_export_json_shapes() {
         "virtual_digital_assets",
         "intraday_sales",
         "intraday_gain",
+        "other_rules",
         "notes",
     ];
     assert_eq!(keys(&india), schedule_keys);
@@ -799,7 +877,15 @@ fn goal_and_tax_export_json_shapes() {
     let us_keys: Vec<&str> = schedule_keys
         .iter()
         .copied()
-        .filter(|k| !["virtual_digital_assets", "intraday_sales", "intraday_gain"].contains(k))
+        .filter(|k| {
+            ![
+                "virtual_digital_assets",
+                "intraday_sales",
+                "intraday_gain",
+                "other_rules",
+            ]
+            .contains(k)
+        })
         .collect();
     assert_eq!(keys(&us), us_keys);
     assert_eq!(

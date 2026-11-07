@@ -231,6 +231,9 @@ pub struct IndiaSchedule {
     pub intraday_sales: usize,
     /// Net gain or loss of those sales.
     pub intraday_gain: f64,
+    /// Symbols sold this year that 111A/112A do not cover (gold, silver,
+    /// liquid, debt and international ETFs), left out.
+    pub other_rules: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -253,6 +256,13 @@ pub fn india_schedule(
     virtual_digital_assets.dedup();
     // Bought and sold on one day: speculative income (Sec. 43(5)), not 111A/112A.
     let (intraday, kept): (Vec<_>, Vec<_>) = kept.into_iter().partition(|(s, _)| s.is_intraday());
+    // Gold, silver, liquid, debt and international ETFs are not listed shares.
+    let (other, kept): (Vec<_>, Vec<_>) = kept
+        .into_iter()
+        .partition(|(s, _)| crate::offmarket::non_equity_etf(&s.symbol).is_some());
+    let mut other_rules: Vec<String> = other.iter().map(|(s, _)| s.symbol.clone()).collect();
+    other_rules.sort();
+    other_rules.dedup();
     let intraday_sales = intraday.len();
     let intraday_gain = round(
         intraday
@@ -367,6 +377,14 @@ pub fn india_schedule(
             intraday_gain.abs()
         ));
     }
+    if !other_rules.is_empty() {
+        notes.push(format!(
+            "Not included (not listed shares or equity-oriented funds, so not 111A/112A — gold, silver \
+             and international ETF units: 12.5% after 12 months with no ₹1.25 lakh exemption, shorter \
+             holdings at your slab rate; liquid and debt ETFs: slab rate): {}",
+            other_rules.join(", ")
+        ));
+    }
     if !virtual_digital_assets.is_empty() {
         notes.push(format!(
             "Not included (crypto is a virtual digital asset — 30% under section 115BBH, reported \
@@ -394,6 +412,7 @@ pub fn india_schedule(
         virtual_digital_assets,
         intraday_sales,
         intraday_gain,
+        other_rules,
         notes,
     }
 }

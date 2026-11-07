@@ -137,6 +137,138 @@ pub fn is_fund(symbol: &str) -> bool {
     fund_id(symbol).is_some()
 }
 
+/// Exchange-traded funds that Indian tax does not treat like equity shares
+/// or equity-oriented funds (no Sec. 111A/112A, no ₹1.25 lakh exemption).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EtfKind {
+    Gold,
+    Silver,
+    /// Funds that hold foreign shares (Nasdaq, S&P, Hang Seng).
+    International,
+    /// Liquid and overnight ETFs.
+    Liquid,
+    /// Bond, gilt and SDL ETFs.
+    Debt,
+}
+
+impl EtfKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gold => "gold ETF",
+            Self::Silver => "silver ETF",
+            Self::International => "international ETF",
+            Self::Liquid => "liquid ETF",
+            Self::Debt => "debt ETF",
+        }
+    }
+
+    /// How a sale is taxed, for the "other rules" lists.
+    pub fn rule(self) -> &'static str {
+        match self {
+            Self::Gold | Self::Silver | Self::International => {
+                "not an equity-oriented fund: 12.5% after 12 months with no ₹1.25 lakh exemption, \
+                 short-term gains at your slab rate"
+            }
+            Self::Liquid | Self::Debt => {
+                "debt ETF (Sec. 50AA): gains taxed at your slab rate however long you hold it"
+            }
+        }
+    }
+}
+
+/// Well-known NSE ETFs that are not equity-oriented, by symbol. A table of
+/// names beats treating every ETF as a listed share; an ETF missing from it
+/// is still counted like one (see the `tax` docs).
+const NON_EQUITY_ETFS: &[(&str, EtfKind)] = &[
+    ("GOLDBEES", EtfKind::Gold),
+    ("GOLDIETF", EtfKind::Gold),
+    ("GOLDCASE", EtfKind::Gold),
+    ("GOLDSHARE", EtfKind::Gold),
+    ("AXISGOLD", EtfKind::Gold),
+    ("HDFCGOLD", EtfKind::Gold),
+    ("KOTAKGOLD", EtfKind::Gold),
+    ("SBIGETS", EtfKind::Gold),
+    ("LICMFGOLD", EtfKind::Gold),
+    ("BSLGOLDETF", EtfKind::Gold),
+    ("IVZINGOLD", EtfKind::Gold),
+    ("QGOLDHALF", EtfKind::Gold),
+    ("TATAGOLD", EtfKind::Gold),
+    ("GOLD1", EtfKind::Gold),
+    ("UNIONGOLD", EtfKind::Gold),
+    ("SILVERBEES", EtfKind::Silver),
+    ("SILVERIETF", EtfKind::Silver),
+    ("SILVER1", EtfKind::Silver),
+    ("HDFCSILVER", EtfKind::Silver),
+    ("AXISILVER", EtfKind::Silver),
+    ("TATSILV", EtfKind::Silver),
+    ("SILVRETF", EtfKind::Silver),
+    ("ESILVER", EtfKind::Silver),
+    ("SBISILVER", EtfKind::Silver),
+    ("MON100", EtfKind::International),
+    ("MONQ50", EtfKind::International),
+    ("MAFANG", EtfKind::International),
+    ("MAHKTECH", EtfKind::International),
+    ("MASPTOP50", EtfKind::International),
+    ("HNGSNGBEES", EtfKind::International),
+    ("N100", EtfKind::International),
+    ("LIQUIDBEES", EtfKind::Liquid),
+    ("LIQUIDCASE", EtfKind::Liquid),
+    ("LIQUIDIETF", EtfKind::Liquid),
+    ("LIQUID", EtfKind::Liquid),
+    ("LIQUIDADD", EtfKind::Liquid),
+    ("LIQUIDSHRI", EtfKind::Liquid),
+    ("LIQUIDSBI", EtfKind::Liquid),
+    ("LIQUIDETF", EtfKind::Liquid),
+    ("CASHIETF", EtfKind::Liquid),
+    ("GROWWLIQID", EtfKind::Liquid),
+    ("GILT5YBEES", EtfKind::Debt),
+    ("LTGILTBEES", EtfKind::Debt),
+    ("LICNETFGSC", EtfKind::Debt),
+    ("SETF10GILT", EtfKind::Debt),
+    ("NETFGILT5Y", EtfKind::Debt),
+    ("NETFLTGILT", EtfKind::Debt),
+];
+
+/// Which kind of non-equity ETF a `GOLDBEES` / `GOLDBEES.NS` symbol is, or
+/// `None` for shares, equity ETFs (`NIFTYBEES`) and anything unknown. Beyond
+/// the table, Nippon-style `…BEES` names that say gold, silver, liquid, gilt,
+/// Nasdaq or Hang Seng, and Bharat Bond (`EBBETF…`) names, count too.
+pub fn non_equity_etf(symbol: &str) -> Option<EtfKind> {
+    let upper = symbol.trim().to_ascii_uppercase();
+    let bare = upper
+        .strip_suffix(".NS")
+        .or_else(|| upper.strip_suffix(".BO"))
+        .unwrap_or(&upper);
+    if let Some((_, kind)) = NON_EQUITY_ETFS.iter().find(|(s, _)| *s == bare) {
+        return Some(*kind);
+    }
+    if bare.starts_with("EBBETF") {
+        return Some(EtfKind::Debt);
+    }
+    if bare.starts_with("LIQUID") {
+        return Some(EtfKind::Liquid);
+    }
+    if bare.ends_with("BEES") {
+        let has = |w: &str| bare.contains(w);
+        if has("GOLD") {
+            return Some(EtfKind::Gold);
+        }
+        if has("SILVER") {
+            return Some(EtfKind::Silver);
+        }
+        if has("LIQUID") {
+            return Some(EtfKind::Liquid);
+        }
+        if has("GILT") {
+            return Some(EtfKind::Debt);
+        }
+        if has("NASDAQ") || has("HNGSNG") || has("SNP") {
+            return Some(EtfKind::International);
+        }
+    }
+    None
+}
+
 /// The NSE symbol or ISIN of a Sovereign Gold Bond holding: `SGBNOV26.NS`
 /// and `SGBNOV26` → `SGBNOV26`, an outstanding tranche's ISIN
 /// (`IN0020180314`) as is. Only `SGB…` symbols with a digit count, so a
@@ -478,6 +610,50 @@ pub async fn price(src: &impl DataSource, symbols: &[String], yahoo: &[Quote]) -
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn non_equity_etfs_are_told_from_shares_and_equity_etfs() {
+        for (sym, kind) in [
+            ("GOLDBEES", EtfKind::Gold),
+            ("GOLDBEES.NS", EtfKind::Gold),
+            ("goldbees.ns", EtfKind::Gold),
+            ("SILVERBEES.NS", EtfKind::Silver),
+            ("LIQUIDBEES.NS", EtfKind::Liquid),
+            ("LIQUIDCASE.NS", EtfKind::Liquid),
+            ("MON100.NS", EtfKind::International),
+            ("HNGSNGBEES.NS", EtfKind::International),
+            ("EBBETF0433.NS", EtfKind::Debt),
+            ("LTGILTBEES.NS", EtfKind::Debt),
+            // A name that says gold on a BEES fund not in the table.
+            ("NEWGOLDBEES.NS", EtfKind::Gold),
+        ] {
+            assert_eq!(non_equity_etf(sym), Some(kind), "{sym}");
+        }
+        // Equity ETFs, shares (even with gold or silver in the name), funds, SGBs.
+        for sym in [
+            "NIFTYBEES.NS",
+            "BANKBEES.NS",
+            "JUNIORBEES.NS",
+            "MID150BEES.NS",
+            "CPSEETF.NS",
+            "SILVERTUC.NS",
+            "GOLDIAM.NS",
+            "TITAN.NS",
+            "RELIANCE.NS",
+            "AAPL",
+            "MF:120503",
+            "SGBNOV26.NS",
+        ] {
+            assert_eq!(non_equity_etf(sym), None, "{sym}");
+        }
+    }
+
+    #[test]
+    fn etf_rules_say_how_the_gain_is_taxed() {
+        assert!(EtfKind::Gold.rule().contains("no ₹1.25 lakh exemption"));
+        assert!(EtfKind::Liquid.rule().contains("slab rate"));
+        assert_eq!(EtfKind::Silver.name(), "silver ETF");
+    }
 
     /// The AMFI fixture from `funds` (PPFAS equity plans, an Axis plan with
     /// no NAV) plus a debt fund and a wound-up scheme.

@@ -355,8 +355,9 @@ pub(crate) fn advance_tax_schedule(
         else {
             continue;
         };
-        // Same-day sales are speculative income at slab rates, not 111A/112A gains.
-        if s.is_intraday() {
+        // Same-day sales are speculative income at slab rates, and gold, silver,
+        // liquid, debt and international ETFs are not 111A/112A: not in this schedule.
+        if s.is_intraday() || crate::offmarket::non_equity_etf(&s.symbol).is_some() {
             continue;
         }
         let is_lt = match NaiveDate::parse_from_str(&s.buy_date, "%Y-%m-%d").ok() {
