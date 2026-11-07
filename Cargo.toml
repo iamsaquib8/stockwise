@@ -118,3 +118,7 @@ tower = { version = "0.5", features = ["util"] }
 [profile.release]
 opt-level = 3
 lto = true
+# Smaller binary (symbols are stripped) and better inlining across crates.
+# `panic` stays "unwind": the broken-pipe hook and tokio task panics need it.
+codegen-units = 1
+strip = "symbols"
