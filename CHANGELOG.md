@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Omit profile-less ETFs from single-stock concentration risk alerts, categorizing them properly under "Funds & ETFs Analyzed" with `(categorized by ETF profile)`.
   - Accurately categorize asset classes (`Equity`, `Commodity` for Gold/Silver ETFs, `Cash` for Liquid ETFs) and market caps (`Large Cap` for Nifty 50/Next 50, `Mid Cap` for Midcap 150) instead of flagging them as `Unclassified`.
 - `longterm`: the SIP calculator now grows each monthly instalment only for the time it stays invested (₹15,000 a month at 12% gives ₹12.37 L after 5 years, not ₹15.86 L), the "SIP for" target reads `$1M` for US stocks, and the "Suggested SIP Allocation" block is gone ([#67](https://github.com/iamsaquib8/stockwise/issues/67), [#189](https://github.com/iamsaquib8/stockwise/issues/189)).
+- Yahoo Finance: commands no longer open the Yahoo session at start-up, so `history`, `backtest` and a provider-backed `quote` still work when Yahoo refuses the session token, and commands that never touch Yahoo send no request at all ([#154](https://github.com/iamsaquib8/stockwise/issues/154)).
 
 ## [0.8.0] - 2026-11-03
 

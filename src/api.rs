@@ -473,10 +473,106 @@ pub struct SearchResult {
 
 // ── Client ──
 
-pub struct YahooClient {
-    client: reqwest::Client,
+/// Yahoo's two-step handshake: a cookie from `cookie_url`, then a crumb for it
+/// from `crumb_url`. Each step is tried up to `MAX_RETRIES` times.
+async fn open_session(
+    client: &reqwest::Client,
+    cookie_url: String,
+    crumb_url: String,
+) -> Result<YahooSession> {
+    // Step 1: Get cookies — retry up to 3 times
+    let mut cookie_str = String::new();
+    for attempt in 0..MAX_RETRIES {
+        match client.get(&cookie_url).send().await {
+            Ok(resp) => {
+                let cookies: Vec<String> = resp
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .filter_map(|v: &header::HeaderValue| v.to_str().ok())
+                    .map(|v: &str| v.split(';').next().unwrap_or("").to_string())
+                    .collect();
+                cookie_str = cookies.join("; ");
+                break;
+            }
+            Err(_e) if attempt < MAX_RETRIES - 1 => {
+                let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            Err(e) => bail!(
+                "Cannot reach Yahoo Finance ({}). Check your internet connection.",
+                e
+            ),
+        }
+    }
+
+    // Step 2: Get crumb — retry
+    let mut crumb = String::new();
+    for attempt in 0..MAX_RETRIES {
+        match client
+            .get(&crumb_url)
+            .header(header::COOKIE, &cookie_str)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                crumb = resp.text().await.context("Failed to read crumb")?;
+                // A real crumb is a short token; anything else is an error page.
+                if !crumb.is_empty() && crumb.len() < 64 && !crumb.contains(char::is_whitespace) {
+                    break;
+                }
+                if attempt == MAX_RETRIES - 1 {
+                    bail!("Yahoo Finance returned an invalid session token. Try again shortly.");
+                }
+                tokio::time::sleep(retry_delay(attempt, None, 500)).await;
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                if attempt == MAX_RETRIES - 1 {
+                    bail!(
+                        "Yahoo Finance refused to start a session (HTTP {}). {}",
+                        status,
+                        if status.as_u16() == 429 {
+                            "You are being rate limited — wait a minute and retry."
+                        } else {
+                            "Try again shortly."
+                        }
+                    );
+                }
+                let delay = retry_delay(attempt, resp.headers().get(header::RETRY_AFTER), 500);
+                tokio::time::sleep(delay).await;
+            }
+            Err(_e) if attempt < MAX_RETRIES - 1 => {
+                tokio::time::sleep(retry_delay(attempt, None, 500)).await;
+            }
+            Err(e) => bail!(
+                "Cannot reach Yahoo Finance ({}). Check your internet connection.",
+                e
+            ),
+        }
+    }
+    Ok(YahooSession {
+        crumb,
+        cookie: cookie_str,
+    })
+}
+
+/// Yahoo session credentials for the endpoints that need a crumb.
+struct YahooSession {
     crumb: String,
     cookie: String,
+}
+
+/// Stands in for the crumb in URLs built before the session exists. `fetch`
+/// swaps in the real crumb, opening the session first if needed.
+const CRUMB_PLACEHOLDER: &str = "STOCKWISE_CRUMB_PLACEHOLDER";
+
+pub struct YahooClient {
+    client: reqwest::Client,
+    /// Opened on the first request that needs it (quotes, quoteSummary,
+    /// fundamentals, options). Chart and search never do.
+    session: tokio::sync::OnceCell<YahooSession>,
     last_request: Mutex<Instant>,
     cache: SharedCache,
     /// Opt-in alternative provider (`STOCKWISE_DATA_PROVIDER`). Quotes,
@@ -497,82 +593,6 @@ impl YahooClient {
             .timeout(Duration::from_secs(30))
             .build()
             .context("Failed to build HTTP client")?;
-
-        // Step 1: Get cookies — retry up to 3 times
-        let mut cookie_str = String::new();
-        for attempt in 0..MAX_RETRIES {
-            match client.get("https://fc.yahoo.com").send().await {
-                Ok(resp) => {
-                    let cookies: Vec<String> = resp
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .filter_map(|v: &header::HeaderValue| v.to_str().ok())
-                        .map(|v: &str| v.split(';').next().unwrap_or("").to_string())
-                        .collect();
-                    cookie_str = cookies.join("; ");
-                    break;
-                }
-                Err(_e) if attempt < MAX_RETRIES - 1 => {
-                    let delay = Duration::from_millis(500 * 2u64.pow(attempt));
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-                Err(e) => bail!(
-                    "Cannot reach Yahoo Finance ({}). Check your internet connection.",
-                    e
-                ),
-            }
-        }
-
-        // Step 2: Get crumb — retry
-        let mut crumb = String::new();
-        for attempt in 0..MAX_RETRIES {
-            match client
-                .get("https://query2.finance.yahoo.com/v1/test/getcrumb")
-                .header(header::COOKIE, &cookie_str)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    crumb = resp.text().await.context("Failed to read crumb")?;
-                    // A real crumb is a short token; anything else is an error page.
-                    if !crumb.is_empty() && crumb.len() < 64 && !crumb.contains(char::is_whitespace)
-                    {
-                        break;
-                    }
-                    if attempt == MAX_RETRIES - 1 {
-                        bail!(
-                            "Yahoo Finance returned an invalid session token. Try again shortly."
-                        );
-                    }
-                    tokio::time::sleep(retry_delay(attempt, None, 500)).await;
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    if attempt == MAX_RETRIES - 1 {
-                        bail!(
-                            "Yahoo Finance refused to start a session (HTTP {}). {}",
-                            status,
-                            if status.as_u16() == 429 {
-                                "You are being rate limited — wait a minute and retry."
-                            } else {
-                                "Try again shortly."
-                            }
-                        );
-                    }
-                    let delay = retry_delay(attempt, resp.headers().get(header::RETRY_AFTER), 500);
-                    tokio::time::sleep(delay).await;
-                }
-                Err(_e) if attempt < MAX_RETRIES - 1 => {
-                    tokio::time::sleep(retry_delay(attempt, None, 500)).await;
-                }
-                Err(e) => bail!(
-                    "Cannot reach Yahoo Finance ({}). Check your internet connection.",
-                    e
-                ),
-            }
-        }
 
         let cache = Arc::new(tokio::sync::Mutex::new(HybridCache::new().await));
         let provider = match providers::Selection::from_env() {
@@ -598,8 +618,7 @@ impl YahooClient {
 
         Ok(Self {
             client,
-            crumb,
-            cookie: cookie_str,
+            session: tokio::sync::OnceCell::new(),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             cache,
             provider,
@@ -609,17 +628,65 @@ impl YahooClient {
         })
     }
 
+    /// The Yahoo session, opened on first use. A failed handshake is not
+    /// remembered, so the next crumb request tries again; requests that need
+    /// no crumb never see the error.
+    async fn session(&self) -> Result<&YahooSession> {
+        self.session
+            .get_or_try_init(|| {
+                open_session(
+                    &self.client,
+                    self.handshake_url("https://fc.yahoo.com"),
+                    self.handshake_url("https://query2.finance.yahoo.com/v1/test/getcrumb"),
+                )
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    fn handshake_url(&self, url: &str) -> String {
+        match &self.url_rewrite {
+            Some(rw) => rw(url),
+            None => url.to_string(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn handshake_url(&self, url: &str) -> String {
+        url.to_string()
+    }
+
     #[cfg(test)]
     pub fn for_tests_with_client(client: reqwest::Client, crumb: &str) -> Self {
         Self {
             client,
-            crumb: crumb.to_string(),
-            cookie: String::new(),
+            session: tokio::sync::OnceCell::new_with(Some(YahooSession {
+                crumb: crumb.to_string(),
+                cookie: String::new(),
+            })),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
             url_rewrite: None,
+        }
+    }
+
+    /// A client that opens its Yahoo session for real (against whatever
+    /// `rewrite` points the URLs at) and may carry a data provider.
+    #[cfg(test)]
+    pub(crate) fn lazy_for_tests<F>(provider: Option<providers::Provider>, rewrite: F) -> Self
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        Self {
+            client: reqwest::Client::new(),
+            session: tokio::sync::OnceCell::new(),
+            last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
+            provider,
+            nse: std::sync::OnceLock::new(),
+            url_rewrite: Some(std::sync::Arc::new(rewrite)),
         }
     }
 
@@ -630,8 +697,10 @@ impl YahooClient {
     {
         Self {
             client,
-            crumb: crumb.to_string(),
-            cookie: String::new(),
+            session: tokio::sync::OnceCell::new_with(Some(YahooSession {
+                crumb: crumb.to_string(),
+                cookie: String::new(),
+            })),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
@@ -707,6 +776,15 @@ impl YahooClient {
                 })
                 .unwrap_or(false);
 
+        // Open the Yahoo session only for URLs that carry the crumb.
+        let with_crumb;
+        let url = if url.contains(CRUMB_PLACEHOLDER) {
+            with_crumb = url.replace(CRUMB_PLACEHOLDER, &self.session().await?.crumb);
+            with_crumb.as_str()
+        } else {
+            url
+        };
+
         #[cfg(test)]
         let url_to_fetch = if let Some(ref rw) = self.url_rewrite {
             rw(url)
@@ -723,8 +801,8 @@ impl YahooClient {
         for attempt in 0..MAX_RETRIES {
             let last_attempt = attempt == MAX_RETRIES - 1;
             let mut req = self.client.get(url_to_fetch);
-            if is_yahoo {
-                req = req.header(header::COOKIE, &self.cookie);
+            if is_yahoo && let Some(session) = self.session.get() {
+                req = req.header(header::COOKIE, &session.cookie);
             }
             for (k, v) in extra_headers {
                 req = req.header(*k, *v);
@@ -818,7 +896,7 @@ impl YahooClient {
         let url = build_url(
             "https://query2.finance.yahoo.com/v7/finance/quote",
             None,
-            &[("symbols", &joined), ("crumb", &self.crumb)],
+            &[("symbols", &joined), ("crumb", CRUMB_PLACEHOLDER)],
         );
 
         let body = self.fetch(&url, Duration::from_secs(30)).await?; // cache 30s for quotes
@@ -938,8 +1016,11 @@ impl YahooClient {
         Ok(events)
     }
 
+    /// Crumb for URLs you build yourself. It is a placeholder: `fetch` swaps in
+    /// the real crumb when the request goes out, so building a URL never
+    /// touches the network.
     pub fn crumb(&self) -> &str {
-        &self.crumb
+        CRUMB_PLACEHOLDER
     }
 
     pub async fn raw_get(&self, url: &str) -> Result<serde_json::Value> {
@@ -962,7 +1043,7 @@ impl YahooClient {
             "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{}?modules={}&crumb={}",
             symbol,
             modules.join(","),
-            self.crumb
+            CRUMB_PLACEHOLDER
         );
         let body = self.fetch(&url, Duration::from_secs(900)).await?;
         let mut resp: serde_json::Value =
@@ -998,7 +1079,7 @@ impl YahooClient {
             types.join(","),
             period1,
             period2,
-            self.crumb
+            CRUMB_PLACEHOLDER
         );
         let body = self.fetch(&url, Duration::from_secs(3600)).await?;
         let resp: serde_json::Value =
@@ -1250,5 +1331,112 @@ mod tests {
         let huge = header::HeaderValue::from_static("3600");
         assert_eq!(retry_delay(0, Some(&huge), 500), MAX_RETRY_DELAY);
         assert_eq!(retry_delay(1, None, 500), Duration::from_millis(1000));
+    }
+
+    fn to_server(server_url: &str) -> impl Fn(&str) -> String + Send + Sync + 'static + use<> {
+        let base = server_url.to_string();
+        move |url: &str| {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            match parsed.query() {
+                Some(q) => format!("{}{}?{}", base, parsed.path(), q),
+                None => format!("{}{}", base, parsed.path()),
+            }
+        }
+    }
+
+    const CHART_BODY: &str = r#"{"chart":{"result":[{"meta":{"symbol":"TCS.NS","regularMarketPrice":3500.0},"timestamp":[1],"indicators":{"quote":[{"close":[3500.0]}]}}],"error":null}}"#;
+
+    #[tokio::test]
+    async fn chart_works_when_the_crumb_handshake_is_rate_limited() {
+        // Every request answers 429 except the first, the chart one.
+        let server = crate::testutil::MockServer::start(vec![
+            (200, CHART_BODY.into()),
+            (429, "Too Many Requests".into()),
+        ])
+        .await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+
+        let chart = client.get_chart("TCS.NS", "1mo", "1d").await.unwrap();
+        assert_eq!(chart.meta.unwrap().regular_market_price, Some(3500.0));
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 1, "chart needs no cookie or crumb: {reqs:?}");
+        assert!(reqs[0].target.starts_with("/v8/finance/chart/TCS.NS"));
+        assert!(!reqs[0].target.contains("crumb"));
+
+        // A crumb endpoint reports the handshake failure.
+        let err = client.quote_summary("TCS.NS", &["financialData"]).await;
+        let msg = format!("{:#}", err.unwrap_err());
+        assert!(msg.contains("rate limited"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn crumb_endpoints_open_the_session_once_and_send_the_crumb() {
+        let summary = r#"{"quoteSummary":{"result":[{"financialData":{}}]}}"#;
+        let server = crate::testutil::MockServer::start_with_headers(vec![
+            (
+                200,
+                vec![("set-cookie".into(), "A3=abc; Path=/".into())],
+                String::new(),
+            ),
+            (200, Vec::new(), "CRUMB123".into()),
+            (200, Vec::new(), summary.into()),
+        ])
+        .await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+        client
+            .quote_summary("TCS.NS", &["financialData"])
+            .await
+            .unwrap();
+        client
+            .fundamentals_timeseries("TCS.NS", &["annualTotalRevenue"], 400)
+            .await
+            .ok();
+        let reqs = server.requests();
+        assert_eq!(reqs[0].target, "/");
+        assert_eq!(reqs[1].target, "/v1/test/getcrumb");
+        assert!(reqs[2].target.contains("quoteSummary/TCS.NS"));
+        assert!(
+            reqs[2].target.contains("crumb=CRUMB123"),
+            "{}",
+            reqs[2].target
+        );
+        assert_eq!(reqs[2].header("cookie"), Some("A3=abc"));
+        let handshakes = reqs
+            .iter()
+            .filter(|r| r.target.contains("getcrumb"))
+            .count();
+        assert_eq!(handshakes, 1, "second crumb request reuses the session");
+    }
+
+    #[tokio::test]
+    async fn new_sends_no_request_and_opens_no_session() {
+        let client = YahooClient::new().await.unwrap();
+        assert!(client.session.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_quote_works_when_the_yahoo_handshake_fails() {
+        let yahoo = crate::testutil::MockServer::start(vec![(429, "no".into())]).await;
+        let nse_server = crate::testutil::MockServer::start(vec![
+            (
+                200,
+                include_str!("providers/fixtures/nse_quote_equity.json").into(),
+            ),
+            (
+                200,
+                include_str!("providers/fixtures/nse_trade_info.json").into(),
+            ),
+        ])
+        .await;
+        let mut site = providers::nse::site(&nse_server.url);
+        site.home = None;
+        let provider = providers::Provider::Nse(providers::nse::Nse::new(Arc::new(
+            providers::session::Session::for_tests(site, providers::session::DiskCache::Off),
+        )));
+        let client = YahooClient::lazy_for_tests(Some(provider), to_server(&yahoo.url));
+        let quotes = client.get_quote(&["RELIANCE.NS"]).await.unwrap();
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].symbol.as_deref(), Some("RELIANCE.NS"));
+        assert_eq!(quotes[0].data_source.as_deref(), Some("NSE"));
     }
 }
