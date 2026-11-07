@@ -119,7 +119,7 @@ The 15 December advance-tax instalment is the first moment Indian investors look
 
 - 📋 **One-command installs** ([#257](https://github.com/iamsaquib8/stockwise/issues/257)) — npm and `npx -y stockwise mcp` ([#228](https://github.com/iamsaquib8/stockwise/issues/228)), PyPI
   ([#169](https://github.com/iamsaquib8/stockwise/issues/169)), Homebrew ([#233](https://github.com/iamsaquib8/stockwise/issues/233)), winget ([#234](https://github.com/iamsaquib8/stockwise/issues/234)), AUR ([#235](https://github.com/iamsaquib8/stockwise/issues/235)), a Scoop bucket ([#236](https://github.com/iamsaquib8/stockwise/issues/236)),
-  nixpkgs and Termux ([#237](https://github.com/iamsaquib8/stockwise/issues/237)), and the Docker Hub mirror
+  nixpkgs and Termux ([#237](https://github.com/iamsaquib8/stockwise/issues/237)), and the Docker Hub mirror ([#271](https://github.com/iamsaquib8/stockwise/issues/271))
 - 📋 **AI setup in a minute** — `stockwise mcp setup <client>` ([#193](https://github.com/iamsaquib8/stockwise/issues/193)), the official MCP
   registry ([#194](https://github.com/iamsaquib8/stockwise/issues/194)), MCP directories and awesome lists ([#242](https://github.com/iamsaquib8/stockwise/issues/242))
 - 📋 **Tax season** ([#259](https://github.com/iamsaquib8/stockwise/issues/259)) — consistent asset classes ([#88](https://github.com/iamsaquib8/stockwise/issues/88)), advance-tax payments with dates
@@ -158,7 +158,7 @@ Launch before the 31 March harvesting deadline and the ITR season, when the four
 - 📋 **Show it** — an animated demo in the README ([#23](https://github.com/iamsaquib8/stockwise/issues/23)), "Open in Codespaces" ([#240](https://github.com/iamsaquib8/stockwise/issues/240)), three
   task guides for the core jobs ([#201](https://github.com/iamsaquib8/stockwise/issues/201))
 - 📋 **Launch** — Show HN ([#199](https://github.com/iamsaquib8/stockwise/issues/199)), Reddit and TradingQnA posts timed to the harvest window
-  ([#200](https://github.com/iamsaquib8/stockwise/issues/200)), Product Hunt last
+  ([#200](https://github.com/iamsaquib8/stockwise/issues/200)), Product Hunt last ([#272](https://github.com/iamsaquib8/stockwise/issues/272))
 - 📋 **Measure** — a launch log and before/after numbers ([#204](https://github.com/iamsaquib8/stockwise/issues/204)); targets for the 90 days after
   launch: 150 stars, 150 installs a week, 500 unique visitors per 14 days
 
@@ -171,7 +171,7 @@ Planned, but only once the four jobs are solid. Ordered roughly by demand.
 **Your money**
 - 📋 **Net worth** — PPF, EPF, NPS, FDs and cash next to the portfolio ([#248](https://github.com/iamsaquib8/stockwise/issues/248)); SIP tracking and a
   household view
-- 📋 **Indian ITR toolkit, rest** — Schedule FA for foreign holdings, Form 67 for US dividend tax,
+- 📋 **Indian ITR toolkit, rest** ([#264](https://github.com/iamsaquib8/stockwise/issues/264)) — Schedule FA for foreign holdings, Form 67 for US dividend tax,
   debt funds under Sec. 50AA, crypto under Sec. 115BBH, and the Income-tax Act 2025's new forms
 - 📋 **Read-only broker sync** of holdings and trades instead of CSV imports ([#254](https://github.com/iamsaquib8/stockwise/issues/254)), and quotes
   from the user's own broker API ([#253](https://github.com/iamsaquib8/stockwise/issues/253))
@@ -179,12 +179,12 @@ Planned, but only once the four jobs are solid. Ordered roughly by demand.
 **Everyday use**
 - 📋 **Alerts that run in the background** as an OS service ([#252](https://github.com/iamsaquib8/stockwise/issues/252))
 - 📋 **A local price-history store** so charts and backtests work offline and fast ([#251](https://github.com/iamsaquib8/stockwise/issues/251))
-- 📋 **Two-way Telegram bot and scheduled digests**
+- 📋 **Two-way Telegram bot and scheduled digests** ([#265](https://github.com/iamsaquib8/stockwise/issues/265))
 - 📋 **More install and launcher options** — mise/aqua ([#238](https://github.com/iamsaquib8/stockwise/issues/238)), a signed APT/RPM repository
   ([#239](https://github.com/iamsaquib8/stockwise/issues/239)), a GitHub Action ([#241](https://github.com/iamsaquib8/stockwise/issues/241)), a Raycast extension ([#243](https://github.com/iamsaquib8/stockwise/issues/243))
 
 **Research**
-- 📋 **Screener queries** — `stockwise screen "roce > 20 and pe < 25"`, the NIFTY Midcap 150 /
+- 📋 **Screener queries** ([#266](https://github.com/iamsaquib8/stockwise/issues/266)) — `stockwise screen "roce > 20 and pe < 25"`, the NIFTY Midcap 150 /
   Smallcap 250 / 500 universes ([#16](https://github.com/iamsaquib8/stockwise/issues/16))
 - 📋 **Market mood** ([#249](https://github.com/iamsaquib8/stockwise/issues/249)) and **mutual fund depth** — rolling returns, category rank,
   direct-vs-regular cost ([#250](https://github.com/iamsaquib8/stockwise/issues/250))
@@ -192,28 +192,28 @@ Planned, but only once the four jobs are solid. Ordered roughly by demand.
 - 📋 **Symbol discovery** — suggestions in every command, a picker and symbol completion ([#54](https://github.com/iamsaquib8/stockwise/issues/54))
 
 **Markets**
-- 📋 **More exchanges** — South Korea, Taiwan, France, Netherlands, Switzerland, China and Brazil,
+- 📋 **More exchanges** ([#267](https://github.com/iamsaquib8/stockwise/issues/267)) — South Korea, Taiwan, France, Netherlands, Switzerland, China and Brazil,
   each with its currency ([#17](https://github.com/iamsaquib8/stockwise/issues/17)), hours and holidays
 - 📋 **Energy and industrial metals** ([#20](https://github.com/iamsaquib8/stockwise/issues/20)) and **macro** — US yields ([#19](https://github.com/iamsaquib8/stockwise/issues/19)), DXY and NRI
   cross-rates ([#18](https://github.com/iamsaquib8/stockwise/issues/18)), an Indian REIT/InvIT list
 
 **Practice and trading**
 - 📋 **Daily replay challenge** with a shareable card ([#244](https://github.com/iamsaquib8/stockwise/issues/244))
-- 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates
-- 🛠️ **Broker integrations verified against live accounts** — `trade selftest` and the
+- 📋 **Virtual F&O trading** in the simulator, with lot sizes and margin estimates ([#268](https://github.com/iamsaquib8/stockwise/issues/268))
+- 🛠️ **Broker integrations verified against live accounts** ([#269](https://github.com/iamsaquib8/stockwise/issues/269), help wanted) — `trade selftest` and the
   [verification criteria](docs/brokers.md#help-verify-a-broker) are ready; we need 3 reports per
   broker plus one small live order a tester places themselves
 - 📋 **SEBI retail-algo rules** in `trade` — order-rate limits, algo tagging and static-IP setup
   ([#132](https://github.com/iamsaquib8/stockwise/issues/132))
-- 📋 **More brokers through OpenAlgo** — one REST adapter to the brokers it supports
+- 📋 **More brokers through OpenAlgo** — one REST adapter to the brokers it supports ([#270](https://github.com/iamsaquib8/stockwise/issues/270))
 
 **Exploring**
-- 💡 Options strategy backtests on end-of-day chains
+- 💡 Options strategy backtests on end-of-day chains ([#273](https://github.com/iamsaquib8/stockwise/issues/273))
 - 💡 Trade journal and two-leg (OCO) GTTs; position sizing in `stoploss` ([#22](https://github.com/iamsaquib8/stockwise/issues/22))
-- 💡 Ownership signals — shareholding and pledge changes, alerts on phrases in filings
-- 💡 An assistant pane in the TUI and web dashboard
-- 💡 Gulf exchanges; MCX futures and live G-sec prices via optional broker feeds
-- 💡 WASM plugins for importers and data providers — kept experimental until someone uses them
+- 💡 Ownership signals — shareholding and pledge changes, alerts on phrases in filings ([#274](https://github.com/iamsaquib8/stockwise/issues/274))
+- 💡 An assistant pane in the TUI and web dashboard ([#275](https://github.com/iamsaquib8/stockwise/issues/275))
+- 💡 Gulf exchanges; MCX futures and live G-sec prices via optional broker feeds ([#276](https://github.com/iamsaquib8/stockwise/issues/276))
+- 💡 WASM plugins for importers and data providers — kept experimental until someone uses them ([#277](https://github.com/iamsaquib8/stockwise/issues/277))
 
 ## Non-goals
 
