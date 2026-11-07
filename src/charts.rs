@@ -15,6 +15,11 @@ const DOT_MAP: [[u32; 2]; 4] = [
     [0x40, 0x80], // row 3
 ];
 
+/// Shown instead of a chart when the terminal is too narrow or short to draw one.
+const TOO_SMALL: &str = "  Chart dimensions too small";
+/// Columns one candlestick takes: the candle itself plus a gap.
+const CANDLE_WIDTH: usize = 2;
+
 struct BrailleCanvas {
     width: usize,  // in chars
     height: usize, // in chars
@@ -96,6 +101,9 @@ pub fn line_chart(
 ) -> Vec<String> {
     if data.is_empty() {
         return vec!["  No data".to_string()];
+    }
+    if width == 0 || height == 0 {
+        return vec![TOO_SMALL.to_string()];
     }
 
     let min = data.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -196,6 +204,9 @@ pub fn dual_line_chart(
 ) -> Vec<String> {
     if data1.is_empty() {
         return vec!["  No data".to_string()];
+    }
+    if width == 0 || height == 0 {
+        return vec![TOO_SMALL.to_string()];
     }
 
     let all_min = data1
@@ -401,6 +412,10 @@ pub fn candlestick_chart(
     if n == 0 {
         return vec!["  No data".to_string()];
     }
+    // One candle takes `CANDLE_WIDTH` columns (the body and a gap).
+    if width < CANDLE_WIDTH || height == 0 {
+        return vec![TOO_SMALL.to_string()];
+    }
 
     let all_min = lows.iter().take(n).cloned().fold(f64::INFINITY, f64::min);
     let all_max = highs
@@ -424,7 +439,7 @@ pub fn candlestick_chart(
     let mut grid = vec![vec![' '; width]; height];
 
     // Downsample candles to fit width (each candle = 1 char wide with 1 space)
-    let candle_width = 2; // char + space
+    let candle_width = CANDLE_WIDTH;
     let max_candles = width / candle_width;
     let step = if n > max_candles {
         n as f64 / max_candles as f64
@@ -776,6 +791,34 @@ mod tests {
             .collect();
         let result = line_chart(&data, 40, 6, "green", "Price");
         assert!(result.len() >= 6); // at least height rows
+    }
+
+    #[test]
+    fn zero_or_tiny_dimensions_do_not_panic() {
+        let (o, h, l, c) = ([10.0, 11.0], [12.0, 12.5], [9.0, 10.0], [11.0, 10.5]);
+        for (w, ht) in [(0, 0), (0, 5), (5, 0), (1, 1), (1, 5), (5, 1)] {
+            let lc = line_chart(&[10.0, 20.0], w, ht, "green", "T");
+            assert!(!lc.is_empty());
+            let dc = dual_line_chart(&[10.0, 20.0], &[12.0, 18.0], w, ht, "T", "A", "B");
+            assert!(!dc.is_empty());
+            let cc = candlestick_chart(&o, &h, &l, &c, w, ht);
+            assert!(!cc.is_empty());
+        }
+        // The zero cases say why nothing was drawn.
+        assert_eq!(line_chart(&[10.0, 20.0], 0, 0, "green", "T"), [TOO_SMALL]);
+        assert_eq!(
+            dual_line_chart(&[10.0], &[20.0], 0, 0, "T", "A", "B"),
+            [TOO_SMALL]
+        );
+        assert_eq!(
+            candlestick_chart(&[10.0], &[12.0], &[9.0], &[11.0], 0, 0),
+            [TOO_SMALL]
+        );
+        // One candle needs two columns; a width of 1 draws none.
+        assert_eq!(candlestick_chart(&o, &h, &l, &c, 1, 4), [TOO_SMALL]);
+        // The smallest drawable sizes still render rows.
+        assert!(line_chart(&[10.0, 20.0], 1, 1, "green", "").len() >= 2);
+        assert!(candlestick_chart(&o, &h, &l, &c, 2, 1).len() >= 3);
     }
 
     #[test]
