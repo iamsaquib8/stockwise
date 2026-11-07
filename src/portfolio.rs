@@ -410,6 +410,10 @@ pub struct ImportRow {
     pub date: Option<String>,
     /// A sell row from a tradebook.
     pub sell: bool,
+    /// For a row restated after a merger ([`merger_swap`]): the merger's last
+    /// trade date. The quantity is already in the acquirer's share count on
+    /// that day, so splits and bonuses up to it must not be applied again.
+    pub units_as_of: Option<String>,
 }
 
 /// A trade from an imported tradebook, kept so the next file for the same
@@ -429,6 +433,9 @@ pub struct ImportedTrade {
     /// The demat account the file belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// See [`ImportRow::units_as_of`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_as_of: Option<String>,
 }
 
 impl ImportedTrade {
@@ -437,6 +444,7 @@ impl ImportedTrade {
             && self.qty == other.qty
             && self.price == other.price
             && self.date == other.date
+            && self.units_as_of == other.units_as_of
     }
 }
 
@@ -687,8 +695,12 @@ fn replay_trades(
         let day = &trades[i..end];
         i = end;
         apply_until(&mut lots, &date, &mut applied);
-        let (buys, sells): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
+        let (all_buys, sells): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
             day.iter().partition(|t| !t.sell);
+        // A buy without a date is dated today only as an estimate: it is not
+        // known to be the same day as a sale, so it never nets (intraday).
+        let (buys, estimated): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
+            all_buys.into_iter().partition(|t| t.date.is_some());
         let bought: f64 = buys.iter().map(|t| t.qty).sum();
         let sold: f64 = sells.iter().map(|t| t.qty).sum();
         let net = bought.min(sold);
@@ -707,12 +719,22 @@ fn replay_trades(
                 sell_avg,
                 source,
             );
-            sale.buy_date_estimated = buys.iter().any(|t| t.date.is_none());
             sale.intraday = true;
             sales.push(sale);
             if bought - net > EPS {
                 let mut lot = new_lot(bought - net, buy_avg, &date);
-                lot.date_estimated = buys.iter().any(|t| t.date.is_none());
+                // Restated only when every buy of the day was, to the same day.
+                let first = &buys[0].units_as_of;
+                if buys.iter().all(|t| &t.units_as_of == first) {
+                    lot.units_as_of = first.clone();
+                }
+                lots.push(lot);
+                lots.sort_by(|a, b| a.date.cmp(&b.date));
+            }
+            for t in &estimated {
+                let mut lot = new_lot(t.qty, t.price, &date);
+                lot.date_estimated = true;
+                lot.units_as_of = t.units_as_of.clone();
                 lots.push(lot);
                 lots.sort_by(|a, b| a.date.cmp(&b.date));
             }
@@ -727,9 +749,10 @@ fn replay_trades(
             }
             continue;
         }
-        for t in buys {
+        for t in buys.into_iter().chain(estimated) {
             let mut lot = new_lot(t.qty, t.price, &date);
             lot.date_estimated = t.date.is_none();
+            lot.units_as_of = t.units_as_of.clone();
             lots.push(lot);
             lots.sort_by(|a, b| a.date.cmp(&b.date));
         }
@@ -823,10 +846,13 @@ fn scoped<R>(lots: &mut Vec<Lot>, scope: &Scope, f: impl FnOnce(&mut Vec<Lot>) -
 /// Like [`take_fifo`], but shares bought on `date` itself go first: a buy and
 /// a sell on one day net against each other (intraday) before an older lot
 /// is touched. The flag is true for the slices that came from that day.
+/// A lot whose date is only an estimate (`date_estimated`: a holdings
+/// snapshot or sync dated it today) is not known to be from that day, so it
+/// is taken like an older lot and never flagged.
 fn take_netting(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64, bool)>, f64) {
     let (mut same_day, mut older): (Vec<Lot>, Vec<Lot>) = std::mem::take(lots)
         .into_iter()
-        .partition(|l| l.date == date);
+        .partition(|l| l.date == date && !l.date_estimated);
     let (netted, rest) = take_fifo(&mut same_day, qty, date);
     let (before, left) = take_fifo(&mut older, rest, date);
     older.extend(same_day);
@@ -1350,6 +1376,7 @@ impl Portfolio {
                     price: r.price,
                     date: r.date.clone(),
                     account: account.map(str::to_string),
+                    units_as_of: r.units_as_of.clone(),
                 })
                 .collect();
             let stored: Vec<ImportedTrade> = if ledger && !opts.replace {
@@ -1392,6 +1419,22 @@ impl Portfolio {
             if (foreign_lots || foreign_sales) && !opts.replace {
                 out.push((sym, ImportOutcome::WouldReplace));
                 continue;
+            }
+            // A file of lots alone is the whole state, so it deletes the
+            // trades kept from this source's tradebooks and the sales they
+            // recorded. Never do that unasked.
+            if !ledger && !opts.replace {
+                let kept_trades = self.imported.iter().any(|t| {
+                    t.symbol == sym && t.source == source && t.account.as_deref() == account
+                });
+                let own_sales = self
+                    .realized
+                    .iter()
+                    .any(|s| s.symbol == sym && scope.sale(s) && s.source == source);
+                if kept_trades || own_sales {
+                    out.push((sym, ImportOutcome::WouldReplace));
+                    continue;
+                }
             }
 
             let splits: &[Split] = if opts.tradebook {
@@ -2273,6 +2316,7 @@ mod tests {
             price: 3500.0,
             date: None,
             sell: false,
+            units_as_of: None,
         }];
         let mut p = Portfolio::default();
         p.apply_import(&rows, opts("import:kite"));
@@ -2289,6 +2333,7 @@ mod tests {
             price,
             date: Some(date.into()),
             sell,
+            units_as_of: None,
         };
         let rows = vec![
             row("2024-05-01", 5.0, 1500.0, false),
@@ -2340,6 +2385,7 @@ mod tests {
                 price: 2800.0,
                 date: Some("2023-05-02".into()),
                 sell: false,
+                units_as_of: None,
             },
             ImportRow {
                 symbol: "RELIANCE.NS".into(),
@@ -2347,6 +2393,7 @@ mod tests {
                 price: 1500.0,
                 date: Some("2025-01-10".into()),
                 sell: true,
+                units_as_of: None,
             },
         ];
         let splits = vec![("RELIANCE.NS".to_string(), vec![split_2_for_1()])];
@@ -2384,6 +2431,7 @@ mod tests {
             price,
             date: Some(date.into()),
             sell,
+            units_as_of: None,
         }
     }
 
@@ -2547,6 +2595,47 @@ mod tests {
         // The earlier trades are gone from the kept list too.
         p.apply_import(&y2025, tradebook_opts("import:kite"));
         assert_eq!(p.holding("TCS.NS").unwrap().shares, 5.0);
+    }
+
+    #[test]
+    fn a_lots_only_file_does_not_delete_tradebook_sales_unless_replacing() {
+        let book = vec![
+            trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0),
+            trade("TCS.NS", "2024-06-01", true, 4.0, 3900.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&book, opts("import:kite"));
+        assert_eq!(p.realized.len(), 1);
+        assert_eq!(p.imported.len(), 2);
+        let before = state(&p);
+
+        // Dated buys, no sell rows, no tradebook: a lot list for the symbol.
+        let lots_only = vec![trade("TCS.NS", "2024-01-10", false, 6.0, 3500.0)];
+        let out = p.apply_import(&lots_only, opts("import:kite"));
+        assert_eq!(out[0].1, ImportOutcome::WouldReplace);
+        assert_eq!(state(&p), before, "nothing changed");
+        assert_eq!(p.imported.len(), 2, "kept trades survive");
+
+        let replace = ImportOptions {
+            replace: true,
+            ..opts("import:kite")
+        };
+        let out = p.apply_import(&lots_only, replace);
+        assert!(matches!(out[0].1, ImportOutcome::Lots { sales: 0, .. }));
+        assert!(p.realized.is_empty());
+        assert!(p.imported.is_empty());
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 6.0);
+    }
+
+    #[test]
+    fn a_lots_only_file_is_still_idempotent() {
+        let lots_only = vec![trade("TCS.NS", "2024-01-10", false, 6.0, 3500.0)];
+        let mut p = Portfolio::default();
+        p.apply_import(&lots_only, opts("import:csv"));
+        let before = state(&p);
+        let out = p.apply_import(&lots_only, opts("import:csv"));
+        assert!(matches!(out[0].1, ImportOutcome::Lots { .. }), "{:?}", out);
+        assert_eq!(state(&p), before);
     }
 
     #[test]
@@ -2734,6 +2823,61 @@ mod tests {
         assert!(!sales[0].is_intraday());
     }
 
+    #[test]
+    fn broker_sell_does_not_net_against_an_estimated_lot_dated_today() {
+        // A holdings snapshot dated 50 shares today (date_estimated): they
+        // may have been bought any day, so a sale today is not intraday and
+        // comes out of the oldest lot first.
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", lot(100.0, 1000.0, "2023-01-10"));
+        let mut est = lot(50.0, 1500.0, "2026-10-20");
+        est.date_estimated = true;
+        p.add_lot("INFY.NS", est);
+        let fills = vec![fill("S1", "T1", true, 30.0, 1520.0, "2026-10-20 10:00:00")];
+        p.apply_broker_fills(&fills);
+        assert_eq!(p.realized.len(), 1);
+        let s = &p.realized[0];
+        assert!(!s.intraday && !s.is_intraday());
+        assert_eq!((s.qty, s.buy_date.as_str()), (30.0, "2023-01-10"));
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!((h.lots[0].qty, h.lots[1].qty), (70.0, 50.0));
+
+        // With only the estimated lot held, it is sold, still not intraday.
+        let mut q = Portfolio::default();
+        let mut est = lot(50.0, 1500.0, "2026-10-20");
+        est.date_estimated = true;
+        q.add_lot("INFY.NS", est);
+        q.apply_broker_fills(&fills);
+        let s = &q.realized[0];
+        assert!(s.buy_date_estimated && !s.is_intraday());
+    }
+
+    #[test]
+    fn tradebook_buy_without_a_date_does_not_net_with_a_sale_today() {
+        let today = today();
+        let mut buy = trade("TCS.NS", &today, false, 10.0, 100.0);
+        buy.date = None;
+        let rows = vec![buy, trade("TCS.NS", &today, true, 10.0, 110.0)];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(p.realized.len(), 1);
+        let s = &p.realized[0];
+        assert!(
+            !s.intraday && !s.is_intraday(),
+            "taxed as delivery, not intraday"
+        );
+        assert!(s.buy_date_estimated);
+        assert!(p.holding("TCS.NS").is_none());
+        // A dated buy the same day still nets.
+        let rows = vec![
+            trade("TCS.NS", &today, false, 10.0, 100.0),
+            trade("TCS.NS", &today, true, 10.0, 110.0),
+        ];
+        let mut q = Portfolio::default();
+        q.apply_import(&rows, tradebook_opts("import:kite"));
+        assert!(q.realized[0].intraday);
+    }
+
     fn snapshot(sym: &str, qty: f64, price: f64) -> ImportRow {
         ImportRow {
             symbol: sym.into(),
@@ -2741,6 +2885,7 @@ mod tests {
             price,
             date: None,
             sell: false,
+            units_as_of: None,
         }
     }
 
@@ -3020,6 +3165,135 @@ mod tests {
         assert_eq!(p.realized[0].buy_date, "2023-03-01");
     }
 
+    fn hdfc_split_2019() -> Split {
+        Split {
+            date: "2019-09-19".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+        }
+    }
+
+    fn hdfcbank_bonus_2025() -> Split {
+        Split {
+            date: "2025-08-26".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+        }
+    }
+
+    /// "HDFC buy 25 at 2000 on 2018-05-10" the way an import restates it.
+    fn merged_hdfc_row() -> ImportRow {
+        let swap = merger_swap("HDFC", Some("2018-05-10"), 25.0, 2000.0).unwrap();
+        ImportRow {
+            units_as_of: Some(swap.merger.through.to_string()),
+            ..trade("HDFCBANK", "2018-05-10", false, swap.qty, swap.price)
+        }
+    }
+
+    #[test]
+    fn merged_hdfc_lot_does_not_get_the_pre_merger_split_again() {
+        // 25 HDFC → 42 HDFCBANK at 2000 × 25 / 42 = 1190.476, cost 50,000.
+        // The 42 are already in HDFC Bank's share count after the 2019 2:1
+        // split, so only a split after the 2023-07-13 merger applies.
+        let mut p = Portfolio::default();
+        let splits = vec![(
+            "HDFCBANK".to_string(),
+            vec![hdfc_split_2019(), hdfcbank_bonus_2025()],
+        )];
+        let opts = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        // The sale (after all splits) makes this a tradebook.
+        let rows = [
+            merged_hdfc_row(),
+            trade("HDFCBANK", "2025-09-10", true, 2.0, 900.0),
+        ];
+        let out = p.apply_import(&rows, opts);
+        assert!(
+            matches!(out[0].1, ImportOutcome::Lots { splits: 1, .. }),
+            "{:?}",
+            out
+        );
+        let l = &p.holding("HDFCBANK").unwrap().lots[0];
+        // 42 × 2 (2025 bonus only) − 2 sold; cost per share 1190.476 / 2.
+        assert!((l.qty - 82.0).abs() < 1e-9, "{}", l.qty);
+        assert!((l.price - 50_000.0 / 84.0).abs() < 1e-6, "{}", l.price);
+        assert_eq!(l.adjustments, vec!["2025-08-26:2:1".to_string()]);
+        assert_eq!(l.date, "2018-05-10");
+    }
+
+    #[test]
+    fn merged_hdfc_lot_with_only_old_splits_stays_42_at_1190() {
+        let mut p = Portfolio::default();
+        let splits = vec![("HDFCBANK".to_string(), vec![hdfc_split_2019()])];
+        let opts = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        let rows = [merged_hdfc_row()];
+        p.apply_import(&rows, opts);
+        let l = &p.holding("HDFCBANK").unwrap().lots[0];
+        assert_eq!(l.qty, 42.0);
+        assert!((l.price - 1_190.476_190).abs() < 1e-5, "{}", l.price);
+        assert!(l.adjustments.is_empty());
+        // The same row without the marker is the bug: 84 shares at half the price.
+        let mut q = Portfolio::default();
+        let unmarked = [ImportRow {
+            units_as_of: None,
+            ..merged_hdfc_row()
+        }];
+        let opts = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        q.apply_import(&unmarked, opts);
+        assert_eq!(q.holding("HDFCBANK").unwrap().lots[0].qty, 84.0);
+    }
+
+    #[test]
+    fn merged_trades_keep_their_marker_across_reimports() {
+        let mut p = Portfolio::default();
+        let splits = vec![("HDFCBANK".to_string(), vec![hdfc_split_2019()])];
+        for _ in 0..2 {
+            let opts = ImportOptions {
+                splits: &splits,
+                ..tradebook_opts("import:kite")
+            };
+            p.apply_import(&[merged_hdfc_row()], opts);
+        }
+        assert_eq!(p.imported.len(), 1);
+        assert_eq!(p.imported[0].units_as_of.as_deref(), Some("2023-07-13"));
+        assert_eq!(p.holding("HDFCBANK").unwrap().lots[0].qty, 42.0);
+    }
+
+    #[test]
+    fn apply_split_skips_a_merged_lot_for_splits_up_to_the_merger() {
+        // A lot added by `portfolio add HDFC --date 2018-05-10`.
+        let mut p = Portfolio::default();
+        let mut merged = lot(42.0, 50_000.0 / 42.0, "2018-05-10");
+        merged.units_as_of = Some("2023-07-13".into());
+        p.add_lot("HDFCBANK.NS", merged);
+        assert_eq!(p.apply_split("HDFCBANK.NS", &hdfc_split_2019()), 0);
+        assert_eq!(p.apply_split("HDFCBANK.NS", &hdfcbank_bonus_2025()), 1);
+        let l = &p.holding("HDFCBANK.NS").unwrap().lots[0];
+        assert_eq!(l.qty, 84.0);
+        assert!((l.cost() - 50_000.0).abs() < 1e-6);
+        // On the merger's own record date the split is still not applied.
+        let on_through = Split {
+            date: "2023-07-13".into(),
+            ..hdfc_split_2019()
+        };
+        assert!(!on_through.pending_for(&lot_with_units("2018-05-10", "2023-07-13")));
+    }
+
+    fn lot_with_units(date: &str, units_as_of: &str) -> Lot {
+        Lot {
+            units_as_of: Some(units_as_of.into()),
+            ..lot(1.0, 1.0, date)
+        }
+    }
+
     #[test]
     fn partial_tradebook_leaves_the_holding_alone() {
         let rows = vec![ImportRow {
@@ -3028,6 +3302,7 @@ mod tests {
             price: 10.0,
             date: Some("2024-01-01".into()),
             sell: true,
+            units_as_of: None,
         }];
         let mut p = Portfolio::default();
         p.add_lot("X", lot(5.0, 8.0, "2023-01-01"));

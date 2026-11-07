@@ -30,6 +30,10 @@ pub const AMFI_TER_URL: &str = "https://www.amfiindia.com/api/populate-te-rdata-
 /// Cached AMFI and mfapi files are re-downloaded after this long.
 pub const CACHE_MAX_AGE: Duration = Duration::from_secs(12 * 3600);
 /// The TER table is re-downloaded once a day.
+/// The oldest saved copy that stands in when a download fails. Past this the
+/// download's error is reported instead: a week-old NAV is old news, not
+/// "the latest NAV".
+pub const STALE_MAX_AGE: Duration = Duration::from_secs(7 * 86_400);
 pub const TER_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 
 // ── AMFI NAVAll.txt ──
@@ -1179,10 +1183,56 @@ pub(crate) fn write_atomic(path: &Path, data: &str) -> Result<()> {
         .with_context(|| format!("Cannot write {}", path.display()))
 }
 
+/// A saved copy that was used because the download failed.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StaleCopy {
+    /// Where the data comes from ("AMFI", "api.mfapi.in").
+    pub source: String,
+    /// Why the download was not used.
+    pub reason: String,
+    /// The day the copy was saved (UTC).
+    pub saved: NaiveDate,
+}
+
+impl StaleCopy {
+    /// One line for the end of a command's output.
+    pub fn note(&self) -> String {
+        format!(
+            "{} could not be refreshed ({}); this is the copy saved on {}",
+            self.source,
+            self.reason,
+            self.saved.format("%d %b %Y")
+        )
+    }
+}
+
+/// Stale copies used so far in this process, by cache file. A fresh read of
+/// the same file removes its entry.
+static STALE: std::sync::Mutex<Vec<(PathBuf, StaleCopy)>> = std::sync::Mutex::new(Vec::new());
+
+fn set_stale(path: &Path, copy: Option<StaleCopy>) {
+    if let Ok(mut all) = STALE.lock() {
+        all.retain(|(p, _)| p != path);
+        if let Some(c) = copy {
+            all.push((path.to_path_buf(), c));
+        }
+    }
+}
+
+/// The stale copies that stood in for failed downloads in this process, so a
+/// command can say its numbers are old (text) or flag them (`--json`).
+pub fn stale_copies() -> Vec<StaleCopy> {
+    STALE
+        .lock()
+        .map(|all| all.iter().map(|(_, c)| c.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// Cached copy of `url` if younger than `max_age`; otherwise download it.
 /// When the download fails, or succeeds with a page that fails `validate`
-/// (a maintenance page served with HTTP 200), a stale copy is used with a
-/// warning on stderr.
+/// (a maintenance page served with HTTP 200), a saved copy up to
+/// [`STALE_MAX_AGE`] old is used with a warning on stderr and recorded in
+/// [`stale_copies`]. An older copy is not used: the error says so.
 pub(crate) async fn cached_text(
     client: &reqwest::Client,
     name: &str,
@@ -1204,6 +1254,7 @@ async fn cached_text_at(
         && let Ok(text) = std::fs::read_to_string(path)
         && validate(&text)
     {
+        set_stale(path, None);
         return Ok(text);
     }
     // Why the download is not used; the saved copy takes over when it is valid.
@@ -1211,6 +1262,7 @@ async fn cached_text_at(
         Ok(text) if validate(&text) => {
             // Caching is best-effort: a read-only data dir still works.
             let _ = write_atomic(path, &text);
+            set_stale(path, None);
             return Ok(text);
         }
         Ok(_) => anyhow::anyhow!("{source} returned an unexpected response"),
@@ -1218,15 +1270,34 @@ async fn cached_text_at(
     };
     match std::fs::read_to_string(path) {
         Ok(text) if validate(&text) => {
-            let saved = std::fs::metadata(path)
-                .and_then(|m| m.modified())
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%d %b %Y"));
-            match saved {
-                Ok(date) => eprintln!(
-                    "  Warning: {err:#}; using the copy saved {date} from {}",
-                    path.display()
-                ),
-                Err(_) => eprintln!(
+            let saved = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            let age = saved.and_then(|t| t.elapsed().ok());
+            if let Some(age) = age
+                && age > STALE_MAX_AGE
+            {
+                bail!(
+                    "{err:#}; the copy saved {} days ago is too old to use (the limit is {})",
+                    age.as_secs() / 86_400,
+                    STALE_MAX_AGE.as_secs() / 86_400
+                );
+            }
+            match saved.map(|t| chrono::DateTime::<chrono::Utc>::from(t).date_naive()) {
+                Some(date) => {
+                    eprintln!(
+                        "  Warning: {err:#}; using the copy saved {} from {}",
+                        date.format("%d %b %Y"),
+                        path.display()
+                    );
+                    set_stale(
+                        path,
+                        Some(StaleCopy {
+                            source: source.to_string(),
+                            reason: format!("{err:#}"),
+                            saved: date,
+                        }),
+                    );
+                }
+                None => eprintln!(
                     "  Warning: {err:#}; using cached data from {}",
                     path.display()
                 ),
@@ -1780,13 +1851,17 @@ HDFC Mutual Fund
 
     /// Write `text` to `path` and date it a day ago, so it counts as stale.
     fn write_stale(path: &Path, text: &str) {
+        write_aged(path, text, 1);
+    }
+
+    fn write_aged(path: &Path, text: &str, days: u64) {
         std::fs::write(path, text).unwrap();
-        let day_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
+        let then = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
         std::fs::File::options()
             .write(true)
             .open(path)
             .unwrap()
-            .set_modified(day_ago)
+            .set_modified(then)
             .unwrap();
     }
 
@@ -1858,5 +1933,51 @@ HDFC Mutual Fund
             .unwrap();
         assert_eq!(text, NAVALL);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), NAVALL);
+    }
+
+    #[tokio::test]
+    async fn a_saved_copy_is_used_and_flagged_up_to_a_week() {
+        let dir = scratch_dir("week");
+        let path = dir.join("amfi_navall.txt");
+        write_aged(&path, NAVALL, 6);
+        let server = crate::testutil::MockServer::start(vec![(503, "down".into())]).await;
+        let client = http_client().unwrap();
+        let text = cached_text_at(&client, &path, &server.url, "AMFI-week", is_navall)
+            .await
+            .unwrap();
+        assert_eq!(text, NAVALL);
+        let copy = stale_copies()
+            .into_iter()
+            .find(|c| c.source == "AMFI-week")
+            .expect("the stale copy is recorded");
+        let saved = chrono::Utc::now().date_naive() - chrono::Days::new(6);
+        assert_eq!(copy.saved, saved);
+        assert!(
+            copy.note().contains("could not be refreshed"),
+            "{}",
+            copy.note()
+        );
+        // A later fresh download clears the flag.
+        let ok = crate::testutil::MockServer::start(vec![(200, NAVALL.into())]).await;
+        cached_text_at(&client, &path, &ok.url, "AMFI-week", is_navall)
+            .await
+            .unwrap();
+        assert!(stale_copies().iter().all(|c| c.source != "AMFI-week"));
+    }
+
+    #[tokio::test]
+    async fn a_saved_copy_older_than_a_week_is_not_used() {
+        let dir = scratch_dir("old");
+        let path = dir.join("amfi_navall.txt");
+        write_aged(&path, NAVALL, 8);
+        let server = crate::testutil::MockServer::start(vec![(503, "down".into())]).await;
+        let client = http_client().unwrap();
+        let err = cached_text_at(&client, &path, &server.url, "AMFI-old", is_navall)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("8 days ago is too old to use"), "{msg}");
+        assert!(msg.contains("limit is 7"), "{msg}");
+        assert!(stale_copies().iter().all(|c| c.source != "AMFI-old"));
     }
 }

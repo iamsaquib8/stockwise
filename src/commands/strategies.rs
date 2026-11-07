@@ -500,17 +500,14 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
     let csym = market.currency_symbol();
     let monthly = amount.unwrap_or(10000.0);
 
-    print_header(&format!(
-        "Long-Term Wealth Bot v2 — {} Market",
-        market.label()
-    ));
+    print_header(&format!("Long-Term Scores — {} Market", market.label()));
     println!(
         "  {} Scoring {} stocks across 6 pillars + Monte Carlo...\n",
         "⟳".yellow(),
         quotes.len()
     );
 
-    // Fetch 1Y chart data for volatility analysis (for top candidates)
+    // Fetch 1Y chart data for volatility analysis
     let mut scores: Vec<longterm::LongTermScore> = Vec::new();
     for q in &quotes {
         let sym = q.symbol.as_deref().unwrap_or("");
@@ -523,184 +520,9 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         });
         scores.push(longterm::score_for_longterm(q, hist.as_deref()));
     }
-    scores.sort_by(|a, b| {
-        b.total_score
-            .partial_cmp(&a.total_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    longterm::rank(&mut scores);
 
-    // Summary table with all 6 pillars
-    print_section("Ranking (6-Pillar Score)");
-    println!(
-        "  {:<14} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>6} {:>8}",
-        "Symbol".bold(),
-        "Val".bold(),
-        "Grw".bold(),
-        "Qua".bold(),
-        "Mom".bold(),
-        "Div".bold(),
-        "Saf".bold(),
-        "Total".bold(),
-        "Moat".bold(),
-        "Risk".bold()
-    );
-    println!("  {}", "─".repeat(78).dimmed());
-
-    for s in scores.iter().take(12) {
-        let sc = if s.total_score >= 70.0 {
-            format!("{:.0}", s.total_score).green().bold().to_string()
-        } else if s.total_score >= 55.0 {
-            format!("{:.0}", s.total_score).yellow().to_string()
-        } else {
-            format!("{:.0}", s.total_score).dimmed().to_string()
-        };
-        let moat_str = match s.moat {
-            longterm::MoatRating::Wide => "Wide".green().to_string(),
-            longterm::MoatRating::Narrow => "Nar".yellow().to_string(),
-            longterm::MoatRating::None => "—".dimmed().to_string(),
-        };
-        let risk_str = match s.risk_tier {
-            longterm::RiskTier::Conservative => "Cons".green().to_string(),
-            longterm::RiskTier::Moderate => "Mod".yellow().to_string(),
-            longterm::RiskTier::Aggressive => "Aggr".red().to_string(),
-        };
-        println!(
-            "  {:<14} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>5.0} {:>6} {:>6} {:>8}",
-            s.symbol.cyan(),
-            s.valuation_score,
-            s.growth_score,
-            s.quality_score,
-            s.momentum_score,
-            s.dividend_score,
-            s.safety_score,
-            sc,
-            moat_str,
-            risk_str
-        );
-    }
-
-    // Detailed top 3
-    for (i, s) in scores.iter().take(3).enumerate() {
-        println!();
-        print_section(&format!(
-            "#{} {} — {} [{}]",
-            i + 1,
-            s.symbol,
-            s.name,
-            s.moat
-        ));
-        print_kv("Price", &format!("{}{:.2}", csym, s.price));
-        print_kv(
-            "Score",
-            &format!("{:.0}/100 ({})", s.total_score, s.risk_tier)
-                .bold()
-                .to_string(),
-        );
-        if let Some(peg) = s.peg_ratio {
-            print_kv("PEG Ratio", &format!("{:.2}", peg));
-        }
-        if let Some(ey) = s.earnings_yield {
-            print_kv("Earnings Yield", &format!("{:.1}%", ey));
-        }
-
-        if !s.reasons.is_empty() {
-            println!();
-            for r in &s.reasons {
-                println!("    {} {}", "✓".green(), r);
-            }
-        }
-        if !s.risk_flags.is_empty() {
-            for r in &s.risk_flags {
-                println!("    {} {}", "✗".red(), r);
-            }
-        }
-
-        print_section("Projections");
-        print_kv(
-            "Est. Annual Return",
-            &format!("{:.1}%", s.est_annual_return),
-        );
-        print_kv(
-            "5-Year Projection",
-            &format!("+{:.0}%", s.projected_5y_return)
-                .green()
-                .to_string(),
-        );
-        print_kv(
-            "10-Year Projection",
-            &format!("+{:.0}%", s.projected_10y_return)
-                .green()
-                .to_string(),
-        );
-        if s.drip_multiplier_10y > 1.01 {
-            print_kv(
-                "DRIP Boost (10Y)",
-                &format!("{:.2}x from dividend reinvestment", s.drip_multiplier_10y),
-            );
-        }
-        print_kv(
-            &format!(
-                "SIP for {}/10Y",
-                format_large_number(longterm::SIP_TARGET, s.currency.as_deref())
-            ),
-            &format!("{}{:.0}/month", csym, s.sip_monthly_10l_10y),
-        );
-
-        // Monte Carlo
-        print_section("Monte Carlo (1000 sims, 5Y)");
-        let mc_bar = |val: f64| -> String {
-            if val >= 0.0 {
-                format!("+{:.0}%", val).green().to_string()
-            } else {
-                format!("{:.0}%", val).red().to_string()
-            }
-        };
-        print_kv("Best case (P90)", &mc_bar(s.monte_carlo_p90));
-        print_kv("Median", &mc_bar(s.monte_carlo_median));
-        print_kv("Worst case (P10)", &mc_bar(s.monte_carlo_p10));
-
-        // SIP projection: every instalment grows for its own time in the market.
-        let inv_5y = monthly * 60.0;
-        let est_5y = longterm::sip_corpus(monthly, 5, s.est_annual_return);
-        let inv_10y = monthly * 120.0;
-        let est_10y = longterm::sip_corpus(monthly, 10, s.est_annual_return);
-        print_section("SIP Calculator");
-        print_kv(
-            &format!("{}{}/mo × 5Y", csym, monthly),
-            &format!("{}{:.0} → {}{:.0}", csym, inv_5y, csym, est_5y)
-                .green()
-                .to_string(),
-        );
-        print_kv(
-            &format!("{}{}/mo × 10Y", csym, monthly),
-            &format!("{}{:.0} → {}{:.0}", csym, inv_10y, csym, est_10y)
-                .green()
-                .bold()
-                .to_string(),
-        );
-        println!(
-            "    {}",
-            format!(
-                "at the estimated {:.1}%/yr, paid at the start of each month; DRIP is not added on top",
-                s.est_annual_return
-            )
-            .dimmed()
-        );
-    }
-
-    println!("\n  {}", "─".repeat(60).dimmed());
-    println!(
-        "  {}",
-        "Long-term investing involves risk. Diversify across asset classes."
-            .dimmed()
-            .italic()
-    );
-    println!(
-        "  {}",
-        "Monte Carlo uses historical volatility. Past ≠ future."
-            .dimmed()
-            .italic()
-    );
+    print!("{}", longterm::render_report(&scores, monthly, csym));
     println!();
     Ok(())
 }

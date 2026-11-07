@@ -204,11 +204,16 @@ pub async fn cmd_mf_nav(codes: &[u32], json: bool) -> Result<()> {
         .map(|s| ter.as_ref().and_then(|t| t.for_scheme(s)))
         .collect();
     if json {
-        let rows: Vec<NavRow> = found
+        let stale = funds::stale_copies();
+        let rows = found
             .iter()
             .zip(&ters)
-            .map(|(scheme, ter)| NavRow { scheme, ter })
-            .collect();
+            .map(|(scheme, ter)| {
+                let mut row = serde_json::to_value(NavRow { scheme, ter })?;
+                add_stale(&mut row, &stale);
+                Ok(row)
+            })
+            .collect::<Result<Vec<_>>>()?;
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else {
         for (s, t) in found.iter().zip(&ters) {
@@ -242,6 +247,7 @@ pub async fn cmd_mf_nav(codes: &[u32], json: bool) -> Result<()> {
             "Source: AMFI NAVAll.txt (cached up to 12 hours); TER: AMFI's monthly TER disclosure (cached a day)"
                 .dimmed()
         );
+        print_stale_notes();
         println!();
     }
     if missing.is_empty() {
@@ -305,6 +311,8 @@ pub async fn cmd_mf_history(code: u32, period: &str, json: bool) -> Result<()> {
             "ter": scheme_ter,
             "navs": window.iter().map(|(d, n)| serde_json::json!({"date": d, "nav": n})).collect::<Vec<_>>(),
         });
+        let mut out = out;
+        add_stale(&mut out, &funds::stale_copies());
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -369,8 +377,28 @@ pub async fn cmd_mf_history(code: u32, period: &str, json: bool) -> Result<()> {
         )
         .dimmed()
     );
+    print_stale_notes();
     println!();
     Ok(())
+}
+
+/// Flag `--json` output that was built from a saved copy because a download
+/// failed: a `stale` list of `{source, reason, saved}`. Absent when all data
+/// is fresh.
+fn add_stale(value: &mut serde_json::Value, stale: &[funds::StaleCopy]) {
+    if stale.is_empty() {
+        return;
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("stale".into(), serde_json::json!(stale));
+    }
+}
+
+/// Say, under a table, that some of its data is a saved copy.
+fn print_stale_notes() {
+    for copy in funds::stale_copies() {
+        println!("\n  {}", format!("Stale data: {}", copy.note()).yellow());
+    }
 }
 
 /// A monthly SIP replayed on a scheme's NAV history.
@@ -911,4 +939,25 @@ pub async fn cmd_mf_overlap(a: &str, b: &str, market: Market, json: bool) -> Res
     );
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+
+    #[test]
+    fn json_output_is_flagged_only_when_data_is_stale() {
+        let mut fresh = serde_json::json!({"code": 1, "nav": 10.0});
+        add_stale(&mut fresh, &[]);
+        assert!(fresh.get("stale").is_none());
+        let copy = funds::StaleCopy {
+            source: "AMFI".into(),
+            reason: "AMFI returned an unexpected response".into(),
+            saved: chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+        };
+        let mut old = serde_json::json!({"code": 1, "nav": 10.0});
+        add_stale(&mut old, &[copy]);
+        assert_eq!(old["stale"][0]["source"], "AMFI");
+        assert_eq!(old["stale"][0]["saved"], "2026-11-03");
+    }
 }

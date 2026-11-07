@@ -26,8 +26,9 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 
 ## Use the CLI the machine-readable way
 
-- Add `--json` to every data command. stdout then holds only JSON; messages go
-  to stderr and failures exit with code 1. Tables also take `--csv`.
+- Add `--json` to data commands (`stockwise <command> --help` shows which take it).
+  stdout then holds only JSON; messages go to stderr and failures exit with code 1.
+  Tables also take `--csv`.
 - Bare tickers are Indian: `TCS` means `TCS.NS`. Use `-m us` for US stocks,
   `-m crypto`, `-m fx`, `-m commodity`, or an exchange: `-m uk`, `-m de`,
   `-m jp`, `-m hk`, `-m sg`, `-m ca`, `-m au`. A suffix (`TCS.NS`, `500325.BO`)
@@ -61,6 +62,8 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 | Open and upcoming IPOs | `stockwise ipo --json` |
 | Portfolio rebalancing plan | `stockwise rebalance --inflow 50000 --json` |
 | Capital-gains estimate | `stockwise tax in --json` |
+| Schedule CG / 112A rows for a tax year | `stockwise tax export in --fy 2025-26 --json` |
+| Return against NIFTY, alpha and beta | `stockwise portfolio benchmark NIFTY -p 1y --json` |
 | Advance tax schedule & 234C | `stockwise tax advance --json` |
 | Tax-loss & 112A LTCG harvest | `stockwise harvest --json` |
 | Results and dividend dates | `stockwise calendar --json` |
@@ -84,7 +87,11 @@ them itself — only suggest it; it may send data to a cloud model.
   real one; never add `--yes`.
 - **Not financial advice.** Describe what the numbers show and their risks.
   Do not tell the user to buy, sell or hold, and say that prices can be
-  delayed (NSE quotes from Yahoo are about 15 minutes behind).
+  delayed (NSE quotes from Yahoo are about 15 minutes behind). Scores such as
+  `verdict` and `scorecard` describe data; they are not ratings.
+- **Tax figures are estimates.** `tax`, `harvest` and `tax advance` cover only
+  the sales and lots StockWise has recorded. Say so, and tell the user to check
+  them against their broker's tax P&L before filing.
 - **Missing data stays missing.** Holdings without a price are listed in
   `unpriced` and quotes StockWise could not find in `missing`; report them,
   never treat them as zero.

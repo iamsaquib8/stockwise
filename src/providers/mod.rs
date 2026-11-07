@@ -129,12 +129,14 @@ impl ProviderKind {
     /// minute), so a scan of 30 stocks must not burn — or wait on — the whole
     /// allowance: one command (a CLI run lasts seconds) gets one window's
     /// worth. A long-running `serve`, `tui`, `mcp` or daemon gets the same
-    /// allowance again when the window ends. Alpha Vantage's 25 a day is 5
-    /// every 4 h 48 min.
+    /// allowance again when the window ends. Windows start with the first
+    /// request in them, so two can sit back to back with a burst at the end of
+    /// one and the start of the next: Alpha Vantage's 25 a day is 4 every
+    /// 4 h 48 min, whose worst case in any 24 hours is 23 (5 would reach 29).
     fn allowance(self) -> (u32, Duration) {
         const MINUTE: Duration = Duration::from_secs(60);
         match self {
-            ProviderKind::AlphaVantage => (5, Duration::from_secs(17_280)),
+            ProviderKind::AlphaVantage => (4, Duration::from_secs(17_280)),
             ProviderKind::Massive => (5, MINUTE),
             ProviderKind::TwelveData => (8, MINUTE),
             ProviderKind::Nse => (nse::QUOTE_BATCH, MINUTE),
@@ -1373,6 +1375,61 @@ mod tests {
         assert_eq!(a.remaining(at(60)), 5);
         assert!(a.take(at(60)).is_ok());
         assert_eq!(a.remaining(at(3600)), 5);
+    }
+
+    /// The most requests an [`Allowance`] lets through in any 24 hours.
+    /// Windows start with their first request, so a caller can put each
+    /// window's other requests at its very start or very end; every
+    /// combination over six back-to-back windows is tried.
+    fn worst_case_per_day(limit: u32, window: Duration) -> usize {
+        let w = window.as_secs();
+        let windows = 6u32;
+        let mut worst = 0;
+        // `tails[k]`: how many of window k's requests (after the first) wait for its end.
+        let mut tails = vec![0u32; windows as usize];
+        loop {
+            let t0 = Instant::now();
+            let mut a = Allowance::new(limit, window);
+            let mut sent: Vec<u64> = Vec::new();
+            for (k, tail) in tails.iter().enumerate() {
+                let start = k as u64 * w;
+                let at = std::iter::once(start)
+                    .chain((0..limit - 1 - tail).map(|_| start))
+                    .chain((0..*tail).map(|_| start + w - 1));
+                for at in at {
+                    if a.take(t0 + Duration::from_secs(at)).is_ok() {
+                        sent.push(at);
+                    }
+                }
+            }
+            let most = sent
+                .iter()
+                .map(|&t| sent.iter().filter(|&&u| u >= t && u < t + 86_400).count())
+                .max()
+                .unwrap();
+            worst = worst.max(most);
+            // Next combination (odometer over 0..limit per window).
+            let mut i = 0;
+            while i < tails.len() && tails[i] == limit - 1 {
+                tails[i] = 0;
+                i += 1;
+            }
+            if i == tails.len() {
+                return worst;
+            }
+            tails[i] += 1;
+        }
+    }
+
+    // The provider's own limit is 25 a day.
+    #[test]
+    fn alpha_vantage_never_exceeds_25_requests_in_any_24_hours() {
+        let (limit, window) = ProviderKind::AlphaVantage.allowance();
+        let worst = worst_case_per_day(limit, window);
+        assert!(worst <= 25, "{worst} requests in 24 h");
+        assert_eq!(worst, 23);
+        // The old 5 per window: 29 in one day, over the limit.
+        assert_eq!(worst_case_per_day(5, window), 29);
     }
 
     #[test]

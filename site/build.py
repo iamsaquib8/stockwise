@@ -7,6 +7,10 @@ target/site-src, rewrites links that point outside docs/ (images are copied
 next to the pages, project pages become site pages, source files link to
 GitHub), then runs `mdbook build site`.
 
+Every built HTML page gets a banner saying the docs describe the development
+version and naming the latest release, read from the newest released section
+of CHANGELOG.md (the Markdown copies for AI assistants have no banner).
+
 After a build it also writes, for AI assistants (https://llmstxt.org):
 - `llms.txt` — what StockWise is, the docs pages and the cheatsheet's commands
 - `llms-full.txt` — every page in one Markdown file
@@ -35,6 +39,49 @@ PROJECT_PAGES = {
     "CONTRIBUTING.md": "contributing.md",
     "DISCLAIMER.md": "disclaimer.md",
 }
+
+RELEASE_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
+
+
+def latest_release(changelog: str) -> str | None:
+    """The newest released version in a changelog ("0.8.0"), skipping [Unreleased]."""
+    m = RELEASE_HEADING.search(changelog)
+    return m.group(1) if m else None
+
+
+def banner_html(version: str) -> str:
+    """The version banner shown at the top of every page."""
+    return (
+        '<div class="docs-version-banner" style="background: var(--quote-bg); '
+        "border-inline-start: 4px solid var(--links); padding: 0.5em 1em; "
+        'margin-bottom: 1.5em; font-size: 0.9em;">'
+        f"Docs for the development version; the latest release is "
+        f'<a href="{REPO}/releases/tag/v{version}">v{version}</a>.</div>'
+    )
+
+
+def add_banner(html: str, version: str) -> str:
+    """`html` with the banner right after its opening <main> tag (once)."""
+    if "docs-version-banner" in html:
+        return html
+    return html.replace("<main>", "<main>" + banner_html(version), 1)
+
+
+def add_banners() -> int:
+    """Put the banner on every built page; returns how many pages got it."""
+    version = latest_release((ROOT / "CHANGELOG.md").read_text())
+    if version is None:
+        print("warning: no released version in CHANGELOG.md, so no version banner", file=sys.stderr)
+        return 0
+    count = 0
+    for page in OUT.glob("*.html"):
+        text = page.read_text()
+        new = add_banner(text, version)
+        if new != text:
+            page.write_text(new)
+            count += 1
+    return count
+
 
 LINK = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)((?:\s+\"[^\"]*\")?\))")
 
@@ -75,6 +122,7 @@ DESCRIPTIONS = {
     "bot-design.md": "How the intraday and long-term bots and the daemon work, and what is planned.",
     "contributing.md": "How to build StockWise, run the checks and send a change.",
     "architecture.md": "Map of the source tree, data flow, caching, storage and dependencies.",
+    "troubleshooting.md": "What to do when Yahoo or NSE does not answer, price data is missing, a ticker is unknown or an import skips a symbol, and where your data folder is.",
 }
 
 SUMMARY_LINK = re.compile(r"^(\s*)(?:- )?\[([^\]]+)\]\(([^)]+\.md)\)")
@@ -155,6 +203,13 @@ def cheatsheet_rows() -> list[tuple[str, list[tuple[str, str]]]]:
     return [(h, rows) for h, rows in out if rows]
 
 
+def mcp_tool_count() -> str:
+    """The number of MCP tools, as docs/ai.md states it ("There are 34 tools");
+    "the" (as in "the read-only tools") if that sentence is gone."""
+    m = re.search(r"There are (\d+) tools", (ROOT / "docs" / "ai.md").read_text())
+    return m.group(1) if m else "the"
+
+
 def write_llms_txt() -> None:
     """llms.txt, llms-full.txt and a .md copy of every page, in the built site."""
     pages = summary_pages()
@@ -167,9 +222,9 @@ def write_llms_txt() -> None:
         "> Stock market toolkit for the terminal, built for Indian (NSE/BSE) and US stocks: "
         "quotes, charts, technicals, screeners, mutual funds (AMFI), F&O option chains, "
         "commodities, G-secs, crypto and FX, backtests, paper trading, portfolio tracking "
-        "with XIRR and capital-gains tax, goal planning. One binary, no API keys, no account. "
-        "Also an MCP server (`stockwise mcp`) that gives AI assistants the same data as "
-        "read-only tools.",
+        "with XIRR, capital-gains and advance tax, goal planning. One binary, no API keys, "
+        "no account. Also an MCP server (`stockwise mcp`) that gives AI assistants the same "
+        f"data as {mcp_tool_count()} read-only tools.",
         "",
         "Key facts for agents:",
         "",
@@ -178,10 +233,12 @@ def write_llms_txt() -> None:
         "are not published yet. Check with `stockwise doctor`.",
         "- Bare tickers are Indian (`TCS` means `TCS.NS`); add `-m us`, `-m crypto`, `-m fx`, "
         "`-m commodity` or an exchange (`-m uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).",
-        "- Add `--json` for machine-readable output (most commands; tables also take `--csv`). "
+        "- Add `--json` for machine-readable output (many commands; tables also take `--csv`; "
+        "`stockwise <command> --help` shows which). "
         "stdout then holds only JSON; errors go to stderr with exit code 1.",
         "- Prefer the MCP server when it is connected: `stockwise mcp` (stdio) or "
-        "`stockwise mcp --http 127.0.0.1:8788`. Its tools are read-only.",
+        "`stockwise mcp --http 127.0.0.1:8788`. Its tools are read-only; "
+        "`stockwise mcp --list-tools` prints them with their schemas.",
         "- Live orders (`stockwise trade`) move real money: never run them for a user without "
         "their explicit request, and they always ask for a typed confirmation.",
         "- Output is educational information, not financial advice.",
@@ -251,6 +308,7 @@ def main() -> int:
     cmd = ["mdbook", "serve" if serve else "build", str(ROOT / "site")]
     code = subprocess.call(cmd)
     if code == 0 and not serve:
+        add_banners()
         write_llms_txt()
     return code
 

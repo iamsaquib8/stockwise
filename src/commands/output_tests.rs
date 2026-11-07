@@ -232,6 +232,7 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
         price,
         date: Some(date.into()),
         sell,
+        units_as_of: None,
     };
     // The issue's tradebook: 100 held since 2023, 50 bought and sold on 2025-06-02.
     let mut p = Portfolio::default();
@@ -486,6 +487,17 @@ fn technical_json_has_the_documented_keys() {
     );
     assert_eq!(keys(&v["bias"]), ["verdict", "bullish", "bearish"]);
     assert!(v["sma_200"].is_number());
+    // Every string in the output describes data; none reads as advice.
+    crate::verdict::testing::assert_neutral(&v.to_string());
+
+    // A steep rise and a steep fall give both extreme RSI readings.
+    let up: Vec<f64> = (0..250).map(|i| 100.0 + i as f64).collect();
+    let down: Vec<f64> = (0..250).map(|i| 500.0 - i as f64).collect();
+    for c in [&up, &down] {
+        let v = technical_json("X", None, "1y", "1d", c, c, c, &[1000; 250]);
+        assert!(v["rsi_signal"].is_string());
+        crate::verdict::testing::assert_neutral(&v.to_string());
+    }
 
     // Too few bars for the long averages: null, not 0.
     let short = closes(40);
@@ -1042,6 +1054,48 @@ fn india_tax_commands_classify_the_same_portfolio_alike() {
     assert_eq!(candidates, ["MF:100001", "TCS.NS"]);
     let skipped: Vec<&str> = h.other_rules.iter().map(|o| o.symbol.as_str()).collect();
     assert!(skipped.contains(&"BTC-INR"), "harvest leaves out crypto");
+}
+
+#[tokio::test]
+async fn harvest_counts_the_sale_of_a_fund_no_longer_held() {
+    use crate::views::fixtures::Fixture;
+    // PPFAS Flexi Cap (equity fund, AMFI 122639): 100 units bought at 100 in
+    // January 2024, all sold at 180 on 2026-06-10, so it is no longer held.
+    // Long term: gain 100 × (180 - 100) = ₹8,000 of the ₹1,25,000 exemption.
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(10.0, 3500.0, "2024-01-10", "manual"));
+    p.add_lot("MF:122639", Lot::new(100.0, 100.0, "2024-01-10", "manual"));
+    p.sell_fifo("MF:122639", 100.0, 180.0, "2026-06-10", "manual")
+        .unwrap();
+    assert!(p.holding("MF:122639").is_none());
+    let mut src = Fixture::default();
+    src.navall = Some(crate::offmarket::tests::navall());
+
+    let (h, _) = super::holdings::harvest_summary(&src, &p, Market::In, day("2026-11-01"))
+        .await
+        .unwrap();
+    assert_eq!(h.ltcg_exemption_limit, 125_000.0);
+    assert_eq!(h.ltcg_exemption_remaining, 117_000.0);
+
+    // Valuing only what is held (the old `harvest`) loses the mark, so the
+    // sale drops out and the whole exemption looks unused.
+    let held = valued(&p, vec![quote("TCS.NS", Some(4100.0), None)]);
+    let old = super::holdings::compute_harvest(&p, &held, Market::In, day("2026-11-01"));
+    assert_eq!(old.ltcg_exemption_remaining, 125_000.0);
+}
+
+#[test]
+fn tax_advance_for_an_old_year_uses_that_years_rate() {
+    // Bought 2023-05-01 at 100, sold 2023-08-10 at 200: STCG ₹1,00,000 before
+    // the July 2024 change, so 15% + 4% cess = ₹15,600 (not ₹20,800).
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(1000.0, 100.0, "2023-05-01", "manual"));
+    p.sell_fifo("TCS.NS", 1000.0, 200.0, "2023-08-10", "manual")
+        .unwrap();
+    let off = crate::offmarket::OffMarket::default();
+    let old = super::planning::advance_tax_schedule(&p, Some("2023-24"), &[], &off).unwrap();
+    assert_eq!(old.total_stcg, 100_000.0);
+    assert!((old.total_tax_estimated - 15_600.0).abs() < 1e-6);
 }
 
 /// Hand-calculated `harvest` cases (India, today is 2026-11-01).

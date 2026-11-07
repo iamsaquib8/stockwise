@@ -458,6 +458,16 @@ pub struct PriorSession {
     pub close: f64,
 }
 
+/// The session date of a bar stamped `ts` (UTC seconds) on an exchange
+/// `offset` seconds east of UTC. Three hours of slack absorb a daylight-saving
+/// change since the bar (the chart carries one offset for all of its bars),
+/// but only where there is an offset to be wrong: at offset 0 (crypto, and
+/// charts without one) a bar stamped 22:30 UTC still belongs to that UTC day.
+fn bar_date(ts: i64, offset: i64) -> Option<chrono::NaiveDate> {
+    let slack = if offset == 0 { 0 } else { 3 * 3600 };
+    Some(chrono::DateTime::from_timestamp(ts + offset + slack, 0)?.date_naive())
+}
+
 impl ChartData {
     /// High, low and close of the last *completed* session in a daily chart,
     /// for classic pivot points, which come from the previous session. While
@@ -471,6 +481,12 @@ impl ChartData {
         market: crate::market::Market,
     ) -> Option<PriorSession> {
         let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
+        // The chart's own symbol decides the market: a BTC-USD chart never
+        // closes, whatever market the command was run with.
+        let market = match self.meta.as_ref().and_then(|m| m.symbol.as_deref()) {
+            Some(symbol) => crate::market::market_of_symbol(symbol, market),
+            None => market,
+        };
         let q = self.indicators.quote.first()?;
         let (highs, lows, closes) = (q.high.as_deref()?, q.low.as_deref()?, q.close.as_deref()?);
         let mut bars: Vec<PriorSession> = self
@@ -480,7 +496,7 @@ impl ChartData {
             .enumerate()
             .filter_map(|(i, ts)| {
                 Some(PriorSession {
-                    date: chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?.date_naive(),
+                    date: bar_date(*ts, offset)?,
                     high: (*highs.get(i)?)?,
                     low: (*lows.get(i)?)?,
                     close: (*closes.get(i)?)?,
@@ -498,8 +514,7 @@ impl ChartData {
     }
 
     /// Closing prices with the session date of each bar, dated in the
-    /// exchange's time zone (`gmtoffset`; three hours of slack absorb a
-    /// daylight-saving change since). Bars without a close are skipped.
+    /// exchange's time zone (`gmtoffset`; see [`bar_date`] for the slack). Bars without a close are skipped.
     pub fn dated_closes(&self) -> Vec<(chrono::NaiveDate, f64)> {
         let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
         let closes = self
@@ -513,10 +528,7 @@ impl ChartData {
             .unwrap_or_default()
             .iter()
             .zip(closes)
-            .filter_map(|(ts, close)| {
-                let date = chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?;
-                Some((date.date_naive(), (*close)?))
-            })
+            .filter_map(|(ts, close)| Some((bar_date(*ts, offset)?, (*close)?)))
             .collect()
     }
 }
@@ -693,6 +705,10 @@ struct YahooSession {
 /// not started more often than this.
 const CRUMB_RENEW_AFTER: Duration = Duration::from_secs(60);
 
+/// After a failed handshake the error is returned from memory this long
+/// instead of starting another handshake.
+const HANDSHAKE_FAILURE_TTL: Duration = Duration::from_secs(45);
+
 /// Stands in for the crumb in URLs built before the session exists. `fetch`
 /// swaps in the real crumb, opening the session first if needed.
 const CRUMB_PLACEHOLDER: &str = "STOCKWISE_CRUMB_PLACEHOLDER";
@@ -733,6 +749,11 @@ pub struct YahooClient {
     /// an HTTP 401. Held across the handshake, so concurrent callers wait
     /// for one handshake instead of each starting their own.
     session: tokio::sync::Mutex<Option<YahooSession>>,
+    /// When the last handshake failed and what it said. Crumb requests within
+    /// [`HANDSHAKE_FAILURE_TTL`] get this error back without another
+    /// handshake (3 cookie + 3 crumb attempts, with sleeps and connect
+    /// timeouts) against a server that has just refused one.
+    handshake_failure: Mutex<Option<(Instant, String)>>,
     crumb_renew_after: Duration,
     last_request: Mutex<Instant>,
     cache: SharedCache,
@@ -780,6 +801,7 @@ impl YahooClient {
         Ok(Self {
             client,
             session: tokio::sync::Mutex::new(None),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: CRUMB_RENEW_AFTER,
             cache,
@@ -791,14 +813,15 @@ impl YahooClient {
     }
 
     /// The current crumb and its generation, opening the session on first
-    /// use. A failed handshake is not remembered, so the next crumb request
-    /// tries again; requests that need no crumb never see the error.
+    /// use. A failed handshake is remembered for [`HANDSHAKE_FAILURE_TTL`]:
+    /// crumb requests in that time get the same error at once, then the next
+    /// one tries again. Requests that need no crumb never see the error.
     async fn crumb_now(&self) -> Result<(String, u64)> {
         let mut slot = self.session.lock().await;
         if let Some(s) = slot.as_ref() {
             return Ok((s.crumb.clone(), s.generation));
         }
-        let crumb = self.handshake().await?;
+        let crumb = self.handshake_remembering_failure().await?;
         *slot = Some(YahooSession {
             crumb: crumb.clone(),
             generation: 1,
@@ -819,13 +842,35 @@ impl YahooClient {
             Some(s) => s.generation + 1,
             None => 1,
         };
-        let crumb = self.handshake().await?;
+        let crumb = self.handshake_remembering_failure().await?;
         *slot = Some(YahooSession {
             crumb: crumb.clone(),
             generation,
             opened: Instant::now(),
         });
         Ok(Some(crumb))
+    }
+
+    /// [`Self::handshake`], except that a failure within the last
+    /// [`HANDSHAKE_FAILURE_TTL`] is returned again without a new attempt.
+    /// Called with the session lock held, so callers queue behind one attempt.
+    async fn handshake_remembering_failure(&self) -> Result<String> {
+        if let Some((at, msg)) = self.handshake_failure.lock().expect("lock").as_ref()
+            && at.elapsed() < HANDSHAKE_FAILURE_TTL
+        {
+            bail!("{msg}");
+        }
+        match self.handshake().await {
+            Ok(crumb) => {
+                *self.handshake_failure.lock().expect("lock") = None;
+                Ok(crumb)
+            }
+            Err(e) => {
+                *self.handshake_failure.lock().expect("lock") =
+                    Some((Instant::now(), format!("{e:#}")));
+                Err(e)
+            }
+        }
     }
 
     async fn handshake(&self) -> Result<String> {
@@ -859,6 +904,7 @@ impl YahooClient {
                 generation: 1,
                 opened: Instant::now(),
             })),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: CRUMB_RENEW_AFTER,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
@@ -881,6 +927,7 @@ impl YahooClient {
                 .build()
                 .expect("HTTP client builds"),
             session: tokio::sync::Mutex::new(None),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: Duration::ZERO,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
@@ -902,6 +949,7 @@ impl YahooClient {
                 generation: 1,
                 opened: Instant::now(),
             })),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: CRUMB_RENEW_AFTER,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
@@ -1597,6 +1645,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_handshake_is_remembered_for_a_while() {
+        let server =
+            crate::testutil::MockServer::start(vec![(429, "Too Many Requests".into())]).await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+        let modules = ["financialData"];
+
+        let first = client.quote_summary("AAA.NS", &modules).await.unwrap_err();
+        let after_one = server.requests().len();
+        assert!(format!("{first:#}").contains("rate limited"), "{first:#}");
+        assert_eq!(
+            after_one,
+            1 + MAX_RETRIES as usize,
+            "one cookie try, three crumb tries"
+        );
+
+        for i in 0..10 {
+            let err = client
+                .quote_summary(&format!("S{i}.NS"), &modules)
+                .await
+                .unwrap_err();
+            assert_eq!(format!("{err:#}"), format!("{first:#}"));
+        }
+        assert_eq!(server.requests().len(), after_one, "no further handshakes");
+
+        // Once the memory expires the next call tries again.
+        *client.handshake_failure.lock().unwrap() =
+            Some((Instant::now() - HANDSHAKE_FAILURE_TTL, "old".into()));
+        client.quote_summary("BBB.NS", &modules).await.unwrap_err();
+        assert!(server.requests().len() > after_one);
+    }
+
+    #[tokio::test]
     async fn chart_404_names_the_symbol_and_suggests_a_ticker() {
         let server = crate::testutil::MockServer::start(vec![
             (
@@ -2061,5 +2141,69 @@ mod tests {
             .prior_session(utc("2026-11-03T20:00:00Z"), Market::Crypto)
             .unwrap();
         assert_eq!(p.close, 105.0);
+    }
+
+    /// The chart's own symbol picks the market, not the command's (default India).
+    #[test]
+    fn the_symbols_own_market_decides_whether_a_session_runs() {
+        use crate::market::Market;
+        let days = [
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, None),
+        ];
+        // BTC-USD at 20:00Z on the 3rd is 01:30 IST on the 4th: judged by
+        // Indian hours the bar of the 3rd would look finished.
+        let mut btc = nse_chart(&days);
+        btc.meta.as_mut().unwrap().gmtoffset = Some(0);
+        btc.meta.as_mut().unwrap().symbol = Some("BTC-USD".into());
+        let now = utc("2026-11-03T20:00:00Z");
+        assert_eq!(btc.prior_session(now, Market::In).unwrap().close, 105.0);
+        assert_eq!(btc.prior_session(now, Market::Crypto).unwrap().close, 105.0);
+        // ^GSPC at 21:30 IST (11:00 ET) on a weekday: the US session is still
+        // open, though the Indian one closed at 15:30 IST.
+        let mut spx = nse_chart(&[
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, Some(118.0)),
+        ]);
+        spx.meta.as_mut().unwrap().gmtoffset = Some(-18_000);
+        spx.meta.as_mut().unwrap().symbol = Some("^GSPC".into());
+        let now = utc("2026-11-03T16:00:00Z");
+        assert_eq!(spx.prior_session(now, Market::In).unwrap().close, 105.0);
+        // Without a symbol on the chart the caller's market is all there is.
+        spx.meta.as_mut().unwrap().symbol = None;
+        assert_eq!(spx.prior_session(now, Market::In).unwrap().close, 118.0);
+    }
+
+    /// The DST slack must not push a late UTC bar into the next day when the
+    /// chart has no exchange offset (crypto).
+    #[test]
+    fn a_bar_stamped_late_in_the_utc_day_keeps_its_date_at_offset_zero() {
+        use crate::market::Market;
+        let stamp = |s: &str| utc(s).timestamp();
+        let mut chart: ChartData = serde_json::from_value(serde_json::json!({
+            "meta": {"gmtoffset": 0, "symbol": "BTC-USD"},
+            "timestamp": [stamp("2026-11-02T22:30:00Z"), stamp("2026-11-03T22:30:00Z")],
+            "indicators": {"quote": [{
+                "high": [110.0, 120.0], "low": [100.0, 108.0], "close": [105.0, 118.0]}]}
+        }))
+        .unwrap();
+        let day = |d| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        assert_eq!(
+            chart.dated_closes(),
+            [(day(2), 105.0), (day(3), 118.0)],
+            "22:30Z is still the same UTC day"
+        );
+        // 01:00Z on the 4th: the bar of the 3rd is complete and is the prior session.
+        let p = chart
+            .prior_session(utc("2026-11-04T01:00:00Z"), Market::Crypto)
+            .unwrap();
+        assert_eq!((p.date, p.close), (day(3), 118.0));
+        // With an exchange offset the slack stays: 09:15 IST bars date as before.
+        chart.meta.as_mut().unwrap().gmtoffset = Some(19_800);
+        assert_eq!(
+            chart.dated_closes()[0].0,
+            day(3),
+            "22:30Z is 04:00 IST next day"
+        );
     }
 }

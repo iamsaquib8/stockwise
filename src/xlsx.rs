@@ -59,7 +59,21 @@ fn central_directory(zip: &[u8]) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
+/// The most one zip entry may inflate to. A real sheet (AMFI's TER export is
+/// a few MB) is far below it; a zip bomb or a lying central directory is not.
+const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+
+/// How much to reserve for an entry the central directory says is `declared`
+/// bytes: that figure is the file's own claim (up to 4 GiB), so it is capped.
+fn reserve_for(declared: usize, limit: usize) -> usize {
+    declared.min(limit)
+}
+
 fn extract(zip: &[u8], e: &Entry) -> Result<Vec<u8>> {
+    extract_within(zip, e, MAX_ENTRY_BYTES)
+}
+
+fn extract_within(zip: &[u8], e: &Entry, limit: usize) -> Result<Vec<u8>> {
     let h = e.local_header;
     if zip.get(h..h + 4) != Some(&[0x50, 0x4b, 0x03, 0x04][..]) {
         bail!("corrupt zip entry {}", e.name);
@@ -74,10 +88,19 @@ fn extract(zip: &[u8], e: &Entry) -> Result<Vec<u8>> {
     match e.method {
         0 => Ok(data.to_vec()),
         8 => {
-            let mut out = Vec::with_capacity(e.size);
+            let mut out = Vec::with_capacity(reserve_for(e.size, limit));
+            // One byte past the limit tells "exactly at it" from "over it".
             flate2::read::DeflateDecoder::new(data)
+                .take(limit as u64 + 1)
                 .read_to_end(&mut out)
                 .with_context(|| format!("cannot inflate {}", e.name))?;
+            if out.len() > limit {
+                bail!(
+                    "zip entry {} inflates to more than {} MiB",
+                    e.name,
+                    limit / (1024 * 1024)
+                );
+            }
             Ok(out)
         }
         m => bail!("zip entry {} uses unsupported compression {m}", e.name),
@@ -452,6 +475,64 @@ mod tests {
             &[],
         );
         assert_eq!(rows, vec![vec!["x", "y"]]);
+    }
+
+    /// A one-entry zip holding `payload` deflated, whose central directory
+    /// says the file is `claimed_size` bytes.
+    fn zip_with(name: &str, payload: &[u8], claimed_size: u32) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(payload).unwrap();
+        let data = enc.finish().unwrap();
+        let mut z = Vec::new();
+        z.extend([0x50, 0x4b, 0x03, 0x04]);
+        z.extend([20, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        z.extend((data.len() as u32).to_le_bytes());
+        z.extend(claimed_size.to_le_bytes());
+        z.extend((name.len() as u16).to_le_bytes());
+        z.extend([0, 0]);
+        z.extend(name.as_bytes());
+        z.extend(&data);
+        let cdir = z.len();
+        z.extend([0x50, 0x4b, 0x01, 0x02]);
+        z.extend([20, 0, 20, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        z.extend((data.len() as u32).to_le_bytes());
+        z.extend(claimed_size.to_le_bytes());
+        z.extend((name.len() as u16).to_le_bytes());
+        z.extend([0; 16]);
+        z.extend(0u32.to_le_bytes());
+        z.extend(name.as_bytes());
+        let cdir_len = z.len() - cdir;
+        z.extend([0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 1, 0, 1, 0]);
+        z.extend((cdir_len as u32).to_le_bytes());
+        z.extend((cdir as u32).to_le_bytes());
+        z.extend([0, 0]);
+        z
+    }
+
+    #[test]
+    fn a_hostile_declared_size_is_not_trusted_for_the_allocation() {
+        // The central directory claims 4 GiB - 1 for a 5-byte file.
+        let zip = zip_with("a.xml", b"hello", u32::MAX);
+        let entries = central_directory(&zip).unwrap();
+        assert_eq!(entries[0].size, u32::MAX as usize);
+        assert_eq!(
+            reserve_for(entries[0].size, MAX_ENTRY_BYTES),
+            MAX_ENTRY_BYTES
+        );
+        assert_eq!(extract(&zip, &entries[0]).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn an_entry_that_inflates_past_the_limit_is_refused() {
+        // 10 KiB of zeros deflates to a few bytes; the limit stops it at 1 KiB.
+        let zip = zip_with("bomb.xml", &[0u8; 10 * 1024], 10 * 1024);
+        let e = &central_directory(&zip).unwrap()[0];
+        let err = extract_within(&zip, e, 1024).unwrap_err().to_string();
+        assert!(err.contains("inflates to more than"), "{err}");
+        // Exactly at the limit is fine.
+        assert_eq!(extract_within(&zip, e, 10 * 1024).unwrap().len(), 10 * 1024);
     }
 
     #[test]

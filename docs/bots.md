@@ -39,20 +39,20 @@ stockwise -m us bot 5000 1  # US market, $5K, 1% target
 - At most 5 plans, and **together they never need more than your capital**:
   walking down the ranking, a plan that doesn't fit in what's left is shrunk
   to what does (or dropped)
-- Smart stop-loss: uses support levels when available, else ATR-based
+- Exit level for each paper position: uses support levels when available, else ATR-based
 
 ### Output
 
 - Sector heat map (which sectors are moving)
 - Market regime detection (Strong Uptrend → Strong Downtrend)
 - Top 15 signals ranked by score
-- The strategies behind the five strongest signals, with each one's strength and reason (`intraday` shows no position sizes, entries, stops or targets; the paper-trading `daemon` and `sim` still size simulated trades)
+- The strategies behind the five strongest signals, with each one's strength and reason (`intraday` shows no position sizes or price levels; the paper-trading `daemon` and `sim` still size simulated trades and show them as long or short with level 1, level 2 and an exit level)
 
 ---
 
-## Long-Term Wealth Bot
+## Long-Term Scores
 
-6-pillar fundamental scoring with Monte Carlo simulation.
+6-pillar scoring of the market's stock universe with a Monte Carlo illustration. It shows data and how each score was built: no buy, sell or hold calls, no entries, stops or targets, and no allocation advice.
 
 ```bash
 stockwise longterm 15000         # ₹15K/month SIP budget
@@ -66,13 +66,13 @@ stockwise -m us longterm 1000    # US market, $1K/month
 | Valuation | 18% | P/E, PEG ratio, P/B, forward P/E compression, EV/EBITDA, earnings yield |
 | Growth | 22% | Revenue growth, quarterly earnings growth, EPS trajectory |
 | Quality | 25% | Profit margins, ROE, debt/equity, current ratio |
-| Momentum | 10% | Golden/Death cross, analyst consensus, target upside |
+| Momentum | 10% | Price against the 50- and 200-day averages, analyst mean rating, analyst mean price estimate against the price |
 | Dividend | 10% | Yield level, DRIP compounding |
 | Safety | 15% | Beta, market cap, historical volatility, debt levels |
 
 ### Moat Analysis
 
-Stocks are rated Wide/Narrow/No Moat based on:
+Stocks get Wide/Narrow/No Moat signals from these rules:
 - Profit margins >25% (pricing power)
 - ROE >25% (capital efficiency)
 - Revenue growth >25% (market dominance)
@@ -86,10 +86,11 @@ Stocks are rated Wide/Narrow/No Moat based on:
 
 ### Output
 
-- Top 12 stocks ranked across all 6 pillars
-- Detailed top 3: moat rating, risk tier, PEG, earnings yield
-- 5Y and 10Y projections with DRIP compounding
-- SIP calculator (how much/month for ₹10L in 10 years)
+- Top 12 names ranked by composite score, with each pillar's score (a dash where the pillar had no data; `n/a` when under half the weight had data)
+- Detailed top 3: score band, data coverage, risk level (Lower / Moderate / Higher), PEG, earnings yield, and the facts that added or took away points
+- 5Y and 10Y growth at an *assumed* annual return set from the score (not a forecast), with dividends reinvested
+- SIP arithmetic (the monthly amount that would reach ₹10L in 10 years at that rate, and what your budget compounds to)
+- A simulated 5-year range: 10th percentile, median and 90th percentile
 
 ---
 
@@ -115,12 +116,14 @@ whatever the price is when you run the command:
 
 1. Bars before the entry time are ignored.
 2. The bars are walked with the same position manager as the daemon: book
-   half at T1 and move the stop to breakeven, close the rest at T2, trail the
-   stop after T1, tighten it in the wind-down.
-3. Whichever of the stop or a target the price reached first decides the
+   half at level 1 and move the exit level to the opening price, close the
+   rest at level 2, trail the exit level after level 1, tighten it in the
+   wind-down. (Levels are fixed when the paper position opens; they are
+   simulation mechanics, not advice.)
+3. Whichever of the exit level or level 2 the price reached first decides the
    trade. Inside a single bar the order of the high and low is unknown, so a
-   bar that touched both counts as **the stop** (conservative). Stops and
-   targets fill at their level; a bar that opens beyond one fills at the open.
+   bar that touched both counts as **the exit level** (conservative). Levels
+   fill at their price; a bar that opens beyond one fills at the open.
 4. Otherwise the trade exits at the open of the 15:15 IST bar (15:45 ET).
 
 Yahoo keeps 5-minute bars for about 60 days. Older sessions fall back to
@@ -131,8 +134,8 @@ command exits non-zero if nothing was settled.
 
 ### What It Tracks
 
-- Per trade: entry/exit, target/stop hit, P&L, strategies used
-- Per day: total P&L, win/loss count, target achievement
+- Per trade: opening and closing price, whether level 2 or the exit level was reached, P&L, strategies used
+- Per day: total P&L, win/loss count, how often level 2 was reached
 - Cumulative: equity curve, Sharpe ratio, win streaks, day/trade win rates
 
 ### Confidence Rating (after 5+ days)
@@ -178,11 +181,11 @@ Lifecycle (NSE; NYSE uses the same offsets from 09:30–16:00 ET):
 9:00 AM   Pre-market scan (sectors, gaps)
 9:15 AM   Enter up to 5 positions (9 strategies, Kelly sizing, ≤ capital in total)
 9:30–3:15 Monitor every 60 seconds:
-          - T1 hit → book 50%, move stop to breakeven
-          - T2 hit → close fully
-          - Stop hit → exit, record loss
-          - Trailing stop updates (1.5% trail)
-          - Wind-down (2 PM+): tighten stops to 0.5%
+          - Level 1 reached → book 50%, move the exit level to the opening price
+          - Level 2 reached → close fully
+          - Exit level reached → close, record the loss
+          - Trailing exit level updates (1.5% trail)
+          - Wind-down (2 PM+): tighten the exit level to 0.5%
 3:15 PM   Square off all remaining positions
 3:20 PM   Settle → save to sim_history.json → AI EOD report → wait for the
           next session (with --once: exit)
@@ -196,7 +199,7 @@ sleeps until 15 minutes before it.
 Risk controls:
 - 1% max risk per trade, 30% max per position, total allocation ≤ capital
 - 3% daily loss kill switch (closes everything; counts every realised exit,
-  including targets)
+  including level 2 exits)
 - Max 5 concurrent positions
 - Entries only in the first 15 minutes; no new entries after that
 - Forced square-off 15 minutes before the close
@@ -241,11 +244,11 @@ stockwise daemon longterm
 ```
 
 Runs 5 steps:
-1. Score 30 stocks on 6 pillars + Monte Carlo
+1. Score 30 stocks on 6 pillars + Monte Carlo and print the three highest scores
 2. Check portfolio value, snapshot wealth tracker
 3. Check all price alerts
-4. Scan for tax-loss harvest opportunities
-5. Generate AI investment memo via Ollama
+4. List holdings priced below their average cost
+5. Generate AI research notes via Ollama
 
 Run daily after market close, or weekly for deep analysis.
 

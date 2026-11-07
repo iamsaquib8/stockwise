@@ -716,24 +716,24 @@ pub fn generate_rich_insights(r: &Research) -> Vec<InsightCard> {
             cards.push(InsightCard {
                     impact: Impact::Positive,
                     category: InsightCategory::Analysts,
-                    title: "Substantial Target Upside".to_string(),
+                    title: "Analyst Estimate Above Price".to_string(),
                     description: format!(
-                        "Consensus analyst price target of {}{:.2} implies {:+.1}% upside potential from current levels",
+                        "Mean analyst price estimate of {}{:.2} is {:.1}% above the current price (third-party estimate)",
                         csym, target, upside * 100.0
                     ),
-                    metric: Some(format!("{:+.1}% Upside", upside * 100.0)),
+                    metric: Some(format!("{:+.1}% vs estimate", upside * 100.0)),
                     importance: 5,
                 });
         } else if upside <= -0.06 {
             cards.push(InsightCard {
                     impact: Impact::Negative,
                     category: InsightCategory::Analysts,
-                    title: "Trading Above Price Target".to_string(),
+                    title: "Price Above Analyst Estimate".to_string(),
                     description: format!(
-                        "Current price trades {:+.1}% above mean analyst target ({}{:.2}), indicating limited upside room",
+                        "Current price is {:.1}% above the mean analyst price estimate ({}{:.2}) (third-party estimate)",
                         upside.abs() * 100.0, csym, target
                     ),
-                    metric: Some(format!("-{:.1}% vs Target", upside.abs() * 100.0)),
+                    metric: Some(format!("{:.1}% above estimate", upside.abs() * 100.0)),
                     importance: 3,
                 });
         }
@@ -1216,34 +1216,11 @@ pub fn generate_insights(q: &Quote) -> Vec<String> {
     {
         let csym = market::currency_symbol(q.currency.as_deref());
         let upside = ((target - price) / price) * 100.0;
-        let label = match q.recommendation_key.as_deref() {
-            Some(k) => k.to_string(),
-            None => format!("{:.1}", rec),
-        };
-        if upside > 20.0 {
-            insights.push(
-                format!(
-                    "Analyst consensus: {} — target {}{:.2} implies {:.1}% upside",
-                    label, csym, target, upside
-                )
-                .green()
-                .to_string(),
-            );
-        } else if upside < -10.0 {
-            insights.push(
-                format!(
-                    "Analyst consensus: {} — target {}{:.2} implies {:.1}% downside",
-                    label, csym, target, upside
-                )
-                .red()
-                .to_string(),
-            );
-        } else {
-            insights.push(format!(
-                "Analyst consensus: {} — target {}{:.2} ({:+.1}%)",
-                label, csym, target, upside
-            ));
-        }
+        // The mean rating as a number, never the Buy / Hold / Sell word.
+        insights.push(format!(
+            "Analysts: mean rating {:.1}/5 (1 = most positive); mean price estimate {}{:.2} ({:+.1}% from price)",
+            rec, csym, target, upside
+        ));
     }
 
     if insights.is_empty() {
@@ -1573,7 +1550,7 @@ mod tests {
         );
         assert!(titles.contains(&"Zero Promoter Pledge"), "{:?}", titles);
         assert!(
-            titles.contains(&"Substantial Target Upside"),
+            titles.contains(&"Analyst Estimate Above Price"),
             "{:?}",
             titles
         );

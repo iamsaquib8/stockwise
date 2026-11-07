@@ -1,0 +1,1 @@
+- `tax advance --fy` for a year before 2024-25 uses the rates and exemption that applied to each sale date, as `tax export in` does: STCG of Rs 1,00,000 in FY 2023-24 is now Rs 15,600 with cess, not Rs 20,800.

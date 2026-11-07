@@ -67,6 +67,8 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "cookies"], default-features = false }
 tokio = { version = "1", features = ["full"] }
+# Runs the tool calls of one `ask` turn together, results in call order.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 colored = "3"
@@ -116,3 +118,7 @@ tower = { version = "0.5", features = ["util"] }
 [profile.release]
 opt-level = 3
 lto = true
+# Smaller binary (symbols are stripped) and better inlining across crates.
+# `panic` stays "unwind": the broken-pipe hook and tokio task panics need it.
+codegen-units = 1
+strip = "symbols"

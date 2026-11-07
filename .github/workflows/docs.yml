@@ -45,6 +45,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
+      - name: Test the build script
+        run: python3 site/test_build.py
       - name: Build
         run: python3 site/build.py
       - name: Upload Pages artifact

@@ -577,7 +577,7 @@ pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
             technical::periods_per_year_for(
                 market::AssetClass::of(&resolved),
                 interval,
-                session_hours(market),
+                session_hours(market::market_of_symbol(&resolved, market)),
             ),
         );
 
@@ -666,7 +666,7 @@ pub async fn cmd_multitimeframe(symbol: &str, market: Market) -> Result<()> {
             technical::periods_per_year_for(
                 market::AssetClass::of(&resolved),
                 interval,
-                session_hours(market),
+                session_hours(market::market_of_symbol(&resolved, market)),
             ),
         )
         .map(|v| format!("{:.1}%", v * 100.0))
@@ -918,11 +918,10 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
     } else {
         Some(client.get_chart(&resolved, "1mo", "1d").await?)
     };
-    let Some(prior) = daily
-        .as_ref()
-        .unwrap_or(&chart)
-        .prior_session(chrono::Utc::now(), market)
-    else {
+    let Some(prior) = daily.as_ref().unwrap_or(&chart).prior_session(
+        chrono::Utc::now(),
+        market::market_of_symbol(&resolved, market),
+    ) else {
         bail!("No completed trading session found to build pivot points from");
     };
     let (pivot, r1, r2, r3, s1, s2, s3) =

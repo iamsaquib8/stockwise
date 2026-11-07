@@ -1015,6 +1015,7 @@ pub async fn cmd_portfolio_add(
     // A purchase of a merged-away ticker (HDFC, MINDTREE) before its merger
     // is recorded in the acquirer's shares, at the same cost and date.
     let (mut symbol, mut shares, mut cost) = (symbol.to_string(), shares, cost);
+    let mut units_as_of = None;
     if market == Market::In
         && let Some(swap) = pf::merger_swap(&symbol, Some(&date), shares, cost)
     {
@@ -1033,11 +1034,16 @@ pub async fn cmd_portfolio_add(
             swap.merger.old_shares
         );
         (symbol, shares, cost) = (swap.symbol, swap.qty, swap.price);
+        // The quantity is the acquirer's share count as of the merger, so
+        // splits dated up to then must not be applied to the lot again.
+        units_as_of = Some(swap.merger.through.to_string());
     }
     let resolved = market::resolve_symbol(&symbol, market);
     check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
     let holding = Portfolio::update(|p| {
-        p.add_lot(&resolved, Lot::new(shares, cost, &date, "manual"));
+        let mut lot = Lot::new(shares, cost, &date, "manual");
+        lot.units_as_of = units_as_of;
+        p.add_lot(&resolved, lot);
         Ok(p.holding(&resolved).cloned())
     })?;
     let cur = pf::symbol_currency(&resolved);

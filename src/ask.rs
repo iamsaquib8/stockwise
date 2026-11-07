@@ -13,6 +13,7 @@ use crate::ai::{AiClient, AiProvider, CLOUD_MAX_TOKENS};
 use crate::tools::{NOTE, Tool, ToolContext};
 use crate::views::DataSource;
 use anyhow::{Result, anyhow, bail};
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -536,6 +537,10 @@ fn explain(e: anyhow::Error, ai: &AiClient) -> anyhow::Error {
     e
 }
 
+/// Tool calls of one model turn that run at the same time. The Yahoo and NSE
+/// clients space their requests themselves, so this only overlaps the waiting.
+const MAX_PARALLEL_TOOLS: usize = 4;
+
 /// Answer `question` with the tools in `ctx`.
 pub async fn ask<D: DataSource>(
     ai: &AiClient,
@@ -611,17 +616,39 @@ pub async fn ask<D: DataSource>(
             return Ok(t);
         }
 
-        let mut results = Vec::new();
+        // Decide, in the model's order, which calls the limit still allows;
+        // those then run together (at most `MAX_PARALLEL_TOOLS` at a time),
+        // and their answers are recorded in the model's order again.
+        let mut planned = Vec::new();
         for call in reply.calls {
-            let (value, ok, error) = if t.usage.tool_calls >= opts.max_tool_calls {
-                let msg = "Tool-call limit reached: answer with what you have.".to_string();
-                (json!({ "error": msg }), false, Some(msg))
+            if t.usage.tool_calls >= opts.max_tool_calls {
+                planned.push((call, false));
             } else {
                 t.usage.tool_calls += 1;
                 if opts.verbose {
                     eprintln!("  → {} {}", call.name, call.args);
                 }
-                match ctx.call(&call.name, &call.args).await {
+                planned.push((call, true));
+            }
+        }
+        let outcomes: Vec<Result<Value>> =
+            futures_util::stream::iter(planned.iter().map(|(call, allowed)| async move {
+                if *allowed {
+                    ctx.call(&call.name, &call.args).await
+                } else {
+                    Ok(Value::Null)
+                }
+            }))
+            .buffered(MAX_PARALLEL_TOOLS)
+            .collect()
+            .await;
+        let mut results = Vec::new();
+        for ((call, allowed), outcome) in planned.into_iter().zip(outcomes) {
+            let (value, ok, error) = if !allowed {
+                let msg = "Tool-call limit reached: answer with what you have.".to_string();
+                (json!({ "error": msg }), false, Some(msg))
+            } else {
+                match outcome {
                     Ok(v) => (v, true, None),
                     Err(e) => {
                         // This text goes back to the model, which may be a

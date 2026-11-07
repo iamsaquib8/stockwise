@@ -228,6 +228,7 @@ pub(super) async fn prepare_order(
     last: Option<f64>,
 ) -> Result<Prepared> {
     check_args(qty, &intent)?;
+    let last = usable_price(last);
     if matches!(intent, Intent::Gtt { .. }) && !broker.supports_gtt() {
         bail!("{} GTT orders are not supported yet", broker.kind().label());
     }
@@ -310,7 +311,7 @@ pub(super) async fn place_live_order(
     guard: &Guard<'_>,
 ) -> Result<Outcome> {
     let kind = broker.kind();
-    let last = guard.last_price;
+    let last = usable_price(guard.last_price);
     let Prepared {
         instrument,
         est_value,
@@ -487,14 +488,23 @@ pub(super) fn confirm_live_order(what: &str) -> Result<bool> {
     Ok(line.trim() == "yes")
 }
 
+/// A price an order check can rely on: finite and above zero. A halted or
+/// broken quote of `0.0` (or NaN) is "no price", so a market order cannot be
+/// valued at nothing and slip under `max_order_value`.
+pub(super) fn usable_price(p: Option<f64>) -> Option<f64> {
+    p.filter(|p| p.is_finite() && *p > 0.0)
+}
+
 /// Last NSE price from Yahoo, or None.
 pub(super) async fn last_price(symbol: &str) -> Option<f64> {
-    let yahoo_sym = format!("{}.NS", brokers::plain_symbol(symbol));
     let y = YahooClient::new().await.ok()?;
-    y.get_quote(&[yahoo_sym.as_str()])
-        .await
-        .ok()
-        .and_then(|q| q.first().and_then(|q| q.regular_market_price))
+    last_price_with(&y, symbol).await
+}
+
+async fn last_price_with(y: &YahooClient, symbol: &str) -> Option<f64> {
+    let yahoo_sym = format!("{}.NS", brokers::plain_symbol(symbol));
+    let quotes = y.get_quote(&[yahoo_sym.as_str()]).await.ok()?;
+    usable_price(quotes.first()?.regular_market_price)
 }
 
 /// Log in, look up the price, and run the safety flow for one order or GTT.
@@ -1284,6 +1294,71 @@ mod tests {
             .unwrap();
         assert!(matches!(out, Outcome::Sent(_)));
         assert_eq!(b.sent(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_zero_last_price_is_no_price_and_a_cap_refuses_the_market_order() {
+        // Direct: halted, broken and negative prices are "unknown".
+        for p in [
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            None,
+        ] {
+            assert_eq!(usable_price(p), None, "{p:?}");
+        }
+        assert_eq!(usable_price(Some(1234.5)), Some(1234.5));
+
+        // Through the safety flow: a guard that carries Some(0.0) still has
+        // no estimate, so --yes with a cap sends nothing.
+        let b = FakeBroker::default();
+        let g = guard(Some(0.0), Some(5000.0), &never_confirm);
+        let err = place_live_order(
+            &b,
+            Side::Buy,
+            "SBIN",
+            1000,
+            Intent::Order(OrderKind::Market),
+            YES,
+            &g,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("Cannot estimate"), "{err}");
+        assert_eq!(b.sent(), 0);
+
+        // End to end with a mock Yahoo quote that reports a halted stock.
+        let body = r#"{"quoteResponse":{"result":[
+            {"symbol":"SBIN.NS","quoteType":"EQUITY","regularMarketPrice":0.0}
+        ],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let base = server.url.clone();
+        let y = YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url| {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            match parsed.query() {
+                Some(q) => format!("{}{}?{}", base, parsed.path(), q),
+                None => format!("{}{}", base, parsed.path()),
+            }
+        });
+        let last = last_price_with(&y, "SBIN").await;
+        assert_eq!(last, None, "a quote of 0.0 is not a price");
+        // The quote was fetched and parsed; it was the zero that was refused.
+        assert_eq!(server.requests().len(), 1);
+        let g = guard(last, Some(5000.0), &never_confirm);
+        let err = place_live_order(
+            &b,
+            Side::Buy,
+            "SBIN",
+            1000,
+            Intent::Order(OrderKind::Market),
+            YES,
+            &g,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("Cannot estimate"), "{err}");
+        assert_eq!(b.sent(), 0);
     }
 
     #[tokio::test]

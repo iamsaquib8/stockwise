@@ -448,6 +448,21 @@ pub fn exchange_of(symbol: &str) -> Option<Exchange> {
     })
 }
 
+/// The market a symbol itself trades in, for session logic (hours, closes,
+/// bars per year). Crypto and FX pairs have no exchange session, futures
+/// (`GC=F`) are commodities, and everything else follows its suffix or index
+/// name. `fallback` (the command's market) is used only when the symbol says
+/// nothing, so `levels BTC-USD` is never judged by Indian market hours.
+pub fn market_of_symbol(symbol: &str, fallback: Market) -> Market {
+    let upper = symbol.trim().to_ascii_uppercase();
+    match AssetClass::of(&upper) {
+        AssetClass::Crypto => Market::Crypto,
+        AssetClass::Fx => Market::Fx,
+        _ if upper.ends_with("=F") => Market::Commodity,
+        _ => crate::alerts::alert_market(&upper).unwrap_or(fallback),
+    }
+}
+
 /// What kind of instrument a Yahoo symbol is. Decides how prices are
 /// formatted (crypto and FX need more decimals) and whether exchange hours
 /// apply.
@@ -1291,6 +1306,20 @@ pub const SCREENER_CATEGORIES: &[&str] =
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn symbols_pick_their_own_market() {
+        use super::{Exchange, Market, market_of_symbol as m};
+        assert_eq!(m("BTC-USD", Market::In), Market::Crypto);
+        assert_eq!(m("USDINR=X", Market::In), Market::Fx);
+        assert_eq!(m("GC=F", Market::In), Market::Commodity);
+        assert_eq!(m("^GSPC", Market::In), Market::Us);
+        assert_eq!(m("AAPL", Market::In), Market::Us);
+        assert_eq!(m("TCS.NS", Market::Us), Market::In);
+        assert_eq!(m("VOD.L", Market::In), Market::Global(Exchange::Uk));
+        // Unknown dotted symbols fall back to the caller's market.
+        assert_eq!(m("FOO.ZZ", Market::In), Market::In);
+    }
+
     use super::*;
 
     #[test]

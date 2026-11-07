@@ -238,7 +238,7 @@ pub fn replay_trade(
         entered_at,
         initial_stop: Some(trade.stop_loss),
     };
-    let long = trade.direction == "BUY";
+    let long = crate::intraday::Direction::is_long_str(&trade.direction);
     let mut last_time = None;
 
     for bar in bars
@@ -304,7 +304,7 @@ pub fn replay_trade(
 
 /// Feed a price that moved through the stop as a fill at the stop level.
 fn feed_with_stop(pos: &mut LivePosition, price: f64, phase: Phase) {
-    let long = pos.direction == "BUY";
+    let long = crate::intraday::Direction::is_long_str(&pos.direction);
     let stop = match (long, pos.t1_booked) {
         (true, true) => pos.stop_loss.max(pos.trailing_stop),
         (false, true) => pos.stop_loss.min(pos.trailing_stop),
@@ -387,6 +387,23 @@ mod tests {
             loss_count: Some(losses),
             settled: true,
         }
+    }
+
+    #[test]
+    fn old_history_with_buy_and_sell_still_loads_as_long_and_short() {
+        let mut long = serde_json::to_value(make_trade("A.NS", 10.0)).unwrap();
+        assert_eq!(long["direction"], "BUY"); // fixture uses the pre-0.8.1 spelling
+        let mut short = serde_json::to_value(make_trade("B.NS", 10.0)).unwrap();
+        short["direction"] = "SELL".into();
+        long["direction"] = "BUY".into();
+        let long: SimTrade = serde_json::from_value(long).unwrap();
+        let short: SimTrade = serde_json::from_value(short).unwrap();
+        assert!(crate::intraday::Direction::is_long_str(&long.direction));
+        assert!(!crate::intraday::Direction::is_long_str(&short.direction));
+        assert_eq!(
+            crate::intraday::Direction::label_of(&short.direction),
+            "short"
+        );
     }
 
     #[test]

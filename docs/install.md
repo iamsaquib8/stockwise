@@ -66,6 +66,9 @@ stockwise --version
 stockwise doctor        # data directory, network, optional Redis/Ollama/keyring
 ```
 
+If a command fails, [Troubleshooting](troubleshooting.md) lists the common
+messages and what to do about each.
+
 ## Privacy
 
 StockWise sends no telemetry. The project counts downloads only from the

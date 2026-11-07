@@ -5,8 +5,8 @@ every option; the [commands reference](commands.md) explains each one.
 
 Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 `-m jp`, `-m crypto`, `-m fx`, `-m commodity` … for other markets, or set
-`STOCKWISE_MARKET`. Almost every data command takes `--json` (and tables take
-`--csv`).
+`STOCKWISE_MARKET`. Many commands take `--json`, and tables take
+`--csv` (`stockwise <command> --help` shows which).
 
 ## Quotes and markets
 
@@ -51,7 +51,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Rank a category by return | `stockwise mf screen flexi cap` |
 | Option chain with greeks | `stockwise options chain NIFTY` |
 | Put/call ratio, max pain | `stockwise options pcr BANKNIFTY` · `stockwise options maxpain NIFTY` |
-| OI build-up & resistance/support walls | `stockwise fno oi NIFTY` · `stockwise options oi BANKNIFTY -n 5` |
+| OI build-up & resistance/support walls | `stockwise fno oi NIFTY` · `stockwise options oi BANKNIFTY -n 5 --explain` |
 | Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --width 200` |
 | Gold and silver in ₹/10 g | `stockwise commodity spot` |
 | Sovereign Gold Bonds | `stockwise commodity sgb` |
@@ -67,6 +67,8 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
 | Portfolio X-Ray (overlap, concentration, sectors) | `stockwise portfolio xray` · `stockwise portfolio xray --json` |
 | Import from your broker | `stockwise import kite holdings.xlsx` (CSV or `.xlsx`; also `groww`, `upstox`, `indmoney`, `cas`) |
+| Rebuild a symbol's lots from a dated file | `stockwise import kite tradebook.csv --replace` |
+| One holding's lots, sales and XIRR | `stockwise portfolio lots TCS` |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |
 | Splits, bonuses, dividends | `stockwise portfolio actions --apply` |
 | Set target allocation | `stockwise portfolio target set TCS 25` · `stockwise portfolio target show` |
@@ -76,6 +78,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Capital-gains estimate | `stockwise tax in` |
 | ITR Schedule CG CSV | `stockwise tax export in --out cg.csv` |
 | Advance tax schedule & 234C estimator | `stockwise tax advance` · `stockwise tax advance --paid 25000` |
+| Advance tax with each payment dated (exact 234C) | `stockwise tax advance --fy 2025-26 --paid 2025-06-14:3000 --paid 2025-09-10:5000` |
 | Everything on one screen | `stockwise dashboard` |
 
 ## Alerts and watchlist
@@ -107,6 +110,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Backtest a strategy (after costs) | `stockwise backtest INFY -s macd` |
 | Backtest a basket | `stockwise backtest portfolio TCS INFY WIPRO -s rsi` |
 | Walk-forward test | `stockwise backtest walkforward TCS -s sma --train 1y --test 3mo` |
+| Paper-trade one session, then exit (for cron) | `stockwise daemon intraday 25000 --once` |
 | Replay the 2020 crash | `stockwise sim replay start covid-crash-2020` |
 | Take a challenge | `stockwise sim challenge start beat-the-index` |
 | Your badges and best scores | `stockwise sim profile` |

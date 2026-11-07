@@ -32,8 +32,9 @@ stockwise tui                           # live dashboard in the terminal
 ```
 
 Mutual funds, F&O option chains, crypto and FX, portfolio XIRR and look-through
-exposure (`portfolio xray`), Indian capital-gains tax and advance tax, alerts, a
-paper-trading simulator and optional live orders through Indian brokers — see the
+exposure (`portfolio xray`), Indian capital-gains tax with `harvest`, `tax export`
+and dated advance-tax payments, alerts, a paper-trading simulator and optional live
+orders through Indian brokers — see the
 [documentation](https://iamsaquib8.github.io/stockwise/) and the
 [cheatsheet](https://iamsaquib8.github.io/stockwise/cheatsheet.html).
 
@@ -43,7 +44,7 @@ Your portfolio stays in local files and StockWise sends no telemetry.
 
 `stockwise mcp` is a Model Context Protocol server: Claude Desktop, Claude
 Code, Cursor and other assistants can use quotes, fund NAVs, option chains,
-backtests and your portfolio as read-only tools. It never places orders. With
+backtests, your portfolio and its tax estimate through 34 read-only tools. It never places orders. With
 `uvx` there is nothing to install first:
 
 ```json

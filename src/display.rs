@@ -232,14 +232,10 @@ pub fn rating_bar(score: f64, max: f64) -> String {
     format!("{}{}", filled.green(), empty.dimmed())
 }
 
-pub fn sentiment_label(recommendation_mean: f64) -> String {
-    match recommendation_mean {
-        x if x <= 1.5 => "Strong Buy".green().bold().to_string(),
-        x if x <= 2.5 => "Buy".green().to_string(),
-        x if x <= 3.5 => "Hold".yellow().to_string(),
-        x if x <= 4.5 => "Sell".red().to_string(),
-        _ => "Strong Sell".red().bold().to_string(),
-    }
+/// The analysts' mean rating as plain data: the number and its scale, with no
+/// Buy / Hold / Sell label and no colour that reads as a call.
+pub fn mean_rating_text(recommendation_mean: f64) -> String {
+    format!("mean rating {recommendation_mean:.1}/5 (1 = most positive)")
 }
 
 #[cfg(test)]
@@ -368,33 +364,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sentiment_label_strong_buy() {
-        let label = sentiment_label(1.0);
-        assert!(label.contains("Strong Buy") || label.to_lowercase().contains("strong buy"));
-    }
-
-    #[test]
-    fn test_sentiment_label_buy() {
-        let label = sentiment_label(2.0);
-        assert!(label.contains("Buy") || label.to_lowercase().contains("buy"));
-    }
-
-    #[test]
-    fn test_sentiment_label_hold() {
-        let label = sentiment_label(3.0);
-        assert!(label.contains("Hold") || label.to_lowercase().contains("hold"));
-    }
-
-    #[test]
-    fn test_sentiment_label_sell() {
-        let label = sentiment_label(4.0);
-        assert!(label.contains("Sell") || label.to_lowercase().contains("sell"));
-    }
-
-    #[test]
-    fn test_sentiment_label_strong_sell() {
-        let label = sentiment_label(5.0);
-        assert!(label.contains("Strong Sell") || label.to_lowercase().contains("strong sell"));
+    fn mean_rating_text_is_the_number_and_its_scale() {
+        assert_eq!(
+            mean_rating_text(1.84),
+            "mean rating 1.8/5 (1 = most positive)"
+        );
+        for x in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            crate::verdict::testing::assert_neutral(&mean_rating_text(x));
+        }
     }
 
     #[test]

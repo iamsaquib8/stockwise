@@ -11,6 +11,7 @@
 - [Markets](markets.md)
 - [Data providers](data-providers.md)
 - [AI](ai.md)
+- [Troubleshooting](troubleshooting.md)
 
 # Investing and trading
 

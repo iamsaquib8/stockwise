@@ -1,0 +1,1 @@
+- `technical` (and the `technical` MCP and `ask` tool): the RSI signal now reads "RSI above 70 (overbought zone)" or "RSI below 30 (oversold zone)" instead of "Consider selling" / "Consider buying" / "Strong buy signal". It describes the reading and no longer gives a call.

@@ -390,8 +390,9 @@ fn analyst(r: &Research) -> PillarScore {
         {
             let upside = (target - p) / p;
             let note = format!(
-                "Analyst mean target {:+.0}% vs price (third-party data)",
-                upside * 100.0
+                "Analyst mean price estimate is {:.0}% {} the current price (third-party data)",
+                upside.abs() * 100.0,
+                if upside >= 0.0 { "above" } else { "below" }
             );
             if upside >= 0.18 {
                 b.add(25.0, note);
@@ -769,7 +770,7 @@ pub fn explain_lines(v: &DecisionVerdict) -> Vec<String> {
         ),
         "• Pillar score: 50 is neutral. Each rule moves it up or down by a fixed amount, e.g. a low PEG adds 25, and the result is kept between 10 and 95.".to_string(),
         "• Bands: Strong is 65 and above, Moderate is 45 to 64, Weak is below 45.".to_string(),
-        "• Data coverage: for each pillar, the share of its inputs that had data, weighted by the pillar weight. Inputs are PEG, P/E and P/B (valuation); revenue growth, earnings growth, net margin and ROE (growth); debt-to-equity and current ratio (balance sheet); shareholding history, institutional ownership and insider trades (smart money); analyst rating and target (analyst); 50/200-day averages and 20+ price bars (technical).".to_string(),
+        "• Data coverage: for each pillar, the share of its inputs that had data, weighted by the pillar weight. Inputs are PEG, P/E and P/B (valuation); revenue growth, earnings growth, net margin and ROE (growth); debt-to-equity and current ratio (balance sheet); shareholding history, institutional ownership and insider trades (smart money); analyst mean rating and mean price estimate (analyst); 50/200-day averages and 20+ price bars (technical).".to_string(),
         "• Failed data sources lower coverage and are listed under DATA NOTES.".to_string(),
         "• Scores describe the data. They are not a prediction and not a recommendation.".to_string(),
     ]
@@ -793,10 +794,14 @@ pub(crate) mod testing {
         "risk / reward",
         "risk-reward",
         "reduce",
+        "avoid",
+        "subscribe",
+        "apply",
     ];
 
     /// Panics when `text` contains advice wording. "buying" and "selling" are
-    /// allowed as plain descriptions of insider and institutional flows.
+    /// allowed as plain descriptions of insider and institutional flows, and
+    /// "subscribed" / "application" are not the call words "subscribe" / "apply".
     pub fn assert_neutral(text: &str) {
         let lower = text.to_lowercase();
         for word in FORBIDDEN {

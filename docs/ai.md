@@ -289,8 +289,9 @@ Put a TLS proxy in front of it before exposing it beyond your network.
 
 - [`server.json`](../server.json) describes the server for the
   [official MCP registry](https://registry.modelcontextprotocol.io) as
-  `io.github.iamsaquib8/stockwise`, installable from crates.io, PyPI
-  (`uvx stockwise mcp`) and GHCR.
+  `io.github.iamsaquib8/stockwise`. It lists the crates.io package and the
+  GHCR image (`ghcr.io/iamsaquib8/stockwise`); `uvx stockwise mcp` works once
+  the PyPI wheels are published.
 - [`packaging/mcpb/`](../packaging/mcpb/README.md) builds a Claude Desktop
   extension (`.mcpb`) from a release binary.
 
@@ -312,7 +313,8 @@ Put a TLS proxy in front of it before exposing it beyond your network.
 |----------|------------|---------|---------|
 | `STOCKWISE_AI_PROVIDER` | `ai_provider` | `ollama` | `ollama`, `openai`, `anthropic` (or `claude`), `gemini` (or `google`) |
 | `STOCKWISE_MODEL` | `model` | per provider | Model name; overrides the provider's default below |
-| `OLLAMA_HOST` | `ollama_host` | `http://localhost:11434` | Ollama server (`host:port` or a full URL) |
+| `OLLAMA_HOST` | `ollama_host` | `http://localhost:11434` | Ollama server (`host:port` or a full URL). A server that is not on this computer is refused over plain `http://` unless `STOCKWISE_ALLOW_REMOTE_OLLAMA=1` is set (use `https://` or a tunnel when you can); `ask` says when the server is remote |
+| `STOCKWISE_ALLOW_REMOTE_OLLAMA` | — | off | `1` to allow plain `http://` to an Ollama server on another machine. Environment only |
 | `OPENAI_API_KEY` | — | — | Key for `STOCKWISE_AI_PROVIDER=openai` |
 | `ANTHROPIC_API_KEY` | — | — | Key for `STOCKWISE_AI_PROVIDER=anthropic` |
 | `GEMINI_API_KEY` | — | — | Key for `STOCKWISE_AI_PROVIDER=gemini` |
@@ -323,7 +325,7 @@ API keys are read from the environment only, never from the config file.
 
 ```bash
 STOCKWISE_MODEL=llama3.1:8b stockwise report portfolio
-OLLAMA_HOST=192.168.1.20:11434 stockwise report TCS
+STOCKWISE_ALLOW_REMOTE_OLLAMA=1 OLLAMA_HOST=192.168.1.20:11434 stockwise report TCS
 ```
 
 If the Ollama model isn't pulled, StockWise tells you the exact `ollama pull`

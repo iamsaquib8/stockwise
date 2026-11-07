@@ -528,6 +528,16 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: &[String], json: bool) -> R
             "  • Advance Tax Paid Recorded: {}",
             inr(schedule.total_paid)
         );
+        if schedule.ignored_before_year {
+            println!(
+                "  • {}",
+                format!(
+                    "A payment dated before {} was made for an earlier year and is not counted.",
+                    schedule.fy_start.format("%d %b %Y")
+                )
+                .yellow()
+            );
+        }
         if schedule.assumed_on_time {
             println!(
                 "  • {}",
