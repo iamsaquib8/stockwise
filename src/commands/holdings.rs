@@ -819,6 +819,40 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
     apply_import_rows(source, file, rows, side_col.is_some(), replace).await
 }
 
+/// Splits and bonuses for each dated symbol, from its first trade. A symbol
+/// Yahoo has no chart for (HTTP 404, such as a renamed ticker) is not an
+/// error: it is returned in the second list and imported without a split
+/// check. Any other failure stops the import, so nothing is changed.
+pub(super) async fn fetch_import_splits(
+    client: &YahooClient,
+    rows: &[ImportRow],
+    symbols: &[&String],
+) -> Result<(Vec<(String, Vec<crate::portfolio::Split>)>, Vec<String>)> {
+    let mut found = Vec::new();
+    let mut unchecked = Vec::new();
+    for sym in symbols {
+        let since = rows
+            .iter()
+            .filter(|r| &r.symbol == *sym)
+            .filter_map(|r| r.date.clone())
+            .min()
+            .unwrap_or_else(pf::today);
+        match super::portfolio::fetch_actions(client, sym, &since).await {
+            Ok((s, _, _)) => found.push(((*sym).clone(), s)),
+            Err(e) if crate::api::is_not_found(&e) => unchecked.push((*sym).clone()),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Could not check {} for splits, which a tradebook needs; nothing was changed. Try again when online",
+                        sym
+                    )
+                });
+            }
+        }
+    }
+    Ok((found, unchecked))
+}
+
 /// Apply parsed import rows (from any source) to the portfolio and report
 /// what changed: dated rows rebuild a symbol's lots, undated rows sync its
 /// quantity and keep existing lots. Re-importing the same rows changes
@@ -845,22 +879,15 @@ pub(super) async fn apply_import_rows(
     let mut splits = Vec::new();
     if tradebook {
         let client = YahooClient::new().await?;
-        for sym in symbols.iter().filter(|s| dated(s)) {
-            let since = rows
-                .iter()
-                .filter(|r| &r.symbol == sym)
-                .filter_map(|r| r.date.clone())
-                .min()
-                .unwrap_or_else(pf::today);
-            let (s, _, _) = super::portfolio::fetch_actions(&client, sym, &since)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Could not check {} for splits, which a tradebook needs; nothing was changed. Try again when online",
-                        sym
-                    )
-                })?;
-            splits.push((sym.clone(), s));
+        let dated_symbols: Vec<&String> = symbols.iter().filter(|s| dated(s)).collect();
+        let (found, unchecked) = fetch_import_splits(&client, &rows, &dated_symbols).await?;
+        splits = found;
+        for sym in unchecked {
+            println!(
+                "  {} {} — split check skipped: Yahoo has no price history for it, so its quantities are used as in the file",
+                "!".yellow(),
+                sym
+            );
         }
     }
 

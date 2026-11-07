@@ -1273,4 +1273,52 @@ X AMC,1,P,X Fund,,INF000000001,1,2024-05-01,Purchase,1000,10,100,110,PURCHASE,\n
         let d = pf::parse_trade_date("45366", false).unwrap();
         assert_eq!(d.to_string(), "2024-03-15");
     }
+
+    fn mock_yahoo(server_url: &str) -> YahooClient {
+        let base = server_url.to_string();
+        YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            format!("{}{}?{}", base, parsed.path(), parsed.query().unwrap_or(""))
+        })
+    }
+
+    fn dated_buy(symbol: &str) -> ImportRow {
+        ImportRow {
+            symbol: symbol.into(),
+            qty: 73.0,
+            price: 4109.58,
+            date: Some("2022-06-01".into()),
+            sell: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn split_check_skips_a_symbol_yahoo_has_no_chart_for() {
+        // Mindtree trades become LTIM.NS, which Yahoo answers with a 404.
+        let server = crate::testutil::MockServer::start(vec![(404, "Not Found".into())]).await;
+        let client = mock_yahoo(&server.url);
+        let rows = vec![dated_buy("LTIM.NS")];
+        let sym = "LTIM.NS".to_string();
+        let (found, unchecked) =
+            super::super::holdings::fetch_import_splits(&client, &rows, &[&sym])
+                .await
+                .unwrap();
+        assert!(found.is_empty());
+        assert_eq!(unchecked, vec!["LTIM.NS".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn split_check_still_fails_on_other_errors() {
+        let server = crate::testutil::MockServer::start(vec![(403, "Forbidden".into())]).await;
+        let client = mock_yahoo(&server.url);
+        let rows = vec![dated_buy("LTIM.NS")];
+        let sym = "LTIM.NS".to_string();
+        let err = super::super::holdings::fetch_import_splits(&client, &rows, &[&sym])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("nothing was changed"),
+            "{err:#}"
+        );
+    }
 }
