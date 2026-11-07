@@ -162,16 +162,17 @@ pub fn vwap(highs: &[f64], lows: &[f64], closes: &[f64], volumes: &[u64]) -> Opt
     Some(cum_tp_vol / cum_vol)
 }
 
-/// Generate a signal interpretation
+/// Describe where an RSI reading sits. Words only describe the reading; they
+/// are not a trading call.
 pub fn rsi_signal(rsi_val: f64) -> &'static str {
     match rsi_val {
-        x if x >= 80.0 => "Extremely Overbought - Strong sell signal",
-        x if x >= 70.0 => "Overbought - Consider selling",
+        x if x >= 80.0 => "RSI above 80 (extremely overbought zone)",
+        x if x >= 70.0 => "RSI above 70 (overbought zone)",
         x if x >= 60.0 => "Bullish momentum",
         x if x >= 40.0 => "Neutral",
         x if x >= 30.0 => "Bearish momentum",
-        x if x >= 20.0 => "Oversold - Consider buying",
-        _ => "Extremely Oversold - Strong buy signal",
+        x if x >= 20.0 => "RSI below 30 (oversold zone)",
+        _ => "RSI below 20 (extremely oversold zone)",
     }
 }
 
@@ -995,6 +996,17 @@ mod tests {
         assert!(rsi_signal(25.0).to_lowercase().contains("oversold"));
         assert!(rsi_signal(75.0).to_lowercase().contains("overbought"));
         assert_eq!(rsi_signal(50.0), "Neutral");
+    }
+
+    #[test]
+    fn rsi_and_macd_signals_are_neutral_wording() {
+        for rsi in [0.0, 10.0, 25.0, 35.0, 50.0, 65.0, 75.0, 85.0, 100.0] {
+            crate::verdict::testing::assert_neutral(rsi_signal(rsi));
+        }
+        assert_eq!(rsi_signal(75.0), "RSI above 70 (overbought zone)");
+        assert_eq!(rsi_signal(25.0), "RSI below 30 (oversold zone)");
+        crate::verdict::testing::assert_neutral(macd_signal(1.0));
+        crate::verdict::testing::assert_neutral(macd_signal(-1.0));
     }
 
     #[test]
