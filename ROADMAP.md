@@ -28,6 +28,14 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 
 ## ✅ Shipped
 
+**0.8.1** — fix what was wrong
+- Imports no longer lose lots: a second tradebook or broker file merges, same-day trades are
+  intraday, HDFC and Mindtree trades use the merger ratios, and writes are locked
+- Gold, silver, liquid and international ETFs are no longer taxed as listed shares
+- Correct SIP projection, BSE codes reported as not found, USD statements converted, dividend yield
+- `verdict`, `ipo`, `picks` and `intraday` show scores and data, never buy/sell calls
+- Yahoo's session opens lazily, so one failed handshake no longer stops every command
+
 **0.8** — portfolio depth, tax season and an easier start
 - Portfolio X-Ray (look-through overlap across stocks, funds and ETFs), target allocations with
   drift bands and inflow-only rebalancing, and lot-level `harvest` with `--json`/`--csv`
@@ -102,24 +110,6 @@ stocks and mutual funds across brokers, files their own ITR, and wants their dat
 machine. Four jobs must be excellent: **one true portfolio**, **capital-gains tax done right**,
 **fast lookups**, and **asking an AI about your money locally**. Everything else is secondary
 until 1.0.
-
-### 0.8.1 — fix what's wrong ([milestone](https://github.com/iamsaquib8/stockwise/milestone/1), target: late November 2026)
-
-Epics: [#258](https://github.com/iamsaquib8/stockwise/issues/258), [#259](https://github.com/iamsaquib8/stockwise/issues/259), [#260](https://github.com/iamsaquib8/stockwise/issues/260), [#278](https://github.com/iamsaquib8/stockwise/issues/278), [#257](https://github.com/iamsaquib8/stockwise/issues/257).
-
-Correct numbers before new features. These are the "Known issues" in the 0.8.0 release.
-
-- 📋 **No data loss on import** — a second tradebook or holdings file replacing lots
-  ([#83](https://github.com/iamsaquib8/stockwise/issues/83), [#85](https://github.com/iamsaquib8/stockwise/issues/85)), same-day trades booked as capital gains ([#84](https://github.com/iamsaquib8/stockwise/issues/84)), merger swap ratios ([#86](https://github.com/iamsaquib8/stockwise/issues/86))
-- 📋 **Right tax and numbers** — non-equity ETFs taxed as shares ([#87](https://github.com/iamsaquib8/stockwise/issues/87)), the SIP projection
-  ([#67](https://github.com/iamsaquib8/stockwise/issues/67)), USD statements shown in ₹ ([#207](https://github.com/iamsaquib8/stockwise/issues/207)), NSE dividend yield ([#208](https://github.com/iamsaquib8/stockwise/issues/208)), BSE codes not
-  found ([#206](https://github.com/iamsaquib8/stockwise/issues/206))
-- 📋 **No buy/sell calls** — neutral pillar scores instead of verdicts, entries and targets
-  ([#188](https://github.com/iamsaquib8/stockwise/issues/188), [#112](https://github.com/iamsaquib8/stockwise/issues/112))
-- 📋 **Works when Yahoo hiccups** — open the session lazily ([#154](https://github.com/iamsaquib8/stockwise/issues/154))
-- 📋 **Releases publish themselves** — crates.io and PyPI from the release workflow ([#169](https://github.com/iamsaquib8/stockwise/issues/169))
-
-Done when: no open `priority: high` issues.
 
 ### 0.9 — install anywhere, ready for tax season ([milestone](https://github.com/iamsaquib8/stockwise/milestone/2), target: before 15 December 2026)
 
