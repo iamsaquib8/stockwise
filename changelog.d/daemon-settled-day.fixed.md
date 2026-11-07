@@ -1,0 +1,1 @@
+- `daemon intraday`: Ctrl+C or SIGTERM on a day that is already settled no longer closes its leftover open rows at stale prices or adds made-up P&L; `--once` on a settled day exits at once instead of waiting for the next session; and a saved state with open positions but no entry flag no longer loops printing "Session complete".

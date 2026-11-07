@@ -660,9 +660,12 @@ async fn tick(
             } else if state.entered {
                 settle_day(state, market)?;
             } else {
-                state.settled = true;
                 println!("\n  {} No trades today.", "→".dimmed());
             }
+            // The day is over whichever branch ran. A saved state with open
+            // positions but `entered: false` is handed over by none of them,
+            // and without this it would report `done` on every tick.
+            state.settled = true;
             Ok(Tick {
                 events: Vec::new(),
                 wait: Duration::ZERO,
@@ -714,6 +717,18 @@ async fn monitor(
 
 /// Ctrl+C / SIGTERM: square off at last prices, settle, save, exit 0.
 async fn stop_intraday(state: &mut DaemonState, market: Market, notifier: &Notifier) -> Result<()> {
+    // A settled day is over. Its rows may still read Open (a missed
+    // square-off was handed to `sim settle`, which replays the day's bars),
+    // so closing them here would invent exits at stale prices and add made-up
+    // P&L to the day's totals.
+    if state.settled {
+        println!(
+            "\n  {} Stopping. Today's session is already settled; nothing to close.",
+            "■".yellow().bold()
+        );
+        println!("\n  {} Daemon stopped.", "✓".green().bold());
+        return Ok(());
+    }
     let open = state.open_count();
     if open > 0 {
         println!(
@@ -817,6 +832,16 @@ async fn run_intraday(amount: Option<f64>, market: Market, once: bool) -> Result
         }
     }
     if state.settled {
+        if once {
+            // `--once` means one session. Waiting for the next one would block
+            // for hours or days and then run a session nobody asked for.
+            println!(
+                "  {} Today's session is already settled — see {}. Exiting (--once).",
+                "→".dimmed(),
+                "stockwise sim history".cyan()
+            );
+            return Ok(());
+        }
         println!(
             "  {} Today's session is already settled — see {}. Waiting for the next session.",
             "→".dimmed(),
@@ -1093,6 +1118,83 @@ mod tests {
         let monday = clock::session_date(Market::In, mon_open);
         let fresh = DaemonState::new(monday, "IN", state.capital, state.target_pct, mon_open);
         assert!(!fresh.settled);
+    }
+
+    /// A state with a row that still reads Open, as left by a missed
+    /// square-off that was handed to `sim settle`.
+    fn open_row(now: DateTime<Utc>, entered: bool, settled: bool) -> DaemonState {
+        let mut state = DaemonState::new(
+            clock::session_date(Market::In, now),
+            "IN",
+            DEFAULT_CAPITAL,
+            TARGET_PCT,
+            now,
+        );
+        state.entered = entered;
+        state.settled = settled;
+        state.positions.push(crate::daemon::LivePosition {
+            symbol: "TCS.NS".into(),
+            direction: "long".into(),
+            entry_price: 100.0,
+            current_price: 100.0,
+            target1: 102.0,
+            target2: 104.0,
+            stop_loss: 98.0,
+            trailing_stop: 98.0,
+            qty: 10,
+            t1_booked: false,
+            remaining_qty: 10,
+            booked_pnl: 0.0,
+            pnl: 0.0,
+            pnl_pct: 0.0,
+            status: PositionStatus::Open,
+            strategies: vec![],
+            score: 70.0,
+            entered_at: None,
+            initial_stop: None,
+        });
+        state
+    }
+
+    fn post_market() -> DateTime<Utc> {
+        clock::at(
+            Market::In,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+            chrono::NaiveTime::from_hms_opt(15, 25, 0).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn stopping_a_settled_day_closes_nothing_and_adds_no_pnl() {
+        let now = post_market();
+        let mut state = open_row(now, true, true);
+        let notifier = Notifier::from_env();
+        stop_intraday(&mut state, Market::In, &notifier).await.unwrap();
+        // The row stays Open for `sim settle`; no exit was invented.
+        assert_eq!(state.positions[0].status, PositionStatus::Open);
+        assert_eq!(state.open_count(), 1);
+        assert_eq!(state.risk.realized_pnl, 0.0);
+        assert_eq!(state.total_pnl(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn open_positions_without_entered_do_not_spin_the_post_market_loop() {
+        let now = post_market();
+        let mut state = open_row(now, false, false);
+        let mut feed = Feed::default();
+        let mut scanned = false;
+        let t = tick(&mut state, Phase::PostMarket, Market::In, &mut feed, &mut scanned, now)
+            .await
+            .unwrap();
+        assert!(t.done);
+        assert!(state.settled, "the day must end, or every tick reports done");
+        // The next tick waits for the next session instead of returning
+        // `done` with no wait.
+        let t = tick(&mut state, Phase::PostMarket, Market::In, &mut feed, &mut scanned, now)
+            .await
+            .unwrap();
+        assert!(!t.done);
+        assert!(t.wait >= Duration::from_secs(60), "{:?}", t.wait);
     }
 
     #[test]
