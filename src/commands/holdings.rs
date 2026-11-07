@@ -1628,9 +1628,10 @@ pub(crate) struct TaxReport {
 
 /// Whether Indian capital-gains tax treats `symbol` like a listed share
 /// (Sec. 111A/112A): shares and equity-oriented funds do; debt and other
-/// funds, funds of unknown category and SGBs don't (the reason says how
-/// they are taxed instead). Gold, silver, liquid, debt and international
-/// ETFs are not listed shares either.
+/// funds, funds of unknown category, SGBs, crypto and gold, silver, liquid,
+/// debt and international ETFs don't (the reason says how they are taxed
+/// instead). The decision is [`crate::offmarket::india_class`], shared with
+/// `tax export in` and `tax advance`.
 enum IndiaRules {
     Listed,
     EquityFund,
@@ -1638,40 +1639,17 @@ enum IndiaRules {
 }
 
 fn india_rules(symbol: &str, val: &Valuation) -> IndiaRules {
-    use crate::offmarket;
-    if offmarket::is_fund(symbol) {
-        let mark = val.mark(symbol);
-        return match mark.and_then(|m| m.category.as_deref()) {
-            Some(cat)
-                if offmarket::is_equity_oriented(
-                    cat,
-                    mark.and_then(|m| m.name.as_deref()).unwrap_or(""),
-                ) =>
-            {
-                IndiaRules::EquityFund
-            }
-            Some(cat) => IndiaRules::Other(format!(
-                "{cat} — not an equity-oriented fund: units bought from 1 Apr 2023 are taxed at \
-                 your slab rate, older units at 12.5% after 24 months"
-            )),
-            None => IndiaRules::Other(
-                "no AMFI category (not in AMFI's NAV file, or the file could not be loaded), so \
-                 whether it is equity-oriented is unknown"
-                    .into(),
-            ),
-        };
-    }
-    if let Some(kind) = offmarket::non_equity_etf(symbol) {
-        return IndiaRules::Other(format!("{} — {}", kind.name(), kind.rule()));
-    }
-    if offmarket::is_sgb(symbol) {
-        return IndiaRules::Other(
-            "Sovereign Gold Bond — tax-free when RBI redeems it; sold on the exchange, 12.5% \
-             after 12 months (no ₹1.25 lakh exemption), else your slab rate"
+    use crate::offmarket::{IndiaClass, india_class};
+    match india_class(symbol, val.mark(symbol)) {
+        IndiaClass::Listed => IndiaRules::Listed,
+        IndiaClass::EquityFund => IndiaRules::EquityFund,
+        IndiaClass::Vda => IndiaRules::Other(
+            "Crypto — taxed at a flat 30% under Sec. 115BBH, and losses cannot be set off against \
+             other income"
                 .into(),
-        );
+        ),
+        IndiaClass::Other(reason) => IndiaRules::Other(reason),
     }
-    IndiaRules::Listed
 }
 
 /// Gains realized this tax year and what selling every open lot at `val`'s

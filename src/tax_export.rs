@@ -246,23 +246,27 @@ pub fn india_schedule(
     sales: &[Sale],
     start: NaiveDate,
     isin: impl Fn(&str) -> Option<String>,
+    marks: &crate::offmarket::OffMarket,
 ) -> IndiaSchedule {
+    use crate::offmarket::{IndiaClass, india_class};
     let c = Country::India;
     let (from, to) = c.tax_year(start);
     let (all, other_currency) = sales_in_year(c, sales, start);
-    let (vda, kept): (Vec<_>, Vec<_>) = all.into_iter().partition(|(s, _)| {
-        crate::market::AssetClass::of(&s.symbol) == crate::market::AssetClass::Crypto
-    });
+    let class = |symbol: &str| india_class(symbol, marks.mark(symbol));
+    let (vda, kept): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .partition(|(s, _)| class(&s.symbol) == IndiaClass::Vda);
     let mut virtual_digital_assets: Vec<String> =
         vda.iter().map(|(s, _)| s.symbol.clone()).collect();
     virtual_digital_assets.sort();
     virtual_digital_assets.dedup();
     // Bought and sold on one day: speculative income (Sec. 43(5)), not 111A/112A.
     let (intraday, kept): (Vec<_>, Vec<_>) = kept.into_iter().partition(|(s, _)| s.is_intraday());
-    // Gold, silver, liquid, debt and international ETFs are not listed shares.
+    // Debt and other funds, SGBs, and gold, silver, liquid, debt and
+    // international ETFs are not listed shares or equity-oriented funds.
     let (other, kept): (Vec<_>, Vec<_>) = kept
         .into_iter()
-        .partition(|(s, _)| crate::offmarket::non_equity_etf(&s.symbol).is_some());
+        .partition(|(s, _)| matches!(class(&s.symbol), IndiaClass::Other(_)));
     let mut other_rules: Vec<String> = other.iter().map(|(s, _)| s.symbol.clone()).collect();
     other_rules.sort();
     other_rules.dedup();
@@ -366,8 +370,7 @@ pub fn india_schedule(
     }
     if rows.iter().any(|r| r.symbol.starts_with("MF:")) {
         notes.push(
-            "Mutual fund rows belong in 111A/112A only for equity-oriented funds; debt fund units \
-             bought after 31 Mar 2023 are taxed at your slab rate"
+            "Mutual fund rows are equity-oriented funds (by AMFI category), taxed like listed shares"
                 .into(),
         );
     }
@@ -385,7 +388,8 @@ pub fn india_schedule(
         notes.push(format!(
             "Not included (not listed shares or equity-oriented funds, so not 111A/112A — gold, silver \
              and international ETF units: 12.5% after 12 months with no ₹1.25 lakh exemption, shorter \
-             holdings at your slab rate; liquid and debt ETFs: slab rate): {}",
+             holdings at your slab rate; liquid and debt ETFs, debt and other funds without an AMFI \
+             category, and Sovereign Gold Bonds: other rules, see `stockwise tax`): {}",
             other_rules.join(", ")
         ));
     }
@@ -915,7 +919,7 @@ mod tests {
     #[test]
     fn india_schedule_worked_example() {
         let isin = |s: &str| (s == "TCS.NS").then(|| "INE467B01029".to_string());
-        let s = india_schedule(&fy26_sales(), d("2025-04-01"), isin);
+        let s = india_schedule(&fy26_sales(), d("2025-04-01"), isin, &Default::default());
         assert_eq!(s.tax_year, "FY 2025-26 (AY 2026-27)");
         assert_eq!(
             s.sales.len(),
@@ -977,7 +981,12 @@ mod tests {
             ("2025-01-15", 1900.0),
             ("2025-08-20", 1800.0),
         );
-        let s = india_schedule(&[intraday, loss], d("2025-04-01"), |_| None);
+        let s = india_schedule(
+            &[intraday, loss],
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
         // Only the delivery sale is in the schedule and the summary.
         assert_eq!(s.sales.len(), 1);
         assert_eq!(s.sales[0].symbol, "INFY.NS");
@@ -1007,7 +1016,7 @@ mod tests {
                 ("2025-10-01", 3000.0),
             ),
         ];
-        let s = india_schedule(&sales, d("2025-04-01"), |_| None);
+        let s = india_schedule(&sales, d("2025-04-01"), |_| None, &Default::default());
         assert_eq!(s.summary.st_loss_set_off_against_ltcg, 50_000.0);
         assert_eq!(s.summary.ltcg_after_set_off, 150_000.0);
         assert_eq!(s.summary.ltcg_tax, 3_125.0);
@@ -1016,7 +1025,12 @@ mod tests {
 
     #[test]
     fn india_csv_has_title_rows_header_and_summary() {
-        let s = india_schedule(&fy26_sales(), d("2025-04-01"), |_| None);
+        let s = india_schedule(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
         let csv = india_csv(&s);
         let lines: Vec<&str> = csv.lines().collect();
         assert!(lines[0].contains("estimate — verify with your broker's tax P&L"));
@@ -1048,7 +1062,7 @@ mod tests {
             ("2024-01-01", 100.0),
             ("2024-05-01", 120.0),
         )];
-        let s = india_schedule(&sales, d("2024-04-01"), |_| None);
+        let s = india_schedule(&sales, d("2024-04-01"), |_| None, &Default::default());
         assert!(s.notes.iter().any(|n| n.contains("23 Jul 2024")));
         assert_eq!(s.sales[0].term, "STCG");
         // Earlier years had a ₹1 lakh exemption.
@@ -1058,7 +1072,7 @@ mod tests {
             ("2022-01-01", 100.0),
             ("2023-05-01", 120.0),
         )];
-        let s = india_schedule(&sales, d("2023-04-01"), |_| None);
+        let s = india_schedule(&sales, d("2023-04-01"), |_| None, &Default::default());
         assert!(s.notes.iter().any(|n| n.contains("₹1 lakh")));
         assert!(!s.notes.iter().any(|n| n.contains("23 Jul 2024")));
     }

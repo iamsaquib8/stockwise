@@ -420,6 +420,14 @@ are equity ETFs such as `NIFTYBEES`. `harvest` skips the same holdings (they
 are listed under "Not checked") and `tax export in` and `tax advance` leave
 their sales out.
 
+`tax in`, `harvest`, `tax export in` and `tax advance` share one rule for what
+counts as a listed share or an equity-oriented fund (Sec. 111A/112A); the other
+three load AMFI's file to read the category of any fund you sold. Crypto (such
+as `BTC-INR`) is never in 111A/112A: it is taxed at a flat 30% under Sec.
+115BBH with no set-off of losses, `tax export in` lists it under
+`virtual_digital_assets`, and the other commands name it among the holdings
+they leave out.
+
 ### Mutual funds and SGBs
 
 Holdings that Yahoo Finance doesn't quote are priced by StockWise itself, the

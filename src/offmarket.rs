@@ -291,6 +291,63 @@ pub fn is_sgb(symbol: &str) -> bool {
     sgb_id(symbol).is_some()
 }
 
+/// How an Indian sale or holding is taxed, decided from its symbol and, for a
+/// mutual fund, its AMFI category. `tax in`, `tax export in`, `tax advance`
+/// and `harvest` all use this, so one portfolio gives the same sales in
+/// Sec. 111A/112A in every command.
+#[derive(Clone, Debug, PartialEq)]
+pub enum IndiaClass {
+    /// A listed share, or an exchange-traded equity ETF: Sec. 111A/112A.
+    Listed,
+    /// An equity-oriented mutual fund: Sec. 111A/112A, like listed shares.
+    EquityFund,
+    /// Crypto and other virtual digital assets: Sec. 115BBH (30% flat, no
+    /// set-off of losses), reported in Schedule VDA.
+    Vda,
+    /// Everything else (debt and other funds, gold, silver, liquid and
+    /// international ETFs, Sovereign Gold Bonds): left out of 111A/112A, with
+    /// the rule that applies.
+    Other(String),
+}
+
+/// Classify `symbol` for Indian capital-gains tax. `mark` is its AMFI mark
+/// (see [`OffMarket::mark`]); a fund without a category is `Other`, because
+/// nothing says it is equity-oriented.
+pub fn india_class(symbol: &str, mark: Option<&Mark>) -> IndiaClass {
+    if crate::market::AssetClass::of(symbol) == crate::market::AssetClass::Crypto {
+        return IndiaClass::Vda;
+    }
+    if is_fund(symbol) {
+        return match mark.and_then(|m| m.category.as_deref()) {
+            Some(cat)
+                if is_equity_oriented(cat, mark.and_then(|m| m.name.as_deref()).unwrap_or("")) =>
+            {
+                IndiaClass::EquityFund
+            }
+            Some(cat) => IndiaClass::Other(format!(
+                "{cat} — not an equity-oriented fund: units bought from 1 Apr 2023 are taxed at \
+                 your slab rate, older units at 12.5% after 24 months"
+            )),
+            None => IndiaClass::Other(
+                "no AMFI category (not in AMFI's NAV file, or the file could not be loaded), so \
+                 whether it is equity-oriented is unknown"
+                    .into(),
+            ),
+        };
+    }
+    if let Some(kind) = non_equity_etf(symbol) {
+        return IndiaClass::Other(format!("{} — {}", kind.name(), kind.rule()));
+    }
+    if is_sgb(symbol) {
+        return IndiaClass::Other(
+            "Sovereign Gold Bond — tax-free when RBI redeems it; sold on the exchange, 12.5% \
+             after 12 months (no ₹1.25 lakh exemption), else your slab rate"
+                .into(),
+        );
+    }
+    IndiaClass::Listed
+}
+
 /// Whether a symbol is priced here rather than by a market quote.
 pub fn is_off_market(symbol: &str) -> bool {
     is_fund(symbol) || is_sgb(symbol)
