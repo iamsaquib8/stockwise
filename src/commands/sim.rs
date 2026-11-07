@@ -392,6 +392,21 @@ pub(crate) fn sim_history_json(
     })
 }
 
+/// Width of the daily P&L bar (1 to 20 cells): the day's size relative to the
+/// larger of the best and worst day. Breakeven sessions, where that scale is
+/// zero or not a number, get the minimum width instead of a full bar.
+fn daily_bar_len(pnl: f64, best_day: Option<f64>, worst_day: Option<f64>) -> usize {
+    const MAX_BAR: f64 = 20.0;
+    let scale = best_day
+        .unwrap_or(0.0)
+        .abs()
+        .max(worst_day.unwrap_or(0.0).abs());
+    if !(scale > 0.0 && scale.is_finite()) || !pnl.is_finite() {
+        return 1;
+    }
+    ((pnl.abs() / scale * MAX_BAR).min(MAX_BAR) as usize).max(1)
+}
+
 /// `sim history`: past sessions and the bot's confidence rating.
 pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
     let csym = market.currency_symbol();
@@ -432,14 +447,7 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
         println!("  {}", "Daily P&L".bold());
         for s in history.in_market(market.id()).filter(|s| s.settled) {
             let pnl = s.total_pnl.unwrap_or(0.0);
-            let bar_len = (pnl.abs()
-                / stats
-                    .best_day
-                    .unwrap_or(1.0)
-                    .abs()
-                    .max(stats.worst_day.unwrap_or(1.0).abs())
-                * 20.0)
-                .min(20.0) as usize;
+            let bar_len = daily_bar_len(pnl, stats.best_day, stats.worst_day);
             let bar = if pnl >= 0.0 {
                 "█".repeat(bar_len.max(1)).green().to_string()
             } else {
@@ -819,4 +827,31 @@ pub fn cmd_sim_reset(yes: bool) -> Result<()> {
         backup.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daily_bar_scales_to_the_biggest_day() {
+        // Best +200, worst -100: scale 200. +100 is half of it, 100/200*20 = 10
+        // cells; the best day fills all 20; -100 is 10 as well.
+        assert_eq!(daily_bar_len(100.0, Some(200.0), Some(-100.0)), 10);
+        assert_eq!(daily_bar_len(200.0, Some(200.0), Some(-100.0)), 20);
+        assert_eq!(daily_bar_len(-100.0, Some(200.0), Some(-100.0)), 10);
+        // A tiny day still shows one cell.
+        assert_eq!(daily_bar_len(1.0, Some(200.0), Some(-100.0)), 1);
+    }
+
+    #[test]
+    fn breakeven_history_gets_minimal_bars_not_full_ones() {
+        // Best and worst day both 0: the scale is 0, which used to give
+        // 0/0 = NaN and a full 20-cell bar.
+        assert_eq!(daily_bar_len(0.0, Some(0.0), Some(0.0)), 1);
+        assert_eq!(daily_bar_len(5.0, Some(0.0), Some(-0.0)), 1);
+        assert_eq!(daily_bar_len(0.0, None, None), 1);
+        assert_eq!(daily_bar_len(f64::NAN, Some(10.0), Some(-10.0)), 1);
+        assert_eq!(daily_bar_len(10.0, Some(f64::INFINITY), None), 1);
+    }
 }
