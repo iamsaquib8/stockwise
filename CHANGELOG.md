@@ -7,15 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-07
+
+Fixes the wrong numbers and import data loss listed under "Known issues" in 0.8.0, and replaces the BUY/SELL verdict with neutral pillar scores.
+
 ### Added
-- Granular `Needs` bitset and selective source fetching in `research::fetch` ([#222](https://github.com/iamsaquib8/stockwise/issues/222)):
-  - Commands selectively fetch only required data sources rather than unconditionally firing 10 concurrent requests:
-    - `score` / `scorecard` (`Needs::STATEMENTS`): fetches quote summary and 5-year financials timeseries only; skips charts, Google News, Yahoo RSS, and all NSE endpoints.
-    - `verdict` / `insights` / `analyze` / bare symbol snapshot (`Needs::VERDICT`): fetches statements, prices chart, and shareholding/insiders; skips RSS news, NSE filings, benchmark chart, and corporate actions.
-    - `events` / `deep` (`Needs::ALL`): fetches full research snapshot.
-  - Enforced a bounded 3-second timeout (`tokio::time::timeout`) on all NSE endpoints (filings, shareholding, insider trading, corporate actions) so slow or unresponsive NSE calls log to warnings and degrade gracefully rather than hanging the CLI.
+- `score` fetches only the statements it needs, and `verdict`, `insights` and the bare-symbol snapshot skip the news and filing sources, so they answer faster. Every NSE request now times out after 3 seconds instead of stalling the command ([#222](https://github.com/iamsaquib8/stockwise/issues/222)).
+
+- `score` fetches only the statements it needs, and `verdict`, `insights` and the bare-symbol snapshot skip the news and filing sources, so they answer faster. Every NSE request now times out after 3 seconds instead of stalling the command ([#222](https://github.com/iamsaquib8/stockwise/issues/222)).
 
 ### Changed
+- `verdict`, `deep`, `analyze` and `stockwise SYMBOL` no longer print a STRONG BUY / SELL label, an entry zone, a stop-loss, a target price or risk/reward. They show six pillar scores (Strong / Moderate / Weak), a 0-100 composite and a "not a recommendation" note. In `--json`, `action`, `entry_zone`, `stop_loss`, `target_price`, `upside_pct`, `risk_pct`, `risk_reward`, the time-horizon texts and each pillar's `grade` are gone, and each pillar has a `band`. The `decision`, `signal` and `buysell` aliases are removed ([#188](https://github.com/iamsaquib8/stockwise/issues/188)).
+- `verdict`: a pillar with no data now shows "no data" and is left out of the composite instead of scoring 50 or 55, and crypto, FX and index symbols get only the technical pillar and no composite ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
+- `verdict --explain` now lists the real weights (valuation 20, growth 25, balance sheet 15, smart money 15, analyst 10, technicals 15), taken from the scores themselves, and the data sources that failed are listed under the score ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
+- `verdict`: the fixed "Confidence: 85%" is replaced by `data_coverage` (JSON) / "Data coverage" (text), the share of the score's inputs that had data ([#77](https://github.com/iamsaquib8/stockwise/issues/77)).
+- `insights`: analyst cards say "mean rating x/5" instead of "Strong Buy", and the 52-week-low card no longer calls it a "value entry".
+- The `verdict` tool in the MCP server and in `stockwise ask` is now called "6-pillar scorecard", returns only pillar scores, data coverage and the facts behind them, and its description says it is not a recommendation; the buy/sell action, entry zone and stop-loss are no longer sent to the model ([#112](https://github.com/iamsaquib8/stockwise/issues/112)).
+- `ipo`: the board and `ipo SYMBOL` no longer print APPLY / AVOID / SUBSCRIBE labels or the family-PAN "Retail Split Strategy". They show demand labels (strong, moderate, mixed or weak demand, book building), the allotment odds by application tier and, with `--capital`, the odds at that amount. In `--json`, `listing_verdict`, `long_term_verdict`, `timing_guidance`, `capital_plan` and `golden_rules` are replaced by `listing_demand`, `long_term_profile`, `timeline`, `capital_odds` and `allotment_rules` ([#189](https://github.com/iamsaquib8/stockwise/issues/189)).
+- `picks` is now "Highest Scores in the Large-Cap Universe" and lists the factors that raised each score instead of "reasons" such as "Analyst buy" ([#189](https://github.com/iamsaquib8/stockwise/issues/189)).
+- `intraday` is a signal scanner: it no longer gives entries, stop-losses, targets or position sizes for your capital, and shows the strategies behind the strongest signals instead. The `CAPITAL` and `TARGET%` arguments are accepted and ignored ([#189](https://github.com/iamsaquib8/stockwise/issues/189)).
+- The web dashboard's Research tab shows the pillar scores and data coverage instead of the buy/sell label, entry zone and stop-loss.
+- The crates.io and PyPI description and keywords now mention portfolio, tax and the MCP server.
+
 - `verdict`, `deep`, `analyze` and `stockwise SYMBOL` no longer print a STRONG BUY / SELL label, an entry zone, a stop-loss, a target price or risk/reward. They show six pillar scores (Strong / Moderate / Weak), a 0-100 composite and a "not a recommendation" note. In `--json`, `action`, `entry_zone`, `stop_loss`, `target_price`, `upside_pct`, `risk_pct`, `risk_reward`, the time-horizon texts and each pillar's `grade` are gone, and each pillar has a `band`. The `decision`, `signal` and `buysell` aliases are removed ([#188](https://github.com/iamsaquib8/stockwise/issues/188)).
 - `verdict`: a pillar with no data now shows "no data" and is left out of the composite instead of scoring 50 or 55, and crypto, FX and index symbols get only the technical pillar and no composite ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
 - `verdict --explain` now lists the real weights (valuation 20, growth 25, balance sheet 15, smart money 15, analyst 10, technicals 15), taken from the scores themselves, and the data sources that failed are listed under the score ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
@@ -40,14 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `import` and `portfolio add`: dated HDFC and Mindtree trades from before their mergers are now recorded as HDFCBANK (42 for 25) and LTIM (73 for 100) shares at the same total cost and date, instead of the old quantity at the old price ([#86](https://github.com/iamsaquib8/stockwise/issues/86)).
 - `tax in`, `tax export in`, `tax advance` and `harvest`: gold, silver, liquid, debt and international ETFs (such as `GOLDBEES`, `LIQUIDBEES`, `MON100`) are no longer taxed as listed shares under Sec. 111A/112A; `tax in` lists them under "taxed under other rules" and `harvest` no longer offers them for the ₹1.25 lakh exemption ([#87](https://github.com/iamsaquib8/stockwise/issues/87)).
 - `portfolio`, `import`, `trade sync`, `trade holdings` and `wealth`: commands that change your portfolio or wealth history at the same time no longer overwrite each other's changes. Each takes a lock, reloads the file and applies only its own change; a second command waits up to 30 seconds, then says so ([#93](https://github.com/iamsaquib8/stockwise/issues/93)).
-- `deep`: no longer crashes with "index out of bounds" in Support & Resistance when the latest bar has no close yet, so the report reaches the score.
 - `deep`: no longer panics (`index out of bounds`) on NSE stocks when the latest bar has a missing close ([#306](https://github.com/iamsaquib8/stockwise/issues/306)).
-- Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
-- `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):
-  - Retain ETF classification even when Yahoo Finance returns no `topHoldings` or fund profile modules for NSE-listed instruments.
-  - Automatically map common Indian index ETFs to their benchmark indices (`NIFTY 50`, `NIFTY NEXT 50`, `NIFTY BANK`, `NIFTY MIDCAP 150`, etc.) and attempt look-through to underlying index constituents via NSE.
-  - Omit profile-less ETFs from single-stock concentration risk alerts, categorizing them properly under "Funds & ETFs Analyzed" with `(categorized by ETF profile)`.
-  - Accurately categorize asset classes (`Equity`, `Commodity` for Gold/Silver ETFs, `Cash` for Liquid ETFs) and market caps (`Large Cap` for Nifty 50/Next 50, `Mid Cap` for Midcap 150) instead of flagging them as `Unclassified`.
+- Yahoo fetch errors no longer include the request URL, so the session crumb cannot appear in error text.
+- `portfolio xray` treats Indian ETFs (such as `NIFTYBEES`, `GOLDBEES`, `LIQUIDBEES`) as funds, also when Yahoo returns no holdings for them, instead of flagging them as one stock with too much weight. Gold, silver and liquid ETFs count as commodity and cash ([#220](https://github.com/iamsaquib8/stockwise/issues/220)).
 - `longterm`: the SIP calculator now grows each monthly instalment only for the time it stays invested (₹15,000 a month at 12% gives ₹12.37 L after 5 years, not ₹15.86 L), the "SIP for" target reads `$1M` for US stocks, and the "Suggested SIP Allocation" block is gone ([#67](https://github.com/iamsaquib8/stockwise/issues/67), [#189](https://github.com/iamsaquib8/stockwise/issues/189)).
 - Yahoo Finance: commands no longer open the Yahoo session at start-up, so `history`, `backtest` and a provider-backed `quote` still work when Yahoo refuses the session token, and commands that never touch Yahoo send no request at all ([#154](https://github.com/iamsaquib8/stockwise/issues/154)).
 - `quote`, `verdict`, `deep`, `score` and `insights`: a symbol Yahoo does not know, such as the BSE code `500325`, now gives a "not found" error with exit code 1 instead of an empty card or a verdict on a company with no price ([#206](https://github.com/iamsaquib8/stockwise/issues/206)).
@@ -58,6 +66,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `forecast`: the default history is now 6 months instead of one, so `forecast TCS` prints a projection instead of "Not enough price data". The error now says how many days it found, and the `SYMBOL` argument has a help line ([#215](https://github.com/iamsaquib8/stockwise/issues/215)).
 - `watch add`, `portfolio add` and `alert add` now refuse a ticker Yahoo does not know (for example `RELIANC`) and name the likely one, instead of saving it silently; `--force` saves it anyway, and funds, SGBs and offline use are not blocked. `technical`, `history`, `risk` and the other chart commands say "No price history for ZZQQXX.NS" instead of "HTTP 404" ([#216](https://github.com/iamsaquib8/stockwise/issues/216)).
 - `portfolio` and `portfolio --json` now work offline: they list every holding with shares, average cost and cost basis, show prices as N/A (`price: null` and `unpriced` in JSON) and say "Offline: prices unavailable" instead of failing. `tax`, `harvest`, `rebalance` and `xray` still need a connection ([#221](https://github.com/iamsaquib8/stockwise/issues/221)).
+
+- `import` of an `.xlsx` workbook with several sheets: only one sheet is read (the first whose header fits the importer, in tab order), so a mutual-fund or summary tab is no longer imported as bogus holdings. The sheets used and skipped are listed, and `--sheet NAME` picks another ([#101](https://github.com/iamsaquib8/stockwise/issues/101)).
+- `import`: a tradebook with Mindtree trades (now recorded as LTIM) no longer stops with a 404 at the split check. If Yahoo has no price history for a symbol, the check is skipped for it, a note says so, and the rest of the file is imported ([#316](https://github.com/iamsaquib8/stockwise/issues/316)).
+- `portfolio xray`: Indian stocks are now called large cap from ₹1,00,000 crore and mid cap from ₹33,000 crore (AMFI's list of December 2024), not ₹20,000 and ₹5,000 crore, so a ₹25,000 crore company shows as small cap and the market-cap split is no longer tilted to large caps ([#100](https://github.com/iamsaquib8/stockwise/issues/100)).
+- `import groww` and `import upstox`: a holdings file whose ISIN column holds text such as `₹12,34,567` no longer crashes the import; the cell is treated as not an ISIN ([#102](https://github.com/iamsaquib8/stockwise/issues/102)).
+- `import cas`: schemes you have fully redeemed are no longer skipped. When the statement covers every purchase, their redemptions are recorded as realized sales for `tax in`, `tax export in` and `tax advance`, and no holding is left. A redeemed scheme with units bought before the statement is listed as skipped, with the reason ([#90](https://github.com/iamsaquib8/stockwise/issues/90)).
+- `import`: a second tradebook for the same broker is merged with the first instead of replacing its lots and sales, so yearly Zerodha Console files can be imported in any order and re-importing a file changes nothing ([#83](https://github.com/iamsaquib8/stockwise/issues/83)).
+- `import` and `trade sync`: a buy and sell of the same share on one day are netted as an intraday sale before any older lot is touched, and `tax in`, `tax export in` and `tax advance` report intraday results separately instead of as 111A/112A gains from the oldest lot ([#84](https://github.com/iamsaquib8/stockwise/issues/84)).
+- `import` and `trade holdings`: a holdings file from a second broker adds to the shares of the first instead of overwriting them. Lots and sales now carry the demat account (`zerodha`, `groww`, ...), FIFO, imports and syncs work per account, `portfolio lots` shows it, and old portfolio files load unchanged ([#85](https://github.com/iamsaquib8/stockwise/issues/85)).
+- `import` and `portfolio add`: dated HDFC and Mindtree trades from before their mergers are now recorded as HDFCBANK (42 for 25) and LTIM (73 for 100) shares at the same total cost and date, instead of the old quantity at the old price ([#86](https://github.com/iamsaquib8/stockwise/issues/86)).
+- `tax in`, `tax export in`, `tax advance` and `harvest`: gold, silver, liquid, debt and international ETFs (such as `GOLDBEES`, `LIQUIDBEES`, `MON100`) are no longer taxed as listed shares under Sec. 111A/112A; `tax in` lists them under "taxed under other rules" and `harvest` no longer offers them for the ₹1.25 lakh exemption ([#87](https://github.com/iamsaquib8/stockwise/issues/87)).
+- `portfolio`, `import`, `trade sync`, `trade holdings` and `wealth`: commands that change your portfolio or wealth history at the same time no longer overwrite each other's changes. Each takes a lock, reloads the file and applies only its own change; a second command waits up to 30 seconds, then says so ([#93](https://github.com/iamsaquib8/stockwise/issues/93)).
+- `deep`: no longer panics (`index out of bounds`) on NSE stocks when the latest bar has a missing close ([#306](https://github.com/iamsaquib8/stockwise/issues/306)).
+- Yahoo fetch errors no longer include the request URL, so the session crumb cannot appear in error text.
+- `portfolio xray` treats Indian ETFs (such as `NIFTYBEES`, `GOLDBEES`, `LIQUIDBEES`) as funds, also when Yahoo returns no holdings for them, instead of flagging them as one stock with too much weight. Gold, silver and liquid ETFs count as commodity and cash ([#220](https://github.com/iamsaquib8/stockwise/issues/220)).
+- `longterm`: the SIP calculator now grows each monthly instalment only for the time it stays invested (₹15,000 a month at 12% gives ₹12.37 L after 5 years, not ₹15.86 L), the "SIP for" target reads `$1M` for US stocks, and the "Suggested SIP Allocation" block is gone ([#67](https://github.com/iamsaquib8/stockwise/issues/67), [#189](https://github.com/iamsaquib8/stockwise/issues/189)).
+- Yahoo Finance: commands no longer open the Yahoo session at start-up, so `history`, `backtest` and a provider-backed `quote` still work when Yahoo refuses the session token, and commands that never touch Yahoo send no request at all ([#154](https://github.com/iamsaquib8/stockwise/issues/154)).
+- `quote`, `verdict`, `deep`, `score` and `insights`: a symbol Yahoo does not know, such as the BSE code `500325`, now gives a "not found" error with exit code 1 instead of an empty card or a verdict on a company with no price ([#206](https://github.com/iamsaquib8/stockwise/issues/206)).
+- `score`, `analyze`, `verdict` and `deep`: companies that file statements in US dollars but trade in rupees, such as Infosys, now have their statement amounts converted at the live USD/INR rate before ratios and revenue are shown, so INFY's Altman Z drops from 426 to about 8 and its revenue reads ₹47.33K Cr, not ₹504 Cr ([#207](https://github.com/iamsaquib8/stockwise/issues/207)).
+- `quote`, `compare`, `deep`, `dividends` and `divcal`: dividend yield no longer reads 0 for stocks such as RELIANCE, or 0.05% for INFY, when Yahoo's trailing figure is missing or computed from a dollar dividend; `dividends INFY` now shows 4.4% ([#208](https://github.com/iamsaquib8/stockwise/issues/208)).
+- `peers`, `compare`, `deep` and `analyze`: sector, profit margin, debt/equity, revenue growth, beta and analyst ratings are now read from Yahoo's company summary, so `peers TCS` lists IT peers and `compare` no longer shows rows of N/A. Rows and sections with no data at all are left out ([#209](https://github.com/iamsaquib8/stockwise/issues/209)).
+- `deep` and `analyze`: banks and lenders no longer show an Altman Z "Distress Zone" next to a strong score; they show "n/a for banks and lenders", and `score` says the same. The doubled brackets in the zone label are gone ([#212](https://github.com/iamsaquib8/stockwise/issues/212)).
+- `forecast`: the default history is now 6 months instead of one, so `forecast TCS` prints a projection instead of "Not enough price data". The error now says how many days it found, and the `SYMBOL` argument has a help line ([#215](https://github.com/iamsaquib8/stockwise/issues/215)).
+- `watch add`, `portfolio add` and `alert add` now refuse a ticker Yahoo does not know (for example `RELIANC`) and name the likely one, instead of saving it silently; `--force` saves it anyway, and funds, SGBs and offline use are not blocked. `technical`, `history`, `risk` and the other chart commands say "No price history for ZZQQXX.NS" instead of "HTTP 404" ([#216](https://github.com/iamsaquib8/stockwise/issues/216)).
+- `portfolio` and `portfolio --json` now work offline: they list every holding with shares, average cost and cost basis, show prices as N/A (`price: null` and `unpriced` in JSON) and say "Offline: prices unavailable" instead of failing. `tax`, `harvest`, `rebalance` and `xray` still need a connection ([#221](https://github.com/iamsaquib8/stockwise/issues/221)).
+- `alert watch` and `alert check`: `change-above`, `change-below` and `volume-spike` alerts no longer
+  repeat the last session's move on weekends, holidays and before the open (for example Friday's fall
+  announced again on Saturday, Sunday and Monday morning by `alert watch --once` in cron). They give
+  no reading until today's session has traded and re-arm on the quote's own session date, so a crypto
+  alert does not fire twice across midnight in your market's time zone
+  ([#103](https://github.com/iamsaquib8/stockwise/issues/103)).
+- `sim replay end` now scores and clears a replay whose price file (`sim_replay_tape.json`) was
+  deleted, instead of asking you to run `sim replay end` and leaving the replay stuck
+  ([#106](https://github.com/iamsaquib8/stockwise/issues/106)).
+- `sim history` and `sim status` no longer mix markets: history totals, best and worst day, win rate,
+  streaks and the chart cover only the `-m` market (rupees and dollars were added together), and `sim
+  status` shows each session in its own currency. `sim start` is no longer blocked by an open session
+  of another market the same day ([#107](https://github.com/iamsaquib8/stockwise/issues/107)).
+- `sim` practice score: the drawdown part is now judged against what the benchmark would have lost at
+  your average exposure, so holding mostly cash through a crash no longer earns drawdown points that
+  the same picks fully invested would not. Scores of runs with under full exposure can drop by up to
+  about 14 points ([#119](https://github.com/iamsaquib8/stockwise/issues/119)).
+- `trade buy`, `trade sell`, `trade limit` and `trade gtt` with `--yes` are now refused, before any
+  broker login, unless `max_order_value` is set in the broker's config file, since `--yes` removes the
+  only other guard against a wrong quantity. Scripts that use `--yes` need `"max_order_value": 50000`
+  (or your own cap) added; `--dry-run` and typing `yes` at the prompt work as before. The preview now
+  notes when no cap is set ([#125](https://github.com/iamsaquib8/stockwise/issues/125)).
+- MCP `order_preview`: the `stockwise trade` command it returns now quotes symbols with `&`, such as
+  `'M&M'`, so pasting it into bash, zsh or PowerShell no longer splits at the `&`
+  ([#126](https://github.com/iamsaquib8/stockwise/issues/126)).
+- `ask`: a failing tool no longer sends the full error to the model. Local file paths (a corrupt
+  `portfolio.json` includes your home directory) and the Yahoo session `crumb` are removed, as
+  `stockwise mcp` already did; `--verbose` still prints the full error on your terminal. The notice
+  before the first cloud request now says that your portfolio may be sent if a tool reads it, not only
+  market data ([#127](https://github.com/iamsaquib8/stockwise/issues/127)).
+- `correlate` and `pcorr` pair returns by date instead of by position, so symbols with different holiday calendars (NSE and NYSE) or a seven-day crypto week no longer give a correlation near zero. Two symbols with fewer than 20 shared returns show `N/A`, and `pcorr` no longer prints `0.000` for them ([#72](https://github.com/iamsaquib8/stockwise/issues/72)).
+- `risk` and the volatility in `timeframes` annualize with the right number of bars for the asset: 365
+  a year for crypto, 260 for FX, 252 for stocks, and 288 five-minute bars a day for crypto. `returns`
+  annualizes by calendar time and shows `—` (null in JSON) for spans under a year, so a +100% year
+  reads +100% for crypto and for stocks. Calmar annualizes over the number of returns
+  ([#73](https://github.com/iamsaquib8/stockwise/issues/73)).
+- Pivot points in `support`, `intraday`/`bot` and the stock report come from the last completed daily session, not today's live bar, a weekly bar or the last five minutes, so the levels no longer move with every tick or change with `-p`. `support` names the session they come from ([#74](https://github.com/iamsaquib8/stockwise/issues/74)).
+- `options oi` reads put build-up for the underlying: put buying (premium and open interest up) is now bearish and put writing is bullish, and the per-strike tags are coloured that way. `--json` gains `calls_sentiment` and `puts_sentiment` ([#75](https://github.com/iamsaquib8/stockwise/issues/75)).
+- `longterm`, `verdict` and `insights` compare market cap, cash and insider trades with cut-offs
+  written in US dollars after converting from the quote currency (at rough fixed rates), so the same
+  size scores the same for a rupee and a dollar stock: a ₹1.5 lakh insider buy no longer earns the
+  insider-buying bonus, and ₹5,000 crore is a small cap
+  ([#76](https://github.com/iamsaquib8/stockwise/issues/76)).
+- `tax in`, `tax export in`, `tax advance` and `harvest` now decide in one place which sales count as
+  listed shares or equity funds (Sec. 111A/112A). Debt funds, SGBs, crypto and gold, silver, liquid
+  and international ETFs are left out of all four, so a tax-free SGB redemption no longer raises
+  advance tax and a crypto loss no longer reduces STCG tax
+  ([#88](https://github.com/iamsaquib8/stockwise/issues/88)).
+- `tax advance` no longer shows past instalments as `Paid` when no payment is recorded: they are `Overdue`. `--paid` takes dated payments (`--paid 2025-06-14:3000`, repeated) so Sec. 234C interest follows what was paid by each due date, on shortfalls rounded down to ₹100 ([#89](https://github.com/iamsaquib8/stockwise/issues/89)).
+- `harvest` offers losses as the FIFO sale you would actually make: a losing lot behind older lots is
+  sold with them, and a holding whose sale books a net gain is listed as FIFO-blocked instead of a
+  loss. Tax saved comes from the tax estimate with this year's gains, the shared ₹1.25 lakh exemption
+  is split between candidates, and `Total P&L` shows its real sign
+  ([#91](https://github.com/iamsaquib8/stockwise/issues/91)).
+- `harvest` no longer counts US holdings as rupees in the Indian harvest: they are listed under `other_currency`, as `tax in` does ([#92](https://github.com/iamsaquib8/stockwise/issues/92)).
+- `tax in`, `tax export in`, `harvest` and `tax advance` now include the 4% health and education cess in India estimates, so totals and advance-tax instalments are no longer about 4% too low. Surcharge is still left out ([#98](https://github.com/iamsaquib8/stockwise/issues/98)).
+- `tax export in` applies the rates and exemption that were in force on each sale date: sales before 23 Jul 2024 are taxed at 15% (STCG) and 10% (LTCG), and the LTCG exemption is ₹1 lakh up to FY 2023-24. A mixed FY 2024-25 shows how much of the taxable gain came from before 23 Jul ([#99](https://github.com/iamsaquib8/stockwise/issues/99)).
 
 ## [0.8.0] - 2026-11-03
 
@@ -98,7 +188,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Percent returns in `markets`, technicals and risk metrics no longer show `+inf%` when the first price is zero or negative ([#59](https://github.com/iamsaquib8/stockwise/issues/59)). Thanks [@ShahadatTest](https://github.com/ShahadatTest).
 
 ### Known issues
-These are open and planned for the next release. Check the linked issues before relying on the numbers involved.
+Fixed in 0.8.1. Check the linked issues before relying on the numbers involved.
 - Importing a second tradebook or holdings file from a broker can replace earlier lots ([#83](https://github.com/iamsaquib8/stockwise/issues/83), [#85](https://github.com/iamsaquib8/stockwise/issues/85)), and same-day trades are booked as capital gains ([#84](https://github.com/iamsaquib8/stockwise/issues/84)). Back up `portfolio.json` before importing.
 - `tax` treats gold, silver, liquid and international ETFs as listed shares ([#87](https://github.com/iamsaquib8/stockwise/issues/87)).
 - The SIP projection in `longterm` overstates the corpus ([#67](https://github.com/iamsaquib8/stockwise/issues/67)).
@@ -862,7 +952,8 @@ Initial development. Not published. Highlights that landed during this phase:
 - Multi-timeframe and braille terminal charts; `-p/--period` flag on chart commands.
 - `deep` command — full report on a single stock in one shot.
 
-[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/iamsaquib8/stockwise/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/iamsaquib8/stockwise/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.7.0
 [0.6.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...d9f52f2

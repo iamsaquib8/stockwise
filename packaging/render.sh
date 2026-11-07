@@ -1,8 +1,8 @@
 #!/bin/sh
 # Render the package-manager templates in packaging/ for one release.
 #
-#   gh release download v0.8.0 --pattern '*.sha256' --dir sums
-#   packaging/render.sh 0.8.0 sums dist
+#   gh release download v0.8.1 --pattern '*.sha256' --dir sums
+#   packaging/render.sh 0.8.1 sums dist
 #
 # Fills @VERSION@ and @SHA256_<TARGET>@ from the release's .sha256 files (asset
 # names from .github/workflows/release.yml), drops the "#:" template comments,
