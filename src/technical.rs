@@ -323,27 +323,36 @@ pub fn sortino_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
 }
 
 /// Sortino Ratio annualized for prices sampled `periods_per_year` times a year.
+///
+/// The target (minimum acceptable return) is the risk-free rate per period,
+/// `risk_free_annual / periods_per_year`. Downside deviation is the root of the
+/// mean squared shortfall below that target taken over *all* periods, not only
+/// the periods that fell short, so a series with few down periods is not
+/// penalised as if every period were a bad one. `None` when no period falls
+/// below the target.
 pub fn sortino_ratio_with(
     prices: &[f64],
     risk_free_annual: f64,
     periods_per_year: f64,
 ) -> Option<f64> {
     let returns = daily_returns(prices);
-    if returns.len() < 2 {
+    if returns.len() < 2 || periods_per_year <= 0.0 {
         return None;
     }
-    let mean_daily = returns.iter().sum::<f64>() / returns.len() as f64;
-    let downside: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
-    if downside.is_empty() {
+    let n = returns.len() as f64;
+    let mean_daily = returns.iter().sum::<f64>() / n;
+    let target = risk_free_annual / periods_per_year;
+    let shortfall_sq: f64 = returns
+        .iter()
+        .map(|r| (r - target).min(0.0).powi(2))
+        .sum();
+    if shortfall_sq == 0.0 {
         return None;
     }
-    let downside_var = downside.iter().map(|r| r.powi(2)).sum::<f64>() / downside.len() as f64;
-    let downside_std = downside_var.sqrt() * periods_per_year.sqrt();
-    if downside_std == 0.0 {
-        return None;
-    }
+    let downside_std = (shortfall_sq / n).sqrt() * periods_per_year.sqrt();
     let annual_return = mean_daily * periods_per_year;
-    Some((annual_return - risk_free_annual) / downside_std)
+    let ratio = (annual_return - risk_free_annual) / downside_std;
+    ratio.is_finite().then_some(ratio)
 }
 
 /// Maximum drawdown from peak
@@ -997,6 +1006,56 @@ mod tests {
         if let Some(s_val) = s {
             assert!(s_val.is_finite());
         }
+    }
+
+    // Prices 100, 110, 99, 108.9, 119.79 give returns +10%, -10%, +10%, +10%.
+    // N = 4, mean = 5%, one shortfall of -10% (target 0), so
+    // downside deviation = sqrt(0.10^2 / 4) = 5% per period. The old divisor
+    // (count of down periods, 1) gave 10% and halved the ratio.
+    const SORTINO_PRICES: [f64; 5] = [100.0, 110.0, 99.0, 108.9, 119.79];
+
+    #[test]
+    fn sortino_divides_by_all_periods_not_down_periods() {
+        // One period a year: ratio = (0.05 - 0) / 0.05 = 1.
+        let s = sortino_ratio_with(&SORTINO_PRICES, 0.0, 1.0).unwrap();
+        assert!((s - 1.0).abs() < 1e-9, "got {s}");
+        // 252 periods a year: both numerator and deviation scale, ratio is
+        // 0.05 * 252 / (0.05 * sqrt(252)) = sqrt(252).
+        let s = sortino_ratio(&SORTINO_PRICES, 0.0).unwrap();
+        assert!((s - 252.0_f64.sqrt()).abs() < 1e-9, "got {s}");
+    }
+
+    #[test]
+    fn sortino_rarely_down_series_is_not_over_penalised() {
+        // 1 down period of -1% among 100 (the other 99 are flat +1%), N = 100.
+        // Downside deviation = sqrt(0.01^2 / 100) = 0.001, mean = 0.0098,
+        // ratio (1 period a year) = 0.0098 / 0.001 = 9.8. Dividing by the
+        // single down period would give 0.0098 / 0.01 = 0.98.
+        let mut prices = vec![100.0];
+        for i in 0..100 {
+            let r = if i == 50 { -0.01 } else { 0.01 };
+            let last = *prices.last().unwrap();
+            prices.push(last * (1.0 + r));
+        }
+        let s = sortino_ratio_with(&prices, 0.0, 1.0).unwrap();
+        assert!((s - 9.8).abs() < 1e-6, "got {s}");
+    }
+
+    #[test]
+    fn sortino_measures_shortfall_below_the_risk_free_target() {
+        // 4 periods a year, 4% risk-free: target = 1% per period, so the
+        // shortfalls are 0 for +10% periods and -11% for the -10% period.
+        // Deviation = sqrt(0.11^2 / 4) = 5.5% per period = 11% a year.
+        // Annual return = 0.05 * 4 = 20%; ratio = (0.20 - 0.04) / 0.11 = 16/11.
+        let s = sortino_ratio_with(&SORTINO_PRICES, 0.04, 4.0).unwrap();
+        assert!((s - 16.0 / 11.0).abs() < 1e-9, "got {s}");
+    }
+
+    #[test]
+    fn sortino_none_without_shortfall_or_data() {
+        assert_eq!(sortino_ratio(&[100.0, 101.0, 102.0, 103.0], 0.0), None);
+        assert_eq!(sortino_ratio(&[100.0, 99.0], 0.0), None);
+        assert_eq!(sortino_ratio_with(&SORTINO_PRICES, 0.0, 0.0), None);
     }
 
     #[test]
