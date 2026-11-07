@@ -122,6 +122,10 @@ pub struct AltmanScorecard {
     pub components: Vec<AltmanComponent>,
     pub z_double_prime: Option<f64>,
     pub z_double_prime_zone: Option<AltmanZone>,
+    /// The Z'' model's own factors. X4 here is book equity / total
+    /// liabilities, unlike the classic model's market-cap X4 in `components`.
+    pub z_double_prime_components: Vec<AltmanComponent>,
+    pub z_double_prime_formula_str: String,
 }
 
 /// Combined transparent report holding both accounting scorecards.
@@ -724,13 +728,61 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
         }
     });
 
-    // Also compute non-manufacturing / emerging market Z'' = 6.56*X1 + 3.26*X2 + 6.72*X3 + 1.05*X4
-    let z_double_prime = match (x1, x2, x3, x4) {
-        (Some(v1), Some(v2), Some(v3), Some(v4)) => {
-            Some(6.56 * v1 + 3.26 * v2 + 6.72 * v3 + 1.05 * v4)
-        }
+    // Z'' (Altman 1995; Altman, Hartzell & Peck): non-manufacturers and
+    // emerging markets, Z'' = 6.56*X1 + 3.26*X2 + 6.72*X3 + 1.05*X4 with X4 =
+    // BOOK value of equity / total liabilities (market value is not used), and
+    // zones 1.10 / 2.60. X5 is not part of the model.
+    let book_equity = latest_annual
+        .and_then(|p| p.equity)
+        .or_else(|| latest_quarter.and_then(|p| p.equity));
+    let x4_book = match (book_equity, total_liabilities) {
+        (Some(eq), Some(tl)) if tl > 0.0 => Some(eq / tl),
         _ => None,
     };
+    let z2_components = vec![
+        make_altman_component(
+            "X1",
+            "Working Capital / Total Assets",
+            "Working Capital / Total Assets",
+            6.56,
+            x1,
+            x1.map_or("N/A".to_string(), |v| {
+                format!("{:.3} ({:.1}%)", v, v * 100.0)
+            }),
+        ),
+        make_altman_component(
+            "X2",
+            "Retained Earnings / Total Assets",
+            "Retained Earnings / Total Assets",
+            3.26,
+            x2,
+            x2.map_or("N/A".to_string(), |v| {
+                format!("{:.3} ({:.1}%)", v, v * 100.0)
+            }),
+        ),
+        make_altman_component(
+            "X3",
+            "EBIT / Total Assets",
+            "EBIT / Total Assets",
+            6.72,
+            x3,
+            x3.map_or("N/A".to_string(), |v| {
+                format!("{:.3} ({:.1}%)", v, v * 100.0)
+            }),
+        ),
+        make_altman_component(
+            "X4",
+            "Book Equity / Total Liabilities",
+            "Book Equity / Total Liabilities",
+            1.05,
+            x4_book,
+            x4_book.map_or("N/A".to_string(), |v| format!("{:.3}x", v)),
+        ),
+    ];
+    let z_double_prime = z2_components
+        .iter()
+        .map(|c| c.weighted_value)
+        .sum::<Option<f64>>();
 
     let z_double_prime_zone = z_double_prime.map(|z| {
         if z > 2.60 {
@@ -758,6 +810,10 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
         components,
         z_double_prime,
         z_double_prime_zone,
+        z_double_prime_components: z2_components,
+        z_double_prime_formula_str:
+            "Z'' = 6.56*X1 + 3.26*X2 + 6.72*X3 + 1.05*X4 (X4 = book equity / total liabilities)"
+                .to_string(),
     }
 }
 
@@ -980,6 +1036,24 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
             None => "N/A".to_string(),
         };
         println!("  Total Altman Z-Score:  {:.2}  ▶  {}", z, zone_desc);
+    }
+    println!(
+        "\n  Z'' model (non-manufacturers): {}",
+        report.altman.z_double_prime_formula_str.dimmed()
+    );
+    for comp in &report.altman.z_double_prime_components {
+        let contrib_str = comp
+            .weighted_value
+            .map(|wv| format!("{:+.3}", wv))
+            .unwrap_or_else(|| "N/A".to_string());
+        println!(
+            "  {:<6} {:<32} {:>7.2}x {:>12} {:>10}",
+            comp.factor.bold(),
+            comp.name,
+            comp.weight,
+            comp.formatted_value,
+            contrib_str.cyan()
+        );
     }
     if let (Some(z_prime), Some(zone_prime)) = (
         report.altman.z_double_prime,
@@ -1445,5 +1519,65 @@ mod tests {
         r.annual[0].shares_outstanding = None;
         let c = dil(&r);
         assert!(!c.evaluated && !c.passed && c.points == 0);
+    }
+
+    // #70. Hand-worked, amounts in crore: assets 160,000 = equity 100,000 +
+    // liabilities 60,000; market cap 800,000 (P/B 8).
+    //   X1 = -16,000 / 160,000 = -0.10    X2 = 16,000 / 160,000 = 0.10
+    //   X3 =   3,200 / 160,000 =  0.02    X4 book = 100,000 / 60,000 = 1.6667
+    //   Z'' = 6.56(-0.10) + 3.26(0.10) + 6.72(0.02) + 1.05(1.6667)
+    //       = -0.656 + 0.326 + 0.1344 + 1.75 = 1.5544  -> Grey (1.10 to 2.60)
+    // The old code used market X4 = 800,000 / 60,000 = 13.333 and got
+    //   -0.656 + 0.326 + 0.1344 + 14.0 = 13.8044 -> "Safe".
+    // The classic Z keeps market X4: 0.6 x 13.333 = 8.0, so
+    //   Z = 1.2(-0.10) + 1.4(0.10) + 3.3(0.02) + 8.0 + 0.999(1.0) = 9.085.
+    fn pb8_research() -> Research {
+        let mut r = Research::default();
+        r.quote = Quote {
+            market_cap: Some(800_000.0),
+            ..Default::default()
+        };
+        r.annual = vec![Period {
+            end: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            total_assets: Some(160_000.0),
+            total_liabilities: Some(60_000.0),
+            equity: Some(100_000.0),
+            working_capital: Some(-16_000.0),
+            retained_earnings: Some(16_000.0),
+            ebit: Some(3_200.0),
+            revenue: Some(160_000.0),
+            ..Default::default()
+        }];
+        r
+    }
+
+    #[test]
+    fn altman_z_double_prime_uses_book_equity_for_x4() {
+        let a = calculate_altman(&pb8_research());
+        let x4 = a
+            .z_double_prime_components
+            .iter()
+            .find(|c| c.factor == "X4")
+            .unwrap();
+        assert!((x4.raw_value.unwrap() - 100_000.0 / 60_000.0).abs() < 1e-9);
+        let z2 = a.z_double_prime.unwrap();
+        assert!((z2 - 1.5544).abs() < 1e-3, "Z'' = {z2}");
+        assert_eq!(a.z_double_prime_zone, Some(AltmanZone::Grey));
+        // The classic Z still uses market cap for X4.
+        let x4m = a.components.iter().find(|c| c.factor == "X4").unwrap();
+        assert!((x4m.raw_value.unwrap() - 800_000.0 / 60_000.0).abs() < 1e-9);
+        let z = a.z_score.unwrap();
+        assert!((z - 9.085).abs() < 1e-3, "Z = {z}");
+    }
+
+    #[test]
+    fn altman_z_double_prime_is_none_without_book_equity() {
+        let mut r = pb8_research();
+        r.annual[0].equity = None;
+        // Assets are known, so total liabilities stay as reported; only equity is gone.
+        let a = calculate_altman(&r);
+        assert_eq!(a.z_double_prime, None);
+        assert_eq!(a.z_double_prime_zone, None);
+        assert!(a.z_score.is_some());
     }
 }
