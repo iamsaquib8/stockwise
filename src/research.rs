@@ -1660,6 +1660,9 @@ const HOLDINGS_BUDGET: HoldingsBudget = HoldingsBudget {
 
 /// Quarters of shareholding wanted: enough for QoQ and YoY changes.
 const HOLDING_QUARTERS: usize = 5;
+/// Filings asked for at most, whatever fails: the quarters wanted plus a few
+/// spare for ones that do not load or parse.
+const MAX_XBRL_REQUESTS: usize = HOLDING_QUARTERS + 3;
 
 /// Shareholding quarters, and a note when fewer than wanted were read
 /// because the budget ran out.
@@ -1697,8 +1700,11 @@ async fn fetch_nse_holdings(
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     let mut timed_out = false;
+    let mut requests = 0;
     for e in entries {
-        if out.len() >= HOLDING_QUARTERS {
+        // Filings that do not load or parse are skipped, but only so far: a
+        // long list of dead links must not turn into dozens of requests.
+        if out.len() >= HOLDING_QUARTERS || requests >= MAX_XBRL_REQUESTS {
             break;
         }
         let Some(date) = text(&e, "date").and_then(|d| parse_nse_date(&d)) else {
@@ -1716,6 +1722,7 @@ async fn fetch_nse_holdings(
             timed_out = true;
             break;
         }
+        requests += 1;
         // Filed XBRL never changes — cache for a week.
         match tokio::time::timeout(
             budget.per_request.min(left),
@@ -2385,6 +2392,32 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(r.holdings.len(), 1);
         assert!(r.note.unwrap().contains("read 1 of 5 quarters"));
+    }
+
+    #[tokio::test]
+    async fn a_list_of_dead_filings_is_not_asked_for_in_full() {
+        let months = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let master: Vec<Value> = (2020..2022)
+            .flat_map(|y| months.iter().map(move |m| (y, m)))
+            .enumerate()
+            .map(|(i, (y, m))| {
+                json!({"date": format!("28-{m}-{y}"),
+                       "xbrl": format!("https://nsearchives.nseindia.com/x/q{i}.xml")})
+            })
+            .collect();
+        let server = crate::testutil::MockServer::start(vec![
+            (200, Value::Array(master).to_string()),
+            (200, "not xbrl".into()),
+        ])
+        .await;
+        let r = fetch_nse_holdings(&nse_client(&server.url), "TCS", HOLDINGS_BUDGET)
+            .await
+            .unwrap();
+        assert!(r.holdings.is_empty());
+        // The master list and then no more than MAX_XBRL_REQUESTS filings.
+        assert_eq!(server.requests().len(), 1 + MAX_XBRL_REQUESTS);
     }
 
     #[tokio::test]
