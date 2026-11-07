@@ -67,8 +67,12 @@ fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &
 pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let quotes = client.get_quote(&[&resolved]).await?;
-    let q = quotes.first().context("No data found for this symbol")?;
+    let mut quotes = client.get_quote(&[&resolved]).await?;
+    let q = quotes
+        .first_mut()
+        .context("No data found for this symbol")?;
+    crate::research::enrich_quote(&client, q, false).await;
+    let q = &*q;
     let r_opt =
         crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::VERDICT)
             .await
@@ -167,8 +171,10 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
     print_kv("Current Ratio", &format_optional_f64(q.current_ratio, "x"));
     print_kv("Book Value", &format_optional_f64(q.book_value, ""));
 
-    // Analyst Ratings
-    print_section("Analyst Ratings");
+    // Analyst Ratings (skipped when Yahoo has no coverage)
+    if has_analyst_data(q) {
+        print_section("Analyst Ratings");
+    }
     if let Some(rec) = q.recommendation_mean {
         print_kv("Consensus", &sentiment_label(rec));
         print_kv(
@@ -316,11 +322,18 @@ impl From<&crate::api::Quote> for CompareRow {
     }
 }
 
+/// Whether the quote carries any analyst figure worth a section.
+fn has_analyst_data(q: &crate::api::Quote) -> bool {
+    q.recommendation_mean.is_some()
+        || q.target_mean_price.is_some()
+        || q.number_of_analyst_opinions.is_some()
+}
+
 pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Result<()> {
     let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
     let sym_refs: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let mut quotes = client.get_quote(&sym_refs).await?;
 
     if quotes.is_empty() {
         bail!(
@@ -328,6 +341,9 @@ pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Res
             resolved.join(", "),
             market::not_found_hint(market)
         );
+    }
+    for q in &mut quotes {
+        crate::research::enrich_quote(&client, q, false).await;
     }
     if !fmt.is_table() {
         let rows: Vec<CompareRow> = quotes.iter().map(CompareRow::from).collect();
@@ -463,9 +479,14 @@ pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Res
     ];
 
     for (label, func) in &rows {
+        let cells: Vec<String> = quotes.iter().map(func).collect();
+        // Leave out rows no stock has a value for.
+        if cells.iter().all(|c| c == "N/A") {
+            continue;
+        }
         print!("  {:<22}", label.dimmed());
-        for q in &quotes {
-            print!(" {:>14}", func(q));
+        for c in &cells {
+            print!(" {:>14}", c);
         }
         println!();
     }
@@ -495,34 +516,57 @@ pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Res
     Ok(())
 }
 
+/// Peers shown, and the most candidates looked up to find them.
+const PEER_COUNT: usize = 8;
+const PEER_LOOKUPS: usize = 40;
+
 pub async fn cmd_peers(symbol: &str, market: Market) -> Result<()> {
     market.require_stocks("peers")?;
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let quotes = client.get_quote(&[&resolved]).await?;
-    let q = quotes.first().context("Symbol not found")?;
-    let sector = q.sector.as_deref().unwrap_or("Unknown");
+    let mut quotes = client.get_quote(&[&resolved]).await?;
+    let q = quotes.first_mut().context("Symbol not found")?;
+    // The v7 quote has no sector; it comes from quoteSummary's assetProfile.
+    crate::research::enrich_quote(&client, q, true).await;
+    let q = &*q;
+    let Some(sector) = q.sector.as_deref() else {
+        bail!(
+            "Yahoo has no sector for {}, so peers cannot be matched",
+            resolved
+        );
+    };
 
-    // Get all popular stocks and filter by same sector
+    // Walk the popular stocks, largest first, and keep those in the same
+    // sector. Each lookup is one cached quoteSummary call, so stop early.
     let all_symbols = market.universe();
     let all_refs: Vec<&str> = all_symbols.iter().map(String::as_str).collect();
-    let all_quotes = client.get_quote(&all_refs).await?;
-    let mut peers: Vec<&crate::api::Quote> = all_quotes
-        .iter()
-        .filter(|p| p.sector.as_deref() == Some(sector) && p.symbol.as_deref() != Some(&resolved))
-        .collect();
-    peers.sort_by(|a, b| {
+    let mut all_quotes = client.get_quote(&all_refs).await?;
+    all_quotes.sort_by(|a, b| {
         b.market_cap
             .unwrap_or(0.0)
             .partial_cmp(&a.market_cap.unwrap_or(0.0))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let mut peers: Vec<crate::api::Quote> = Vec::new();
+    for mut p in all_quotes
+        .into_iter()
+        .filter(|p| p.symbol.as_deref() != Some(&resolved))
+        .take(PEER_LOOKUPS)
+    {
+        crate::research::enrich_quote(&client, &mut p, true).await;
+        if p.sector.as_deref() == Some(sector) {
+            peers.push(p);
+            if peers.len() >= PEER_COUNT {
+                break;
+            }
+        }
+    }
 
     print_header(&format!("Peer Comparison: {} ({})", resolved, sector));
 
     // Include the target stock first
     let mut all_peers = vec![q];
-    all_peers.extend(peers.iter().take(8).copied());
+    all_peers.extend(peers.iter());
 
     println!(
         "  {:<14} {:>10} {:>8} {:>8} {:>8} {:>10}",
@@ -796,8 +840,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     let cur_ref = &resolved;
 
     // ── 1. Quote + Fundamentals ──
-    let quotes = client.get_quote(&[cur_ref.as_str()]).await?;
-    let q = quotes.first().context("Symbol not found")?;
+    let mut quotes = client.get_quote(&[cur_ref.as_str()]).await?;
+    let q = quotes.first_mut().context("Symbol not found")?;
+    crate::research::enrich_quote(&client, q, false).await;
+    let q = &*q;
     let r_opt = crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::ALL)
         .await
         .ok();
@@ -944,8 +990,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         );
     }
 
-    // Analyst
-    print_section("Analyst Ratings");
+    // Analyst (skipped when Yahoo has no coverage)
+    if has_analyst_data(q) {
+        print_section("Analyst Ratings");
+    }
     if let Some(rec) = q.recommendation_mean {
         print_kv("Consensus", &sentiment_label(rec));
         print_kv(
@@ -1232,5 +1280,13 @@ mod tests {
             (2, 2, 2, 2, 2)
         );
         assert_eq!(c, vec![11.0, 11.5]);
+    }
+
+    #[test]
+    fn analyst_section_needs_at_least_one_figure() {
+        let mut q = crate::api::Quote::default();
+        assert!(!has_analyst_data(&q));
+        q.number_of_analyst_opinions = Some(12);
+        assert!(has_analyst_data(&q));
     }
 }

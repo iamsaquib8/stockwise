@@ -963,6 +963,55 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
     annual.sort_by_key(|p| p.end);
 }
 
+/// Fill the fields the v7 quote endpoint never returns (sector, margins,
+/// beta, debt/equity, growth, analyst rating) from a `quoteSummary` answer.
+/// Values already on the quote are kept.
+pub fn apply_summary(q: &mut Quote, summary: &Value) {
+    let empty = Value::Null;
+    let fd = summary.get("financialData").unwrap_or(&empty);
+    let ks = summary.get("defaultKeyStatistics").unwrap_or(&empty);
+    let sd = summary.get("summaryDetail").unwrap_or(&empty);
+    if let Some(p) = summary.get("assetProfile") {
+        q.sector = q.sector.take().or_else(|| text(p, "sector"));
+        q.industry = q.industry.take().or_else(|| text(p, "industry"));
+    }
+    q.profit_margins = q.profit_margins.or(raw(fd, "profitMargins"));
+    q.debt_to_equity = q.debt_to_equity.or(raw(fd, "debtToEquity"));
+    q.revenue_growth = q.revenue_growth.or(raw(fd, "revenueGrowth"));
+    q.return_on_equity = q.return_on_equity.or(raw(fd, "returnOnEquity"));
+    q.current_ratio = q.current_ratio.or(raw(fd, "currentRatio"));
+    q.target_mean_price = q.target_mean_price.or(raw(fd, "targetMeanPrice"));
+    q.recommendation_mean = q.recommendation_mean.or(raw(fd, "recommendationMean"));
+    q.recommendation_key = q
+        .recommendation_key
+        .take()
+        .or_else(|| text(fd, "recommendationKey"));
+    q.number_of_analyst_opinions =
+        q.number_of_analyst_opinions
+            .or(raw(fd, "numberOfAnalystOpinions").map(|n| n as u32));
+    q.earnings_quarterly_growth = q.earnings_quarterly_growth.or(raw(fd, "earningsGrowth"));
+    q.beta = q.beta.or(raw(sd, "beta")).or(raw(ks, "beta"));
+}
+
+/// Quote modules `apply_summary` reads. `profile_only` asks for the sector
+/// and industry alone, which is all `peers` needs per candidate.
+pub async fn enrich_quote(client: &YahooClient, q: &mut Quote, profile_only: bool) {
+    let Some(sym) = q.symbol.clone() else { return };
+    let modules: &[&str] = if profile_only {
+        &["assetProfile"]
+    } else {
+        &[
+            "assetProfile",
+            "financialData",
+            "defaultKeyStatistics",
+            "summaryDetail",
+        ]
+    };
+    if let Ok(summary) = client.quote_summary(&sym, modules).await {
+        apply_summary(q, &summary);
+    }
+}
+
 pub fn parse_fin(summary: &Value, quote: &Quote) -> Fin {
     let empty = Value::Null;
     let fd = summary.get("financialData").unwrap_or(&empty);
@@ -2413,5 +2462,64 @@ mod tests {
         assert!(msg.contains("'500325.BO' not found"), "{msg}");
         assert!(msg.contains("BSE scrip codes"), "{msg}");
         assert_eq!(server.requests().len(), 1, "stops after the quote");
+    }
+
+    const SUMMARY: &str = r#"{"quoteSummary":{"result":[{
+        "assetProfile":{"sector":"Technology","industry":"Information Technology Services"},
+        "financialData":{"profitMargins":{"raw":0.19},"debtToEquity":{"raw":9.5},
+            "revenueGrowth":{"raw":0.06},"recommendationKey":"hold",
+            "recommendationMean":{"raw":2.6},"numberOfAnalystOpinions":{"raw":31}},
+        "summaryDetail":{"beta":{"raw":0.55}}}]}}"#;
+
+    #[test]
+    fn apply_summary_fills_fields_the_v7_quote_lacks_and_keeps_existing_ones() {
+        let summary: Value = serde_json::from_str(SUMMARY).unwrap();
+        let mut q = Quote {
+            beta: Some(1.1),
+            ..Default::default()
+        };
+        apply_summary(&mut q, &summary["quoteSummary"]["result"][0]);
+        assert_eq!(q.sector.as_deref(), Some("Technology"));
+        assert_eq!(q.profit_margins, Some(0.19));
+        assert_eq!(q.debt_to_equity, Some(9.5));
+        assert_eq!(q.revenue_growth, Some(0.06));
+        assert_eq!(q.recommendation_key.as_deref(), Some("hold"));
+        assert_eq!(q.number_of_analyst_opinions, Some(31));
+        assert_eq!(q.beta, Some(1.1), "a value already on the quote wins");
+    }
+
+    #[tokio::test]
+    async fn enrich_quote_reads_the_sector_from_quote_summary() {
+        let server = crate::testutil::MockServer::start(vec![(200, SUMMARY.into())]).await;
+        let base = server.url.clone();
+        let client =
+            YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+                let u = reqwest::Url::parse(url).unwrap();
+                format!("{}{}?{}", base, u.path(), u.query().unwrap_or(""))
+            });
+        let mut q = Quote {
+            symbol: Some("TCS.NS".into()),
+            ..Default::default()
+        };
+        enrich_quote(&client, &mut q, true).await;
+        assert_eq!(q.sector.as_deref(), Some("Technology"));
+        assert!(server.requests()[0].target.contains("modules=assetProfile"));
+    }
+
+    #[tokio::test]
+    async fn enrich_quote_leaves_the_quote_alone_when_the_summary_fails() {
+        let server = crate::testutil::MockServer::start(vec![(404, "{}".into())]).await;
+        let base = server.url.clone();
+        let client =
+            YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+                let u = reqwest::Url::parse(url).unwrap();
+                format!("{}{}?{}", base, u.path(), u.query().unwrap_or(""))
+            });
+        let mut q = Quote {
+            symbol: Some("TCS.NS".into()),
+            ..Default::default()
+        };
+        enrich_quote(&client, &mut q, false).await;
+        assert!(q.sector.is_none() && q.beta.is_none());
     }
 }
