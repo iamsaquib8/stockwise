@@ -422,6 +422,31 @@ pub struct ChartData {
     pub events: Option<ChartEvents>,
 }
 
+impl ChartData {
+    /// Closing prices with the session date of each bar, dated in the
+    /// exchange's time zone (`gmtoffset`; three hours of slack absorb a
+    /// daylight-saving change since). Bars without a close are skipped.
+    pub fn dated_closes(&self) -> Vec<(chrono::NaiveDate, f64)> {
+        let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
+        let closes = self
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_deref())
+            .unwrap_or_default();
+        self.timestamp
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .zip(closes)
+            .filter_map(|(ts, close)| {
+                let date = chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?;
+                Some((date.date_naive(), (*close)?))
+            })
+            .collect()
+    }
+}
+
 /// Dividends and splits from the chart API, keyed by an opaque bucket
 /// timestamp — use each event's own `date`.
 #[derive(Debug, Default, Deserialize)]
@@ -475,6 +500,9 @@ pub struct ChartMeta {
     pub currency: Option<String>,
     #[serde(rename = "exchangeName")]
     pub exchange_name: Option<String>,
+    /// Seconds east of UTC for the exchange's time zone, to date its bars.
+    #[serde(default)]
+    pub gmtoffset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

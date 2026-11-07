@@ -101,7 +101,7 @@ prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), 
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |
 | `compare <SYMBOLS...> [--json\|--csv]` (`c`) | Two or more stocks side by side across 16 metrics |
 | `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars. Default `1y` |
-| `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols) |
+| `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols), from the days both traded, so NSE, NYSE and crypto calendars line up; `null`/`N/A` when two symbols share fewer than 20 returns |
 | `timeframes <SYMBOL>` (`mtf`) | 1M–5Y return, volatility, RSI, SMA/MACD signals |
 | `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns with CAGR |
 | `patterns <SYMBOL> [-p]` | Candlestick patterns (doji, hammer, engulfing, morning star) |
@@ -373,7 +373,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
 | `tax advance [--fy 2025-26] [--paid N] [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
-| `pcorr` | Correlation between holdings, diversification warnings |
+| `pcorr` | Correlation between holdings from the days both traded, diversification warnings (`N/A` when two holdings share too few days) |
 
 ### Lots, sales and tax
 

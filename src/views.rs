@@ -830,6 +830,7 @@ pub mod fixtures {
                 fifty_two_week_low: None,
                 currency: Some(currency.to_string()),
                 exchange_name: None,
+                gmtoffset: None,
             }),
             timestamp: Some(
                 (0..closes.len() as i64)

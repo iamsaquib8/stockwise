@@ -372,10 +372,17 @@ fn return_row_needs_two_closes() {
 
 #[test]
 fn correlation_matrix_has_a_unit_diagonal_and_nulls_for_gaps() {
+    let start = day("2026-01-01");
+    let dated = |v: Vec<f64>| -> Vec<(chrono::NaiveDate, f64)> {
+        v.into_iter()
+            .enumerate()
+            .map(|(i, x)| (start + chrono::Duration::days(i as i64), x))
+            .collect()
+    };
     let a = closes(60);
     let series = vec![
-        ("A".to_string(), a.clone()),
-        ("B".to_string(), a.iter().map(|x| x * 2.0).collect()),
+        ("A".to_string(), dated(a.clone())),
+        ("B".to_string(), dated(a.iter().map(|x| x * 2.0).collect())),
         ("EMPTY".to_string(), Vec::new()),
     ];
     let m = correlation_matrix(&series);

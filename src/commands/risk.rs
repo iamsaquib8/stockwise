@@ -187,9 +187,12 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
 
 // ── Correlation ──
 
-/// Pairwise correlation matrix (diagonal 1.0), rounded to 4 decimals; `None`
-/// where two series don't overlap enough to compare.
-pub(crate) fn correlation_matrix(series: &[(String, Vec<f64>)]) -> Vec<Vec<Option<f64>>> {
+/// Pairwise correlation matrix (diagonal 1.0), rounded to 4 decimals, from
+/// the returns on dates both series traded; `None` where two series share too
+/// few dates to compare (see [`technical::dated_correlation`]).
+pub(crate) fn correlation_matrix(
+    series: &[(String, Vec<(chrono::NaiveDate, f64)>)],
+) -> Vec<Vec<Option<f64>>> {
     series
         .iter()
         .enumerate()
@@ -201,7 +204,7 @@ pub(crate) fn correlation_matrix(series: &[(String, Vec<f64>)]) -> Vec<Vec<Optio
                     if i == j {
                         Some(1.0)
                     } else {
-                        round_opt(technical::correlation(a, b), 4)
+                        round_opt(technical::dated_correlation(a, b), 4)
                     }
                 })
                 .collect()
@@ -230,17 +233,10 @@ pub async fn cmd_correlate(symbols: &[String], market: Market, fmt: Format) -> R
     let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
 
-    let mut all_closes: Vec<(String, Vec<f64>)> = Vec::new();
+    let mut all_closes: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> = Vec::new();
     for sym in &resolved {
         let chart = client.get_chart(sym, "1y", "1d").await?;
-        let closes: Vec<f64> = chart
-            .indicators
-            .quote
-            .first()
-            .and_then(|q| q.close.as_ref())
-            .map(|c| c.iter().filter_map(|v| *v).collect())
-            .unwrap_or_default();
-        all_closes.push((sym.clone(), closes));
+        all_closes.push((sym.clone(), chart.dated_closes()));
     }
     let matrix = correlation_matrix(&all_closes);
     let names: Vec<&str> = all_closes.iter().map(|(s, _)| s.as_str()).collect();

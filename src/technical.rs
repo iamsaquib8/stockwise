@@ -1,3 +1,5 @@
+use chrono::NaiveDate;
+
 /// Calculate Simple Moving Average for the last `period` data points
 pub fn sma(data: &[f64], period: usize) -> Option<f64> {
     if data.len() < period {
@@ -358,7 +360,42 @@ pub fn calmar_ratio(prices: &[f64]) -> Option<f64> {
     Some(annual_return / mdd)
 }
 
-/// Pearson correlation between two price series
+/// Fewest common returns [`dated_correlation`] will compare.
+pub const MIN_COMMON_RETURNS: usize = 20;
+
+/// Correlation of the daily returns two dated price series share. Only dates
+/// both series traded are used and each return runs between consecutive
+/// common dates, so different holiday calendars (NSE and NYSE) or a seven-day
+/// crypto week line up on the same days. `None` below
+/// [`MIN_COMMON_RETURNS`] returns, instead of a number built from too little.
+/// Both series must be in ascending date order.
+pub fn dated_correlation(a: &[(NaiveDate, f64)], b: &[(NaiveDate, f64)]) -> Option<f64> {
+    let (mut i, mut j) = (0, 0);
+    let (mut pa, mut pb) = (Vec::new(), Vec::new());
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                pa.push(a[i].1);
+                pb.push(b[j].1);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    let (ra, rb) = (daily_returns(&pa), daily_returns(&pb));
+    // `daily_returns` skips a zero price, which would shift the pairs; only
+    // trust the result when both lists kept every return.
+    if ra.len() != rb.len() || ra.len() < MIN_COMMON_RETURNS {
+        return None;
+    }
+    pearson(&ra, &rb)
+}
+
+/// Pearson correlation between two price series, pairing their returns from
+/// the end by position. Use [`dated_correlation`] for series fetched
+/// separately: they carry different dates.
 pub fn correlation(a: &[f64], b: &[f64]) -> Option<f64> {
     let ra = daily_returns(a);
     let rb = daily_returns(b);
@@ -366,8 +403,16 @@ pub fn correlation(a: &[f64], b: &[f64]) -> Option<f64> {
     if n < 2 {
         return None;
     }
-    let ra = &ra[ra.len() - n..];
-    let rb = &rb[rb.len() - n..];
+    pearson(&ra[ra.len() - n..], &rb[rb.len() - n..])
+}
+
+/// Pearson correlation of two equal-length series; `None` for fewer than two
+/// points or a series that does not vary.
+fn pearson(ra: &[f64], rb: &[f64]) -> Option<f64> {
+    let n = ra.len();
+    if n < 2 || rb.len() != n {
+        return None;
+    }
 
     let mean_a = ra.iter().sum::<f64>() / n as f64;
     let mean_b = rb.iter().sum::<f64>() / n as f64;
@@ -663,6 +708,71 @@ mod tests {
             "Expected -1.0 correlation, got {}",
             corr
         );
+    }
+
+    fn dated(start: &str, days: impl IntoIterator<Item = (i64, f64)>) -> Vec<(NaiveDate, f64)> {
+        let start = NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap();
+        days.into_iter()
+            .map(|(d, p)| (start + chrono::Duration::days(d), p))
+            .collect()
+    }
+
+    /// A price path with returns that vary from day to day.
+    fn path(n: usize) -> Vec<f64> {
+        let mut price = 100.0;
+        (0..n)
+            .map(|i| {
+                price *= 1.0 + ((i * 7 % 11) as f64 - 5.0) / 200.0;
+                price
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_extra_date_in_one_series_does_not_shift_the_pairs() {
+        // B is A's returns on the same days; A also has one extra date in the
+        // middle. By position the pairs would drift by a day after it; by
+        // date the correlation is exactly 1.
+        let p = path(40);
+        let b = dated(
+            "2026-01-01",
+            p.iter().enumerate().map(|(i, x)| (i as i64 * 2, *x)),
+        );
+        let mut a = b.clone();
+        a.insert(20, (b[19].0 + chrono::Duration::days(1), b[19].1 * 1.07));
+        let c = dated_correlation(&a, &b).unwrap();
+        assert!((c - 1.0).abs() < 1e-9, "{c}");
+        // The old positional pairing of the same data is far from 1.
+        let pa: Vec<f64> = a.iter().map(|x| x.1).collect();
+        let pb: Vec<f64> = b.iter().map(|x| x.1).collect();
+        assert!(correlation(&pa, &pb).unwrap() < 0.9);
+    }
+
+    #[test]
+    fn a_seven_day_week_correlates_with_a_five_day_week_on_common_dates() {
+        // Stock B trades Mon-Fri, "crypto" A every day. On the days both
+        // trade, A's price is B's price, so the correlation is 1; A's
+        // weekend prices must not count.
+        let weekday = |d: i64| (d % 7) < 5;
+        let p = path(60);
+        let b = dated(
+            "2026-01-05", // a Monday
+            (0..60).filter(|d| weekday(*d)).map(|d| (d, p[d as usize])),
+        );
+        let a = dated("2026-01-05", (0..60).map(|d| (d, p[d as usize])));
+        let c = dated_correlation(&a, &b).unwrap();
+        assert!((c - 1.0).abs() < 1e-9, "{c}");
+    }
+
+    #[test]
+    fn too_few_shared_dates_give_no_correlation() {
+        let a = dated("2026-01-01", (0..30).map(|d| (d, 100.0 + d as f64)));
+        let b = dated("2026-03-01", (0..30).map(|d| (d, 100.0 + d as f64)));
+        assert_eq!(dated_correlation(&a, &b), None);
+        // 10 shared dates is under the minimum of 20 returns.
+        let c = dated("2026-01-21", (0..30).map(|d| (d, 100.0 + (d * d) as f64)));
+        assert_eq!(dated_correlation(&a, &c), None);
+        assert_eq!(dated_correlation(&a, &[]), None);
     }
 
     #[test]
