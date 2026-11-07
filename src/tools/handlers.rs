@@ -255,8 +255,14 @@ async fn verdict(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
         crate::research::Needs::VERDICT,
     )
     .await?;
-    let cards = crate::insights::generate_rich_insights(&r);
-    let v = crate::verdict::generate_verdict(&r, &cards);
+    verdict_value(&r)
+}
+
+/// The tool result: pillar scores, coverage and the facts behind them. No
+/// rating, entry, stop or target is ever added here.
+pub(super) fn verdict_value(r: &crate::research::Research) -> Result<Value> {
+    let cards = crate::insights::generate_rich_insights(r);
+    let v = crate::verdict::generate_verdict(r, &cards);
     Ok(serde_json::to_value(v)?)
 }
 

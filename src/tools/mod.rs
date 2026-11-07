@@ -240,11 +240,15 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "verdict",
-        title: "6-Pillar Buy/Sell verdict",
-        description: "Quantitative 6-pillar Buy/Hold/Sell verdict for one ticker (Technical Trend, \
-                      Valuation, Profitability & Quality, Financial Health, Growth & Momentum, \
-                      Institutional & Analyst), with composite score (0-100), risk level, target \
-                      prices, stop-loss and bullish/bearish reasons.",
+        title: "6-pillar scorecard",
+        description: "Quantitative 6-pillar scorecard for one ticker: valuation, growth & \
+                      profitability, balance sheet, smart money & ownership, analyst consensus \
+                      and technical trend, each scored 0-100 with a band (strong, moderate, weak \
+                      or no data) and the facts behind it, a weighted composite (0-100) and the \
+                      share of the model's inputs that had data. Pillars without data are marked \
+                      \"no data\" and left out of the composite; crypto, FX and indices get only \
+                      the technical pillar. It describes the data and is not a recommendation: \
+                      do not present it as advice or as a call on the stock.",
         params: &[SYMBOL, MARKET],
         personal: false,
     },

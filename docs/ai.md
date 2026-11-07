@@ -213,6 +213,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `history` | OHLCV bars (most recent `limit`, default 60) with the period's change, high and low | `history --json` |
 | `technical` | SMAs, EMAs, RSI, MACD, Bollinger Bands, ATR, VWAP and a signal tally | `technical --json` |
 | `risk` | Volatility, Sharpe, Sortino, Calmar, max drawdown, value at risk | `risk --json` |
+| `verdict` | The 6-pillar scorecard: each pillar's 0–100 score, band and the facts behind it, the composite, and the data coverage. Pillars without data are marked as such. No rating, entry, stop or target, and the description tells the model it is not a recommendation | `verdict --json` |
 | `search` | Tickers matching a company name | `search --json` |
 | `markets` | Index levels; optional crypto, FX and global benchmarks | `markets --json` |
 | `mf_search` / `mf_nav` / `mf_sip` | Mutual fund search, NAV with expense ratio, past SIP returns with XIRR (by AMFI code or ISIN) | `mf search/nav/sip --json` |

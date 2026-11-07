@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `verdict --explain` now lists the real weights (valuation 20, growth 25, balance sheet 15, smart money 15, analyst 10, technicals 15), taken from the scores themselves, and the data sources that failed are listed under the score ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
 - `verdict`: the fixed "Confidence: 85%" is replaced by `data_coverage` (JSON) / "Data coverage" (text), the share of the score's inputs that had data ([#77](https://github.com/iamsaquib8/stockwise/issues/77)).
 - `insights`: analyst cards say "mean rating x/5" instead of "Strong Buy", and the 52-week-low card no longer calls it a "value entry".
+- The `verdict` tool in the MCP server and in `stockwise ask` is now called "6-pillar scorecard", returns only pillar scores, data coverage and the facts behind them, and its description says it is not a recommendation; the buy/sell action, entry zone and stop-loss are no longer sent to the model ([#112](https://github.com/iamsaquib8/stockwise/issues/112)).
 - The web dashboard's Research tab shows the pillar scores and data coverage instead of the buy/sell label, entry zone and stop-loss.
 
 ### Fixed
