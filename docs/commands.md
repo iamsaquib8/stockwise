@@ -94,18 +94,18 @@ prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), 
 | `analyze <SYMBOL>` (`a`) | Valuation, profitability, growth, analyst ratings, plain-English outlook |
 | `events <SYMBOL> [--days N] [--ai]` (`ev`) | Unified timeline of material corporate events, exchange filings, earnings results, and excess market reaction vs NIFTY/S&P 500 |
 | `insights <SYMBOL>` | Positive, negative and neutral findings (Growth, Valuation, Margins, Ownership, etc.) with quantified metrics and XBRL shareholding patterns |
-| `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. A description of the data, not a recommendation; `--explain` lists the weights and rules |
+| `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. Size cut-offs (cash, insider trades; market cap in `longterm`) are written in US dollars and amounts in other currencies are converted at rough fixed rates, so the same size scores the same in rupees and dollars. A description of the data, not a recommendation; `--explain` lists the weights and rules |
 | `score <SYMBOL> [--json] [--explain]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards: Piotroski 9-point F-Score (out of 9) and Altman Z-Score with full formula breakdown and distress zones |
 | `technical <SYMBOL> [-p] [--json] [--explain]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |
 | `compare <SYMBOLS...> [--json\|--csv]` (`c`) | Two or more stocks side by side across 16 metrics |
-| `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars. Default `1y` |
-| `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols) |
+| `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars, annualized with 252 bars a year for stocks and indices, 365 for crypto and 260 for FX. Default `1y` |
+| `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols), from the days both traded, so NSE, NYSE and crypto calendars line up; `null`/`N/A` when two symbols share fewer than 20 returns |
 | `timeframes <SYMBOL>` (`mtf`) | 1M–5Y return, volatility, RSI, SMA/MACD signals |
-| `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns with CAGR |
+| `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns. The annualized figure (CAGR) uses the calendar time between the first and last bar, and is shown only for spans of a year or more (`null` otherwise) |
 | `patterns <SYMBOL> [-p]` | Candlestick patterns (doji, hammer, engulfing, morning star) |
-| `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) + Fibonacci levels |
+| `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) from the last completed daily session (named on screen), whatever `-p` is, + Fibonacci levels |
 | `fibs <SYMBOL> [-p]` | Fibonacci retracement with a "you are here" marker |
 | `volume <SYMBOL> [-p]` (`vol`) | OBV, A/D line, volume ratio, volume bars |
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
@@ -157,7 +157,7 @@ and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
 | `mf overlap <A> <B> [--json]` | Shared top holdings, holdings and sector overlap, and expense ratios of two funds or ETFs, e.g. `mf overlap SPY QQQ -m us` |
 | `options chain <SYMBOL> [-e DATE] [-n STRIKES] [--rate %] [--div-yield %] [--json]` | Calls and puts around the money: last price, open interest (and change on NSE/BSE), volume, IV, delta, gamma, theta, vega, rho, and the lot size. Default: nearest expiry, 10 strikes each side (`-n 0` for all) |
 | `options pcr <SYMBOL> [-e DATE] [--json]` | Put/call ratio by open interest and by volume, and the three strikes with the most call and put open interest |
-| `options oi <SYMBOL> [-e DATE] [-n N] [--json] [--explain]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown |
+| `options oi <SYMBOL> [-e DATE] [-n N] [--json] [--explain]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown. Sentiment is read for the underlying: put buying (`LB` on a put) is bearish and put writing (`SB`) is bullish; `--json` carries `calls_sentiment` and `puts_sentiment` |
 | `options maxpain <SYMBOL> [-e DATE] [--json]` (`max-pain`) | The settlement strike at which open options pay their holders least, with the payout curve around it |
 | `options payoff <SYMBOL> [--leg LEG]... [-s PRESET] [-w WIDTH] [-e DATE] [-l LOTS] [--lot-size N] [--rate %] [--div-yield %] [--iv %] [--today] [--json]` | A multi-leg position priced from the live chain: legs with price source, IV and delta; net debit/credit; max profit and loss (or "unlimited"); breakevens; probability of profit; position greeks; and a braille P/L chart at expiry (green/red), plus today's curve with `--today`. Analysis only — no orders |
 | `options <SYMBOL> [-p]` / `options moves <SYMBOL> [-p]` | Expected 1/5/10/30-day moves and OTM strike ideas from realized volatility |
@@ -351,7 +351,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | Command | Description |
 |---------|-------------|
 | `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
-| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD]` | Add a purchase as a new lot (default date: today). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
+| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--force]` | Add a purchase as a new lot (default date: today). A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N --date YYYY-MM-DD]` | Lots, sales, dividends and XIRR of one holding; `--lot N --date` corrects a purchase date |
 | `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo). Shows them; `--apply` adjusts lots and records dividends, and is safe to repeat |
@@ -360,20 +360,20 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL>` | Remove a holding and its lots without recording a sale |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
-| `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...>` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
-| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
+| `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
+| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
 | `calendar [SYMBOLS...] [--days 30] [--holdings\|--watchlist] [--json\|--csv]` | Upcoming results, ex-dividend and dividend payment dates, splits and bonus issues for your holdings and watchlist (or the named symbols), sorted by date, with today and the next 7 days marked. See [the calendar](#results-and-corporate-calendar) |
-| `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`, every sheet read, Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
+| `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
 | `rebalance [--inflow N] [--drift N] [--json]` (or `portfolio rebalance`) | Trades to rebalance to targets (or equal weight); `--inflow` buys underweight assets with new cash without selling; `--drift` ignores minor deviations |
-| `harvest` | Tax-loss harvesting candidates |
+| `harvest [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale (see [below](#harvest)) |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
-| `tax advance [--fy 2025-26] [--paid N] [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
+| `tax advance [--fy 2025-26] [--paid [DATE:]AMOUNT]... [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
-| `pcorr` | Correlation between holdings, diversification warnings |
+| `pcorr` | Correlation between holdings from the days both traded, diversification warnings (`N/A` when two holdings share too few days) |
 
 ### Lots, sales and tax
 
@@ -390,7 +390,7 @@ short-term loss is set off against short-term gains, then long-term gains; a
 long-term loss only against long-term gains; then ₹1.25 lakh of LTCG is exempt
 and STCG is taxed at 20%, LTCG at 12.5%. Losses left over are shown as carry
 forward. Holdings in another currency (e.g. US shares in `tax in`) are listed
-but not included. It is an estimate — no cess, surcharge, grandfathering or
+but not included. It is an estimate — it includes the 4% cess but not surcharge, grandfathering or
 brought-forward losses.
 
 Same-day trades (India): a buy and sell of one share on the same day net
@@ -420,6 +420,14 @@ are equity ETFs such as `NIFTYBEES`. `harvest` skips the same holdings (they
 are listed under "Not checked") and `tax export in` and `tax advance` leave
 their sales out.
 
+`tax in`, `harvest`, `tax export in` and `tax advance` share one rule for what
+counts as a listed share or an equity-oriented fund (Sec. 111A/112A); the other
+three load AMFI's file to read the category of any fund you sold. Crypto (such
+as `BTC-INR`) is never in 111A/112A: it is taxed at a flat 30% under Sec.
+115BBH with no set-off of losses, `tax export in` lists it under
+`virtual_digital_assets`, and the other commands name it among the holdings
+they leave out.
+
 ### Mutual funds and SGBs
 
 Holdings that Yahoo Finance doesn't quote are priced by StockWise itself, the
@@ -446,6 +454,25 @@ same way in `portfolio`, `dashboard`, `tui`, `serve`, `wealth`, `rebalance`,
 Older versions stored `portfolio add MF:120503` as `MF:120503.NS` (and
 `watch add` / `alert add` likewise); those symbols are repaired when the files
 load.
+
+### Harvest
+
+`harvest` lists what you could sell to book a loss, and which long-term winners
+you could sell to use this year's unused ₹1.25 lakh LTCG exemption. For India it
+follows FIFO, as a demat account does: to reach a losing lot you must sell the
+older lots first, so the row shows that whole sale (`shares`, and the net `st_pnl`
+and `lt_pnl` it books). If selling up to a losing lot books a net gain in all, the
+holding is not offered as a loss; `fifo_blocked` (and a note on screen) says how
+many shares you would sell and what the sale books. For the US you can choose lots,
+so only the losing lots are offered.
+
+`estimated_tax_saved` is how much the tax estimate falls when the loss is booked
+on top of this year's realized gains, so set-off order, the exemption and cess are
+counted; a loss with nothing to offset saves 0 and is carried forward. The
+remaining exemption is shared: each winner takes its part of it, biggest first,
+and the saving counts only that part. Holdings in another currency (US shares for
+`in`) are listed under `other_currency` and not counted; holdings taxed under
+other rules (crypto, debt funds, SGBs, gold and similar ETFs) under `other_rules`.
 
 ### Tax export
 
@@ -474,12 +501,17 @@ goes to stdout. It is an **estimate — verify it with your broker's tax P&L**:
 it only knows sales StockWise recorded (`portfolio sell`, tradebook and CAS
 imports) at their recorded prices, without brokerage or STT. Shares bought on
 or before 31 Jan 2018 are flagged — Schedule 112A lets you use that day's
-fair market value as the cost, which StockWise doesn't apply; sales before
-23 Jul 2024 are noted because they had the old rates (15% / 10%); mutual fund
-rows are noted because only equity-oriented funds belong in 111A/112A; sales
-in another currency (US shares for `in`) and crypto (taxed at 30% under
-section 115BBH, Schedule VDA) are listed but left out. Years before FY 2024-25
-are noted too: their LTCG exemption was ₹1 lakh.
+fair market value as the cost, which StockWise doesn't apply; sales in
+another currency (US shares for `in`) and crypto (taxed at 30% under section
+115BBH, Schedule VDA) are listed but left out, and so are debt and other funds
+and SGBs.
+
+The rates follow the **sale date**: sales before 23 Jul 2024 are taxed at 15%
+(STCG) and 10% (LTCG), later ones at 20% and 12.5%. The LTCG exemption is ₹1 lakh
+up to FY 2023-24 and ₹1.25 lakh from FY 2024-25, for the whole of that year. In a
+mixed FY 2024-25, losses and the exemption are used against the higher-rate gains
+first (the lowest tax; the Act does not prescribe an order), and the summary
+shows how much of the taxable gain came from before 23 Jul 2024.
 
 ### Advance tax (India)
 
@@ -501,12 +533,15 @@ Indian equity rules (STCG @ 20%, LTCG @ 12.5% above ₹1.25L exemption):
 ```bash
 stockwise tax advance                             # current FY advance tax schedule
 stockwise tax advance --fy 2025-26                # specific financial year
-stockwise tax advance --paid 25000                # track shortfall and Section 234C interest
+stockwise tax advance --paid 2025-06-14:3000 --paid 2026-01-10:17800   # dated payments: exact Section 234C interest
+stockwise tax advance --paid 25000                # a total with no date: assumed paid on time
 stockwise tax advance --json                      # programmatic JSON output
 ```
 
 - **Section 208 Check**: Automatically flags whether advance tax is mandatory (total liability ≥ ₹10,000) or exempt.
-- **Section 234C Deferment Interest**: When `--paid <AMOUNT>` is passed, calculates exact shortfall and 1%/month interest (3% for Q1–Q3, 1% for Q4) on shortfalls below safe-harbour levels (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4).
+- **Status**: A quarter is `Paid` only when payments dated on or before its due date cover the minimum. With no `--paid`, a quarter past its due date is `Overdue`, because StockWise has no record of any payment.
+- **Section 234C Deferment Interest**: Section 234C looks at what was paid by each due date, so pass each payment with its date (`--paid 2025-06-14:3000`, repeated). It then charges 1% a month (3% for Q1–Q3, 1% for Q4) on each shortfall, rounded down to ₹100, when the payments by that date are below the safe-harbour level (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4). A payment without a date is assumed to have been made before every due date, which can understate the interest.
+- **Cess**: The tax and the instalments include the 4% health and education cess; surcharge is left out.
 - **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
 
 ### Benchmark and attribution
@@ -780,7 +815,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `risk` | `{symbol, currency, period, interval, bars, price, return_percent, volatility_percent, risk_level, sharpe, sortino, calmar, max_drawdown: {percent, peak_price, trough_price, trading_days}, var_95_percent, var_99_percent}` — `risk_level` is `low`, `moderate`, `high` or `very_high` | — |
 | `compare` | `[{symbol, name, currency, price, change_percent, market_cap, pe_ttm, pe_forward, eps_ttm, price_to_book, dividend_yield, profit_margin, revenue_growth, debt_to_equity, beta, year_high, year_low, sma_50, analyst_rating}]` — the table's transpose | stock |
 | `correlate` | `{period, interval, symbols: [..], matrix: [[..]]}` — `matrix[i][j]` pairs `symbols[i]` and `symbols[j]` | symbol: `symbol, <SYM1>, <SYM2>, ...` |
-| `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` | period |
+| `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` — `annualized_percent` is `null` for spans under a year | period |
 | `movers` | `{gainers: [row], losers: [row]}`, row = `{side, rank, symbol, price, change_percent, volume, currency}` | stock, gainers then losers |
 | `sectors` | `[{sector, symbol, price, change_percent, currency}]`, best first | sector |
 | `screen` | `[{symbol, name, price, change_percent, pe, market_cap, dividend_yield, currency}]` | match |
@@ -795,8 +830,8 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `calendar` | `[{date, days_until, when, symbol, event, detail, source, estimate}]` — `when` is `today`, `tomorrow`, `this_week` (within 7 days) or `later`; `event` is `results`, `board_meeting`, `ex_dividend`, `dividend_paid`, `split`, `bonus`, `rights` or `other`; `source` is `yahoo` or `nse`; `estimate` marks Yahoo's unconfirmed earnings dates. Notes (e.g. NSE refused) go to stderr | event |
 | `portfolio benchmark` | `{benchmark: {symbol, name, currency, converted_to_base}, base_currency, period, start, end, trading_days, portfolio_return, benchmark_return, excess_return, portfolio_annualized, benchmark_annualized, metrics: {observations, alpha, beta, tracking_error, information_ratio, correlation}, holdings: [holding], sectors: [{sector, holdings, avg_weight, end_weight, return_pct, contribution, active_contribution}], flagged: [{symbol, reason}], series: [{date, portfolio, benchmark}]}`, holding = `{symbol, sector, avg_weight, end_weight, return_pct, contribution, active_contribution, days_held, days_unpriced, flag}` — returns, weights, `alpha` and `tracking_error` are percentages, contributions are percentage points; annualized returns only for periods over about 13 months; `series` is growth of 100; figures are null when nothing was held | holding |
 | `portfolio xray` | `{portfolio_name, base_currency, total_value, effective_holdings: [{symbol, name, direct_value, direct_weight_pct, fund_value, fund_weight_pct, total_value, effective_weight_pct, is_concentrated, via_funds: [{fund_symbol, value, weight_in_fund_pct, effective_weight_pct}]}], concentrations_above_10pct: [effective_holding], market_cap_breakdown: {large_cap_value, large_cap_pct, mid_cap_value, mid_cap_pct, small_cap_value, small_cap_pct, unclassified_value, unclassified_pct}, sector_allocation: [{sector, value, weight_pct}], asset_class_split: {equity_value, equity_pct, debt_value, debt_pct, commodity_value, commodity_pct, cash_value, cash_pct}, funds_analyzed: [{symbol, name, look_through_available, holdings_count, coverage_pct}]}` | effective holding |
-| `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], intraday_sales, intraday_gain, other_rules: [symbol], notes: [text]}` (`virtual_digital_assets`, `intraday_sales`, `intraday_gain` and `other_rules` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, stcg_tax, ltcg_tax, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, gain_or_loss, date_acquired_estimated}`, summary = `{short_term_proceeds, short_term_cost, short_term_gain, long_term_proceeds, long_term_cost, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}` | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
-| `tax advance` | `{fy_label, fy_start, fy_end, as_of, total_stcg, total_ltcg, total_tax_estimated, sec_208_threshold, sec_208_applicable, total_paid, total_sec_234c_interest, sec_234b_applicable, quarters: [{quarter, due_date, cutoff_date, stcg_quarter, ltcg_quarter, stcg_cumulative, ltcg_cumulative, cumulative_tax_estimated, required_cumulative_pct, min_cumulative_tax_required, quarter_tax_payable, paid, shortfall, sec_234c_interest, status}]}` — `status` is `paid`, `pending` or `upcoming` | quarter row |
+| `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], intraday_sales, intraday_gain, other_rules: [symbol], notes: [text]}` (`virtual_digital_assets`, `intraday_sales`, `intraday_gain` and `other_rules` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, taxable_stcg_before_23_jul_2024, taxable_ltcg_before_23_jul_2024, stcg_tax, ltcg_tax, cess, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, gain_or_loss, date_acquired_estimated}`, summary = `{short_term_proceeds, short_term_cost, short_term_gain, long_term_proceeds, long_term_cost, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}` | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
+| `tax advance` | `{fy_label, fy_start, fy_end, as_of, total_stcg, total_ltcg, total_tax_estimated, sec_208_threshold, sec_208_applicable, total_paid, payments: [{date, amount}], assumed_on_time, total_sec_234c_interest, sec_234b_applicable, quarters: [{quarter, due_date, cutoff_date, stcg_quarter, ltcg_quarter, stcg_cumulative, ltcg_cumulative, cumulative_tax_estimated, required_cumulative_pct, min_cumulative_tax_required, quarter_tax_payable, paid, shortfall, sec_234c_interest, status}]}` — `paid` is what was paid on or before that due date; `status` is `paid`, `pending`, `upcoming`, `overdue` or `nothingdue` | quarter row |
 | `goal sip` | `{target, years, annual_return_pct, step_up_pct, savings, savings_future_value, monthly_sip, final_monthly_sip, total_invested, gains, lump_sum_today, schedule: [{year, monthly_sip, invested, value}], goal, currency}` — `goal` is `sip`, `retire` or `education` | — |
 | `goal retire` | `{monthly_expense_today, years_to_retire, years_in_retirement, inflation_pct, return_pre_pct, return_post_pct, monthly_expense_at_retirement, corpus, sip: plan, goal, currency}` — `plan` is the `goal sip` object without `goal`/`currency` | — |
 | `goal education` | `{cost_today, years, inflation_pct, future_cost, sip: plan, goal, currency}` | — |

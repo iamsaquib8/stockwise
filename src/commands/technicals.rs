@@ -105,6 +105,14 @@ pub(crate) fn technical_json(
     })
 }
 
+/// Hours of trading in a day's session, for intraday bars per year.
+fn session_hours(market: Market) -> f64 {
+    match market {
+        Market::In | Market::Commodity => 6.25,
+        _ => 6.5,
+    }
+}
+
 pub async fn cmd_technical(
     symbol: &str,
     period: &str,
@@ -564,8 +572,14 @@ pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
         let change = ((last / first) - 1.0) * 100.0;
         let min = closes.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = closes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let vol =
-            technical::annualized_volatility_with(&closes, technical::periods_per_year(interval));
+        let vol = technical::annualized_volatility_with(
+            &closes,
+            technical::periods_per_year_for(
+                market::AssetClass::of(&resolved),
+                interval,
+                session_hours(market),
+            ),
+        );
 
         let change_str = if change >= 0.0 {
             format!("{:+.2}%", change).green().bold().to_string()
@@ -647,10 +661,16 @@ pub async fn cmd_multitimeframe(symbol: &str, market: Market) -> Result<()> {
         }
 
         let ret = technical::percent_change(closes[0], *closes.last().unwrap());
-        let vol =
-            technical::annualized_volatility_with(&closes, technical::periods_per_year(interval))
-                .map(|v| format!("{:.1}%", v * 100.0))
-                .unwrap_or("—".into());
+        let vol = technical::annualized_volatility_with(
+            &closes,
+            technical::periods_per_year_for(
+                market::AssetClass::of(&resolved),
+                interval,
+                session_hours(market),
+            ),
+        )
+        .map(|v| format!("{:.1}%", v * 100.0))
+        .unwrap_or("—".into());
         let rsi = technical::rsi(&closes, 14)
             .map(|r| format!("{:.0}", r))
             .unwrap_or("—".into());
@@ -889,16 +909,32 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
     }
 
     let current = *closes.last().unwrap();
-    let last_high = *highs.last().unwrap();
-    let last_low = *lows.last().unwrap();
-    let last_close = *closes.last().unwrap();
 
-    let (pivot, r1, r2, r3, s1, s2, s3) = technical::pivot_points(last_high, last_low, last_close);
+    // Pivot points come from the last completed daily session, whatever
+    // `-p` is: a weekly bar would give the week's range and a 5-minute bar
+    // the last five minutes.
+    let daily = if period_to_interval(period) == "1d" {
+        None
+    } else {
+        Some(client.get_chart(&resolved, "1mo", "1d").await?)
+    };
+    let Some(prior) = daily
+        .as_ref()
+        .unwrap_or(&chart)
+        .prior_session(chrono::Utc::now(), market)
+    else {
+        bail!("No completed trading session found to build pivot points from");
+    };
+    let (pivot, r1, r2, r3, s1, s2, s3) =
+        technical::pivot_points(prior.high, prior.low, prior.close);
 
     print_header(&format!("Support & Resistance: {}", resolved));
     println!("  Current Price: {}\n", format_price(current, cur).bold());
 
-    print_section("Classic Pivot Points");
+    print_section(&format!(
+        "Classic Pivot Points (from the {} session)",
+        prior.date.format("%d %b")
+    ));
     print_kv(
         "R3 (Resistance)",
         &format!("{}{:.2}", csym, r3).red().to_string(),

@@ -1,3 +1,6 @@
+use crate::market::AssetClass;
+use chrono::NaiveDate;
+
 /// Calculate Simple Moving Average for the last `period` data points
 pub fn sma(data: &[f64], period: usize) -> Option<f64> {
     if data.len() < period {
@@ -251,22 +254,50 @@ pub fn xirr(cashflows: &[(f64, f64)]) -> Option<f64> {
     Some((lo + hi) / 2.0)
 }
 
-/// Bars per year for a Yahoo chart interval.
+/// Bars per year for a Yahoo chart interval of a stock on a 6.25-hour (NSE)
+/// session. Use [`periods_per_year_for`] for other asset classes.
 pub fn periods_per_year(interval: &str) -> f64 {
-    // Intraday bars assume a 6.25-hour (NSE) session.
+    periods_per_year_for(AssetClass::Stock, interval, 6.25)
+}
+
+/// Bars per year for a Yahoo chart interval, by asset class. Daily bars: 252
+/// trading days for stocks and indices, 365 for crypto, which trades every
+/// day, 260 for FX (weekdays). Intraday bars fill `session_hours` of each
+/// trading day (the exchange's session), or 24 hours for crypto and FX.
+/// Weekly and monthly bars are 52 and 12 a year.
+pub fn periods_per_year_for(class: AssetClass, interval: &str, session_hours: f64) -> f64 {
+    let days = match class {
+        AssetClass::Crypto => 365.0,
+        AssetClass::Fx => 260.0,
+        AssetClass::Stock | AssetClass::Index => 252.0,
+    };
+    let hours = match class {
+        AssetClass::Crypto | AssetClass::Fx => 24.0,
+        AssetClass::Stock | AssetClass::Index => session_hours,
+    };
+    let per_day = |minutes: f64| hours * 60.0 / minutes;
     match interval {
         "1wk" => 52.0,
         "1mo" => 12.0,
-        "1h" | "60m" => 252.0 * 6.25,
-        "30m" => 252.0 * 12.5,
-        "15m" => 252.0 * 25.0,
-        "5m" => 252.0 * 75.0,
-        _ => 252.0,
+        "1h" | "60m" => days * per_day(60.0),
+        "30m" => days * per_day(30.0),
+        "15m" => days * per_day(15.0),
+        "5m" => days * per_day(5.0),
+        _ => days,
     }
 }
 
-/// Sharpe Ratio (annualized, assuming risk-free rate)
+/// Sharpe Ratio (annualized with 252 bars a year; see [`sharpe_ratio_with`])
 pub fn sharpe_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
+    sharpe_ratio_with(prices, risk_free_annual, 252.0)
+}
+
+/// Sharpe Ratio annualized for prices sampled `periods_per_year` times a year.
+pub fn sharpe_ratio_with(
+    prices: &[f64],
+    risk_free_annual: f64,
+    periods_per_year: f64,
+) -> Option<f64> {
     let returns = daily_returns(prices);
     if returns.len() < 2 {
         return None;
@@ -281,13 +312,22 @@ pub fn sharpe_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
     if std_daily == 0.0 {
         return None;
     }
-    let annual_return = mean_daily * 252.0;
-    let annual_std = std_daily * (252.0_f64).sqrt();
+    let annual_return = mean_daily * periods_per_year;
+    let annual_std = std_daily * periods_per_year.sqrt();
     Some((annual_return - risk_free_annual) / annual_std)
 }
 
-/// Sortino Ratio (only penalizes downside volatility)
+/// Sortino Ratio (only penalizes downside volatility; 252 bars a year)
 pub fn sortino_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
+    sortino_ratio_with(prices, risk_free_annual, 252.0)
+}
+
+/// Sortino Ratio annualized for prices sampled `periods_per_year` times a year.
+pub fn sortino_ratio_with(
+    prices: &[f64],
+    risk_free_annual: f64,
+    periods_per_year: f64,
+) -> Option<f64> {
     let returns = daily_returns(prices);
     if returns.len() < 2 {
         return None;
@@ -298,11 +338,11 @@ pub fn sortino_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
         return None;
     }
     let downside_var = downside.iter().map(|r| r.powi(2)).sum::<f64>() / downside.len() as f64;
-    let downside_std = downside_var.sqrt() * (252.0_f64).sqrt();
+    let downside_std = downside_var.sqrt() * periods_per_year.sqrt();
     if downside_std == 0.0 {
         return None;
     }
-    let annual_return = mean_daily * 252.0;
+    let annual_return = mean_daily * periods_per_year;
     Some((annual_return - risk_free_annual) / downside_std)
 }
 
@@ -343,14 +383,21 @@ pub fn value_at_risk(prices: &[f64], confidence: f64) -> Option<f64> {
     Some(returns[idx.min(returns.len() - 1)])
 }
 
-/// Calmar Ratio (annualized return / max drawdown)
+/// Calmar Ratio (annualized return / max drawdown; 252 bars a year)
 pub fn calmar_ratio(prices: &[f64]) -> Option<f64> {
+    calmar_ratio_with(prices, 252.0)
+}
+
+/// Calmar Ratio for prices sampled `periods_per_year` times a year. The
+/// return is annualized over the number of *returns* (one fewer than prices),
+/// so a series spanning exactly one year annualizes to its own return.
+pub fn calmar_ratio_with(prices: &[f64], periods_per_year: f64) -> Option<f64> {
     if prices.len() < 2 {
         return None;
     }
     let total_return = (prices.last()? / prices.first()?) - 1.0;
-    let days = prices.len() as f64;
-    let annual_return = (1.0 + total_return).powf(252.0 / days) - 1.0;
+    let periods = (prices.len() - 1) as f64;
+    let annual_return = (1.0 + total_return).powf(periods_per_year / periods) - 1.0;
     let (mdd, _, _) = max_drawdown(prices)?;
     if mdd == 0.0 {
         return None;
@@ -358,7 +405,42 @@ pub fn calmar_ratio(prices: &[f64]) -> Option<f64> {
     Some(annual_return / mdd)
 }
 
-/// Pearson correlation between two price series
+/// Fewest common returns [`dated_correlation`] will compare.
+pub const MIN_COMMON_RETURNS: usize = 20;
+
+/// Correlation of the daily returns two dated price series share. Only dates
+/// both series traded are used and each return runs between consecutive
+/// common dates, so different holiday calendars (NSE and NYSE) or a seven-day
+/// crypto week line up on the same days. `None` below
+/// [`MIN_COMMON_RETURNS`] returns, instead of a number built from too little.
+/// Both series must be in ascending date order.
+pub fn dated_correlation(a: &[(NaiveDate, f64)], b: &[(NaiveDate, f64)]) -> Option<f64> {
+    let (mut i, mut j) = (0, 0);
+    let (mut pa, mut pb) = (Vec::new(), Vec::new());
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                pa.push(a[i].1);
+                pb.push(b[j].1);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    let (ra, rb) = (daily_returns(&pa), daily_returns(&pb));
+    // `daily_returns` skips a zero price, which would shift the pairs; only
+    // trust the result when both lists kept every return.
+    if ra.len() != rb.len() || ra.len() < MIN_COMMON_RETURNS {
+        return None;
+    }
+    pearson(&ra, &rb)
+}
+
+/// Pearson correlation between two price series, pairing their returns from
+/// the end by position. Use [`dated_correlation`] for series fetched
+/// separately: they carry different dates.
 pub fn correlation(a: &[f64], b: &[f64]) -> Option<f64> {
     let ra = daily_returns(a);
     let rb = daily_returns(b);
@@ -366,8 +448,16 @@ pub fn correlation(a: &[f64], b: &[f64]) -> Option<f64> {
     if n < 2 {
         return None;
     }
-    let ra = &ra[ra.len() - n..];
-    let rb = &rb[rb.len() - n..];
+    pearson(&ra[ra.len() - n..], &rb[rb.len() - n..])
+}
+
+/// Pearson correlation of two equal-length series; `None` for fewer than two
+/// points or a series that does not vary.
+fn pearson(ra: &[f64], rb: &[f64]) -> Option<f64> {
+    let n = ra.len();
+    if n < 2 || rb.len() != n {
+        return None;
+    }
 
     let mean_a = ra.iter().sum::<f64>() / n as f64;
     let mean_b = rb.iter().sum::<f64>() / n as f64;
@@ -663,6 +753,133 @@ mod tests {
             "Expected -1.0 correlation, got {}",
             corr
         );
+    }
+
+    fn dated(start: &str, days: impl IntoIterator<Item = (i64, f64)>) -> Vec<(NaiveDate, f64)> {
+        let start = NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap();
+        days.into_iter()
+            .map(|(d, p)| (start + chrono::Duration::days(d), p))
+            .collect()
+    }
+
+    /// A price path with returns that vary from day to day.
+    fn path(n: usize) -> Vec<f64> {
+        let mut price = 100.0;
+        (0..n)
+            .map(|i| {
+                price *= 1.0 + ((i * 7 % 11) as f64 - 5.0) / 200.0;
+                price
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_extra_date_in_one_series_does_not_shift_the_pairs() {
+        // B is A's returns on the same days; A also has one extra date in the
+        // middle. By position the pairs would drift by a day after it; by
+        // date the correlation is exactly 1.
+        let p = path(40);
+        let b = dated(
+            "2026-01-01",
+            p.iter().enumerate().map(|(i, x)| (i as i64 * 2, *x)),
+        );
+        let mut a = b.clone();
+        a.insert(20, (b[19].0 + chrono::Duration::days(1), b[19].1 * 1.07));
+        let c = dated_correlation(&a, &b).unwrap();
+        assert!((c - 1.0).abs() < 1e-9, "{c}");
+        // The old positional pairing of the same data is far from 1.
+        let pa: Vec<f64> = a.iter().map(|x| x.1).collect();
+        let pb: Vec<f64> = b.iter().map(|x| x.1).collect();
+        assert!(correlation(&pa, &pb).unwrap() < 0.9);
+    }
+
+    #[test]
+    fn a_seven_day_week_correlates_with_a_five_day_week_on_common_dates() {
+        // Stock B trades Mon-Fri, "crypto" A every day. On the days both
+        // trade, A's price is B's price, so the correlation is 1; A's
+        // weekend prices must not count.
+        let weekday = |d: i64| (d % 7) < 5;
+        let p = path(60);
+        let b = dated(
+            "2026-01-05", // a Monday
+            (0..60).filter(|d| weekday(*d)).map(|d| (d, p[d as usize])),
+        );
+        let a = dated("2026-01-05", (0..60).map(|d| (d, p[d as usize])));
+        let c = dated_correlation(&a, &b).unwrap();
+        assert!((c - 1.0).abs() < 1e-9, "{c}");
+    }
+
+    #[test]
+    fn too_few_shared_dates_give_no_correlation() {
+        let a = dated("2026-01-01", (0..30).map(|d| (d, 100.0 + d as f64)));
+        let b = dated("2026-03-01", (0..30).map(|d| (d, 100.0 + d as f64)));
+        assert_eq!(dated_correlation(&a, &b), None);
+        // 10 shared dates is under the minimum of 20 returns.
+        let c = dated("2026-01-21", (0..30).map(|d| (d, 100.0 + (d * d) as f64)));
+        assert_eq!(dated_correlation(&a, &c), None);
+        assert_eq!(dated_correlation(&a, &[]), None);
+    }
+
+    #[test]
+    fn bars_per_year_follow_the_asset_class() {
+        use crate::market::AssetClass::*;
+        // Daily: 252 sessions, 365 days for crypto, 260 weekdays for FX.
+        assert_eq!(periods_per_year_for(Stock, "1d", 6.25), 252.0);
+        assert_eq!(periods_per_year_for(Index, "1d", 6.25), 252.0);
+        assert_eq!(periods_per_year_for(Crypto, "1d", 6.25), 365.0);
+        assert_eq!(periods_per_year_for(Fx, "1d", 6.25), 260.0);
+        // 5-minute bars: 75 a NSE session, 78 a US session, 288 a crypto day.
+        assert_eq!(periods_per_year_for(Stock, "5m", 6.25), 252.0 * 75.0);
+        assert_eq!(periods_per_year_for(Stock, "5m", 6.5), 252.0 * 78.0);
+        assert_eq!(periods_per_year_for(Crypto, "5m", 6.25), 365.0 * 288.0);
+        assert_eq!(periods_per_year_for(Stock, "1wk", 6.25), 52.0);
+        // The old stock-only function is the NSE case.
+        assert_eq!(periods_per_year("15m"), 252.0 * 25.0);
+    }
+
+    #[test]
+    fn crypto_volatility_and_sharpe_use_365_bars() {
+        // Daily returns alternating +1% / -1%: the same standard deviation, so
+        // annualized volatility scales with sqrt(bars per year).
+        let mut prices = vec![100.0];
+        for i in 0..60 {
+            let last = *prices.last().unwrap();
+            prices.push(last * if i % 2 == 0 { 1.01 } else { 0.99 });
+        }
+        let stock = annualized_volatility_with(&prices, 252.0).unwrap();
+        let crypto = annualized_volatility_with(&prices, 365.0).unwrap();
+        assert!((crypto / stock - (365.0_f64 / 252.0).sqrt()).abs() < 1e-12);
+        // Sharpe with a zero risk-free rate: mean * ppy / (sd * sqrt(ppy)) also
+        // scales with sqrt(ppy).
+        let s252 = sharpe_ratio_with(&prices, 0.0, 252.0).unwrap();
+        let s365 = sharpe_ratio_with(&prices, 0.0, 365.0).unwrap();
+        assert!((s365 / s252 - (365.0_f64 / 252.0).sqrt()).abs() < 1e-9);
+        // The plain functions are the 252-bar case.
+        assert_eq!(
+            sharpe_ratio(&prices, 0.05),
+            sharpe_ratio_with(&prices, 0.05, 252.0)
+        );
+    }
+
+    #[test]
+    fn calmar_annualizes_over_the_number_of_returns() {
+        // 253 prices are 252 returns: one year of daily bars. Doubling in
+        // that time is +100% a year, and with a 20% max drawdown Calmar = 5.
+        let mut prices: Vec<f64> = (0..253)
+            .map(|i| 100.0 * 2.0_f64.powf(i as f64 / 252.0))
+            .collect();
+        // Insert a 20% dip and recovery without changing the endpoints.
+        let peak = prices[100];
+        prices[101] = peak * 0.8;
+        let (mdd, _, _) = max_drawdown(&prices).unwrap();
+        let calmar = calmar_ratio(&prices).unwrap();
+        assert!(
+            (calmar - 1.0 / mdd).abs() < 1e-9,
+            "{calmar} vs {}",
+            1.0 / mdd
+        );
+        // The old exponent used 253 bars and gave a little under 100%.
+        assert!(calmar > 1.0 / mdd - 1e-6);
     }
 
     #[test]

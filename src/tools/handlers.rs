@@ -63,7 +63,7 @@ pub(super) async fn run<D: DataSource>(
         }
         "holdings_lots" => holdings_lots(src, a, m),
         "tax_estimate" => tax_estimate(src, a, m).await,
-        "tax_advance" => tax_advance(src, a),
+        "tax_advance" => tax_advance(src, a).await,
         "harvest" => harvest(src, m).await,
         "rebalance" => rebalance(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
@@ -623,9 +623,18 @@ async fn tax_estimate(src: &impl DataSource, a: &Args, m: Market) -> Result<Valu
     Ok(commands::tax_json(country, &report, today))
 }
 
-fn tax_advance(src: &impl DataSource, a: &Args) -> Result<Value> {
+async fn tax_advance(src: &impl DataSource, a: &Args) -> Result<Value> {
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
-    let schedule = commands::advance_tax_schedule(&p, a.str("fy"), a.f64("paid"))?;
+    let symbols: Vec<String> = p.realized.iter().map(|s| s.symbol.clone()).collect();
+    let marks = commands::sale_marks(src, &symbols).await;
+    let schedule = commands::advance_tax_schedule(
+        &p,
+        a.str("fy"),
+        &a.f64("paid")
+            .map(|amount| vec![crate::tax::AdvancePayment { date: None, amount }])
+            .unwrap_or_default(),
+        &marks,
+    )?;
     Ok(serde_json::to_value(schedule)?)
 }
 

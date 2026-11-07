@@ -205,8 +205,15 @@ pub struct IndiaSummary {
     pub ltcg_after_set_off: f64,
     pub ltcg_exemption: f64,
     pub taxable_ltcg: f64,
+    /// Of `taxable_stcg`, the part from sales before 23 Jul 2024 (taxed at 15%).
+    pub taxable_stcg_before_23_jul_2024: f64,
+    /// Of `taxable_ltcg`, the part from sales before 23 Jul 2024 (taxed at 10%).
+    pub taxable_ltcg_before_23_jul_2024: f64,
     pub stcg_tax: f64,
     pub ltcg_tax: f64,
+    /// 4% health and education cess on the STCG and LTCG tax.
+    pub cess: f64,
+    /// STCG tax, LTCG tax and cess.
     pub total_tax: f64,
     pub st_loss_carried_forward: f64,
     pub lt_loss_carried_forward: f64,
@@ -243,23 +250,27 @@ pub fn india_schedule(
     sales: &[Sale],
     start: NaiveDate,
     isin: impl Fn(&str) -> Option<String>,
+    marks: &crate::offmarket::OffMarket,
 ) -> IndiaSchedule {
+    use crate::offmarket::{IndiaClass, india_class};
     let c = Country::India;
     let (from, to) = c.tax_year(start);
     let (all, other_currency) = sales_in_year(c, sales, start);
-    let (vda, kept): (Vec<_>, Vec<_>) = all.into_iter().partition(|(s, _)| {
-        crate::market::AssetClass::of(&s.symbol) == crate::market::AssetClass::Crypto
-    });
+    let class = |symbol: &str| india_class(symbol, marks.mark(symbol));
+    let (vda, kept): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .partition(|(s, _)| class(&s.symbol) == IndiaClass::Vda);
     let mut virtual_digital_assets: Vec<String> =
         vda.iter().map(|(s, _)| s.symbol.clone()).collect();
     virtual_digital_assets.sort();
     virtual_digital_assets.dedup();
     // Bought and sold on one day: speculative income (Sec. 43(5)), not 111A/112A.
     let (intraday, kept): (Vec<_>, Vec<_>) = kept.into_iter().partition(|(s, _)| s.is_intraday());
-    // Gold, silver, liquid, debt and international ETFs are not listed shares.
+    // Debt and other funds, SGBs, and gold, silver, liquid, debt and
+    // international ETFs are not listed shares or equity-oriented funds.
     let (other, kept): (Vec<_>, Vec<_>) = kept
         .into_iter()
-        .partition(|(s, _)| crate::offmarket::non_equity_etf(&s.symbol).is_some());
+        .partition(|(s, _)| matches!(class(&s.symbol), IndiaClass::Other(_)));
     let mut other_rules: Vec<String> = other.iter().map(|(s, _)| s.symbol.clone()).collect();
     other_rules.sort();
     other_rules.dedup();
@@ -274,6 +285,9 @@ pub fn india_schedule(
     let mut rows = Vec::new();
     let mut sum = IndiaSummary::default();
     let mut buckets = tax::Buckets::default();
+    // Sales before and from 23 Jul 2024 are taxed at different rates.
+    let (mut before_change, mut after_change) = (tax::Buckets::default(), tax::Buckets::default());
+    let rate_change = ymd(INDIA_RATE_CHANGE);
     let gf = ymd(GRANDFATHER_DATE);
     for (s, scale) in kept {
         let long = is_long_term(c, s);
@@ -281,6 +295,11 @@ pub fn india_schedule(
         let cost = s.qty * s.buy_price * scale;
         let gain = sale_value - cost;
         buckets.add(gain, long);
+        if date(&s.sell_date).is_some_and(|d| d < rate_change) {
+            before_change.add(gain, long);
+        } else {
+            after_change.add(gain, long);
+        }
         if long {
             sum.ltcg_112a_sale_value += sale_value;
             sum.ltcg_112a_cost += cost;
@@ -307,7 +326,16 @@ pub fn india_schedule(
             purchase_date_estimated: s.buy_date_estimated,
         });
     }
-    let e = tax::estimate(c, buckets);
+    // Rates by sale date, and the exemption of the year (₹1 lakh before
+    // FY 2024-25, ₹1.25 lakh from it).
+    let e = tax::estimate_india_by_period(
+        before_change,
+        after_change,
+        tax::india_exemption_for_year(from.year()),
+    );
+    let mixed_rates = !before_change.is_empty() && !after_change.is_empty();
+    sum.taxable_stcg_before_23_jul_2024 = e.taxable_before.0;
+    sum.taxable_ltcg_before_23_jul_2024 = e.taxable_before.1;
     sum.stcg_gains = buckets.st_gain;
     sum.stcg_losses = buckets.st_loss;
     sum.ltcg_gains = buckets.lt_gain;
@@ -319,37 +347,41 @@ pub fn india_schedule(
     sum.taxable_ltcg = e.lt_taxable;
     sum.stcg_tax = e.st_tax;
     sum.ltcg_tax = e.lt_tax;
+    sum.cess = e.cess;
     sum.total_tax = e.total();
     sum.st_loss_carried_forward = e.st_carry;
     sum.lt_loss_carried_forward = e.lt_carry;
     let sum = round_india(sum);
 
-    let mut notes = vec![format!(
-        "STCG under section 111A at {}%, LTCG under section 112A at {}% above the ₹1.25 lakh exemption; \
-         no surcharge, cess, transfer costs or brought-forward losses",
-        c.st_rate(),
-        c.lt_rate()
-    )];
+    let mut notes = vec![if !before_change.is_empty() && after_change.is_empty() {
+        let exemption = if from < ymd(FY_2024_25) {
+            "₹1 lakh"
+        } else {
+            "₹1.25 lakh"
+        };
+        format!(
+            "STCG under section 111A at 15%, LTCG under section 112A at 10% above the {exemption} \
+             exemption (the rates for sales before 23 Jul 2024); 4% cess included, but no surcharge, \
+             transfer costs or brought-forward losses"
+        )
+    } else if mixed_rates {
+        "Sales before 23 Jul 2024: STCG under section 111A at 15%, LTCG under section 112A at 10%; \
+         from that day 20% and 12.5%. The ₹1.25 lakh exemption covers the whole year, and losses and \
+         the exemption are used against the higher-rate gains first. 4% cess included, but no \
+         surcharge, transfer costs or brought-forward losses"
+            .to_string()
+    } else {
+        format!(
+            "STCG under section 111A at {}%, LTCG under section 112A at {}% above the ₹1.25 lakh exemption; \
+             4% cess included, but no surcharge, transfer costs or brought-forward losses",
+            c.st_rate(),
+            c.lt_rate()
+        )
+    }];
     if rows.iter().any(|r| r.grandfathered) {
         notes.push(
             "Shares bought on or before 31 Jan 2018 use their actual cost; Schedule 112A lets you use \
              the 31 Jan 2018 fair market value instead, which may lower the gain"
-                .into(),
-        );
-    }
-    if from < ymd(FY_2024_25) {
-        notes.push(
-            "Before FY 2024-25 the LTCG exemption was ₹1 lakh and the rates 15% (STCG) and 10% \
-             (LTCG); this estimate uses the current ones"
-                .into(),
-        );
-    } else if rows
-        .iter()
-        .any(|r| date(&r.sale_date).is_some_and(|d| d < ymd(INDIA_RATE_CHANGE)))
-    {
-        notes.push(
-            "Sales before 23 Jul 2024 were taxed at 15% (STCG) and 10% (LTCG); this estimate uses \
-             the current rates for every sale"
                 .into(),
         );
     }
@@ -362,8 +394,7 @@ pub fn india_schedule(
     }
     if rows.iter().any(|r| r.symbol.starts_with("MF:")) {
         notes.push(
-            "Mutual fund rows belong in 111A/112A only for equity-oriented funds; debt fund units \
-             bought after 31 Mar 2023 are taxed at your slab rate"
+            "Mutual fund rows are equity-oriented funds (by AMFI category), taxed like listed shares"
                 .into(),
         );
     }
@@ -381,7 +412,8 @@ pub fn india_schedule(
         notes.push(format!(
             "Not included (not listed shares or equity-oriented funds, so not 111A/112A — gold, silver \
              and international ETF units: 12.5% after 12 months with no ₹1.25 lakh exemption, shorter \
-             holdings at your slab rate; liquid and debt ETFs: slab rate): {}",
+             holdings at your slab rate; liquid and debt ETFs, debt and other funds without an AMFI \
+             category, and Sovereign Gold Bonds: other rules, see `stockwise tax`): {}",
             other_rules.join(", ")
         ));
     }
@@ -433,8 +465,11 @@ fn round_india(s: IndiaSummary) -> IndiaSummary {
         ltcg_after_set_off: r(s.ltcg_after_set_off),
         ltcg_exemption: r(s.ltcg_exemption),
         taxable_ltcg: r(s.taxable_ltcg),
+        taxable_stcg_before_23_jul_2024: r(s.taxable_stcg_before_23_jul_2024),
+        taxable_ltcg_before_23_jul_2024: r(s.taxable_ltcg_before_23_jul_2024),
         stcg_tax: r(s.stcg_tax),
         ltcg_tax: r(s.ltcg_tax),
+        cess: r(s.cess),
         total_tax: r(s.total_tax),
         st_loss_carried_forward: r(s.st_loss_carried_forward),
         lt_loss_carried_forward: r(s.lt_loss_carried_forward),
@@ -532,9 +567,24 @@ pub fn india_csv(s: &IndiaSchedule) -> String {
         ("LTCG after set-off", m.ltcg_after_set_off),
         ("LTCG exemption (up to ₹1.25 lakh)", m.ltcg_exemption),
         ("Taxable LTCG (112A)", m.taxable_ltcg),
+    ] {
+        line(&[label, &money(value)]);
+    }
+    if m.taxable_stcg_before_23_jul_2024 > 0.0 || m.taxable_ltcg_before_23_jul_2024 > 0.0 {
+        line(&[
+            "  of which sales before 23 Jul 2024 — STCG (15%)",
+            &money(m.taxable_stcg_before_23_jul_2024),
+        ]);
+        line(&[
+            "  of which sales before 23 Jul 2024 — LTCG (10%)",
+            &money(m.taxable_ltcg_before_23_jul_2024),
+        ]);
+    }
+    for (label, value) in [
         ("Estimated STCG tax", m.stcg_tax),
         ("Estimated LTCG tax", m.ltcg_tax),
-        ("Estimated total tax", m.total_tax),
+        ("Health and education cess (4%)", m.cess),
+        ("Estimated total tax (with cess)", m.total_tax),
         (
             "Short-term loss to carry forward",
             m.st_loss_carried_forward,
@@ -909,7 +959,7 @@ mod tests {
     #[test]
     fn india_schedule_worked_example() {
         let isin = |s: &str| (s == "TCS.NS").then(|| "INE467B01029".to_string());
-        let s = india_schedule(&fy26_sales(), d("2025-04-01"), isin);
+        let s = india_schedule(&fy26_sales(), d("2025-04-01"), isin, &Default::default());
         assert_eq!(s.tax_year, "FY 2025-26 (AY 2026-27)");
         assert_eq!(
             s.sales.len(),
@@ -949,7 +999,9 @@ mod tests {
         assert_eq!(m.taxable_ltcg, 1_000.0);
         assert_eq!(m.stcg_tax, 1_400.0);
         assert_eq!(m.ltcg_tax, 125.0);
-        assert_eq!(m.total_tax, 1_525.0);
+        // Cess: 4% of 1,525 = 61.
+        assert_eq!(m.cess, 61.0);
+        assert_eq!(m.total_tax, 1_586.0);
         assert!(s.notes.iter().any(|n| n.contains("31 Jan 2018")));
         assert!(s.notes.iter().any(|n| n.contains("AAPL")));
     }
@@ -969,7 +1021,12 @@ mod tests {
             ("2025-01-15", 1900.0),
             ("2025-08-20", 1800.0),
         );
-        let s = india_schedule(&[intraday, loss], d("2025-04-01"), |_| None);
+        let s = india_schedule(
+            &[intraday, loss],
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
         // Only the delivery sale is in the schedule and the summary.
         assert_eq!(s.sales.len(), 1);
         assert_eq!(s.sales[0].symbol, "INFY.NS");
@@ -999,7 +1056,7 @@ mod tests {
                 ("2025-10-01", 3000.0),
             ),
         ];
-        let s = india_schedule(&sales, d("2025-04-01"), |_| None);
+        let s = india_schedule(&sales, d("2025-04-01"), |_| None, &Default::default());
         assert_eq!(s.summary.st_loss_set_off_against_ltcg, 50_000.0);
         assert_eq!(s.summary.ltcg_after_set_off, 150_000.0);
         assert_eq!(s.summary.ltcg_tax, 3_125.0);
@@ -1008,7 +1065,12 @@ mod tests {
 
     #[test]
     fn india_csv_has_title_rows_header_and_summary() {
-        let s = india_schedule(&fy26_sales(), d("2025-04-01"), |_| None);
+        let s = india_schedule(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
         let csv = india_csv(&s);
         let lines: Vec<&str> = csv.lines().collect();
         assert!(lines[0].contains("estimate — verify with your broker's tax P&L"));
@@ -1022,7 +1084,8 @@ mod tests {
         assert!(lines.contains(&"112A,LTCG,,TCS,10,2025-06-02,4100.0000,41000.00,2024-01-10,3500.0000,35000.00,509,6000.00,No,No"));
         assert!(lines.contains(&"Taxable LTCG (112A),1000.00"));
         assert!(lines.contains(&"LTCG exemption (up to ₹1.25 lakh),125000.00"));
-        assert!(lines.contains(&"Estimated total tax,1525.00"));
+        assert!(lines.contains(&"Health and education cess (4%),61.00"));
+        assert!(lines.contains(&"Estimated total tax (with cess),1586.00"));
         // Notes with commas are quoted.
         assert!(
             lines
@@ -1032,26 +1095,82 @@ mod tests {
     }
 
     #[test]
-    fn rate_change_note_for_fy_2024_25() {
+    fn export_uses_the_rates_in_force_on_the_sale_date() {
+        // The issue's repro: STCG ₹1,00,000 sold 2024-06-10 (FY 2024-25): 15%, not 20%.
         let sales = vec![sale(
             "A.NS",
             1.0,
             ("2024-01-01", 100.0),
-            ("2024-05-01", 120.0),
+            ("2024-06-10", 100_100.0),
         )];
-        let s = india_schedule(&sales, d("2024-04-01"), |_| None);
-        assert!(s.notes.iter().any(|n| n.contains("23 Jul 2024")));
+        let s = india_schedule(&sales, d("2024-04-01"), |_| None, &Default::default());
         assert_eq!(s.sales[0].term, "STCG");
-        // Earlier years had a ₹1 lakh exemption.
+        assert_eq!(s.summary.stcg_tax, 15_000.0);
+        assert_eq!(s.summary.cess, 600.0);
+        assert_eq!(s.summary.taxable_stcg_before_23_jul_2024, 100_000.0);
+        assert!(s.notes.iter().any(|n| n.contains("23 Jul 2024")));
+        // The same gain from 23 Jul 2024 is taxed at 20%.
         let sales = vec![sale(
             "A.NS",
             1.0,
-            ("2022-01-01", 100.0),
-            ("2023-05-01", 120.0),
+            ("2024-01-01", 100.0),
+            ("2024-07-23", 100_100.0),
         )];
-        let s = india_schedule(&sales, d("2023-04-01"), |_| None);
+        let s = india_schedule(&sales, d("2024-04-01"), |_| None, &Default::default());
+        assert_eq!(s.summary.stcg_tax, 20_000.0);
+        assert_eq!(s.summary.taxable_stcg_before_23_jul_2024, 0.0);
+    }
+
+    #[test]
+    fn export_mixed_year_and_older_exemption() {
+        // FY 2024-25: ₹1,00,000 STCG before 23 Jul (15,000) and after (20,000).
+        let sales = vec![
+            sale(
+                "A.NS",
+                1.0,
+                ("2024-01-01", 100.0),
+                ("2024-06-10", 100_100.0),
+            ),
+            sale(
+                "B.NS",
+                1.0,
+                ("2024-01-01", 100.0),
+                ("2024-09-10", 100_100.0),
+            ),
+        ];
+        let s = india_schedule(&sales, d("2024-04-01"), |_| None, &Default::default());
+        assert_eq!(s.summary.stcg_tax, 35_000.0);
+        assert_eq!(s.summary.taxable_stcg, 200_000.0);
+        assert!(
+            s.notes
+                .iter()
+                .any(|n| n.contains("higher-rate gains first"))
+        );
+        let csv = india_csv(&s);
+        assert!(csv.contains("of which sales before 23 Jul 2024 — STCG (15%),100000.00"));
+
+        // FY 2023-24: ₹3,00,000 LTCG, ₹1 lakh exempt, 10% on 2,00,000 = 20,000.
+        let sales = vec![sale(
+            "A.NS",
+            1.0,
+            ("2021-01-01", 100.0),
+            ("2023-05-01", 300_100.0),
+        )];
+        let s = india_schedule(&sales, d("2023-04-01"), |_| None, &Default::default());
+        assert_eq!(s.summary.ltcg_exemption, 100_000.0);
+        assert_eq!(s.summary.ltcg_tax, 20_000.0);
         assert!(s.notes.iter().any(|n| n.contains("₹1 lakh")));
-        assert!(!s.notes.iter().any(|n| n.contains("23 Jul 2024")));
+        assert!(!csv.contains("FY 2023"));
+
+        // FY 2025-26 is unchanged: 20% and 12.5% above ₹1.25 lakh.
+        let sales = vec![sale(
+            "A.NS",
+            1.0,
+            ("2025-02-01", 100.0),
+            ("2025-08-01", 100_100.0),
+        )];
+        let s = india_schedule(&sales, d("2025-04-01"), |_| None, &Default::default());
+        assert_eq!(s.summary.stcg_tax, 20_000.0);
     }
 
     #[test]

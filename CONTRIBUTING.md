@@ -66,7 +66,7 @@ cargo test --features wasm-plugins
   `Closes #N` in the description. Split larger work into a series.
 - Review your own diff before asking for review, and never merge with failing CI.
 - Add tests for new behavior — CLI parsing tests live in `src/main.rs`, pure logic tests next to the code.
-- Update `docs/`, `README.md`, and `CHANGELOG.md` (`[Unreleased]`) when behavior
+- Update `docs/` and `README.md`, and add a changelog fragment (see "Changelog entries"), when behavior
   changes.
 - New commands: add the variant to `Commands` and to the `GROUPS` help table in
   `src/main.rs` (a test checks every command is grouped), write `cmd_<name>` in
@@ -104,14 +104,26 @@ testers when a live response differs. Anything that only reads from a real accou
 
 ## Changelog entries
 
-Add one entry under `[Unreleased]` for each user-visible change:
+Do not edit `CHANGELOG.md` in a pull request: add one small file to
+`changelog.d/` per user-visible change, so pull requests never conflict. Name it
+`<issue-or-slug>.<type>.md` with a type of `added`, `changed`, `deprecated`,
+`removed`, `fixed`, `performance` or `security`, and put one bullet in it:
+
+```markdown
+- `tax in` counts gold ETFs as non-equity, so they are no longer taxed as listed
+  shares ([#87](https://github.com/iamsaquib8/stockwise/issues/87)).
+```
 
 - One to three lines, in plain language, saying what the user can now do or what
   was wrong. Start with the command name in backticks.
-- Link the issue: `([#123](https://github.com/iamsaquib8/stockwise/issues/123))`.
+- Link the issue.
 - No marketing words ("powerful", "2.0", "institutional-grade"), no formulas and
   no nested lists. Details belong in `docs/`.
 - Credit outside contributors: `Thanks [@name](https://github.com/name).`
+
+`python3 scripts/changelog.py check` validates the files (CI runs it). Maintainers
+cut a release with `python3 scripts/changelog.py release X.Y.Z`; see
+[changelog.d/README.md](changelog.d/README.md).
 
 ## Commit messages
 

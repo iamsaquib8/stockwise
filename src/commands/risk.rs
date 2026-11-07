@@ -15,6 +15,12 @@ fn risk_level(vol: f64) -> &'static str {
     }
 }
 
+/// Daily bars in a year for `symbol`: 252 for stocks, 365 for crypto, 260 for
+/// FX (the same table the backtest engine uses).
+fn bars_per_year(symbol: &str) -> f64 {
+    crate::backtest::engine::bars_per_year([symbol])
+}
+
 /// `risk --json`: the metrics the table shows, from daily closes.
 /// Percentages are rounded to 2 decimals, ratios to 3.
 pub(crate) fn risk_json(
@@ -25,7 +31,8 @@ pub(crate) fn risk_json(
 ) -> serde_json::Value {
     let current = closes.last().copied().unwrap_or(f64::NAN);
     let first = closes.first().copied().unwrap_or(f64::NAN);
-    let vol = technical::annualized_volatility(closes);
+    let ppy = bars_per_year(symbol);
+    let vol = technical::annualized_volatility_with(closes, ppy);
     let pct = |v: Option<f64>| v.map(|x| round(x * 100.0, 2));
     serde_json::json!({
         "symbol": symbol,
@@ -37,9 +44,9 @@ pub(crate) fn risk_json(
         "return_percent": round((current / first - 1.0) * 100.0, 2),
         "volatility_percent": pct(vol),
         "risk_level": vol.map(|v| risk_level(v).to_lowercase().replace(' ', "_")),
-        "sharpe": round_opt(technical::sharpe_ratio(closes, 0.05), 3),
-        "sortino": round_opt(technical::sortino_ratio(closes, 0.05), 3),
-        "calmar": round_opt(technical::calmar_ratio(closes), 3),
+        "sharpe": round_opt(technical::sharpe_ratio_with(closes, 0.05, ppy), 3),
+        "sortino": round_opt(technical::sortino_ratio_with(closes, 0.05, ppy), 3),
+        "calmar": round_opt(technical::calmar_ratio_with(closes, ppy), 3),
         "max_drawdown": technical::max_drawdown(closes).map(|(mdd, peak, trough)| {
             serde_json::json!({
                 "percent": round(mdd * 100.0, 2),
@@ -56,7 +63,9 @@ pub(crate) fn risk_json(
 pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    // Always daily bars: every metric below annualizes with 252 trading days.
+    // Always daily bars: every metric below annualizes with the symbol's bars
+    // per year (252 for stocks, 365 for crypto).
+    let ppy = bars_per_year(&resolved);
     let chart = client.get_chart(&resolved, period, "1d").await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
@@ -94,7 +103,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     );
 
     print_section("Volatility Metrics");
-    if let Some(vol) = technical::annualized_volatility(&closes) {
+    if let Some(vol) = technical::annualized_volatility_with(&closes, ppy) {
         print_kv("Annual Volatility", &format!("{:.2}%", vol * 100.0));
         let level = risk_level(vol);
         let level = if vol > 0.3 {
@@ -108,7 +117,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     print_section("Risk-Adjusted Returns");
-    if let Some(sharpe) = technical::sharpe_ratio(&closes, 0.05) {
+    if let Some(sharpe) = technical::sharpe_ratio_with(&closes, 0.05, ppy) {
         let color = if sharpe > 1.0 {
             format!("{:.3}", sharpe).green().to_string()
         } else if sharpe > 0.0 {
@@ -125,10 +134,10 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
         };
         print_kv("Interpretation", interp);
     }
-    if let Some(sortino) = technical::sortino_ratio(&closes, 0.05) {
+    if let Some(sortino) = technical::sortino_ratio_with(&closes, 0.05, ppy) {
         print_kv("Sortino Ratio", &format!("{:.3}", sortino));
     }
-    if let Some(calmar) = technical::calmar_ratio(&closes) {
+    if let Some(calmar) = technical::calmar_ratio_with(&closes, ppy) {
         print_kv("Calmar Ratio", &format!("{:.3}", calmar));
     }
 
@@ -187,9 +196,12 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
 
 // ── Correlation ──
 
-/// Pairwise correlation matrix (diagonal 1.0), rounded to 4 decimals; `None`
-/// where two series don't overlap enough to compare.
-pub(crate) fn correlation_matrix(series: &[(String, Vec<f64>)]) -> Vec<Vec<Option<f64>>> {
+/// Pairwise correlation matrix (diagonal 1.0), rounded to 4 decimals, from
+/// the returns on dates both series traded; `None` where two series share too
+/// few dates to compare (see [`technical::dated_correlation`]).
+pub(crate) fn correlation_matrix(
+    series: &[(String, Vec<(chrono::NaiveDate, f64)>)],
+) -> Vec<Vec<Option<f64>>> {
     series
         .iter()
         .enumerate()
@@ -201,7 +213,7 @@ pub(crate) fn correlation_matrix(series: &[(String, Vec<f64>)]) -> Vec<Vec<Optio
                     if i == j {
                         Some(1.0)
                     } else {
-                        round_opt(technical::correlation(a, b), 4)
+                        round_opt(technical::dated_correlation(a, b), 4)
                     }
                 })
                 .collect()
@@ -230,17 +242,10 @@ pub async fn cmd_correlate(symbols: &[String], market: Market, fmt: Format) -> R
     let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
 
-    let mut all_closes: Vec<(String, Vec<f64>)> = Vec::new();
+    let mut all_closes: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> = Vec::new();
     for sym in &resolved {
         let chart = client.get_chart(sym, "1y", "1d").await?;
-        let closes: Vec<f64> = chart
-            .indicators
-            .quote
-            .first()
-            .and_then(|q| q.close.as_ref())
-            .map(|c| c.iter().filter_map(|v| *v).collect())
-            .unwrap_or_default();
-        all_closes.push((sym.clone(), closes));
+        all_closes.push((sym.clone(), chart.dated_closes()));
     }
     let matrix = correlation_matrix(&all_closes);
     let names: Vec<&str> = all_closes.iter().map(|(s, _)| s.as_str()).collect();
@@ -314,7 +319,8 @@ pub(crate) struct ReturnRow {
     pub(crate) start_price: f64,
     pub(crate) end_price: f64,
     pub(crate) return_percent: f64,
-    pub(crate) annualized_percent: f64,
+    /// `None` (null) for a span under a year.
+    pub(crate) annualized_percent: Option<f64>,
     pub(crate) growth_of_100000: f64,
 }
 
@@ -330,31 +336,36 @@ impl CsvRow for ReturnRow {
     ];
 }
 
-/// Return over a series of daily closes; `None` with fewer than two.
+/// Spans shorter than this many calendar days get no annualized figure: a
+/// month's return compounded over a year says little.
+const MIN_ANNUALIZED_DAYS: i64 = 360;
+
+/// Return over a series of dated daily closes; `None` with fewer than two.
+/// The annualized figure uses the calendar time between the first and last
+/// bar (`growth ^ (365.25 / days) - 1`), so it is the same for a stock and for
+/// crypto, and a one-year span annualizes to its own return. It is `None` for
+/// spans under a year.
 pub(crate) fn return_row(
     period: &'static str,
     label: &'static str,
-    closes: &[f64],
+    closes: &[(chrono::NaiveDate, f64)],
 ) -> Option<ReturnRow> {
     if closes.len() < 2 {
         return None;
     }
-    let first = closes[0];
-    let last = *closes.last()?;
+    let (first_date, first) = closes[0];
+    let (last_date, last) = *closes.last()?;
     let ret = ((last / first) - 1.0) * 100.0;
-    let days = closes.len() as f64;
-    let annual = if days > 30.0 {
-        ((last / first).powf(252.0 / days) - 1.0) * 100.0
-    } else {
-        ret * (252.0 / days)
-    };
+    let days = (last_date - first_date).num_days();
+    let annual = (days >= MIN_ANNUALIZED_DAYS && first > 0.0 && last > 0.0)
+        .then(|| ((last / first).powf(365.25 / days as f64) - 1.0) * 100.0);
     Some(ReturnRow {
         period,
         label,
         start_price: first,
         end_price: last,
         return_percent: round(ret, 2),
-        annualized_percent: round(annual, 2),
+        annualized_percent: annual.map(|a| round(a, 2)),
         growth_of_100000: round(100000.0 * (last / first), 2),
     })
 }
@@ -382,14 +393,7 @@ pub async fn cmd_returns(symbol: &str, market: Market, fmt: Format) -> Result<()
             Ok(c) => c,
             Err(_) => continue,
         };
-        let closes: Vec<f64> = chart
-            .indicators
-            .quote
-            .first()
-            .and_then(|qi| qi.close.as_ref())
-            .map(|c| c.iter().filter_map(|v| *v).collect())
-            .unwrap_or_default();
-        rows.extend(return_row(range, label, &closes));
+        rows.extend(return_row(range, label, &chart.dated_closes()));
     }
     match fmt {
         Format::Json => {
@@ -418,21 +422,16 @@ pub async fn cmd_returns(symbol: &str, market: Market, fmt: Format) -> Result<()
     println!("  {}", "─".repeat(54).dimmed());
 
     for row in &rows {
-        let (ret, annual, value, label) = (
-            row.return_percent,
-            row.annualized_percent,
-            row.growth_of_100000,
-            row.label,
-        );
+        let (ret, value, label) = (row.return_percent, row.growth_of_100000, row.label);
         let ret_str = if ret >= 0.0 {
             format!("+{:.2}%", ret).green().to_string()
         } else {
             format!("{:.2}%", ret).red().to_string()
         };
-        let ann_str = if annual >= 0.0 {
-            format!("+{:.1}%", annual).green().to_string()
-        } else {
-            format!("{:.1}%", annual).red().to_string()
+        let ann_str = match row.annualized_percent {
+            Some(a) if a >= 0.0 => format!("+{:.1}%", a).green().to_string(),
+            Some(a) => format!("{:.1}%", a).red().to_string(),
+            None => "—".dimmed().to_string(),
         };
         println!(
             "  {:<14} {:>10} {:>12} {:>14}",
@@ -463,7 +462,10 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
         .map(|c| c.iter().filter_map(|v| *v).collect())
         .unwrap_or_default();
     if closes.len() < 30 {
-        bail!("Not enough price data — try a longer period with -p");
+        bail!(
+            "Only {} daily closes in {period}; forecast needs at least 30. Try a longer period, e.g. -p 6mo",
+            closes.len()
+        );
     }
 
     let n = closes.len();

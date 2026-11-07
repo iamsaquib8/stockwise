@@ -39,7 +39,17 @@ fn parallel_portfolio_adds_all_land() {
         .map(|s| {
             spawn(
                 &home,
-                &["portfolio", "add", s, "1", "100", "--date", "2024-01-02"],
+                &[
+                    "portfolio",
+                    "add",
+                    s,
+                    "1",
+                    "100",
+                    "--date",
+                    "2024-01-02",
+                    // The symbols are made up; skip the ticker lookup.
+                    "--force",
+                ],
             )
         })
         .collect();

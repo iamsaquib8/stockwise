@@ -401,12 +401,13 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
 
     /// Trend projection with confidence bands (not a prediction)
     Forecast {
+        /// Ticker or company name
         symbol: String,
         /// Days to project forward
         #[arg(short, long, default_value = "30")]
         days: usize,
-        /// History used to fit the trend
-        #[arg(short, long, default_value = "1mo", value_parser = PERIODS)]
+        /// History used to fit the trend (needs at least 30 trading days)
+        #[arg(short, long, default_value = "6mo", value_parser = PERIODS)]
         period: String,
     },
 
@@ -674,6 +675,10 @@ stockwise options TCS                     expected moves (same as `options moves
         /// sales recorded another way (manual entries, another import)
         #[arg(long)]
         replace: bool,
+        /// For an .xlsx workbook with several sheets: the sheet to read
+        /// (default: the first whose header fits the importer)
+        #[arg(long, value_name = "NAME")]
+        sheet: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -870,6 +875,9 @@ enum PortfolioCmd {
         /// Purchase date, YYYY-MM-DD (default: today) — used for LTCG/STCG and XIRR
         #[arg(long)]
         date: Option<String>,
+        /// Save even if Yahoo Finance does not know the ticker
+        #[arg(long)]
+        force: bool,
     },
     /// Record a sale: oldest lots first (FIFO), realized P&L kept for `tax`
     Sell {
@@ -1012,9 +1020,11 @@ under Section 208 and 211, with Section 234C(1) capital-gains proviso protection
         /// Financial year: 2025-26 or AY2026-27 [default: current FY]
         #[arg(long, value_name = "YEAR")]
         fy: Option<String>,
-        /// Total advance tax paid so far for this financial year
-        #[arg(long, value_name = "AMOUNT")]
-        paid: Option<f64>,
+        /// An advance tax payment: AMOUNT, or DATE:AMOUNT (2025-06-14:3000).
+        /// Repeat for each payment. Interest under Sec. 234C depends on the
+        /// date; an AMOUNT without a date is assumed paid on time
+        #[arg(long, value_name = "[DATE:]AMOUNT")]
+        paid: Vec<String>,
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -1149,6 +1159,9 @@ enum WatchCmd {
     Add {
         #[arg(required = true, num_args = 1..)]
         symbols: Vec<String>,
+        /// Save even if Yahoo Finance does not know the ticker
+        #[arg(long)]
+        force: bool,
     },
     /// Remove tickers from the watchlist
     #[command(alias = "rm")]
@@ -1215,6 +1228,9 @@ enum AlertCmd {
         /// RSI period (default 14) or volume-average length (default 20)
         #[arg(long, value_parser = clap::value_parser!(u32).range(2..=200))]
         period: Option<u32>,
+        /// Save even if Yahoo Finance does not know the ticker
+        #[arg(long)]
+        force: bool,
     },
     /// Remove an alert by its number from `alert list`
     #[command(alias = "rm")]
@@ -3444,7 +3460,10 @@ async fn dispatch(
                 shares,
                 cost,
                 date,
-            }) => commands::cmd_portfolio_add(&symbol, shares, cost, date.as_deref(), m).await,
+                force,
+            }) => {
+                commands::cmd_portfolio_add(&symbol, shares, cost, date.as_deref(), force, m).await
+            }
             Some(PortfolioCmd::Sell {
                 symbol,
                 shares,
@@ -3505,9 +3524,11 @@ async fn dispatch(
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
-            Some(WatchCmd::Add { symbols }) => commands::cmd_watchlist("add", &symbols, m).await,
+            Some(WatchCmd::Add { symbols, force }) => {
+                commands::cmd_watchlist("add", &symbols, force, m).await
+            }
             Some(WatchCmd::Remove { symbols }) => {
-                commands::cmd_watchlist("remove", &symbols, m).await
+                commands::cmd_watchlist("remove", &symbols, false, m).await
             }
             Some(WatchCmd::Show { out: show }) => commands::cmd_watchlist_show(out.or(show)).await,
             None => commands::cmd_watchlist_show(out.into()).await,
@@ -3518,10 +3539,11 @@ async fn dispatch(
                 condition,
                 target,
                 period,
+                force,
             }) => {
                 let condition = value_name(condition);
                 let period = period.map(|p| p as usize);
-                commands::cmd_alert_add(&symbol, &condition, target, period, m).await
+                commands::cmd_alert_add(&symbol, &condition, target, period, force, m).await
             }
             Some(AlertCmd::Remove { index }) => commands::cmd_alert_remove(index),
             Some(AlertCmd::Check { out: check }) => commands::cmd_alert_check(out.or(check)).await,
@@ -3550,7 +3572,8 @@ async fn dispatch(
             source,
             file,
             replace,
-        } => commands::cmd_import(&value_name(source), &file, replace, m).await,
+            sheet,
+        } => commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await,
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance {
             inflow,
@@ -3581,7 +3604,7 @@ async fn dispatch(
                 commands::cmd_tax_export(&country, fy.as_deref(), out.as_deref(), json).await
             }
             Some(TaxCmd::Advance { fy, paid, json }) => {
-                commands::cmd_tax_advance(fy.as_deref(), paid, json).await
+                commands::cmd_tax_advance(fy.as_deref(), &paid, json).await
             }
             None => {
                 let country = country.expect("clap requires COUNTRY without a subcommand");
@@ -3959,6 +3982,16 @@ mod tests {
             cli.command,
             Commands::Markets { global: true, .. }
         ));
+    }
+
+    #[test]
+    fn forecast_default_period_has_enough_history() {
+        let cli = Cli::try_parse_from(["stockwise", "forecast", "TCS"]).unwrap();
+        let Commands::Forecast { period, .. } = cli.command else {
+            panic!("not forecast");
+        };
+        // 1mo is about 21 trading days and cmd_forecast needs 30.
+        assert_eq!(period, "6mo");
     }
 
     #[test]
@@ -4554,6 +4587,7 @@ mod tests {
             vec!["stockwise", "--portfolio", "long-term", "portfolio"],
             vec!["stockwise", "tax", "in", "--portfolio", "us"],
             vec!["stockwise", "import", "csv", "tradebook.csv", "--replace"],
+            vec!["stockwise", "import", "kite", "h.xlsx", "--sheet", "Equity"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} should parse");
         }
@@ -4762,7 +4796,7 @@ mod tests {
         else {
             panic!("expected tax advance");
         };
-        assert!(country.is_none() && fy.is_none() && paid.is_none() && !json);
+        assert!(country.is_none() && fy.is_none() && paid.is_empty() && !json);
 
         let cli = Cli::try_parse_from([
             "stockwise",
@@ -4783,7 +4817,7 @@ mod tests {
             panic!("expected tax advance with flags");
         };
         assert_eq!(fy.as_deref(), Some("2025-26"));
-        assert_eq!(paid, Some(25000.0));
+        assert_eq!(paid, vec!["25000".to_string()]);
         assert!(json);
     }
 

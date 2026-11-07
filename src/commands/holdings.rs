@@ -5,13 +5,19 @@ use super::*;
 use crate::portfolio::{self as pf, ImportOptions, ImportOutcome, ImportRow, SyncChange};
 use crate::tax::{self, Country};
 
-pub async fn cmd_watchlist(action: &str, symbols: &[String], market: Market) -> Result<()> {
+pub async fn cmd_watchlist(
+    action: &str,
+    symbols: &[String],
+    force: bool,
+    market: Market,
+) -> Result<()> {
     let mut wl = Watchlist::load()?;
 
     match action {
         "add" => {
-            for sym in symbols {
-                let resolved = market::resolve_symbol(sym, market);
+            let resolved_all = resolve_symbols(symbols, market);
+            check_symbols_before_add(&resolved_all, market, force).await?;
+            for resolved in resolved_all {
                 if wl.add(&resolved) {
                     println!("  {} Added {} to watchlist", "✓".green(), resolved.cyan());
                 } else {
@@ -163,6 +169,7 @@ pub async fn cmd_alert_add(
     condition: &str,
     target: f64,
     period: Option<usize>,
+    force: bool,
     market: Market,
 ) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
@@ -174,6 +181,7 @@ pub async fn cmd_alert_add(
         );
     };
     let (target, period) = crate::alerts::validate(cond, target, period)?;
+    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
     let mut store = AlertStore::load()?;
     store.add_with_period(&resolved, cond, target, period);
     store.save()?;
@@ -506,7 +514,126 @@ pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
 
 // ── Alerts ──
 
-pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market) -> Result<()> {
+/// Column names a generic stock-holdings import looks for.
+struct ImportColumns {
+    symbol: &'static [&'static str],
+    qty: &'static [&'static str],
+    price: &'static [&'static str],
+    /// For the error message.
+    expected: &'static str,
+}
+
+/// Column names per format, most specific first (matched as substrings).
+fn import_columns(source: &str) -> ImportColumns {
+    let (symbol, qty, price, expected): (&[&str], &[&str], &[&str], &str) = match source {
+        // Kite holdings: Instrument, Qty., Avg. cost, LTP, ...
+        // Kite tradebook: symbol, trade_date, trade_type, quantity, price, ...
+        "kite" | "zerodha" => (
+            &["instrument", "tradingsymbol", "symbol", "stock"],
+            &["qty", "qty.", "quantity", "shares"],
+            &[
+                "avg. cost",
+                "avg cost",
+                "average cost",
+                "avg_price",
+                "average price",
+                "buy avg",
+                "buy avg.",
+                "price",
+            ],
+            "Kite CSV/Excel columns. Expected: Instrument, Qty., Avg. cost",
+        ),
+        // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, ...
+        "indmoney" => (
+            &[
+                "symbol",
+                "isin",
+                "stock symbol",
+                "scrip",
+                "stock name",
+                "name",
+            ],
+            &["quantity", "qty", "shares", "units"],
+            &[
+                "avg buy price",
+                "avg price",
+                "average price",
+                "buy price",
+                "avg. buy price",
+                "average cost",
+            ],
+            "IndMoney CSV/Excel columns. Expected: Symbol/Stock Name, Quantity, Avg Buy Price",
+        ),
+        // "csv" or any unrecognized format: generic columns.
+        _ => (
+            &[
+                "symbol",
+                "stock",
+                "instrument",
+                "name",
+                "ticker",
+                "scrip",
+                "tradingsymbol",
+            ],
+            &["quantity", "qty", "qty.", "shares", "units"],
+            &[
+                "avg price",
+                "avg. price",
+                "average price",
+                "avg cost",
+                "avg. cost",
+                "buy price",
+                "price",
+                "cost",
+            ],
+            "CSV/Excel columns. Your file needs Symbol, Quantity and Average Price columns",
+        ),
+    };
+    ImportColumns {
+        symbol,
+        qty,
+        price,
+        expected,
+    }
+}
+
+/// The header row of a generic holdings export, in its first 40 lines (an
+/// `.xlsx` export may start with account details), and the columns of the
+/// symbol, quantity and price.
+fn find_stock_header(
+    lines: &[&str],
+    columns: &ImportColumns,
+) -> Option<(usize, Vec<String>, usize, usize, usize)> {
+    // Scan the first 40 lines for the header row so .xlsx exports with account preamble work seamlessly.
+    lines.iter().take(40).enumerate().find_map(|(idx, line)| {
+        let c = parse_csv_header(&line.to_lowercase());
+        let si = find_col(&c, columns.symbol)?;
+        let qi = find_col(&c, columns.qty)?;
+        let pi = find_col(&c, columns.price)?;
+        Some((idx, c, si, qi, pi))
+    })
+}
+
+/// Whether a workbook sheet (as CSV) has the header `source`'s importer needs.
+pub(super) fn sheet_has_header(source: &str, csv: &str) -> bool {
+    match source {
+        "groww" => super::imports::parse_groww(csv, Market::In).is_ok(),
+        "upstox" => super::imports::parse_upstox(csv, Market::In).is_ok(),
+        "cas" => super::imports::parse_cas(csv).is_ok(),
+        _ => {
+            let lines: Vec<&str> = csv.lines().collect();
+            find_stock_header(&lines, &import_columns(source)).is_some()
+        }
+    }
+}
+
+pub async fn cmd_import(
+    source: &str,
+    file: &str,
+    replace: bool,
+    sheet: Option<&str>,
+    market: Market,
+) -> Result<()> {
     let path = std::path::Path::new(file);
     if !path.exists() {
         println!();
@@ -574,9 +701,29 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
 
     let raw_bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", file))?;
     let content = if raw_bytes.starts_with(b"PK\x03\x04") {
-        crate::xlsx::workbook_to_csv(&raw_bytes)
-            .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?
+        let sheets = crate::xlsx::read_workbook(&raw_bytes)
+            .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?;
+        // Only one sheet is read: rows of another sheet (a mutual-fund tab, a
+        // summary) have other columns and must not be parsed with these.
+        let chosen = crate::xlsx::pick_sheet(&sheets, sheet, |csv| sheet_has_header(source, csv))?;
+        if sheets.len() > 1 {
+            let skipped: Vec<&str> = sheets
+                .iter()
+                .filter(|s| !std::ptr::eq(*s, chosen))
+                .map(|s| s.name.as_str())
+                .collect();
+            println!(
+                "  {} Using sheet \"{}\" (skipped: {}). Pick another with --sheet NAME.",
+                "·".dimmed(),
+                chosen.name,
+                skipped.join(", ")
+            );
+        }
+        chosen.to_csv()
     } else {
+        if sheet.is_some() {
+            bail!("--sheet only applies to .xlsx workbooks, and {file} is not one");
+        }
         String::from_utf8(raw_bytes)
             .with_context(|| format!("{} is not valid UTF-8 text or an .xlsx workbook", file))?
     };
@@ -616,81 +763,9 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         bail!("{} is empty or has no data rows", file);
     }
 
-    // Column names per format, most specific first (matched as substrings).
-    let (sym_names, qty_names, price_names, expected): (&[&str], &[&str], &[&str], &str) =
-        match source {
-            // Kite holdings: Instrument, Qty., Avg. cost, LTP, ...
-            // Kite tradebook: symbol, trade_date, trade_type, quantity, price, ...
-            "kite" | "zerodha" => (
-                &["instrument", "tradingsymbol", "symbol", "stock"],
-                &["qty", "qty.", "quantity", "shares"],
-                &[
-                    "avg. cost",
-                    "avg cost",
-                    "average cost",
-                    "avg_price",
-                    "average price",
-                    "buy avg",
-                    "buy avg.",
-                    "price",
-                ],
-                "Kite CSV/Excel columns. Expected: Instrument, Qty., Avg. cost",
-            ),
-            // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, ...
-            "indmoney" => (
-                &[
-                    "symbol",
-                    "isin",
-                    "stock symbol",
-                    "scrip",
-                    "stock name",
-                    "name",
-                ],
-                &["quantity", "qty", "shares", "units"],
-                &[
-                    "avg buy price",
-                    "avg price",
-                    "average price",
-                    "buy price",
-                    "avg. buy price",
-                    "average cost",
-                ],
-                "IndMoney CSV/Excel columns. Expected: Symbol/Stock Name, Quantity, Avg Buy Price",
-            ),
-            // "csv" or any unrecognized format: generic columns.
-            _ => (
-                &[
-                    "symbol",
-                    "stock",
-                    "instrument",
-                    "name",
-                    "ticker",
-                    "scrip",
-                    "tradingsymbol",
-                ],
-                &["quantity", "qty", "qty.", "shares", "units"],
-                &[
-                    "avg price",
-                    "avg. price",
-                    "average price",
-                    "avg cost",
-                    "avg. cost",
-                    "buy price",
-                    "price",
-                    "cost",
-                ],
-                "CSV/Excel columns. Your file needs Symbol, Quantity and Average Price columns",
-            ),
-        };
-    // Scan the first 40 lines for the header row so .xlsx exports with account preamble work seamlessly.
-    let found_header = lines.iter().take(40).enumerate().find_map(|(idx, line)| {
-        let c = parse_csv_header(&line.to_lowercase());
-        let si = find_col(&c, sym_names)?;
-        let qi = find_col(&c, qty_names)?;
-        let pi = find_col(&c, price_names)?;
-        Some((idx, c, si, qi, pi))
-    });
-    let Some((header_idx, cols, si, qi, pi)) = found_header else {
+    let columns = import_columns(source);
+    let ImportColumns { expected, .. } = columns;
+    let Some((header_idx, cols, si, qi, pi)) = find_stock_header(&lines, &columns) else {
         bail!(
             "Could not detect {}. Found: {}",
             expected,
@@ -819,6 +894,40 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
     apply_import_rows(source, file, rows, side_col.is_some(), replace).await
 }
 
+/// Splits and bonuses for each dated symbol, from its first trade. A symbol
+/// Yahoo has no chart for (HTTP 404, such as a renamed ticker) is not an
+/// error: it is returned in the second list and imported without a split
+/// check. Any other failure stops the import, so nothing is changed.
+pub(super) async fn fetch_import_splits(
+    client: &YahooClient,
+    rows: &[ImportRow],
+    symbols: &[&String],
+) -> Result<(Vec<(String, Vec<crate::portfolio::Split>)>, Vec<String>)> {
+    let mut found = Vec::new();
+    let mut unchecked = Vec::new();
+    for sym in symbols {
+        let since = rows
+            .iter()
+            .filter(|r| &r.symbol == *sym)
+            .filter_map(|r| r.date.clone())
+            .min()
+            .unwrap_or_else(pf::today);
+        match super::portfolio::fetch_actions(client, sym, &since).await {
+            Ok((s, _, _)) => found.push(((*sym).clone(), s)),
+            Err(e) if crate::api::is_not_found(&e) => unchecked.push((*sym).clone()),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Could not check {} for splits, which a tradebook needs; nothing was changed. Try again when online",
+                        sym
+                    )
+                });
+            }
+        }
+    }
+    Ok((found, unchecked))
+}
+
 /// Apply parsed import rows (from any source) to the portfolio and report
 /// what changed: dated rows rebuild a symbol's lots, undated rows sync its
 /// quantity and keep existing lots. Re-importing the same rows changes
@@ -845,22 +954,15 @@ pub(super) async fn apply_import_rows(
     let mut splits = Vec::new();
     if tradebook {
         let client = YahooClient::new().await?;
-        for sym in symbols.iter().filter(|s| dated(s)) {
-            let since = rows
-                .iter()
-                .filter(|r| &r.symbol == sym)
-                .filter_map(|r| r.date.clone())
-                .min()
-                .unwrap_or_else(pf::today);
-            let (s, _, _) = super::portfolio::fetch_actions(&client, sym, &since)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Could not check {} for splits, which a tradebook needs; nothing was changed. Try again when online",
-                        sym
-                    )
-                })?;
-            splits.push((sym.clone(), s));
+        let dated_symbols: Vec<&String> = symbols.iter().filter(|s| dated(s)).collect();
+        let (found, unchecked) = fetch_import_splits(&client, &rows, &dated_symbols).await?;
+        splits = found;
+        for sym in unchecked {
+            println!(
+                "  {} {} — split check skipped: Yahoo has no price history for it, so its quantities are used as in the file",
+                "!".yellow(),
+                sym
+            );
         }
     }
 
@@ -1193,6 +1295,19 @@ impl CsvRow for HarvestRow {
     ];
 }
 
+/// A holding with a losing lot that FIFO does not let you sell on its own:
+/// the older lots come first, and selling them books a net gain.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FifoBlockedRow {
+    pub(crate) symbol: String,
+    /// Shares you would have to sell to reach the first losing lot.
+    pub(crate) shares_to_sell: f64,
+    /// What that sale books in all: positive is a net gain.
+    pub(crate) net_result: f64,
+    /// The losing lot's own loss.
+    pub(crate) lot_loss: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarvestSummary {
     pub(crate) country: &'static str,
@@ -1204,11 +1319,25 @@ pub(crate) struct HarvestSummary {
     pub(crate) ltcg_exemption_remaining: f64,
     pub(crate) loss_candidates: Vec<HarvestRow>,
     pub(crate) gain_harvest_candidates: Vec<HarvestRow>,
+    /// India: holdings with a losing lot that FIFO makes unsellable on its
+    /// own without booking a net gain.
+    pub(crate) fifo_blocked: Vec<FifoBlockedRow>,
     pub(crate) unpriced: Vec<String>,
     /// India: holdings left out because they are not taxed like listed
     /// shares (non-equity ETFs, debt and other funds, SGBs), so neither the
     /// ₹1.25 lakh exemption nor the 111A/112A rates apply to them.
     pub(crate) other_rules: Vec<OtherRulesRow>,
+    /// Holdings in a currency this country does not tax in (US shares for
+    /// India), left out like `tax in` does.
+    pub(crate) other_currency: Vec<String>,
+}
+
+/// The sale that would harvest a holding's losses, in the tax currency.
+struct HarvestSale {
+    shares: f64,
+    cost: f64,
+    st: f64,
+    lt: f64,
 }
 
 pub(crate) fn compute_harvest(
@@ -1224,16 +1353,21 @@ pub(crate) fn compute_harvest(
     let report = tax_report(country, portfolio, val, today);
     let realized_est = tax::estimate(country, report.realized);
     let exemption_limit = country.exemption();
-    let exemption_remaining = (exemption_limit - realized_est.exemption_used).max(0.0);
+    let mut exemption_remaining = (exemption_limit - realized_est.exemption_used).max(0.0);
+    // Tax on a gain that the exemption covers, including India's cess.
+    let gain_rate = country.lt_rate() / 100.0
+        * if country == Country::India {
+            1.0 + tax::INDIA_CESS_RATE
+        } else {
+            1.0
+        };
 
     let parse_date = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
-    let mut loss_candidates = Vec::new();
-    let mut gain_harvest_candidates = Vec::new();
-    let mut total_st_loss = 0.0;
-    let mut total_lt_loss = 0.0;
-    let mut total_tax_saved = 0.0;
-
+    let mut losing: Vec<(HarvestRow, HarvestSale)> = Vec::new();
+    let mut gain_candidates = Vec::new();
+    let mut fifo_blocked = Vec::new();
     let mut other_rules = Vec::new();
+    let mut other_currency = Vec::new();
     for h in &portfolio.holdings {
         let Some(price) = val.price(&h.symbol) else {
             continue;
@@ -1247,58 +1381,119 @@ pub(crate) fn compute_harvest(
             });
             continue;
         }
-        let scale = val
+        // Holdings in another currency are not counted, as in `tax in`.
+        let Some(scale) = val
             .currency(&h.symbol)
             .and_then(|cur| country.currency_scale(&cur))
-            .unwrap_or(1.0);
-        let mut st_pnl = 0.0;
-        let mut lt_pnl = 0.0;
-        let mut losing_st = 0.0;
-        let mut losing_lt = 0.0;
-        for l in &h.lots {
-            let gain = l.qty * (price - l.price) * scale;
-            let long = parse_date(&l.date).is_some_and(|d| country.is_long_term(d, today));
-            if long {
-                lt_pnl += gain;
-                if gain < 0.0 {
-                    losing_lt += -gain;
+        else {
+            other_currency.push(h.symbol.clone());
+            continue;
+        };
+        // Each lot's gain at today's price, oldest first (the order FIFO sells in).
+        let lots: Vec<(f64, f64, f64, bool)> = h
+            .lots
+            .iter()
+            .map(|l| {
+                let long = parse_date(&l.date).is_some_and(|d| country.is_long_term(d, today));
+                (
+                    l.qty,
+                    l.qty * l.price * scale,
+                    l.qty * (price - l.price) * scale,
+                    long,
+                )
+            })
+            .collect();
+        let lt_pnl: f64 = lots.iter().filter(|l| l.3).map(|l| l.2).sum();
+        let st_pnl: f64 = lots.iter().filter(|l| !l.3).map(|l| l.2).sum();
+
+        // The sale that harvests the most loss. India sells FIFO, so reaching
+        // a losing lot means selling every older lot first; the US allows
+        // choosing the lots, so only the losing ones are sold.
+        let sale = if country == Country::India {
+            let (mut shares, mut cost, mut st, mut lt) = (0.0, 0.0, 0.0, 0.0);
+            let mut best: Option<HarvestSale> = None;
+            let mut first_loss: Option<(f64, f64, f64)> = None;
+            for (qty, lot_cost, gain, long) in &lots {
+                shares += qty;
+                cost += lot_cost;
+                if *long {
+                    lt += gain;
+                } else {
+                    st += gain;
                 }
-            } else {
-                st_pnl += gain;
-                if gain < 0.0 {
-                    losing_st += -gain;
+                if *gain < 0.0 && first_loss.is_none() {
+                    first_loss = Some((shares, st + lt, -gain));
+                }
+                if st + lt < best.as_ref().map_or(0.0, |b| b.st + b.lt) {
+                    best = Some(HarvestSale {
+                        shares,
+                        cost,
+                        st,
+                        lt,
+                    });
                 }
             }
-        }
-        let pnl = (price - h.avg_cost) * h.shares * scale;
-        let pnl_pct = if h.avg_cost > 0.0 {
-            ((price / h.avg_cost) - 1.0) * 100.0
+            if best.is_none()
+                && let Some((shares_to_sell, net_result, lot_loss)) = first_loss
+            {
+                fifo_blocked.push(FifoBlockedRow {
+                    symbol: h.symbol.clone(),
+                    shares_to_sell: round(shares_to_sell, 4),
+                    net_result: round(net_result, 2),
+                    lot_loss: round(lot_loss, 2),
+                });
+            }
+            best
         } else {
-            0.0
+            let mut sale = HarvestSale {
+                shares: 0.0,
+                cost: 0.0,
+                st: 0.0,
+                lt: 0.0,
+            };
+            for (qty, lot_cost, gain, long) in lots.iter().filter(|l| l.2 < 0.0) {
+                sale.shares += qty;
+                sale.cost += lot_cost;
+                if *long {
+                    sale.lt += gain;
+                } else {
+                    sale.st += gain;
+                }
+            }
+            (sale.shares > 0.0).then_some(sale)
         };
 
-        if pnl < 0.0 || losing_st > 0.0 || losing_lt > 0.0 {
-            let tax_saved =
-                losing_st * (country.st_rate() / 100.0) + losing_lt * (country.lt_rate() / 100.0);
-            total_st_loss += losing_st;
-            total_lt_loss += losing_lt;
-            total_tax_saved += tax_saved;
-            loss_candidates.push(HarvestRow {
+        if let Some(sale) = sale {
+            let net = sale.st + sale.lt;
+            let row = HarvestRow {
                 symbol: h.symbol.clone(),
-                shares: round(h.shares, 4),
-                avg_cost: round(h.avg_cost, 2),
+                shares: round(sale.shares, 4),
+                avg_cost: round(sale.cost / sale.shares / scale, 2),
                 price: round(price, 2),
-                pnl: round(pnl, 2),
-                pnl_pct: round(pnl_pct, 2),
-                st_pnl: round(st_pnl, 2),
-                lt_pnl: round(lt_pnl, 2),
-                estimated_tax_saved: round(tax_saved, 2),
+                pnl: round(net, 2),
+                pnl_pct: round(
+                    if sale.cost > 0.0 {
+                        net / sale.cost * 100.0
+                    } else {
+                        0.0
+                    },
+                    2,
+                ),
+                st_pnl: round(sale.st, 2),
+                lt_pnl: round(sale.lt, 2),
+                estimated_tax_saved: 0.0,
                 harvest_type: "tax_loss",
-            });
+            };
+            losing.push((row, sale));
         } else if exemption_limit > 0.0 && lt_pnl > 0.0 {
-            let tax_free_gain = lt_pnl.min(exemption_remaining);
-            let tax_saved = tax_free_gain * (country.lt_rate() / 100.0);
-            gain_harvest_candidates.push(HarvestRow {
+            // The long-term lots are the oldest, so FIFO reaches them first.
+            let pnl = (price - h.avg_cost) * h.shares * scale;
+            let pnl_pct = if h.avg_cost > 0.0 {
+                ((price / h.avg_cost) - 1.0) * 100.0
+            } else {
+                0.0
+            };
+            gain_candidates.push(HarvestRow {
                 symbol: h.symbol.clone(),
                 shares: round(h.shares, 4),
                 avg_cost: round(h.avg_cost, 2),
@@ -1307,10 +1502,43 @@ pub(crate) fn compute_harvest(
                 pnl_pct: round(pnl_pct, 2),
                 st_pnl: round(st_pnl, 2),
                 lt_pnl: round(lt_pnl, 2),
-                estimated_tax_saved: round(tax_saved, 2),
+                estimated_tax_saved: 0.0,
                 harvest_type: "ltcg_exemption_step_up",
             });
         }
+    }
+
+    // Tax saved is what the estimate drops by when each loss is realized on
+    // top of this year's gains, so set-off order and the exemption are
+    // respected. Biggest losses first; a loss with nothing to offset saves 0
+    // and carries forward.
+    losing.sort_by(|a, b| a.0.pnl.total_cmp(&b.0.pnl));
+    let mut running = report.realized;
+    let (mut total_st_loss, mut total_lt_loss, mut total_tax_saved) = (0.0, 0.0, 0.0);
+    let mut loss_candidates = Vec::new();
+    for (mut row, sale) in losing {
+        let before = tax::estimate(country, running).total();
+        running.add(sale.st, false);
+        running.add(sale.lt, true);
+        let saved = (before - tax::estimate(country, running).total()).max(0.0);
+        row.estimated_tax_saved = round(saved, 2);
+        total_st_loss += (-sale.st).max(0.0);
+        total_lt_loss += (-sale.lt).max(0.0);
+        total_tax_saved += saved;
+        loss_candidates.push(row);
+    }
+
+    // The remaining exemption is shared: each candidate takes its part of it.
+    gain_candidates.sort_by(|a, b| b.lt_pnl.total_cmp(&a.lt_pnl));
+    let mut gain_harvest_candidates = Vec::new();
+    for mut row in gain_candidates {
+        if exemption_remaining <= 0.0 {
+            break;
+        }
+        let tax_free_gain = row.lt_pnl.min(exemption_remaining);
+        exemption_remaining -= tax_free_gain;
+        row.estimated_tax_saved = round(tax_free_gain * gain_rate, 2);
+        gain_harvest_candidates.push(row);
     }
 
     HarvestSummary {
@@ -1328,11 +1556,16 @@ pub(crate) fn compute_harvest(
         total_lt_loss_harvestable: round(total_lt_loss, 2),
         estimated_loss_tax_saved: round(total_tax_saved, 2),
         ltcg_exemption_limit: round(exemption_limit, 2),
-        ltcg_exemption_remaining: round(exemption_remaining, 2),
+        ltcg_exemption_remaining: round(
+            (exemption_limit - realized_est.exemption_used).max(0.0),
+            2,
+        ),
         loss_candidates,
         gain_harvest_candidates,
+        fifo_blocked,
         unpriced: report.unpriced,
         other_rules,
+        other_currency,
     }
 }
 
@@ -1383,14 +1616,22 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
 
     print_section("Loss Harvesting Candidates (STCG / LTCG Offset)");
     if summary.loss_candidates.is_empty() {
-        println!(
-            "  {} No losing positions — nothing to loss-harvest!",
-            "✓".green()
-        );
+        if summary.fifo_blocked.is_empty() {
+            println!(
+                "  {} No losing positions — nothing to loss-harvest!",
+                "✓".green()
+            );
+        } else {
+            println!(
+                "  {} No loss can be booked on its own: FIFO sells the older lots first.",
+                "!".yellow()
+            );
+        }
     } else {
         println!(
-            "  {:<14} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
+            "  {:<14} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
             "Symbol".bold(),
+            "Sell".bold(),
             "Avg Cost".bold(),
             "Price".bold(),
             "ST P&L".bold(),
@@ -1398,17 +1639,18 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             "Total P&L".bold(),
             "Est. Saved".bold()
         );
-        println!("  {}", "─".repeat(87).dimmed());
+        println!("  {}", "─".repeat(96).dimmed());
 
         for r in &summary.loss_candidates {
             println!(
-                "  {:<14} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
+                "  {:<14} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
                 r.symbol.cyan(),
+                format!("{}", r.shares),
                 format!("{}{:.2}", csym, r.avg_cost),
                 format!("{}{:.2}", csym, r.price),
                 signed_tax_money(csym, r.st_pnl),
                 signed_tax_money(csym, r.lt_pnl),
-                format!("-{}{:.2}", csym, r.pnl.abs()).red(),
+                signed_tax_money(csym, r.pnl),
                 format!("{}{:.0}", csym, r.estimated_tax_saved).green(),
             );
         }
@@ -1422,6 +1664,24 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             format!("{}{:.0}", csym, summary.estimated_loss_tax_saved)
                 .green()
                 .bold()
+        );
+    }
+
+    for b in &summary.fifo_blocked {
+        println!(
+            "  {} {}: its losing lot (-{}{:.0}) comes after older lots, so selling {} shares books {} {}{:.0} in all.",
+            "!".yellow(),
+            b.symbol.cyan(),
+            csym,
+            b.lot_loss,
+            b.shares_to_sell,
+            if b.net_result >= 0.0 {
+                "a net gain of"
+            } else {
+                "a net loss of"
+            },
+            csym,
+            b.net_result.abs()
         );
     }
 
@@ -1467,6 +1727,14 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
         for o in &summary.other_rules {
             println!("    {} {}", o.symbol.cyan(), o.reason.dimmed());
         }
+    }
+    if !summary.other_currency.is_empty() {
+        println!(
+            "  {} Not included (not in {}): {}",
+            "!".yellow(),
+            summary.currency,
+            summary.other_currency.join(", ")
+        );
     }
     if !summary.unpriced.is_empty() {
         println!(
@@ -1529,6 +1797,9 @@ fn print_tax_estimate(country: Country, b: &tax::Buckets) {
         print_kv("Taxable LTCG", &m(e.lt_taxable));
         print_kv(&format!("STCG tax ({}%)", country.st_rate()), &m(e.st_tax));
         print_kv(&format!("LTCG tax ({}%)", country.lt_rate()), &m(e.lt_tax));
+        if e.cess > 0.0 {
+            print_kv("Health & education cess (4%)", &m(e.cess));
+        }
     } else {
         print_kv(
             "Gains / losses",
@@ -1625,9 +1896,10 @@ pub(crate) struct TaxReport {
 
 /// Whether Indian capital-gains tax treats `symbol` like a listed share
 /// (Sec. 111A/112A): shares and equity-oriented funds do; debt and other
-/// funds, funds of unknown category and SGBs don't (the reason says how
-/// they are taxed instead). Gold, silver, liquid, debt and international
-/// ETFs are not listed shares either.
+/// funds, funds of unknown category, SGBs, crypto and gold, silver, liquid,
+/// debt and international ETFs don't (the reason says how they are taxed
+/// instead). The decision is [`crate::offmarket::india_class`], shared with
+/// `tax export in` and `tax advance`.
 enum IndiaRules {
     Listed,
     EquityFund,
@@ -1635,40 +1907,17 @@ enum IndiaRules {
 }
 
 fn india_rules(symbol: &str, val: &Valuation) -> IndiaRules {
-    use crate::offmarket;
-    if offmarket::is_fund(symbol) {
-        let mark = val.mark(symbol);
-        return match mark.and_then(|m| m.category.as_deref()) {
-            Some(cat)
-                if offmarket::is_equity_oriented(
-                    cat,
-                    mark.and_then(|m| m.name.as_deref()).unwrap_or(""),
-                ) =>
-            {
-                IndiaRules::EquityFund
-            }
-            Some(cat) => IndiaRules::Other(format!(
-                "{cat} — not an equity-oriented fund: units bought from 1 Apr 2023 are taxed at \
-                 your slab rate, older units at 12.5% after 24 months"
-            )),
-            None => IndiaRules::Other(
-                "no AMFI category (not in AMFI's NAV file, or the file could not be loaded), so \
-                 whether it is equity-oriented is unknown"
-                    .into(),
-            ),
-        };
-    }
-    if let Some(kind) = offmarket::non_equity_etf(symbol) {
-        return IndiaRules::Other(format!("{} — {}", kind.name(), kind.rule()));
-    }
-    if offmarket::is_sgb(symbol) {
-        return IndiaRules::Other(
-            "Sovereign Gold Bond — tax-free when RBI redeems it; sold on the exchange, 12.5% \
-             after 12 months (no ₹1.25 lakh exemption), else your slab rate"
+    use crate::offmarket::{IndiaClass, india_class};
+    match india_class(symbol, val.mark(symbol)) {
+        IndiaClass::Listed => IndiaRules::Listed,
+        IndiaClass::EquityFund => IndiaRules::EquityFund,
+        IndiaClass::Vda => IndiaRules::Other(
+            "Crypto — taxed at a flat 30% under Sec. 115BBH, and losses cannot be set off against \
+             other income"
                 .into(),
-        );
+        ),
+        IndiaClass::Other(reason) => IndiaRules::Other(reason),
     }
-    IndiaRules::Listed
 }
 
 /// Gains realized this tax year and what selling every open lot at `val`'s
@@ -1813,6 +2062,7 @@ fn estimate_json(country: Country, b: tax::Buckets) -> serde_json::Value {
         "exemption_used": round(e.exemption_used, 2),
         "short_term_tax": round(e.st_tax, 2),
         "long_term_tax": round(e.lt_tax, 2),
+        "cess": round(e.cess, 2),
         "total_tax": round(e.total(), 2),
         "loss_carried_forward": round(e.st_carry + e.lt_carry, 2),
     })
@@ -2111,7 +2361,7 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     let caveat = match country {
         Country::India => {
             "ESTIMATE for listed shares with STT paid (Sec. 111A/112A rates from 23 Jul 2024), FIFO lots. \
-             Excludes cess and surcharge, pre-2018 grandfathering, brought-forward losses, and bonus-share \
+             Includes the 4% cess; excludes surcharge, pre-2018 grandfathering, brought-forward losses, and bonus-share \
              cost rules. Consult a chartered accountant."
         }
         Country::Us => {
@@ -2284,16 +2534,10 @@ pub async fn cmd_pcorr(_market: Market) -> Result<()> {
     }
 
     let client = YahooClient::new().await?;
-    let mut all_closes: Vec<(String, Vec<f64>)> = Vec::new();
+    let mut all_closes: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> = Vec::new();
     for h in &portfolio.holdings {
         if let Ok(chart) = client.get_chart(&h.symbol, "6mo", "1d").await {
-            let closes: Vec<f64> = chart
-                .indicators
-                .quote
-                .first()
-                .and_then(|q| q.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect())
-                .unwrap_or_default();
+            let closes = chart.dated_closes();
             if closes.len() > 20 {
                 all_closes.push((h.symbol.clone(), closes));
             }
@@ -2320,7 +2564,11 @@ pub async fn cmd_pcorr(_market: Market) -> Result<()> {
             if i == j {
                 print!(" {:>10}", "1.000".bold());
             } else {
-                let corr = technical::correlation(ca, cb).unwrap_or(0.0);
+                // Too few shared dates to compare: say so, not 0.000.
+                let Some(corr) = technical::dated_correlation(ca, cb) else {
+                    print!(" {:>10}", "N/A".dimmed());
+                    continue;
+                };
                 if corr > 0.7 && i < j {
                     high_corr_pairs.push((sym_a.clone(), sym_b.clone(), corr));
                 }

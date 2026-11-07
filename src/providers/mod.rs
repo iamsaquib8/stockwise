@@ -924,6 +924,7 @@ impl Series {
                 fifty_two_week_low: None,
                 currency: self.currency,
                 exchange_name: None,
+                gmtoffset: None,
             }),
             timestamp: Some(self.bars.iter().map(|b| noon(b.date)).collect()),
             indicators: Indicators {
@@ -969,6 +970,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
             fifty_two_week_low: None,
             currency: currency.map(str::to_string),
             exchange_name: None,
+            gmtoffset: None,
         }),
         timestamp: Some(bars.iter().map(|b| b.ts).collect()),
         indicators: Indicators {

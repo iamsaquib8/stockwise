@@ -112,52 +112,129 @@ impl From<&crate::api::Quote> for QuoteRow {
     }
 }
 
+/// "Did you mean" entries (`SYMBOL (Name)`) for symbols with no quote: the
+/// built-in directory first, then Yahoo's search when exactly one is missing.
+pub(crate) async fn symbol_suggestions(
+    src: &impl views::DataSource,
+    missing: &[String],
+) -> Vec<String> {
+    let mut list = Vec::new();
+    for m in missing {
+        for (sym, name) in market::suggest_symbols(m, 3) {
+            let item = format!("{sym} ({name})");
+            if !list.contains(&item) {
+                list.push(item);
+            }
+        }
+    }
+    if list.is_empty()
+        && missing.len() == 1
+        && let Ok(found) = src.search(&missing[0]).await
+    {
+        for q in found.into_iter().take(3) {
+            let Some(sym) = q.symbol else { continue };
+            let name = q.long_name.or(q.short_name).unwrap_or_default();
+            if name.is_empty() {
+                list.push(sym);
+            } else {
+                list.push(format!("{sym} ({name})"));
+            }
+        }
+    }
+    list
+}
+
+/// "No quote for X ... Did you mean: Y" for `quote` and the `add` commands.
+pub(crate) fn unknown_symbols_message(
+    missing: &[String],
+    suggestions: &[String],
+    market: Market,
+) -> String {
+    let mut msg = tf(
+        Msg::NoQuoteFor,
+        &[&missing.join(", "), &market::not_found_hint(market)],
+    );
+    if !suggestions.is_empty() {
+        msg.push_str(&format!("\n  Did you mean: {}", suggestions.join(", ")));
+    }
+    if missing.iter().any(|m| market::is_bse_scrip_code(m)) {
+        msg.push_str(&format!("\n  {}", market::BSE_CODE_HINT));
+    }
+    msg
+}
+
+/// Refuse to save a symbol Yahoo has never heard of (a typo would sit in a
+/// watchlist or an alert and never fire). Fund and SGB symbols are priced
+/// elsewhere and skip the check. A lookup that fails, such as offline, does
+/// not block: the symbol is saved with a note. `--force` skips the lookup.
+pub(crate) async fn ensure_symbols_exist(
+    src: &impl views::DataSource,
+    resolved: &[String],
+    market: Market,
+) -> Result<()> {
+    let to_check: Vec<String> = resolved
+        .iter()
+        .filter(|s| !market::is_namespaced(s) && !crate::offmarket::is_off_market(s))
+        .cloned()
+        .collect();
+    if to_check.is_empty() {
+        return Ok(());
+    }
+    let missing = match views::quotes(src, &to_check).await {
+        Ok(set) => set.missing,
+        Err(e) => {
+            eprintln!(
+                "  {} Could not check {} ({}); saved without checking.",
+                "!".yellow(),
+                to_check.join(", "),
+                e.to_string().lines().next().unwrap_or("lookup failed")
+            );
+            return Ok(());
+        }
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let suggestions = symbol_suggestions(src, &missing).await;
+    bail!(
+        "{}\n  Nothing was saved. Add --force to keep it anyway.",
+        unknown_symbols_message(&missing, &suggestions, market)
+    )
+}
+
+/// [`ensure_symbols_exist`] on a live client, for `watch add`, `portfolio
+/// add` and `alert add`. Without a client (offline) it saves unchecked.
+pub(crate) async fn check_symbols_before_add(
+    resolved: &[String],
+    market: Market,
+    force: bool,
+) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    match YahooClient::new().await {
+        Ok(client) => ensure_symbols_exist(&client, resolved, market).await,
+        Err(_) => {
+            eprintln!(
+                "  {} Could not reach Yahoo Finance to check the ticker; saved without checking.",
+                "!".yellow()
+            );
+            Ok(())
+        }
+    }
+}
+
 pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Result<()> {
     let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
     // Yahoo silently drops unknown symbols; name them instead.
     let views::QuoteSet { quotes, missing } = views::quotes(&client, &resolved).await?;
-    let suggestions = if !missing.is_empty() {
-        let mut s_list = Vec::new();
-        for m in &missing {
-            for (sym, name) in market::suggest_symbols(m, 3) {
-                let item = format!("{sym} ({name})");
-                if !s_list.contains(&item) {
-                    s_list.push(item);
-                }
-            }
-        }
-        if s_list.is_empty()
-            && missing.len() == 1
-            && let Ok(found) = client.search(&missing[0]).await
-        {
-            for q in found.into_iter().take(3) {
-                let Some(sym) = q.symbol else { continue };
-                let name = q.long_name.or(q.short_name).unwrap_or_default();
-                if name.is_empty() {
-                    s_list.push(sym);
-                } else {
-                    s_list.push(format!("{sym} ({name})"));
-                }
-            }
-        }
-        s_list
-    } else {
-        Vec::new()
-    };
+    let suggestions = symbol_suggestions(&client, &missing).await;
     let missing_err = || {
-        let base = tf(
-            Msg::NoQuoteFor,
-            &[&missing.join(", "), &market::not_found_hint(market)],
-        );
-        let mut msg = base;
-        if !suggestions.is_empty() {
-            msg.push_str(&format!("\n  Did you mean: {}", suggestions.join(", ")));
-        }
-        if missing.iter().any(|m| market::is_bse_scrip_code(m)) {
-            msg.push_str(&format!("\n  {}", market::BSE_CODE_HINT));
-        }
-        anyhow::anyhow!("{msg}")
+        anyhow::anyhow!(
+            "{}",
+            unknown_symbols_message(&missing, &suggestions, market)
+        )
     };
 
     if quotes.is_empty() {
@@ -899,4 +976,100 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
         bail!("{}", t(Msg::DoctorMarketDataDown));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod add_check_tests {
+    use super::*;
+    use crate::api::{ChartData, Quote, SearchResult};
+
+    /// A source that knows `known` and fails everything when `offline`.
+    struct Source {
+        known: Vec<&'static str>,
+        offline: bool,
+    }
+
+    impl views::DataSource for Source {
+        async fn quotes(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
+            if self.offline {
+                bail!("Cannot reach Yahoo Finance");
+            }
+            Ok(symbols
+                .iter()
+                .filter(|s| self.known.contains(s))
+                .map(|s| Quote {
+                    symbol: Some(s.to_string()),
+                    regular_market_price: Some(100.0),
+                    ..Default::default()
+                })
+                .collect())
+        }
+        async fn chart(&self, _: &str, _: &str, _: &str) -> Result<ChartData> {
+            bail!("no charts")
+        }
+        async fn search(&self, _: &str) -> Result<Vec<SearchResult>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn syms(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_misspelled_ticker_is_refused_with_a_suggestion() {
+        let src = Source {
+            known: vec!["RELIANCE.NS"],
+            offline: false,
+        };
+        let err = ensure_symbols_exist(&src, &syms(&["RELIANC.NS"]), Market::In)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("No quote for RELIANC.NS"), "{err}");
+        assert!(err.contains("Did you mean: RELIANCE.NS"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_known_ticker_and_off_market_symbols_pass() {
+        let src = Source {
+            known: vec!["TCS.NS"],
+            offline: false,
+        };
+        assert!(
+            ensure_symbols_exist(&src, &syms(&["TCS.NS"]), Market::In)
+                .await
+                .is_ok()
+        );
+        // Funds and SGBs are priced elsewhere: never sent to the quote source.
+        assert!(
+            ensure_symbols_exist(&src, &syms(&["MF:119551", "SGBJUN31I"]), Market::In)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_does_not_block_the_add() {
+        let src = Source {
+            known: vec![],
+            offline: true,
+        };
+        assert!(
+            ensure_symbols_exist(&src, &syms(&["TCS.NS"]), Market::In)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn force_skips_the_lookup() {
+        // No client can be built for this call: --force must not need one.
+        assert!(
+            check_symbols_before_add(&syms(&["ZZQQXX.NS"]), Market::In, true)
+                .await
+                .is_ok()
+        );
+    }
 }

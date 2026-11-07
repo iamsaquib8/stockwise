@@ -69,7 +69,7 @@ src/
   funds.rs           AMFI NAV file + api.mfapi.in history (cached), returns, SIP, ETF holdings overlap
   funds.rs           AMFI NAV file + api.mfapi.in history (cached), AMFI TER disclosure (cached a day),
                      returns, SIP, ETF holdings overlap
-  xlsx.rs            Minimal .xlsx reader (zip via flate2 + sheet cells) for AMFI's TER export
+  xlsx.rs            Minimal .xlsx reader (zip via flate2 + sheet cells, tab-ordered sheets) for AMFI's TER export and broker imports
   derivatives.rs     Option chains from NSE / BSE / Yahoo, lot sizes, PCR, max pain, per-contract IV and greeks
   greeks.rs          Black-Scholes pricing, greeks, implied-volatility solver
   payoff.rs          Multi-leg option payoffs: presets, max profit/loss, breakevens, probability of profit

@@ -644,7 +644,7 @@ pub const TOOLS: &[Tool] = &[
                     min: 0.0,
                     max: 1e11,
                 },
-                "Advance tax already paid for this financial year in INR (default 0)",
+                "Advance tax already paid for this financial year in INR (default 0). Treated as paid before every due date",
             ),
         ],
         personal: true,

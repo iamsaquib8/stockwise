@@ -102,8 +102,23 @@ fn opt_count(v: Option<u64>, width: usize) -> String {
     }
 }
 
+/// A build-up tag coloured by what it says about the underlying: green for a
+/// bullish reading, red for a bearish one, cyan or yellow for the milder ones.
+/// A put's colours are the reverse of a call's (see
+/// [`derivatives::Buildup::underlying_sentiment`]).
+fn buildup_tag(b: derivatives::Buildup, kind: OptionKind, width: usize) -> String {
+    let text = format!("{:>width$}", b.code());
+    match b.underlying_sentiment(kind) {
+        "Bullish" => text.green().to_string(),
+        "Mildly Bullish" => text.cyan().to_string(),
+        "Bearish" => text.red().to_string(),
+        _ => text.yellow().to_string(),
+    }
+}
+
 fn print_side(
     title: &str,
+    kind: OptionKind,
     rows: &[(f64, Option<&ContractView>)],
     atm: Option<f64>,
     oi_change: bool,
@@ -150,10 +165,7 @@ fn print_side(
             _ => format!("{:>8}", ""),
         };
         let buildup_str = match (c.buildup(), oi_change) {
-            (Some(derivatives::Buildup::LongBuildup), true) => "  LB".green().to_string(),
-            (Some(derivatives::Buildup::ShortCovering), true) => "  SC".cyan().to_string(),
-            (Some(derivatives::Buildup::ShortBuildup), true) => "  SB".red().to_string(),
-            (Some(derivatives::Buildup::LongUnwinding), true) => "  LU".yellow().to_string(),
+            (Some(b), true) => buildup_tag(b, kind, 4),
             _ if oi_change => format!("{:>4}", "—".dimmed()),
             _ => format!("{:>4}", ""),
         };
@@ -306,8 +318,8 @@ pub async fn cmd_options_chain(
         views.iter().map(|r| (r.strike, r.call.as_ref())).collect();
     let puts: Vec<(f64, Option<&ContractView>)> =
         views.iter().map(|r| (r.strike, r.put.as_ref())).collect();
-    print_side("Calls", &calls, atm, oi_change);
-    print_side("Puts", &puts, atm, oi_change);
+    print_side("Calls", OptionKind::Call, &calls, atm, oi_change);
+    print_side("Puts", OptionKind::Put, &puts, atm, oi_change);
 
     if rows.len() < chain.rows.len() {
         println!(
@@ -545,6 +557,8 @@ pub(crate) fn oi_json(chain: &OptionChain, top: usize) -> serde_json::Value {
         "top_calls": top_calls,
         "top_puts": top_puts,
         "breakdown": breakdown,
+        "calls_sentiment": breakdown.calls.dominant_sentiment(OptionKind::Call),
+        "puts_sentiment": breakdown.puts.dominant_sentiment(OptionKind::Put),
     })
 }
 
@@ -608,77 +622,85 @@ pub async fn cmd_options_oi(
         ),
     );
     print_kv(
-        "Chain Sentiment",
+        "Chain Sentiment (for the underlying)",
         &format!(
             "Calls: {}  |  Puts: {}",
-            match breakdown.calls.dominant_sentiment() {
+            match breakdown.calls.dominant_sentiment(OptionKind::Call) {
                 "Bullish" => "Bullish".green(),
                 "Bearish" => "Bearish".red(),
                 _ => "Neutral / Mixed".yellow(),
             },
-            match breakdown.puts.dominant_sentiment() {
+            match breakdown.puts.dominant_sentiment(OptionKind::Put) {
                 "Bullish" => "Bullish".green(),
                 "Bearish" => "Bearish".red(),
                 _ => "Neutral / Mixed".yellow(),
             }
         ),
     );
+    println!(
+        "  {}",
+        "Read for the underlying: put buying is bearish, put writing is bullish.".dimmed()
+    );
 
-    let print_top_table = |title: &str, items: &[derivatives::TopOiStrike], role: &str| {
-        print_section(&format!("{title} — {role}"));
-        if items.is_empty() {
-            println!("  {}", "No open interest recorded for this side.".dimmed());
-            return;
-        }
-        println!(
-            "  {:>10} {:>10} {:>8} {:>10} {:>6} {:>10}",
-            "Strike".bold(),
-            "OI".bold(),
-            "Share".bold(),
-            "ΔOI".bold(),
-            "Type".bold(),
-            "LTP".bold()
-        );
-        println!("  {}", "─".repeat(60).dimmed());
-        for item in items {
-            let oi_chg = match item.oi_change {
-                Some(x) => {
-                    let s = format!("{:+}", x);
-                    if x >= 0 {
-                        format!("{:>10}", s.green())
-                    } else {
-                        format!("{:>10}", s.red())
-                    }
-                }
-                None => format!("{:>10}", "—".dimmed()),
-            };
-            let type_str = match item.buildup {
-                Some(derivatives::Buildup::LongBuildup) => "    LB".green().to_string(),
-                Some(derivatives::Buildup::ShortCovering) => "    SC".cyan().to_string(),
-                Some(derivatives::Buildup::ShortBuildup) => "    SB".red().to_string(),
-                Some(derivatives::Buildup::LongUnwinding) => "    LU".yellow().to_string(),
-                None => format!("{:>6}", "—".dimmed()),
-            };
+    let print_top_table =
+        |title: &str, kind: OptionKind, items: &[derivatives::TopOiStrike], role: &str| {
+            print_section(&format!("{title} — {role}"));
+            if items.is_empty() {
+                println!("  {}", "No open interest recorded for this side.".dimmed());
+                return;
+            }
             println!(
-                "  {:>10} {:>10} {:>7.1}% {} {} {:>10}",
-                format_price(item.strike, cur).bold(),
-                format_volume(item.open_interest),
-                item.share_pct,
-                oi_chg,
-                type_str,
-                item.last_price
-                    .map(|p| format_price(p, cur))
-                    .unwrap_or_else(|| "—".into())
+                "  {:>10} {:>10} {:>8} {:>10} {:>6} {:>10}",
+                "Strike".bold(),
+                "OI".bold(),
+                "Share".bold(),
+                "ΔOI".bold(),
+                "Type".bold(),
+                "LTP".bold()
             );
-        }
-    };
+            println!("  {}", "─".repeat(60).dimmed());
+            for item in items {
+                let oi_chg = match item.oi_change {
+                    Some(x) => {
+                        let s = format!("{:+}", x);
+                        if x >= 0 {
+                            format!("{:>10}", s.green())
+                        } else {
+                            format!("{:>10}", s.red())
+                        }
+                    }
+                    None => format!("{:>10}", "—".dimmed()),
+                };
+                let type_str = match item.buildup {
+                    Some(b) => buildup_tag(b, kind, 6),
+                    None => format!("{:>6}", "—".dimmed()),
+                };
+                println!(
+                    "  {:>10} {:>10} {:>7.1}% {} {} {:>10}",
+                    format_price(item.strike, cur).bold(),
+                    format_volume(item.open_interest),
+                    item.share_pct,
+                    oi_chg,
+                    type_str,
+                    item.last_price
+                        .map(|p| format_price(p, cur))
+                        .unwrap_or_else(|| "—".into())
+                );
+            }
+        };
 
     print_top_table(
         "Top Call Open Interest",
+        OptionKind::Call,
         &top_calls,
         "Major Resistance Walls",
     );
-    print_top_table("Top Put Open Interest", &top_puts, "Major Support Walls");
+    print_top_table(
+        "Top Put Open Interest",
+        OptionKind::Put,
+        &top_puts,
+        "Major Support Walls",
+    );
 
     print_section("Build-up Breakdown");
     println!(
@@ -1427,5 +1449,35 @@ mod tests {
     fn signed_money() {
         assert_eq!(money(-1234.5, Some("INR")), "-₹1234.50");
         assert_eq!(money(12.0, Some("USD")), "$12.00");
+    }
+
+    #[test]
+    fn oi_json_reads_each_side_for_the_underlying() {
+        use crate::derivatives::{ChainSource, Contract, OptionChain};
+        // Put buying on one strike: premium up, open interest up.
+        let chain = OptionChain {
+            symbol: "NIFTY".into(),
+            source: ChainSource::Nse,
+            underlying: Some(24_000.0),
+            currency: Some("INR".into()),
+            expiry: chrono::NaiveDate::from_ymd_opt(2026, 11, 27).unwrap(),
+            expiries: vec![],
+            as_of: None,
+            rows: vec![ChainRow {
+                strike: 24_000.0,
+                call: None,
+                put: Some(Contract {
+                    open_interest: Some(50_000),
+                    oi_change: Some(4_000),
+                    price_change: Some(12.0),
+                    last: Some(90.0),
+                    ..Default::default()
+                }),
+            }],
+            lot_size: Some(75),
+        };
+        let json = oi_json(&chain, 5);
+        assert_eq!(json["puts_sentiment"], "Bearish");
+        assert_eq!(json["calls_sentiment"], "Neutral");
     }
 }
