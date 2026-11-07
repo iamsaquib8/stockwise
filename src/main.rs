@@ -442,7 +442,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     Peers { symbol: String },
     /// Insider activity and analyst consensus
     Insider { symbol: String },
-    /// Indian IPOs: open and upcoming issues, subscription, allotment odds and a Buy/Skip verdict
+    /// Indian IPOs: open and upcoming issues, subscription, allotment odds and demand scores
     #[command(after_help = IPO_HELP)]
     Ipo {
         /// IPO symbol or company name for the deep analysis (omit for the live board)
@@ -465,7 +465,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     Surprise,
     /// Quality vs growth quadrants
     Matrix,
-    /// Top-scored stocks from the large-cap universe
+    /// Highest-scoring large caps on eight factors (a score, not a recommendation)
     Picks,
     /// Screen large caps by a preset
     Screen {
@@ -570,13 +570,13 @@ stockwise options TCS                     expected moves (same as `options moves
         out: JsonOutput,
     },
 
-    /// Intraday trade ideas sized for your capital (signals only, no orders)
+    /// Intraday signal scanner: nine strategies over the liquid universe (no sizing, no orders)
     #[command(alias = "bot")]
     Intraday {
-        /// Capital to deploy
-        amount: f64,
-        /// Target return for the day, in percent (e.g. 1.5)
-        target: f64,
+        /// Ignored; kept so older scripts still run
+        amount: Option<f64>,
+        /// Ignored; kept so older scripts still run
+        target: Option<f64>,
         /// Add a strategy's entry/exit rule as an extra signal: a built-in, a file in your
         /// strategies folder, file:PATH.toml or wasm:PATH.wasm (as in `backtest -s`)
         #[arg(short, long)]
@@ -1301,12 +1301,12 @@ const IPO_HELP: &str = "\
 Examples:
   stockwise ipo                          open, upcoming and recently listed IPOs
   stockwise ipo --board sme              SME issues only
-  stockwise ipo BCSSL                    subscription, demand by price, dual verdict
-  stockwise ipo BCSSL --capital 2.5L     allotment odds for ₹2.5 lakh across family PANs
+  stockwise ipo BCSSL                    subscription, demand by price, 6-pillar score
+  stockwise ipo BCSSL --capital 2.5L     allotment odds at ₹2.5 lakh
   stockwise ipo --json                   the board as JSON
 
 Data comes from NSE's IPO pages; GMP and broker calls are unofficial press chatter.
-Education, not advice — read the prospectus (RHP) before applying.";
+Scores describe the data; they are not a recommendation. The prospectus (RHP) is the source document.";
 
 /// Which IPO boards `stockwise ipo` lists.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -2627,7 +2627,7 @@ fn curated_quickstart_help() -> String {
                 ),
                 (
                     "ipo",
-                    "Indian Mainboard & SME IPO board, GMP & dual verdict",
+                    "Indian Mainboard & SME IPO board, subscription, GMP & demand scores",
                 ),
                 (
                     "screen <TYPE>",

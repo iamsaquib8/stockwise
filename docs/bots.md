@@ -46,7 +46,7 @@ stockwise -m us bot 5000 1  # US market, $5K, 1% target
 - Sector heat map (which sectors are moving)
 - Market regime detection (Strong Uptrend → Strong Downtrend)
 - Top 15 signals ranked by score
-- Top 5 trade plans with: dual targets (T1: book 50%, T2: ride), trailing stop, Kelly fraction
+- The strategies behind the five strongest signals, with each one's strength and reason (`intraday` shows no position sizes, entries, stops or targets; the paper-trading `daemon` and `sim` still size simulated trades)
 
 ---
 

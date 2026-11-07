@@ -274,9 +274,13 @@ pub async fn cmd_whatif(
     Ok(())
 }
 
+/// `intraday`: the signal scanner. It shows what the nine strategies see in
+/// each stock; it does not size positions or set entries, stops or targets.
+/// `amount` and `target_pct` are still accepted so existing scripts run, but
+/// they are not used.
 pub async fn cmd_intraday(
-    amount: f64,
-    target_pct: f64,
+    amount: Option<f64>,
+    target_pct: Option<f64>,
     strategy: Option<&str>,
     market: Market,
 ) -> Result<()> {
@@ -287,18 +291,21 @@ pub async fn cmd_intraday(
         Some(s) => Some(backtest::rules::load(s)?.compile()?),
         None => None,
     };
-    let target_profit = amount * (target_pct / 100.0);
     let csym = market.currency_symbol();
     let market_name = market.label();
 
-    print_header(&format!("Intraday Trading Bot — {} Market", market_name));
+    print_header(&format!("Intraday Signal Scanner — {} Market", market_name));
     println!(
-        "  Capital: {}  |  Target: {}% ({}{:.2})  |  Max Risk: 1%/trade\n",
-        format!("{}{:.2}", csym, amount).bold().cyan(),
-        target_pct,
-        csym,
-        target_profit
+        "  {}\n",
+        "Signals from 9 strategies. No position sizes, entries, stops or targets are given."
+            .dimmed()
     );
+    if amount.is_some() || target_pct.is_some() {
+        println!(
+            "  {} Capital and target are no longer used here. `stockwise sim` paper-trades with a capital you choose.\n",
+            "ⓘ".dimmed()
+        );
+    }
 
     let client = YahooClient::new().await?;
 
@@ -339,7 +346,6 @@ pub async fn cmd_intraday(
         extra
     );
     let signals = intraday::scan_intraday_with(&client, market, rule.as_ref()).await?;
-    let plans = intraday::generate_trade_plans(&signals, amount, target_pct, 1.0);
 
     // Market regime summary
     let regimes: Vec<_> = signals.iter().map(|s| &s.regime).collect();
@@ -361,18 +367,10 @@ pub async fn cmd_intraday(
             )
         })
         .count();
-    let market_bias = if uptrend > downtrend * 2 {
-        "BULLISH".green().bold()
-    } else if downtrend > uptrend * 2 {
-        "BEARISH".red().bold()
-    } else {
-        "MIXED".yellow().bold()
-    };
     println!(
-        "  Market Bias: {} ({} bullish, {} bearish, {} ranging)\n",
-        market_bias,
-        uptrend,
-        downtrend,
+        "  Trend breadth: {} in uptrend, {} in downtrend, {} ranging\n",
+        uptrend.to_string().green(),
+        downtrend.to_string().red(),
         signals.len() - uptrend - downtrend
     );
 
@@ -387,7 +385,7 @@ pub async fn cmd_intraday(
         "Vol".bold(),
         "Regime".bold(),
         "Score".bold(),
-        "Conf".bold()
+        "Agree".bold()
     );
     println!("  {}", "─".repeat(72).dimmed());
 
@@ -439,111 +437,51 @@ pub async fn cmd_intraday(
         );
     }
 
-    // Trade plans
-    if plans.is_empty() {
+    // Which strategies fired for the strongest signals.
+    let detailed: Vec<_> = signals
+        .iter()
+        .filter(|s| s.score >= 50.0 && s.confidence != intraday::Confidence::Low)
+        .take(5)
+        .collect();
+    if detailed.is_empty() {
         println!(
             "\n  {}",
-            "No high-confidence trades found. Market conditions may be unfavorable.".yellow()
+            "No stock has several strategies agreeing right now.".yellow()
         );
     } else {
-        print_section(&format!(
-            "Trade Plans (target: {}{:.2})",
-            csym, target_profit
-        ));
-
-        for (i, plan) in plans.iter().take(5).enumerate() {
-            let s = &plan.signal;
+        print_section("Strategies Behind the Strongest Signals");
+        for (i, s) in detailed.iter().enumerate() {
             println!();
             println!(
-                "  {}  {} — {} [{} | {} confidence]",
+                "  {}  {} — {} [{} · {} agreement]",
                 format!("#{}", i + 1).bold().cyan(),
                 s.symbol.bold().cyan(),
                 s.name,
                 s.regime,
                 match s.confidence {
                     intraday::Confidence::High => "HIGH".green().bold().to_string(),
-                    intraday::Confidence::Medium => "MED".yellow().to_string(),
-                    _ => "LOW".dimmed().to_string(),
+                    intraday::Confidence::Medium => "MEDIUM".yellow().to_string(),
+                    intraday::Confidence::Low => "LOW".dimmed().to_string(),
                 }
             );
             println!("  {}", "─".repeat(55).dimmed());
-
-            // Show which strategies triggered
-            println!(
-                "  {} {}",
-                "Strategies:".dimmed(),
-                s.strategies
-                    .iter()
-                    .map(|st| format!("{} ({:.0})", st.name, st.strength))
-                    .collect::<Vec<_>>()
-                    .join(" + ")
-            );
             for st in &s.strategies {
-                println!("    {} {}", "→".cyan(), st.reason.dimmed());
+                println!(
+                    "    {} {} ({:.0}, {}): {}",
+                    "→".cyan(),
+                    st.name,
+                    st.strength,
+                    st.direction.lean(),
+                    st.reason.dimmed()
+                );
             }
-
-            println!();
-            println!(
-                "  {} {}    {} {}    {} {}",
-                "Entry:".dimmed(),
-                format!("{}{:.2}", csym, plan.entry).bold(),
-                "Target 1:".dimmed(),
-                format!("{}{:.2}", csym, plan.target1).green(),
-                "Target 2:".dimmed(),
-                format!("{}{:.2}", csym, plan.target2).green().bold()
-            );
-            println!(
-                "  {} {}    {} {}    {} {}",
-                "Stop Loss:".dimmed(),
-                format!("{}{:.2}", csym, plan.stop_loss).red(),
-                "Trailing:".dimmed(),
-                format!("{}{:.2}", csym, plan.trailing_stop).red().dimmed(),
-                "R:R:".dimmed(),
-                format!("1:{:.1}", plan.risk_reward).yellow()
-            );
-            let capital = format!(
-                "{}{:.0} ({:.0}%)",
-                csym, plan.capital_required, plan.position_pct
-            );
-            println!(
-                "  {} {}    {} {}    {} {}    {} {}",
-                "Qty:".dimmed(),
-                plan.qty.to_string().bold(),
-                "Capital:".dimmed(),
-                capital,
-                "Max Risk:".dimmed(),
-                format!("{}{:.0}", csym, plan.max_risk).red(),
-                "Exp P&L:".dimmed(),
-                format!("+{}{:.0}", csym, plan.expected_profit)
-                    .green()
-                    .bold()
-            );
-            println!(
-                "  {} Kelly fraction: {:.1}%",
-                "→".dimmed(),
-                plan.kelly_fraction * 100.0
-            );
         }
-
-        let total_profit: f64 = plans.iter().take(3).map(|p| p.expected_profit).sum();
-        let total_risk: f64 = plans.iter().take(3).map(|p| p.max_risk).sum();
-        println!("\n  {}", "─".repeat(60).dimmed());
-        println!(
-            "  {} Top 3 combined: {} potential | {} max risk",
-            if total_profit >= target_profit {
-                "✓".green().bold()
-            } else {
-                "→".yellow().bold()
-            },
-            format!("+{}{:.0}", csym, total_profit).green().bold(),
-            format!("{}{:.0}", csym, total_risk).red()
-        );
     }
 
     println!("\n  {}", "─".repeat(60).dimmed());
     println!(
         "  {}",
-        "This is NOT financial advice. Trade at your own risk."
+        "Signals describe the price data; they are not recommendations and not financial advice."
             .red()
             .italic()
     );

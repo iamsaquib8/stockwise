@@ -1,5 +1,5 @@
-//! `stockwise ipo`: the live Indian IPO board, and a deep analysis with a
-//! dual verdict and SEBI allotment odds for one issue. The data and the
+//! `stockwise ipo`: the live Indian IPO board, and a deep analysis with
+//! demand scores and SEBI allotment odds for one issue. The data and the
 //! scoring live in `crate::ipo`; this file only prints.
 
 use super::*;
@@ -45,19 +45,27 @@ fn times(v: Option<f64>) -> String {
     v.map_or("—".to_string(), |x| format!("{x:.2}x"))
 }
 
-/// Green for a go, red for a stay-away, yellow for everything in between.
+/// Colours a label by what it describes: red for weak or negative readings,
+/// yellow for mixed, pending or in-between ones, green for the rest. The colour
+/// describes the data; it is not an instruction.
 fn tone(text: &str) -> ColoredString {
     let t = text.to_ascii_uppercase();
-    if t.contains("AVOID") || t.contains("WEAK") || t.contains("COLD") || t.contains("BELOW") {
+    if t.contains("WEAK")
+        || t.contains("COLD")
+        || t.contains("BELOW")
+        || t.contains("TEPID")
+        || t.contains("NEGATIVE")
+        || t.contains("EXIT")
+        || t.contains("HEAVY")
+    {
         text.red().bold()
-    } else if t.contains("WAIT")
+    } else if t.contains("BOOK")
+        || t.contains("MIXED")
         || t.contains("SELECTIVE")
         || t.contains("NEUTRAL")
-        || t.contains("CAUTIOUS")
         || t.contains("SME")
         || t.contains("UPCOMING")
         || t.contains("MODERATE")
-        || t.contains("TRACK")
         || t.contains("PENDING")
         || t.contains("AWAITING")
     {
@@ -197,7 +205,7 @@ pub fn print_ipo_board(v: &IpoBoardView) {
     }
 
     println!(
-        "\n  {} Deep analysis, allotment odds and a Buy/Skip verdict: '{}'\n",
+        "\n  {} Subscription detail, allotment odds and demand scores: '{}'\n",
         "💡".yellow(),
         "stockwise ipo <SYMBOL> [--capital 2.5L]".cyan()
     );
@@ -224,17 +232,17 @@ pub fn print_ipo_analysis(a: &IpoAnalysis) {
     println!("  {}", meta.join(" · ").dimmed());
     println!("{}", border.cyan());
 
-    // ── Verdict ──
+    // ── Scores ──
     let v = &a.verdict;
-    println!("\n  LISTING-GAIN VERDICT:  {}", tone(&v.listing_verdict));
-    println!("  LONG-TERM VERDICT:     {}", tone(&v.long_term_verdict));
+    println!("\n  LISTING DEMAND:        {}", tone(&v.listing_demand));
+    println!("  LONG-TERM PROFILE:     {}", tone(&v.long_term_profile));
     println!(
-        "  IPO Score:             {:.0}/100  {}  (Confidence: {})",
+        "  IPO Score:             {:.0}/100  {}  (Data: {})",
         v.overall_score,
         rating_bar(v.overall_score, 100.0),
         v.confidence
     );
-    println!("  Timing:                {}", v.timing_guidance.italic());
+    println!("  Timeline:              {}", v.timeline.italic());
 
     // ── Terms ──
     println!("\n  {}", "ISSUE TERMS".bold().yellow());
@@ -355,7 +363,7 @@ pub fn print_ipo_analysis(a: &IpoAnalysis) {
     }
 
     if !v.bull_points.is_empty() {
-        println!("\n  {}", "WHY IT COULD WORK".bold().green());
+        println!("\n  {}", "POSITIVE FACTORS".bold().green());
         for b in &v.bull_points {
             println!("  {} {}", "▲".green(), b);
         }
@@ -383,10 +391,10 @@ pub fn print_ipo_analysis(a: &IpoAnalysis) {
             odds.bold()
         );
     }
-    for line in &a.allotment.capital_plan {
+    for line in &a.allotment.capital_odds {
         println!("  {} {}", "→".cyan(), line);
     }
-    for rule in &a.allotment.golden_rules {
+    for rule in &a.allotment.allotment_rules {
         println!("  {} {}", "•".dimmed(), rule.dimmed());
     }
 

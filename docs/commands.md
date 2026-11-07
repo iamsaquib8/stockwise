@@ -120,11 +120,11 @@ network, invalid config file), `2` invalid arguments.
 | `sectorcmp <SECTOR1> <SECTOR2>` | Two sectors head to head |
 | `peers <SYMBOL>` | Same-sector peers on P/E, P/B, market cap |
 | `insider <SYMBOL>` | Analyst consensus + insider-related news |
-| `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a quick signal) and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (a family-PAN capital plan with `--capital`), unofficial GMP and broker calls from press headlines, and a 6-pillar score with separate **listing-gain** and **long-term** verdicts |
+| `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a demand label such as "STRONG DEMAND" or "BOOK BUILDING") and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (with `--capital`, the odds at that amount, including for several separate applications), unofficial GMP and broker calls from press headlines, and a 6-pillar score with a **listing demand** label and a **long-term profile** label. In `--json`: `listing_demand`, `long_term_profile` and `timeline` replace `listing_verdict`, `long_term_verdict` and `timing_guidance`; `capital_odds` and `allotment_rules` replace `capital_plan` and `golden_rules`. Not a recommendation |
 | `earnings` | Earnings growth for portfolio and watchlist |
 | `surprise` | Earnings momentum — accelerating vs decelerating |
 | `matrix` | Quality vs growth quadrants |
-| `picks` | Large caps ranked on 8 fundamental + technical factors |
+| `picks` | The highest-scoring large caps on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
 | `screen <CATEGORY> [--universe INDEX] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
@@ -301,7 +301,7 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 | `backtest strategies [FILES...] [--json]` | List built-in and your own strategies, or check strategy files (exit 1 on errors) |
 | `sip <SYMBOL> <AMOUNT> [-p] [--json]` | Monthly SIP/DCA simulation with value-vs-invested chart and XIRR. Default `5y` |
 | `whatif <SYMBOL> <AMOUNT> <YYYY-MM-DD> [--json]` | What a lump sum on a past date is worth today |
-| `intraday <CAPITAL> <TARGET%> [-s STRATEGY]` (`bot`) | 9-strategy intraday ideas with Kelly sizing and dual targets. `-s` adds a strategy file's rules as a tenth signal. Signals only |
+| `intraday [-s STRATEGY]` (`bot`) | 9-strategy intraday signal scanner: sector heat, trend breadth, a table of regime, score and strategy agreement, and the strategies behind the strongest signals. No position sizes, entries, stops or targets. `-s` adds a strategy file's rules as a tenth signal. Old `CAPITAL TARGET%` arguments are accepted and ignored |
 | `longterm [MONTHLY_BUDGET]` | 6-pillar scoring, Monte Carlo, SIP allocation |
 | `daemon intraday [CAPITAL]` | Paper-trading loop on the NSE clock (IST, holidays included; `-m us` uses NYSE hours in ET): scan, enter at the open, trail stops every 60s, book half at T1, square off 15 minutes before the close, settle into `sim` history. Survives network blips, resumes the day after a restart, and squares off on Ctrl+C. **Never sends broker orders** |
 | `daemon longterm` | Post-market scan: scores, portfolio check, alerts, tax-harvest ideas |

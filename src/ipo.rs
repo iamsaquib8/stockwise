@@ -1,7 +1,8 @@
 //! Indian IPO intelligence: live ongoing & upcoming board, post-listing regime
 //! tracker, consolidated NSE + BSE subscription & price-band demand book,
-//! SEBI allotment probability & capital optimizer, and a 6-pillar dual verdict
-//! engine (Listing Gain vs Long-Term Hold).
+//! SEBI allotment odds, and a 6-pillar score that describes listing-day demand
+//! and the long-term profile of an issue. Nothing here tells the reader to
+//! apply for or avoid an issue.
 //!
 //! Primary data comes from NSE's public IPO endpoints via [`nse::shared_session`]
 //! (`/api/ipo-current-issue`, `/api/all-upcoming-issues?category=ipo`,
@@ -289,13 +290,16 @@ pub struct AllotmentBucketOdds {
     pub rule_note: String,
 }
 
-/// Full SEBI allotment probability & capital deployment plan.
+/// SEBI allotment odds by application tier, and the odds for the amount given
+/// with `--capital`. Probability maths, not a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllotmentOptimizer {
     pub buckets: Vec<AllotmentBucketOdds>,
     pub capital_input_inr: Option<f64>,
-    pub capital_plan: Vec<String>,
-    pub golden_rules: Vec<String>,
+    /// What the `--capital` amount buys and the odds at that size.
+    pub capital_odds: Vec<String>,
+    /// How allotment works under SEBI's rules.
+    pub allotment_rules: Vec<String>,
 }
 
 /// One scored pillar of the 6-pillar Indian IPO Verdict Engine.
@@ -308,14 +312,19 @@ pub struct IpoPillarScore {
     pub summary: String,
 }
 
-/// Dual verdict: Listing Gain (Day-1 pop) vs Long-Term Compounder.
+/// Score of one IPO: the demand seen so far, the long-term profile of the
+/// issue, six pillar scores and the facts behind them. Not a recommendation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpoDualVerdict {
     pub overall_score: f64,
-    pub listing_verdict: String,
-    pub long_term_verdict: String,
+    /// Describes bids so far ("Strong demand", "Weak demand", ...).
+    pub listing_demand: String,
+    /// Describes institutional demand and issue structure.
+    pub long_term_profile: String,
+    /// How complete the data behind the score is.
     pub confidence: String,
-    pub timing_guidance: String,
+    /// Dates and what is known at this stage of the issue.
+    pub timeline: String,
     pub pillars: Vec<IpoPillarScore>,
     pub bull_points: Vec<String>,
     pub risk_flags: Vec<String>,
@@ -802,7 +811,7 @@ pub fn build_analysis_from_parts(
         street_buzz,
         regime,
         verdict,
-        disclaimer: "Educational IPO analysis from public NSE/BSE filings and press reports — not SEBI-registered investment advice. Read the Red Herring Prospectus (RHP) before applying.".to_string(),
+        disclaimer: "Educational IPO analysis from public NSE/BSE filings and press reports — not SEBI-registered investment advice. The Red Herring Prospectus (RHP) is the source document.".to_string(),
     }
 }
 
@@ -1061,9 +1070,7 @@ fn apply_quotes_to_recent(recent: &mut [IpoSummaryRow], quotes: &[Quote]) {
             {
                 let ret = round((price / iss - 1.0) * 100.0, 2);
                 row.return_from_issue_pct = Some(ret);
-                row.quick_signal = if ret >= 15.0 {
-                    format!("+{ret:.1}% WINNER")
-                } else if ret >= 0.0 {
+                row.quick_signal = if ret >= 0.0 {
                     format!("+{ret:.1}% ABOVE ISSUE")
                 } else {
                     format!("{ret:.1}% BELOW ISSUE")
@@ -1557,19 +1564,19 @@ pub fn build_allotment_optimizer(
     capital_inr: Option<f64>,
 ) -> AllotmentOptimizer {
     let mut buckets = Vec::new();
-    let mut capital_plan = Vec::new();
-    let mut golden_rules = Vec::new();
+    let mut capital_odds = Vec::new();
+    let mut allotment_rules = Vec::new();
 
     let (Some(lot), Some(price)) = (lot_size.filter(|&l| l > 0), cap_price.filter(|&p| p > 0.0))
     else {
         return AllotmentOptimizer {
             buckets,
             capital_input_inr: capital_inr,
-            capital_plan: vec![
-                "Lot size / price band not announced yet — allotment math unlocks once price band is published.".to_string(),
+            capital_odds: vec![
+                "Lot size and price band are not announced yet; allotment odds appear once they are published.".to_string(),
             ],
-            golden_rules: vec![
-                "Always check QIB institutional subscription after 1:30 PM IST on Closing Day before locking UPI funds.".to_string(),
+            allotment_rules: vec![
+                "QIB bids typically arrive late on the closing day, so the QIB multiple changes most then.".to_string(),
             ],
         };
     };
@@ -1605,7 +1612,7 @@ pub fn build_allotment_optimizer(
 
         if let Some(cap) = capital_inr {
             if cap < ind_amt {
-                capital_plan.push(format!(
+                capital_odds.push(format!(
                     "₹{} is below this SME IPO's minimum application of ₹{} ({} lots × {} shares).",
                     fmt_inr(cap),
                     fmt_inr(ind_amt),
@@ -1614,23 +1621,23 @@ pub fn build_allotment_optimizer(
                 ));
             } else {
                 let pans = (cap / ind_amt).floor() as u64;
-                capital_plan.push(format!(
-                    "With ₹{}, apply minimum {} lots (₹{}) per distinct PAN (up to {} family PANs) rather than oversizing a single SME application.",
+                capital_odds.push(format!(
+                    "₹{} covers up to {} applications of the minimum size ({} lots, ₹{} each); every application needs its own PAN.",
                     fmt_inr(cap),
+                    pans.max(1),
                     ind_lots,
-                    fmt_inr(ind_amt),
-                    pans.max(1)
+                    fmt_inr(ind_amt)
                 ));
             }
         }
-        golden_rules.push(
-            "SME Warning: Post-listing, SME stocks trade ONLY in full lot multiples — partial share exits are impossible and 5% circuit filters can trap liquidity.".to_string(),
+        allotment_rules.push(
+            "After listing, SME shares trade only in full lots, so partial exits are not possible, and the 5% circuit filter can limit liquidity.".to_string(),
         );
         return AllotmentOptimizer {
             buckets,
             capital_input_inr: capital_inr,
-            capital_plan,
-            golden_rules,
+            capital_odds,
+            allotment_rules,
         };
     }
 
@@ -1710,7 +1717,7 @@ pub fn build_allotment_optimizer(
     let max_retail_lots = (200_000.0 / one_lot_inr).floor().max(1.0) as u64;
     if let Some(cap) = capital_inr {
         if cap < one_lot_inr {
-            capital_plan.push(format!(
+            capital_odds.push(format!(
                 "₹{} is below 1 Retail lot (₹{} for {} shares).",
                 fmt_inr(cap),
                 fmt_inr(one_lot_inr),
@@ -1718,35 +1725,35 @@ pub fn build_allotment_optimizer(
             ));
         } else if sub.retail_x.unwrap_or(1.5) <= 1.0 && status == IpoStatus::Ongoing {
             let affordable_lots = ((cap / one_lot_inr).floor() as u64).min(max_retail_lots);
-            capital_plan.push(format!(
-                "Retail is currently undersubscribed ({:.2}x): 1 PAN can bid {} lots (₹{}) at Cut-Off — IF RII stays ≤ 1.0x at close, full lots are allotted; if RII crosses 1.0x on Day 3, extra lots on 1 PAN add 0% odds.",
+            capital_odds.push(format!(
+                "Retail is at {:.2}x. At or below 1.0x every valid retail bid is allotted in full; above 1.0x allotment is by lottery and extra lots in one application add no odds. ₹{} buys up to {} lots within the ₹2L retail limit.",
                 sub.retail_x.unwrap_or(0.0),
-                affordable_lots,
-                fmt_inr(affordable_lots as f64 * one_lot_inr)
+                fmt_inr(affordable_lots as f64 * one_lot_inr),
+                affordable_lots
             ));
         } else {
-            let family_pans = (cap / one_lot_inr).floor() as u32;
+            let affordable_apps = (cap / one_lot_inr).floor() as u32;
             if let Some(p_pct) = rii_prob {
                 let p = (p_pct / 100.0).clamp(0.0, 1.0);
-                let n = family_pans.min(6);
+                let n = affordable_apps.min(6);
                 let multi_pan_prob = round((1.0 - (1.0 - p).powi(n as i32)) * 100.0, 1);
-                capital_plan.push(format!(
-                    "Retail Split Strategy: {} distinct family PANs × 1 lot at Cut-Off (₹{} total) gives ~{multi_pan_prob:.1}% chance of ≥1 allotment (vs {p_pct:.1}% if all lots are placed on 1 PAN).",
+                capital_odds.push(format!(
+                    "Odds for {} separate applications of 1 lot (₹{} in total): ~{multi_pan_prob:.1}% chance of at least one allotment, against {p_pct:.1}% for one application (each needs its own PAN).",
                     n,
                     fmt_inr(n as f64 * one_lot_inr)
                 ));
             }
             if cap >= bnii_amt {
-                capital_plan.push(format!(
-                    "bNII Option: 1 application of {} lots (₹{}) enters Big HNI with ~{}% packet odds for a ₹{} allotment.",
+                capital_odds.push(format!(
+                    "One bNII application of {} lots (₹{}) has ~{}% odds of an allotment of a ₹{} packet.",
                     bnii_lots,
                     fmt_inr(bnii_amt),
                     bnii_prob.map_or("N/A".to_string(), |v| format!("{v:.1}")),
                     fmt_inr(snii_amt)
                 ));
             } else if cap >= snii_amt {
-                capital_plan.push(format!(
-                    "sNII vs Multi-PAN Retail: 1 sNII bid of {} lots (₹{}) has ~{}% odds for a ₹{} packet — compare against multiple 1-lot Retail family accounts before locking funds.",
+                capital_odds.push(format!(
+                    "One sNII application of {} lots (₹{}) has ~{}% odds of a ₹{} packet.",
                     snii_lots,
                     fmt_inr(snii_amt),
                     snii_prob.map_or("N/A".to_string(), |v| format!("{v:.1}")),
@@ -1758,32 +1765,32 @@ pub fn build_allotment_optimizer(
         if let Some(p_pct) = rii_prob {
             let p = (p_pct / 100.0).clamp(0.0, 1.0);
             let three_pan = round((1.0 - (1.0 - p).powi(3)) * 100.0, 1);
-            capital_plan.push(format!(
-                "Retail is oversubscribed ({:.2}x): apply strictly 1 lot (₹{}) at Cut-Off per PAN. Using 3 distinct family demat/PANs lifts ≥1-lot odds from {p_pct:.1}% → {three_pan:.1}%.",
+            capital_odds.push(format!(
+                "Retail is oversubscribed ({:.2}x): one application of 1 lot (₹{}) has {p_pct:.1}% odds; 3 separate applications would have {three_pan:.1}% odds of at least one allotment.",
                 sub.retail_x.unwrap_or(0.0),
                 fmt_inr(one_lot_inr)
             ));
         }
     } else {
-        capital_plan.push(format!(
-            "1 Retail lot = {} shares (₹{}). Pass `--capital 2.5L` or `--capital 12L` to compare Retail multi-PAN vs sNII vs bNII odds for your budget.",
+        capital_odds.push(format!(
+            "1 Retail lot = {} shares (₹{}). Pass `--capital 2.5L` or `--capital 12L` to see the odds at that amount for retail, sNII and bNII applications.",
             lot,
             fmt_inr(one_lot_inr)
         ));
     }
 
-    golden_rules.push(
-        "Always tick 'Cut-Off Price' in Retail (RII) — fixed-price bids below the final cap price are rejected outright when an issue is oversubscribed.".to_string(),
+    allotment_rules.push(
+        "A retail bid below the final issue price is not allotted; a cut-off bid takes whatever the final price turns out to be.".to_string(),
     );
-    golden_rules.push(
-        "Day-3 Timing Rule: QIBs place ~80–90% of institutional bids between 1:00 PM and 3:30 PM IST on closing day; accept UPI mandate well before the 5:00 PM IST hard cutoff.".to_string(),
+    allotment_rules.push(
+        "QIBs typically place most of their bids on the afternoon of the closing day; the UPI mandate deadline for retail is 5:00 PM IST.".to_string(),
     );
 
     AllotmentOptimizer {
         buckets,
         capital_input_inr: capital_inr,
-        capital_plan,
-        golden_rules,
+        capital_odds,
+        allotment_rules,
     }
 }
 
@@ -1812,7 +1819,8 @@ pub fn score_ipo_verdict(
         (
             50.0,
             "PENDING".to_string(),
-            "Bidding has not opened yet — monitor Anchor book filing (T-1 evening) and Day-3 QIB demand.".to_string(),
+            "Bidding has not opened yet; the anchor book and QIB demand are not available."
+                .to_string(),
         )
     } else if row.board == BoardKind::Sme && sub.qib_x.unwrap_or(0.0) == 0.0 {
         let anchor_bonus = if st.anchor_shares.unwrap_or(0) > 0 {
@@ -1868,7 +1876,7 @@ pub fn score_ipo_verdict(
             if mf_pct >= 30.0 && qib >= 1.5 {
                 sc += 6.0;
                 bull_points.push(format!(
-                    "Domestic Mutual Funds account for {mf_pct:.0}% of QIB demand — strong sticky institutional conviction."
+                    "Domestic Mutual Funds account for {mf_pct:.0}% of QIB demand."
                 ));
             } else if mf_pct == 0.0 && qib >= 2.0 && is_final_day_or_closed {
                 sc -= 4.0;
@@ -1885,25 +1893,23 @@ pub fn score_ipo_verdict(
             ));
         }
         if qib >= 10.0 {
-            bull_points.push(format!(
-                "Strong QIB institutional oversubscription at {qib:.2}x."
-            ));
+            bull_points.push(format!("QIB book subscribed {qib:.2}x."));
         } else if qib < 1.0 && is_final_day_or_closed {
             risk_flags.push(format!(
-                "Weak QIB institutional subscription ({qib:.2}x) on final/closed book."
+                "QIB book subscribed only {qib:.2}x on the final or closed book."
             ));
         }
         let sc = sc.clamp(10.0, 99.0);
         let status_lbl = if sc >= 72.0 {
-            "BULLISH"
+            "STRONG"
         } else if sc >= 48.0 {
-            "WATCH"
+            "MODERATE"
         } else {
             "WEAK"
         };
         let summary = if !is_final_day_or_closed && qib < 1.0 {
             format!(
-                "QIB at {qib:.2}x so far (early bidding day — QIBs typically bid after 1:30 PM IST on closing day)."
+                "QIB at {qib:.2}x so far (early bidding day — QIBs typically bid on the afternoon of the closing day)."
             )
         } else {
             format!(
@@ -1920,7 +1926,7 @@ pub fn score_ipo_verdict(
     let (p2_score, p2_status, p2_sum) = match st.fresh_pct {
         Some(fp) if fp >= 85.0 => {
             bull_points.push(format!(
-                "{fp:.0}% Fresh Issue — proceeds go into company growth/balance sheet rather than shareholder exits."
+                "{fp:.0}% fresh issue: proceeds go to the company rather than to selling shareholders."
             ));
             (
                 86.0,
@@ -2041,7 +2047,7 @@ pub fn score_ipo_verdict(
     let (p4_score, p4_status, p4_sum) = match (row.board, tier1_brlm) {
         (BoardKind::Mainboard, true) => {
             bull_points.push(format!(
-                "Mainboard listing led by institutional Tier-1 BRLM ({}).",
+                "Mainboard listing led by a Tier-1 lead manager ({}).",
                 st.brlms.first().cloned().unwrap_or_default()
             ));
             (
@@ -2057,7 +2063,7 @@ pub fn score_ipo_verdict(
             let issue_small = st.total_issue_cr.is_some_and(|c| c < 250.0);
             if issue_small {
                 risk_flags.push(format!(
-                    "Small-cap Mainboard issue ({}) with boutique BRLM — monitor post-listing operator volatility.",
+                    "Small Mainboard issue ({}) without a Tier-1 lead manager; post-listing price swings can be large.",
                     fmt_cr_opt(st.total_issue_cr)
                 ));
             }
@@ -2108,12 +2114,12 @@ pub fn score_ipo_verdict(
             if gp >= 25.0 {
                 sc += 30.0;
                 bull_points.push(format!(
-                    "Press reports cite ~{gp:+.1}% unofficial Grey Market Premium (GMP)."
+                    "Press reports cite an unofficial grey market premium of ~{gp:+.1}%."
                 ));
             } else if gp >= 10.0 {
                 sc += 18.0;
                 bull_points.push(format!(
-                    "Positive ~{gp:+.1}% unofficial GMP reported in financial press."
+                    "Financial press reports an unofficial GMP of ~{gp:+.1}%."
                 ));
             } else if gp > 0.0 {
                 sc += 6.0;
@@ -2129,7 +2135,7 @@ pub fn score_ipo_verdict(
         } else if buzz.avoid_mentions > buzz.subscribe_mentions {
             sc -= ((buzz.avoid_mentions - buzz.subscribe_mentions) as f64 * 8.0).min(24.0);
             risk_flags.push(format!(
-                "Cautious street coverage ({} 'Avoid' vs {} 'Subscribe' headline mentions).",
+                "Press headlines lean cautious ({} mention 'avoid' vs {} 'subscribe').",
                 buzz.avoid_mentions, buzz.subscribe_mentions
             ));
         }
@@ -2223,61 +2229,55 @@ pub fn score_ipo_verdict(
         1,
     );
 
-    let listing_verdict = match row.status {
-        IpoStatus::Upcoming => "UPCOMING — WATCH ANCHOR & DAY-3 QIB".to_string(),
+    let listing_demand = match row.status {
+        IpoStatus::Upcoming => "Upcoming: book not open yet".to_string(),
         IpoStatus::Listed => match row.return_from_issue_pct {
-            Some(r) if r >= 10.0 => {
-                format!("LISTED (+{r:.1}% VS ISSUE) — USE `verdict {}`", row.symbol)
-            }
-            Some(r) if r < 0.0 => {
-                format!("LISTED ({r:.1}% VS ISSUE) — USE `verdict {}`", row.symbol)
-            }
-            _ => format!("ALREADY LISTED — USE `stockwise verdict {}`", row.symbol),
+            Some(r) => format!(
+                "Listed ({r:+.1}% vs issue price); see `stockwise verdict {}`",
+                row.symbol
+            ),
+            None => format!("Already listed; see `stockwise verdict {}`", row.symbol),
         },
         IpoStatus::ClosedPendingListing => {
             if listing_score >= 75.0 {
-                "CLOSED STRONG — POSITIVE LISTING EXPECTED".to_string()
+                "Strong demand at close".to_string()
             } else if listing_score >= 55.0 {
-                "CLOSED MODERATE — FLAT TO MODEST LISTING".to_string()
+                "Moderate demand at close".to_string()
             } else {
-                "CLOSED WEAK — MUTED / DISCOUNT LISTING RISK".to_string()
+                "Weak demand at close".to_string()
             }
         }
         IpoStatus::Ongoing => {
             if !is_final_day_or_closed && sub.qib_x.unwrap_or(0.0) < 2.0 {
-                if overall_score >= 65.0 {
-                    "CONSTRUCTIVE — WAIT FOR DAY-3 QIB SURGE".to_string()
-                } else {
-                    "WAIT FOR DAY-3 QIB BOOK (DO NOT RUSH DAY 1/2)".to_string()
-                }
+                "Book still building: QIB bids usually arrive on the last day".to_string()
             } else if row.board == BoardKind::Sme && listing_score >= 68.0 {
-                "SPECULATIVE APPLY (SME LOT-LOCKED RISK)".to_string()
+                "Strong demand (SME: lot-locked liquidity)".to_string()
             } else if listing_score >= 78.0 {
-                "STRONG APPLY FOR LISTING GAINS".to_string()
+                "Strong demand".to_string()
             } else if listing_score >= 64.0 {
-                "APPLY (CUT-OFF · MODERATE LISTING EDGE)".to_string()
+                "Moderate demand".to_string()
             } else if listing_score >= 50.0 {
-                "SELECTIVE / NEUTRAL — LOW MARGIN OF SAFETY".to_string()
+                "Mixed demand".to_string()
             } else {
-                "AVOID FOR LISTING GAINS".to_string()
+                "Weak demand".to_string()
             }
         }
     };
 
-    let long_term_verdict = if row.board == BoardKind::Sme {
+    let long_term_profile = if row.board == BoardKind::Sme {
         if long_term_score >= 65.0 {
-            "HIGH-RISK SME — TRACK POST-LISTING EARNINGS FIRST".to_string()
+            "Higher-risk SME profile; no earnings history yet".to_string()
         } else {
-            "AVOID LONG-TERM (SME ILLIQUIDITY RISK)".to_string()
+            "Weak profile: SME illiquidity".to_string()
         }
     } else if long_term_score >= 76.0 {
-        "SUBSCRIBE & HOLD (STRONG INSTITUTIONAL + STRUCTURE)".to_string()
+        "Strong institutional demand and issue structure".to_string()
     } else if long_term_score >= 60.0 {
-        "NEUTRAL — REVIEW RHP VALUATION & POST-Q1 RESULTS".to_string()
+        "Mixed profile".to_string()
     } else if st.fresh_pct.is_some_and(|f| f < 25.0) {
-        "CAUTIOUS LONG-TERM (OFS EXIT HEAVY — PREFER LISTING ONLY)".to_string()
+        "Weak profile: mostly offer for sale".to_string()
     } else {
-        "AVOID LONG-TERM — WAIT FOR SECONDARY MARKET DISCOVERY".to_string()
+        "Weak institutional demand and issue structure".to_string()
     };
 
     let confidence = if active_weight_sum >= 85.0 && is_final_day_or_closed {
@@ -2289,43 +2289,43 @@ pub fn score_ipo_verdict(
     }
     .to_string();
 
-    let timing_guidance = match row.status {
+    let timeline = match row.status {
         IpoStatus::Upcoming => format!(
-            "Opens {}. Check Anchor Allocation Report the evening before opening, and wait until Closing Day 1:30–3:00 PM IST before bidding.",
+            "Opens {}. The anchor allocation report is published the evening before opening.",
             row.open_date
                 .map_or("soon".to_string(), |d| d.format("%d %b %Y").to_string())
         ),
         IpoStatus::Ongoing => {
             if is_final_day_or_closed {
-                "CLOSING DAY: Verify final QIB multiple between 1:30 PM and 3:15 PM IST, place bid at Cut-Off, and accept your UPI mandate strictly before 5:00 PM IST.".to_string()
+                "Closing day: the UPI mandate deadline is 5:00 PM IST, and QIB bids typically arrive between 1:30 PM and 3:15 PM IST.".to_string()
             } else {
                 format!(
-                    "Issue closes {}. Keep capital unblocked today — QIBs bid on the final afternoon, giving you free optionality before committing UPI funds.",
+                    "Issue closes {}. QIBs typically bid on the final afternoon.",
                     row.close_date
                         .map_or("soon".to_string(), |d| d.format("%d %b %Y").to_string())
                 )
             }
         }
         IpoStatus::ClosedPendingListing => format!(
-            "Bidding closed. Check allotment status on the registrar portal{} and prepare listing-day stop-loss levels.",
+            "Bidding closed. Allotment status is published on the registrar portal{}.",
             st.registrar_name
                 .as_deref()
                 .map_or(String::new(), |r| format!(" ({r})"))
         ),
         IpoStatus::Listed => format!(
-            "Now trading in the secondary market — run `stockwise verdict {}` and `stockwise events {}` for ongoing post-listing tracking.",
-            row.symbol, row.symbol
+            "Trading in the secondary market; `stockwise verdict {}` shows its 6-pillar score.",
+            row.symbol
         ),
     };
 
     if bull_points.is_empty() {
-        bull_points.push(
-            "Regulated exchange book-built offering with transparent ASBA/UPI price discovery."
-                .to_string(),
-        );
+        bull_points.push("Exchange book-built offering with ASBA/UPI bidding.".to_string());
     }
     if risk_flags.is_empty() {
-        risk_flags.push("Verify RHP valuation multiples (P/E, EV/EBITDA vs listed peers) and contingent liabilities before applying.".to_string());
+        risk_flags.push(
+            "Valuation multiples and contingent liabilities in the RHP are not part of this score."
+                .to_string(),
+        );
     }
 
     let pillars = vec![
@@ -2375,10 +2375,10 @@ pub fn score_ipo_verdict(
 
     IpoDualVerdict {
         overall_score,
-        listing_verdict,
-        long_term_verdict,
+        listing_demand,
+        long_term_profile,
         confidence,
-        timing_guidance,
+        timeline,
         pillars,
         bull_points,
         risk_flags,
@@ -2605,22 +2605,22 @@ fn derive_quick_signal(row: &IpoSummaryRow, today: NaiveDate) -> String {
             let tot = row.total_x.unwrap_or(0.0);
             if row.board == BoardKind::Sme {
                 if tot >= 15.0 {
-                    "SME · HOT DEMAND".to_string()
+                    "SME · STRONG DEMAND".to_string()
                 } else if tot >= 2.0 {
-                    "SME · ACTIVE".to_string()
+                    "SME · MODERATE DEMAND".to_string()
                 } else {
-                    "SME · HIGH RISK".to_string()
+                    "SME · WEAK DEMAND".to_string()
                 }
             } else if qib >= 10.0 || (qib >= 3.0 && tot >= 8.0) {
                 "STRONG · QIB BACKED".to_string()
             } else if qib >= 1.5 && tot >= 2.0 {
-                "CONSTRUCTIVE".to_string()
+                "MODERATE DEMAND".to_string()
             } else if !final_day {
-                "WAIT DAY-3 QIB".to_string()
+                "BOOK BUILDING".to_string()
             } else if tot >= 1.0 {
-                "SELECTIVE".to_string()
+                "MIXED DEMAND".to_string()
             } else {
-                "AVOID / TEPID".to_string()
+                "WEAK DEMAND".to_string()
             }
         }
     }
@@ -3333,11 +3333,11 @@ mod tests {
         assert_eq!(opt.buckets[1].estimated_win_prob_pct, Some(10.0));
         // bNII 10.0x with ~68/14 = 4.86 packets -> ~48.6% packet odds!
         assert!(opt.buckets[2].estimated_win_prob_pct.unwrap() > 45.0);
-        // ₹45,000 -> 3 family PANs × 1 lot = 1 - 0.8^3 = 48.8%
+        // ₹45,000 -> 3 applications of 1 lot = 1 - 0.8^3 = 48.8%
         assert!(
-            opt.capital_plan.iter().any(|p| p.contains("48.8%")),
+            opt.capital_odds.iter().any(|p| p.contains("48.8%")),
             "{:?}",
-            opt.capital_plan
+            opt.capital_odds
         );
     }
 
@@ -3352,10 +3352,14 @@ mod tests {
             a.verdict.overall_score
         );
         assert!(
-            a.verdict.listing_verdict.contains("APPLY")
-                || a.verdict.listing_verdict.contains("CONSTRUCTIVE")
+            a.verdict.listing_demand.contains("demand"),
+            "{}",
+            a.verdict.listing_demand
         );
-        assert!(a.verdict.long_term_verdict.contains("SUBSCRIBE"));
+        assert_eq!(
+            a.verdict.long_term_profile,
+            "Strong institutional demand and issue structure"
+        );
         assert_eq!(a.street_buzz.gmp_pct, Some(14.0));
         assert!(
             a.structure
@@ -3368,7 +3372,7 @@ mod tests {
         let sme = fixture_analysis("MAXENGS", None, Some(100_000.0)).unwrap();
         assert_eq!(sme.board, BoardKind::Sme);
         assert!(sme.verdict.risk_flags.iter().any(|f| f.contains("SME")));
-        assert!(sme.allotment.capital_plan[0].contains("below this SME IPO's minimum"));
+        assert!(sme.allotment.capital_odds[0].contains("below this SME IPO's minimum"));
     }
 
     #[test]
@@ -3534,13 +3538,71 @@ mod tests {
             &regime,
             today,
         );
-        assert!(v.listing_verdict.contains("WAIT"), "{}", v.listing_verdict);
+        assert!(
+            v.listing_demand.starts_with("Book still building"),
+            "{}",
+            v.listing_demand
+        );
         assert!(v.risk_flags.iter().any(|f| f.contains("Offer For Sale")));
-        assert!(v.long_term_verdict.contains("AVOID") || v.long_term_verdict.contains("CAUTIOUS"));
+        assert_eq!(v.long_term_profile, "Weak profile: mostly offer for sale");
         assert_eq!(v.pillars.len(), 6);
         assert_eq!(
             v.pillars.iter().map(|p| p.weight_pct as u32).sum::<u32>(),
             100
         );
+    }
+
+    /// Every user-visible string of the IPO analysis and board is a description
+    /// of data: no apply/avoid call, no family-PAN plan, no advice wording.
+    #[test]
+    fn ipo_output_has_no_apply_or_avoid_call() {
+        let mut text = Vec::new();
+        for (symbol, capital) in [
+            ("BCSSL", Some(250_000.0)),
+            ("BCSSL", Some(45_000.0)),
+            ("BCSSL", None),
+            ("MAXENGS", Some(100_000.0)),
+            ("MAXENGS", Some(600_000.0)),
+        ] {
+            let a = fixture_analysis(symbol, None, capital).unwrap();
+            text.push(serde_json::to_string(&a).unwrap());
+        }
+        let board = fixture_board(BoardFilter::All, 10);
+        text.push(serde_json::to_string(&board).unwrap());
+        let text = text.join("\n");
+        for banned in [
+            "APPLY",
+            "AVOID",
+            "SUBSCRIBE &",
+            "family",
+            "Split Strategy",
+            "listing_verdict",
+            "long_term_verdict",
+            "timing_guidance",
+            "capital_plan",
+            "golden_rules",
+        ] {
+            assert!(!text.contains(banned), "{banned:?} found in IPO output");
+        }
+        crate::verdict::testing::assert_neutral(&text);
+    }
+
+    #[test]
+    fn board_signals_describe_demand() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let mut row = fixture_board(BoardFilter::All, 10).ongoing[0].clone();
+        row.status = IpoStatus::Ongoing;
+        row.board = BoardKind::Mainboard;
+        row.close_date = NaiveDate::from_ymd_opt(2026, 10, 30);
+        row.qib_x = Some(0.2);
+        row.total_x = Some(0.4);
+        assert_eq!(derive_quick_signal(&row, today), "WEAK DEMAND");
+        row.total_x = Some(1.4);
+        assert_eq!(derive_quick_signal(&row, today), "MIXED DEMAND");
+        row.qib_x = Some(12.0);
+        assert_eq!(derive_quick_signal(&row, today), "STRONG · QIB BACKED");
+        row.close_date = NaiveDate::from_ymd_opt(2026, 11, 5);
+        row.qib_x = Some(0.0);
+        assert_eq!(derive_quick_signal(&row, today), "BOOK BUILDING");
     }
 }

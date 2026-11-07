@@ -144,7 +144,7 @@
     },
     {
       "name": "ipo_analyze",
-      "description": "Indian IPO analysis. Deep analysis of one Indian IPO: issue structure, subscription by category, demand by price, SEBI allotment odds, unofficial GMP and a 6-pillar score with separate listing-gain and long-term verdicts."
+      "description": "Indian IPO analysis. Deep analysis of one Indian IPO: issue structure, subscription by category, demand by price, SEBI allotment odds, unofficial GMP and a 6-pillar score with demand and long-term profile labels. Not a recommendation."
     },
     {
       "name": "goal_sip",

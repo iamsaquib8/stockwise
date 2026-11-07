@@ -720,3 +720,14 @@ fn verdict_tool_result_has_scores_and_no_call() {
         assert_neutral(&wrapped.to_string());
     }
 }
+
+#[test]
+fn ipo_tools_are_described_without_a_call() {
+    use crate::verdict::testing::assert_neutral;
+    for name in ["ipo_board", "ipo_analyze"] {
+        let t = tool(name);
+        assert_neutral(t.title);
+        assert_neutral(t.description);
+        assert!(!t.description.to_lowercase().contains("verdict"), "{name}");
+    }
+}

@@ -22,6 +22,16 @@ impl std::fmt::Display for Direction {
     }
 }
 
+impl Direction {
+    /// Which way the signal leans, for screens that only describe data.
+    pub fn lean(&self) -> &'static str {
+        match self {
+            Direction::Long => "bullish",
+            Direction::Short => "bearish",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MarketRegime {
     StrongUptrend,
@@ -1252,5 +1262,11 @@ mod tests {
         assert!((kept[1].expected_profit - 8.0).abs() < 1e-9);
         let kept = cap_total_allocation(vec![mk("A", 1), mk("B", 1), mk("C", 1)], 1000.0, 2);
         assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn signal_direction_is_described_not_called() {
+        assert_eq!(Direction::Long.lean(), "bullish");
+        assert_eq!(Direction::Short.lean(), "bearish");
     }
 }

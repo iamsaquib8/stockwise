@@ -703,9 +703,10 @@ pub const TOOLS: &[Tool] = &[
         description: "Deep analysis of one Indian IPO by NSE symbol or company name: issue terms \
                       (fresh issue vs offer for sale, anchor, lead managers), subscription by \
                       category (QIB with mutual-fund share, bNII, sNII, retail and cut-off bids), \
-                      demand by price, SEBI allotment odds for retail, sNII and bNII (with a \
-                      capital plan when `capital` is given), unofficial GMP from the press, and a \
-                      6-pillar score with separate listing-gain and long-term verdicts.",
+                      demand by price, SEBI allotment odds for retail, sNII and bNII (and the odds \
+                      at the `capital` amount when given), unofficial GMP from the press, and a \
+                      6-pillar score with demand and long-term profile labels. Describes the \
+                      data; not a recommendation.",
         params: &[
             req(
                 "symbol",
