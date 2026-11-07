@@ -162,7 +162,16 @@ Persistent background workers that run the bots continuously.
 ```bash
 stockwise daemon intraday 25000         # NSE, ₹25K paper capital
 stockwise -m us daemon intraday 5000    # NYSE hours (ET), $5K
+stockwise daemon intraday 25000 --once  # one session, then exit
 ```
+
+The daemon keeps running: after it settles a session it waits for the next
+trading day (skipping weekends and exchange holidays) and runs that one, so
+one process covers every day until you stop it with Ctrl+C or SIGTERM.
+Start it any time: before or during a session it picks that session up (a
+late start enters no new positions); after the close or on a weekend it waits
+for the next pre-market. Add `--once` to run a single session and exit with
+status 0 (for example from cron or a systemd timer).
 
 Lifecycle (NSE; NYSE uses the same offsets from 09:30–16:00 ET):
 ```
@@ -175,7 +184,8 @@ Lifecycle (NSE; NYSE uses the same offsets from 09:30–16:00 ET):
           - Trailing stop updates (1.5% trail)
           - Wind-down (2 PM+): tighten stops to 0.5%
 3:15 PM   Square off all remaining positions
-3:20 PM   Settle → save to sim_history.json → AI EOD report → exit
+3:20 PM   Settle → save to sim_history.json → AI EOD report → wait for the
+          next session (with --once: exit)
 ```
 
 The clock is the exchange's, not your machine's: IST (+05:30) for NSE, US

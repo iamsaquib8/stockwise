@@ -165,8 +165,10 @@ data directory after every tick — `daemon_state.json` for NSE,
 `daemon_state_us.json` for `-m us` — and the server reads both, so run them
 against the same data directory (`STOCKWISE_HOME`). Every daemon gauge has a
 `market` label (`IN` or `US`). `stockwise_daemon_up` is 1 if that market's
-state is less than 45 minutes old (while the market is closed the daemon
-saves at least every 30 minutes); the other `stockwise_daemon_*` gauges appear
+state is less than 45 minutes old. A running daemon saves at least every 30
+minutes, including overnight, at weekends and on holidays, so it stays 1 around
+the clock; it is 0 when no daemon is running (never started, stopped, crashed,
+or exited after `daemon intraday --once`). The other `stockwise_daemon_*` gauges appear
 once a daemon has run. The daemon paper-trades only.
 
 The money gauges (`day_pnl`, `realized_pnl`, `unrealized_pnl`, `capital`) also
@@ -192,7 +194,8 @@ scrape_configs:
 ```
 
 Example alert: `stockwise_daemon_kill_switch{market="IN"} == 1`, or
-`stockwise_daemon_up{market="IN"} == 0` during NSE hours.
+`stockwise_daemon_up{market="IN"} == 0` for as long as you expect the daemon to
+be running (all the time, unless you start it with `--once` from a scheduler).
 
 ## Remote access
 

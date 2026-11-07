@@ -310,7 +310,7 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 | `whatif <SYMBOL> <AMOUNT> <YYYY-MM-DD> [--json]` | What a lump sum on a past date is worth today |
 | `intraday [-s STRATEGY]` (`bot`) | 9-strategy intraday signal scanner: sector heat, trend breadth, a table of regime, score and strategy agreement, and the strategies behind the strongest signals. No position sizes, entries, stops or targets. `-s` adds a strategy file's rules as a tenth signal. Old `CAPITAL TARGET%` arguments are accepted and ignored |
 | `longterm [MONTHLY_BUDGET]` | 6-pillar scoring, Monte Carlo, SIP projections |
-| `daemon intraday [CAPITAL]` | Paper-trading loop on the NSE clock (IST, holidays included; `-m us` uses NYSE hours in ET): scan, enter at the open, trail stops every 60s, book half at T1, square off 15 minutes before the close, settle into `sim` history. Survives network blips, resumes the day after a restart, and squares off on Ctrl+C. **Never sends broker orders** |
+| `daemon intraday [CAPITAL] [--once]` | Paper-trading loop on the NSE clock (IST, holidays included; `-m us` uses NYSE hours in ET): scan, enter at the open, trail stops every 60s, book half at T1, square off 15 minutes before the close, settle into `sim` history, then wait for the next trading day (`--once` exits after one session). Survives network blips, resumes the day after a restart, and squares off on Ctrl+C. **Never sends broker orders** |
 | `daemon longterm` | Post-market scan: scores, portfolio check, alerts, tax-harvest ideas |
 | `sim start [CAPITAL] [TARGET%]` | Start a paper session with the bot's picks (default ₹25,000, 2%) on a trading day before the close |
 | `sim status` / `history [--json]` | Live P&L / record + confidence rating |
