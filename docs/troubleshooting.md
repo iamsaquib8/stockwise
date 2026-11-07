@@ -5,6 +5,8 @@ whether Yahoo Finance answers, the optional Redis cache, the AI model and your
 broker config, and exits with status 1 if market data is unreachable or the
 config file is invalid.
 
+Walkthroughs for the common jobs are in [What do you want to do?](guides.md).
+
 The messages below are quoted from StockWise. `...` stands for text that
 changes from run to run.
 
