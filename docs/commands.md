@@ -368,7 +368,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
 | `rebalance [--inflow N] [--drift N] [--json]` (or `portfolio rebalance`) | Trades to rebalance to targets (or equal weight); `--inflow` buys underweight assets with new cash without selling; `--drift` ignores minor deviations |
-| `harvest` | Tax-loss harvesting candidates |
+| `harvest [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale (see [below](#harvest)) |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
 | `tax advance [--fy 2025-26] [--paid [DATE:]AMOUNT]... [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
@@ -454,6 +454,25 @@ same way in `portfolio`, `dashboard`, `tui`, `serve`, `wealth`, `rebalance`,
 Older versions stored `portfolio add MF:120503` as `MF:120503.NS` (and
 `watch add` / `alert add` likewise); those symbols are repaired when the files
 load.
+
+### Harvest
+
+`harvest` lists what you could sell to book a loss, and which long-term winners
+you could sell to use this year's unused ₹1.25 lakh LTCG exemption. For India it
+follows FIFO, as a demat account does: to reach a losing lot you must sell the
+older lots first, so the row shows that whole sale (`shares`, and the net `st_pnl`
+and `lt_pnl` it books). If selling up to a losing lot books a net gain in all, the
+holding is not offered as a loss; `fifo_blocked` (and a note on screen) says how
+many shares you would sell and what the sale books. For the US you can choose lots,
+so only the losing lots are offered.
+
+`estimated_tax_saved` is how much the tax estimate falls when the loss is booked
+on top of this year's realized gains, so set-off order, the exemption and cess are
+counted; a loss with nothing to offset saves 0 and is carried forward. The
+remaining exemption is shared: each winner takes its part of it, biggest first,
+and the saving counts only that part. Holdings in another currency (US shares for
+`in`) are listed under `other_currency` and not counted; holdings taxed under
+other rules (crypto, debt funds, SGBs, gold and similar ETFs) under `other_rules`.
 
 ### Tax export
 
