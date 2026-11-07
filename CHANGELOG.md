@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The crates.io and PyPI description and keywords now mention portfolio, tax and the MCP server.
 
 ### Fixed
+- `import groww` and `import upstox`: a holdings file whose ISIN column holds text such as `₹12,34,567` no longer crashes the import; the cell is treated as not an ISIN ([#102](https://github.com/iamsaquib8/stockwise/issues/102)).
 - `import cas`: schemes you have fully redeemed are no longer skipped. When the statement covers every purchase, their redemptions are recorded as realized sales for `tax in`, `tax export in` and `tax advance`, and no holding is left. A redeemed scheme with units bought before the statement is listed as skipped, with the reason ([#90](https://github.com/iamsaquib8/stockwise/issues/90)).
 - `import`: a second tradebook for the same broker is merged with the first instead of replacing its lots and sales, so yearly Zerodha Console files can be imported in any order and re-importing a file changes nothing ([#83](https://github.com/iamsaquib8/stockwise/issues/83)).
 - `import` and `trade sync`: a buy and sell of the same share on one day are netted as an intraday sale before any older lot is touched, and `tax in`, `tax export in` and `tax advance` report intraday results separately instead of as 111A/112A gains from the oldest lot ([#84](https://github.com/iamsaquib8/stockwise/issues/84)).

@@ -76,8 +76,11 @@ fn number(s: &str) -> Option<f64> {
 
 fn is_isin(s: &str) -> bool {
     let s = s.trim();
+    // Check characters, not byte offsets: a cell such as `₹12,34,567` is 12
+    // bytes long but has no character boundary at byte 2.
     s.len() == 12
-        && s[..2].chars().all(|c| c.is_ascii_uppercase())
+        && s.is_ascii()
+        && s.chars().take(2).all(|c| c.is_ascii_uppercase())
         && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
@@ -943,6 +946,16 @@ mod tests {
         assert!(is_isin("INF179K01UT0"));
         assert!(!is_isin("RELIANCE"));
         assert!(!is_isin("ine002a01018"));
+    }
+
+    #[test]
+    fn is_isin_does_not_panic_on_non_ascii_cells() {
+        // 12 bytes, but byte 2 is inside `₹`: a byte slice would panic.
+        assert_eq!("₹12,34,567".len(), 12);
+        assert!(!is_isin("₹12,34,567"));
+        assert!(!is_isin("ÉÉ123456789"));
+        assert!(!is_isin("IN\u{e9}002A01018"));
+        assert!(!is_isin(""));
     }
 
     #[test]
