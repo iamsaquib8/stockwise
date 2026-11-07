@@ -159,20 +159,23 @@ fn shared_strings(xml: &str) -> Vec<String> {
         .collect()
 }
 
-/// `B12` → column index 1.
+/// Excel's last column, `XFD`: a worksheet has at most this many columns.
+const MAX_COLUMNS: usize = 16_384;
+
+/// `B12` → column index 1. `None` when there are no column letters or the
+/// column is past `XFD`, so a corrupt reference cannot ask for a huge row.
 fn column_index(cell_ref: &str) -> Option<usize> {
-    let letters: String = cell_ref
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect();
-    if letters.is_empty() {
-        return None;
+    let mut n = 0usize;
+    let mut any = false;
+    for b in cell_ref.bytes().take_while(u8::is_ascii_alphabetic) {
+        any = true;
+        n = n * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize;
+        // Stop before the value can overflow: it only grows with each letter.
+        if n > MAX_COLUMNS {
+            return None;
+        }
     }
-    Some(
-        letters.bytes().fold(0usize, |n, b| {
-            n * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize
-        }) - 1,
-    )
+    any.then(|| n - 1)
 }
 
 fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -216,9 +219,15 @@ fn sheet_rows(xml: &str, shared: &[String]) -> Vec<Vec<String>> {
                 Some("inlineStr") => text_runs(body),
                 _ => raw_value(),
             };
-            let col = attr(&tag, "r")
-                .and_then(column_index)
-                .unwrap_or(cells.len());
+            // A cell without a reference follows the previous one; a cell
+            // whose reference is not a valid column is dropped.
+            let col = match attr(&tag, "r") {
+                Some(r) => match column_index(r) {
+                    Some(col) => col,
+                    None => continue,
+                },
+                None => cells.len(),
+            };
             if col >= cells.len() {
                 cells.resize(col + 1, String::new());
             }
@@ -411,6 +420,35 @@ mod tests {
             "{footer:?}"
         );
         assert!(footer[1..].iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn column_index_is_bounded_to_excels_last_column() {
+        assert_eq!(column_index("A1"), Some(0));
+        assert_eq!(column_index("b12"), Some(1));
+        assert_eq!(column_index("Z1"), Some(25));
+        assert_eq!(column_index("AA1"), Some(26));
+        // XFD is column 16,384, index 16,383: the last one allowed.
+        // X=24, F=6, D=4: ((24 * 26) + 6) * 26 + 4 = 16,384.
+        assert_eq!(column_index("XFD1"), Some(16_383));
+        assert_eq!(column_index("XFE1"), None);
+        assert_eq!(column_index("ZZZZZ1"), None);
+        // Enough letters to overflow a usize if folded without a bound.
+        assert_eq!(column_index(&"Z".repeat(64)), None);
+        assert_eq!(column_index("1"), None);
+        assert_eq!(column_index(""), None);
+    }
+
+    #[test]
+    fn hostile_cell_references_are_dropped_not_allocated() {
+        // `ZZZZZZZZ1` would have resized the row to about 2e11 strings; a huge
+        // row number is ignored because rows are read in document order.
+        let xml = r#"<sheetData><row r="99999999999999999999"><c r="A99999999999999999999"><v>1</v></c><c r="ZZZZZZZZ1"><v>evil</v></c><c r="C1"><v>3</v></c></row></sheetData>"#;
+        let rows = sheet_rows(xml, &[]);
+        assert_eq!(rows, vec![vec!["1", "", "3"]]);
+        // A cell with no reference at all still follows the previous one.
+        let rows = sheet_rows(r#"<row><c s="1"><v>x</v></c><c s="1"><v>y</v></c></row>"#, &[]);
+        assert_eq!(rows, vec![vec!["x", "y"]]);
     }
 
     #[test]
