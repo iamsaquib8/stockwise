@@ -200,6 +200,7 @@ fn compute_signal(
     lows: &[f64],
     volumes: &[u64],
     opens: &[f64],
+    prior: Option<crate::api::PriorSession>,
     custom: Option<StrategySignal>,
 ) -> IntradaySignal {
     let mut strategies: Vec<StrategySignal> = custom.into_iter().collect();
@@ -339,12 +340,11 @@ fn compute_signal(
     }
 
     // ── Strategy 6: Support/Resistance Bounce ──
-    let n = highs.len().min(lows.len()).min(closes.len());
     let (mut near_support, mut near_resistance) = (false, false);
     let (mut pivot_val, mut s1_val, mut r1_val) = (None, None, None);
-    if n > 1 {
-        let (pivot, r1, _r2, _r3, s1, _s2, _s3) =
-            technical::pivot_points(highs[n - 1], lows[n - 1], closes[n - 1]);
+    // Pivots come from the last completed session, not today's live bar.
+    if let Some(p) = prior {
+        let (pivot, r1, _r2, _r3, s1, _s2, _s3) = technical::pivot_points(p.high, p.low, p.close);
         pivot_val = Some(pivot);
         s1_val = Some(s1);
         r1_val = Some(r1);
@@ -912,8 +912,9 @@ pub async fn scan_intraday_with(
             Some(rule) => custom_rule_signal(client, &symbol, rule).await?,
             None => None,
         };
+        let prior = chart.prior_session(chrono::Utc::now(), market);
         let signal = compute_signal(
-            &symbol, quote, price, &closes, &highs, &lows, &volumes, &opens, custom,
+            &symbol, quote, price, &closes, &highs, &lows, &volumes, &opens, prior, custom,
         );
         signals.push(signal);
     }

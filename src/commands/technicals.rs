@@ -909,16 +909,32 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
     }
 
     let current = *closes.last().unwrap();
-    let last_high = *highs.last().unwrap();
-    let last_low = *lows.last().unwrap();
-    let last_close = *closes.last().unwrap();
 
-    let (pivot, r1, r2, r3, s1, s2, s3) = technical::pivot_points(last_high, last_low, last_close);
+    // Pivot points come from the last completed daily session, whatever
+    // `-p` is: a weekly bar would give the week's range and a 5-minute bar
+    // the last five minutes.
+    let daily = if period_to_interval(period) == "1d" {
+        None
+    } else {
+        Some(client.get_chart(&resolved, "1mo", "1d").await?)
+    };
+    let Some(prior) = daily
+        .as_ref()
+        .unwrap_or(&chart)
+        .prior_session(chrono::Utc::now(), market)
+    else {
+        bail!("No completed trading session found to build pivot points from");
+    };
+    let (pivot, r1, r2, r3, s1, s2, s3) =
+        technical::pivot_points(prior.high, prior.low, prior.close);
 
     print_header(&format!("Support & Resistance: {}", resolved));
     println!("  Current Price: {}\n", format_price(current, cur).bold());
 
-    print_section("Classic Pivot Points");
+    print_section(&format!(
+        "Classic Pivot Points (from the {} session)",
+        prior.date.format("%d %b")
+    ));
     print_kv(
         "R3 (Resistance)",
         &format!("{}{:.2}", csym, r3).red().to_string(),
