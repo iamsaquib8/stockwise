@@ -699,6 +699,10 @@ struct YahooSession {
 /// not started more often than this.
 const CRUMB_RENEW_AFTER: Duration = Duration::from_secs(60);
 
+/// After a failed handshake the error is returned from memory this long
+/// instead of starting another handshake.
+const HANDSHAKE_FAILURE_TTL: Duration = Duration::from_secs(45);
+
 /// Stands in for the crumb in URLs built before the session exists. `fetch`
 /// swaps in the real crumb, opening the session first if needed.
 const CRUMB_PLACEHOLDER: &str = "STOCKWISE_CRUMB_PLACEHOLDER";
@@ -739,6 +743,11 @@ pub struct YahooClient {
     /// an HTTP 401. Held across the handshake, so concurrent callers wait
     /// for one handshake instead of each starting their own.
     session: tokio::sync::Mutex<Option<YahooSession>>,
+    /// When the last handshake failed and what it said. Crumb requests within
+    /// [`HANDSHAKE_FAILURE_TTL`] get this error back without another
+    /// handshake (3 cookie + 3 crumb attempts, with sleeps and connect
+    /// timeouts) against a server that has just refused one.
+    handshake_failure: Mutex<Option<(Instant, String)>>,
     crumb_renew_after: Duration,
     last_request: Mutex<Instant>,
     cache: SharedCache,
@@ -786,6 +795,7 @@ impl YahooClient {
         Ok(Self {
             client,
             session: tokio::sync::Mutex::new(None),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: CRUMB_RENEW_AFTER,
             cache,
@@ -797,14 +807,15 @@ impl YahooClient {
     }
 
     /// The current crumb and its generation, opening the session on first
-    /// use. A failed handshake is not remembered, so the next crumb request
-    /// tries again; requests that need no crumb never see the error.
+    /// use. A failed handshake is remembered for [`HANDSHAKE_FAILURE_TTL`]:
+    /// crumb requests in that time get the same error at once, then the next
+    /// one tries again. Requests that need no crumb never see the error.
     async fn crumb_now(&self) -> Result<(String, u64)> {
         let mut slot = self.session.lock().await;
         if let Some(s) = slot.as_ref() {
             return Ok((s.crumb.clone(), s.generation));
         }
-        let crumb = self.handshake().await?;
+        let crumb = self.handshake_remembering_failure().await?;
         *slot = Some(YahooSession {
             crumb: crumb.clone(),
             generation: 1,
@@ -825,13 +836,35 @@ impl YahooClient {
             Some(s) => s.generation + 1,
             None => 1,
         };
-        let crumb = self.handshake().await?;
+        let crumb = self.handshake_remembering_failure().await?;
         *slot = Some(YahooSession {
             crumb: crumb.clone(),
             generation,
             opened: Instant::now(),
         });
         Ok(Some(crumb))
+    }
+
+    /// [`Self::handshake`], except that a failure within the last
+    /// [`HANDSHAKE_FAILURE_TTL`] is returned again without a new attempt.
+    /// Called with the session lock held, so callers queue behind one attempt.
+    async fn handshake_remembering_failure(&self) -> Result<String> {
+        if let Some((at, msg)) = self.handshake_failure.lock().expect("lock").as_ref()
+            && at.elapsed() < HANDSHAKE_FAILURE_TTL
+        {
+            bail!("{msg}");
+        }
+        match self.handshake().await {
+            Ok(crumb) => {
+                *self.handshake_failure.lock().expect("lock") = None;
+                Ok(crumb)
+            }
+            Err(e) => {
+                *self.handshake_failure.lock().expect("lock") =
+                    Some((Instant::now(), format!("{e:#}")));
+                Err(e)
+            }
+        }
     }
 
     async fn handshake(&self) -> Result<String> {
@@ -865,6 +898,7 @@ impl YahooClient {
                 generation: 1,
                 opened: Instant::now(),
             })),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: CRUMB_RENEW_AFTER,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
@@ -887,6 +921,7 @@ impl YahooClient {
                 .build()
                 .expect("HTTP client builds"),
             session: tokio::sync::Mutex::new(None),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: Duration::ZERO,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
@@ -908,6 +943,7 @@ impl YahooClient {
                 generation: 1,
                 opened: Instant::now(),
             })),
+            handshake_failure: Mutex::new(None),
             last_request: Mutex::new(Instant::now() - Duration::from_secs(1)),
             crumb_renew_after: CRUMB_RENEW_AFTER,
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
@@ -1600,6 +1636,38 @@ mod tests {
         let err = client.quote_summary("TCS.NS", &["financialData"]).await;
         let msg = format!("{:#}", err.unwrap_err());
         assert!(msg.contains("rate limited"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_handshake_is_remembered_for_a_while() {
+        let server =
+            crate::testutil::MockServer::start(vec![(429, "Too Many Requests".into())]).await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+        let modules = ["financialData"];
+
+        let first = client.quote_summary("AAA.NS", &modules).await.unwrap_err();
+        let after_one = server.requests().len();
+        assert!(format!("{first:#}").contains("rate limited"), "{first:#}");
+        assert_eq!(
+            after_one,
+            1 + MAX_RETRIES as usize,
+            "one cookie try, three crumb tries"
+        );
+
+        for i in 0..10 {
+            let err = client
+                .quote_summary(&format!("S{i}.NS"), &modules)
+                .await
+                .unwrap_err();
+            assert_eq!(format!("{err:#}"), format!("{first:#}"));
+        }
+        assert_eq!(server.requests().len(), after_one, "no further handshakes");
+
+        // Once the memory expires the next call tries again.
+        *client.handshake_failure.lock().unwrap() =
+            Some((Instant::now() - HANDSHAKE_FAILURE_TTL, "old".into()));
+        client.quote_summary("BBB.NS", &modules).await.unwrap_err();
+        assert!(server.requests().len() > after_one);
     }
 
     #[tokio::test]
