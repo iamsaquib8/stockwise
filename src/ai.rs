@@ -22,6 +22,77 @@ pub(crate) fn ollama_url() -> String {
         _ => DEFAULT_OLLAMA_URL.to_string(),
     }
 }
+
+/// Set to `1` to allow plain `http://` to an Ollama server that is not on
+/// this computer. Environment only, never the config file.
+pub(crate) const ALLOW_REMOTE_OLLAMA_ENV: &str = "STOCKWISE_ALLOW_REMOTE_OLLAMA";
+
+/// The host (and port) of an Ollama URL, without any user:password part.
+fn url_host_label(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => match (u.host_str(), u.port()) {
+            (Some(h), Some(p)) => format!("{h}:{p}"),
+            (Some(h), None) => h.to_string(),
+            _ => "an unknown host".to_string(),
+        },
+        Err(_) => "an unknown host".to_string(),
+    }
+}
+
+/// True when the URL points at this computer: `localhost`, `127.0.0.0/8` or
+/// `::1`. An unparseable URL is not loopback.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether the Ollama server named by `OLLAMA_HOST` is somewhere else.
+pub(crate) fn ollama_is_remote() -> bool {
+    !is_loopback_url(&ollama_url())
+}
+
+/// Host of the configured Ollama server, for messages.
+pub(crate) fn ollama_host_label() -> String {
+    url_host_label(&ollama_url())
+}
+
+/// Why Ollama at `url` may not be used: prompts carry holdings, lots and tax
+/// figures, and plain HTTP to another machine sends them readable to anyone on
+/// the path. `None` when the host is this computer, uses HTTPS, or `allow`
+/// (the opt-in) is set.
+pub(crate) fn remote_ollama_problem(url: &str, allow: bool) -> Option<String> {
+    if is_loopback_url(url) || allow || url.starts_with("https://") {
+        return None;
+    }
+    Some(format!(
+        "OLLAMA_HOST points at {}, which is not this computer, over plain http://. StockWise \
+         would send your questions and what the tools return (holdings, lots, tax figures) \
+         there unencrypted. Use an https:// URL, or a tunnel to localhost, or set {}=1 if you \
+         trust that network.",
+        url_host_label(url),
+        ALLOW_REMOTE_OLLAMA_ENV
+    ))
+}
+
+fn remote_ollama_allowed() -> bool {
+    std::env::var(ALLOW_REMOTE_OLLAMA_ENV).is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 const DEFAULT_MODEL: &str = "qwen3:14b";
 
 /// AI model: `STOCKWISE_MODEL`, then `model` in the config file, then the
@@ -225,7 +296,16 @@ impl AiClient {
     // Sync constructor for backward compat (no Redis)
     pub fn new() -> Self {
         match configured_provider() {
-            Ok(provider) => Self::with_provider(provider, None, None),
+            Ok(provider) => {
+                let mut ai = Self::with_provider(provider, None, None);
+                // Refuse plain http:// to another machine before anything is sent.
+                if provider == AiProvider::Ollama
+                    && let Some(problem) = remote_ollama_problem(&ollama_url(), remote_ollama_allowed())
+                {
+                    ai.config_error = Some(problem);
+                }
+                ai
+            }
             // Never guess where to send data: AI stays off until it's fixed.
             Err(e) => {
                 let mut ai = Self::with_provider(AiProvider::Ollama, None, None);
@@ -1056,6 +1136,43 @@ impl StockData {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_http_to_another_machine_is_refused_unless_opted_in() {
+        use super::{is_loopback_url, remote_ollama_problem};
+        for local in [
+            "http://localhost:11434",
+            "http://LOCALHOST:11434",
+            "http://127.0.0.1:11434",
+            "http://127.1.2.3:11434",
+            "http://[::1]:11434",
+            "http://ollama.localhost:11434",
+        ] {
+            assert!(is_loopback_url(local), "{local}");
+            assert_eq!(remote_ollama_problem(local, false), None, "{local}");
+        }
+        for remote in [
+            "http://203.0.113.5:11434",
+            "http://192.168.1.20:11434",
+            "http://gpu-box:11434",
+            "http://localhost.evil.example:11434",
+            "http://0.0.0.0:11434",
+            "not a url",
+        ] {
+            assert!(!is_loopback_url(remote), "{remote}");
+        }
+        let msg = remote_ollama_problem("http://203.0.113.5:11434", false).unwrap();
+        assert!(
+            msg.contains("203.0.113.5:11434") && msg.contains("STOCKWISE_ALLOW_REMOTE_OLLAMA"),
+            "{msg}"
+        );
+        // Opt-in, or HTTPS, lets it through.
+        assert_eq!(remote_ollama_problem("http://203.0.113.5:11434", true), None);
+        assert_eq!(remote_ollama_problem("https://gpu.example.com", false), None);
+        // A password in the URL never reaches a message.
+        let msg = remote_ollama_problem("http://me:hunter2@203.0.113.5:11434", false).unwrap();
+        assert!(!msg.contains("hunter2") && !msg.contains("me:"), "{msg}");
+    }
+
     use super::*;
     use crate::api::Quote;
 
