@@ -1,1 +1,0 @@
-- `trade`: a quote of 0 (a halted stock) or an invalid price no longer counts as a price, so a market order cannot pass `max_order_value` as worth nothing. With a cap set and no usable price the order is refused with "Cannot estimate the order value".

@@ -1,1 +1,0 @@
-- `import` and `portfolio add` no longer apply HDFC Bank's 2019 split a second time to HDFC (or Mindtree) lots restated after the merger: 25 HDFC bought in 2018 stay 42 HDFCBANK shares at the same total cost, and only splits and bonuses after the merger date are applied.

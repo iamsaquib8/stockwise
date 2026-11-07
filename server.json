@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://iamsaquib8.github.io/stockwise/ai.html",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "packages": [
     {
       "registryType": "cargo",
       "identifier": "stockwise",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "transport": {
         "type": "stdio"
       },
@@ -34,7 +34,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/iamsaquib8/stockwise:0.8.0",
+      "identifier": "ghcr.io/iamsaquib8/stockwise:0.8.1",
       "transport": {
         "type": "stdio"
       },

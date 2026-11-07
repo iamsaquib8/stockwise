@@ -1,1 +1,0 @@
-- Reading an expense-ratio spreadsheet no longer reserves memory from the file's own size claim, and refuses a sheet that inflates past 64 MiB, so a crafted `.xlsx` cannot crash the program.

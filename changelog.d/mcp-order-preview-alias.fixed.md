@@ -1,1 +1,0 @@
-- MCP `order_preview`: a symbol that StockWise's quote lookup rewrites (such as `HDFC` or `L&T`) is refused with the NSE ticker to use (`HDFCBANK`, `LT`), so the preview always prices the instrument the `trade` command will send. For quoted symbols it also tells Windows `cmd.exe` users to use double quotes.
