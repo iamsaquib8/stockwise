@@ -61,17 +61,25 @@ fn disclaimer() -> &'static str {
     t(score::DISCLAIMER)
 }
 
-fn load_replay() -> Result<(Replay, Tape)> {
+/// The running replay, without its price file. `sim replay end` scores from
+/// the marks and fills saved in the replay itself, so it must work even when
+/// the price file is gone.
+fn load_running_replay() -> Result<Replay> {
     let Some(r) = Replay::load()? else {
         bail!(
             "No replay is running. Start one with `stockwise sim replay start covid-crash-2020` \
              (`stockwise sim replay list` shows them all)."
         );
     };
+    Ok(r)
+}
+
+fn load_replay() -> Result<(Replay, Tape)> {
+    let r = load_running_replay()?;
     let tape = Tape::load()?;
     if !tape.has(&r.scenario.benchmark) {
         bail!(
-            "The replay's price file ({}) is missing or damaged. Run `stockwise sim replay end` and start again.",
+            "The replay's price file ({}) is missing or damaged. `stockwise sim replay end` still scores the run so far; then start again.",
             tape::FILE
         );
     }
@@ -1075,7 +1083,7 @@ fn run_json(run: &RunResult, debrief: &str) -> Value {
 // ── sim replay end ──
 
 pub fn cmd_replay_end(fmt: Format) -> Result<()> {
-    let (mut r, _tape) = load_replay()?;
+    let mut r = load_running_replay()?;
     let today = chrono::Local::now().date_naive();
     let mut profile = Profile::load()?;
     let mut challenge_badges = Vec::new();

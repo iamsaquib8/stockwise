@@ -1,0 +1,106 @@
+{
+  "scenario": {
+    "name": "leak",
+    "title": "Leak test",
+    "market": "in",
+    "from": "2020-03-02",
+    "to": "2020-03-11",
+    "benchmark": "^NSEI",
+    "benchmark_name": "NIFTY 50",
+    "capital": 100000.0,
+    "description": "",
+    "debrief": "",
+    "universe": [
+      {
+        "symbol": "AAA.NS",
+        "sector": "IT"
+      },
+      {
+        "symbol": "BBB.NS",
+        "sector": "Energy"
+      }
+    ]
+  },
+  "calendar": [
+    "2020-03-02",
+    "2020-03-03",
+    "2020-03-04",
+    "2020-03-05",
+    "2020-03-06",
+    "2020-03-07",
+    "2020-03-08",
+    "2020-03-09",
+    "2020-03-10",
+    "2020-03-11"
+  ],
+  "day": 3,
+  "capital": 100000.0,
+  "cash": 89871.0391679587,
+  "costs": "auto",
+  "positions": {
+    "AAA.NS": {
+      "qty": 100,
+      "avg_price": 101.0505,
+      "stop": 95.0,
+      "target": null,
+      "opened": "2020-03-03"
+    }
+  },
+  "orders": [],
+  "fills": [
+    {
+      "date": "2020-03-03",
+      "symbol": "AAA.NS",
+      "side": "buy",
+      "qty": 100,
+      "price": 101.0505,
+      "charges": 23.91,
+      "reason": "order",
+      "with_stop": true,
+      "weight_percent": 10.0
+    }
+  ],
+  "marks": [
+    {
+      "date": "2020-03-02",
+      "equity": 100000.0,
+      "invested": 0.0,
+      "flow": 0.0,
+      "benchmark": 9000.0,
+      "positions": 0,
+      "sectors": 0
+    },
+    {
+      "date": "2020-03-03",
+      "equity": 99971.0391679587,
+      "invested": 10100.0,
+      "flow": 0.0,
+      "benchmark": 9001.0,
+      "positions": 1,
+      "sectors": 1
+    },
+    {
+      "date": "2020-03-04",
+      "equity": 100071.0391679587,
+      "invested": 10200.0,
+      "flow": 0.0,
+      "benchmark": 9002.0,
+      "positions": 1,
+      "sectors": 1
+    },
+    {
+      "date": "2020-03-05",
+      "equity": 100171.0391679587,
+      "invested": 10300.0,
+      "flow": 0.0,
+      "benchmark": 9003.0,
+      "positions": 1,
+      "sectors": 1
+    }
+  ],
+  "costs_paid": 28.960832041299952,
+  "next_id": 2,
+  "challenge": null,
+  "finished_challenges": [],
+  "contribution": null
+}

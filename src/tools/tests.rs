@@ -522,6 +522,32 @@ async fn order_preview_sends_nothing_and_returns_the_command() {
 }
 
 #[tokio::test]
+async fn order_preview_quotes_symbols_a_shell_would_split() {
+    let mut f = Fixture::default();
+    f.quotes.push(quote("M&M.NS", Some(3000.0), 0.0, "INR"));
+    f.quotes
+        .push(quote("BAJAJ-AUTO.NS", Some(9000.0), 0.0, "INR"));
+    let mut c = ToolContext::new(f, Market::In);
+    c.allow_orders = true;
+    let args = |symbol: &str| json!({"side": "buy", "symbol": symbol, "quantity": 2, "limit": 3000, "broker": "zerodha"});
+    let mm = c.call("order_preview", &args("M&M")).await.unwrap();
+    assert_eq!(
+        mm["data"]["command"],
+        "stockwise trade buy 'M&M' 2 --broker zerodha --limit 3000"
+    );
+    assert_eq!(
+        mm["data"]["dry_run_command"],
+        "stockwise trade buy 'M&M' 2 --broker zerodha --limit 3000 --dry-run"
+    );
+    // Plain symbols, hyphens included, stay unquoted.
+    let bajaj = c.call("order_preview", &args("BAJAJ-AUTO")).await.unwrap();
+    assert_eq!(
+        bajaj["data"]["command"],
+        "stockwise trade buy BAJAJ-AUTO 2 --broker zerodha --limit 3000"
+    );
+}
+
+#[tokio::test]
 async fn failures_are_errors_the_model_can_read() {
     let f = Fixture::default();
     *f.fail.lock().unwrap() = Some("Yahoo Finance is unreachable".into());

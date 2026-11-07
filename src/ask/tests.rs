@@ -79,6 +79,76 @@ async fn ollama_runs_tool_calls_and_returns_the_answer() {
     assert_eq!(result["note"], NOTE);
 }
 
+/// A source whose local data is corrupt and whose market data fails with a
+/// transport error that carries the Yahoo crumb.
+struct Leaky;
+
+impl crate::views::DataSource for Leaky {
+    async fn quotes(&self, _: &[&str]) -> Result<Vec<crate::api::Quote>> {
+        anyhow::bail!("request to https://q.yahoo.com/v7?symbols=TCS.NS&crumb=SECRETCRUMB failed")
+    }
+    async fn chart(&self, _: &str, _: &str, _: &str) -> Result<crate::api::ChartData> {
+        anyhow::bail!("down")
+    }
+    async fn search(&self, _: &str) -> Result<Vec<crate::api::SearchResult>> {
+        anyhow::bail!("down")
+    }
+    fn portfolio(&self) -> Result<crate::portfolio::Portfolio> {
+        Err(anyhow::anyhow!(
+            "Failed to parse /Users/alice/.local/share/stockwise/portfolio.json: expected value"
+        ))
+    }
+}
+
+#[tokio::test]
+async fn tool_errors_reach_the_model_without_paths_or_the_crumb() {
+    let server = MockServer::start(
+        vec![
+            json!({
+                "message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "portfolio_summary", "arguments": {}}},
+                    {"function": {"name": "quote", "arguments": {"symbols": ["TCS"]}}}
+                ]},
+                "done_reason": "stop",
+            }),
+            json!({
+                "message": {"role": "assistant", "content": "I could not read your data."},
+                "done_reason": "stop",
+            }),
+        ]
+        .into_iter()
+        .map(|r| (200, r.to_string()))
+        .collect(),
+    )
+    .await;
+    let ai = client(AiProvider::Ollama, &server.url);
+    let ctx = ToolContext::new(Leaky, Market::In);
+    let t = ask(&ai, &ctx, "What do I own?", &AskOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(t.steps.len(), 2);
+    assert!(t.steps.iter().all(|s| !s.ok));
+
+    // What the model was sent after the failures.
+    let sent = server.requests()[1].json().to_string();
+    assert!(
+        sent.contains("Could not read the local StockWise data"),
+        "{sent}"
+    );
+    assert!(
+        !sent.contains("alice") && !sent.contains("portfolio.json"),
+        "{sent}"
+    );
+    assert!(sent.contains("crumb=REDACTED"), "{sent}");
+    assert!(!sent.contains("SECRETCRUMB"), "{sent}");
+    // The transcript the user sees is scrubbed too.
+    let shown = serde_json::to_string(&t.steps).unwrap();
+    assert!(
+        !shown.contains("alice") && !shown.contains("SECRETCRUMB"),
+        "{shown}"
+    );
+}
+
 #[tokio::test]
 async fn ollama_models_without_tools_get_a_clear_error() {
     let server = MockServer::start(vec![(

@@ -624,7 +624,13 @@ pub async fn ask<D: DataSource>(
                 match ctx.call(&call.name, &call.args).await {
                     Ok(v) => (v, true, None),
                     Err(e) => {
-                        let msg = format!("{e:#}");
+                        // This text goes back to the model, which may be a
+                        // cloud one: no local paths, no Yahoo crumb. The full
+                        // error stays on this machine.
+                        let msg = crate::tools::client_error(&e);
+                        if opts.verbose && format!("{e:#}") != msg {
+                            eprintln!("    full error (not sent): {e:#}");
+                        }
                         (json!({ "error": msg }), false, Some(msg))
                     }
                 }

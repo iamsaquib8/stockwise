@@ -273,6 +273,29 @@ pub(super) fn check_cap(kind: BrokerKind, cap: Option<f64>, est_value: Option<f6
     }
 }
 
+/// An order sent with `--yes` has no typed confirmation, so the value cap is
+/// the only guard left against a wrong quantity. Refuse it unless the
+/// broker's config sets `max_order_value`. `--dry-run` places nothing and is
+/// exempt.
+pub(super) fn require_cap_for_unattended(
+    kind: BrokerKind,
+    opts: OrderOpts,
+    limits: &OrderLimits,
+) -> Result<()> {
+    if !opts.yes || opts.dry_run || limits.max_order_value.is_some() {
+        return Ok(());
+    }
+    let file = crate::store::path(kind.config_file())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| kind.config_file().into());
+    bail!(
+        "--yes skips the typed confirmation, so it needs a cap on the order value. Add \
+         \"max_order_value\": 50000 to {file} (your {} config), or leave out --yes and \
+         confirm by typing yes. --dry-run always works.",
+        kind.label()
+    )
+}
+
 /// Resolve, validate, preview, cap-check, confirm, and send one live order
 /// or GTT. Each guard exists because a typo in a shell command could
 /// otherwise spend real money. This is the only caller of
@@ -320,12 +343,20 @@ pub(super) async fn place_live_order(
     println!();
 
     check_cap(kind, guard.limits.max_order_value, est_value)?;
+    if guard.limits.max_order_value.is_none() && !opts.yes {
+        println!(
+            "  {}",
+            "No max_order_value set in your broker config: add one to cap any single order."
+                .dimmed()
+        );
+    }
 
     if opts.dry_run {
         println!("  {} Dry run — no order sent.\n", "✓".green());
         return Ok(Outcome::DryRun);
     }
     check_orders_enabled(kind, Some(&intent), &guard.limits)?;
+    require_cap_for_unattended(kind, opts, &guard.limits)?;
     let what = match intent {
         Intent::Order(_) => "place this order",
         Intent::Gtt { .. } => "create this GTT",
@@ -478,6 +509,9 @@ async fn run_order(
     check_args(qty, &intent)?;
     brokers::nse_symbol(symbol)?;
     let limits = brokers::order_limits(kind)?;
+    // Before logging in: an unattended order without a cap is refused
+    // without touching the broker.
+    require_cap_for_unattended(kind, opts, &limits)?;
     let broker = brokers::connect(kind).await?;
     let guard = Guard {
         limits,
@@ -1209,6 +1243,47 @@ mod tests {
         .await;
         assert!(matches!(out.unwrap(), Outcome::Sent(_)));
         assert_eq!(b.sent(), 1);
+    }
+
+    #[tokio::test]
+    async fn yes_without_a_cap_is_refused_but_dry_run_and_typing_yes_still_work() {
+        let b = FakeBroker::default();
+        let g = guard(Some(800.0), None, &say_yes);
+        let market = Intent::Order(OrderKind::Market);
+        // Unattended and uncapped: nothing is sent, and the error names the setting.
+        let err = place_live_order(&b, Side::Buy, "SBIN", 1000, market, YES, &g)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("max_order_value") && err.contains("--yes"),
+            "{err}"
+        );
+        assert_eq!(b.sent(), 0);
+        // The same refusal comes before any login (`run_order` calls it first).
+        assert!(require_cap_for_unattended(BrokerKind::Angel, YES, &g.limits).is_err());
+        // --dry-run places nothing, so it is not blocked.
+        let out = place_live_order(&b, Side::Buy, "SBIN", 1000, market, DRY, &g)
+            .await
+            .unwrap();
+        assert_eq!(out, Outcome::DryRun);
+        let dry_yes = OrderOpts {
+            yes: true,
+            dry_run: true,
+        };
+        assert!(require_cap_for_unattended(BrokerKind::Angel, dry_yes, &g.limits).is_ok());
+        // Typing yes at the prompt keeps working without a cap.
+        let out = place_live_order(&b, Side::Buy, "SBIN", 1, market, LIVE, &g)
+            .await
+            .unwrap();
+        assert!(matches!(out, Outcome::Sent(_)));
+        // With a cap, --yes works as before.
+        let capped = guard(Some(800.0), Some(5000.0), &never_confirm);
+        let out = place_live_order(&b, Side::Buy, "SBIN", 2, market, YES, &capped)
+            .await
+            .unwrap();
+        assert!(matches!(out, Outcome::Sent(_)));
+        assert_eq!(b.sent(), 2);
     }
 
     #[tokio::test]

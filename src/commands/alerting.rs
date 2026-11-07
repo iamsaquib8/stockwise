@@ -106,6 +106,23 @@ fn alert_key(a: &crate::alerts::Alert) -> String {
     key
 }
 
+/// The date a notification counts against. A per-session alert (today's
+/// change or volume) re-arms with the quote's own session, not the wall
+/// clock: on a weekend the quote still describes Friday, and a crypto
+/// quote's day turns over at Yahoo's midnight, not at midnight in `-m`'s
+/// time zone.
+fn rearm_date(
+    condition: crate::alerts::AlertCondition,
+    data: &crate::alerts::MarketData,
+    today: NaiveDate,
+) -> NaiveDate {
+    if condition.per_session() {
+        data.traded.unwrap_or(today)
+    } else {
+        today
+    }
+}
+
 fn is_due(symbol: &str, now: DateTime<Utc>) -> bool {
     alert_market(symbol).is_none_or(|m| clock::is_open(m, now))
 }
@@ -262,7 +279,12 @@ async fn check_alerts(
         let currency = d.currency.clone();
         let reading_text = alert.reading_text(&reading);
         let previous = state.fired.get(&key).copied();
-        let fire = state.should_notify_with(&key, hit, today, alert.condition.per_session());
+        let fire = state.should_notify_with(
+            &key,
+            hit,
+            rearm_date(alert.condition, &d, today),
+            alert.condition.per_session(),
+        );
         if verbose {
             let status = if fire {
                 "TRIGGERED".red().bold().to_string()
@@ -713,5 +735,66 @@ mod tests {
         assert_eq!(two.title, "StockWise: 2 alerts triggered");
         assert_eq!(two.body.lines().count(), 2);
         assert!(trigger_message(&[]).is_none());
+    }
+
+    #[test]
+    fn friday_s_move_is_not_announced_again_over_the_weekend() {
+        use crate::alerts::{Alert, AlertCondition, MarketData};
+        let mut store = AlertStore::default();
+        store.add("HDFCBANK.NS", AlertCondition::ChangeBelow, -3.0);
+        let alert: &Alert = &store.alerts[0];
+        let friday = day(21);
+        let quote = |today| MarketData {
+            change_percent: Some(-3.5),
+            today: Some(today),
+            traded: Some(friday),
+            ..Default::default()
+        };
+        // Friday: the move is live.
+        assert!(alert.evaluate(&quote(friday)).unwrap().hit);
+        // Saturday, Sunday and Monday before the open: the quote is still
+        // Friday's, so there is no reading and nothing to notify.
+        for d in [day(22), day(23), day(24)] {
+            assert!(alert.evaluate(&quote(d)).is_none(), "{d}");
+        }
+        // Level alerts read the live price whatever the day.
+        store.add("HDFCBANK.NS", AlertCondition::Below, 1500.0);
+        let level = MarketData {
+            price: Some(1400.0),
+            today: Some(day(22)),
+            traded: Some(friday),
+            ..Default::default()
+        };
+        assert!(store.alerts[1].evaluate(&level).unwrap().hit);
+    }
+
+    #[test]
+    fn crypto_alert_does_not_rearm_at_midnight_in_the_market_zone() {
+        use crate::alerts::{AlertCondition, MarketData};
+        // The quote's day is the same before and after midnight IST (which
+        // falls at 18:30 UTC): one notification, not two.
+        let data = MarketData {
+            change_percent: Some(6.0),
+            traded: Some(day(21)),
+            ..Default::default()
+        };
+        let mut s = WatchState::default();
+        let rearm = |today| rearm_date(AlertCondition::ChangeAbove, &data, today);
+        assert!(s.should_notify_with("btc", true, rearm(day(21)), true));
+        // 00:30 IST: the wall-clock date is now the 22nd.
+        assert!(!s.should_notify_with("btc", true, rearm(day(22)), true));
+        // Yahoo's day turns over: a new quote date re-arms it.
+        let next = MarketData {
+            traded: Some(day(22)),
+            ..data
+        };
+        assert!(s.should_notify_with(
+            "btc",
+            true,
+            rearm_date(AlertCondition::ChangeAbove, &next, day(22)),
+            true
+        ));
+        // A level alert still counts by the wall clock.
+        assert_eq!(rearm_date(AlertCondition::Above, &next, day(23)), day(23));
     }
 }

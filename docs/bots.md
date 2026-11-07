@@ -284,7 +284,7 @@ cached for a day). Every condition is listed in
 Each trigger is announced **once**: an alert fires when its condition becomes
 true, re-arms after the condition turns false again, and fires at most once a
 trading day. Day-change and volume-spike alerts describe one session, so they
-re-arm with each new session; `results-in` re-arms once the results date has
+re-arm with each new session, using the quote's own session date. Until today's session has traded they give no reading, so a weekend or holiday does not repeat Friday's move; `results-in` re-arms once the results date has
 passed. That
 memory lives in `alert_watch.json`, so a restart doesn't repeat
 notifications. If every configured channel fails, the trigger is not marked
