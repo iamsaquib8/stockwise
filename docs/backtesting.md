@@ -11,6 +11,8 @@ Strategies are small TOML files; the six built-ins are files too.
 
 ## Quick start
 
+> **Guide:** [Backtest and practise on past markets](guide-practice.md) walks through a backtest and a replay.
+
 ```bash
 stockwise backtest INFY -s macd                     # one stock, 2 years, Indian delivery costs
 stockwise backtest TCS -s rsi -P oversold=25        # change a parameter

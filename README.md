@@ -30,7 +30,8 @@ cargo binstall stockwise                                                        
 ```
 
 Also `.deb`/`.rpm`, Scoop, Nix and Docker — see [Install](docs/install.md) for
-every option. PyPI, Homebrew, winget and the AUR are not published yet. Building
+every option, and the [five-minute quickstart](docs/quickstart.md) for your
+first commands. PyPI, Homebrew, winget and the AUR are not published yet. Building
 from source needs Rust 1.97 or newer. Then run `stockwise doctor` to check your
 setup.
 
@@ -159,7 +160,22 @@ The [cheatsheet](docs/cheatsheet.md) has the commands people use most, and the
 ## Docs
 
 **[iamsaquib8.github.io/stockwise](https://iamsaquib8.github.io/stockwise/)** —
-install, cheatsheet, commands, markets, AI, backtesting, brokers,
+install, a [five-minute quickstart](docs/quickstart.md), guides by goal,
+and the reference.
+
+New here? [What do you want to do?](docs/guides.md) lists the guides:
+
+- [Import your trades and see true returns](docs/guide-portfolio.md)
+- [File your Indian capital-gains tax](docs/guide-tax.md)
+- [Check a stock or fund fast](docs/guide-research.md)
+- [Rebalance to target weights](docs/guide-rebalance.md)
+- [Use StockWise from Claude or Cursor](docs/guide-mcp.md)
+- [Set up alerts and the daemon](docs/guide-alerts.md)
+- [Backtest and practise on past markets](docs/guide-practice.md)
+- [Script it with JSON, CSV and jq](docs/guide-scripting.md)
+
+The reference has the [cheatsheet](docs/cheatsheet.md), the
+[commands](docs/commands.md), markets, AI, backtesting, brokers,
 [troubleshooting](docs/troubleshooting.md), and
 [how StockWise compares](docs/comparison.md) with other tools.
 

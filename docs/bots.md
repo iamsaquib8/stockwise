@@ -158,6 +158,8 @@ shareable card: `stockwise sim replay start covid-crash-2020`. See
 
 ## Daemon Mode
 
+> **Guide:** [Set up alerts and the daemon](guide-alerts.md#5-run-the-paper-trading-daemon-optional).
+
 Persistent background workers that run the bots continuously.
 
 ### Intraday Daemon
@@ -265,6 +267,8 @@ Shows: company info, price action, valuation (P/E, PEG, P/B, EV/EBITDA), profita
 ---
 
 ## Price and Technical Alerts
+
+> **Guide:** [Set up alerts and the daemon](guide-alerts.md) walks through alerts, notifications and cron.
 
 ```bash
 stockwise alert add TCS above 4200

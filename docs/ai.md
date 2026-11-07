@@ -140,6 +140,8 @@ usual notice.
 
 ## Use StockWise from AI assistants (MCP)
 
+> **Guide:** [Use StockWise from Claude or Cursor](guide-mcp.md) is a short walkthrough of this section.
+
 `stockwise mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server built on the official Rust SDK. AI assistants start it and call its
 tools; it runs on your machine with your data directory and needs no account.

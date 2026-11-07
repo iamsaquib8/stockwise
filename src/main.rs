@@ -4136,6 +4136,63 @@ mod tests {
         );
     }
 
+    /// Parse every `stockwise ...` line in the fenced `bash` blocks of a
+    /// Markdown file, plus its code spans; returns how many were checked.
+    fn check_doc_blocks(file: &str) -> usize {
+        let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), file);
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return 0;
+        };
+        let mut checked = check_doc_commands(file);
+        let mut in_bash = false;
+        for line in text.lines() {
+            if let Some(info) = line.strip_prefix("```") {
+                in_bash = !in_bash && info.trim() == "bash";
+                continue;
+            }
+            let line = line.trim();
+            if !in_bash || !line.starts_with("stockwise ") {
+                continue;
+            }
+            // Drop a trailing "# comment".
+            let line = line.split(" #").next().unwrap_or(line);
+            let args = shell_words(line);
+            if let Err(e) = Cli::try_parse_from(&args) {
+                use clap::error::ErrorKind;
+                if !matches!(e.kind(), ErrorKind::DisplayVersion | ErrorKind::DisplayHelp)
+                    && parse_bare_symbol_invocation(&args, Market::In).is_none()
+                {
+                    panic!("{file}: `{line}` does not parse:\n{e}");
+                }
+            }
+            checked += 1;
+        }
+        checked
+    }
+
+    #[test]
+    fn guide_commands_parse() {
+        let mut checked = 0;
+        for file in [
+            "docs/quickstart.md",
+            "docs/guides.md",
+            "docs/guide-portfolio.md",
+            "docs/guide-tax.md",
+            "docs/guide-research.md",
+            "docs/guide-rebalance.md",
+            "docs/guide-mcp.md",
+            "docs/guide-alerts.md",
+            "docs/guide-practice.md",
+            "docs/guide-scripting.md",
+        ] {
+            checked += check_doc_blocks(file);
+        }
+        assert!(
+            checked == 0 || checked > 100,
+            "only {checked} commands found in the guides"
+        );
+    }
+
     #[test]
     fn agent_skill_commands_parse() {
         let checked = check_doc_commands("skills/stockwise/SKILL.md");

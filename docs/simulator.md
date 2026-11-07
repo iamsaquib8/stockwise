@@ -23,6 +23,8 @@ For the bot-driven daily simulator (`sim start`, `sim settle`) see
 
 ## A five-minute tutorial
 
+> **Guide:** [Backtest and practise on past markets](guide-practice.md) puts this next to backtesting.
+
 ```bash
 stockwise sim replay list                       # the built-in scenarios
 stockwise sim replay start covid-crash-2020     # 3 Feb 2020, ₹1,00,000 of paper money

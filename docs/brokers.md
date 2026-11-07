@@ -380,6 +380,8 @@ preview says the path is experimental.
 
 ## Importing holdings
 
+> **Guide:** [Import your trades and see true returns](guide-portfolio.md) walks through a tradebook and CAS import.
+
 Import holdings from other brokers without manual entry:
 
 ```bash

@@ -3,6 +3,8 @@
 One page of the commands people use most. `stockwise <command> --help` shows
 every option; the [commands reference](commands.md) explains each one.
 
+For step-by-step walkthroughs, see [What do you want to do?](guides.md).
+
 Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 `-m jp`, `-m crypto`, `-m fx`, `-m commodity` … for other markets, or set
 `STOCKWISE_MARKET`. Many commands take `--json`, and tables take

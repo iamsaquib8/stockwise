@@ -69,6 +69,12 @@ stockwise doctor        # data directory, network, optional Redis/Ollama/keyring
 If a command fails, [Troubleshooting](troubleshooting.md) lists the common
 messages and what to do about each.
 
+## Next steps
+
+- Run the [five-minute quickstart](quickstart.md).
+- Pick a goal on [What do you want to do?](guides.md).
+- Something wrong? See [Troubleshooting](troubleshooting.md).
+
 ## Privacy
 
 StockWise sends no telemetry. The project counts downloads only from the

@@ -3,6 +3,9 @@
 `stockwise --help` lists every command by group; `stockwise <command> --help`
 shows its arguments. This page adds detail.
 
+Looking for a walkthrough instead? [What do you want to do?](guides.md) lists
+task-based guides, and each section below links to its guide.
+
 ## Global options
 
 | Option | Env var | Description |
@@ -73,6 +76,8 @@ network, invalid config file), `2` invalid arguments.
 
 ## Start here
 
+> **Guide:** [Quickstart: five minutes](quickstart.md) walks through the first commands.
+
 `stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise`
 prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
 `c` (compare), `p` (portfolio), `w` (watch), `ev` (events). The aliases are lowercase: a capital
@@ -92,6 +97,8 @@ always works. Common names resolve to NSE symbols
 | `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config. Exits 1 if market data is unreachable or the config file is invalid |
 
 ## Analysis
+
+> **Guide:** [Check a stock or fund fast](guide-research.md).
 
 | Command | Description |
 |---------|-------------|
@@ -119,6 +126,8 @@ always works. Common names resolve to NSE symbols
 `--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners.
 
 ## Market
+
+> **Guide:** [Check a stock or fund fast](guide-research.md#2-get-the-price).
 
 | Command | Description |
 |---------|-------------|
@@ -150,6 +159,8 @@ large caps for `nifty50` / `nifty100`, a built-in member list for `banknifty`
 and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
 
 ## Funds & F&O
+
+> **Guide:** [Check a stock or fund fast](guide-research.md#6-check-a-mutual-fund) covers funds and SIP returns.
 
 | Command | Description |
 |---------|-------------|
@@ -304,6 +315,8 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 
 ## Strategies & bots
 
+> **Guide:** [Backtest and practise on past markets](guide-practice.md) and [Set up alerts and the daemon](guide-alerts.md).
+
 | Command | Description |
 |---------|-------------|
 | `backtest <SYMBOL> [-s STRATEGY] [-P NAME=VALUE] [-p] [--json\|--csv]` | Backtest one stock after costs: net and gross return, buy & hold, CAGR, drawdown, Sharpe/Sortino, exposure, trades. Fills at the next bar's open. Strategies: `rsi` (default), `macd`, `sma`, `bb`, `vwap`, `mr`, or your own TOML file. Default `2y` |
@@ -350,6 +363,8 @@ Costs, fills, the metrics, walk-forward and the strategy file format are in
 
 ## Portfolio
 
+> **Guide:** [Import your trades and see true returns](guide-portfolio.md) and [Rebalance to target weights](guide-rebalance.md).
+
 Data lives in the directory shown by `stockwise doctor`.
 
 | Command | Description |
@@ -380,6 +395,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `pcorr` | Correlation between holdings from the days both traded, diversification warnings (`N/A` when two holdings share too few days) |
 
 ### Lots, sales and tax
+
+> **Guide:** [File your Indian capital-gains tax](guide-tax.md).
 
 Every purchase is a lot: quantity, price, date and where it came from
 (`manual`, `import:kite`, `broker:angel`, ...). `portfolio sell` takes shares
@@ -434,6 +451,8 @@ they leave out.
 
 ### Mutual funds and SGBs
 
+> **Guide:** [Import your trades](guide-portfolio.md#3-import-mutual-funds-from-a-cas) shows how to load a CAS.
+
 Holdings that Yahoo Finance doesn't quote are priced by StockWise itself, the
 same way in `portfolio`, `dashboard`, `tui`, `serve`, `wealth`, `rebalance`,
 `harvest`, `tax`, `portfolio sell` and `report portfolio`:
@@ -461,6 +480,8 @@ load.
 
 ### Harvest
 
+> **Guide:** [File your Indian capital-gains tax](guide-tax.md#2-look-at-harvest-candidates-before-31-march).
+
 `harvest` lists what you could sell to book a loss, and which long-term winners
 you could sell to use this year's unused ₹1.25 lakh LTCG exemption. For India it
 follows FIFO, as a demat account does: to reach a losing lot you must sell the
@@ -479,6 +500,8 @@ and the saving counts only that part. Holdings in another currency (US shares fo
 other rules (crypto, debt funds, SGBs, gold and similar ETFs) under `other_rules`.
 
 ### Tax export
+
+> **Guide:** [File your Indian capital-gains tax](guide-tax.md#4-export-the-schedule-for-your-itr).
 
 `tax export in` writes the realized sales of an Indian financial year as a
 spreadsheet laid out for ITR Schedule CG and Schedule 112A: one row per lot
@@ -519,6 +542,8 @@ shows how much of the taxable gain came from before 23 Jul 2024.
 
 ### Advance tax (India)
 
+> **Guide:** [File your Indian capital-gains tax](guide-tax.md#3-check-advance-tax).
+
 Under Section 208 and 211 of the Indian Income-tax Act, any taxpayer whose
 estimated tax liability for the financial year is ₹10,000 or more must pay
 advance tax in four quarterly instalments:
@@ -549,6 +574,8 @@ stockwise tax advance --json                      # programmatic JSON output
 - **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
 
 ### Benchmark and attribution
+
+> **Guide:** [Import your trades and see true returns](guide-portfolio.md#6-compare-with-the-index-and-look-through-your-funds).
 
 `portfolio benchmark` rebuilds what you held at each close of the period
 from your lots and sales (in today's share count, so splits don't break the
@@ -681,6 +708,8 @@ last year. Returns are assumptions, not promises.
 
 ## AI assistants
 
+> **Guide:** [Use StockWise from Claude or Cursor](guide-mcp.md).
+
 Both use the same read-only tools (quotes, history, technicals, risk, scorecards,
 insights, events, mutual funds, option chains, IPOs, screens, backtests, your
 portfolio, lots, tax estimate, advance tax, harvest and rebalance plans,
@@ -740,6 +769,8 @@ untested against a live account.
 | `man [--dir <DIR>]` | Print the `stockwise.1` man page, or write it plus one `stockwise-<command>.1` page per command into `DIR`, e.g. `stockwise man --dir ~/.local/share/man/man1` |
 
 ## Scripting with `--json` and `--csv`
+
+> **Guide:** [Script it with JSON, CSV and jq](guide-scripting.md).
 
 ```bash
 stockwise portfolio --json | jq '.totals'
@@ -862,6 +893,8 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 
 ## Alert conditions
 
+> **Guide:** [Set up alerts and the daemon](guide-alerts.md#2-add-alerts).
+
 `stockwise alert add <SYMBOL> <CONDITION> <NUMBER>`:
 
 | Condition | NUMBER | Fires when |
@@ -894,6 +927,8 @@ stockwise alert add TCS results-in 7
 Alerts saved by earlier versions keep working unchanged.
 
 ## Results and corporate calendar
+
+> **Guide:** [Check a stock or fund fast](guide-research.md#5-see-what-happened-and-what-the-data-says) and [Set up alerts and the daemon](guide-alerts.md).
 
 `stockwise calendar` lists what is coming up for your holdings and watchlist
 (`--holdings` or `--watchlist` for one of them, or name symbols), over the
