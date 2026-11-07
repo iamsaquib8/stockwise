@@ -71,12 +71,32 @@ impl Buildup {
         }
     }
 
+    /// How the build-up reads for the *contract's own price*: a call that
+    /// gains with rising open interest is bullish. For what it says about the
+    /// underlying, use [`Buildup::underlying_sentiment`]; the two differ for puts.
     pub fn sentiment(&self) -> &'static str {
         match self {
             Self::LongBuildup => "Bullish",
             Self::ShortCovering => "Mildly Bullish",
             Self::ShortBuildup => "Bearish",
             Self::LongUnwinding => "Mildly Bearish",
+        }
+    }
+
+    /// How the build-up reads for the *underlying*, which is how traders read
+    /// the chain. A call moves with the underlying, so it reads as
+    /// [`Buildup::sentiment`]. A put moves against it: put buying (price and
+    /// open interest up) is bearish, put writing (price down, open interest
+    /// up) is read as support and is bullish.
+    pub fn underlying_sentiment(&self, kind: OptionKind) -> &'static str {
+        match kind {
+            OptionKind::Call => self.sentiment(),
+            OptionKind::Put => match self {
+                Self::LongBuildup => "Bearish",
+                Self::ShortCovering => "Mildly Bearish",
+                Self::ShortBuildup => "Bullish",
+                Self::LongUnwinding => "Mildly Bullish",
+            },
         }
     }
 }
@@ -775,9 +795,20 @@ pub struct BuildupCount {
 }
 
 impl BuildupCount {
-    pub fn dominant_sentiment(&self) -> &'static str {
-        let bullish = self.long_buildup_oi + self.short_covering_oi;
-        let bearish = self.short_buildup_oi + self.long_unwinding_oi;
+    /// The side with the most open interest, as it reads for the underlying
+    /// (see [`Buildup::underlying_sentiment`]): `Bullish`, `Bearish` or `Neutral / Mixed`.
+    pub fn dominant_sentiment(&self, kind: OptionKind) -> &'static str {
+        let (up, down) = match kind {
+            OptionKind::Call => (
+                self.long_buildup_oi + self.short_covering_oi,
+                self.short_buildup_oi + self.long_unwinding_oi,
+            ),
+            OptionKind::Put => (
+                self.short_buildup_oi + self.long_unwinding_oi,
+                self.long_buildup_oi + self.short_covering_oi,
+            ),
+        };
+        let (bullish, bearish) = (up, down);
         if bullish == 0 && bearish == 0 {
             "Neutral"
         } else if bullish > (bearish as f64 * 1.3) as u64 {
@@ -1871,5 +1902,64 @@ mod tests {
         assert_eq!(breakdown.calls.short_buildup_oi, 80000);
         assert_eq!(breakdown.puts.short_covering_oi, 10000);
         assert_eq!(breakdown.puts.short_buildup_oi, 70000);
+    }
+    #[test]
+    fn put_build_up_reads_the_other_way_for_the_underlying() {
+        use Buildup::*;
+        // Calls move with the underlying.
+        for (b, call) in [
+            (LongBuildup, "Bullish"),
+            (ShortCovering, "Mildly Bullish"),
+            (ShortBuildup, "Bearish"),
+            (LongUnwinding, "Mildly Bearish"),
+        ] {
+            assert_eq!(b.underlying_sentiment(OptionKind::Call), call, "{b:?}");
+        }
+        // Puts move against it: buying puts is bearish, writing them is bullish.
+        for (b, put) in [
+            (LongBuildup, "Bearish"),
+            (ShortCovering, "Mildly Bearish"),
+            (ShortBuildup, "Bullish"),
+            (LongUnwinding, "Mildly Bullish"),
+        ] {
+            assert_eq!(b.underlying_sentiment(OptionKind::Put), put, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn a_chain_full_of_put_buying_reads_bearish() {
+        // Put premiums up with open interest up on every strike: traders are
+        // buying protection. The calls are quiet.
+        let put_buying = |strike: f64| ChainRow {
+            strike,
+            call: None,
+            put: Some(Contract {
+                open_interest: Some(50_000),
+                oi_change: Some(4_000),
+                price_change: Some(12.0),
+                last: Some(90.0),
+                ..Default::default()
+            }),
+        };
+        let rows = vec![put_buying(24_000.0), put_buying(24_500.0)];
+        let b = buildup_breakdown(&rows);
+        assert_eq!(b.puts.long_buildup_oi, 100_000);
+        assert_eq!(b.puts.dominant_sentiment(OptionKind::Put), "Bearish");
+        // The same counts on the call side would read bullish.
+        assert_eq!(b.puts.dominant_sentiment(OptionKind::Call), "Bullish");
+        // Heavy put writing (price down, open interest up) reads bullish.
+        let writing = ChainRow {
+            strike: 24_000.0,
+            call: None,
+            put: Some(Contract {
+                open_interest: Some(50_000),
+                oi_change: Some(4_000),
+                price_change: Some(-12.0),
+                last: Some(60.0),
+                ..Default::default()
+            }),
+        };
+        let b = buildup_breakdown(&[writing]);
+        assert_eq!(b.puts.dominant_sentiment(OptionKind::Put), "Bullish");
     }
 }

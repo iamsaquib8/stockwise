@@ -447,6 +447,78 @@ pub struct ChartData {
     pub events: Option<ChartEvents>,
 }
 
+/// The last completed daily session's range, the input to pivot levels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriorSession {
+    pub date: chrono::NaiveDate,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+impl ChartData {
+    /// High, low and close of the last *completed* session in a daily chart,
+    /// for classic pivot points, which come from the previous session. While
+    /// today's session is still running (the market is open or has not
+    /// closed yet, or the market never closes, like crypto), the last bar is
+    /// today's live one and is skipped. Bars missing a high, low or close are
+    /// ignored. Only meaningful for `1d` bars: a weekly bar would be a week.
+    pub fn prior_session(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        market: crate::market::Market,
+    ) -> Option<PriorSession> {
+        let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
+        let q = self.indicators.quote.first()?;
+        let (highs, lows, closes) = (q.high.as_deref()?, q.low.as_deref()?, q.close.as_deref()?);
+        let mut bars: Vec<PriorSession> = self
+            .timestamp
+            .as_deref()?
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ts)| {
+                Some(PriorSession {
+                    date: chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?.date_naive(),
+                    high: (*highs.get(i)?)?,
+                    low: (*lows.get(i)?)?,
+                    close: (*closes.get(i)?)?,
+                })
+            })
+            .collect();
+        let today = crate::clock::session_date(market, now);
+        let running = bars.last().is_some_and(|b| {
+            b.date == today && crate::clock::close_at(market, today).is_none_or(|c| now < c)
+        });
+        if running {
+            bars.pop();
+        }
+        bars.pop()
+    }
+
+    /// Closing prices with the session date of each bar, dated in the
+    /// exchange's time zone (`gmtoffset`; three hours of slack absorb a
+    /// daylight-saving change since). Bars without a close are skipped.
+    pub fn dated_closes(&self) -> Vec<(chrono::NaiveDate, f64)> {
+        let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
+        let closes = self
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_deref())
+            .unwrap_or_default();
+        self.timestamp
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .zip(closes)
+            .filter_map(|(ts, close)| {
+                let date = chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?;
+                Some((date.date_naive(), (*close)?))
+            })
+            .collect()
+    }
+}
+
 /// Dividends and splits from the chart API, keyed by an opaque bucket
 /// timestamp — use each event's own `date`.
 #[derive(Debug, Default, Deserialize)]
@@ -500,6 +572,9 @@ pub struct ChartMeta {
     pub currency: Option<String>,
     #[serde(rename = "exchangeName")]
     pub exchange_name: Option<String>,
+    /// Seconds east of UTC for the exchange's time zone, to date its bars.
+    #[serde(default)]
+    pub gmtoffset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1660,5 +1735,113 @@ mod tests {
             .collect();
         assert!((yields[0] - 0.0046).abs() < 1e-12);
         assert!((yields[1] - 0.0448).abs() < 1e-12);
+    }
+
+    /// A daily chart whose bars open at 09:15 IST (03:45 UTC) on `days`, with
+    /// (high, low, close) each; a `None` close is a bar still being formed.
+    fn nse_chart(days: &[(&str, f64, f64, Option<f64>)]) -> ChartData {
+        let ts = |d: &str| {
+            chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(3, 45, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        };
+        serde_json::from_value(serde_json::json!({
+            "meta": {"gmtoffset": 19800},
+            "timestamp": days.iter().map(|d| ts(d.0)).collect::<Vec<_>>(),
+            "indicators": {"quote": [{
+                "open": days.iter().map(|d| Some(d.1)).collect::<Vec<_>>(),
+                "high": days.iter().map(|d| Some(d.1 + 5.0)).collect::<Vec<_>>(),
+                "low": days.iter().map(|d| Some(d.2)).collect::<Vec<_>>(),
+                "close": days.iter().map(|d| d.3).collect::<Vec<_>>(),
+            }]}
+        }))
+        .unwrap()
+    }
+
+    fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc()
+    }
+
+    #[test]
+    fn pivots_skip_the_live_bar_while_the_session_runs() {
+        use crate::market::Market;
+        // Fri 30 Oct, Mon 2 Nov and today's live bar (Tue 3 Nov).
+        let chart = nse_chart(&[
+            ("2026-10-30", 100.0, 90.0, Some(95.0)),
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, None),
+        ]);
+        // 11:30 IST on the 3rd: the market is open, so Monday is the last full session.
+        let p = chart
+            .prior_session(utc("2026-11-03T06:00:00Z"), Market::In)
+            .unwrap();
+        assert_eq!(
+            p.date,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()
+        );
+        assert_eq!((p.high, p.low, p.close), (115.0, 100.0, 105.0));
+        // The same instant, a minute later: the same levels (the live bar moved).
+        let moved = nse_chart(&[
+            ("2026-10-30", 100.0, 90.0, Some(95.0)),
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 125.0, 104.0, Some(124.0)),
+        ]);
+        assert_eq!(
+            moved.prior_session(utc("2026-11-03T06:01:00Z"), Market::In),
+            Some(p)
+        );
+        // Before the open (07:30 IST) the 3rd has no bar yet: Monday again.
+        let early = nse_chart(&[
+            ("2026-10-30", 100.0, 90.0, Some(95.0)),
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+        ]);
+        assert_eq!(
+            early
+                .prior_session(utc("2026-11-03T02:00:00Z"), Market::In)
+                .unwrap()
+                .close,
+            105.0
+        );
+    }
+
+    #[test]
+    fn pivots_use_the_last_bar_after_the_close_and_on_weekends() {
+        use crate::market::Market;
+        let chart = nse_chart(&[
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, Some(118.0)),
+        ]);
+        // 16:30 IST on the 3rd: the session has closed, so its bar counts.
+        let p = chart
+            .prior_session(utc("2026-11-03T11:00:00Z"), Market::In)
+            .unwrap();
+        assert_eq!(p.close, 118.0);
+        // Saturday 7 Nov: the last bar is Friday's (here the 3rd), complete.
+        assert_eq!(
+            chart
+                .prior_session(utc("2026-11-07T06:00:00Z"), Market::In)
+                .unwrap()
+                .close,
+            118.0
+        );
+    }
+
+    #[test]
+    fn crypto_never_closes_so_todays_bar_is_always_skipped() {
+        use crate::market::Market;
+        let mut chart = nse_chart(&[
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, Some(118.0)),
+        ]);
+        chart.meta.as_mut().unwrap().gmtoffset = Some(0);
+        // Bars are dated 03:45 + 3h slack, 2 and 3 Nov; at 20:00 UTC on the 3rd
+        // the 3rd's bar is still forming.
+        let p = chart
+            .prior_session(utc("2026-11-03T20:00:00Z"), Market::Crypto)
+            .unwrap();
+        assert_eq!(p.close, 105.0);
     }
 }

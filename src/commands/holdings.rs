@@ -2534,16 +2534,10 @@ pub async fn cmd_pcorr(_market: Market) -> Result<()> {
     }
 
     let client = YahooClient::new().await?;
-    let mut all_closes: Vec<(String, Vec<f64>)> = Vec::new();
+    let mut all_closes: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> = Vec::new();
     for h in &portfolio.holdings {
         if let Ok(chart) = client.get_chart(&h.symbol, "6mo", "1d").await {
-            let closes: Vec<f64> = chart
-                .indicators
-                .quote
-                .first()
-                .and_then(|q| q.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect())
-                .unwrap_or_default();
+            let closes = chart.dated_closes();
             if closes.len() > 20 {
                 all_closes.push((h.symbol.clone(), closes));
             }
@@ -2570,7 +2564,11 @@ pub async fn cmd_pcorr(_market: Market) -> Result<()> {
             if i == j {
                 print!(" {:>10}", "1.000".bold());
             } else {
-                let corr = technical::correlation(ca, cb).unwrap_or(0.0);
+                // Too few shared dates to compare: say so, not 0.000.
+                let Some(corr) = technical::dated_correlation(ca, cb) else {
+                    print!(" {:>10}", "N/A".dimmed());
+                    continue;
+                };
                 if corr > 0.7 && i < j {
                     high_corr_pairs.push((sym_a.clone(), sym_b.clone(), corr));
                 }

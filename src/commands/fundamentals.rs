@@ -1100,11 +1100,13 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         // Support/Resistance
         // Bars with a missing close (today's, while the market is open) are
         // dropped from `closes` only, so index each series from its own end.
-        if highs.len() > 1
-            && let (Some(&h), Some(&l), Some(&c)) = (highs.last(), lows.last(), closes.last())
-        {
-            let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(h, l, c);
-            print_section("Support & Resistance");
+        // Levels come from the last completed session, not today's live bar.
+        if let Some(p) = chart.prior_session(chrono::Utc::now(), market) {
+            let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(p.high, p.low, p.close);
+            print_section(&format!(
+                "Support & Resistance (from the {} session)",
+                p.date.format("%d %b")
+            ));
             print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
             print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
             print_kv("Pivot", &format!("{}{:.2}", csym, pivot).bold().to_string());

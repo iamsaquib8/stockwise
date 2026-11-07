@@ -94,18 +94,18 @@ prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), 
 | `analyze <SYMBOL>` (`a`) | Valuation, profitability, growth, analyst ratings, plain-English outlook |
 | `events <SYMBOL> [--days N] [--ai]` (`ev`) | Unified timeline of material corporate events, exchange filings, earnings results, and excess market reaction vs NIFTY/S&P 500 |
 | `insights <SYMBOL>` | Positive, negative and neutral findings (Growth, Valuation, Margins, Ownership, etc.) with quantified metrics and XBRL shareholding patterns |
-| `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. A description of the data, not a recommendation; `--explain` lists the weights and rules |
+| `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. Size cut-offs (cash, insider trades; market cap in `longterm`) are written in US dollars and amounts in other currencies are converted at rough fixed rates, so the same size scores the same in rupees and dollars. A description of the data, not a recommendation; `--explain` lists the weights and rules |
 | `score <SYMBOL> [--json] [--explain]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards: Piotroski 9-point F-Score (out of 9) and Altman Z-Score with full formula breakdown and distress zones |
 | `technical <SYMBOL> [-p] [--json] [--explain]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |
 | `compare <SYMBOLS...> [--json\|--csv]` (`c`) | Two or more stocks side by side across 16 metrics |
-| `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars. Default `1y` |
-| `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols) |
+| `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars, annualized with 252 bars a year for stocks and indices, 365 for crypto and 260 for FX. Default `1y` |
+| `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols), from the days both traded, so NSE, NYSE and crypto calendars line up; `null`/`N/A` when two symbols share fewer than 20 returns |
 | `timeframes <SYMBOL>` (`mtf`) | 1M–5Y return, volatility, RSI, SMA/MACD signals |
-| `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns with CAGR |
+| `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns. The annualized figure (CAGR) uses the calendar time between the first and last bar, and is shown only for spans of a year or more (`null` otherwise) |
 | `patterns <SYMBOL> [-p]` | Candlestick patterns (doji, hammer, engulfing, morning star) |
-| `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) + Fibonacci levels |
+| `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) from the last completed daily session (named on screen), whatever `-p` is, + Fibonacci levels |
 | `fibs <SYMBOL> [-p]` | Fibonacci retracement with a "you are here" marker |
 | `volume <SYMBOL> [-p]` (`vol`) | OBV, A/D line, volume ratio, volume bars |
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
@@ -157,7 +157,7 @@ and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
 | `mf overlap <A> <B> [--json]` | Shared top holdings, holdings and sector overlap, and expense ratios of two funds or ETFs, e.g. `mf overlap SPY QQQ -m us` |
 | `options chain <SYMBOL> [-e DATE] [-n STRIKES] [--rate %] [--div-yield %] [--json]` | Calls and puts around the money: last price, open interest (and change on NSE/BSE), volume, IV, delta, gamma, theta, vega, rho, and the lot size. Default: nearest expiry, 10 strikes each side (`-n 0` for all) |
 | `options pcr <SYMBOL> [-e DATE] [--json]` | Put/call ratio by open interest and by volume, and the three strikes with the most call and put open interest |
-| `options oi <SYMBOL> [-e DATE] [-n N] [--json] [--explain]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown |
+| `options oi <SYMBOL> [-e DATE] [-n N] [--json] [--explain]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown. Sentiment is read for the underlying: put buying (`LB` on a put) is bearish and put writing (`SB`) is bullish; `--json` carries `calls_sentiment` and `puts_sentiment` |
 | `options maxpain <SYMBOL> [-e DATE] [--json]` (`max-pain`) | The settlement strike at which open options pay their holders least, with the payout curve around it |
 | `options payoff <SYMBOL> [--leg LEG]... [-s PRESET] [-w WIDTH] [-e DATE] [-l LOTS] [--lot-size N] [--rate %] [--div-yield %] [--iv %] [--today] [--json]` | A multi-leg position priced from the live chain: legs with price source, IV and delta; net debit/credit; max profit and loss (or "unlimited"); breakevens; probability of profit; position greeks; and a braille P/L chart at expiry (green/red), plus today's curve with `--today`. Analysis only — no orders |
 | `options <SYMBOL> [-p]` / `options moves <SYMBOL> [-p]` | Expected 1/5/10/30-day moves and OTM strike ideas from realized volatility |
@@ -373,7 +373,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
 | `tax advance [--fy 2025-26] [--paid [DATE:]AMOUNT]... [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
-| `pcorr` | Correlation between holdings, diversification warnings |
+| `pcorr` | Correlation between holdings from the days both traded, diversification warnings (`N/A` when two holdings share too few days) |
 
 ### Lots, sales and tax
 
@@ -815,7 +815,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `risk` | `{symbol, currency, period, interval, bars, price, return_percent, volatility_percent, risk_level, sharpe, sortino, calmar, max_drawdown: {percent, peak_price, trough_price, trading_days}, var_95_percent, var_99_percent}` — `risk_level` is `low`, `moderate`, `high` or `very_high` | — |
 | `compare` | `[{symbol, name, currency, price, change_percent, market_cap, pe_ttm, pe_forward, eps_ttm, price_to_book, dividend_yield, profit_margin, revenue_growth, debt_to_equity, beta, year_high, year_low, sma_50, analyst_rating}]` — the table's transpose | stock |
 | `correlate` | `{period, interval, symbols: [..], matrix: [[..]]}` — `matrix[i][j]` pairs `symbols[i]` and `symbols[j]` | symbol: `symbol, <SYM1>, <SYM2>, ...` |
-| `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` | period |
+| `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` — `annualized_percent` is `null` for spans under a year | period |
 | `movers` | `{gainers: [row], losers: [row]}`, row = `{side, rank, symbol, price, change_percent, volume, currency}` | stock, gainers then losers |
 | `sectors` | `[{sector, symbol, price, change_percent, currency}]`, best first | sector |
 | `screen` | `[{symbol, name, price, change_percent, pe, market_cap, dividend_yield, currency}]` | match |

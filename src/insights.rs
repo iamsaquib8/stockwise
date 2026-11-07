@@ -227,7 +227,9 @@ pub fn generate_rich_insights(r: &Research) -> Vec<InsightCard> {
         .filter(|t| !t.is_buy)
         .map(|t| t.value)
         .sum();
-    if recent_buys > 100_000.0 && recent_buys > recent_sells * 2.0 {
+    // Cut-offs are US dollars; trades are in the quote currency.
+    let usd = |v: f64| crate::market::approx_usd(v, r.currency.as_deref()).unwrap_or(0.0);
+    if usd(recent_buys) > 100_000.0 && recent_buys > recent_sells * 2.0 {
         cards.push(InsightCard {
             impact: Impact::Positive,
             category: InsightCategory::Ownership,
@@ -239,7 +241,7 @@ pub fn generate_rich_insights(r: &Research) -> Vec<InsightCard> {
             metric: Some("Insider Buying".to_string()),
             importance: 4,
         });
-    } else if recent_sells > 5_000_000.0 && recent_buys < 50_000.0 {
+    } else if usd(recent_sells) > 5_000_000.0 && usd(recent_buys) < 50_000.0 {
         cards.push(InsightCard {
             impact: Impact::Negative,
             category: InsightCategory::Ownership,
