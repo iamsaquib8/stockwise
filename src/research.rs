@@ -1638,21 +1638,62 @@ async fn fetch_nse_filings(client: &YahooClient, sym: &str, days: i64) -> Result
     Ok(parse_nse_filings(&v))
 }
 
-async fn fetch_nse_holdings(client: &YahooClient, sym: &str) -> Result<Vec<Holding>> {
+/// How long the NSE shareholding fetch may take. Each request (the master
+/// list, then one XBRL file per quarter, all through the shared 200 ms
+/// limiter) gets `per_request`; `overall` ends the whole read. Quarters read
+/// by then are kept.
+#[derive(Clone, Copy, Debug)]
+struct HoldingsBudget {
+    per_request: Duration,
+    overall: Duration,
+}
+
+const HOLDINGS_BUDGET: HoldingsBudget = HoldingsBudget {
+    per_request: Duration::from_secs(3),
+    overall: Duration::from_secs(8),
+};
+
+/// Quarters of shareholding wanted: enough for QoQ and YoY changes.
+const HOLDING_QUARTERS: usize = 5;
+
+/// Shareholding quarters, and a note when fewer than wanted were read
+/// because the budget ran out.
+#[derive(Debug, Default)]
+struct HoldingsRead {
+    holdings: Vec<Holding>,
+    note: Option<String>,
+}
+
+async fn fetch_nse_holdings(
+    client: &YahooClient,
+    sym: &str,
+    budget: HoldingsBudget,
+) -> Result<HoldingsRead> {
+    let deadline = tokio::time::Instant::now() + budget.overall;
     let url = format!(
         "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities&symbol={}",
         url_encode(sym)
     );
-    let master = client
-        .nse_get_json(&url, Duration::from_secs(6 * 3600))
-        .await?;
+    let master = match tokio::time::timeout(
+        budget.per_request.min(budget.overall),
+        client.nse_get_json(&url, Duration::from_secs(6 * 3600)),
+    )
+    .await
+    {
+        Ok(res) => res?,
+        Err(_) => anyhow::bail!(
+            "the list of filings timed out after {}s",
+            budget.per_request.min(budget.overall).as_secs_f64()
+        ),
+    };
     let entries = master.as_array().cloned().unwrap_or_default();
-    // Latest 5 quarters → QoQ and YoY changes. Revised filings repeat a date;
+    // Latest quarters → QoQ and YoY changes. Revised filings repeat a date;
     // keep the first (most recent) per quarter.
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    let mut timed_out = false;
     for e in entries {
-        if out.len() >= 5 {
+        if out.len() >= HOLDING_QUARTERS {
             break;
         }
         let Some(date) = text(&e, "date").and_then(|d| parse_nse_date(&d)) else {
@@ -1665,17 +1706,46 @@ async fn fetch_nse_holdings(client: &YahooClient, sym: &str) -> Result<Vec<Holdi
             continue;
         }
         let promoter_hint = nse_num(&e, "pr_and_prgrp");
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            timed_out = true;
+            break;
+        }
         // Filed XBRL never changes — cache for a week.
-        if let Ok(xml) = client
-            .nse_get_text(&xbrl, Duration::from_secs(7 * 86_400))
-            .await
-            && let Some(h) = holding_from_xbrl(&xml, date, promoter_hint)
+        match tokio::time::timeout(
+            budget.per_request.min(left),
+            client.nse_get_text(&xbrl, Duration::from_secs(7 * 86_400)),
+        )
+        .await
         {
-            out.push(h);
+            Ok(Ok(xml)) => {
+                if let Some(h) = holding_from_xbrl(&xml, date, promoter_hint) {
+                    out.push(h);
+                }
+            }
+            Ok(Err(_)) => {}
+            Err(_) => timed_out = true,
         }
     }
     out.sort_by_key(|h| h.date);
-    Ok(out)
+    let note = (timed_out && out.len() < HOLDING_QUARTERS).then(|| {
+        format!(
+            "NSE shareholding was slow: read {} of {} quarters within {}s",
+            out.len(),
+            HOLDING_QUARTERS,
+            budget.overall.as_secs_f64()
+        )
+    });
+    if out.is_empty() && timed_out {
+        anyhow::bail!(
+            "timed out: no quarter read within {}s",
+            budget.overall.as_secs_f64()
+        );
+    }
+    Ok(HoldingsRead {
+        holdings: out,
+        note,
+    })
 }
 
 async fn fetch_nse_pit(client: &YahooClient, sym: &str) -> Result<Vec<InsiderTxn>> {
@@ -1840,21 +1910,12 @@ pub async fn fetch(
         },
         async {
             if !needs.ownership {
-                return Ok(vec![]);
+                return Ok(HoldingsRead::default());
             }
             match nse {
-                Some(s) => {
-                    match tokio::time::timeout(
-                        Duration::from_secs(3),
-                        fetch_nse_holdings(client, s),
-                    )
-                    .await
-                    {
-                        Ok(res) => res,
-                        Err(_) => anyhow::bail!("timed out after 3s"),
-                    }
-                }
-                None => Ok(vec![]),
+                // Times each request itself and keeps what it has read.
+                Some(s) => fetch_nse_holdings(client, s, HOLDINGS_BUDGET).await,
+                None => Ok(HoldingsRead::default()),
             }
         },
         async {
@@ -1903,6 +1964,8 @@ pub async fn fetch(
     let yrss = soft(yrss, "Yahoo RSS", &mut warnings);
     let filings = soft(filings, "NSE filings", &mut warnings);
     let holdings = soft(holdings, "NSE shareholding", &mut warnings);
+    warnings.extend(holdings.note);
+    let holdings = holdings.holdings;
     let pit = soft(pit, "NSE insider trades", &mut warnings);
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
@@ -2195,6 +2258,105 @@ mod tests {
         assert!((h.retail.unwrap() - 18.96).abs() < 1e-6);
         assert_eq!(h.promoter, Some(0.0));
         assert_eq!(h.pledged, Some(false));
+    }
+
+    const XBRL: &str = r#"<in-bse-shp:ShareholdingAsAPercentageOfTotalNumberOfShares contextRef="InstitutionsForeign_ContextI" decimals="INF" unitRef="pure">0.1921</in-bse-shp:ShareholdingAsAPercentageOfTotalNumberOfShares>"#;
+
+    /// NSE stand-in: the master list names five quarters; filings whose path
+    /// is in `slow` take 5 s to answer, the others answer at once.
+    async fn nse_holdings_server(slow: &'static [&'static str]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let dates = ["30-SEP-2026", "30-JUN-2026", "31-MAR-2026", "31-DEC-2025"];
+        let master: Vec<Value> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                json!({"date": d, "pr_and_prgrp": "50.0",
+                       "xbrl": format!("https://nsearchives.nseindia.com/x/q{i}.xml")})
+            })
+            .collect();
+        let master = Value::Array(master).to_string();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (master, slow) = (master.clone(), slow);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    if slow.iter().any(|p| target.ends_with(p)) {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    let body = if target.contains("holdings-master") {
+                        master
+                    } else {
+                        XBRL.to_string()
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        url
+    }
+
+    fn nse_client(server: &str) -> YahooClient {
+        let base = server.to_string();
+        YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+            let u = reqwest::Url::parse(url).unwrap();
+            format!("{base}{}", u.path()) + &u.query().map_or(String::new(), |q| format!("?{q}"))
+        })
+    }
+
+    #[tokio::test]
+    async fn a_slow_filing_costs_one_quarter_not_all_of_them() {
+        let server = nse_holdings_server(&["q1.xml"]).await;
+        let budget = HoldingsBudget {
+            per_request: Duration::from_millis(300),
+            overall: Duration::from_secs(4),
+        };
+        let r = fetch_nse_holdings(&nse_client(&server), "TCS", budget)
+            .await
+            .unwrap();
+        assert_eq!(r.holdings.len(), 3, "the other three quarters are kept");
+        let note = r.note.expect("a short read is reported");
+        assert!(note.contains("read 3 of 5 quarters"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn the_overall_deadline_returns_the_quarters_read_so_far() {
+        // From the second filing on, every answer takes too long.
+        let server = nse_holdings_server(&["q1.xml", "q2.xml", "q3.xml"]).await;
+        let budget = HoldingsBudget {
+            per_request: Duration::from_secs(10),
+            overall: Duration::from_millis(600),
+        };
+        let started = std::time::Instant::now();
+        let r = fetch_nse_holdings(&nse_client(&server), "TCS", budget)
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(r.holdings.len(), 1);
+        assert!(r.note.unwrap().contains("read 1 of 5 quarters"));
+    }
+
+    #[tokio::test]
+    async fn nothing_read_before_the_deadline_is_an_error() {
+        let server = nse_holdings_server(&["q0.xml", "q1.xml", "q2.xml", "q3.xml"]).await;
+        let budget = HoldingsBudget {
+            per_request: Duration::from_millis(200),
+            overall: Duration::from_millis(500),
+        };
+        let err = fetch_nse_holdings(&nse_client(&server), "TCS", budget)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no quarter read"), "{err:#}");
     }
 
     #[test]
