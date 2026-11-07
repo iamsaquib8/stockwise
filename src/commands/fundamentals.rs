@@ -8,7 +8,9 @@ fn altman_summary(a: &scorecard::AltmanScorecard) -> Option<String> {
     if a.is_financial {
         return Some("n/a for banks and lenders".to_string());
     }
-    let z = a.z_score?;
+    let Some(z) = a.z_score else {
+        return Some(format!("n/a (missing {})", a.missing_factors.join(", ")));
+    };
     Some(match a.zone_label.as_deref() {
         Some(label) => format!("{z:.2} — {label}"),
         None => format!("{z:.2}"),

@@ -119,6 +119,8 @@ pub struct AltmanScorecard {
     pub formula_str: String,
     pub is_financial: bool,
     pub note: Option<String>,
+    /// Classic-model factors with no value, for example `["X1", "X5"]`.
+    pub missing_factors: Vec<String>,
     pub components: Vec<AltmanComponent>,
     pub z_double_prime: Option<f64>,
     pub z_double_prime_zone: Option<AltmanZone>,
@@ -504,7 +506,7 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
     let total_score = profitability_score + leverage_score + efficiency_score;
     let evaluated = criteria.iter().filter(|c| c.evaluated).count() as u8;
 
-    let rating = (evaluated == 9).then(|| {
+    let rating = (evaluated == 9).then_some({
         if total_score >= 8 {
             PiotroskiRating::VeryStrong
         } else if total_score >= 5 {
@@ -531,7 +533,20 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
     }
 }
 
-/// Calculate the classical Edward Altman Z-Score discriminant model.
+/// Calculate the Altman bankruptcy-risk models from reported figures.
+///
+/// - Z (Altman 1968, public manufacturers): 1.2*X1 + 1.4*X2 + 3.3*X3 +
+///   0.6*X4 + 0.999*X5, zones 1.81 / 2.99. Needs all five ratios; X4 uses
+///   the MARKET value of equity.
+/// - Z'' (Altman 1995, non-manufacturers and emerging markets): 6.56*X1 +
+///   3.26*X2 + 6.72*X3 + 1.05*X4, zones 1.10 / 2.60, X4 using BOOK equity,
+///   no X5. It is computed whenever its own four ratios exist.
+/// - Z' (Altman 1983, private firms) is not computed.
+///
+/// X1 = working capital / total assets, X2 = retained earnings / total assets,
+/// X3 = EBIT / total assets, X5 = sales / total assets. A ratio whose inputs
+/// are not reported is missing; it is never estimated or set to zero, and a
+/// model with a missing ratio gives no score and no zone.
 pub fn calculate_altman(r: &Research) -> AltmanScorecard {
     let is_financial = r.is_financial();
 
@@ -539,65 +554,33 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
     let latest_annual = r.annual.last();
     let latest_quarter = r.quarters.last();
 
+    // Reported figures only. Nothing is invented: no fixed share of assets, no
+    // "retained earnings = 70% of equity", no ROA in place of EBIT / assets.
+    // A missing input leaves its ratio missing (#69).
     let assets = latest_annual
         .and_then(|p| p.total_assets)
-        .or_else(|| latest_quarter.and_then(|p| p.total_assets))
-        .or_else(|| {
-            // Estimate assets from Equity + Debt if total assets wasn't directly reported
-            let eq = latest_annual
-                .and_then(|p| p.equity)
-                .or(latest_quarter.and_then(|p| p.equity));
-            let debt = latest_annual
-                .and_then(|p| p.total_debt)
-                .or(r.fin.total_debt);
-            match (eq, debt) {
-                (Some(e), Some(d)) => Some(e + d),
-                _ => None,
-            }
-        });
+        .or_else(|| latest_quarter.and_then(|p| p.total_assets));
 
-    let revenue = latest_annual.and_then(|p| p.revenue).or_else(|| {
-        // TTM revenue from latest 4 quarters
-        if r.quarters.len() >= 4 {
-            let sum: f64 = r
-                .quarters
-                .iter()
-                .rev()
-                .take(4)
-                .filter_map(|p| p.revenue)
-                .sum();
-            if sum > 0.0 { Some(sum) } else { None }
-        } else {
-            latest_quarter.and_then(|p| p.revenue).map(|r| r * 4.0)
-        }
-    });
-
+    // Flow items need a full year: the latest annual figure, or the sum of the
+    // last four quarters when all four report it. One quarter is not annualised.
+    let ttm = |f: &dyn Fn(&crate::research::Period) -> Option<f64>| -> Option<f64> {
+        let q: Vec<f64> = r.quarters.iter().rev().take(4).filter_map(f).collect();
+        (q.len() == 4).then(|| q.iter().sum())
+    };
+    let revenue = latest_annual
+        .and_then(|p| p.revenue)
+        .or_else(|| ttm(&|p| p.revenue));
     let ebit = latest_annual
         .and_then(|p| p.ebit.or(p.operating_income))
-        .or_else(|| latest_quarter.and_then(|p| p.ebit.or(p.operating_income)))
-        .or_else(|| r.fin.ebitda.map(|e| e * 0.85));
+        .or_else(|| ttm(&|p| p.ebit.or(p.operating_income)));
 
     let working_capital = latest_annual
         .and_then(|p| p.working_capital())
-        .or_else(|| latest_quarter.and_then(|p| p.working_capital()))
-        .or_else(|| {
-            // Estimate from current ratio and assets
-            if let (Some(cr), Some(a)) = (r.fin.current_ratio, assets) {
-                let current_assets = a * 0.40;
-                let current_liab = current_assets / cr.max(0.1);
-                Some(current_assets - current_liab)
-            } else {
-                None
-            }
-        });
+        .or_else(|| latest_quarter.and_then(|p| p.working_capital()));
 
     let retained_earnings = latest_annual
         .and_then(|p| p.retained_earnings)
-        .or_else(|| latest_quarter.and_then(|p| p.retained_earnings))
-        .or_else(|| {
-            // Estimate from equity
-            latest_annual.and_then(|p| p.equity).map(|eq| eq * 0.70)
-        });
+        .or_else(|| latest_quarter.and_then(|p| p.retained_earnings));
 
     let market_cap = r.quote.market_cap.or_else(|| {
         if let (Some(price), Some(shares)) = (r.price(), r.fin.shares) {
@@ -607,12 +590,14 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
         }
     });
 
+    // Total liabilities as reported, or assets - equity (the balance-sheet
+    // identity) when only those two are reported.
     let total_liabilities = latest_annual
         .and_then(|p| p.total_liabilities)
         .or_else(|| latest_quarter.and_then(|p| p.total_liabilities))
         .or_else(|| match (assets, latest_annual.and_then(|p| p.equity)) {
             (Some(a), Some(eq)) if a > eq => Some(a - eq),
-            _ => r.fin.total_debt.map(|d| d * 1.3),
+            _ => None,
         });
 
     // 5 Discriminant Factor Ratios:
@@ -629,12 +614,11 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
     // X3 = EBIT / Total Assets (weight: 3.3)
     let x3 = match (ebit, assets) {
         (Some(eb), Some(a)) if a > 0.0 => Some(eb / a),
-        _ => r.fin.roa,
+        _ => None,
     };
     // X4 = Market Value of Equity / Total Liabilities (weight: 0.6)
     let x4 = match (market_cap, total_liabilities) {
         (Some(mc), Some(tl)) if tl > 0.0 => Some(mc / tl),
-        (Some(_), Some(0.0)) => Some(10.0), // Pristine zero liability
         _ => None,
     };
     // X5 = Sales / Total Assets (weight: 0.999)
@@ -696,26 +680,21 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
         x5.map_or("N/A".to_string(), |v| format!("{:.3}x Turnover", v)),
     ));
 
-    // Compute standard Z-Score if components are populated
-    let z_score = if let (Some(w1), Some(w2), Some(w3), Some(w4), Some(w5)) = (
-        components[0].weighted_value,
-        components[1].weighted_value,
-        components[2].weighted_value,
-        components[3].weighted_value,
-        components[4].weighted_value,
-    ) {
-        Some(w1 + w2 + w3 + w4 + w5)
+    // Altman (1968) Z, the original public-manufacturer model, is defined only
+    // when all five ratios exist. A partial sum is not comparable with the
+    // 1.81 / 2.99 zones, so with any ratio missing there is no Z and no zone.
+    let missing: Vec<&str> = components
+        .iter()
+        .filter(|c| c.raw_value.is_none())
+        .map(|c| c.factor.as_str())
+        .collect();
+    let z_score = if missing.is_empty() {
+        components
+            .iter()
+            .map(|c| c.weighted_value)
+            .sum::<Option<f64>>()
     } else {
-        // Partial sum if at least X1, X3, X4 are present
-        let mut sum = 0.0;
-        let mut count = 0;
-        for c in &components {
-            if let Some(wv) = c.weighted_value {
-                sum += wv;
-                count += 1;
-            }
-        }
-        if count >= 3 { Some(sum) } else { None }
+        None
     };
 
     let zone = z_score.map(|z| {
@@ -794,11 +773,29 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
         }
     });
 
-    let note = if is_financial {
-        Some("Financial institution: Classical industrial Altman Z-score is not designed for banking and lending institutions due to deposit liability structures.".into())
-    } else {
-        None
-    };
+    let mut notes: Vec<String> = Vec::new();
+    if is_financial {
+        notes.push("Financial institution: Classical industrial Altman Z-score is not designed for banking and lending institutions due to deposit liability structures.".into());
+    }
+    if !missing.is_empty() {
+        notes.push(format!(
+            "Z-score not computed: missing {} (the model needs all five ratios; none are estimated).",
+            missing.join(", ")
+        ));
+    }
+    if z_double_prime.is_none() {
+        let z2_missing: Vec<&str> = z2_components
+            .iter()
+            .filter(|c| c.raw_value.is_none())
+            .map(|c| c.factor.as_str())
+            .collect();
+        notes.push(format!(
+            "Z'' not computed: missing {} (book equity, not market cap, is X4).",
+            z2_missing.join(", ")
+        ));
+    }
+    let note = (!notes.is_empty()).then(|| notes.join(" "));
+    let missing_factors: Vec<String> = missing.iter().map(|m| m.to_string()).collect();
 
     AltmanScorecard {
         z_score,
@@ -807,6 +804,7 @@ pub fn calculate_altman(r: &Research) -> AltmanScorecard {
         formula_str: "Z = 1.20*X1 + 1.40*X2 + 3.30*X3 + 0.60*X4 + 0.999*X5".to_string(),
         is_financial,
         note,
+        missing_factors,
         components,
         z_double_prime,
         z_double_prime_zone,
@@ -898,7 +896,12 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
             .unwrap_or_else(|| "N/A".to_string());
         println!("  Altman Z-Score:      {:.2}  {}", z, zone_str);
     } else {
-        println!("  Altman Z-Score:      {}", "Insufficient data".dimmed());
+        let why = if report.altman.missing_factors.is_empty() {
+            "n/a".to_string()
+        } else {
+            format!("n/a (missing {})", report.altman.missing_factors.join(", "))
+        };
+        println!("  Altman Z-Score:      {}", why.dimmed());
     }
     if let Some(note) = &report.altman.note {
         println!("  {}", note.italic().dimmed());
@@ -1036,6 +1039,11 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
             None => "N/A".to_string(),
         };
         println!("  Total Altman Z-Score:  {:.2}  ▶  {}", z, zone_desc);
+    } else {
+        println!(
+            "  Total Altman Z-Score:  n/a (needs all five ratios; missing {})",
+            report.altman.missing_factors.join(", ")
+        );
     }
     println!(
         "\n  Z'' model (non-manufacturers): {}",
@@ -1579,5 +1587,120 @@ mod tests {
         assert_eq!(a.z_double_prime, None);
         assert_eq!(a.z_double_prime_zone, None);
         assert!(a.z_score.is_some());
+    }
+
+    // #69. Hand-worked, assets 100, X1 and X5 unreported (no working capital,
+    // no revenue): X2 = 30/100 = 0.30, X3 = 15/100 = 0.15, X4 = 100/50 = 2.0.
+    // The old code summed the three it had: 1.4(0.30) + 3.3(0.15) + 0.6(2.0)
+    // = 0.42 + 0.495 + 1.2 = 2.115 and called it "Grey Zone". With sales/assets
+    // of 1.0 the full model gives 3.114 ("Safe"), so the verdict hung on a
+    // ratio the code never had. Now: no Z, no zone, and the note names X1, X5.
+    // Z'' also needs X1, so it is absent too.
+    fn three_of_five() -> Research {
+        let mut r = Research::default();
+        r.quote = Quote {
+            market_cap: Some(100.0),
+            ..Default::default()
+        };
+        r.annual = vec![Period {
+            end: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            total_assets: Some(100.0),
+            retained_earnings: Some(30.0),
+            ebit: Some(15.0),
+            total_liabilities: Some(50.0),
+            ..Default::default()
+        }];
+        r
+    }
+
+    #[test]
+    fn altman_with_three_of_five_ratios_gives_no_zone() {
+        let a = calculate_altman(&three_of_five());
+        assert_eq!(a.z_score, None);
+        assert_eq!(a.zone, None);
+        assert_eq!(a.zone_label, None);
+        assert_eq!(a.missing_factors, vec!["X1", "X5"]);
+        let note = a.note.unwrap();
+        assert!(note.contains("X1, X5"), "{note}");
+        assert_eq!(a.z_double_prime, None);
+        // The three known ratios are still shown.
+        assert!((a.components[3].raw_value.unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    // #69. Z'' needs X1-X4 only. X5 (revenue) is missing here, so Z is absent
+    // but Z'' is computed: X1 = 10/100 = 0.10, X2 = 0.30, X3 = 0.15, book
+    // X4 = 50/50 = 1.0, so Z'' = 0.656 + 0.978 + 1.008 + 1.05 = 3.692 (Safe).
+    #[test]
+    fn altman_z_double_prime_survives_a_missing_x5() {
+        let mut r = three_of_five();
+        r.annual[0].working_capital = Some(10.0);
+        r.annual[0].equity = Some(50.0);
+        let a = calculate_altman(&r);
+        assert_eq!(a.z_score, None);
+        assert_eq!(a.missing_factors, vec!["X5"]);
+        let z2 = a.z_double_prime.unwrap();
+        assert!((z2 - 3.692).abs() < 1e-9, "Z'' = {z2}");
+        assert_eq!(a.z_double_prime_zone, Some(AltmanZone::Safe));
+    }
+
+    // #69. Full data, hand-worked: assets 100, WC 20, RE 30, EBIT 15, market
+    // cap 100, liabilities 50, sales 100 -> X = 0.20, 0.30, 0.15, 2.0, 1.0.
+    // Z = 1.2(0.20) + 1.4(0.30) + 3.3(0.15) + 0.6(2.0) + 0.999(1.0)
+    //   = 0.24 + 0.42 + 0.495 + 1.2 + 0.999 = 3.354 -> Safe (> 2.99).
+    #[test]
+    fn altman_full_model_is_scored() {
+        let mut r = three_of_five();
+        r.annual[0].working_capital = Some(20.0);
+        r.annual[0].revenue = Some(100.0);
+        let a = calculate_altman(&r);
+        let z = a.z_score.unwrap();
+        assert!((z - 3.354).abs() < 1e-9, "Z = {z}");
+        assert_eq!(a.zone, Some(AltmanZone::Safe));
+        assert!(a.missing_factors.is_empty());
+    }
+
+    // #69. The fixed-ratio guesses are gone: with only equity, assets, EBITDA,
+    // ROA and one quarter of revenue, retained earnings (was 70% of equity),
+    // EBIT (was 85% of EBITDA, or ROA) and sales (was quarter x 4) stay missing.
+    #[test]
+    fn altman_does_not_guess_missing_inputs() {
+        let mut r = Research::default();
+        r.fin = Fin {
+            ebitda: Some(20.0),
+            roa: Some(0.10),
+            current_ratio: Some(1.5),
+            total_debt: Some(10.0),
+            ..Default::default()
+        };
+        r.quote = Quote {
+            market_cap: Some(100.0),
+            ..Default::default()
+        };
+        r.annual = vec![Period {
+            end: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            total_assets: Some(100.0),
+            equity: Some(40.0),
+            ..Default::default()
+        }];
+        r.quarters = vec![Period {
+            end: NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+            revenue: Some(25.0),
+            ..Default::default()
+        }];
+        let a = calculate_altman(&r);
+        let raw = |f: &str| {
+            a.components
+                .iter()
+                .find(|c| c.factor == f)
+                .unwrap()
+                .raw_value
+        };
+        assert_eq!(raw("X1"), None);
+        assert_eq!(raw("X2"), None);
+        assert_eq!(raw("X3"), None);
+        assert_eq!(raw("X5"), None);
+        // Liabilities come from the balance-sheet identity: 100 - 40 = 60.
+        assert!((raw("X4").unwrap() - 100.0 / 60.0).abs() < 1e-9);
+        assert_eq!(a.z_score, None);
     }
 }
