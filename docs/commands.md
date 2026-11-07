@@ -75,7 +75,11 @@ network, invalid config file), `2` invalid arguments.
 
 `stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise`
 prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
-`c` (compare), `p` (portfolio), `w` (watch), `ev` (events). Common names resolve to NSE symbols
+`c` (compare), `p` (portfolio), `w` (watch), `ev` (events). The aliases are lowercase: a capital
+single letter is a ticker, so `stockwise C -m us` (Citigroup), `T`, `D`, `A` and `W` work as bare
+symbols, and `stockwise c TCS INFY` still compares. A longer ticker that spells a command, such as
+`ALL` or `PATH`, is a symbol when you give `-m` (`stockwise PATH -m us`). `stockwise quote C -m us`
+always works. Common names resolve to NSE symbols
 (`SBI` → `SBIN`, `L&T` → `LT`, index names), and `quote` suggests close matches for a mistyped symbol.
 
 | Command | Description |

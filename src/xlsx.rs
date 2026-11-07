@@ -447,7 +447,10 @@ mod tests {
         let rows = sheet_rows(xml, &[]);
         assert_eq!(rows, vec![vec!["1", "", "3"]]);
         // A cell with no reference at all still follows the previous one.
-        let rows = sheet_rows(r#"<row><c s="1"><v>x</v></c><c s="1"><v>y</v></c></row>"#, &[]);
+        let rows = sheet_rows(
+            r#"<row><c s="1"><v>x</v></c><c s="1"><v>y</v></c></row>"#,
+            &[],
+        );
         assert_eq!(rows, vec![vec!["x", "y"]]);
     }
 

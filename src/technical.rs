@@ -342,10 +342,7 @@ pub fn sortino_ratio_with(
     let n = returns.len() as f64;
     let mean_daily = returns.iter().sum::<f64>() / n;
     let target = risk_free_annual / periods_per_year;
-    let shortfall_sq: f64 = returns
-        .iter()
-        .map(|r| (r - target).min(0.0).powi(2))
-        .sum();
+    let shortfall_sq: f64 = returns.iter().map(|r| (r - target).min(0.0).powi(2)).sum();
     if shortfall_sq == 0.0 {
         return None;
     }
