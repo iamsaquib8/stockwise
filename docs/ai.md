@@ -202,7 +202,7 @@ the data directory. Add them to `args` or the client's `env`.
 
 ### Tools
 
-Every tool only reads. Each result is JSON with the data, a short "not
+There are 34 tools. Every tool only reads. Each result is JSON with the data, a short "not
 financial advice" `note`, and `truncated` when long lists were shortened.
 Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 `commodity`, `uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).
@@ -213,17 +213,26 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `history` | OHLCV bars (most recent `limit`, default 60) with the period's change, high and low | `history --json` |
 | `technical` | SMAs, EMAs, RSI, MACD, Bollinger Bands, ATR, VWAP and a signal tally | `technical --json` |
 | `risk` | Volatility, Sharpe, Sortino, Calmar, max drawdown, value at risk | `risk --json` |
+| `verdict` | The six-pillar 0–100 score for one ticker, with entry zone, stop-loss and target | `verdict --json` |
+| `scorecard` | Piotroski F-score and Altman Z-score with every criterion and its formula | `score --json` |
+| `insights` | Positive, negative and neutral findings plus the shareholding split for one ticker | `insights --json` |
+| `events` | Recent and upcoming corporate events with the price reaction around each | `events --json` |
 | `search` | Tickers matching a company name | `search --json` |
 | `markets` | Index levels; optional crypto, FX and global benchmarks | `markets --json` |
 | `mf_search` / `mf_nav` / `mf_sip` | Mutual fund search, NAV with expense ratio, past SIP returns with XIRR (by AMFI code or ISIN) | `mf search/nav/sip --json` |
 | `options_chain` / `options_pcr` / `options_maxpain` | Strikes around the money with OI, IV and greeks; put/call ratio; max pain | `options chain/pcr/maxpain --json` |
+| `options_oi` | Open-interest walls and the build-up classification (long build-up, short covering, short build-up, long unwinding) | `options oi --json` |
 | `options_payoff` | A preset strategy's max profit/loss, breakevens, probability of profit, payoff table | `options payoff --json` |
 | `screen` | A preset screen (undervalued, growth, dividend, momentum, bluechip) | `screen --json` |
 | `backtest` | A built-in strategy on one ticker after costs, against buy and hold (last 10 trades) | `backtest --json` |
 | `portfolio_summary` | Holdings, value, P&L, weights, XIRR and totals; unpriced holdings listed, never valued at 0 | `portfolio --json` |
 | `holdings_lots` | Purchase lots with days held and short/long term, and recent sales | `portfolio lots` |
 | `tax_estimate` | Realized and if-sold-today capital gains with India's set-off rules and ₹1.25 lakh exemption (or US/UK) | `tax --json` |
+| `tax_advance` | India's four advance-tax instalments from your realised gains, with Sec. 234C interest on a shortfall | `tax advance --json` |
+| `harvest` | Lot-level loss-harvesting candidates and the unused ₹1.25 lakh LTCG exemption | `harvest --json` |
+| `rebalance` | Trades to reach your saved target weights (or equal weight); buy-only when `inflow` is given | `rebalance --json` |
 | `calendar` | Results, ex-dividend and split dates for tickers, or for your holdings and watchlist | `calendar --json` |
+| `ipo_board` / `ipo_analyze` | Open, upcoming and recently listed IPOs from NSE; one issue's terms, subscription and allotment odds | `ipo --json` |
 | `goal_sip` / `goal_retire` / `goal_education` | Goal calculators | `goal ... --json` |
 | `alerts_list` | Your alerts checked against live data | `alert check --json` |
 | `watchlist` | Your watchlist with live prices | `watch --json` |
