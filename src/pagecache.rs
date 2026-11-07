@@ -8,7 +8,8 @@
 use crate::store;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// A cached page and when it was downloaded.
@@ -49,10 +50,26 @@ pub fn read(name: &str, max_age: Duration, validate: impl Fn(&str) -> bool) -> O
 /// directory still works, just without a cache.
 pub fn write(name: &str, text: &str) {
     let Ok(path) = path(name) else { return };
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    let _ = write_atomic(&path, text);
+}
+
+/// Write `text` to `path` through a temp file next to it, then rename it over
+/// the target, so readers never see half a file. The temp name holds the
+/// process id and a counter: two tasks (or threads) writing the same file at
+/// once each get their own temp file, and the last rename wins whole. A temp
+/// file is removed again when the write or the rename fails.
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+    result
 }
 
 /// HTTP client for public data pages: a short timeout, a StockWise user agent.
@@ -142,5 +159,72 @@ pub fn fall_back(cached: Option<Page>, err: anyhow::Error) -> Result<Page> {
             })
         }
         None => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sw-pagecache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = temp_dir("replace");
+        let path = dir.join("page.txt");
+        write_atomic(&path, "old").unwrap();
+        write_atomic(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(leftovers(&dir).is_empty());
+    }
+
+    #[test]
+    fn write_atomic_removes_its_temp_file_when_the_rename_fails() {
+        let dir = temp_dir("fails");
+        // A directory cannot be replaced by a file, so the rename fails.
+        let target = dir.join("page.txt");
+        std::fs::create_dir(&target).unwrap();
+        assert!(write_atomic(&target, "text").is_err());
+        assert!(leftovers(&dir).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_to_one_file_never_collide() {
+        let dir = temp_dir("concurrent");
+        let path = dir.join("page.txt");
+        let texts: Vec<String> = (0..16).map(|i| format!("{i}:").repeat(20_000)).collect();
+        let tasks: Vec<_> = texts
+            .iter()
+            .cloned()
+            .map(|text| {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    for _ in 0..10 {
+                        write_atomic(&path, &text).expect("write succeeds");
+                    }
+                })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        // The file holds one writer's text, whole.
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(texts.contains(&got), "file is a mix of writes");
+        assert!(leftovers(&dir).is_empty());
     }
 }

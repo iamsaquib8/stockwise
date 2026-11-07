@@ -1175,9 +1175,8 @@ pub(crate) fn is_fresh(path: &Path, max_age: Duration) -> bool {
 
 /// Write via a temp file and rename, so a crash never leaves half a cache.
 pub(crate) fn write_atomic(path: &Path, data: &str) -> Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data).with_context(|| format!("Cannot write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("Cannot replace {}", path.display()))
+    crate::pagecache::write_atomic(path, data)
+        .with_context(|| format!("Cannot write {}", path.display()))
 }
 
 /// Cached copy of `url` if younger than `max_age`; otherwise download it.
