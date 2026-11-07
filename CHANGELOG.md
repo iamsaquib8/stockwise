@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `longterm`: the SIP calculator now grows each monthly instalment only for the time it stays invested (₹15,000 a month at 12% gives ₹12.37 L after 5 years, not ₹15.86 L), the "SIP for" target reads `$1M` for US stocks, and the "Suggested SIP Allocation" block is gone ([#67](https://github.com/iamsaquib8/stockwise/issues/67), [#189](https://github.com/iamsaquib8/stockwise/issues/189)).
 - Yahoo Finance: commands no longer open the Yahoo session at start-up, so `history`, `backtest` and a provider-backed `quote` still work when Yahoo refuses the session token, and commands that never touch Yahoo send no request at all ([#154](https://github.com/iamsaquib8/stockwise/issues/154)).
 - `quote`, `verdict`, `deep`, `score` and `insights`: a symbol Yahoo does not know, such as the BSE code `500325`, now gives a "not found" error with exit code 1 instead of an empty card or a verdict on a company with no price ([#206](https://github.com/iamsaquib8/stockwise/issues/206)).
+- `score`, `analyze`, `verdict` and `deep`: companies that file statements in US dollars but trade in rupees, such as Infosys, now have their statement amounts converted at the live USD/INR rate before ratios and revenue are shown, so INFY's Altman Z drops from 426 to about 8 and its revenue reads ₹47.33K Cr, not ₹504 Cr ([#207](https://github.com/iamsaquib8/stockwise/issues/207)).
 
 ## [0.8.0] - 2026-11-03
 
