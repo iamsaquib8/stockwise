@@ -355,12 +355,15 @@ pub fn sortino_ratio_with(
     ratio.is_finite().then_some(ratio)
 }
 
-/// Maximum drawdown from peak
+/// Maximum drawdown from peak, as a fraction of the peak. A drawdown is only
+/// measured against a positive peak, so leading zero or negative prices are
+/// skipped until the series first rises above zero. `None` when the series is
+/// too short or never has a positive price. A fall to zero is a 100% drawdown.
 pub fn max_drawdown(prices: &[f64]) -> Option<(f64, usize, usize)> {
     if prices.len() < 2 {
         return None;
     }
-    let mut peak = prices[0];
+    let mut peak = f64::NEG_INFINITY;
     let mut max_dd = 0.0_f64;
     let mut peak_idx = 0;
     let mut trough_idx = 0;
@@ -371,6 +374,9 @@ pub fn max_drawdown(prices: &[f64]) -> Option<(f64, usize, usize)> {
             peak = price;
             current_peak_idx = i;
         }
+        if peak <= 0.0 {
+            continue;
+        }
         let dd = (peak - price) / peak;
         if dd > max_dd {
             max_dd = dd;
@@ -378,7 +384,7 @@ pub fn max_drawdown(prices: &[f64]) -> Option<(f64, usize, usize)> {
             trough_idx = i;
         }
     }
-    Some((max_dd, peak_idx, trough_idx))
+    (peak > 0.0).then_some((max_dd, peak_idx, trough_idx))
 }
 
 /// Value at Risk (historical, percentile-based)
@@ -401,17 +407,24 @@ pub fn calmar_ratio(prices: &[f64]) -> Option<f64> {
 /// return is annualized over the number of *returns* (one fewer than prices),
 /// so a series spanning exactly one year annualizes to its own return.
 pub fn calmar_ratio_with(prices: &[f64], periods_per_year: f64) -> Option<f64> {
-    if prices.len() < 2 {
+    if prices.len() < 2 || periods_per_year <= 0.0 {
         return None;
     }
-    let total_return = (prices.last()? / prices.first()?) - 1.0;
+    // A ratio of prices needs a positive start; a series that ends at or
+    // below zero (total loss) has no annualised return to speak of.
+    let (first, last) = (*prices.first()?, *prices.last()?);
+    if !(first > 0.0 && last > 0.0 && first.is_finite() && last.is_finite()) {
+        return None;
+    }
+    let total_return = (last / first) - 1.0;
     let periods = (prices.len() - 1) as f64;
     let annual_return = (1.0 + total_return).powf(periods_per_year / periods) - 1.0;
     let (mdd, _, _) = max_drawdown(prices)?;
     if mdd == 0.0 {
         return None;
     }
-    Some(annual_return / mdd)
+    let ratio = annual_return / mdd;
+    ratio.is_finite().then_some(ratio)
 }
 
 /// Fewest common returns [`dated_correlation`] will compare.
@@ -1066,6 +1079,48 @@ mod tests {
         if let Some(c) = cr {
             assert!(c.is_finite());
         }
+    }
+
+    #[test]
+    fn max_drawdown_by_hand_and_with_bad_prices() {
+        // Peak 120 at index 2, trough 90 at index 3: (120 - 90) / 120 = 0.25.
+        let (dd, p, t) = max_drawdown(&[100.0, 110.0, 120.0, 90.0, 95.0]).unwrap();
+        assert!((dd - 0.25).abs() < 1e-12 && (p, t) == (2, 3));
+        // Falling to zero is a 100% drawdown from the 50 peak.
+        assert_eq!(max_drawdown(&[50.0, 40.0, 0.0]), Some((1.0, 0, 2)));
+        // No positive price, so no peak to measure from: None, never NaN/inf.
+        assert_eq!(max_drawdown(&[0.0, 0.0, 0.0]), None);
+        assert_eq!(max_drawdown(&[-5.0, -3.0]), None);
+        // Leading zero is skipped; the drawdown is measured from the first
+        // positive peak (10 down to 5 = 0.5).
+        let (dd, p, t) = max_drawdown(&[0.0, 10.0, 5.0]).unwrap();
+        assert!((dd - 0.5).abs() < 1e-12 && (p, t) == (1, 2));
+        // NaN prices do not poison the result.
+        let (dd, _, _) = max_drawdown(&[100.0, f64::NAN, 80.0]).unwrap();
+        assert!((dd - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn calmar_ratio_by_hand() {
+        // 100 -> 121 is 3 returns; at 3 periods a year that is exactly one
+        // year, so the annual return is the total 21%. The deepest drawdown
+        // is 110 -> 105 = 5/110, so the ratio is 0.21 / (5/110) = 4.62.
+        let c = calmar_ratio_with(&[100.0, 110.0, 105.0, 121.0], 3.0).unwrap();
+        assert!((c - 0.21 / (5.0 / 110.0)).abs() < 1e-9, "got {c}");
+    }
+
+    #[test]
+    fn calmar_ratio_none_for_zero_or_negative_prices_and_total_loss() {
+        // Zero start would divide by zero.
+        assert_eq!(calmar_ratio(&[0.0, 10.0, 20.0]), None);
+        assert_eq!(calmar_ratio(&[-10.0, 10.0, 20.0]), None);
+        // Total loss, and a series that ends below zero, would raise a
+        // non-positive base to a fractional power (NaN).
+        assert_eq!(calmar_ratio(&[100.0, 50.0, 0.0]), None);
+        assert_eq!(calmar_ratio(&[100.0, 50.0, -10.0]), None);
+        assert_eq!(calmar_ratio(&[f64::NAN, 1.0, 2.0]), None);
+        // Zero periods per year is not a sampling rate.
+        assert_eq!(calmar_ratio_with(&[100.0, 90.0, 110.0], 0.0), None);
     }
 
     #[test]
