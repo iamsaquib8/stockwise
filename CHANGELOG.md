@@ -49,6 +49,11 @@ Fixes the wrong numbers and import data loss listed under "Known issues" in 0.8.
 - `ipo`: the press section counts positive and negative third-party headlines instead of "Subscribe / Avoid" mentions, and headlines that tell readers what to do are no longer repeated. In `--json`, `street_buzz.subscribe_mentions` and `avoid_mentions` are now `positive_headlines` and `negative_headlines`.
 - `daemon intraday` and `sim`: paper positions are shown and sent in notifications as "long" / "short" with "level 1", "level 2" and "exit level" instead of BUY / SELL, ENTRY, T1, T2 and SL. Existing `daemon_state.json` and simulator history files still load.
 - `technical` (and the `technical` MCP and `ask` tool): the RSI signal now reads "RSI above 70 (overbought zone)" or "RSI below 30 (oversold zone)" instead of "Consider selling" / "Consider buying" / "Strong buy signal". It describes the reading and no longer gives a call.
+- The docs site is organised around goals: a five-minute quickstart, a "What do
+  you want to do?" page and eight task-based guides (import trades, Indian
+  capital-gains tax, quick lookups, rebalancing, Claude and Cursor over MCP,
+  alerts and the daemon, backtests and practice, scripting). Each command
+  reference section links to its guide.
 
 ### Fixed
 - `import` of an `.xlsx` workbook with several sheets: only one sheet is read (the first whose header fits the importer, in tab order), so a mutual-fund or summary tab is no longer imported as bogus holdings. The sheets used and skipped are listed, and `--sheet NAME` picks another ([#101](https://github.com/iamsaquib8/stockwise/issues/101)).
@@ -231,6 +236,13 @@ Fixes the wrong numbers and import data loss listed under "Known issues" in 0.8.
 - Yahoo Finance: when the cookie and crumb handshake fails (for example while Yahoo is rate limiting you),
   StockWise now remembers the failure for 45 seconds instead of repeating up to six requests and their
   waits for every later call, so a command that makes many fundamentals calls fails fast.
+- Prices in Swiss francs, South Korean won, New Taiwan dollars, Chinese yuan and
+  Brazilian reais are shown with `CHF `, `₩`, `NT$`, `CN¥` and `R$` instead of
+  `$` ([#17](https://github.com/iamsaquib8/stockwise/issues/17), thanks
+  @O1sumitkumar).
+- `movers` lists only rising stocks under gainers and only falling stocks under
+  losers, and says so when a side is empty
+  ([#210](https://github.com/iamsaquib8/stockwise/issues/210), thanks @ShahadatTest).
 
 ### Performance
 - `ask`: when the model asks for several tools in one turn, up to 4 of them now run at the same time
