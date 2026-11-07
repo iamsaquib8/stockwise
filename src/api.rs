@@ -146,8 +146,10 @@ impl std::error::Error for HttpStatusError {}
 /// True when `err` is (or wraps) an HTTP 404 from [`YahooClient`], such as a
 /// symbol Yahoo has no chart for.
 pub fn is_not_found(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<HttpStatusError>()
-        .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND)
+    err.downcast_ref::<NoPriceHistory>().is_some()
+        || err
+            .downcast_ref::<HttpStatusError>()
+            .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND)
 }
 
 fn host_of(url: &str) -> &str {
@@ -705,21 +707,18 @@ struct YahooSession {
 /// swaps in the real crumb, opening the session first if needed.
 const CRUMB_PLACEHOLDER: &str = "STOCKWISE_CRUMB_PLACEHOLDER";
 
-/// A non-retryable HTTP status from an upstream host (404, 401, ...).
-/// Callers can `downcast_ref` it to word a clearer message.
+/// A chart request for a ticker Yahoo does not know: the readable message,
+/// still counted by [`is_not_found`] like the 404 it replaces.
 #[derive(Debug)]
-pub struct HttpStatusError {
-    pub host: String,
-    pub status: reqwest::StatusCode,
-}
+struct NoPriceHistory(String);
 
-impl std::fmt::Display for HttpStatusError {
+impl std::fmt::Display for NoPriceHistory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} returned HTTP {}", self.host, self.status)
+        f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for HttpStatusError {}
+impl std::error::Error for NoPriceHistory {}
 
 /// What a chart request for a ticker Yahoo does not know says instead of
 /// the raw "HTTP 404", with built-in "did you mean" names where it has them.
@@ -1128,7 +1127,7 @@ impl YahooClient {
                 .await
                 .map_err(|e| match e.downcast_ref::<HttpStatusError>() {
                     Some(h) if h.status == reqwest::StatusCode::NOT_FOUND => {
-                        anyhow::anyhow!(no_history_message(symbol))
+                        anyhow::Error::new(NoPriceHistory(no_history_message(symbol)))
                     }
                     _ => e,
                 })?;
@@ -1572,11 +1571,13 @@ mod tests {
         .await;
         let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
 
-        let msg = client
+        let err = client
             .get_chart("RELIANC.NS", "1mo", "1d")
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        // Callers that skip a symbol Yahoo has no chart for still see a 404.
+        assert!(is_not_found(&err));
+        let msg = format!("{err:#}");
         assert!(msg.contains("No price history for RELIANC.NS"), "{msg}");
         assert!(msg.contains("stockwise search RELIANC"), "{msg}");
         assert!(msg.contains("Did you mean: RELIANCE.NS"), "{msg}");
