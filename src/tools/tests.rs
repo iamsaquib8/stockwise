@@ -675,3 +675,59 @@ async fn long_histories_keep_their_newest_bars() {
     assert_eq!(bars.last().unwrap()["time"], newest);
     assert_eq!(d["bar_count"], 300);
 }
+
+// ── the verdict tool states no call ──
+
+#[test]
+fn verdict_tool_is_described_as_scores_not_advice() {
+    use crate::verdict::testing::assert_neutral;
+    let t = tool("verdict");
+    assert_neutral(t.title);
+    assert_neutral(t.description);
+    assert!(t.description.contains("not a recommendation"));
+    assert!(!t.title.to_lowercase().contains("verdict"));
+}
+
+#[test]
+fn verdict_tool_result_has_scores_and_no_call() {
+    use crate::verdict::testing::assert_neutral;
+    for symbol in ["TCS.NS", "BTC-USD"] {
+        let mut r = crate::research::Research::default();
+        r.symbol = symbol.into();
+        r.quote.regular_market_price = Some(100.0);
+        r.quote.fifty_day_average = Some(95.0);
+        r.quote.two_hundred_day_average = Some(90.0);
+        r.fin.peg = Some(0.9);
+        r.fin.rec_mean = Some(1.5);
+        r.fin.target_mean = Some(130.0);
+        let v = handlers::verdict_value(&r).unwrap();
+        for gone in [
+            "action",
+            "entry_zone",
+            "stop_loss",
+            "target_price",
+            "risk_reward",
+            "confidence",
+        ] {
+            assert!(
+                v.get(gone).is_none(),
+                "{symbol}: {gone} leaked into the tool result"
+            );
+        }
+        assert!(v["pillars"].is_array() && v["data_coverage"].is_number());
+        // The envelope the model sees: data plus the note.
+        let wrapped = envelope(v, 100_000);
+        assert_neutral(&wrapped.to_string());
+    }
+}
+
+#[test]
+fn ipo_tools_are_described_without_a_call() {
+    use crate::verdict::testing::assert_neutral;
+    for name in ["ipo_board", "ipo_analyze"] {
+        let t = tool(name);
+        assert_neutral(t.title);
+        assert_neutral(t.description);
+        assert!(!t.description.to_lowercase().contains("verdict"), "{name}");
+    }
+}

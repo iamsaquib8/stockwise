@@ -842,6 +842,84 @@ pub async fn cmd_screen(
 
 // ── Dashboard ──
 
+/// The `picks` score for one quote: 50 plus or minus fixed amounts for eight
+/// factors, and the names of the factors that raised it. The same rules for
+/// every stock; a description of the data, not a recommendation.
+fn score_quote(q: &crate::api::Quote) -> (f64, Vec<&'static str>) {
+    let mut score = 50.0_f64;
+    let mut reasons: Vec<&str> = Vec::new();
+    // P/E
+    if let Some(pe) = q.trailing_pe {
+        if pe > 0.0 && pe < 20.0 {
+            score += 10.0;
+            reasons.push("P/E under 20");
+        } else if pe > 40.0 {
+            score -= 10.0;
+        }
+    }
+    // Forward > Trailing (earnings growing)
+    if let (Some(t), Some(f)) = (q.trailing_pe, q.forward_pe)
+        && f < t
+        && t > 0.0
+        && f > 0.0
+    {
+        score += 8.0;
+        reasons.push("Forward P/E below trailing");
+    }
+    // Moving averages
+    if let (Some(p), Some(ma50), Some(ma200)) = (
+        q.regular_market_price,
+        q.fifty_day_average,
+        q.two_hundred_day_average,
+    ) {
+        if p > ma50 && ma50 > ma200 {
+            score += 12.0;
+            reasons.push("Price above 50- and 200-day averages");
+        } else if p < ma50 && ma50 < ma200 {
+            score -= 10.0;
+        }
+    }
+    // Analyst rating
+    if let Some(rec) = q.recommendation_mean {
+        if rec <= 2.0 {
+            score += 10.0;
+            reasons.push("Analyst mean rating 2.0 or better");
+        } else if rec >= 4.0 {
+            score -= 8.0;
+        }
+    }
+    // Revenue growth
+    if let Some(g) = q.revenue_growth
+        && g > 0.15
+    {
+        score += 8.0;
+        reasons.push("Revenue growth >15%");
+    }
+    // Profit margin
+    if let Some(m) = q.profit_margins
+        && m > 0.2
+    {
+        score += 5.0;
+        reasons.push("Net margin above 20%");
+    }
+    // Dividend
+    if let Some(d) = q.trailing_annual_dividend_yield
+        && d > 0.02
+    {
+        score += 3.0;
+        reasons.push("Dividend >2%");
+    }
+    // Volume
+    if let (Some(v), Some(avg)) = (q.regular_market_volume, q.average_daily_volume_3_month)
+        && avg > 0
+        && v as f64 / avg as f64 > 1.3
+    {
+        score += 5.0;
+        reasons.push("Volume 1.3x average or more");
+    }
+    (score.clamp(0.0, 100.0), reasons)
+}
+
 pub async fn cmd_picks(market: Market) -> Result<()> {
     market.require_stocks("picks")?;
     let client = YahooClient::new().await?;
@@ -849,7 +927,10 @@ pub async fn cmd_picks(market: Market) -> Result<()> {
     let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
     let quotes = client.get_quote(&sym_refs).await?;
 
-    print_header(&format!("Top Picks — {} Market", market.label()));
+    print_header(&format!(
+        "Highest Scores in the Large-Cap Universe — {} Market",
+        market.label()
+    ));
     println!(
         "  {} Scoring {} stocks across 8 factors...\n",
         "⟳".yellow(),
@@ -858,78 +939,7 @@ pub async fn cmd_picks(market: Market) -> Result<()> {
 
     let mut scored: Vec<(&crate::api::Quote, f64, Vec<&str>)> = Vec::new();
     for q in &quotes {
-        let mut score = 50.0_f64;
-        let mut reasons: Vec<&str> = Vec::new();
-        // P/E
-        if let Some(pe) = q.trailing_pe {
-            if pe > 0.0 && pe < 20.0 {
-                score += 10.0;
-                reasons.push("Low P/E");
-            } else if pe > 40.0 {
-                score -= 10.0;
-            }
-        }
-        // Forward > Trailing (earnings growing)
-        if let (Some(t), Some(f)) = (q.trailing_pe, q.forward_pe)
-            && f < t
-            && t > 0.0
-            && f > 0.0
-        {
-            score += 8.0;
-            reasons.push("Earnings growth");
-        }
-        // Moving averages
-        if let (Some(p), Some(ma50), Some(ma200)) = (
-            q.regular_market_price,
-            q.fifty_day_average,
-            q.two_hundred_day_average,
-        ) {
-            if p > ma50 && ma50 > ma200 {
-                score += 12.0;
-                reasons.push("Strong uptrend");
-            } else if p < ma50 && ma50 < ma200 {
-                score -= 10.0;
-            }
-        }
-        // Analyst rating
-        if let Some(rec) = q.recommendation_mean {
-            if rec <= 2.0 {
-                score += 10.0;
-                reasons.push("Analyst buy");
-            } else if rec >= 4.0 {
-                score -= 8.0;
-            }
-        }
-        // Revenue growth
-        if let Some(g) = q.revenue_growth
-            && g > 0.15
-        {
-            score += 8.0;
-            reasons.push("Revenue growth >15%");
-        }
-        // Profit margin
-        if let Some(m) = q.profit_margins
-            && m > 0.2
-        {
-            score += 5.0;
-            reasons.push("High margins");
-        }
-        // Dividend
-        if let Some(d) = q.trailing_annual_dividend_yield
-            && d > 0.02
-        {
-            score += 3.0;
-            reasons.push("Dividend >2%");
-        }
-        // Volume
-        if let (Some(v), Some(avg)) = (q.regular_market_volume, q.average_daily_volume_3_month)
-            && avg > 0
-            && v as f64 / avg as f64 > 1.3
-        {
-            score += 5.0;
-            reasons.push("High volume");
-        }
-        score = score.clamp(0.0, 100.0);
+        let (score, reasons) = score_quote(q);
         scored.push((q, score, reasons));
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -940,7 +950,7 @@ pub async fn cmd_picks(market: Market) -> Result<()> {
         "Price".bold(),
         "Chg%".bold(),
         "Score".bold(),
-        "Reasons".bold()
+        "Factors that raised the score".bold()
     );
     println!("  {}", "─".repeat(72).dimmed());
 
@@ -972,7 +982,7 @@ pub async fn cmd_picks(market: Market) -> Result<()> {
     }
     println!(
         "\n  {}",
-        "Scores are algorithmic. Always do your own research."
+        "Scores apply the same eight rules to every stock. They describe the data; they are not a recommendation."
             .dimmed()
             .italic()
     );
@@ -1423,5 +1433,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("-m in"), "{err}");
+    }
+
+    #[test]
+    fn picks_score_names_its_factors_without_a_call() {
+        let q = crate::api::Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(100.0),
+            fifty_day_average: Some(95.0),
+            two_hundred_day_average: Some(90.0),
+            trailing_pe: Some(18.0),
+            forward_pe: Some(15.0),
+            recommendation_mean: Some(1.8),
+            revenue_growth: Some(0.2),
+            profit_margins: Some(0.25),
+            ..Default::default()
+        };
+        let (score, reasons) = score_quote(&q);
+        assert!(score > 75.0, "{score}");
+        assert!(reasons.contains(&"Price above 50- and 200-day averages"));
+        crate::verdict::testing::assert_neutral(&reasons.join(", "));
+        let (bare, none) = score_quote(&crate::api::Quote::default());
+        assert_eq!(bare, 50.0);
+        assert!(none.is_empty());
     }
 }

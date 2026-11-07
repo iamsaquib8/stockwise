@@ -29,10 +29,10 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Fundamentals in plain English | `stockwise analyze INFY` |
 | Key events & filings timeline | `stockwise events LT` |
 | Positive and negative findings | `stockwise insights LT` |
-| Actionable Buy/Sell verdict | `stockwise verdict LT` · `stockwise verdict LT --explain` |
+| 6-pillar score (not a recommendation) | `stockwise verdict LT` · `stockwise verdict LT --explain` |
 | Piotroski F-score & Altman Z-score | `stockwise score INFY --explain` · `stockwise scorecard TCS --json` |
 | Open and upcoming IPOs | `stockwise ipo` |
-| One IPO: verdict and allotment odds | `stockwise ipo BCSSL --capital 2.5L` |
+| One IPO: demand, scores and allotment odds | `stockwise ipo BCSSL --capital 2.5L` |
 | RSI, MACD, Bollinger Bands | `stockwise technical TCS -p 6mo --explain` |
 | Price chart with volume | `stockwise history AAPL -m us -p 1y` |
 | Compare stocks | `stockwise compare TCS INFY WIPRO` |

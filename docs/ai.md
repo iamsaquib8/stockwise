@@ -213,7 +213,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `history` | OHLCV bars (most recent `limit`, default 60) with the period's change, high and low | `history --json` |
 | `technical` | SMAs, EMAs, RSI, MACD, Bollinger Bands, ATR, VWAP and a signal tally | `technical --json` |
 | `risk` | Volatility, Sharpe, Sortino, Calmar, max drawdown, value at risk | `risk --json` |
-| `verdict` | The six-pillar 0–100 score for one ticker, with entry zone, stop-loss and target | `verdict --json` |
+| `verdict` | The 6-pillar scorecard: each pillar's 0–100 score, band and the facts behind it, the composite, and the data coverage. Pillars without data are marked as such. No rating, entry, stop or target, and the description tells the model it is not a recommendation | `verdict --json` |
 | `scorecard` | Piotroski F-score and Altman Z-score with every criterion and its formula | `score --json` |
 | `insights` | Positive, negative and neutral findings plus the shareholding split for one ticker | `insights --json` |
 | `events` | Recent and upcoming corporate events with the price reaction around each | `events --json` |

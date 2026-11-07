@@ -134,7 +134,7 @@ pub async fn cmd_insights(symbol: &str, market: Market, json: bool) -> Result<()
     insights::print_insight_cards(&cards, None);
 
     println!(
-        "  {} For the definitive Buy/Sell decision and scoring, run '{}'",
+        "  {} For the 6-pillar score and its data coverage, run '{}'",
         "💡".yellow(),
         format!("stockwise verdict {}", symbol).cyan()
     );

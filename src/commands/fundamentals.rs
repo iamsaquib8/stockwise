@@ -2,11 +2,7 @@
 
 use super::*;
 
-fn print_unified_research_footer(
-    r_opt: Option<&crate::research::Research>,
-    q: &crate::api::Quote,
-    csym: &str,
-) {
+fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &crate::api::Quote) {
     if let Some(r) = r_opt {
         let sc = scorecard::generate_scorecard_report(r);
         print_section("Accounting Scorecards (Piotroski & Altman)");
@@ -54,22 +50,7 @@ fn print_unified_research_footer(
         let v = crate::verdict::generate_verdict(r, &cards);
         println!();
         println!("{}", "─".repeat(60).dimmed());
-        println!(
-            "  VERDICT: {}  (Score: {:.0}/100 · Confidence: {:.0}%)",
-            v.action.badge(),
-            v.overall_score,
-            v.confidence
-        );
-        println!(
-            "  Entry: {csym}{:.2}–{csym}{:.2}  |  Stop-Loss: {csym}{:.2}{}",
-            v.entry_zone.0,
-            v.entry_zone.1,
-            v.stop_loss,
-            v.target_price
-                .map(|t| format!("  |  Target: {csym}{t:.2}"))
-                .unwrap_or_default()
-        );
-        println!("  {}", v.action.summary_tagline().dimmed());
+        crate::verdict::print_snapshot(&v, &r.symbol);
         println!("{}", "─".repeat(60).dimmed());
     } else {
         print_section("Insights");
@@ -229,7 +210,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_kv("Volatility", &risk);
     }
 
-    print_unified_research_footer(r_opt.as_ref(), q, csym);
+    print_unified_research_footer(r_opt.as_ref(), q);
 
     // AI-powered analysis (with --ai, if the provider is available)
     let mut ai = crate::ai::AiClient::connect().await;
@@ -1063,10 +1044,12 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         }
 
         // Support/Resistance
-        let n = highs.len();
-        if n > 1 {
-            let (pivot, r1, r2, _r3, s1, s2, _s3) =
-                technical::pivot_points(highs[n - 1], lows[n - 1], closes[n - 1]);
+        // Bars with a missing close (today's, while the market is open) are
+        // dropped from `closes` only, so index each series from its own end.
+        if highs.len() > 1
+            && let (Some(&h), Some(&l), Some(&c)) = (highs.last(), lows.last(), closes.last())
+        {
+            let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(h, l, c);
             print_section("Support & Resistance");
             print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
             print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
@@ -1076,7 +1059,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         }
 
         // Fibonacci
-        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, 60.min(n)) {
+        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, 60.min(highs.len())) {
             let fibs = technical::fibonacci_levels(sh, sl);
             print_section("Fibonacci (3M swing)");
             for (name, val) in [
@@ -1142,7 +1125,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     }
 
     // ── 3. Unified Scorecards, Rich Insights & 6-Pillar Verdict ──
-    print_unified_research_footer(r_opt.as_ref(), q, csym);
+    print_unified_research_footer(r_opt.as_ref(), q);
 
     // ── 4. AI Analysis ──
     let mut ai = crate::ai::AiClient::connect().await;
