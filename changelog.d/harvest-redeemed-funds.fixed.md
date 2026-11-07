@@ -1,1 +1,0 @@
-- `harvest` values funds you sold in full like `tax in` does, so their gains use up the Rs 1.25 lakh exemption it reports instead of being dropped.

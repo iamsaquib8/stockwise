@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.s
 The installer picks the right build for your system, checks its SHA-256
 against the release, and installs to `~/.local/bin` (`$PREFIX/bin` on
 Termux). `STOCKWISE_INSTALL=/usr/local/bin` changes the directory and
-`STOCKWISE_VERSION=v0.8.0` pins a version.
+`STOCKWISE_VERSION=v0.8.1` pins a version.
 
 ## Every option
 

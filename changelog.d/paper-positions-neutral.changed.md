@@ -1,1 +1,0 @@
-- `daemon intraday` and `sim`: paper positions are shown and sent in notifications as "long" / "short" with "level 1", "level 2" and "exit level" instead of BUY / SELL, ENTRY, T1, T2 and SL. Existing `daemon_state.json` and simulator history files still load.

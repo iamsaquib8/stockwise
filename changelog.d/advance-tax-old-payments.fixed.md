@@ -1,1 +1,0 @@
-- `tax advance --paid` ignores a payment dated before the financial year began, since it was made for an earlier year, and says so in the output.

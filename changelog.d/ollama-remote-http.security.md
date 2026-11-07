@@ -1,1 +1,0 @@
-- `ask`, `report` and `--ai`: plain `http://` to an Ollama server on another machine is refused unless `STOCKWISE_ALLOW_REMOTE_OLLAMA=1` is set, because the prompts carry holdings and tax figures. `ask` also prints a notice whenever the Ollama server is not on this computer, as it already did for cloud providers.

@@ -1,1 +1,0 @@
-- `tax advance` no longer charges Sec. 234C interest on the last instalment for gains made after 15 March when their tax is paid by 31 March; the 15 March requirement now covers only gains up to that day.
