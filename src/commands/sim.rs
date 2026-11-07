@@ -6,6 +6,15 @@ use crate::daemon::PositionStatus;
 use crate::simulator::{Bar, replay_trade};
 use chrono::{DateTime, NaiveDate, Utc};
 
+/// The currency symbol of a session's own market; the `-m` market's when
+/// the saved id is not one this version knows.
+fn session_currency(session: &SimSession, fallback: Market) -> &'static str {
+    use clap::ValueEnum;
+    Market::from_str(&session.market, true)
+        .unwrap_or(fallback)
+        .currency_symbol()
+}
+
 pub async fn cmd_sim(
     action: &str,
     amount: Option<f64>,
@@ -42,14 +51,13 @@ pub async fn cmd_sim(
             }
 
             let mut history = SimHistory::load()?;
-            if history
-                .sessions
-                .iter()
-                .any(|s| s.date == today && !s.settled)
-            {
+            // One open session per market and day: an NSE session does not
+            // block a NYSE one.
+            if history.has_open_session(market.id(), &today) {
                 println!(
-                    "  {} Already have an open simulation for today.",
-                    "!".yellow()
+                    "  {} Already have an open {} simulation for today.",
+                    "!".yellow(),
+                    market.label()
                 );
                 println!(
                     "  Run {} to settle it, or {} to check status.",
@@ -173,6 +181,7 @@ pub async fn cmd_sim(
 
             let client = YahooClient::new().await?;
             for session in &open {
+                let csym = session_currency(session, market);
                 print_header(&format!("Simulation Status — {}", session.date));
                 println!(
                     "  Capital: {}{:.0}  |  Target: {}%\n",
@@ -341,11 +350,11 @@ fn sim_confidence(stats: &crate::simulator::SimStats) -> Option<&'static str> {
 /// rating, and every session (open ones have null P&L).
 pub(crate) fn sim_history_json(
     history: &SimHistory,
+    market: Market,
     stats: &crate::simulator::SimStats,
 ) -> serde_json::Value {
     let sessions: Vec<serde_json::Value> = history
-        .sessions
-        .iter()
+        .in_market(market.id())
         .map(|s| {
             serde_json::json!({
                 "date": s.date,
@@ -387,9 +396,9 @@ pub(crate) fn sim_history_json(
 pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
     let csym = market.currency_symbol();
     let history = SimHistory::load()?;
-    let stats = history.stats();
+    let stats = history.stats(market.id());
     if fmt == Format::Json {
-        return output::print_json(&sim_history_json(&history, &stats));
+        return output::print_json(&sim_history_json(&history, market, &stats));
     }
     if stats.total_days == 0 {
         println!(
@@ -400,10 +409,9 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
         return Ok(());
     }
 
-    print_header("Paper Trading Performance");
+    print_header(&format!("Paper Trading Performance — {}", market.label()));
     let daily_pnls: Vec<f64> = history
-        .sessions
-        .iter()
+        .in_market(market.id())
         .filter(|s| s.settled)
         .filter_map(|s| s.total_pnl)
         .collect();
@@ -422,7 +430,7 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
         }
         println!();
         println!("  {}", "Daily P&L".bold());
-        for s in history.sessions.iter().filter(|s| s.settled) {
+        for s in history.in_market(market.id()).filter(|s| s.settled) {
             let pnl = s.total_pnl.unwrap_or(0.0);
             let bar_len = (pnl.abs()
                 / stats

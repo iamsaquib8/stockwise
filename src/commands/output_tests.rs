@@ -594,7 +594,7 @@ fn backtest_json_and_trade_rows() {
 #[test]
 fn empty_sim_history_is_not_an_error() {
     let history = SimHistory::default();
-    let v = sim_history_json(&history, &history.stats());
+    let v = sim_history_json(&history, Market::In, &history.stats("IN"));
     assert_eq!(keys(&v), ["stats", "confidence", "sessions"]);
     assert_eq!(v["stats"]["days"], 0);
     assert!(v["confidence"].is_null());

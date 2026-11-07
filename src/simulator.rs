@@ -62,8 +62,22 @@ impl SimHistory {
         crate::store::save("sim_history.json", self, false)
     }
 
-    pub fn stats(&self) -> SimStats {
-        let settled: Vec<&SimSession> = self.sessions.iter().filter(|s| s.settled).collect();
+    /// The sessions of one market (`Market::id`, e.g. `IN`). Rupee and
+    /// dollar sessions must never be added together.
+    pub fn in_market<'a>(&'a self, market: &'a str) -> impl Iterator<Item = &'a SimSession> + 'a {
+        self.sessions
+            .iter()
+            .filter(move |s| s.market.eq_ignore_ascii_case(market))
+    }
+
+    /// Whether `market` already has an unsettled session dated `date`.
+    pub fn has_open_session(&self, market: &str, date: &str) -> bool {
+        self.in_market(market).any(|s| s.date == date && !s.settled)
+    }
+
+    /// Statistics over the settled sessions of one market.
+    pub fn stats(&self, market: &str) -> SimStats {
+        let settled: Vec<&SimSession> = self.in_market(market).filter(|s| s.settled).collect();
         let total_days = settled.len();
         let winning_days = settled
             .iter()
@@ -378,7 +392,7 @@ mod tests {
     #[test]
     fn test_empty_stats() {
         let h = SimHistory::default();
-        let s = h.stats();
+        let s = h.stats("IN");
         assert_eq!(s.total_days, 0);
         assert_eq!(s.total_pnl, 0.0);
     }
@@ -387,7 +401,7 @@ mod tests {
     fn test_single_winning_day() {
         let mut h = SimHistory::default();
         h.sessions.push(make_session("2026-04-01", 500.0, 3, 1));
-        let s = h.stats();
+        let s = h.stats("IN");
         assert_eq!(s.total_days, 1);
         assert_eq!(s.winning_days, 1);
         assert_eq!(s.total_pnl, 500.0);
@@ -400,7 +414,7 @@ mod tests {
         h.sessions.push(make_session("2026-04-01", 500.0, 3, 1));
         h.sessions.push(make_session("2026-04-02", -200.0, 1, 3));
         h.sessions.push(make_session("2026-04-03", 300.0, 2, 2));
-        let s = h.stats();
+        let s = h.stats("IN");
         assert_eq!(s.total_days, 3);
         assert_eq!(s.winning_days, 2);
         assert!((s.total_pnl - 600.0).abs() < 0.01);
@@ -414,7 +428,7 @@ mod tests {
         h.sessions.push(make_session("2026-04-02", 200.0, 1, 0));
         h.sessions.push(make_session("2026-04-03", 300.0, 1, 0));
         h.sessions.push(make_session("2026-04-04", -50.0, 0, 1));
-        let s = h.stats();
+        let s = h.stats("IN");
         assert_eq!(s.max_win_streak, 3);
         assert_eq!(s.max_loss_streak, 1);
     }
@@ -434,7 +448,7 @@ mod tests {
             loss_count: None,
             settled: false,
         });
-        let s = h.stats();
+        let s = h.stats("IN");
         assert_eq!(s.total_days, 0); // unsettled shouldn't count
     }
 
@@ -443,7 +457,7 @@ mod tests {
         let mut h = SimHistory::default();
         h.sessions.push(make_session("2026-04-01", 300.0, 2, 1));
         h.sessions.push(make_session("2026-04-02", 100.0, 1, 2));
-        let s = h.stats();
+        let s = h.stats("IN");
         assert!((s.avg_daily_pnl - 200.0).abs() < 0.01);
     }
 
@@ -458,7 +472,7 @@ mod tests {
                 0,
             ));
         }
-        let s = h.stats();
+        let s = h.stats("IN");
         assert!(s.sharpe.is_some());
     }
 
@@ -617,5 +631,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.status, PositionStatus::StopHit);
+    }
+
+    #[test]
+    fn history_never_adds_rupee_and_dollar_sessions() {
+        let mut h = SimHistory::default();
+        h.sessions.push(make_session("2026-01-05", 500.0, 1, 0));
+        let mut us = make_session("2026-01-05", -20.0, 0, 1);
+        us.market = "US".into();
+        h.sessions.push(us);
+
+        let india = h.stats("IN");
+        assert_eq!(india.total_days, 1);
+        assert_eq!(india.total_pnl, 500.0);
+        assert_eq!(india.best_day, Some(500.0));
+        assert_eq!(india.worst_day, Some(500.0));
+
+        let us = h.stats("us");
+        assert_eq!(us.total_days, 1, "market ids compare without case");
+        assert_eq!(us.total_pnl, -20.0);
+        assert_eq!(us.winning_days, 0);
+
+        assert_eq!(h.stats("UK").total_days, 0);
+
+        // An open NSE session does not block a NYSE one on the same date.
+        let mut open = make_session("2026-01-06", 0.0, 0, 0);
+        open.settled = false;
+        h.sessions.push(open);
+        assert!(h.has_open_session("IN", "2026-01-06"));
+        assert!(!h.has_open_session("US", "2026-01-06"));
+        assert_eq!(h.in_market("IN").count(), 2);
     }
 }

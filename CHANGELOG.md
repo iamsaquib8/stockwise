@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `score`, `analyze`, `verdict` and `deep`: companies that file statements in US dollars but trade in rupees, such as Infosys, now have their statement amounts converted at the live USD/INR rate before ratios and revenue are shown, so INFY's Altman Z drops from 426 to about 8 and its revenue reads ₹47.33K Cr, not ₹504 Cr ([#207](https://github.com/iamsaquib8/stockwise/issues/207)).
 - `quote`, `compare`, `deep`, `dividends` and `divcal`: dividend yield no longer reads 0 for stocks such as RELIANCE, or 0.05% for INFY, when Yahoo's trailing figure is missing or computed from a dollar dividend; `dividends INFY` now shows 4.4% ([#208](https://github.com/iamsaquib8/stockwise/issues/208)).
 - `sim replay end` now scores and clears a replay whose price file (`sim_replay_tape.json`) was deleted, instead of asking you to run `sim replay end` and leaving the replay stuck ([#106](https://github.com/iamsaquib8/stockwise/issues/106)).
+- `sim history` and `sim status` no longer mix markets: history totals, best and worst day, win rate, streaks and the chart cover only the `-m` market (rupees and dollars were added together), and `sim status` shows each session in its own currency. `sim start` is no longer blocked by an open session of another market the same day ([#107](https://github.com/iamsaquib8/stockwise/issues/107)).
 
 ## [0.8.0] - 2026-11-03
 
