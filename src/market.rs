@@ -801,6 +801,16 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// A resolved symbol that is a BSE scrip code such as `500325.BO`.
+pub fn is_bse_scrip_code(symbol: &str) -> bool {
+    symbol
+        .strip_suffix(".BO")
+        .is_some_and(|c| !c.is_empty() && c.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Extra line for a not-found BSE scrip code: Yahoo has no such ticker.
+pub const BSE_CODE_HINT: &str = "BSE scrip codes are not looked up; use the ticker, e.g. RELIANCE or RELIANCE.BO (or set STOCKWISE_DATA_PROVIDER=bse)";
+
 /// Hint shown when a symbol is not found, pointing at the most common cause:
 /// a US ticker looked up in the default Indian market.
 pub fn not_found_hint(market: Market) -> &'static str {
