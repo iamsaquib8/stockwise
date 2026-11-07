@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `score`, `analyze`, `verdict` and `deep`: companies that file statements in US dollars but trade in rupees, such as Infosys, now have their statement amounts converted at the live USD/INR rate before ratios and revenue are shown, so INFY's Altman Z drops from 426 to about 8 and its revenue reads ₹47.33K Cr, not ₹504 Cr ([#207](https://github.com/iamsaquib8/stockwise/issues/207)).
 - `quote`, `compare`, `deep`, `dividends` and `divcal`: dividend yield no longer reads 0 for stocks such as RELIANCE, or 0.05% for INFY, when Yahoo's trailing figure is missing or computed from a dollar dividend; `dividends INFY` now shows 4.4% ([#208](https://github.com/iamsaquib8/stockwise/issues/208)).
 - `peers`, `compare`, `deep` and `analyze`: sector, profit margin, debt/equity, revenue growth, beta and analyst ratings are now read from Yahoo's company summary, so `peers TCS` lists IT peers and `compare` no longer shows rows of N/A. Rows and sections with no data at all are left out ([#209](https://github.com/iamsaquib8/stockwise/issues/209)).
+- `deep` and `analyze`: banks and lenders no longer show an Altman Z "Distress Zone" next to a strong score; they show "n/a for banks and lenders", and `score` says the same. The doubled brackets in the zone label are gone ([#212](https://github.com/iamsaquib8/stockwise/issues/212)).
 
 ## [0.8.0] - 2026-11-03
 

@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// The Altman line for `deep` and `analyze`. The industrial Z-score does not
+/// describe banks and lenders, so they get a note instead of a zone label.
+fn altman_summary(a: &scorecard::AltmanScorecard) -> Option<String> {
+    if a.is_financial {
+        return Some("n/a for banks and lenders".to_string());
+    }
+    let z = a.z_score?;
+    Some(match a.zone_label.as_deref() {
+        Some(label) => format!("{z:.2} — {label}"),
+        None => format!("{z:.2}"),
+    })
+}
+
 fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &crate::api::Quote) {
     if let Some(r) = r_opt {
         let sc = scorecard::generate_scorecard_report(r);
@@ -13,15 +26,8 @@ fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &
                 sc.piotroski.score, sc.piotroski.max_score, sc.piotroski.rating_label
             ),
         );
-        if let Some(z) = sc.altman.z_score {
-            print_kv(
-                "Altman Z-Score",
-                &format!(
-                    "{:.2} ({})",
-                    z,
-                    sc.altman.zone_label.as_deref().unwrap_or("—")
-                ),
-            );
+        if let Some(text) = altman_summary(&sc.altman) {
+            print_kv("Altman Z-Score", &text);
         }
 
         let cards = insights::generate_rich_insights(r);
@@ -1280,6 +1286,37 @@ mod tests {
             (2, 2, 2, 2, 2)
         );
         assert_eq!(c, vec![11.0, 11.5]);
+    }
+
+    fn altman(is_financial: bool) -> scorecard::AltmanScorecard {
+        let mut r = crate::research::Research::default();
+        r.sector = Some(
+            if is_financial {
+                "Financial Services"
+            } else {
+                "Technology"
+            }
+            .into(),
+        );
+        let mut a = scorecard::generate_scorecard_report(&r).altman;
+        a.z_score = Some(0.32);
+        a.zone_label = Some("Distress Zone (High Default Risk)".into());
+        a
+    }
+
+    #[test]
+    fn altman_line_for_a_bank_has_no_zone() {
+        let a = altman(true);
+        assert!(a.is_financial);
+        let line = altman_summary(&a).unwrap();
+        assert_eq!(line, "n/a for banks and lenders");
+        assert!(!line.contains("Distress") && !line.contains("0.32"));
+    }
+
+    #[test]
+    fn altman_line_for_an_industrial_keeps_the_zone_without_double_brackets() {
+        let line = altman_summary(&altman(false)).unwrap();
+        assert_eq!(line, "0.32 — Distress Zone (High Default Risk)");
     }
 
     #[test]

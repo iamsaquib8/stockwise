@@ -890,7 +890,11 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
     }
 
     println!("  {}", subline.dimmed());
-    if let Some(z) = report.altman.z_score {
+    if report.altman.is_financial {
+        println!(
+            "  Altman Z-Score:        n/a for banks and lenders (deposits are not industrial debt)"
+        );
+    } else if let Some(z) = report.altman.z_score {
         let zone_desc = match report.altman.zone {
             Some(AltmanZone::Safe) => {
                 "Safe Zone (Z > 2.99) — Low probability of financial distress"
