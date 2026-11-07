@@ -96,7 +96,7 @@ src/
     walkforward.rs   Rolling train/test optimisation and the overfitting verdict
     plugin.rs        WASM strategy plugins: wasmi sandbox, ABI v1 (`wasm-plugins` feature)
   intraday.rs        Intraday bot (9 strategies, regime detection, Kelly sizing)
-  longterm.rs        Long-term bot (6-pillar scoring, Monte Carlo, DRIP)
+  longterm.rs        Long-term scores (6-pillar scoring, Monte Carlo, DRIP)
   simulator.rs       Paper-trading sessions and confidence rating
   practice/          Practice mode (see docs/simulator.md): scenarios/*.toml and challenges.toml
                      (embedded), scenario.rs, tape.rs (cached daily bars; reads stop at the replay
