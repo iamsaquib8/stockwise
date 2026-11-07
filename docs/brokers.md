@@ -379,7 +379,7 @@ Import holdings from other brokers without manual entry:
 ```bash
 stockwise import kite ~/Downloads/holdings.csv       # Zerodha Kite
 stockwise import indmoney ~/Downloads/portfolio.csv  # INDmoney
-stockwise import groww ~/Downloads/holdings.csv      # Groww (save the .xlsx as CSV)
+stockwise import groww ~/Downloads/holdings.xlsx     # Groww (CSV or .xlsx)
 stockwise import upstox ~/Downloads/holdings.csv     # Upstox
 stockwise import cas ~/Downloads/cas.json            # CAMS / KFintech / NSDL / CDSL CAS via casparser
 stockwise import csv ~/Downloads/stocks.csv          # Any CSV
@@ -391,8 +391,8 @@ skipped. A holdings export is a snapshot: existing lots and their dates are
 kept and only the quantity follows the file, so re-importing never doubles a
 holding. `trade holdings` syncs broker holdings the same way.
 
-- **Groww** exports holdings as `.xlsx` with no ticker column: open it, save as
-  CSV, and StockWise looks up each ISIN's NSE ticker (Yahoo search, one exact
+- **Groww** exports holdings as `.xlsx` with no ticker column: import the file
+  as it is, and StockWise looks up each ISIN's NSE ticker (Yahoo search, one exact
   result only). Mutual-fund ISINs that don't trade on an exchange become
   `MF:<ISIN>`.
 - **Upstox** holdings exports have no published layout; StockWise detects the
