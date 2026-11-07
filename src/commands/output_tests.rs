@@ -363,11 +363,58 @@ fn movers_leave_out_quotes_without_a_change() {
 
 #[test]
 fn return_row_needs_two_closes() {
-    assert!(return_row("5d", "1 Week", &[100.0]).is_none());
-    let r = return_row("1mo", "1 Month", &[100.0, 105.0, 110.0]).unwrap();
+    let d = |s: &str, p: f64| (day(s), p);
+    assert!(return_row("5d", "1 Week", &[d("2026-01-01", 100.0)]).is_none());
+    let r = return_row(
+        "1mo",
+        "1 Month",
+        &[
+            d("2026-01-01", 100.0),
+            d("2026-01-15", 105.0),
+            d("2026-02-01", 110.0),
+        ],
+    )
+    .unwrap();
     assert_eq!(r.return_percent, 10.0);
     assert_eq!(r.growth_of_100000, 110000.0);
+    // A month is too short to annualize.
+    assert_eq!(r.annualized_percent, None);
     assert_columns(&r);
+}
+
+#[test]
+fn annualized_return_uses_calendar_time_for_stocks_and_crypto() {
+    // 366 daily crypto closes (one per calendar day) from 100 to 200: the
+    // span is 365 days, so the annualized return is the return, +100%.
+    let crypto: Vec<(chrono::NaiveDate, f64)> = (0..366)
+        .map(|i| {
+            let t = i as f64 / 365.0;
+            (
+                day("2025-01-01") + chrono::Duration::days(i),
+                100.0 * 2.0_f64.powf(t),
+            )
+        })
+        .collect();
+    let r = return_row("1y", "1 Year", &crypto).unwrap();
+    assert!((r.annualized_percent.unwrap() - 100.0).abs() < 0.5, "{r:?}");
+    // 252 stock sessions over the same 365 days give the same answer: the
+    // number of bars no longer matters.
+    let stock: Vec<(chrono::NaiveDate, f64)> = (0..253)
+        .map(|i| {
+            let t = i as f64 / 252.0;
+            let days = (i as f64 / 252.0 * 365.0).round() as i64;
+            (
+                day("2025-01-01") + chrono::Duration::days(days),
+                100.0 * 2.0_f64.powf(t),
+            )
+        })
+        .collect();
+    let r = return_row("1y", "1 Year", &stock).unwrap();
+    assert!((r.annualized_percent.unwrap() - 100.0).abs() < 0.5, "{r:?}");
+    // +300% over about five years (1,826 days): CAGR = 4^(1/5) - 1 = 31.95%.
+    let five = [(day("2021-01-01"), 100.0), (day("2026-01-01"), 400.0)];
+    let r = return_row("5y", "5 Years", &five).unwrap();
+    assert!((r.annualized_percent.unwrap() - 31.95).abs() < 0.1, "{r:?}");
 }
 
 #[test]

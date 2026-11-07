@@ -100,10 +100,10 @@ prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), 
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |
 | `compare <SYMBOLS...> [--json\|--csv]` (`c`) | Two or more stocks side by side across 16 metrics |
-| `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars. Default `1y` |
+| `risk <SYMBOL> [-p] [--json]` | Annualized volatility, Sharpe/Sortino/Calmar, max drawdown, VaR 95/99% — always from daily bars, annualized with 252 bars a year for stocks and indices, 365 for crypto and 260 for FX. Default `1y` |
 | `correlate <SYMBOLS...> [--json\|--csv]` (`corr`) | Correlation matrix of daily returns (two or more symbols), from the days both traded, so NSE, NYSE and crypto calendars line up; `null`/`N/A` when two symbols share fewer than 20 returns |
 | `timeframes <SYMBOL>` (`mtf`) | 1M–5Y return, volatility, RSI, SMA/MACD signals |
-| `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns with CAGR |
+| `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns. The annualized figure (CAGR) uses the calendar time between the first and last bar, and is shown only for spans of a year or more (`null` otherwise) |
 | `patterns <SYMBOL> [-p]` | Candlestick patterns (doji, hammer, engulfing, morning star) |
 | `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) + Fibonacci levels |
 | `fibs <SYMBOL> [-p]` | Fibonacci retracement with a "you are here" marker |
@@ -780,7 +780,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `risk` | `{symbol, currency, period, interval, bars, price, return_percent, volatility_percent, risk_level, sharpe, sortino, calmar, max_drawdown: {percent, peak_price, trough_price, trading_days}, var_95_percent, var_99_percent}` — `risk_level` is `low`, `moderate`, `high` or `very_high` | — |
 | `compare` | `[{symbol, name, currency, price, change_percent, market_cap, pe_ttm, pe_forward, eps_ttm, price_to_book, dividend_yield, profit_margin, revenue_growth, debt_to_equity, beta, year_high, year_low, sma_50, analyst_rating}]` — the table's transpose | stock |
 | `correlate` | `{period, interval, symbols: [..], matrix: [[..]]}` — `matrix[i][j]` pairs `symbols[i]` and `symbols[j]` | symbol: `symbol, <SYM1>, <SYM2>, ...` |
-| `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` | period |
+| `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` — `annualized_percent` is `null` for spans under a year | period |
 | `movers` | `{gainers: [row], losers: [row]}`, row = `{side, rank, symbol, price, change_percent, volume, currency}` | stock, gainers then losers |
 | `sectors` | `[{sector, symbol, price, change_percent, currency}]`, best first | sector |
 | `screen` | `[{symbol, name, price, change_percent, pe, market_cap, dividend_yield, currency}]` | match |

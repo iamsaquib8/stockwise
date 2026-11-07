@@ -1,3 +1,4 @@
+use crate::market::AssetClass;
 use chrono::NaiveDate;
 
 /// Calculate Simple Moving Average for the last `period` data points
@@ -253,22 +254,50 @@ pub fn xirr(cashflows: &[(f64, f64)]) -> Option<f64> {
     Some((lo + hi) / 2.0)
 }
 
-/// Bars per year for a Yahoo chart interval.
+/// Bars per year for a Yahoo chart interval of a stock on a 6.25-hour (NSE)
+/// session. Use [`periods_per_year_for`] for other asset classes.
 pub fn periods_per_year(interval: &str) -> f64 {
-    // Intraday bars assume a 6.25-hour (NSE) session.
+    periods_per_year_for(AssetClass::Stock, interval, 6.25)
+}
+
+/// Bars per year for a Yahoo chart interval, by asset class. Daily bars: 252
+/// trading days for stocks and indices, 365 for crypto, which trades every
+/// day, 260 for FX (weekdays). Intraday bars fill `session_hours` of each
+/// trading day (the exchange's session), or 24 hours for crypto and FX.
+/// Weekly and monthly bars are 52 and 12 a year.
+pub fn periods_per_year_for(class: AssetClass, interval: &str, session_hours: f64) -> f64 {
+    let days = match class {
+        AssetClass::Crypto => 365.0,
+        AssetClass::Fx => 260.0,
+        AssetClass::Stock | AssetClass::Index => 252.0,
+    };
+    let hours = match class {
+        AssetClass::Crypto | AssetClass::Fx => 24.0,
+        AssetClass::Stock | AssetClass::Index => session_hours,
+    };
+    let per_day = |minutes: f64| hours * 60.0 / minutes;
     match interval {
         "1wk" => 52.0,
         "1mo" => 12.0,
-        "1h" | "60m" => 252.0 * 6.25,
-        "30m" => 252.0 * 12.5,
-        "15m" => 252.0 * 25.0,
-        "5m" => 252.0 * 75.0,
-        _ => 252.0,
+        "1h" | "60m" => days * per_day(60.0),
+        "30m" => days * per_day(30.0),
+        "15m" => days * per_day(15.0),
+        "5m" => days * per_day(5.0),
+        _ => days,
     }
 }
 
-/// Sharpe Ratio (annualized, assuming risk-free rate)
+/// Sharpe Ratio (annualized with 252 bars a year; see [`sharpe_ratio_with`])
 pub fn sharpe_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
+    sharpe_ratio_with(prices, risk_free_annual, 252.0)
+}
+
+/// Sharpe Ratio annualized for prices sampled `periods_per_year` times a year.
+pub fn sharpe_ratio_with(
+    prices: &[f64],
+    risk_free_annual: f64,
+    periods_per_year: f64,
+) -> Option<f64> {
     let returns = daily_returns(prices);
     if returns.len() < 2 {
         return None;
@@ -283,13 +312,22 @@ pub fn sharpe_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
     if std_daily == 0.0 {
         return None;
     }
-    let annual_return = mean_daily * 252.0;
-    let annual_std = std_daily * (252.0_f64).sqrt();
+    let annual_return = mean_daily * periods_per_year;
+    let annual_std = std_daily * periods_per_year.sqrt();
     Some((annual_return - risk_free_annual) / annual_std)
 }
 
-/// Sortino Ratio (only penalizes downside volatility)
+/// Sortino Ratio (only penalizes downside volatility; 252 bars a year)
 pub fn sortino_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
+    sortino_ratio_with(prices, risk_free_annual, 252.0)
+}
+
+/// Sortino Ratio annualized for prices sampled `periods_per_year` times a year.
+pub fn sortino_ratio_with(
+    prices: &[f64],
+    risk_free_annual: f64,
+    periods_per_year: f64,
+) -> Option<f64> {
     let returns = daily_returns(prices);
     if returns.len() < 2 {
         return None;
@@ -300,11 +338,11 @@ pub fn sortino_ratio(prices: &[f64], risk_free_annual: f64) -> Option<f64> {
         return None;
     }
     let downside_var = downside.iter().map(|r| r.powi(2)).sum::<f64>() / downside.len() as f64;
-    let downside_std = downside_var.sqrt() * (252.0_f64).sqrt();
+    let downside_std = downside_var.sqrt() * periods_per_year.sqrt();
     if downside_std == 0.0 {
         return None;
     }
-    let annual_return = mean_daily * 252.0;
+    let annual_return = mean_daily * periods_per_year;
     Some((annual_return - risk_free_annual) / downside_std)
 }
 
@@ -345,14 +383,21 @@ pub fn value_at_risk(prices: &[f64], confidence: f64) -> Option<f64> {
     Some(returns[idx.min(returns.len() - 1)])
 }
 
-/// Calmar Ratio (annualized return / max drawdown)
+/// Calmar Ratio (annualized return / max drawdown; 252 bars a year)
 pub fn calmar_ratio(prices: &[f64]) -> Option<f64> {
+    calmar_ratio_with(prices, 252.0)
+}
+
+/// Calmar Ratio for prices sampled `periods_per_year` times a year. The
+/// return is annualized over the number of *returns* (one fewer than prices),
+/// so a series spanning exactly one year annualizes to its own return.
+pub fn calmar_ratio_with(prices: &[f64], periods_per_year: f64) -> Option<f64> {
     if prices.len() < 2 {
         return None;
     }
     let total_return = (prices.last()? / prices.first()?) - 1.0;
-    let days = prices.len() as f64;
-    let annual_return = (1.0 + total_return).powf(252.0 / days) - 1.0;
+    let periods = (prices.len() - 1) as f64;
+    let annual_return = (1.0 + total_return).powf(periods_per_year / periods) - 1.0;
     let (mdd, _, _) = max_drawdown(prices)?;
     if mdd == 0.0 {
         return None;
@@ -773,6 +818,68 @@ mod tests {
         let c = dated("2026-01-21", (0..30).map(|d| (d, 100.0 + (d * d) as f64)));
         assert_eq!(dated_correlation(&a, &c), None);
         assert_eq!(dated_correlation(&a, &[]), None);
+    }
+
+    #[test]
+    fn bars_per_year_follow_the_asset_class() {
+        use crate::market::AssetClass::*;
+        // Daily: 252 sessions, 365 days for crypto, 260 weekdays for FX.
+        assert_eq!(periods_per_year_for(Stock, "1d", 6.25), 252.0);
+        assert_eq!(periods_per_year_for(Index, "1d", 6.25), 252.0);
+        assert_eq!(periods_per_year_for(Crypto, "1d", 6.25), 365.0);
+        assert_eq!(periods_per_year_for(Fx, "1d", 6.25), 260.0);
+        // 5-minute bars: 75 a NSE session, 78 a US session, 288 a crypto day.
+        assert_eq!(periods_per_year_for(Stock, "5m", 6.25), 252.0 * 75.0);
+        assert_eq!(periods_per_year_for(Stock, "5m", 6.5), 252.0 * 78.0);
+        assert_eq!(periods_per_year_for(Crypto, "5m", 6.25), 365.0 * 288.0);
+        assert_eq!(periods_per_year_for(Stock, "1wk", 6.25), 52.0);
+        // The old stock-only function is the NSE case.
+        assert_eq!(periods_per_year("15m"), 252.0 * 25.0);
+    }
+
+    #[test]
+    fn crypto_volatility_and_sharpe_use_365_bars() {
+        // Daily returns alternating +1% / -1%: the same standard deviation, so
+        // annualized volatility scales with sqrt(bars per year).
+        let mut prices = vec![100.0];
+        for i in 0..60 {
+            let last = *prices.last().unwrap();
+            prices.push(last * if i % 2 == 0 { 1.01 } else { 0.99 });
+        }
+        let stock = annualized_volatility_with(&prices, 252.0).unwrap();
+        let crypto = annualized_volatility_with(&prices, 365.0).unwrap();
+        assert!((crypto / stock - (365.0_f64 / 252.0).sqrt()).abs() < 1e-12);
+        // Sharpe with a zero risk-free rate: mean * ppy / (sd * sqrt(ppy)) also
+        // scales with sqrt(ppy).
+        let s252 = sharpe_ratio_with(&prices, 0.0, 252.0).unwrap();
+        let s365 = sharpe_ratio_with(&prices, 0.0, 365.0).unwrap();
+        assert!((s365 / s252 - (365.0_f64 / 252.0).sqrt()).abs() < 1e-9);
+        // The plain functions are the 252-bar case.
+        assert_eq!(
+            sharpe_ratio(&prices, 0.05),
+            sharpe_ratio_with(&prices, 0.05, 252.0)
+        );
+    }
+
+    #[test]
+    fn calmar_annualizes_over_the_number_of_returns() {
+        // 253 prices are 252 returns: one year of daily bars. Doubling in
+        // that time is +100% a year, and with a 20% max drawdown Calmar = 5.
+        let mut prices: Vec<f64> = (0..253)
+            .map(|i| 100.0 * 2.0_f64.powf(i as f64 / 252.0))
+            .collect();
+        // Insert a 20% dip and recovery without changing the endpoints.
+        let peak = prices[100];
+        prices[101] = peak * 0.8;
+        let (mdd, _, _) = max_drawdown(&prices).unwrap();
+        let calmar = calmar_ratio(&prices).unwrap();
+        assert!(
+            (calmar - 1.0 / mdd).abs() < 1e-9,
+            "{calmar} vs {}",
+            1.0 / mdd
+        );
+        // The old exponent used 253 bars and gave a little under 100%.
+        assert!(calmar > 1.0 / mdd - 1e-6);
     }
 
     #[test]
