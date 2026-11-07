@@ -164,6 +164,9 @@ jobs:
             on && /^## \[/ { exit }
             on { print }
           ' CHANGELOG.md > release-notes.md
+          # A release candidate has no section of its own yet: use the pending
+          # fragments and [Unreleased] entries.
+          [ -s release-notes.md ] || python3 scripts/changelog.py preview --notes > release-notes.md
           [ -s release-notes.md ] || echo "See CHANGELOG.md." > release-notes.md
 
       - name: Upload to release

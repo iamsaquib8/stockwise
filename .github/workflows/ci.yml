@@ -15,6 +15,14 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  changelog:
+    name: changelog fragments
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/changelog.py check
+      - run: python3 scripts/test_changelog.py
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
