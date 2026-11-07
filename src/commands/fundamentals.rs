@@ -772,6 +772,43 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
 
 // ── IPO Calendar ──
 
+/// Open, high, low, close and volume series of equal length. Yahoo can leave
+/// a null in one field of a bar (usually a bar still forming), so a bar
+/// missing any price is dropped from every series rather than from one.
+fn aligned_ohlcv(
+    chart: &crate::api::ChartData,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u64>) {
+    let mut out = (vec![], vec![], vec![], vec![], vec![]);
+    let Some(q) = chart.indicators.quote.first() else {
+        return out;
+    };
+    let at = |v: &Option<Vec<Option<f64>>>, i: usize| {
+        v.as_ref().and_then(|v| v.get(i).copied().flatten())
+    };
+    let n = q.close.as_ref().map_or(0, |c| c.len());
+    for i in 0..n {
+        let (Some(o), Some(h), Some(l), Some(c)) = (
+            at(&q.open, i),
+            at(&q.high, i),
+            at(&q.low, i),
+            at(&q.close, i),
+        ) else {
+            continue;
+        };
+        out.0.push(o);
+        out.1.push(h);
+        out.2.push(l);
+        out.3.push(c);
+        out.4.push(
+            q.volume
+                .as_ref()
+                .and_then(|v| v.get(i).copied().flatten())
+                .unwrap_or(0),
+        );
+    }
+    out
+}
+
 pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
@@ -953,34 +990,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
 
     // ── 2. Technical Indicators ──
     let chart = client.get_chart(&resolved, period, "1d").await?;
-    let closes: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|qi| qi.close.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
-    let highs: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|qi| qi.high.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
-    let lows: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|qi| qi.low.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
-    let volumes: Vec<u64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|qi| qi.volume.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
+    let (opens, highs, lows, closes, volumes) = aligned_ohlcv(&chart);
 
     if closes.len() >= 20 {
         // Chart
@@ -1114,13 +1124,6 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         }
 
         // Gaps
-        let opens: Vec<f64> = chart
-            .indicators
-            .quote
-            .first()
-            .and_then(|qi| qi.open.as_ref())
-            .map(|c| c.iter().filter_map(|v| *v).collect())
-            .unwrap_or_default();
         let gaps = technical::detect_gaps(&opens, &highs, &lows, &closes);
         let unfilled: Vec<_> = gaps.iter().filter(|g| !g.filled).collect();
         if !unfilled.is_empty() {
@@ -1211,4 +1214,40 @@ pub async fn cmd_fundamental_score(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{ChartData, Indicators, QuoteIndicator};
+
+    fn chart(close: Vec<Option<f64>>) -> ChartData {
+        let n = close.len();
+        let some = |x: f64| Some(vec![Some(x); n]);
+        ChartData {
+            meta: None,
+            timestamp: None,
+            indicators: Indicators {
+                quote: vec![QuoteIndicator {
+                    open: some(10.0),
+                    high: some(12.0),
+                    low: some(9.0),
+                    close: Some(close),
+                    volume: Some(vec![Some(100); n]),
+                }],
+            },
+            events: None,
+        }
+    }
+
+    #[test]
+    fn a_bar_with_a_null_close_leaves_every_series_the_same_length() {
+        // The live bar of an NSE chart: high and low set, close still null.
+        let (o, h, l, c, v) = aligned_ohlcv(&chart(vec![Some(11.0), Some(11.5), None]));
+        assert_eq!(
+            (o.len(), h.len(), l.len(), c.len(), v.len()),
+            (2, 2, 2, 2, 2)
+        );
+        assert_eq!(c, vec![11.0, 11.5]);
+    }
 }
