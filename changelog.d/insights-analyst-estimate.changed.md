@@ -1,0 +1,1 @@
+- `analyze` and the research insight cards: the analyst lines say "mean price estimate" and give the mean rating as a number, instead of "target upside" and the Buy / Hold word.

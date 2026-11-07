@@ -52,9 +52,9 @@ impl std::fmt::Display for PositionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PositionStatus::Open => write!(f, "OPEN"),
-            PositionStatus::T1Hit => write!(f, "T1 HIT"),
-            PositionStatus::T2Hit => write!(f, "TARGET"),
-            PositionStatus::StopHit => write!(f, "STOPPED"),
+            PositionStatus::T1Hit => write!(f, "LEVEL 1"),
+            PositionStatus::T2Hit => write!(f, "LEVEL 2"),
+            PositionStatus::StopHit => write!(f, "EXIT LEVEL"),
             PositionStatus::SquaredOff => write!(f, "SQUARED OFF"),
         }
     }
@@ -117,7 +117,7 @@ fn pnl_pct_of_cost(pos: &LivePosition) -> f64 {
 /// Update a position with new price, handle T1/stop/trailing
 pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
     pos.current_price = new_price;
-    let is_long = pos.direction == "BUY";
+    let is_long = crate::intraday::Direction::is_long_str(&pos.direction);
 
     // Calculate P&L = realized (booked half) + open leg on the remaining qty.
     let leg = if is_long {
@@ -347,15 +347,22 @@ impl Event {
                 target2,
                 stop,
             } => format!(
-                "ENTRY {} {} x{} @ {}{:.2} (T1 {:.2}, T2 {:.2}, SL {:.2})",
-                direction, symbol, qty, csym, entry, target1, target2, stop
+                "OPENED paper {} {} x{} @ {}{:.2} (level 1 {:.2}, level 2 {:.2}, exit level {:.2})",
+                crate::intraday::Direction::label_of(direction),
+                symbol,
+                qty,
+                csym,
+                entry,
+                target1,
+                target2,
+                stop
             ),
             Event::T1Booked {
                 symbol,
                 price,
                 booked_pnl,
             } => format!(
-                "T1 HIT {} — booked half at {}{:.2} ({}), stop moved to breakeven",
+                "LEVEL 1 reached {} — booked half at {}{:.2} ({}), exit level moved to the opening price",
                 symbol,
                 csym,
                 price,
@@ -368,8 +375,8 @@ impl Event {
                 pnl,
             } => {
                 let what = match status {
-                    PositionStatus::T2Hit => "TARGET HIT",
-                    PositionStatus::StopHit => "STOPPED",
+                    PositionStatus::T2Hit => "LEVEL 2 reached",
+                    PositionStatus::StopHit => "EXIT LEVEL reached",
                     _ => "SQUARED OFF",
                 };
                 format!(
@@ -722,6 +729,88 @@ mod tests {
             entered_at: None,
             initial_stop: None,
         }
+    }
+
+    /// State files written before 0.8.1 store `BUY` / `SELL`. They must load,
+    /// act as long / short, and show as long / short.
+    #[test]
+    fn old_state_files_with_buy_and_sell_still_load() {
+        let mut long = serde_json::to_value(make_position(100.0, 103.0, 106.0, 97.0)).unwrap();
+        long["direction"] = "BUY".into();
+        let mut short = serde_json::to_value(make_position(100.0, 97.0, 94.0, 103.0)).unwrap();
+        short["direction"] = "SELL".into();
+        let mut long: LivePosition = serde_json::from_value(long).unwrap();
+        let mut short: LivePosition = serde_json::from_value(short).unwrap();
+        update_position(&mut long, 96.0, Phase::Active);
+        assert_eq!(long.status, PositionStatus::StopHit);
+        update_position(&mut short, 104.0, Phase::Active);
+        assert_eq!(short.status, PositionStatus::StopHit);
+        assert_eq!(
+            crate::intraday::Direction::label_of(&long.direction),
+            "long"
+        );
+        assert_eq!(
+            crate::intraday::Direction::label_of(&short.direction),
+            "short"
+        );
+        // New files use the new spelling and behave the same.
+        let mut new = make_position(100.0, 103.0, 106.0, 97.0);
+        new.direction = crate::intraday::Direction::Long.to_string();
+        update_position(&mut new, 96.0, Phase::Active);
+        assert_eq!(new.status, PositionStatus::StopHit);
+        assert!(serde_json::to_string(&new).unwrap().contains("\"long\""));
+    }
+
+    /// Screens and notifications describe paper positions without a call.
+    #[test]
+    fn event_text_has_no_buy_sell_entry_target_or_stop_wording() {
+        let events = [
+            Event::Entered {
+                symbol: "TCS.NS".into(),
+                direction: "BUY".into(),
+                qty: 10,
+                entry: 100.0,
+                target1: 102.0,
+                target2: 104.0,
+                stop: 98.0,
+            },
+            Event::T1Booked {
+                symbol: "TCS.NS".into(),
+                price: 102.0,
+                booked_pnl: 10.0,
+            },
+            Event::Closed {
+                symbol: "TCS.NS".into(),
+                status: PositionStatus::T2Hit,
+                price: 104.0,
+                pnl: 30.0,
+            },
+            Event::Closed {
+                symbol: "TCS.NS".into(),
+                status: PositionStatus::StopHit,
+                price: 98.0,
+                pnl: -20.0,
+            },
+        ];
+        let mut text = events
+            .iter()
+            .map(|e| e.text("₹"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for s in [
+            PositionStatus::Open,
+            PositionStatus::T1Hit,
+            PositionStatus::T2Hit,
+            PositionStatus::StopHit,
+            PositionStatus::SquaredOff,
+        ] {
+            text.push_str(&format!("\n{s}"));
+        }
+        crate::verdict::testing::assert_neutral(&text);
+        for banned in ["ENTRY", "SL ", "T1", "T2", "STOPPED", "TARGET"] {
+            assert!(!text.contains(banned), "{banned:?} in {text}");
+        }
+        assert!(text.contains("long"));
     }
 
     #[test]

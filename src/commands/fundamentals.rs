@@ -184,16 +184,15 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_section("Analyst Ratings");
     }
     if let Some(rec) = q.recommendation_mean {
-        print_kv("Consensus", &sentiment_label(rec));
         print_kv(
-            "Rating Score",
-            &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)),
+            "Analyst Rating",
+            &format!("{}  {}", mean_rating_text(rec), rating_bar(5.0 - rec, 4.0)),
         );
     }
     if let Some(target) = q.target_mean_price {
         let upside = q.regular_market_price.map(|p| ((target - p) / p) * 100.0);
         print_kv(
-            "Price Target",
+            "Analyst Mean Price Estimate",
             &format!(
                 "{}{:.2} ({})",
                 csym,
@@ -277,7 +276,8 @@ pub(crate) struct CompareRow {
     pub(crate) year_high: Option<f64>,
     pub(crate) year_low: Option<f64>,
     pub(crate) sma_50: Option<f64>,
-    pub(crate) analyst_rating: Option<String>,
+    /// Analysts' mean rating, 1 (most positive) to 5.
+    pub(crate) analyst_mean_rating: Option<f64>,
 }
 
 impl CsvRow for CompareRow {
@@ -300,7 +300,7 @@ impl CsvRow for CompareRow {
         "year_high",
         "year_low",
         "sma_50",
-        "analyst_rating",
+        "analyst_mean_rating",
     ];
 }
 
@@ -325,7 +325,7 @@ impl From<&crate::api::Quote> for CompareRow {
             year_high: q.fifty_two_week_high,
             year_low: q.fifty_two_week_low,
             sma_50: q.fifty_day_average,
-            analyst_rating: q.recommendation_key.clone(),
+            analyst_mean_rating: q.recommendation_mean,
         }
     }
 }
@@ -481,8 +481,11 @@ pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Res
             }),
         ),
         (
-            "Analyst Rating",
-            Box::new(|q| q.recommendation_key.clone().unwrap_or("N/A".into())),
+            "Analyst Mean Rating (1 = most positive)",
+            Box::new(|q| {
+                q.recommendation_mean
+                    .map_or("N/A".into(), |r| format!("{r:.1}/5"))
+            }),
         ),
     ];
 
@@ -759,7 +762,7 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
 
     // Show what we have from the quote
     if let Some(rec) = q.recommendation_mean {
-        print_kv("Analyst Consensus", &sentiment_label(rec));
+        print_kv("Analyst Rating", &mean_rating_text(rec));
     }
     if let Some(n) = q.number_of_analyst_opinions {
         print_kv("# Analysts", &n.to_string());
@@ -770,9 +773,9 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
             .map(|p| ((target - p) / p) * 100.0)
             .unwrap_or(0.0);
         print_kv(
-            "Target Price",
+            "Analyst Mean Price Estimate",
             &format!(
-                "{}{:.2} ({:+.1}%)",
+                "{}{:.2} ({:+.1}% from price)",
                 market::currency_symbol(q.currency.as_deref()),
                 target,
                 upside
@@ -1003,10 +1006,9 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         print_section("Analyst Ratings");
     }
     if let Some(rec) = q.recommendation_mean {
-        print_kv("Consensus", &sentiment_label(rec));
         print_kv(
-            "Score",
-            &format!("{:.1}/5  {}", rec, rating_bar(5.0 - rec, 4.0)),
+            "Analyst Rating",
+            &format!("{}  {}", mean_rating_text(rec), rating_bar(5.0 - rec, 4.0)),
         );
     }
     if let Some(target) = q.target_mean_price {
@@ -1019,7 +1021,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         } else {
             format!("{:.1}%", upside).red().to_string()
         };
-        print_kv("Price Target", &format!("{}{:.2} ({})", csym, target, u));
+        print_kv(
+            "Analyst Mean Price Estimate",
+            &format!("{}{:.2} ({})", csym, target, u),
+        );
     }
     if let Some(n) = q.number_of_analyst_opinions {
         print_kv("# Analysts", &n.to_string());

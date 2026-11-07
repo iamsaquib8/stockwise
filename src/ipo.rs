@@ -264,14 +264,21 @@ pub struct IssueStructure {
     pub structure_tag: String,
 }
 
-/// Unofficial press / street consensus signals extracted from news RSS.
+/// Unofficial press signals extracted from news RSS. The counts say how many
+/// third-party headlines read positive or negative about the issue; they are
+/// reported data, not a call from StockWise.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreetBuzz {
     pub gmp_inr: Option<f64>,
     pub gmp_pct: Option<f64>,
-    pub subscribe_mentions: usize,
-    pub avoid_mentions: usize,
-    pub neutral_mentions: usize,
+    #[serde(alias = "subscribe_mentions")]
+    pub positive_headlines: usize,
+    #[serde(alias = "avoid_mentions")]
+    pub negative_headlines: usize,
+    #[serde(alias = "neutral_mentions")]
+    pub neutral_headlines: usize,
+    /// Plain-news headlines only; headlines that tell readers what to do are
+    /// counted above but not repeated here.
     pub headlines: Vec<IpoHeadline>,
     pub caveat: String,
 }
@@ -571,7 +578,7 @@ pub async fn fetch_analysis(
     }
 
     let search_name = clean_company_for_search(&base_row.company_name, &symbol);
-    let buzz_query = format!("\"{search_name}\" IPO GMP OR subscribe OR avoid");
+    let buzz_query = format!("\"{search_name}\" IPO GMP OR review OR subscription");
 
     let quote_refs: Vec<&str> = quote_syms.iter().map(String::as_str).collect();
     let (quotes_res, rss_xml) = tokio::join!(
@@ -2100,13 +2107,15 @@ pub fn score_ipo_verdict(
         }
     };
 
-    // 5. Pillar 5: Street Consensus & Unofficial GMP (10% — reweighted if absent)
-    let has_buzz = buzz.gmp_pct.is_some() || buzz.subscribe_mentions > 0 || buzz.avoid_mentions > 0;
+    // 5. Pillar 5: Press headlines & unofficial GMP (10% — reweighted if absent)
+    let has_buzz =
+        buzz.gmp_pct.is_some() || buzz.positive_headlines > 0 || buzz.negative_headlines > 0;
     let (p5_score, p5_status, p5_sum) = if !has_buzz {
         (
             50.0,
             "NO SIGNAL".to_string(),
-            "No verified broker ratings or GMP figures detected in recent headlines (weight redistributed).".to_string(),
+            "No GMP figures or positive/negative press headlines detected (weight redistributed)."
+                .to_string(),
         )
     } else {
         let mut sc: f64 = 55.0;
@@ -2130,13 +2139,13 @@ pub fn score_ipo_verdict(
                 ));
             }
         }
-        if buzz.subscribe_mentions > buzz.avoid_mentions {
-            sc += ((buzz.subscribe_mentions - buzz.avoid_mentions) as f64 * 5.0).min(15.0);
-        } else if buzz.avoid_mentions > buzz.subscribe_mentions {
-            sc -= ((buzz.avoid_mentions - buzz.subscribe_mentions) as f64 * 8.0).min(24.0);
+        if buzz.positive_headlines > buzz.negative_headlines {
+            sc += ((buzz.positive_headlines - buzz.negative_headlines) as f64 * 5.0).min(15.0);
+        } else if buzz.negative_headlines > buzz.positive_headlines {
+            sc -= ((buzz.negative_headlines - buzz.positive_headlines) as f64 * 8.0).min(24.0);
             risk_flags.push(format!(
-                "Press headlines lean cautious ({} mention 'avoid' vs {} 'subscribe').",
-                buzz.avoid_mentions, buzz.subscribe_mentions
+                "More press headlines read negative than positive ({} negative vs {} positive).",
+                buzz.negative_headlines, buzz.positive_headlines
             ));
         }
         let sc = sc.clamp(15.0, 95.0);
@@ -2151,15 +2160,15 @@ pub fn score_ipo_verdict(
             }
             .to_string(),
             format!(
-                "GMP: {} · Press mentions: {} Subscribe / {} Avoid (unofficial)",
+                "GMP: {} · Press headlines (third party): {} positive / {} negative",
                 buzz.gmp_pct.map_or("Not reported".to_string(), |p| {
                     match buzz.gmp_inr {
                         Some(r) => format!("₹{r:.0} ({p:+.1}%)"),
                         None => format!("{p:+.1}%"),
                     }
                 }),
-                buzz.subscribe_mentions,
-                buzz.avoid_mentions
+                buzz.positive_headlines,
+                buzz.negative_headlines
             ),
         )
     };
@@ -2358,7 +2367,7 @@ pub fn score_ipo_verdict(
             summary: p4_sum,
         },
         IpoPillarScore {
-            name: "Street Consensus & GMP".to_string(),
+            name: "Press Headlines & GMP".to_string(),
             weight_pct: 10,
             score: round(p5_score, 1),
             status: p5_status,
@@ -2388,14 +2397,14 @@ pub fn score_ipo_verdict(
 // ── Street Buzz / GMP RSS Parser ──
 
 pub fn parse_street_buzz(rss_xml: &str, cap_price: Option<f64>) -> StreetBuzz {
-    let headlines = parse_rss_headlines(rss_xml, 8);
+    let raw = parse_rss_headlines_raw(rss_xml, 8);
     let mut gmp_pcts = Vec::new();
     let mut gmp_inrs = Vec::new();
-    let mut subscribe_mentions = 0usize;
-    let mut avoid_mentions = 0usize;
-    let mut neutral_mentions = 0usize;
+    let mut positive_headlines = 0usize;
+    let mut negative_headlines = 0usize;
+    let mut neutral_headlines = 0usize;
 
-    for h in &headlines {
+    for h in &raw {
         let lc = h.title.to_ascii_lowercase();
         if (lc.contains("subscribe")
             && !lc.contains("should you subscribe")
@@ -2403,13 +2412,13 @@ pub fn parse_street_buzz(rss_xml: &str, cap_price: Option<f64>) -> StreetBuzz {
             || lc.contains("apply for")
             || lc.contains("thumbs up")
         {
-            subscribe_mentions += 1;
+            positive_headlines += 1;
         }
         if lc.contains("avoid") || lc.contains("skip") || lc.contains("stay away") {
-            avoid_mentions += 1;
+            negative_headlines += 1;
         }
         if lc.contains("neutral") || lc.contains("may apply") || lc.contains("high risk") {
-            neutral_mentions += 1;
+            neutral_headlines += 1;
         }
         if lc.contains("gmp") || lc.contains("grey market") {
             let (inr_opt, pct_opt) = extract_gmp_from_headline(&h.title, cap_price);
@@ -2435,11 +2444,11 @@ pub fn parse_street_buzz(rss_xml: &str, cap_price: Option<f64>) -> StreetBuzz {
     StreetBuzz {
         gmp_inr,
         gmp_pct,
-        subscribe_mentions,
-        avoid_mentions,
-        neutral_mentions,
-        headlines,
-        caveat: "GMP is unregulated, unofficial grey-market chatter extracted from financial news headlines and can vanish before listing.".to_string(),
+        positive_headlines,
+        negative_headlines,
+        neutral_headlines,
+        headlines: raw.into_iter().filter(|h| !reads_as_call(&h.title)).collect(),
+        caveat: "Headlines and GMP come from third-party news and are not StockWise's view. GMP is unregulated grey-market chatter and can vanish before listing. Headlines that tell readers what to do are counted but not shown.".to_string(),
     }
 }
 
@@ -2514,7 +2523,42 @@ fn has_negative_number(text: &str) -> bool {
     })
 }
 
+/// True when a headline tells the reader what to do with the issue
+/// ("Subscribe", "Avoid", "Apply", "Skip"...). Such a headline is a third
+/// party's call; StockWise counts it but does not repeat it. Past-tense news
+/// such as "subscribed 4.7x" is not a call.
+fn reads_as_call(title: &str) -> bool {
+    let lc = title.to_lowercase();
+    if lc.contains("stay away") || lc.contains("thumbs up") || lc.contains("thumbs down") {
+        return true;
+    }
+    lc.split(|c: char| !c.is_alphanumeric()).any(|w| {
+        matches!(
+            w,
+            "subscribe"
+                | "avoid"
+                | "apply"
+                | "skip"
+                | "buy"
+                | "sell"
+                | "hold"
+                | "accumulate"
+                | "recommend"
+                | "recommends"
+        )
+    })
+}
+
+/// Headlines from an RSS feed, without the ones that read as a call.
 pub fn parse_rss_headlines(xml: &str, max_items: usize) -> Vec<IpoHeadline> {
+    parse_rss_headlines_raw(xml, max_items * 2)
+        .into_iter()
+        .filter(|h| !reads_as_call(&h.title))
+        .take(max_items)
+        .collect()
+}
+
+fn parse_rss_headlines_raw(xml: &str, max_items: usize) -> Vec<IpoHeadline> {
     let mut out = Vec::new();
     let mut rest = xml;
     while let Some(item_idx) = rest.find("<item>") {
@@ -3496,6 +3540,33 @@ mod tests {
         // No GMP headline: no figure, never a zero.
         let none = parse_street_buzz(&rss("Acme IPO opens on Monday"), Some(100.0));
         assert_eq!((none.gmp_pct, none.gmp_inr), (None, None));
+    }
+
+    #[test]
+    fn headlines_that_tell_readers_what_to_do_are_counted_not_shown() {
+        let rss = r#"<rss><channel>
+            <item><title>Acme IPO opens; GMP at 14%, brokerages say Subscribe - Mint</title></item>
+            <item><title>Acme IPO: avoid, say analysts - Mint</title></item>
+            <item><title>Should you apply for the Acme IPO? - ET</title></item>
+            <item><title>Acme IPO subscribed 4.7x on day two - ET</title></item>
+        </channel></rss>"#;
+        let b = parse_street_buzz(rss, Some(100.0));
+        assert_eq!(b.positive_headlines, 2); // "Subscribe" and "apply for"
+        assert_eq!(b.negative_headlines, 1);
+        let shown: Vec<&str> = b.headlines.iter().map(|h| h.title.as_str()).collect();
+        assert_eq!(shown, ["Acme IPO subscribed 4.7x on day two"]);
+        crate::verdict::testing::assert_neutral(&serde_json::to_string(&b).unwrap());
+        // The board list drops them too.
+        let board = parse_rss_headlines(rss, 6);
+        assert_eq!(board.len(), 1);
+    }
+
+    #[test]
+    fn old_street_buzz_field_names_still_load() {
+        let old = r#"{"gmp_inr":null,"gmp_pct":null,"subscribe_mentions":2,
+            "avoid_mentions":1,"neutral_mentions":0,"headlines":[],"caveat":""}"#;
+        let b: StreetBuzz = serde_json::from_str(old).unwrap();
+        assert_eq!((b.positive_headlines, b.negative_headlines), (2, 1));
     }
 
     #[test]

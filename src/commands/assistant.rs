@@ -38,6 +38,13 @@ pub async fn cmd_ask(question: &str, opts: AskOptions, market: Market, json: boo
         );
     } else {
         ctx.max_result_bytes = ask::OLLAMA_RESULT_BYTES;
+        if crate::ai::ollama_is_remote() {
+            eprintln!(
+                "  \u{24d8} Ollama at {} is not on this computer; it also receives what the tools \
+                 return — including your holdings, lots and tax figures if it asks for them.",
+                crate::ai::ollama_host_label()
+            );
+        }
     }
     {
         use std::io::IsTerminal;

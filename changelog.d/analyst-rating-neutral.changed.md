@@ -1,0 +1,2 @@
+- `analyze`, `insider`, `deep` and `compare`: the analysts' rating is shown as "mean rating 1.8/5 (1 = most positive)" instead of Strong Buy / Buy / Hold / Sell, and the price target line is now "Analyst Mean Price Estimate".
+  `compare --json` and `--csv` give `analyst_mean_rating` (a number) instead of `analyst_rating` (a word). `verdict` words the same figure as an analyst mean price estimate above or below the current price.

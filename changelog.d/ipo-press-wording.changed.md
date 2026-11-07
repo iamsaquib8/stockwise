@@ -1,0 +1,1 @@
+- `ipo`: the press section counts positive and negative third-party headlines instead of "Subscribe / Avoid" mentions, and headlines that tell readers what to do are no longer repeated. In `--json`, `street_buzz.subscribe_mentions` and `avoid_mentions` are now `positive_headlines` and `negative_headlines`.
