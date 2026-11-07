@@ -261,7 +261,7 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
     assert_eq!(r.holdings[0].long_term_gain, 100_000.0);
 
     // `tax advance` leaves it out too.
-    let s = super::planning::advance_tax_schedule(&p, Some("2025-26"), None).unwrap();
+    let s = super::planning::advance_tax_schedule(&p, Some("2025-26"), &[]).unwrap();
     assert_eq!((s.total_stcg, s.total_ltcg), (0.0, 0.0));
 }
 
@@ -338,7 +338,7 @@ fn tax_export_and_advance_tax_skip_non_equity_etfs() {
     assert_eq!(schedule.summary.stcg_gains, 1_500.0);
     assert!(schedule.notes.iter().any(|n| n.contains("GOLDBEES.NS")));
     // Only the NIFTYBEES gain is in the advance-tax base.
-    let adv = super::planning::advance_tax_schedule(&p, Some("2026-27"), None).unwrap();
+    let adv = super::planning::advance_tax_schedule(&p, Some("2026-27"), &[]).unwrap();
     assert_eq!((adv.total_stcg, adv.total_ltcg), (1_500.0, 0.0));
 }
 

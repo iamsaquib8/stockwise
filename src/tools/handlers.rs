@@ -625,7 +625,13 @@ async fn tax_estimate(src: &impl DataSource, a: &Args, m: Market) -> Result<Valu
 
 fn tax_advance(src: &impl DataSource, a: &Args) -> Result<Value> {
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
-    let schedule = commands::advance_tax_schedule(&p, a.str("fy"), a.f64("paid"))?;
+    let schedule = commands::advance_tax_schedule(
+        &p,
+        a.str("fy"),
+        &a.f64("paid")
+            .map(|amount| vec![crate::tax::AdvancePayment { date: None, amount }])
+            .unwrap_or_default(),
+    )?;
     Ok(serde_json::to_value(schedule)?)
 }
 

@@ -207,6 +207,9 @@ pub struct IndiaSummary {
     pub taxable_ltcg: f64,
     pub stcg_tax: f64,
     pub ltcg_tax: f64,
+    /// 4% health and education cess on the STCG and LTCG tax.
+    pub cess: f64,
+    /// STCG tax, LTCG tax and cess.
     pub total_tax: f64,
     pub st_loss_carried_forward: f64,
     pub lt_loss_carried_forward: f64,
@@ -319,6 +322,7 @@ pub fn india_schedule(
     sum.taxable_ltcg = e.lt_taxable;
     sum.stcg_tax = e.st_tax;
     sum.ltcg_tax = e.lt_tax;
+    sum.cess = e.cess;
     sum.total_tax = e.total();
     sum.st_loss_carried_forward = e.st_carry;
     sum.lt_loss_carried_forward = e.lt_carry;
@@ -326,7 +330,7 @@ pub fn india_schedule(
 
     let mut notes = vec![format!(
         "STCG under section 111A at {}%, LTCG under section 112A at {}% above the ₹1.25 lakh exemption; \
-         no surcharge, cess, transfer costs or brought-forward losses",
+         4% cess included, but no surcharge, transfer costs or brought-forward losses",
         c.st_rate(),
         c.lt_rate()
     )];
@@ -435,6 +439,7 @@ fn round_india(s: IndiaSummary) -> IndiaSummary {
         taxable_ltcg: r(s.taxable_ltcg),
         stcg_tax: r(s.stcg_tax),
         ltcg_tax: r(s.ltcg_tax),
+        cess: r(s.cess),
         total_tax: r(s.total_tax),
         st_loss_carried_forward: r(s.st_loss_carried_forward),
         lt_loss_carried_forward: r(s.lt_loss_carried_forward),
@@ -534,7 +539,8 @@ pub fn india_csv(s: &IndiaSchedule) -> String {
         ("Taxable LTCG (112A)", m.taxable_ltcg),
         ("Estimated STCG tax", m.stcg_tax),
         ("Estimated LTCG tax", m.ltcg_tax),
-        ("Estimated total tax", m.total_tax),
+        ("Health and education cess (4%)", m.cess),
+        ("Estimated total tax (with cess)", m.total_tax),
         (
             "Short-term loss to carry forward",
             m.st_loss_carried_forward,
@@ -949,7 +955,9 @@ mod tests {
         assert_eq!(m.taxable_ltcg, 1_000.0);
         assert_eq!(m.stcg_tax, 1_400.0);
         assert_eq!(m.ltcg_tax, 125.0);
-        assert_eq!(m.total_tax, 1_525.0);
+        // Cess: 4% of 1,525 = 61.
+        assert_eq!(m.cess, 61.0);
+        assert_eq!(m.total_tax, 1_586.0);
         assert!(s.notes.iter().any(|n| n.contains("31 Jan 2018")));
         assert!(s.notes.iter().any(|n| n.contains("AAPL")));
     }
@@ -1022,7 +1030,8 @@ mod tests {
         assert!(lines.contains(&"112A,LTCG,,TCS,10,2025-06-02,4100.0000,41000.00,2024-01-10,3500.0000,35000.00,509,6000.00,No,No"));
         assert!(lines.contains(&"Taxable LTCG (112A),1000.00"));
         assert!(lines.contains(&"LTCG exemption (up to ₹1.25 lakh),125000.00"));
-        assert!(lines.contains(&"Estimated total tax,1525.00"));
+        assert!(lines.contains(&"Health and education cess (4%),61.00"));
+        assert!(lines.contains(&"Estimated total tax (with cess),1586.00"));
         // Notes with commas are quoted.
         assert!(
             lines

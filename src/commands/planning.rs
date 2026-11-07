@@ -317,9 +317,9 @@ pub async fn cmd_tax_export(
 pub(crate) fn advance_tax_schedule(
     portfolio: &Portfolio,
     fy: Option<&str>,
-    paid: Option<f64>,
+    payments: &[tax::AdvancePayment],
 ) -> Result<tax::AdvanceTaxSchedule> {
-    if paid.is_some_and(|p| p < 0.0) {
+    if payments.iter().any(|p| p.amount < 0.0) {
         bail!("Advance tax paid amount cannot be negative");
     }
 
@@ -367,14 +367,23 @@ pub(crate) fn advance_tax_schedule(
         advance_sales.push(tax::AdvanceTaxSale::new(sell_d, s.gain() * scale, is_lt));
     }
 
-    Ok(tax::compute_advance_tax(&advance_sales, start, today, paid))
+    Ok(tax::compute_advance_tax(
+        &advance_sales,
+        start,
+        today,
+        payments,
+    ))
 }
 
 /// Advance tax quarterly instalment estimates under Section 208 and 211 with
 /// Section 234C(1) capital-gains proviso protections.
-pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) -> Result<()> {
+pub async fn cmd_tax_advance(fy: Option<&str>, paid: &[String], json: bool) -> Result<()> {
+    let payments = paid
+        .iter()
+        .map(|p| tax::AdvancePayment::parse(p).map_err(|e| anyhow::anyhow!("--paid {p}: {e}")))
+        .collect::<Result<Vec<_>>>()?;
     let portfolio = Portfolio::load()?;
-    let schedule = advance_tax_schedule(&portfolio, fy, paid)?;
+    let schedule = advance_tax_schedule(&portfolio, fy, &payments)?;
 
     if json {
         return output::print_json(&schedule);
@@ -424,6 +433,8 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
             tax::AdvanceTaxStatus::Paid => "Paid".green(),
             tax::AdvanceTaxStatus::Pending => "Pending".yellow(),
             tax::AdvanceTaxStatus::Upcoming => "Upcoming".dimmed(),
+            tax::AdvanceTaxStatus::Overdue => "Overdue".red().bold(),
+            tax::AdvanceTaxStatus::NothingDue => "Nothing due".dimmed(),
         };
         println!(
             "  {:<7} {:<11} {:>12} {:>12} {:>12} {:>5}% {:>13} {:>13}  {}",
@@ -465,8 +476,33 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
         "  • Section 234C Proviso: Shortfalls from capital gains realized later in the year are not penalized."
     );
 
-    if let Some(p) = paid {
-        println!("  • Advance Tax Paid Recorded: {}", inr(p));
+    if !payments.is_empty() {
+        println!(
+            "  • Advance Tax Paid Recorded: {}",
+            inr(schedule.total_paid)
+        );
+        if schedule.assumed_on_time {
+            println!(
+                "  • {}",
+                "A payment without a date is assumed to be paid before every due date. Use --paid DATE:AMOUNT for exact interest."
+                    .yellow()
+            );
+        }
+        for q in schedule
+            .quarters
+            .iter()
+            .filter(|q| q.shortfall > 0.0 && q.sec_234c_interest > 0.0)
+        {
+            println!(
+                "  • {}: {} paid by {} against {} due, shortfall {}, interest {}",
+                q.quarter,
+                inr(q.paid),
+                q.due_date.format("%d %b %Y"),
+                inr(q.min_cumulative_tax_required),
+                inr(q.shortfall),
+                inr(q.sec_234c_interest)
+            );
+        }
         if schedule.total_sec_234c_interest > 0.0 {
             println!(
                 "  • Estimated Section 234C Deferment Interest: {}",
@@ -487,7 +523,7 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
     } else {
         println!(
             "  • Section 234B/C Interest: Pass {} to track shortfall and interest.",
-            "`--paid <AMOUNT>`".cyan()
+            "`--paid [DATE:]AMOUNT`".cyan()
         );
     }
 

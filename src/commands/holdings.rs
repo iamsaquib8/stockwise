@@ -1529,6 +1529,9 @@ fn print_tax_estimate(country: Country, b: &tax::Buckets) {
         print_kv("Taxable LTCG", &m(e.lt_taxable));
         print_kv(&format!("STCG tax ({}%)", country.st_rate()), &m(e.st_tax));
         print_kv(&format!("LTCG tax ({}%)", country.lt_rate()), &m(e.lt_tax));
+        if e.cess > 0.0 {
+            print_kv("Health & education cess (4%)", &m(e.cess));
+        }
     } else {
         print_kv(
             "Gains / losses",
@@ -1813,6 +1816,7 @@ fn estimate_json(country: Country, b: tax::Buckets) -> serde_json::Value {
         "exemption_used": round(e.exemption_used, 2),
         "short_term_tax": round(e.st_tax, 2),
         "long_term_tax": round(e.lt_tax, 2),
+        "cess": round(e.cess, 2),
         "total_tax": round(e.total(), 2),
         "loss_carried_forward": round(e.st_carry + e.lt_carry, 2),
     })
@@ -2111,7 +2115,7 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     let caveat = match country {
         Country::India => {
             "ESTIMATE for listed shares with STT paid (Sec. 111A/112A rates from 23 Jul 2024), FIFO lots. \
-             Excludes cess and surcharge, pre-2018 grandfathering, brought-forward losses, and bonus-share \
+             Includes the 4% cess; excludes surcharge, pre-2018 grandfathering, brought-forward losses, and bonus-share \
              cost rules. Consult a chartered accountant."
         }
         Country::Us => {
