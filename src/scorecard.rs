@@ -46,14 +46,22 @@ pub struct PiotroskiCriterion {
     pub passed: bool,
     pub points: u8,
     pub explanation: String,
+    /// False when the data to run the test is missing: the signal is "n/a",
+    /// earns no point and is left out of the evaluated count.
+    pub evaluated: bool,
 }
 
 /// Complete Piotroski 9-Point Scorecard breakdown.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PiotroskiScorecard {
+    /// Points earned by the signals that could be evaluated.
     pub score: u8,
     pub max_score: u8,
-    pub rating: PiotroskiRating,
+    /// How many of the nine signals had the data to be evaluated.
+    pub evaluated: u8,
+    /// Only set when all nine signals were evaluated; a partial score is not
+    /// comparable with a full one.
+    pub rating: Option<PiotroskiRating>,
     pub rating_label: String,
     pub profitability_score: u8,
     pub leverage_score: u8,
@@ -151,9 +159,10 @@ fn make_criterion(
     name: &str,
     formula: &str,
     formatted_value: String,
-    passed: bool,
+    outcome: Option<bool>,
     explanation: &str,
 ) -> PiotroskiCriterion {
+    let passed = outcome == Some(true);
     PiotroskiCriterion {
         id: id.to_string(),
         category: category.to_string(),
@@ -161,8 +170,9 @@ fn make_criterion(
         formula: formula.to_string(),
         formatted_value,
         passed,
-        points: if passed { 1 } else { 0 },
+        points: u8::from(passed),
         explanation: explanation.to_string(),
+        evaluated: outcome.is_some(),
     }
 }
 
@@ -211,6 +221,18 @@ fn estimate_net_income(r: &Research) -> Option<f64> {
 }
 
 /// Calculate the Piotroski 9-Point F-Score from corporate research data.
+///
+/// Piotroski (2000), "Value Investing: The Use of Historical Financial
+/// Statement Information to Separate Winners from Losers": nine binary
+/// signals, F_SCORE = sum of ROA, CFO, ΔROA, ACCRUAL, ΔLEVER, ΔLIQUID, EQ_OFFER,
+/// ΔMARGIN and ΔTURN. A signal whose inputs are missing is n/a: it earns no
+/// point and is not counted as evaluated, and no rating is given unless all
+/// nine were evaluated.
+///
+/// Known deviation from the paper, kept so the nine-signal layout and the
+/// `ni_pos` id do not change: the signal list has "net income > 0" where the
+/// paper has ΔROA (ROA this year above last year). Net income > 0 and ROA > 0
+/// are the same test, so the paper's ΔROA is not scored.
 pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
     let cur = r.currency.as_deref();
 
@@ -241,8 +263,8 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
     let net_income = reported_ni.or_else(|| estimate_net_income(r));
     let ni_estimated = reported_ni.is_none() && net_income.is_some();
 
-    let ni_pass = net_income.map(|ni| ni > 0.0).unwrap_or(false);
-    let ni_fmt = net_income.map_or("N/A".to_string(), |v| {
+    let ni_outcome = net_income.map(|ni| ni > 0.0);
+    let ni_fmt = net_income.map_or("n/a".to_string(), |v| {
         format!(
             "{} ({}){}",
             format_large_number(v, cur),
@@ -256,28 +278,26 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
         "Positive Net Income",
         "Net Income > 0",
         ni_fmt,
-        ni_pass,
+        ni_outcome,
         "Generates positive accounting bottom-line profit in the latest period.",
     ));
 
     // 2. Positive Return on Assets
     let roa = r.fin.roa.or_else(|| curr_opt.and_then(|p| p.roa()));
-    let roa_pass = roa.map(|v| v > 0.0).unwrap_or(false);
-    let roa_fmt = roa.map_or("N/A".to_string(), |v| format!("{:.2}% ROA", v * 100.0));
+    let roa_fmt = roa.map_or("n/a".to_string(), |v| format!("{:.2}% ROA", v * 100.0));
     criteria.push(make_criterion(
         "roa_pos",
         "Profitability",
         "Positive Return on Assets",
         "ROA > 0%",
         roa_fmt,
-        roa_pass,
+        roa.map(|v| v > 0.0),
         "Productive return generated across the total asset base.",
     ));
 
     // 3. Positive Operating Cash Flow
     let ocf = curr_opt.and_then(|p| p.ocf).or(r.fin.ocf);
-    let ocf_pass = ocf.map(|v| v > 0.0).unwrap_or(false);
-    let ocf_fmt = ocf.map_or("N/A".to_string(), |v| {
+    let ocf_fmt = ocf.map_or("n/a".to_string(), |v| {
         format!("{} CFO", format_large_number(v, cur))
     });
     criteria.push(make_criterion(
@@ -286,22 +306,24 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
         "Positive Operating Cash Flow",
         "CFO > 0",
         ocf_fmt,
-        ocf_pass,
+        ocf.map(|v| v > 0.0),
         "Core day-to-day operations generate positive actual cash flow.",
     ));
 
-    // 4. Quality of Earnings / Accrual (CFO > Net Income)
-    let accrual_pass = match (ocf, net_income) {
-        (Some(c), Some(n)) => c > n,
-        _ => r.fin.fcf.is_some_and(|f| f > 0.0),
-    };
-    let accrual_fmt = match (ocf, net_income) {
-        (Some(c), Some(n)) => format!(
-            "CFO {} vs NI {}",
-            format_large_number(c, cur),
-            format_large_number(n, cur)
+    // 4. Quality of Earnings / Accrual. Piotroski: ACCRUAL = ROA - CFO/assets
+    // < 0. Both terms share one denominator, so the test is CFO > net income.
+    // Free cash flow is a different quantity and is not a stand-in.
+    let (accrual_outcome, accrual_fmt) = match (ocf, net_income) {
+        (Some(c), Some(n)) => (
+            Some(c > n),
+            format!(
+                "CFO {} vs NI {}{}",
+                format_large_number(c, cur),
+                format_large_number(n, cur),
+                if ni_estimated { " (est.)" } else { "" }
+            ),
         ),
-        _ => "CFO > Net Income".to_string(),
+        _ => (None, "n/a".to_string()),
     };
     criteria.push(make_criterion(
         "accrual",
@@ -309,77 +331,65 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
         "Cash Flow > Net Income (Low Accruals)",
         "CFO > Net Income",
         accrual_fmt,
-        accrual_pass,
+        accrual_outcome,
         "Earnings backed by hard operating cash flow rather than non-cash accruals.",
     ));
 
     // ── 2. Leverage, Liquidity & Source of Funds (3 points) ──
-    // 5. Lower Long-Term Debt / Leverage YoY
-    let debt_curr = curr_opt.and_then(|p| p.total_debt).or(r.fin.total_debt);
+    // 5. Lower leverage. Piotroski: long-term debt / average assets fell.
+    // Yahoo gives total debt, so the ratio is total debt / year-end assets.
+    // Two periods are required; equal ratios do not count as a fall, except
+    // that a firm with no debt in both periods keeps the point.
+    let debt_curr = curr_opt.and_then(|p| p.total_debt);
     let debt_prev = prev_opt.and_then(|p| p.total_debt);
-    let assets_curr = curr_opt.and_then(|p| p.total_assets);
-    let assets_prev = prev_opt.and_then(|p| p.total_assets);
-
-    let (lev_pass, lev_fmt) = match (debt_curr, debt_prev) {
-        (Some(dc), Some(dp)) if dc == 0.0 && dp == 0.0 => (
-            true,
+    let assets_curr = curr_opt.and_then(|p| p.total_assets).filter(|a| *a > 0.0);
+    let assets_prev = prev_opt.and_then(|p| p.total_assets).filter(|a| *a > 0.0);
+    let (lev_outcome, lev_fmt) = match (debt_curr, debt_prev, assets_curr, assets_prev) {
+        (Some(0.0), Some(0.0), _, _) => (
+            Some(true),
             "Debt-free across consecutive periods (0 debt)".to_string(),
         ),
-        (Some(dc), Some(dp)) => {
-            let ratio_curr = assets_curr.map(|a| dc / a).unwrap_or(dc);
-            let ratio_prev = assets_prev.map(|a| dp / a).unwrap_or(dp);
-            let decreased = ratio_curr <= ratio_prev * 1.001;
-            let diff_pct = if dp > 0.0 {
-                ((dc - dp) / dp) * 100.0
-            } else {
-                0.0
-            };
+        (Some(dc), Some(dp), Some(ac), Some(ap)) => {
+            let (lc, lp) = (dc / ac, dp / ap);
             (
-                decreased,
+                Some(lc < lp),
                 format!(
-                    "{} vs {} ({:+.1}% YoY)",
+                    "Debt/assets {:.1}% vs {:.1}% ({} vs {} debt)",
+                    lc * 100.0,
+                    lp * 100.0,
                     format_large_number(dc, cur),
-                    format_large_number(dp, cur),
-                    diff_pct
+                    format_large_number(dp, cur)
                 ),
             )
         }
-        (Some(0.0), None) => (true, "Debt-free (0 debt)".to_string()),
-        _ => {
-            let de = r.fin.de.unwrap_or(50.0);
-            (de <= 40.0, format!("D/E {:.1}%", de))
-        }
+        _ => (None, "n/a".to_string()),
     };
     criteria.push(make_criterion(
         "leverage",
         "Leverage & Liquidity",
         "Lower Long-Term Leverage YoY",
-        "Debt Ratio (t) <= Debt Ratio (t-1)",
+        "Debt Ratio (t) < Debt Ratio (t-1)",
         lev_fmt,
-        lev_pass,
-        "Debt ratio or total debt decreased YoY, reducing solvency vulnerability.",
+        lev_outcome,
+        "Debt ratio decreased YoY, reducing solvency vulnerability.",
     ));
 
-    // 6. Higher Current Ratio YoY
+    // 6. Higher current ratio. Piotroski: ΔCURRENT_RATIO > 0.
     let cr_curr = curr_opt
         .and_then(|p| p.current_ratio())
         .or(r.fin.current_ratio);
     let cr_prev = prev_opt.and_then(|p| p.current_ratio());
-    let (liq_pass, liq_fmt) = match (cr_curr, cr_prev) {
-        (Some(cc), Some(cp)) => {
-            let improved = cc >= cp;
-            (
-                improved,
-                format!(
-                    "{:.2}x vs {:.2}x ({:+.1}% YoY)",
-                    cc,
-                    cp,
-                    ((cc - cp) / cp) * 100.0
-                ),
-            )
-        }
-        (Some(cc), None) => (cc >= 1.5, format!("{:.2}x Current Ratio", cc)),
-        _ => (false, "N/A".to_string()),
+    let (liq_outcome, liq_fmt) = match (cr_curr, cr_prev) {
+        (Some(cc), Some(cp)) => (
+            Some(cc > cp),
+            format!(
+                "{:.2}x vs {:.2}x ({:+.1}% YoY)",
+                cc,
+                cp,
+                ((cc - cp) / cp) * 100.0
+            ),
+        ),
+        _ => (None, "n/a".to_string()),
     };
     criteria.push(make_criterion(
         "liquidity",
@@ -387,37 +397,25 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
         "Higher Current Ratio YoY",
         "Current Ratio (t) > Current Ratio (t-1)",
         liq_fmt,
-        liq_pass,
+        liq_outcome,
         "Liquid buffer improved relative to short-term obligations.",
     ));
 
-    // 7. No Share Dilution YoY
+    // 7. No dilution. Piotroski: no common equity issued in the year. Needs a
+    // share count for both periods; a 0.5% rise is tolerated as ESOP rounding.
     let shares_curr = curr_opt.and_then(|p| p.shares_outstanding).or(r.fin.shares);
     let shares_prev = prev_opt.and_then(|p| p.shares_outstanding);
-    let (dil_pass, dil_fmt) = match (shares_curr, shares_prev) {
-        (Some(sc), Some(sp)) => {
-            // Allow <= 0.5% threshold for routine ESOP rounding
-            let no_dilution = sc <= sp * 1.005;
-            let diff_pct = if sp > 0.0 {
+    let (dil_outcome, dil_fmt) = match (shares_curr, shares_prev) {
+        (Some(sc), Some(sp)) if sp > 0.0 => (
+            Some(sc <= sp * 1.005),
+            format!(
+                "{} vs {} shares ({:+.1}% YoY)",
+                format_volume(sc as u64),
+                format_volume(sp as u64),
                 ((sc - sp) / sp) * 100.0
-            } else {
-                0.0
-            };
-            (
-                no_dilution,
-                format!(
-                    "{} vs {} shares ({:+.1}% YoY)",
-                    format_volume(sc as u64),
-                    format_volume(sp as u64),
-                    diff_pct
-                ),
-            )
-        }
-        (Some(sc), None) => (
-            true,
-            format!("{} shares (no dilution tracked)", format_volume(sc as u64)),
+            ),
         ),
-        _ => (true, "No dilution detected".to_string()),
+        _ => (None, "n/a".to_string()),
     };
     criteria.push(make_criterion(
         "dilution",
@@ -425,64 +423,66 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
         "No Common Share Dilution",
         "Shares (t) <= Shares (t-1)",
         dil_fmt,
-        dil_pass,
+        dil_outcome,
         "No dilutive secondary share issuance, preventing equity dilution.",
     ));
 
     // ── 3. Operating Efficiency (2 points) ──
-    // 8. Higher Gross Margin YoY
+    // 8. Higher gross margin. Piotroski: ΔMARGIN > 0. Compare like with like:
+    // gross margin if both periods have it, else operating margin for both.
     let gm_curr = curr_opt
-        .and_then(|p| p.gross_margin().or_else(|| p.op_margin()))
+        .and_then(|p| p.gross_margin())
         .or(r.fin.gross_margin);
-    let gm_prev = prev_opt.and_then(|p| p.gross_margin().or_else(|| p.op_margin()));
-    let (gm_pass, gm_fmt) = match (gm_curr, gm_prev) {
-        (Some(gc), Some(gp)) => {
-            let expanded = gc >= gp;
-            let bps = (gc - gp) * 10_000.0;
-            (
-                expanded,
-                format!(
-                    "{:.1}% vs {:.1}% ({:+.0} bps YoY)",
-                    gc * 100.0,
-                    gp * 100.0,
-                    bps
-                ),
-            )
-        }
-        (Some(gc), None) => (gc >= 0.25, format!("{:.1}% Gross Margin", gc * 100.0)),
-        _ => (false, "N/A".to_string()),
+    let gm_prev = prev_opt.and_then(|p| p.gross_margin());
+    let om_curr = curr_opt.and_then(|p| p.op_margin());
+    let om_prev = prev_opt.and_then(|p| p.op_margin());
+    let (margin_name, margin_pair) = match (gm_curr, gm_prev, om_curr, om_prev) {
+        (Some(c), Some(p), _, _) => ("Gross Margin", Some((c, p))),
+        (_, _, Some(c), Some(p)) => ("Operating Margin", Some((c, p))),
+        _ => ("Gross Margin", None),
+    };
+    let (gm_outcome, gm_fmt) = match margin_pair {
+        Some((c, p)) => (
+            Some(c > p),
+            format!(
+                "{:.1}% vs {:.1}% {} ({:+.0} bps YoY)",
+                c * 100.0,
+                p * 100.0,
+                if margin_name == "Gross Margin" {
+                    "gross"
+                } else {
+                    "operating"
+                },
+                (c - p) * 10_000.0
+            ),
+        ),
+        None => (None, "n/a".to_string()),
     };
     criteria.push(make_criterion(
         "gross_margin",
         "Operating Efficiency",
         "Higher Gross Margin YoY",
-        "Gross Margin (t) > Gross Margin (t-1)",
+        &format!("{margin_name} (t) > {margin_name} (t-1)"),
         gm_fmt,
-        gm_pass,
-        "Gross margin expanded YoY, verifying pricing power or product cost control.",
+        gm_outcome,
+        "Margin expanded YoY, verifying pricing power or product cost control (operating margin is used for both years when gross profit is not reported for both).",
     ));
 
-    // 9. Higher Asset Turnover YoY
+    // 9. Higher asset turnover. Piotroski: ΔTURN > 0, sales / assets (the
+    // paper uses beginning-of-year assets; Yahoo's year-end assets are used).
     let turn_curr = curr_opt.and_then(|p| p.asset_turnover());
     let turn_prev = prev_opt.and_then(|p| p.asset_turnover());
-    let (turn_pass, turn_fmt) = match (turn_curr, turn_prev) {
-        (Some(tc), Some(tp)) => {
-            let improved = tc >= tp;
-            let diff_pct = if tp > 0.0 {
+    let (turn_outcome, turn_fmt) = match (turn_curr, turn_prev) {
+        (Some(tc), Some(tp)) => (
+            Some(tc > tp),
+            format!(
+                "{:.2}x vs {:.2}x ({:+.1}% YoY)",
+                tc,
+                tp,
                 ((tc - tp) / tp) * 100.0
-            } else {
-                0.0
-            };
-            (
-                improved,
-                format!("{:.2}x vs {:.2}x ({:+.1}% YoY)", tc, tp, diff_pct),
-            )
-        }
-        _ => {
-            // Fallback: check if revenue growth is positive
-            let rg = r.fin.revenue_growth.unwrap_or(0.0);
-            (rg >= 0.08, format!("Revenue growth {:+.1}%", rg * 100.0))
-        }
+            ),
+        ),
+        _ => (None, "n/a".to_string()),
     };
     criteria.push(make_criterion(
         "asset_turnover",
@@ -490,7 +490,7 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
         "Higher Asset Turnover YoY",
         "Asset Turnover (t) > Asset Turnover (t-1)",
         turn_fmt,
-        turn_pass,
+        turn_outcome,
         "Asset turnover improved, generating more revenue per unit of capital assets.",
     ));
 
@@ -498,20 +498,28 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
     let leverage_score: u8 = criteria[4..7].iter().map(|c| c.points).sum();
     let efficiency_score: u8 = criteria[7..9].iter().map(|c| c.points).sum();
     let total_score = profitability_score + leverage_score + efficiency_score;
+    let evaluated = criteria.iter().filter(|c| c.evaluated).count() as u8;
 
-    let rating = if total_score >= 8 {
-        PiotroskiRating::VeryStrong
-    } else if total_score >= 5 {
-        PiotroskiRating::Moderate
-    } else {
-        PiotroskiRating::Weak
+    let rating = (evaluated == 9).then(|| {
+        if total_score >= 8 {
+            PiotroskiRating::VeryStrong
+        } else if total_score >= 5 {
+            PiotroskiRating::Moderate
+        } else {
+            PiotroskiRating::Weak
+        }
+    });
+    let rating_label = match rating {
+        Some(rt) => rt.label().to_string(),
+        None => format!("Not rated ({evaluated} of 9 signals evaluated)"),
     };
 
     PiotroskiScorecard {
         score: total_score,
         max_score: 9,
+        evaluated,
         rating,
-        rating_label: rating.label().to_string(),
+        rating_label,
         profitability_score,
         leverage_score,
         efficiency_score,
@@ -807,13 +815,25 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
     // ── Scorecard Summary Badges ──
     println!("\n  {}", "EXECUTIVE AUDIT SUMMARY".bold().yellow());
     println!("  {}", subline.dimmed());
-    println!(
-        "  Piotroski F-Score:   {}/{}  {}  {}",
-        report.piotroski.score,
-        report.piotroski.max_score,
-        score_bar(report.piotroski.score, report.piotroski.max_score),
-        report.piotroski.rating.badge()
-    );
+    if report.piotroski.evaluated == 0 {
+        println!(
+            "  Piotroski F-Score:   {}",
+            "n/a (no signal has data)".dimmed()
+        );
+    } else {
+        let rating = report
+            .piotroski
+            .rating
+            .map(|r| r.badge())
+            .unwrap_or_else(|| report.piotroski.rating_label.yellow().to_string());
+        println!(
+            "  Piotroski F-Score:   {}/{} evaluated  {}  {}",
+            report.piotroski.score,
+            report.piotroski.evaluated,
+            score_bar(report.piotroski.score, report.piotroski.evaluated),
+            rating
+        );
+    }
     if let Some(z) = report.altman.z_score {
         let zone_str = report
             .altman
@@ -844,11 +864,22 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
     for c in &report.piotroski.criteria {
         if c.category != current_cat {
             current_cat = &c.category;
-            let cat_score = match current_cat {
-                "Profitability" => format!("{}/4", report.piotroski.profitability_score),
-                "Leverage & Liquidity" => format!("{}/3", report.piotroski.leverage_score),
-                "Operating Efficiency" => format!("{}/2", report.piotroski.efficiency_score),
-                _ => String::new(),
+            let (score, max) = match current_cat {
+                "Profitability" => (report.piotroski.profitability_score, 4),
+                "Leverage & Liquidity" => (report.piotroski.leverage_score, 3),
+                "Operating Efficiency" => (report.piotroski.efficiency_score, 2),
+                _ => (0, 0),
+            };
+            let n_eval = report
+                .piotroski
+                .criteria
+                .iter()
+                .filter(|x| x.category == current_cat && x.evaluated)
+                .count();
+            let cat_score = if n_eval == max {
+                format!("{score}/{max}")
+            } else {
+                format!("{score}/{n_eval} evaluated, {max} signals")
             };
             println!(
                 "\n  ▶ {} ({})",
@@ -857,7 +888,9 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
             );
         }
 
-        let pts_str = if c.passed {
+        let pts_str = if !c.evaluated {
+            "n/a".dimmed().to_string()
+        } else if c.passed {
             "+1".green().bold().to_string()
         } else {
             " 0".dimmed().to_string()
@@ -874,12 +907,21 @@ pub fn print_scorecard_report(report: &ScorecardReport) {
 
     println!("\n  {}", subline.dimmed());
     println!(
-        "  Piotroski Score Subtotals: Profitability {}/4 · Leverage {}/3 · Efficiency {}/2 = {}/9",
+        "  Piotroski Score Subtotals: Profitability {} · Leverage {} · Efficiency {} = {}/{} ({} of 9 signals evaluated)",
         report.piotroski.profitability_score,
         report.piotroski.leverage_score,
         report.piotroski.efficiency_score,
-        report.piotroski.score.to_string().bold().green()
+        report.piotroski.score.to_string().bold().green(),
+        report.piotroski.evaluated,
+        report.piotroski.evaluated
     );
+    if report.piotroski.evaluated < report.piotroski.max_score {
+        println!(
+            "  {}",
+            "n/a = the data for that year-over-year test is missing; it earns no point and no rating is given."
+                .dimmed()
+        );
+    }
 
     // ── 2. Altman Z-Score Breakdown Table ──
     println!(
@@ -1037,7 +1079,8 @@ mod tests {
         assert_eq!(sc.profitability_score, 4);
         assert_eq!(sc.leverage_score, 3);
         assert_eq!(sc.efficiency_score, 2);
-        assert_eq!(sc.rating, PiotroskiRating::VeryStrong);
+        assert_eq!(sc.rating, Some(PiotroskiRating::VeryStrong));
+        assert_eq!(sc.evaluated, 9);
 
         for c in &sc.criteria {
             assert!(c.passed, "criterion {} should pass", c.id);
@@ -1082,7 +1125,8 @@ mod tests {
         let sc = calculate_piotroski(&r);
 
         assert_eq!(sc.score, 0);
-        assert_eq!(sc.rating, PiotroskiRating::Weak);
+        assert_eq!(sc.rating, Some(PiotroskiRating::Weak));
+        assert_eq!(sc.evaluated, 9);
         assert_eq!(sc.profitability_score, 0);
         assert_eq!(sc.leverage_score, 0);
         assert_eq!(sc.efficiency_score, 0);
@@ -1258,7 +1302,8 @@ mod tests {
         };
         let sc = calculate_piotroski(&r);
         let ni = sc.criteria.iter().find(|c| c.id == "ni_pos").unwrap();
-        assert_eq!(ni.formatted_value, "N/A");
+        assert_eq!(ni.formatted_value, "n/a");
+        assert!(!ni.evaluated);
         assert!(!ni.passed);
     }
 
@@ -1280,5 +1325,125 @@ mod tests {
         }
         let ni = estimate_net_income(&r).unwrap();
         assert!((ni - 2.0e10).abs() < 1.0, "{ni}");
+    }
+
+    // #71. One annual period, no share data, no prior year. Hand count:
+    //   NI 10 > 0 -> 1 point; ROA = 10 / 200 = 0.05 > 0 -> 1 point;
+    //   CFO 15 > 0 -> 1 point; CFO 15 > NI 10 -> 1 point.
+    //   Signals 5-9 need a prior year (or shares) and are n/a: 4 evaluated,
+    //   4 points, no rating. The old code also gave dilution a free point and
+    //   scored D/E 10% <= 40% and revenue growth 20% >= 8% as levels.
+    #[test]
+    fn piotroski_one_period_leaves_year_over_year_signals_unscored() {
+        let mut r = Research::default();
+        r.fin = Fin {
+            de: Some(10.0),
+            revenue_growth: Some(0.20),
+            gross_margin: Some(0.45),
+            current_ratio: Some(2.0),
+            ..Default::default()
+        };
+        r.annual = vec![Period {
+            end: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            revenue: Some(100.0),
+            net_income: Some(10.0),
+            ocf: Some(15.0),
+            total_assets: Some(200.0),
+            total_debt: Some(0.0),
+            ..Default::default()
+        }];
+        let sc = calculate_piotroski(&r);
+        assert_eq!((sc.score, sc.evaluated, sc.max_score), (4, 4, 9));
+        assert_eq!(sc.rating, None);
+        assert!(sc.rating_label.contains("4 of 9"), "{}", sc.rating_label);
+        for id in [
+            "leverage",
+            "liquidity",
+            "dilution",
+            "gross_margin",
+            "asset_turnover",
+        ] {
+            let c = sc.criteria.iter().find(|c| c.id == id).unwrap();
+            assert!(!c.evaluated && !c.passed && c.points == 0, "{id}");
+            assert_eq!(c.formatted_value, "n/a", "{id}");
+        }
+        let json = serde_json::to_value(&sc).unwrap();
+        assert_eq!(json["evaluated"], 4);
+        assert_eq!(json["criteria"][4]["evaluated"], false);
+        assert!(json["rating"].is_null());
+    }
+
+    #[test]
+    fn piotroski_with_no_data_scores_nothing() {
+        let sc = calculate_piotroski(&Research::default());
+        assert_eq!((sc.score, sc.evaluated), (0, 0));
+        assert!(sc.criteria.iter().all(|c| !c.evaluated && c.points == 0));
+    }
+
+    // #71. Current year reports gross profit, prior year does not, so the two
+    // years are compared on operating margin:
+    //   operating margin now 10 / 100 = 0.10, prior 15 / 100 = 0.15 -> fell, 0 points.
+    // Mixing gross margin now (30 / 100 = 0.30) with operating margin before
+    // (0.15) would have shown 0.30 > 0.15 and awarded the point.
+    #[test]
+    fn piotroski_margin_compares_like_with_like() {
+        let mut r = Research::default();
+        r.annual = vec![
+            Period {
+                end: NaiveDate::from_ymd_opt(2025, 3, 31).unwrap(),
+                revenue: Some(100.0),
+                operating_income: Some(15.0),
+                ..Default::default()
+            },
+            Period {
+                end: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+                revenue: Some(100.0),
+                gross_profit: Some(30.0),
+                operating_income: Some(10.0),
+                ..Default::default()
+            },
+        ];
+        let sc = calculate_piotroski(&r);
+        let gm = sc.criteria.iter().find(|c| c.id == "gross_margin").unwrap();
+        assert!(gm.evaluated);
+        assert!(!gm.passed, "{}", gm.formatted_value);
+        assert!(gm.formula.contains("Operating Margin"), "{}", gm.formula);
+        assert!(
+            gm.formatted_value.contains("10.0% vs 15.0%"),
+            "{}",
+            gm.formatted_value
+        );
+    }
+
+    // #71. Dilution needs both share counts: 400,000,000 -> 440,000,000 is
+    // +10%, above the 0.5% tolerance, so it is evaluated and fails; a missing
+    // prior count is n/a, never a pass.
+    #[test]
+    fn piotroski_dilution_fails_on_issuance_and_is_na_when_unknown() {
+        let mut r = Research::default();
+        r.annual = vec![
+            Period {
+                end: NaiveDate::from_ymd_opt(2025, 3, 31).unwrap(),
+                shares_outstanding: Some(400_000_000.0),
+                ..Default::default()
+            },
+            Period {
+                end: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+                shares_outstanding: Some(440_000_000.0),
+                ..Default::default()
+            },
+        ];
+        let dil = |r: &Research| {
+            calculate_piotroski(r)
+                .criteria
+                .into_iter()
+                .find(|c| c.id == "dilution")
+                .unwrap()
+        };
+        let c = dil(&r);
+        assert!(c.evaluated && !c.passed);
+        r.annual[0].shares_outstanding = None;
+        let c = dil(&r);
+        assert!(!c.evaluated && !c.passed && c.points == 0);
     }
 }

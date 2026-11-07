@@ -22,8 +22,8 @@ fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &
         print_kv(
             "Piotroski F-Score",
             &format!(
-                "{}/{} ({})",
-                sc.piotroski.score, sc.piotroski.max_score, sc.piotroski.rating_label
+                "{}/{} evaluated ({})",
+                sc.piotroski.score, sc.piotroski.evaluated, sc.piotroski.rating_label
             ),
         );
         if let Some(text) = altman_summary(&sc.altman) {
