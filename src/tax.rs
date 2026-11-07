@@ -446,9 +446,16 @@ impl AdvancePayment {
         Ok(Self { date, amount })
     }
 
-    /// Whether this payment counts as made by `due`.
-    fn counts_by(&self, due: NaiveDate) -> bool {
-        self.date.is_none_or(|d| d <= due)
+    /// Whether this payment is for the financial year starting `fy_start`:
+    /// one dated before it was made for an earlier year.
+    fn in_year(&self, fy_start: NaiveDate) -> bool {
+        self.date.is_none_or(|d| d >= fy_start)
+    }
+
+    /// Whether this payment counts as made by `due`, in the year starting
+    /// `fy_start`.
+    fn counts_by(&self, fy_start: NaiveDate, due: NaiveDate) -> bool {
+        self.in_year(fy_start) && self.date.is_none_or(|d| d <= due)
     }
 }
 
@@ -526,6 +533,9 @@ pub struct AdvanceTaxSchedule {
     pub payments: Vec<AdvancePayment>,
     /// True when a payment had no date and was assumed to be on time.
     pub assumed_on_time: bool,
+    /// True when a payment dated before the financial year began was left
+    /// out (it was made for an earlier year); `total_paid` excludes it.
+    pub ignored_before_year: bool,
     /// Total Section 234C deferment interest.
     pub total_sec_234c_interest: f64,
     /// True if evaluated after 31 March and paid < 90% of total tax.
@@ -652,7 +662,13 @@ pub fn compute_advance_tax(
         },
     ];
 
-    let total_paid: f64 = payments.iter().map(|p| p.amount).sum();
+    // A payment dated before the year began was made for an earlier year.
+    let ignored_before_year = payments.iter().any(|p| !p.in_year(fy_start));
+    let total_paid: f64 = payments
+        .iter()
+        .filter(|p| p.in_year(fy_start))
+        .map(|p| p.amount)
+        .sum();
 
     // Compute cumulative taxes and quarter gains
     let mut quarters_data = Vec::with_capacity(4);
@@ -735,12 +751,12 @@ pub fn compute_advance_tax(
 
         let paid_by_due: f64 = payments
             .iter()
-            .filter(|p| p.counts_by(m.due_date))
+            .filter(|p| p.counts_by(fy_start, m.due_date))
             .map(|p| p.amount)
             .sum();
         let paid_by_cutoff: f64 = payments
             .iter()
-            .filter(|p| p.counts_by(m.cutoff_date))
+            .filter(|p| p.counts_by(fy_start, m.cutoff_date))
             .map(|p| p.amount)
             .sum();
         // Sec. 234C(1) proviso (second): for the last instalment, a shortfall
@@ -809,7 +825,7 @@ pub fn compute_advance_tax(
     let total_sec_234c_interest = quarters.iter().map(|q| q.sec_234c_interest).sum();
     let paid_by_year_end: f64 = payments
         .iter()
-        .filter(|p| p.counts_by(fy_end))
+        .filter(|p| p.counts_by(fy_start, fy_end))
         .map(|p| p.amount)
         .sum();
     let sec_234b_applicable = sec_208_applicable
@@ -830,6 +846,7 @@ pub fn compute_advance_tax(
         total_paid,
         payments: payments.to_vec(),
         assumed_on_time: payments.iter().any(|p| p.date.is_none()),
+        ignored_before_year,
         total_sec_234c_interest,
         sec_234b_applicable,
         quarters,
@@ -1311,6 +1328,33 @@ mod tests {
         let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false)];
         let s = compute_advance_tax(&sales, d("2025-04-01"), d("2026-04-10"), &[]);
         assert!(close(s.total_tax_estimated, 20_800.0));
+    }
+
+    #[test]
+    fn a_payment_dated_before_the_year_does_not_count() {
+        // Tax ₹20,800 for FY 2025-26 (Q1 needs ₹3,120 by 15 Jun 2025). A
+        // payment of 20,800 dated 14 Jun 2024 was made for FY 2024-25.
+        let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false)];
+        let old = [AdvancePayment {
+            date: Some(d("2024-06-14")),
+            amount: 20_800.0,
+        }];
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-10-01"), &old);
+        assert!(s.ignored_before_year);
+        assert!(close(s.total_paid, 0.0));
+        assert!(close(s.quarters[0].paid, 0.0));
+        assert_eq!(s.quarters[0].status, AdvanceTaxStatus::Overdue);
+        // Q1 shortfall 3,120 -> 3,100 at 3% = 93 (no payment counted).
+        assert!(close(s.quarters[0].sec_234c_interest, 93.0));
+        // The same payment dated inside the year counts.
+        let ok = [AdvancePayment {
+            date: Some(d("2025-04-01")),
+            amount: 20_800.0,
+        }];
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2025-10-01"), &ok);
+        assert!(!s.ignored_before_year);
+        assert!(close(s.total_paid, 20_800.0));
+        assert_eq!(s.quarters[0].status, AdvanceTaxStatus::Paid);
     }
 
     #[test]
