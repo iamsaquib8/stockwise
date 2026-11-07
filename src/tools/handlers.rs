@@ -732,8 +732,10 @@ fn goal_education(a: &Args, m: Market) -> Result<Value> {
 
 /// The symbol as a shell word. `&` (M&M, J&KBANK) is a command separator in
 /// bash and zsh and a parse error in PowerShell, so such symbols go in single
-/// quotes, which all of them accept. The symbol is already limited to
-/// letters, digits, `&` and `-`, so nothing inside the quotes needs escaping.
+/// quotes, which those shells accept. Windows `cmd.exe` does not treat `'` as
+/// a quote; `next_step` tells its users to use double quotes. The symbol is
+/// already limited to letters, digits, `&` and `-`, so nothing inside the
+/// quotes needs escaping.
 fn shell_symbol(sym: &str) -> String {
     if sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         sym.to_string()
@@ -766,7 +768,22 @@ async fn order_preview(src: &impl DataSource, a: &Args) -> Result<Value> {
         );
     }
     // Orders go through Indian brokers on NSE, whatever the default market.
+    // `stockwise trade` sends the symbol as typed, but the quote lookup
+    // rewrites aliases (HDFC to HDFCBANK, L&T to LT). Price exactly what the
+    // command will trade: refuse a symbol the alias table would change.
     let resolved = market::resolve_symbol(&sym, Market::In);
+    if resolved != format!("{sym}.NS") {
+        match resolved.strip_suffix(".NS") {
+            Some(ticker) => bail!(
+                "'{sym}' is an alias: quotes would price {ticker}, but `stockwise trade` sends \
+                 '{sym}' as typed. Use the NSE ticker {ticker} instead"
+            ),
+            None => bail!(
+                "'{sym}' is not an NSE equity symbol (it names {resolved}). Use the NSE trading \
+                 symbol of the stock"
+            ),
+        }
+    }
     let (limit, trigger) = (a.f64("limit"), a.f64("trigger"));
     let kind = match (limit, trigger) {
         (None, None) => OrderKind::Market,
@@ -813,8 +830,16 @@ async fn order_preview(src: &impl DataSource, a: &Args) -> Result<Value> {
         "estimated_value_inr": est.map(|v| round(v, 2)),
         "dry_run_command": format!("{command} --dry-run"),
         "command": command,
-        "next_step": "Show the user the command. Only they can place the order: `stockwise trade` \
-                      shows its own preview, checks max_order_value from their broker config and \
-                      asks them to type yes. Try --dry-run first.",
+        "next_step": format!(
+            "Show the user the command. Only they can place the order: `stockwise trade` \
+             shows its own preview, checks max_order_value from their broker config and \
+             asks them to type yes. Try --dry-run first.{}",
+            if command.contains('\'') {
+                " The symbol is in single quotes, which bash, zsh and PowerShell accept. In \
+                 Windows cmd.exe use double quotes instead (\"M&M\")."
+            } else {
+                ""
+            }
+        ),
     }))
 }
