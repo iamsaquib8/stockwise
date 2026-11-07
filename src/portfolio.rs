@@ -1408,6 +1408,22 @@ impl Portfolio {
                 out.push((sym, ImportOutcome::WouldReplace));
                 continue;
             }
+            // A file of lots alone is the whole state, so it deletes the
+            // trades kept from this source's tradebooks and the sales they
+            // recorded. Never do that unasked.
+            if !ledger && !opts.replace {
+                let kept_trades = self.imported.iter().any(|t| {
+                    t.symbol == sym && t.source == source && t.account.as_deref() == account
+                });
+                let own_sales = self
+                    .realized
+                    .iter()
+                    .any(|s| s.symbol == sym && scope.sale(s) && s.source == source);
+                if kept_trades || own_sales {
+                    out.push((sym, ImportOutcome::WouldReplace));
+                    continue;
+                }
+            }
 
             let splits: &[Split] = if opts.tradebook {
                 opts.splits
@@ -2567,6 +2583,47 @@ mod tests {
         // The earlier trades are gone from the kept list too.
         p.apply_import(&y2025, tradebook_opts("import:kite"));
         assert_eq!(p.holding("TCS.NS").unwrap().shares, 5.0);
+    }
+
+    #[test]
+    fn a_lots_only_file_does_not_delete_tradebook_sales_unless_replacing() {
+        let book = vec![
+            trade("TCS.NS", "2024-01-10", false, 10.0, 3500.0),
+            trade("TCS.NS", "2024-06-01", true, 4.0, 3900.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&book, opts("import:kite"));
+        assert_eq!(p.realized.len(), 1);
+        assert_eq!(p.imported.len(), 2);
+        let before = state(&p);
+
+        // Dated buys, no sell rows, no tradebook: a lot list for the symbol.
+        let lots_only = vec![trade("TCS.NS", "2024-01-10", false, 6.0, 3500.0)];
+        let out = p.apply_import(&lots_only, opts("import:kite"));
+        assert_eq!(out[0].1, ImportOutcome::WouldReplace);
+        assert_eq!(state(&p), before, "nothing changed");
+        assert_eq!(p.imported.len(), 2, "kept trades survive");
+
+        let replace = ImportOptions {
+            replace: true,
+            ..opts("import:kite")
+        };
+        let out = p.apply_import(&lots_only, replace);
+        assert!(matches!(out[0].1, ImportOutcome::Lots { sales: 0, .. }));
+        assert!(p.realized.is_empty());
+        assert!(p.imported.is_empty());
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 6.0);
+    }
+
+    #[test]
+    fn a_lots_only_file_is_still_idempotent() {
+        let lots_only = vec![trade("TCS.NS", "2024-01-10", false, 6.0, 3500.0)];
+        let mut p = Portfolio::default();
+        p.apply_import(&lots_only, opts("import:csv"));
+        let before = state(&p);
+        let out = p.apply_import(&lots_only, opts("import:csv"));
+        assert!(matches!(out[0].1, ImportOutcome::Lots { .. }), "{:?}", out);
+        assert_eq!(state(&p), before);
     }
 
     #[test]

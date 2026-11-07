@@ -1,0 +1,1 @@
+- `import` of a file with dated buys and no sells no longer silently deletes the sales and kept trades an earlier tradebook of the same broker recorded for that symbol; it skips the symbol and asks for `--replace`.

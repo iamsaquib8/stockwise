@@ -1077,8 +1077,9 @@ pub(super) async fn apply_import_rows(
             ),
             ImportOutcome::WouldReplace => println!(
                 "  {} {} — skipped: it has lots or sales from elsewhere (manual entries, another \
-                 import, or a tradebook imported by an older version) that this file would replace. \
-                 Re-run with --replace to rebuild it from this file.",
+                 import, or a tradebook imported by an older version), or sales and trades kept \
+                 from an earlier tradebook of this source that a file of lots alone would delete. \
+                 Re-run with --replace to rebuild it from this file and delete those.",
                 "!".yellow(),
                 sym
             ),
