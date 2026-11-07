@@ -869,9 +869,21 @@ pub fn parse_timeseries(results: &[Value], fx: &StatementFx) -> (Vec<Period>, Ve
     (q.into_values().collect(), a.into_values().collect())
 }
 
+/// Multiplier that takes `quoteSummary` statement amounts (reported in the
+/// company's `financialCurrency`) into the quote currency. `None` means the
+/// currencies differ and no rate is known, so the amounts must be left out.
+pub fn summary_factor(fin_ccy: Option<&str>, fx: &StatementFx) -> Option<f64> {
+    fin_ccy.map_or(Some(1.0), |c| fx.factor(c))
+}
+
 /// Merge `incomeStatementHistoryQuarterly` into timeseries quarters (fills gaps,
-/// usually the most recent quarter which the timeseries lags on).
-pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
+/// usually the most recent quarter which the timeseries lags on). `factor`
+/// converts the amounts into the quote currency (see [`summary_factor`]); with
+/// no factor nothing is merged.
+pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value, factor: Option<f64>) {
+    let Some(factor) = factor else {
+        return;
+    };
     let Some(hist) = summary
         .get("incomeStatementHistoryQuarterly")
         .and_then(|m| m.get("incomeStatementHistory"))
@@ -879,7 +891,7 @@ pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
     else {
         return;
     };
-    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0);
+    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| x * factor);
     for item in hist {
         let Some(end) =
             raw(item, "endDate").and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
@@ -912,7 +924,12 @@ pub fn merge_income_statement(quarters: &mut Vec<Period>, summary: &Value) {
 }
 
 /// Merge `balanceSheetHistory` into annual periods (fills gaps in assets, liabilities, working capital, retained earnings).
-pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
+/// `factor` converts the amounts into the quote currency (see
+/// [`summary_factor`]); with no factor nothing is merged.
+pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value, factor: Option<f64>) {
+    let Some(factor) = factor else {
+        return;
+    };
     let Some(hist) = summary
         .get("balanceSheetHistory")
         .and_then(|m| m.get("balanceSheetStatements"))
@@ -920,7 +937,7 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
     else {
         return;
     };
-    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0);
+    let nz = |v: Option<f64>| v.filter(|x| *x != 0.0).map(|x| x * factor);
     for item in hist {
         let Some(end) =
             raw(item, "endDate").and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
@@ -936,7 +953,9 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
         let re = nz(raw(item, "retainedEarnings"));
         let eq = nz(raw(item, "totalStockholderEquity"));
         // A reported 0 is real: a debt-free year, not missing data.
-        let debt = raw(item, "shortLongTermDebt").or_else(|| raw(item, "longTermDebt"));
+        let debt = raw(item, "shortLongTermDebt")
+            .or_else(|| raw(item, "longTermDebt"))
+            .map(|x| x * factor);
 
         match annual.iter_mut().find(|p| p.end.year() == end.year()) {
             Some(p) => {
@@ -1895,8 +1914,9 @@ pub async fn fetch(
 
     let (quarters, annual) = if needs.statements {
         let (mut q, mut a) = parse_timeseries(&timeseries, &fx);
-        merge_income_statement(&mut q, &summary);
-        merge_balance_sheet(&mut a, &summary);
+        let factor = summary_factor(fin_ccy.as_deref(), &fx);
+        merge_income_statement(&mut q, &summary, factor);
+        merge_balance_sheet(&mut a, &summary, factor);
         (q, a)
     } else {
         (vec![], vec![])
@@ -2027,7 +2047,7 @@ mod tests {
             {"endDate": {"raw": 1790726400}, "totalRevenue": {"raw": 120.0}, "netIncome": {"raw": 12.0}},
             {"endDate": {"raw": 1782777600}, "totalRevenue": {"raw": 999.0}, "netIncome": {"raw": 11.0}}
         ]}});
-        merge_income_statement(&mut q, &summary);
+        merge_income_statement(&mut q, &summary, Some(1.0));
         assert_eq!(q.len(), 3);
         assert_eq!(q[2].revenue, Some(120.0)); // new latest quarter appended
         assert_eq!(q[1].revenue, Some(110.0)); // existing value preserved
@@ -2063,6 +2083,67 @@ mod tests {
         assert!((a[0].eps.unwrap() - 72.0).abs() < 1e-9);
         // Share counts are not money.
         assert_eq!(a[0].shares_outstanding, Some(4_050_000_000.0));
+    }
+
+    /// Infosys: statements in USD, share in INR. The newest quarter only
+    /// comes from `quoteSummary` and must be converted like the others.
+    fn infy_summary() -> Value {
+        json!({
+            "financialData": {"financialCurrency": "USD"},
+            "incomeStatementHistoryQuarterly": {"incomeStatementHistory": [
+                {"endDate": {"raw": 1790726400}, "totalRevenue": {"raw": 5.08e9},
+                 "netIncome": {"raw": 0.8e9}, "operatingIncome": {"raw": 1.1e9}}
+            ]},
+            "balanceSheetHistory": {"balanceSheetStatements": [
+                {"endDate": {"raw": 1790726400}, "totalAssets": {"raw": 17.0e9},
+                 "totalLiab": {"raw": 6.0e9}, "totalStockholderEquity": {"raw": 11.0e9},
+                 "shortLongTermDebt": {"raw": 0.1e9}, "longTermDebt": {"raw": 0.5e9}}
+            ]}
+        })
+    }
+
+    #[test]
+    fn summary_amounts_convert_like_the_timeseries() {
+        let ts = vec![json!({"meta": {"type": ["quarterlyTotalRevenue"]},
+            "quarterlyTotalRevenue": [usd_item("2026-03-31", 4.9e9), usd_item("2026-06-30", 5.0e9)]})];
+        let fx = StatementFx::new(Some("INR"), [("USD".to_string(), 90.0)]);
+        let summary = infy_summary();
+        let factor = summary_factor(financial_currency(&summary).as_deref(), &fx);
+        assert_eq!(factor, Some(90.0));
+        let (mut q, mut a) = parse_timeseries(&ts, &fx);
+        merge_income_statement(&mut q, &summary, factor);
+        merge_balance_sheet(&mut a, &summary, factor);
+        assert_eq!(q.len(), 3);
+        assert_eq!(
+            q[2].revenue,
+            Some(5.08e9 * 90.0),
+            "newest quarter is in INR"
+        );
+        let qoq = q[2].revenue.unwrap() / q[1].revenue.unwrap() - 1.0;
+        assert!((qoq - 0.016).abs() < 1e-9, "QoQ growth is small, got {qoq}");
+        assert_eq!(q[2].operating_income, Some(1.1e9 * 90.0));
+        assert_eq!(a[0].total_assets, Some(17.0e9 * 90.0));
+        assert_eq!(a[0].equity, Some(11.0e9 * 90.0));
+        assert_eq!(a[0].total_liabilities, Some(6.0e9 * 90.0));
+    }
+
+    #[test]
+    fn summary_amounts_without_a_rate_are_left_out() {
+        let summary = infy_summary();
+        let fx = StatementFx::new(Some("INR"), []);
+        let factor = summary_factor(financial_currency(&summary).as_deref(), &fx);
+        assert_eq!(factor, None);
+        let (mut q, mut a) = (vec![], vec![]);
+        merge_income_statement(&mut q, &summary, factor);
+        merge_balance_sheet(&mut a, &summary, factor);
+        assert!(
+            q.is_empty() && a.is_empty(),
+            "no raw USD figure is shown as INR"
+        );
+        // Same currency, or no currency stated: taken as they are.
+        let same = StatementFx::new(Some("USD"), []);
+        assert_eq!(summary_factor(Some("USD"), &same), Some(1.0));
+        assert_eq!(summary_factor(None, &fx), Some(1.0));
     }
 
     #[test]
