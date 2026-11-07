@@ -471,6 +471,12 @@ impl ChartData {
         market: crate::market::Market,
     ) -> Option<PriorSession> {
         let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
+        // The chart's own symbol decides the market: a BTC-USD chart never
+        // closes, whatever market the command was run with.
+        let market = match self.meta.as_ref().and_then(|m| m.symbol.as_deref()) {
+            Some(symbol) => crate::market::market_of_symbol(symbol, market),
+            None => market,
+        };
         let q = self.indicators.quote.first()?;
         let (highs, lows, closes) = (q.high.as_deref()?, q.low.as_deref()?, q.close.as_deref()?);
         let mut bars: Vec<PriorSession> = self
@@ -2061,5 +2067,36 @@ mod tests {
             .prior_session(utc("2026-11-03T20:00:00Z"), Market::Crypto)
             .unwrap();
         assert_eq!(p.close, 105.0);
+    }
+
+    /// The chart's own symbol picks the market, not the command's (default India).
+    #[test]
+    fn the_symbols_own_market_decides_whether_a_session_runs() {
+        use crate::market::Market;
+        let days = [
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, None),
+        ];
+        // BTC-USD at 20:00Z on the 3rd is 01:30 IST on the 4th: judged by
+        // Indian hours the bar of the 3rd would look finished.
+        let mut btc = nse_chart(&days);
+        btc.meta.as_mut().unwrap().gmtoffset = Some(0);
+        btc.meta.as_mut().unwrap().symbol = Some("BTC-USD".into());
+        let now = utc("2026-11-03T20:00:00Z");
+        assert_eq!(btc.prior_session(now, Market::In).unwrap().close, 105.0);
+        assert_eq!(btc.prior_session(now, Market::Crypto).unwrap().close, 105.0);
+        // ^GSPC at 21:30 IST (11:00 ET) on a weekday: the US session is still
+        // open, though the Indian one closed at 15:30 IST.
+        let mut spx = nse_chart(&[
+            ("2026-11-02", 110.0, 100.0, Some(105.0)),
+            ("2026-11-03", 120.0, 108.0, Some(118.0)),
+        ]);
+        spx.meta.as_mut().unwrap().gmtoffset = Some(-18_000);
+        spx.meta.as_mut().unwrap().symbol = Some("^GSPC".into());
+        let now = utc("2026-11-03T16:00:00Z");
+        assert_eq!(spx.prior_session(now, Market::In).unwrap().close, 105.0);
+        // Without a symbol on the chart the caller's market is all there is.
+        spx.meta.as_mut().unwrap().symbol = None;
+        assert_eq!(spx.prior_session(now, Market::In).unwrap().close, 118.0);
     }
 }

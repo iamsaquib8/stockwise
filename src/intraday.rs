@@ -912,7 +912,10 @@ pub async fn scan_intraday_with(
             Some(rule) => custom_rule_signal(client, &symbol, rule).await?,
             None => None,
         };
-        let prior = chart.prior_session(chrono::Utc::now(), market);
+        let prior = chart.prior_session(
+            chrono::Utc::now(),
+            market::market_of_symbol(&symbol, market),
+        );
         let signal = compute_signal(
             &symbol, quote, price, &closes, &highs, &lows, &volumes, &opens, prior, custom,
         );
