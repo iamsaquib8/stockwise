@@ -124,9 +124,7 @@ Claude Desktop (Settings → Developer → Edit Config) and Cursor
 }
 ```
 
-Without installing anything but [uv](https://docs.astral.sh/uv/), once the PyPI
-wheels are out: `"command": "uvx", "args": ["stockwise", "mcp"]`. Over HTTP:
-`stockwise mcp --http 127.0.0.1:8788`. Agents can also read the
+Over HTTP: `stockwise mcp --http 127.0.0.1:8788`. Agents can also read the
 [Agent Skill](skills/stockwise/SKILL.md) and the docs'
 [llms.txt](https://iamsaquib8.github.io/stockwise/llms.txt). Details, the tool
 list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assistants-mcp).
