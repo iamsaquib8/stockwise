@@ -185,6 +185,31 @@ fn make_altman_component(
     }
 }
 
+/// Net income for the first Piotroski signal when no period reports it.
+///
+/// Net income = trailing EPS x shares outstanding, or, failing that, profit
+/// margin x revenue (annual revenue, or the sum of the last four quarters).
+/// Margin x *market cap* is never used: it is off by the price-to-sales ratio
+/// (#68). `None` leaves the signal unscored.
+fn estimate_net_income(r: &Research) -> Option<f64> {
+    if let (Some(eps), Some(shares)) = (r.fin.trailing_eps, r.fin.shares)
+        && shares > 0.0
+    {
+        return Some(eps * shares);
+    }
+    let revenue = r.annual.last().and_then(|p| p.revenue).or_else(|| {
+        let q: Vec<f64> = r
+            .quarters
+            .iter()
+            .rev()
+            .take(4)
+            .filter_map(|p| p.revenue)
+            .collect();
+        (q.len() == 4).then(|| q.iter().sum())
+    })?;
+    r.fin.profit_margin.map(|pm| pm * revenue)
+}
+
 /// Calculate the Piotroski 9-Point F-Score from corporate research data.
 pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
     let cur = r.currency.as_deref();
@@ -212,19 +237,17 @@ pub fn calculate_piotroski(r: &Research) -> PiotroskiScorecard {
 
     // ── 1. Profitability (4 points) ──
     // 1. Positive Net Income
-    let net_income = curr_opt.and_then(|p| p.net_income).or_else(|| {
-        r.fin.profit_margin.map(|pm| {
-            let mcap = r.quote.market_cap.unwrap_or(0.0);
-            pm * mcap
-        })
-    });
+    let reported_ni = curr_opt.and_then(|p| p.net_income);
+    let net_income = reported_ni.or_else(|| estimate_net_income(r));
+    let ni_estimated = reported_ni.is_none() && net_income.is_some();
 
     let ni_pass = net_income.map(|ni| ni > 0.0).unwrap_or(false);
     let ni_fmt = net_income.map_or("N/A".to_string(), |v| {
         format!(
-            "{} ({})",
+            "{} ({}){}",
             format_large_number(v, cur),
-            if v > 0.0 { "Profit" } else { "Loss" }
+            if v > 0.0 { "Profit" } else { "Loss" },
+            if ni_estimated { " (est.)" } else { "" }
         )
     });
     criteria.push(make_criterion(
@@ -1179,5 +1202,83 @@ mod tests {
             .unwrap();
         // 4.8e12 / (6e9 × 85) ≈ 9.4, not ≈ 800.
         assert!((x4 - 9.41).abs() < 0.1, "X4 = {x4}");
+    }
+
+    // #68. Hand-worked, no periods at all:
+    //   trailing EPS 50 x 400,000,000 shares = 20,000,000,000 net income.
+    //   Old code: margin 0.10 x market cap 1e12 = 100,000,000,000 > CFO, so the
+    //   accrual point was lost. Right answer: CFO 30,000,000,000 > 20,000,000,000.
+    #[test]
+    fn piotroski_net_income_estimate_uses_eps_times_shares_not_market_cap() {
+        let mut r = Research::default();
+        r.quote = Quote {
+            market_cap: Some(1_000_000_000_000.0),
+            ..Default::default()
+        };
+        r.fin = Fin {
+            profit_margin: Some(0.10),
+            trailing_eps: Some(50.0),
+            shares: Some(400_000_000.0),
+            ocf: Some(30_000_000_000.0),
+            ..Default::default()
+        };
+        let sc = calculate_piotroski(&r);
+        let ni = sc.criteria.iter().find(|c| c.id == "ni_pos").unwrap();
+        assert!(ni.passed);
+        assert!(
+            ni.formatted_value.contains("(est.)"),
+            "{}",
+            ni.formatted_value
+        );
+        let acc = sc.criteria.iter().find(|c| c.id == "accrual").unwrap();
+        assert!(acc.passed, "{}", acc.formatted_value);
+        // The shown figure is 20 billion, not 100 billion.
+        assert!(
+            acc.formatted_value
+                .contains(&format_large_number(2.0e10, None))
+        );
+        assert!(
+            !acc.formatted_value
+                .contains(&format_large_number(1.0e11, None))
+        );
+    }
+
+    // #68. No EPS and no revenue: margin x revenue is unavailable, and market
+    // cap must not stand in, so net income is n/a and nothing is scored.
+    #[test]
+    fn piotroski_net_income_is_na_without_eps_or_revenue() {
+        let mut r = Research::default();
+        r.quote = Quote {
+            market_cap: Some(1_000_000_000_000.0),
+            ..Default::default()
+        };
+        r.fin = Fin {
+            profit_margin: Some(0.10),
+            ..Default::default()
+        };
+        let sc = calculate_piotroski(&r);
+        let ni = sc.criteria.iter().find(|c| c.id == "ni_pos").unwrap();
+        assert_eq!(ni.formatted_value, "N/A");
+        assert!(!ni.passed);
+    }
+
+    // #68. Margin x revenue path: four quarters of 50,000,000,000 sum to
+    // 200,000,000,000; x 0.10 margin = 20,000,000,000.
+    #[test]
+    fn piotroski_net_income_estimate_from_margin_and_ttm_revenue() {
+        let mut r = Research::default();
+        r.fin = Fin {
+            profit_margin: Some(0.10),
+            ..Default::default()
+        };
+        for m in [3u32, 6, 9, 12] {
+            r.quarters.push(Period {
+                end: NaiveDate::from_ymd_opt(2025, m, 28).unwrap(),
+                revenue: Some(50_000_000_000.0),
+                ..Default::default()
+            });
+        }
+        let ni = estimate_net_income(&r).unwrap();
+        assert!((ni - 2.0e10).abs() < 1.0, "{ni}");
     }
 }
