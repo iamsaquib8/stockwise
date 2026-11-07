@@ -705,22 +705,6 @@ struct YahooSession {
 /// swaps in the real crumb, opening the session first if needed.
 const CRUMB_PLACEHOLDER: &str = "STOCKWISE_CRUMB_PLACEHOLDER";
 
-/// A non-retryable HTTP status from an upstream host (404, 401, ...).
-/// Callers can `downcast_ref` it to word a clearer message.
-#[derive(Debug)]
-pub struct HttpStatusError {
-    pub host: String,
-    pub status: reqwest::StatusCode,
-}
-
-impl std::fmt::Display for HttpStatusError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} returned HTTP {}", self.host, self.status)
-    }
-}
-
-impl std::error::Error for HttpStatusError {}
-
 /// What a chart request for a ticker Yahoo does not know says instead of
 /// the raw "HTTP 404", with built-in "did you mean" names where it has them.
 fn no_history_message(symbol: &str) -> String {
