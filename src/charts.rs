@@ -569,53 +569,37 @@ pub fn rsi_gauge(rsi: f64) -> String {
 }
 
 /// Portfolio allocation donut/bar
+/// Portfolio allocation: one bar per holding, heaviest first, so rows stay
+/// readable without colour and with more holdings than the old palette.
 pub fn allocation_chart(items: &[(&str, f64)]) -> Vec<String> {
     let total: f64 = items.iter().map(|(_, v)| v).sum();
     if total == 0.0 {
         return vec![];
     }
 
-    let colors = ["green", "cyan", "yellow", "magenta", "blue", "red", "white"];
     let bar_width = 40;
+    let label_width = items
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(12);
 
-    let mut output = Vec::new();
+    let mut rows: Vec<(&str, f64)> = items.to_vec();
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // Stacked bar
-    let mut bar = String::new();
-    for (i, (_, value)) in items.iter().enumerate() {
-        let pct = value / total;
-        let chars = (pct * bar_width as f64).round() as usize;
-        let block = "█".repeat(chars.max(if *value > 0.0 { 1 } else { 0 }));
-        let colored = match colors[i % colors.len()] {
-            "green" => block.green().to_string(),
-            "cyan" => block.cyan().to_string(),
-            "yellow" => block.yellow().to_string(),
-            "magenta" => block.magenta().to_string(),
-            "blue" => block.blue().to_string(),
-            "red" => block.red().to_string(),
-            _ => block.white().to_string(),
-        };
-        bar.push_str(&colored);
-    }
-    output.push(format!("  {}", bar));
-    output.push(String::new());
-
-    // Legend
-    for (i, (label, value)) in items.iter().enumerate() {
-        let pct = (value / total) * 100.0;
-        let dot = match colors[i % colors.len()] {
-            "green" => "█".green().to_string(),
-            "cyan" => "█".cyan().to_string(),
-            "yellow" => "█".yellow().to_string(),
-            "magenta" => "█".magenta().to_string(),
-            "blue" => "█".blue().to_string(),
-            "red" => "█".red().to_string(),
-            _ => "█".white().to_string(),
-        };
-        output.push(format!("  {} {:<12} {:>6.1}%", dot, label, pct));
-    }
-
-    output
+    rows.iter()
+        .map(|&(label, value)| {
+            let pct = value / total;
+            let filled = (pct * bar_width as f64).round() as usize;
+            format!(
+                "  {:<label_width$} {:>5.1}% {}",
+                label,
+                pct * 100.0,
+                "█".repeat(filled)
+            )
+        })
+        .collect()
 }
 
 /// Option payoff chart: profit/loss against the underlying's price. The
@@ -878,10 +862,35 @@ mod tests {
     }
 
     #[test]
-    fn test_allocation_chart() {
-        let items = vec![("AAPL", 5000.0), ("MSFT", 3000.0), ("GOOG", 2000.0)];
-        let result = allocation_chart(&items);
-        assert!(result.len() > 3); // bar + legend items
+    fn allocation_chart_gives_each_holding_its_own_bar() {
+        let items = vec![("SMALL", 20.0), ("BIG", 50.0), ("MID", 30.0)];
+        let rows: Vec<String> = allocation_chart(&items)
+            .iter()
+            .map(|row| strip_ansi(row))
+            .collect();
+
+        assert_eq!(rows.len(), 3);
+        // Heaviest first, whatever order the holdings were collected in.
+        assert!(rows[0].starts_with("  BIG"));
+        assert!(rows[1].starts_with("  MID"));
+        assert!(rows[2].starts_with("  SMALL"));
+        assert!(rows[0].ends_with(&"█".repeat(20)));
+        assert!(rows[1].ends_with(&"█".repeat(12)));
+        assert!(rows[2].ends_with(&"█".repeat(8)));
+    }
+
+    #[test]
+    fn allocation_chart_aligns_a_long_symbol_and_needs_no_colour() {
+        let items = vec![("ABCDEFGHIJKLMNO", 60.0), ("TCS.NS", 40.0)];
+        let rows: Vec<String> = allocation_chart(&items)
+            .iter()
+            .map(|row| strip_ansi(row))
+            .collect();
+
+        let pct_at = |row: &str| row.find('%').unwrap();
+        assert_eq!(pct_at(&rows[0]), pct_at(&rows[1]));
+        assert!(rows[0].starts_with("  ABCDEFGHIJKLMNO"));
+        assert!(rows[1].starts_with("  TCS.NS"));
     }
 
     #[test]
