@@ -689,6 +689,87 @@ pub(crate) async fn load_portfolio_report_named(
     ))
 }
 
+/// Said once when prices cannot be fetched.
+const OFFLINE_NOTE: &str = "Offline: prices unavailable; showing cost basis only.";
+
+/// Prices for `symbols`. Without a client, or when the quote request fails
+/// (no network, Yahoo blocked), an empty valuation: every holding is
+/// unpriced but still listed. The flag says whether prices are live.
+pub(crate) async fn value_or_offline(
+    src: Option<&impl views::DataSource>,
+    symbols: &[String],
+    market: Market,
+    base: Option<&str>,
+) -> (Valuation, bool) {
+    if let Some(src) = src
+        && let Ok(val) = value_holdings(src, symbols, market, base).await
+    {
+        return (val, true);
+    }
+    (Valuation::new(Vec::new(), symbols, market, base), false)
+}
+
+/// `portfolio` without prices: shares, average cost and cost basis from the
+/// local file, per currency.
+fn print_offline_portfolio(portfolio: &Portfolio) {
+    print_header(&portfolio_title(t(Msg::YourPortfolio)));
+    println!("  {} {}\n", "!".yellow(), OFFLINE_NOTE);
+    let sw = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.len() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(12);
+    println!(
+        "  {} {} {} {} {}",
+        pad_end(t(Msg::Symbol), sw).bold(),
+        pad_start(t(Msg::Shares), 8).bold(),
+        pad_start(t(Msg::AvgCost), 10).bold(),
+        pad_start(t(Msg::Price), 10).bold(),
+        pad_start("Cost basis", 14).bold(),
+    );
+    println!("  {}", "─".repeat(48 + sw).dimmed());
+    let mut by_currency: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut any_estimated = false;
+    for h in &portfolio.holdings {
+        let cur = pf::symbol_currency(&h.symbol);
+        let mut label = h.symbol.clone();
+        if h.has_estimated_dates() {
+            label.push('*');
+            any_estimated = true;
+        }
+        let cost = h.cost_basis();
+        *by_currency
+            .entry(cur.unwrap_or("?").to_string())
+            .or_default() += cost;
+        println!(
+            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>14}",
+            label.cyan(),
+            h.shares,
+            format_price(h.avg_cost, cur),
+            "N/A",
+            format_price(cost, cur),
+        );
+    }
+    println!("  {}", "─".repeat(48 + sw).dimmed());
+    for (cur, total) in &by_currency {
+        let cur = (cur != "?").then_some(cur.as_str());
+        println!(
+            "  {} {:>8} {:>10} {:>10} {:>14}",
+            pad_end(t(Msg::Total), sw).bold(),
+            "",
+            "",
+            "",
+            format_price(*total, cur).bold(),
+        );
+    }
+    if any_estimated {
+        println!("  {}", ESTIMATED_DATE_HINT.dimmed());
+    }
+    println!();
+}
+
 pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format) -> Result<()> {
     if !fmt.is_table() {
         let portfolio = Portfolio::load()?;
@@ -699,7 +780,17 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 chrono::Local::now().date_naive(),
             )
         } else {
-            load_portfolio_report(&YahooClient::new().await?, market, base).await?
+            let symbols: Vec<String> = portfolio
+                .holdings
+                .iter()
+                .map(|h| h.symbol.clone())
+                .collect();
+            let client = YahooClient::new().await.ok();
+            let (val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
+            if !live {
+                eprintln!("  {OFFLINE_NOTE}");
+            }
+            portfolio_report(&portfolio, &val, chrono::Local::now().date_naive())
         };
         return match fmt {
             Format::Csv => output::print_csv(&report.holdings),
@@ -717,8 +808,12 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let client = YahooClient::new().await?;
-    let mut val = value_holdings(&client, &symbols, market, base).await?;
+    let client = YahooClient::new().await.ok();
+    let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
+    let Some(client) = client.filter(|_| live) else {
+        print_offline_portfolio(&portfolio);
+        return Ok(());
+    };
     let today = chrono::Local::now().date_naive();
 
     print_header(&portfolio_title(t(Msg::YourPortfolio)));
@@ -2425,6 +2520,57 @@ pub async fn cmd_portfolio_xray(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::api::{ChartData, Quote, SearchResult};
+
+    /// A quote source that is always down.
+    struct Down;
+    impl views::DataSource for Down {
+        async fn quotes(&self, _: &[&str]) -> Result<Vec<Quote>> {
+            bail!("Cannot reach Yahoo Finance")
+        }
+        async fn chart(&self, _: &str, _: &str, _: &str) -> Result<ChartData> {
+            bail!("down")
+        }
+        async fn search(&self, _: &str) -> Result<Vec<SearchResult>> {
+            bail!("down")
+        }
+    }
+
+    fn one_holding() -> Portfolio {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 3500.0, "2024-01-02", "manual"));
+        p
+    }
+
+    #[tokio::test]
+    async fn offline_valuation_keeps_every_holding_unpriced() {
+        let p = one_holding();
+        let symbols = vec!["TCS.NS".to_string()];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+
+        // The quote request fails.
+        let (val, live) = value_or_offline(Some(&Down), &symbols, Market::In, None).await;
+        assert!(!live);
+        // No client at all (Yahoo's cookie handshake failed).
+        let (val2, live2) = value_or_offline(None::<&Down>, &symbols, Market::In, None).await;
+        assert!(!live2);
+
+        for v in [val, val2] {
+            let r = portfolio_report(&p, &v, today);
+            assert_eq!(r.holdings.len(), 1);
+            let h = &r.holdings[0];
+            assert_eq!(
+                (h.shares, h.avg_cost, h.cost_basis),
+                (10.0, 3500.0, 35000.0)
+            );
+            assert!(h.price.is_none() && h.value.is_none());
+            assert_eq!(r.unpriced, vec!["TCS.NS".to_string()]);
+            let json = serde_json::to_value(&r).unwrap();
+            assert!(json["holdings"][0]["price"].is_null());
+        }
+    }
+
     use super::fx_pair;
 
     #[test]

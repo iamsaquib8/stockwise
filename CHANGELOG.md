@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `deep` and `analyze`: banks and lenders no longer show an Altman Z "Distress Zone" next to a strong score; they show "n/a for banks and lenders", and `score` says the same. The doubled brackets in the zone label are gone ([#212](https://github.com/iamsaquib8/stockwise/issues/212)).
 - `forecast`: the default history is now 6 months instead of one, so `forecast TCS` prints a projection instead of "Not enough price data". The error now says how many days it found, and the `SYMBOL` argument has a help line ([#215](https://github.com/iamsaquib8/stockwise/issues/215)).
 - `watch add`, `portfolio add` and `alert add` now refuse a ticker Yahoo does not know (for example `RELIANC`) and name the likely one, instead of saving it silently; `--force` saves it anyway, and funds, SGBs and offline use are not blocked. `technical`, `history`, `risk` and the other chart commands say "No price history for ZZQQXX.NS" instead of "HTTP 404" ([#216](https://github.com/iamsaquib8/stockwise/issues/216)).
+- `portfolio` and `portfolio --json` now work offline: they list every holding with shares, average cost and cost basis, show prices as N/A (`price: null` and `unpriced` in JSON) and say "Offline: prices unavailable" instead of failing. `tax`, `harvest`, `rebalance` and `xray` still need a connection ([#221](https://github.com/iamsaquib8/stockwise/issues/221)).
 
 ## [0.8.0] - 2026-11-03
 
