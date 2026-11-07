@@ -463,7 +463,10 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
         .map(|c| c.iter().filter_map(|v| *v).collect())
         .unwrap_or_default();
     if closes.len() < 30 {
-        bail!("Not enough price data — try a longer period with -p");
+        bail!(
+            "Only {} daily closes in {period}; forecast needs at least 30. Try a longer period, e.g. -p 6mo",
+            closes.len()
+        );
     }
 
     let n = closes.len();

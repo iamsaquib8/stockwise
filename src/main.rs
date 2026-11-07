@@ -401,12 +401,13 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
 
     /// Trend projection with confidence bands (not a prediction)
     Forecast {
+        /// Ticker or company name
         symbol: String,
         /// Days to project forward
         #[arg(short, long, default_value = "30")]
         days: usize,
-        /// History used to fit the trend
-        #[arg(short, long, default_value = "1mo", value_parser = PERIODS)]
+        /// History used to fit the trend (needs at least 30 trading days)
+        #[arg(short, long, default_value = "6mo", value_parser = PERIODS)]
         period: String,
     },
 
@@ -3959,6 +3960,16 @@ mod tests {
             cli.command,
             Commands::Markets { global: true, .. }
         ));
+    }
+
+    #[test]
+    fn forecast_default_period_has_enough_history() {
+        let cli = Cli::try_parse_from(["stockwise", "forecast", "TCS"]).unwrap();
+        let Commands::Forecast { period, .. } = cli.command else {
+            panic!("not forecast");
+        };
+        // 1mo is about 21 trading days and cmd_forecast needs 30.
+        assert_eq!(period, "6mo");
     }
 
     #[test]
