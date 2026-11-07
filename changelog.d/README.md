@@ -15,6 +15,7 @@ changelog no longer conflicts. The release script collects the fragments.
 | `deprecated` | Deprecated |
 | `removed` | Removed |
 | `fixed` | Fixed |
+| `performance` | Performance |
 | `security` | Security |
 
 Examples: `123.fixed.md`, `xray-etfs.changed.md`.
@@ -37,6 +38,7 @@ spaces.
 ```bash
 python3 scripts/changelog.py check              # validate the fragments (CI runs this)
 python3 scripts/changelog.py preview            # print the next release's entries
+python3 scripts/changelog.py preview --notes    # the entries only, as the release workflow uses them
 python3 scripts/changelog.py release 0.9.0      # maintainers: cut a release
 ```
 

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import pathlib
 import sys
 import tempfile
@@ -67,6 +69,26 @@ class Fragments(unittest.TestCase):
         self.assertIn("[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v1.1.0...HEAD", text)
         self.assertIn("[1.1.0]: https://github.com/iamsaquib8/stockwise/compare/v1.0.0...v1.1.0", text)
         self.assertEqual([p.name for p in cl.FRAGMENTS.glob("*.md")], [])
+
+    def test_preview_notes_have_the_entries_and_no_heading(self):
+        self.frag("20.performance.md", "- `quote` is faster ([#20](x)).\n")
+        self.frag("21.fixed.md", "- `tax in` fixed ([#21](x)).\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cl.main(["preview", "--notes"]), 0)
+        text = out.getvalue()
+        self.assertNotIn("## [Unreleased]", text)
+        self.assertLess(text.index("### Fixed"), text.index("### Performance"))
+        self.assertIn("Old entry left under Unreleased.", text)
+        self.assertIn("`quote` is faster", text)
+        # Nothing pending: no output at all, so the caller can fall back.
+        (self.root / "CHANGELOG.md").write_text(SAMPLE.replace("### Fixed\n- Old entry left under Unreleased.\n", ""))
+        for f in cl.FRAGMENTS.glob("*.md"):
+            f.unlink()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cl.main(["preview", "--notes"])
+        self.assertEqual(out.getvalue(), "")
 
     def test_release_refuses_empty_and_duplicate(self):
         (self.root / "CHANGELOG.md").write_text(SAMPLE.replace("### Fixed\n- Old entry left under Unreleased.\n", ""))

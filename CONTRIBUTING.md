@@ -107,7 +107,7 @@ testers when a live response differs. Anything that only reads from a real accou
 Do not edit `CHANGELOG.md` in a pull request: add one small file to
 `changelog.d/` per user-visible change, so pull requests never conflict. Name it
 `<issue-or-slug>.<type>.md` with a type of `added`, `changed`, `deprecated`,
-`removed`, `fixed` or `security`, and put one bullet in it:
+`removed`, `fixed`, `performance` or `security`, and put one bullet in it:
 
 ```markdown
 - `tax in` counts gold ETFs as non-equity, so they are no longer taxed as listed

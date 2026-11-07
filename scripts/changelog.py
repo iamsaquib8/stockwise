@@ -3,7 +3,8 @@
 
 Usage:
     changelog.py check              validate fragment names and content
-    changelog.py preview            print the sections a release would add
+    changelog.py preview [--notes]  print the sections a release would add
+                                    (--notes: only the entries, for release notes)
     changelog.py release VERSION [--date YYYY-MM-DD]
                                     cut VERSION: fold fragments and the
                                     [Unreleased] entries into a new section
@@ -23,7 +24,7 @@ CHANGELOG = ROOT / "CHANGELOG.md"
 REPO = "https://github.com/iamsaquib8/stockwise"
 
 # Section order in a release, as in Keep a Changelog.
-SECTIONS = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
+SECTIONS = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Performance", "Security"]
 TYPES = {s.lower(): s for s in SECTIONS}
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(%s)\.md$" % "|".join(TYPES))
 
@@ -116,12 +117,20 @@ def cmd_check(_args):
     return 0
 
 
-def cmd_preview(_args):
+def cmd_preview(args):
     fragments = read_fragments()
     changelog = CHANGELOG.read_text(encoding="utf-8")
     _, body, _ = split_unreleased(changelog)
     intro, existing = parse_sections(body)
-    print(render("Unreleased", "next", intro, existing, fragments))
+    text = render("Unreleased", "next", intro, existing, fragments)
+    if args.notes:
+        # Drop the "## [Unreleased] - next" heading line: release notes get the
+        # entries only, and an empty result means there is nothing to release.
+        text = text.split("\n", 1)[1].strip("\n") if "\n" in text else ""
+        if text:
+            print(text)
+        return 0
+    print(text)
     return 0
 
 
@@ -163,7 +172,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
-    sub.add_parser("preview")
+    prev = sub.add_parser("preview")
+    prev.add_argument("--notes", action="store_true")
     rel = sub.add_parser("release")
     rel.add_argument("version")
     rel.add_argument("--date")
