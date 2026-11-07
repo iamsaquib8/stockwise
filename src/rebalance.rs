@@ -14,6 +14,15 @@ use std::collections::BTreeMap;
 /// Small epsilon for floating-point comparisons.
 const EPS: f64 = 1e-9;
 
+/// Singular or plural noun for a whole-share order.
+fn shares_word(shares: f64) -> &'static str {
+    if (shares - 1.0).abs() < 1e-9 {
+        "share"
+    } else {
+        "shares"
+    }
+}
+
 /// Single holding's market data passed into the rebalancer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoldingInput {
@@ -504,7 +513,7 @@ pub fn compute_rebalance_plan(
                         };
                         (
                             RebalanceActionType::Buy,
-                            format!("BUY {:.0} shares", shares),
+                            format!("BUY {:.0} {}", shares, shares_word(shares)),
                             shares,
                         )
                     }
@@ -524,11 +533,21 @@ pub fn compute_rebalance_plan(
                         } else {
                             raw_shares.floor()
                         };
-                        (
-                            RebalanceActionType::Sell,
-                            format!("SELL {:.0} shares", shares),
-                            shares,
-                        )
+                        // A position less than one share over target cannot be
+                        // sold, so report it as OK instead of "SELL 0 shares".
+                        if shares < 1.0 {
+                            (
+                                RebalanceActionType::Ok,
+                                format!("OK (< 1 sh over: {}{:.0})", currency_sym, diff_val.abs()),
+                                0.0,
+                            )
+                        } else {
+                            (
+                                RebalanceActionType::Sell,
+                                format!("SELL {:.0} {}", shares, shares_word(shares)),
+                                shares,
+                            )
+                        }
                     }
                 };
 
@@ -748,5 +767,51 @@ mod tests {
         assert!(plan.items[0].is_fund);
         assert!(plan.items[0].action_display.contains("units"));
         assert!((plan.items[0].diff_shares - (5000.0 / 52.345)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn overweight_under_one_share_reports_ok_not_a_zero_share_sell() {
+        // 2 x 100 = 200 (16.7%) against a 10% target leaves 80 over, less
+        // than one 100-rupee share, so nothing can be sold.
+        let holdings = vec![
+            sample_holding("OVERWEIGHT", 2.0, 100.0, None),
+            sample_holding("BASE", 10.0, 100.0, None),
+        ];
+        let mut targets = BTreeMap::new();
+        targets.insert("OVERWEIGHT".to_string(), 10.0);
+        targets.insert("BASE".to_string(), 90.0);
+
+        let plan = compute_rebalance_plan(&holdings, &targets, None, 2.0, "INR").unwrap();
+        let item = &plan.items[0];
+
+        assert_eq!(item.action_type, RebalanceActionType::Ok);
+        assert_eq!(item.diff_shares, 0.0);
+        assert!(!item.action_display.contains("SELL"));
+    }
+
+    #[test]
+    fn single_share_orders_use_the_singular_noun() {
+        // 4 x 100 = 400 (20%) against targets of 15% (sell) and 25% (buy)
+        // leaves exactly 100 rupees, i.e. one share, either way.
+        let holdings = vec![
+            sample_holding("ONE", 4.0, 100.0, None),
+            sample_holding("BASE", 16.0, 100.0, None),
+        ];
+
+        let mut sell_targets = BTreeMap::new();
+        sell_targets.insert("ONE".to_string(), 15.0);
+        sell_targets.insert("BASE".to_string(), 85.0);
+        let sell = compute_rebalance_plan(&holdings, &sell_targets, None, 2.0, "INR").unwrap();
+        assert_eq!(sell.items[0].action_type, RebalanceActionType::Sell);
+        assert_eq!(sell.items[0].diff_shares, 1.0);
+        assert_eq!(sell.items[0].action_display, "SELL 1 share");
+
+        let mut buy_targets = BTreeMap::new();
+        buy_targets.insert("ONE".to_string(), 25.0);
+        buy_targets.insert("BASE".to_string(), 75.0);
+        let buy = compute_rebalance_plan(&holdings, &buy_targets, None, 2.0, "INR").unwrap();
+        assert_eq!(buy.items[0].action_type, RebalanceActionType::Buy);
+        assert_eq!(buy.items[0].diff_shares, 1.0);
+        assert_eq!(buy.items[0].action_display, "BUY 1 share");
     }
 }
