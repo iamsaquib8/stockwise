@@ -10,7 +10,7 @@ PublisherSupportUrl: https://github.com/iamsaquib8/stockwise/issues
 PackageName: StockWise
 PackageUrl: https://github.com/iamsaquib8/stockwise
 License: MIT
-LicenseUrl: https://github.com/iamsaquib8/stockwise/blob/master/LICENSE
+LicenseUrl: https://github.com/iamsaquib8/stockwise/blob/main/LICENSE
 ShortDescription: Stock market toolkit for your terminal for Indian (NSE/BSE) and US stocks.
 Description: |-
   StockWise is a command-line tool for quotes, charts, screeners, backtests, SIP math,

@@ -1,7 +1,7 @@
 #!/bin/sh
 # StockWise installer — downloads a prebuilt binary from GitHub Releases.
 #
-#   curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh
 #
 # Environment overrides:
 #   STOCKWISE_VERSION   release tag to install (default: latest), e.g. v0.8.0

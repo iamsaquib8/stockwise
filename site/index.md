@@ -13,7 +13,7 @@ server for AI assistants — in one fast binary. No API keys, no account.
 
 ```bash
 # macOS / Linux / Termux on Android
-curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh
 
 # Debian/Ubuntu, Fedora/RHEL: .deb and .rpm from the latest release
 sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm

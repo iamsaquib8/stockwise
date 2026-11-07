@@ -50,7 +50,7 @@ def site_target(path_from_root: str) -> str:
     if path.startswith("assets/"):
         return path + frag
     kind = "tree" if path.endswith("/") or "." not in Path(path).name else "blob"
-    return f"{REPO}/{kind}/master/{path}{frag}"
+    return f"{REPO}/{kind}/main/{path}{frag}"
 
 
 def rewrite(text: str, base: str) -> str:
@@ -200,9 +200,9 @@ def write_llms_txt() -> None:
         "",
         f"- [MCP server and `stockwise ask`]({SITE_URL}ai.md): tools, resources, prompts, "
         "client setup for Claude Desktop, Claude Code and Cursor",
-        f"- [Agent Skill]({REPO}/blob/master/skills/stockwise/SKILL.md): how an agent should "
+        f"- [Agent Skill]({REPO}/blob/main/skills/stockwise/SKILL.md): how an agent should "
         "use the CLI and the MCP server",
-        f"- [MCP registry entry]({REPO}/blob/master/server.json): `io.github.iamsaquib8/stockwise`",
+        f"- [MCP registry entry]({REPO}/blob/main/server.json): `io.github.iamsaquib8/stockwise`",
         "",
         "## Commands",
         "",

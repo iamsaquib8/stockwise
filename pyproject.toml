@@ -37,7 +37,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/iamsaquib8/stockwise"
 Documentation = "https://iamsaquib8.github.io/stockwise/"
-Changelog = "https://github.com/iamsaquib8/stockwise/blob/master/CHANGELOG.md"
+Changelog = "https://github.com/iamsaquib8/stockwise/blob/main/CHANGELOG.md"
 Issues = "https://github.com/iamsaquib8/stockwise/issues"
 
 [tool.maturin]
