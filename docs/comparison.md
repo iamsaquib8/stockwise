@@ -3,7 +3,8 @@
 StockWise is a free, open-source command-line toolkit that runs on your own
 machine. This page compares it with tools people often use instead, so you can
 pick the right one. It is based on each project's public documentation as of
-October 2026 — if something here is out of date,
+October 2026, and the StockWise column was checked against the code in November
+2026. If something here is out of date,
 [open an issue](https://github.com/iamsaquib8/stockwise/issues) and we'll fix it.
 
 Key: ✓ yes · ◐ partly · ✗ no
@@ -46,8 +47,9 @@ redistribute. StockWise's angle is different:
 
 - You want the deepest fundamentals and custom screening on Indian companies:
   a dedicated screener such as Screener.in.
-- You trade options daily and need intraday open-interest analytics: a
-  dedicated options platform.
+- You trade options daily and need intraday open-interest charts or a strategy
+  builder with live P&L: a dedicated options platform. `options oi` is a
+  snapshot of one expiry.
 - You want a polished desktop or phone app for a household's net worth:
   Wealthfolio, Ghostfolio or your broker's app.
 - You run 24/7 crypto trading bots: Freqtrade.

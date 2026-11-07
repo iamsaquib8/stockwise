@@ -289,8 +289,9 @@ Put a TLS proxy in front of it before exposing it beyond your network.
 
 - [`server.json`](../server.json) describes the server for the
   [official MCP registry](https://registry.modelcontextprotocol.io) as
-  `io.github.iamsaquib8/stockwise`, installable from crates.io, PyPI
-  (`uvx stockwise mcp`) and GHCR.
+  `io.github.iamsaquib8/stockwise`. It lists the crates.io package and the
+  GHCR image (`ghcr.io/iamsaquib8/stockwise`); `uvx stockwise mcp` works once
+  the PyPI wheels are published.
 - [`packaging/mcpb/`](../packaging/mcpb/README.md) builds a Claude Desktop
   extension (`.mcpb`) from a release binary.
 

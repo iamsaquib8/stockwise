@@ -46,8 +46,13 @@ cargo run -- portfolio add TCS 10 3500 && cargo run -- portfolio
 [docs/architecture.md](docs/architecture.md) maps the source tree. In short:
 `src/main.rs` defines the CLI, `src/commands/` holds one file per command area
 (`overview`, `technicals`, `markets`, `holdings`, `trade`, ...), and the
-analysis engines (`technical.rs`, `backtest.rs`, `intraday.rs`, `longterm.rs`)
-are pure functions with unit tests.
+analysis engines (`technical.rs`, `tax.rs`, `rebalance.rs`, `verdict.rs`,
+`backtest.rs`, `intraday.rs`, `longterm.rs`) are pure functions with unit tests.
+The tools that `stockwise mcp` and `stockwise ask` give to AI assistants are in
+`src/tools/`, the MCP server is `src/mcp.rs` and the `ask` loop is `src/ask.rs`.
+Other folders: `docs/` (the documentation pages), `site/` and `site/build.py`
+(the docs site), `changelog.d/` and `scripts/changelog.py` (the changelog),
+`packaging/` (installers and package recipes), `skills/` (the Agent Skill).
 
 ## Before you open a PR
 
@@ -60,7 +65,12 @@ cargo clippy --all-targets --no-default-features -- -D warnings   # minimal buil
 cargo clippy --all-targets --features wasm-plugins -- -D warnings  # WASM strategy plugins
 cargo test                 # all tests green
 cargo test --features wasm-plugins
+python3 scripts/changelog.py check   # changelog fragments are valid
 ```
+
+If you change anything under `docs/`, `site/` or the top-level Markdown pages,
+also run `python3 site/build.py` (it needs [mdBook](https://rust-lang.github.io/mdBook/))
+and fix every warning and broken link it reports.
 
 - Keep PRs focused: one issue per PR, ideally under about 400 changed lines, with
   `Closes #N` in the description. Split larger work into a series.
@@ -71,6 +81,13 @@ cargo test --features wasm-plugins
 - New commands: add the variant to `Commands` and to the `GROUPS` help table in
   `src/main.rs` (a test checks every command is grouped), write `cmd_<name>` in
   the matching `src/commands/*.rs` file, and document it in `docs/commands.md`.
+  Every `stockwise ...` command you write in backticks in `docs/cheatsheet.md`
+  and `skills/stockwise/SKILL.md` must parse: a test checks them.
+- New AI tools: a tool is read-only and calls the function behind a command's
+  `--json` output. Add it to `src/tools/`, list it in
+  `packaging/mcpb/manifest.json` (a test compares the two lists) and in the tool
+  table in `docs/ai.md`. The tool count (`stockwise mcp --list-tools`) is written in
+  `README.md`, `docs/commands.md`, `docs/ai.md` and `docs/architecture.md`: update it.
 - Errors: return `anyhow` errors (`bail!`) instead of printing and returning
   `Ok(())`, so scripts see a non-zero exit code. Empty states (nothing in the
   portfolio yet) are not errors.

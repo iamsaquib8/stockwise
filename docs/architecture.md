@@ -4,26 +4,31 @@
 
 ```
 src/
-  main.rs            CLI definition (clap): 60 subcommands, grouped help, parse tests
+  main.rs            CLI definition (clap): 76 top-level commands, the grouped `--help` table, parse tests
   commands/          Command handlers — one file per area, each `cmd_*` re-exported
     mod.rs           Shared imports and helpers (period → interval, symbol resolution)
     overview.rs      quote, markets, dashboard, search, doctor
     setup.rs         config path/show/init
-    fundamentals.rs  analyze, compare, peers, dividends, insider, deep
+    fundamentals.rs  analyze, compare, peers, dividends, insider, deep, score (`fundamental score`)
+    research.rs      events, insights, verdict (printing; the data is in `research.rs`, `events.rs`, `verdict.rs`)
     technicals.rs    technical, history, chart, timeframes, patterns, support, fibs, volume, gaps, stoploss
     risk.rs          risk, correlate, returns, forecast, options moves
     funds.rs         mf search, nav, history, sip, screen, overlap (TER in nav/history/screen)
-    fno.rs           options chain, pcr, maxpain, payoff
+    fno.rs           options chain, pcr, maxpain, oi, payoff
     commodities.rs   commodity spot, futures, etfs, sgb
     bonds.rs         bonds yields, list, calc
-    markets.rs       movers, sectors, news, sentiment, screen, picks, earnings, rotation, matrix, surprise, heatmap, sectorcmp, ipo
+    markets.rs       movers, sectors, news, sentiment, screen, picks, earnings, rotation, matrix, surprise, heatmap, sectorcmp
+    ipo.rs           ipo (live board, one issue's analysis)
+    calendar.rs      calendar (results, dividends and splits for holdings and watchlist)
     backtests.rs     backtest (single, portfolio, walkforward, strategies)
     strategies.rs    sip, whatif, intraday, longterm, report
-    portfolio.rs     portfolio (show, add, sell, lots, actions, list) and valuation in a base currency
+    portfolio.rs     portfolio (show, add, sell, lots, actions, list, remove, target, xray) and rebalance;
+                     valuation in a base currency
                      (`value_holdings`: market quotes + `offmarket` fund NAVs and SGB prices)
-    planning.rs      tax export, portfolio benchmark (history, FX, sectors), goal sip/retire/education
-    holdings.rs      watch, alert, import, export, wealth, rebalance, harvest, tax, divcal, pcorr
-    imports.rs       Groww / Upstox CSV and CAS (casparser JSON/CSV) import parsers
+    planning.rs      tax export, tax advance, portfolio benchmark (history, FX, sectors), goal sip/retire/education
+    holdings.rs      watch, alert, import (Kite, INDmoney, generic CSV and `.xlsx`, tradebooks), export, wealth,
+                     harvest, tax, divcal, pcorr
+    imports.rs       Groww / Upstox and CAS (casparser JSON/CSV) import parsers
     sim.rs           paper-trading simulator (settle replays intraday bars)
     practice.rs      sim replay / challenge / profile / card (practice mode)
     worker.rs        daemon intraday / longterm loops
@@ -40,21 +45,27 @@ src/
   server/            `stockwise serve`: axum routes, bearer auth, Prometheus metrics; web.rs serves
                      the dashboard (web/, embedded with include_str!) and sets CSP/security headers
   daemon_status.rs   Reads the intraday daemon's daemon_state.json for /metrics
-  tools/             Read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
+  tools/             The 34 read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
                      definitions, JSON schemas from typed Param lists, the result envelope with
                      the "not financial advice" note and size limit), args.rs (argument checks),
-                     handlers.rs (each tool calls the function behind the command's --json)
-  mcp.rs             `stockwise mcp`: rmcp ServerHandler (tools, resources, prompts), stdio and
-                     Streamable HTTP transports (`mcp` feature)
-  ask.rs             `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
-                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent)
+                     handlers.rs (each tool calls the function behind the command's --json),
+                     tests.rs (also checks that the Claude Desktop manifest lists every tool)
+  mcp.rs, mcp/       `stockwise mcp`: rmcp ServerHandler (tools, resources, prompts), stdio and
+                     Streamable HTTP transports (`mcp` feature); mcp/tests.rs
+  ask.rs, ask/       `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
+                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent);
+                     ask/tests.rs
   store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME); `update` locks a file
                      (`<file>.lock`) around load-change-save — do network work first, then update
   config.rs          Optional config.toml: defaults for market, AI, cache, data dir, periods
   output.rs          --json / --csv rendering (Format, CsvRow, RFC 4180 quoting)
-  portfolio.rs       Lots, FIFO sales, splits/dividends, XIRR cash flows, FX, named portfolios
-  tax.rs             Capital-gains rules: holding periods, tax years, set-off (India/US/UK)
+  portfolio.rs       Lots, FIFO sales, splits/dividends, XIRR cash flows, FX, named portfolios, import
+                     rules (kept tradebook trades, merging, `--replace`)
+  tax.rs             Capital-gains rules: holding periods, tax years, set-off, cess, sale-date rates,
+                     advance tax and Sec. 234C (India/US/UK)
   tax_export.rs      ITR Schedule CG / 112A and Form 8949 schedules from realized sales, as CSV/JSON
+  rebalance.rs       Target weights, drift bands and buy-only (`--inflow`) rebalancing
+  xray.rs            Portfolio X-Ray: look-through overlap, asset-class, market-cap and sector split
   benchmark.rs       Daily time-weighted return vs an index, alpha/beta/tracking error, Carino attribution
   goals.rs           SIP / step-up, retirement and education math; Indian amounts (1cr, 25L, 50k)
   api.rs             Yahoo Finance client (session, quotes, charts, search, cache, retries); routes to a provider
@@ -66,7 +77,6 @@ src/
                      (experimental), secrets.rs (OS keyring / owner-only file), mock.rs (test HTTP server),
                      readonly.rs (session wrapper that refuses every order/GTT/cancel), gtt_watch.rs
                      (GTT status changes between looks), per-endpoint response shapes for selftest
-  funds.rs           AMFI NAV file + api.mfapi.in history (cached), returns, SIP, ETF holdings overlap
   funds.rs           AMFI NAV file + api.mfapi.in history (cached), AMFI TER disclosure (cached a day),
                      returns, SIP, ETF holdings overlap
   xlsx.rs            Minimal .xlsx reader (zip via flate2 + sheet cells, tab-ordered sheets) for AMFI's TER export and broker imports
@@ -85,6 +95,7 @@ src/
   clock.rs           Exchange clock: IST / US Eastern / European / Sydney time, NSE, NYSE and global
                      exchange holidays and half days, lunch breaks, session phases
   daemon.rs          Worker state: positions, risk manager, daemon_state.json, shutdown, retry
+                     (`daemon intraday --once` stops after one session)
   notify.rs          Notifications: Telegram, Slack, Discord, SMTP email, desktop
   technical.rs       Indicators and statistics (SMA, EMA, RSI, MACD, BB, ATR, VWAP, OBV, VaR, Sharpe, XIRR, ...)
   backtest/          Backtesting engine (see docs/backtesting.md)
@@ -104,6 +115,11 @@ src/
                      challenge.rs + live.rs (rules and goals), score.rs (0–100 score, badges),
                      profile.rs (streaks, best scores), card.rs (text and SVG cards)
   insights.rs        Rule-based plain-English insights
+  research.rs        One research snapshot per stock (Yahoo, NSE/XBRL filings, news) for events, insights, verdict
+  events.rs          Key-events timeline: de-duplicated, categorised, with the price reaction
+  verdict.rs         6-pillar score from fixed rules; pillars without data are left out, `data_coverage`
+  scorecard.rs       Piotroski F-score and Altman Z (Z'') with every criterion and formula
+  ipo.rs             Indian IPO board, subscription, SEBI allotment odds and 6-pillar demand score
   charts.rs          Braille line charts, option payoff chart, volume bars, gauges
   display.rs         Currency- and asset-aware formatting (₹/$/€/£/¥, FX and crypto decimals), width-aware padding
   market.rs          Market enum (in/us/crypto/fx/commodity + global exchanges), the MarketInfo table
@@ -253,12 +269,34 @@ termux-packages recipes. `.github/workflows/stats.yml` archives download counts 
 
 ## Testing
 
-61 unit tests across 6 modules:
-
 ```bash
-cargo test              # Run all tests
-cargo test technical    # Run only technical indicator tests
-cargo test longterm     # Run only longterm bot tests
+cargo test                           # unit tests, CLI parsing tests and tests/
+cargo test technical                 # only tests whose name matches
+cargo test --features wasm-plugins   # also the WASM strategy plugin tests
 ```
 
-Tested modules: `technical` (18), `backtest` (11), `display` (10), `charts` (9), `longterm` (9), `market` (4).
+Unit tests sit next to the code they test, and the pure engines (`technical`,
+`tax`, `rebalance`, `verdict`, `backtest`) are tested without the network.
+Parsers of exchange and broker pages run against fixtures in `fixtures/`
+directories, and the HTTP clients against `testutil::MockServer`, so no test
+reaches a real service. `tests/` holds the integration tests that run the
+built binary against a scratch `STOCKWISE_HOME`. Two tests read the docs: they
+parse every `stockwise ...` command written in backticks in
+`docs/cheatsheet.md` and `skills/stockwise/SKILL.md`, so a renamed flag breaks
+the build until the docs follow.
+
+CI (`.github/workflows/ci.yml`) runs `scripts/changelog.py check`, the tests on
+Linux, macOS and Windows, `cargo fmt --check`, clippy for the default and the
+`--no-default-features` builds, a check on Rust 1.97, the `wasm-plugins`
+feature and `shellcheck` on `install.sh`.
+
+## Docs and changelog
+
+- `docs/*.md` are the documentation pages. `python3 site/build.py` (needs
+  [mdBook](https://rust-lang.github.io/mdBook/)) copies them with `site/index.md`
+  and `site/SUMMARY.md` into `target/site-src`, builds `target/site`, and writes
+  `llms.txt`, `llms-full.txt` and a Markdown copy of every page.
+  `.github/workflows/docs.yml` publishes it to GitHub Pages on every push to `main`.
+- `changelog.d/` holds one small file per user-visible change.
+  `scripts/changelog.py` checks the files and folds them into `CHANGELOG.md` at
+  release time; see [CONTRIBUTING.md](../CONTRIBUTING.md#changelog-entries).
