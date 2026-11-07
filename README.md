@@ -39,7 +39,7 @@ setup.
 ### One portfolio, true returns
 
 ```bash
-stockwise import kite ~/Downloads/holdings.xlsx   # CSV or .xlsx from Kite, Groww, Upstox, INDmoney; CAS too
+stockwise import kite ~/Downloads/tradebook.xlsx  # CSV or .xlsx from Kite, Groww, Upstox, INDmoney; CAS too
 stockwise portfolio                               # live P&L, XIRR and allocation
 stockwise portfolio sell TCS 5 3900               # FIFO sale; realised P&L kept for tax
 stockwise portfolio benchmark NIFTY -p 1y         # return vs the index
@@ -50,19 +50,26 @@ stockwise portfolio target set TCS 30             # target weights; then rebalan
 Every purchase is a lot with its own date, so holding periods, FIFO sales and
 XIRR are exact. Mutual funds are valued from AMFI's NAVs, and holdings in
 different currencies are totalled in one (`--base`). `rebalance --inflow` puts
-new money only into underweight holdings.
+new money only into underweight holdings. A tradebook import keeps its trades and
+merges with the next file, so yearly Console downloads can be loaded one by one,
+in any order. More: [portfolio and imports](docs/commands.md#portfolio),
+[X-Ray and benchmark](docs/commands.md#benchmark-and-attribution).
 
 ### Capital-gains tax
 
 ```bash
 stockwise tax in                                  # LTCG/STCG per lot, with set-off rules
-stockwise harvest                                 # losses and gains to book before 31 March
-stockwise tax advance --paid 25000                # advance-tax instalments and Sec. 234C interest
+stockwise harvest                                 # losses and gains to book before 31 March, by FIFO sale
+stockwise tax advance --paid 2025-06-14:3000      # dated payments: Sec. 234C interest by due date
 stockwise tax export in --fy 2025-26 > cg.csv     # Schedule CG / 112A rows for your ITR
 ```
 
-Check the [known issues](CHANGELOG.md) for the current release before you file
-with these numbers.
+Tax is worked out per lot, with the 4% cess and the rates in force on each sale
+date (sales before 23 July 2024 use the old ones). The numbers cover only what
+StockWise has recorded, so compare them with your broker's tax P&L before you
+file. More: [how tax is worked out](docs/commands.md#lots-sales-and-tax),
+[harvest](docs/commands.md#harvest), [tax export](docs/commands.md#tax-export),
+[advance tax](docs/commands.md#advance-tax-india).
 
 ### Look things up
 
@@ -83,7 +90,8 @@ stockwise markets                                 # indices at a glance
 
 `q`, `d`, `a`, `t`, `c`, `p` and `w` are short for `quote`, `dashboard`,
 `analyze`, `technical`, `compare`, `portfolio` and `watch`. `--explain` on
-`technical`, `score` and `options oi` adds plain-English notes for beginners.
+`verdict`, `technical`, `score` and `options oi` adds plain-English notes for
+beginners. All commands: [commands reference](docs/commands.md).
 
 Many commands take `--json`, and tables take `--csv` (`stockwise <command> --help`
 shows which), so they fit in scripts:
