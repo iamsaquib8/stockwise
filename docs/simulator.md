@@ -154,7 +154,7 @@ A finished run gets a score from 0 to 100, from four parts:
 | Part | Points | What earns them |
 |------|-------:|-----------------|
 | Risk-adjusted return | 40 | your Sharpe and Sortino ratios against the benchmark's: half the points for matching it, all of them two points above it |
-| Drawdown control | 20 | a worst drawdown small next to the benchmark's (with a 10% floor in calm markets) |
+| Drawdown control | 20 | a worst drawdown small next to the benchmark's, scaled to how invested you were on average (with a 10% floor in calm markets), so cash alone earns nothing here |
 | Discipline | 25 | buys with a stop-loss (60%) and positions of at most 20% (40%); −10% per soft rule broken; none after a hard break or with no buys |
 | Diversification | 15 | sectors held at the same time (5 for full marks, 60%) and stocks used (8, 40%) |
 

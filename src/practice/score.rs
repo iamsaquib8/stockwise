@@ -5,7 +5,7 @@
 //! | Part             | Points | What earns them                                              |
 //! |------------------|-------:|--------------------------------------------------------------|
 //! | Risk-adjusted    | 40     | Sharpe and Sortino ratios compared with the benchmark's       |
-//! | Drawdown control | 20     | a worst drawdown small next to the benchmark's (10% floor)    |
+//! | Drawdown control | 20     | a worst drawdown small next to the benchmark's, scaled to your exposure (10% floor) |
 //! | Discipline       | 25     | buys with a stop-loss, positions at most 20%, rules kept      |
 //! | Diversification  | 15     | sectors held at once (5 for full marks) and stocks used (8)   |
 //!
@@ -169,7 +169,12 @@ pub fn score(input: &RunInput) -> Scorecard {
     let participation = (exposure / FULL_PARTICIPATION).min(1.0);
     let risk = 0.5 * relative(capped(s, ret > 0.0), capped(bs, bench_ret > 0.0))
         + 0.5 * relative(capped(so, ret > 0.0), capped(bso, bench_ret > 0.0));
-    let drawdown = (1.0 - dd / bench_dd.max(10.0)).clamp(0.0, 1.0);
+    // Judge the drawdown against what the benchmark would have lost at the
+    // same exposure, so holding 30% of the index in cash earns what holding
+    // 100% of it earns, and only cutting losses at a given exposure scores.
+    // (At 0% exposure the participation factor already zeroes the part.)
+    let drawdown =
+        (1.0 - dd / (bench_dd.max(10.0) * (exposure / 100.0).clamp(0.01, 1.0))).clamp(0.0, 1.0);
     let discipline = if input.hard_break || input.buys.is_empty() {
         0.0
     } else {
@@ -436,6 +441,45 @@ mod tests {
         assert_eq!(cash.parts.discipline, 0.0);
         assert_eq!(cash.score, Some(0));
         assert_eq!(cash.grade.as_deref(), Some("F"));
+    }
+
+    /// The benchmark held at `weight` of the account, the rest in cash.
+    fn blend(bench: &[f64], weight: f64) -> Vec<f64> {
+        bench
+            .iter()
+            .map(|b| 1.0 + weight * (b / 100.0 - 1.0))
+            .collect()
+    }
+
+    #[test]
+    fn cash_does_not_buy_drawdown_points() {
+        let bench = crash(40);
+        let full = score(&input(blend(&bench, 1.0), bench.clone(), 1.0));
+        let partial = score(&input(blend(&bench, 0.3), bench.clone(), 0.3));
+        // Holding the index at 100% and at 30% scores the same drawdown part
+        // (before: 0 against about 14 of 20).
+        assert!(
+            (full.parts.drawdown - partial.parts.drawdown).abs() < 1.0,
+            "{} vs {}",
+            full.parts.drawdown,
+            partial.parts.drawdown
+        );
+        assert!(partial.parts.drawdown < 2.0, "{:?}", partial.parts);
+    }
+
+    #[test]
+    fn a_smaller_drawdown_at_the_same_exposure_still_earns_more() {
+        let bench = crash(40);
+        // At 30% exposure: the index, and half the index's moves on top of
+        // the same cash.
+        let index = score(&input(blend(&bench, 0.3), bench.clone(), 0.3));
+        let calm = score(&input(blend(&bench, 0.15), bench.clone(), 0.3));
+        assert!(
+            calm.parts.drawdown > index.parts.drawdown + 5.0,
+            "{:?} vs {:?}",
+            calm.parts,
+            index.parts
+        );
     }
 
     #[test]
