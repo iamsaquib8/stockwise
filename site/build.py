@@ -173,9 +173,9 @@ def write_llms_txt() -> None:
         "",
         "Key facts for agents:",
         "",
-        "- Install: `cargo binstall stockwise`, `pipx install stockwise` / `uvx stockwise`, "
-        "Homebrew, Scoop, winget, AUR, Docker (`ghcr.io/iamsaquib8/stockwise`), or the "
-        "one-line installer. Check with `stockwise doctor`.",
+        "- Install: `cargo binstall stockwise`, the one-line installer, `.deb`/`.rpm`, Scoop, "
+        "Nix or Docker (`ghcr.io/iamsaquib8/stockwise`). PyPI, Homebrew, winget and the AUR "
+        "are not published yet. Check with `stockwise doctor`.",
         "- Bare tickers are Indian (`TCS` means `TCS.NS`); add `-m us`, `-m crypto`, `-m fx`, "
         "`-m commodity` or an exchange (`-m uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).",
         "- Add `--json` for machine-readable output (most commands; tables also take `--csv`). "

@@ -6,8 +6,8 @@
 
 **A stock market toolkit for your terminal, built for Indian (NSE/BSE) and US
 stocks.** Quotes, charts, screeners, mutual funds, options, commodities,
-backtests, paper trading, portfolio tracking and tax — in one fast binary. No
-API keys, no account.
+backtests, paper trading, portfolio tracking, capital-gains tax and an MCP
+server for AI assistants — in one fast binary. No API keys, no account.
 
 ## Install
 
@@ -40,6 +40,8 @@ stockwise deep HDFCBANK                 # everything about one stock
 stockwise mf sip 122639 5000 -p 5y      # what a ₹5,000/month SIP became
 stockwise backtest INFY -s macd         # a strategy after STT and brokerage
 stockwise sim replay start covid-crash-2020   # trade the 2020 crash, future hidden
+stockwise portfolio xray                # your real exposure across stocks, funds and ETFs
+stockwise tax advance                   # advance-tax instalments and Sec. 234C interest
 ```
 
 <p align="center">
