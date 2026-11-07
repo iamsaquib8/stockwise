@@ -1,3 +1,4 @@
+use crate::market;
 use crate::providers::{self, MarketData};
 use anyhow::{Context, Result, bail};
 use reqwest::header;
@@ -629,6 +630,38 @@ struct YahooSession {
 /// swaps in the real crumb, opening the session first if needed.
 const CRUMB_PLACEHOLDER: &str = "STOCKWISE_CRUMB_PLACEHOLDER";
 
+/// A non-retryable HTTP status from an upstream host (404, 401, ...).
+/// Callers can `downcast_ref` it to word a clearer message.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub host: String,
+    pub status: reqwest::StatusCode,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} returned HTTP {}", self.host, self.status)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+/// What a chart request for a ticker Yahoo does not know says instead of
+/// the raw "HTTP 404", with built-in "did you mean" names where it has them.
+fn no_history_message(symbol: &str) -> String {
+    let bare = symbol.trim_end_matches(".NS").trim_end_matches(".BO");
+    let mut msg =
+        format!("No price history for {symbol} — check the ticker with `stockwise search {bare}`");
+    let near: Vec<String> = market::suggest_symbols(symbol, 3)
+        .into_iter()
+        .map(|(s, name)| format!("{s} ({name})"))
+        .collect();
+    if !near.is_empty() {
+        msg.push_str(&format!(". Did you mean: {}", near.join(", ")));
+    }
+    msg
+}
+
 pub struct YahooClient {
     client: reqwest::Client,
     /// Opened on the first request that needs it (quotes, quoteSummary,
@@ -1015,7 +1048,15 @@ impl YahooClient {
             _ => Duration::from_secs(600), // 10 min for 1y+
         };
 
-        let body = self.fetch(&url, ttl).await?;
+        let body =
+            self.fetch(&url, ttl)
+                .await
+                .map_err(|e| match e.downcast_ref::<HttpStatusError>() {
+                    Some(h) if h.status == reqwest::StatusCode::NOT_FOUND => {
+                        anyhow::anyhow!(no_history_message(symbol))
+                    }
+                    _ => e,
+                })?;
         let resp: ChartResponse =
             serde_json::from_str(&body).context("Failed to parse chart response")?;
 
@@ -1442,6 +1483,37 @@ mod tests {
         let err = client.quote_summary("TCS.NS", &["financialData"]).await;
         let msg = format!("{:#}", err.unwrap_err());
         assert!(msg.contains("rate limited"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn chart_404_names_the_symbol_and_suggests_a_ticker() {
+        let server = crate::testutil::MockServer::start(vec![
+            (
+                404,
+                r#"{"chart":{"result":null,"error":{"code":"Not Found"}}}"#.into(),
+            ),
+            (404, "{}".into()),
+        ])
+        .await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&server.url));
+
+        let msg = client
+            .get_chart("RELIANC.NS", "1mo", "1d")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("No price history for RELIANC.NS"), "{msg}");
+        assert!(msg.contains("stockwise search RELIANC"), "{msg}");
+        assert!(msg.contains("Did you mean: RELIANCE.NS"), "{msg}");
+        assert!(!msg.contains("HTTP"), "{msg}");
+
+        let msg = client
+            .get_chart("ZZQQXX.NS", "1mo", "1d")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(msg.starts_with("No price history for ZZQQXX.NS"), "{msg}");
+        assert!(!msg.contains("Did you mean"), "{msg}");
     }
 
     #[tokio::test]

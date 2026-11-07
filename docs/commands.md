@@ -351,7 +351,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | Command | Description |
 |---------|-------------|
 | `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
-| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD]` | Add a purchase as a new lot (default date: today). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
+| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--force]` | Add a purchase as a new lot (default date: today). A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N --date YYYY-MM-DD]` | Lots, sales, dividends and XIRR of one holding; `--lot N --date` corrects a purchase date |
 | `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo). Shows them; `--apply` adjusts lots and records dividends, and is safe to repeat |
@@ -360,8 +360,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL>` | Remove a holding and its lots without recording a sale |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
-| `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...>` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
-| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
+| `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
+| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
 | `calendar [SYMBOLS...] [--days 30] [--holdings\|--watchlist] [--json\|--csv]` | Upcoming results, ex-dividend and dividend payment dates, splits and bonus issues for your holdings and watchlist (or the named symbols), sorted by date, with today and the next 7 days marked. See [the calendar](#results-and-corporate-calendar) |
 | `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |

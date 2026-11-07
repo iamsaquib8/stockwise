@@ -109,7 +109,7 @@ fn symbols_stored_by_older_versions_are_repaired() {
     )
     .unwrap();
     // Any change to the watchlist saves the repaired symbols.
-    stockwise(&home, &["watch", "add", "INFY"]);
+    stockwise(&home, &["watch", "add", "INFY", "--force"]);
     let wl = read_json(&home, "watchlist.json");
     assert_eq!(
         wl["symbols"],

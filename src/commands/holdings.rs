@@ -5,13 +5,19 @@ use super::*;
 use crate::portfolio::{self as pf, ImportOptions, ImportOutcome, ImportRow, SyncChange};
 use crate::tax::{self, Country};
 
-pub async fn cmd_watchlist(action: &str, symbols: &[String], market: Market) -> Result<()> {
+pub async fn cmd_watchlist(
+    action: &str,
+    symbols: &[String],
+    force: bool,
+    market: Market,
+) -> Result<()> {
     let mut wl = Watchlist::load()?;
 
     match action {
         "add" => {
-            for sym in symbols {
-                let resolved = market::resolve_symbol(sym, market);
+            let resolved_all = resolve_symbols(symbols, market);
+            check_symbols_before_add(&resolved_all, market, force).await?;
+            for resolved in resolved_all {
                 if wl.add(&resolved) {
                     println!("  {} Added {} to watchlist", "✓".green(), resolved.cyan());
                 } else {
@@ -163,6 +169,7 @@ pub async fn cmd_alert_add(
     condition: &str,
     target: f64,
     period: Option<usize>,
+    force: bool,
     market: Market,
 ) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
@@ -174,6 +181,7 @@ pub async fn cmd_alert_add(
         );
     };
     let (target, period) = crate::alerts::validate(cond, target, period)?;
+    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
     let mut store = AlertStore::load()?;
     store.add_with_period(&resolved, cond, target, period);
     store.save()?;
