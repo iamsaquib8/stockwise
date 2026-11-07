@@ -262,6 +262,9 @@ struct CostBook {
     txns: Vec<Txn>,
     /// A transaction had units but no usable date or price.
     incomplete: bool,
+    /// A redemption was larger than the units the transactions had bought:
+    /// the rest came from before the statement period.
+    oversold: bool,
 }
 
 /// `YYYY-MM-DD` from casparser's ISO dates (or `DD-MMM-YYYY`).
@@ -308,6 +311,9 @@ impl CostBook {
             }
             Some(u) if u < 0.0 => {
                 let sold = -u;
+                if sold > self.units + 0.002_f64.max(self.units * 1e-4) {
+                    self.oversold = true;
+                }
                 let u = sold.min(self.units);
                 if self.units > 0.0 {
                     self.cost -= self.cost / self.units * u;
@@ -360,6 +366,20 @@ impl CostBook {
         self.txns.clone()
     }
 
+    /// The dated transactions of a scheme that ended at zero units, when they
+    /// cover its whole life: every unit sold was bought in them, so the
+    /// sales have a cost. Empty when units bought earlier are missing.
+    fn redeemed_history(&self) -> Vec<Txn> {
+        if self.incomplete
+            || self.oversold
+            || self.units > 1e-6
+            || !self.txns.iter().any(|t| t.sell)
+        {
+            return Vec::new();
+        }
+        self.txns.clone()
+    }
+
     fn avg(&self) -> Option<f64> {
         (self.units > 0.0 && self.cost > 0.0).then(|| self.cost / self.units)
     }
@@ -374,6 +394,56 @@ impl CostBook {
             .then(|| self.avg())
             .flatten()
     }
+}
+
+/// A scheme whose closing balance is zero. When its transactions cover its
+/// whole life, it becomes a row with no units left and the dated buys and
+/// sells, so the redemptions are recorded as realized sales for `tax`. When
+/// units bought before the statement period are missing, it is skipped with
+/// a reason; a scheme with no unit activity at all is ignored.
+fn redeemed_scheme(
+    out: &mut Parsed,
+    book: &CostBook,
+    opening_zero: bool,
+    what: String,
+    symbol: Option<String>,
+    isin: Option<String>,
+    name: String,
+) {
+    if !book.txns.iter().any(|t| t.sell) && !book.incomplete && !book.oversold {
+        return;
+    }
+    let history = if opening_zero {
+        book.redeemed_history()
+    } else {
+        Vec::new()
+    };
+    if history.is_empty() {
+        out.skipped.push(Skipped {
+            what,
+            why: "fully redeemed, but the statement does not cover every unit's purchase (or a \
+                  transaction has no date or amount), so the gain cannot be worked out — \
+                  import a statement that starts before the first purchase"
+                .into(),
+        });
+        return;
+    }
+    let Some(symbol) = symbol else {
+        out.skipped.push(Skipped {
+            what,
+            why: "no AMFI code or ISIN".into(),
+        });
+        return;
+    };
+    out.rows.push(ParsedRow {
+        symbol,
+        isin,
+        name: Some(name),
+        qty: 0.0,
+        avg_cost: None,
+        unit: "units",
+        history,
+    });
 }
 
 fn json_num(v: Option<&serde_json::Value>) -> Option<f64> {
@@ -421,18 +491,6 @@ pub(super) fn parse_cas_json(content: &str) -> Result<Parsed> {
             let units = json_num(scheme.get("close"))
                 .or_else(|| json_num(scheme.get("close_calculated")))
                 .unwrap_or(0.0);
-            if units <= 1e-6 {
-                continue; // fully redeemed
-            }
-            let Some(symbol) = mf_symbol(amfi.as_deref(), isin.as_deref()) else {
-                out.skipped.push(Skipped {
-                    what,
-                    why: "no AMFI code or ISIN".into(),
-                });
-                continue;
-            };
-            let valuation = scheme.get("valuation");
-            let stated_cost = json_num(valuation.and_then(|v| v.get("cost"))).filter(|c| *c > 0.0);
             let mut book = CostBook::default();
             for t in scheme
                 .get("transactions")
@@ -448,6 +506,22 @@ pub(super) fn parse_cas_json(content: &str) -> Result<Parsed> {
                     json_num(t.get("nav")),
                 );
             }
+            let symbol = mf_symbol(amfi.as_deref(), isin.as_deref());
+            if units <= 1e-6 {
+                // Fully redeemed: its sales still count, if the history is whole.
+                let opening_zero = json_num(scheme.get("open")).is_none_or(|o| o <= 1e-6);
+                redeemed_scheme(&mut out, &book, opening_zero, what, symbol, isin, name);
+                continue;
+            }
+            let Some(symbol) = symbol else {
+                out.skipped.push(Skipped {
+                    what,
+                    why: "no AMFI code or ISIN".into(),
+                });
+                continue;
+            };
+            let valuation = scheme.get("valuation");
+            let stated_cost = json_num(valuation.and_then(|v| v.get("cost"))).filter(|c| *c > 0.0);
             // Dated lots when the transactions cover the whole balance; else
             // the statement's cost value; else quantity only (a fund already
             // tracked keeps its cost).
@@ -657,10 +731,22 @@ pub(super) fn parse_cas_csv(content: &str) -> Result<Parsed> {
         let (book, balance, isin, amfi) = &books[&key];
         let what = format!("{} (folio {})", key.1, key.0);
         let units = balance.unwrap_or(book.units);
+        let symbol = mf_symbol(amfi.as_deref(), isin.as_deref());
         if units <= 1e-6 {
+            // Fully redeemed: the CSV has no opening balance, but a sale of
+            // units the file never bought marks the book as incomplete.
+            redeemed_scheme(
+                &mut out,
+                book,
+                true,
+                what,
+                symbol,
+                isin.clone(),
+                key.1.clone(),
+            );
             continue;
         }
-        let Some(symbol) = mf_symbol(amfi.as_deref(), isin.as_deref()) else {
+        let Some(symbol) = symbol else {
             out.skipped.push(Skipped {
                 what,
                 why: "no AMFI code or ISIN".into(),
@@ -821,6 +907,17 @@ pub(super) async fn import_rows(
             "Mutual funds are stored as MF:<AMFI code or ISIN> (units, not shares).".dimmed()
         );
     }
+    let redeemed = rows
+        .iter()
+        .filter(|r| r.qty <= 1e-6 && !r.history.is_empty())
+        .count();
+    if redeemed > 0 {
+        println!(
+            "  {}",
+            format!("{redeemed} fully redeemed scheme(s) imported as sales (no holding left).")
+                .dimmed()
+        );
+    }
     // CAS rows are already split-free units; nothing to replay.
     super::holdings::apply_import_rows(source, file, import, false, replace).await
 }
@@ -968,7 +1065,8 @@ mod tests {
     #[test]
     fn cas_json_uses_stated_cost_then_transactions() {
         let p = parse_cas(include_str!("fixtures/cas_cams.json")).unwrap();
-        assert_eq!(p.rows.len(), 2, "{:?}", p.rows);
+        // Two holdings, and the fund redeemed in full (kept for its sale).
+        assert_eq!(p.rows.len(), 3, "{:?}", p.rows);
         let hdfc = &p.rows[0];
         assert_eq!(hdfc.symbol, "MF:118834");
         assert_eq!(hdfc.qty, 23.412);
@@ -977,8 +1075,15 @@ mod tests {
         let ppfas = &p.rows[1];
         assert_eq!(ppfas.symbol, "MF:122639");
         assert!((ppfas.avg_cost.unwrap() - 6000.0 / 100.5).abs() < 1e-9);
-        // The fully redeemed liquid fund is not a holding.
+        // The liquid fund with units from before the statement is skipped, with a reason.
         assert!(p.rows.iter().all(|r| r.symbol != "MF:119091"));
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        assert!(p.skipped[0].what.contains("HDFC Liquid"), "{:?}", p.skipped);
+        assert!(
+            p.skipped[0].why.contains("fully redeemed"),
+            "{:?}",
+            p.skipped
+        );
         // The transactions cover each balance, so they become dated lots.
         assert_eq!(hdfc.history.len(), 2);
         assert!(hdfc.history[1].sell);
@@ -994,10 +1099,62 @@ mod tests {
             "2024-04-02"
         );
         // The redemption is a realized sale, for `tax`.
-        assert_eq!(portfolio.realized.len(), 1);
+        assert_eq!(portfolio.realized.len(), 2);
+        apply(&mut portfolio, &p.rows);
+        assert_eq!(portfolio.realized.len(), 2);
+        assert!((holding(&portfolio, "MF:118834").0 - 23.412).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fully_redeemed_scheme_records_its_sale_and_no_holding() {
+        let p = parse_cas(include_str!("fixtures/cas_cams.json")).unwrap();
+        let axis = p.rows.iter().find(|r| r.symbol == "MF:120465").unwrap();
+        assert_eq!((axis.qty, axis.history.len()), (0.0, 2));
+
+        let mut portfolio = Portfolio::default();
+        apply(&mut portfolio, &p.rows);
+        assert!(portfolio.holding("MF:120465").is_none());
+        let sales: Vec<_> = portfolio
+            .realized
+            .iter()
+            .filter(|s| s.symbol == "MF:120465")
+            .collect();
+        assert_eq!(sales.len(), 1);
+        assert_eq!(sales[0].sell_date, "2025-06-10");
+        // 100 units: bought for 5,000, sold for 7,000.
+        assert!((sales[0].qty - 100.0).abs() < 1e-9);
+        assert!((sales[0].sell_price * sales[0].qty - 7000.0).abs() < 1e-6);
+        assert!((sales[0].buy_price * sales[0].qty - 5000.0).abs() < 1e-6);
+        // Importing again changes nothing.
+        apply(&mut portfolio, &p.rows);
+        assert_eq!(
+            portfolio
+                .realized
+                .iter()
+                .filter(|s| s.symbol == "MF:120465")
+                .count(),
+            1
+        );
+        assert!(portfolio.holding("MF:120465").is_none());
+    }
+
+    #[test]
+    fn fully_redeemed_csv_scheme_records_its_sale() {
+        let csv = "amc,folio,pan,scheme,advisor,isin,amfi,date,description,amount,units,nav,balance,type,dividend\n\
+X AMC,1,P,X Fund,,INF000000001,1,2024-04-02,Purchase,5000,100,50,100,PURCHASE,\n\
+X AMC,1,P,X Fund,,INF000000001,1,2025-06-10,Redemption,7000,-100,70,0,REDEMPTION,\n\
+X AMC,1,P,Old Fund,,INF000000002,2,2024-06-01,Redemption,4900,-1,4900,0,REDEMPTION,\n";
+        let p = parse_cas(csv).unwrap();
+        // Old Fund sold units the file never bought: skipped with a reason.
+        assert_eq!(p.rows.len(), 1, "{:?}", p.rows);
+        assert_eq!((p.rows[0].symbol.as_str(), p.rows[0].qty), ("MF:1", 0.0));
+        assert_eq!(p.skipped.len(), 1, "{:?}", p.skipped);
+        assert!(p.skipped[0].why.contains("fully redeemed"));
+
+        let mut portfolio = Portfolio::default();
         apply(&mut portfolio, &p.rows);
         assert_eq!(portfolio.realized.len(), 1);
-        assert!((holding(&portfolio, "MF:118834").0 - 23.412).abs() < 1e-9);
+        assert!(portfolio.holdings.is_empty());
     }
 
     #[test]

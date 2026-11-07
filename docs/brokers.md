@@ -418,8 +418,10 @@ stockwise import cas cas.json
   a dated lot (stamp duty included) and every redemption a FIFO sale, so `tax`
   and XIRR use the real dates. Otherwise the statement's cost value is used to
   sync the quantity; a statement that starts with units of unknown cost only
-  updates funds you already track. The JSON and both CSV forms (transactions,
-  `-s` summary) are supported. A scheme with lots from elsewhere is only rebuilt
+  updates funds you already track. A scheme you have fully redeemed is imported
+  only as its sales (no holding is left) when the statement covers every
+  purchase; otherwise it is skipped with a reason. The JSON and both CSV forms
+  (transactions, `-s` summary) are supported. A scheme with lots from elsewhere is only rebuilt
   with `import cas FILE --replace`.
 - **NSDL / CDSL** (demat): equities carry no purchase cost, so they only update
   the quantity of holdings already in your portfolio (keeping your cost);

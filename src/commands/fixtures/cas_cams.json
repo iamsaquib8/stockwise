@@ -52,6 +52,17 @@
           "transactions": [
             { "date": "2023-05-02", "description": "Purchase", "amount": 6000, "units": 100.5, "nav": 59.7, "balance": 100.5, "type": "PURCHASE", "dividend_rate": null }
           ]
+        },
+        {
+          "scheme": "Axis Bluechip Fund - Direct Plan - Growth",
+          "advisor": null, "rta_code": "AX01", "rta": "KFINTECH", "type": "EQUITY",
+          "isin": "INF846K01DP8", "amfi": "120465",
+          "open": "0.000", "close": "0.000", "close_calculated": "0.000",
+          "valuation": { "date": "2025-03-31", "nav": "60.00", "cost": null, "value": "0.00" },
+          "transactions": [
+            { "date": "2024-04-02", "description": "Purchase", "amount": "5000.00", "units": "100.000", "nav": "50.00", "balance": "100.000", "type": "PURCHASE", "dividend_rate": null },
+            { "date": "2025-06-10", "description": "Redemption", "amount": "7000.00", "units": "-100.000", "nav": "70.00", "balance": "0.000", "type": "REDEMPTION", "dividend_rate": null }
+          ]
         }
       ]
     }
