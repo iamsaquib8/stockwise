@@ -1020,9 +1020,11 @@ under Section 208 and 211, with Section 234C(1) capital-gains proviso protection
         /// Financial year: 2025-26 or AY2026-27 [default: current FY]
         #[arg(long, value_name = "YEAR")]
         fy: Option<String>,
-        /// Total advance tax paid so far for this financial year
-        #[arg(long, value_name = "AMOUNT")]
-        paid: Option<f64>,
+        /// An advance tax payment: AMOUNT, or DATE:AMOUNT (2025-06-14:3000).
+        /// Repeat for each payment. Interest under Sec. 234C depends on the
+        /// date; an AMOUNT without a date is assumed paid on time
+        #[arg(long, value_name = "[DATE:]AMOUNT")]
+        paid: Vec<String>,
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -3602,7 +3604,7 @@ async fn dispatch(
                 commands::cmd_tax_export(&country, fy.as_deref(), out.as_deref(), json).await
             }
             Some(TaxCmd::Advance { fy, paid, json }) => {
-                commands::cmd_tax_advance(fy.as_deref(), paid, json).await
+                commands::cmd_tax_advance(fy.as_deref(), &paid, json).await
             }
             None => {
                 let country = country.expect("clap requires COUNTRY without a subcommand");
@@ -4794,7 +4796,7 @@ mod tests {
         else {
             panic!("expected tax advance");
         };
-        assert!(country.is_none() && fy.is_none() && paid.is_none() && !json);
+        assert!(country.is_none() && fy.is_none() && paid.is_empty() && !json);
 
         let cli = Cli::try_parse_from([
             "stockwise",
@@ -4815,7 +4817,7 @@ mod tests {
             panic!("expected tax advance with flags");
         };
         assert_eq!(fy.as_deref(), Some("2025-26"));
-        assert_eq!(paid, Some(25000.0));
+        assert_eq!(paid, vec!["25000".to_string()]);
         assert!(json);
     }
 

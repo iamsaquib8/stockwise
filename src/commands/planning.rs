@@ -179,6 +179,18 @@ impl Schedule {
                 print_kv("Taxable STCG (111A)", &inr(m.taxable_stcg));
                 print_kv("LTCG exemption used", &inr(m.ltcg_exemption));
                 print_kv("Taxable LTCG (112A)", &inr(m.taxable_ltcg));
+                if m.taxable_stcg_before_23_jul_2024 > 0.0
+                    || m.taxable_ltcg_before_23_jul_2024 > 0.0
+                {
+                    print_kv(
+                        "  sales before 23 Jul 2024",
+                        &format!(
+                            "STCG {} at 15%, LTCG {} at 10%",
+                            inr(m.taxable_stcg_before_23_jul_2024),
+                            inr(m.taxable_ltcg_before_23_jul_2024)
+                        ),
+                    );
+                }
                 print_kv("Estimated tax", &inr(m.total_tax).bold().to_string());
                 if m.st_loss_carried_forward + m.lt_loss_carried_forward > 0.0 {
                     print_kv(
@@ -256,10 +268,12 @@ pub async fn cmd_tax_export(
             sold.sort();
             sold.dedup();
             let isins = lookup_isins(&sold).await;
+            let marks = sale_marks(&views::LiveSource::new(), &sold).await;
             Schedule::India(tax_export::india_schedule(
                 &portfolio.realized,
                 start,
                 |sym| isins.iter().find(|(s, _)| s == sym).map(|(_, i)| i.clone()),
+                &marks,
             ))
         }
         _ => Schedule::Us(tax_export::us_schedule(&portfolio.realized, start)),
@@ -313,13 +327,34 @@ pub async fn cmd_tax_export(
     Ok(())
 }
 
+/// AMFI marks (categories) for the funds and SGBs among `symbols`, so the tax
+/// commands that have no valuation can tell equity-oriented funds from the
+/// rest. Never fails: a symbol without a mark is classified as unknown.
+pub(crate) async fn sale_marks(
+    src: &impl views::DataSource,
+    symbols: &[String],
+) -> crate::offmarket::OffMarket {
+    let mut off: Vec<String> = symbols
+        .iter()
+        .filter(|s| crate::offmarket::is_off_market(s))
+        .cloned()
+        .collect();
+    off.sort();
+    off.dedup();
+    if off.is_empty() {
+        return crate::offmarket::OffMarket::default();
+    }
+    crate::offmarket::price(src, &off, &[]).await
+}
+
 /// Compute the Indian advance tax schedule for `portfolio`'s realized sales.
 pub(crate) fn advance_tax_schedule(
     portfolio: &Portfolio,
     fy: Option<&str>,
-    paid: Option<f64>,
+    payments: &[tax::AdvancePayment],
+    marks: &crate::offmarket::OffMarket,
 ) -> Result<tax::AdvanceTaxSchedule> {
-    if paid.is_some_and(|p| p < 0.0) {
+    if payments.iter().any(|p| p.amount < 0.0) {
         bail!("Advance tax paid amount cannot be negative");
     }
 
@@ -355,9 +390,15 @@ pub(crate) fn advance_tax_schedule(
         else {
             continue;
         };
-        // Same-day sales are speculative income at slab rates, and gold, silver,
-        // liquid, debt and international ETFs are not 111A/112A: not in this schedule.
-        if s.is_intraday() || crate::offmarket::non_equity_etf(&s.symbol).is_some() {
+        // Same-day sales are speculative income at slab rates; crypto, debt and
+        // other funds, SGBs and gold, silver, liquid, debt and international
+        // ETFs are not 111A/112A. Same rule as `tax in` and `tax export in`.
+        if s.is_intraday()
+            || !matches!(
+                crate::offmarket::india_class(&s.symbol, marks.mark(&s.symbol)),
+                crate::offmarket::IndiaClass::Listed | crate::offmarket::IndiaClass::EquityFund
+            )
+        {
             continue;
         }
         let is_lt = match NaiveDate::parse_from_str(&s.buy_date, "%Y-%m-%d").ok() {
@@ -367,14 +408,29 @@ pub(crate) fn advance_tax_schedule(
         advance_sales.push(tax::AdvanceTaxSale::new(sell_d, s.gain() * scale, is_lt));
     }
 
-    Ok(tax::compute_advance_tax(&advance_sales, start, today, paid))
+    Ok(tax::compute_advance_tax(
+        &advance_sales,
+        start,
+        today,
+        payments,
+    ))
 }
 
 /// Advance tax quarterly instalment estimates under Section 208 and 211 with
 /// Section 234C(1) capital-gains proviso protections.
-pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) -> Result<()> {
+pub async fn cmd_tax_advance(fy: Option<&str>, paid: &[String], json: bool) -> Result<()> {
+    let payments = paid
+        .iter()
+        .map(|p| tax::AdvancePayment::parse(p).map_err(|e| anyhow::anyhow!("--paid {p}: {e}")))
+        .collect::<Result<Vec<_>>>()?;
     let portfolio = Portfolio::load()?;
-    let schedule = advance_tax_schedule(&portfolio, fy, paid)?;
+    let year_symbols: Vec<String> = portfolio
+        .realized
+        .iter()
+        .map(|s| s.symbol.clone())
+        .collect();
+    let marks = sale_marks(&views::LiveSource::new(), &year_symbols).await;
+    let schedule = advance_tax_schedule(&portfolio, fy, &payments, &marks)?;
 
     if json {
         return output::print_json(&schedule);
@@ -424,6 +480,8 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
             tax::AdvanceTaxStatus::Paid => "Paid".green(),
             tax::AdvanceTaxStatus::Pending => "Pending".yellow(),
             tax::AdvanceTaxStatus::Upcoming => "Upcoming".dimmed(),
+            tax::AdvanceTaxStatus::Overdue => "Overdue".red().bold(),
+            tax::AdvanceTaxStatus::NothingDue => "Nothing due".dimmed(),
         };
         println!(
             "  {:<7} {:<11} {:>12} {:>12} {:>12} {:>5}% {:>13} {:>13}  {}",
@@ -465,8 +523,33 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
         "  • Section 234C Proviso: Shortfalls from capital gains realized later in the year are not penalized."
     );
 
-    if let Some(p) = paid {
-        println!("  • Advance Tax Paid Recorded: {}", inr(p));
+    if !payments.is_empty() {
+        println!(
+            "  • Advance Tax Paid Recorded: {}",
+            inr(schedule.total_paid)
+        );
+        if schedule.assumed_on_time {
+            println!(
+                "  • {}",
+                "A payment without a date is assumed to be paid before every due date. Use --paid DATE:AMOUNT for exact interest."
+                    .yellow()
+            );
+        }
+        for q in schedule
+            .quarters
+            .iter()
+            .filter(|q| q.shortfall > 0.0 && q.sec_234c_interest > 0.0)
+        {
+            println!(
+                "  • {}: {} paid by {} against {} due, shortfall {}, interest {}",
+                q.quarter,
+                inr(q.paid),
+                q.due_date.format("%d %b %Y"),
+                inr(q.min_cumulative_tax_required),
+                inr(q.shortfall),
+                inr(q.sec_234c_interest)
+            );
+        }
         if schedule.total_sec_234c_interest > 0.0 {
             println!(
                 "  • Estimated Section 234C Deferment Interest: {}",
@@ -487,7 +570,7 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: Option<f64>, json: bool) ->
     } else {
         println!(
             "  • Section 234B/C Interest: Pass {} to track shortfall and interest.",
-            "`--paid <AMOUNT>`".cyan()
+            "`--paid [DATE:]AMOUNT`".cyan()
         );
     }
 

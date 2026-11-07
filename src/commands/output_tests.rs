@@ -261,7 +261,8 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
     assert_eq!(r.holdings[0].long_term_gain, 100_000.0);
 
     // `tax advance` leaves it out too.
-    let s = super::planning::advance_tax_schedule(&p, Some("2025-26"), None).unwrap();
+    let s = super::planning::advance_tax_schedule(&p, Some("2025-26"), &[], &Default::default())
+        .unwrap();
     assert_eq!((s.total_stcg, s.total_ltcg), (0.0, 0.0));
 }
 
@@ -331,14 +332,20 @@ fn tax_export_and_advance_tax_skip_non_equity_etfs() {
     );
     p.sell_fifo("NIFTYBEES.NS", 100.0, 75.0, "2026-09-10", "manual")
         .unwrap();
-    let schedule = crate::tax_export::india_schedule(&p.realized, day("2026-04-01"), |_| None);
+    let schedule = crate::tax_export::india_schedule(
+        &p.realized,
+        day("2026-04-01"),
+        |_| None,
+        &Default::default(),
+    );
     assert_eq!(schedule.sales.len(), 1);
     assert_eq!(schedule.sales[0].symbol, "NIFTYBEES.NS");
     assert_eq!(schedule.other_rules, ["GOLDBEES.NS"]);
     assert_eq!(schedule.summary.stcg_gains, 1_500.0);
     assert!(schedule.notes.iter().any(|n| n.contains("GOLDBEES.NS")));
     // Only the NIFTYBEES gain is in the advance-tax base.
-    let adv = super::planning::advance_tax_schedule(&p, Some("2026-27"), None).unwrap();
+    let adv = super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &Default::default())
+        .unwrap();
     assert_eq!((adv.total_stcg, adv.total_ltcg), (1_500.0, 0.0));
 }
 
@@ -825,6 +832,7 @@ fn goal_and_tax_export_json_shapes() {
         std::slice::from_ref(&sale),
         day("2025-04-01"),
         |_| None,
+        &Default::default(),
     ))
     .unwrap();
     let schedule_keys = [
@@ -903,4 +911,192 @@ fn goal_and_tax_export_json_shapes() {
             "date_acquired_estimated"
         ]
     );
+}
+
+/// One portfolio with a listed share, an equity fund, a liquid fund, crypto,
+/// an SGB and a gold ETF: every India tax command must put the same two
+/// sales in Sec. 111A/112A.
+#[test]
+fn india_tax_commands_classify_the_same_portfolio_alike() {
+    use crate::offmarket::{Mark, PriceSource};
+    // (symbol, AMFI category, gain on the sale, quote used for the open lots)
+    let rows: [(&str, Option<&str>, f64); 6] = [
+        ("TCS.NS", None, 1_000.0),
+        ("MF:100001", Some("Equity Scheme - Flexi Cap Fund"), 3_000.0),
+        ("MF:100002", Some("Debt Scheme - Liquid Fund"), 2_000.0),
+        ("BTC-INR", None, 4_000.0),
+        ("SGBNOV26.NS", None, 5_000.0),
+        ("GOLDBEES.NS", None, 6_000.0),
+    ];
+    // 20 units bought at 100, 10 sold at 100 + gain/10, 10 left at 100 and priced at 90.
+    let mut p = Portfolio::default();
+    for (symbol, _, gain) in rows {
+        p.add_lot(symbol, Lot::new(20.0, 100.0, "2026-05-04", "manual"));
+        p.sell_fifo(symbol, 10.0, 100.0 + gain / 10.0, "2026-09-10", "manual")
+            .unwrap();
+    }
+    let quotes: Vec<Quote> = rows
+        .iter()
+        .map(|(s, _, _)| quote(s, Some(90.0), None))
+        .collect();
+    let mut val = valued(&p, quotes);
+    for (symbol, category, _) in rows {
+        val.off.marks.push(Mark {
+            symbol: symbol.into(),
+            name: None,
+            source: PriceSource::AmfiNav,
+            as_of: None,
+            category: category.map(String::from),
+        });
+    }
+    let today = day("2026-11-01");
+
+    // `tax in`: ₹1,000 + ₹3,000 short-term gain.
+    let report = tax_report(Country::India, &p, &val, today);
+    assert_eq!(report.realized.st_gain, 4_000.0);
+    assert_eq!(report.sales.len(), 2);
+    let left_out: Vec<&str> = report
+        .other_rules
+        .iter()
+        .map(|o| o.symbol.as_str())
+        .collect();
+    for symbol in ["MF:100002", "BTC-INR", "SGBNOV26.NS", "GOLDBEES.NS"] {
+        assert!(left_out.contains(&symbol), "tax in leaves out {symbol}");
+    }
+
+    // `tax export in`.
+    let schedule =
+        crate::tax_export::india_schedule(&p.realized, day("2026-04-01"), |_| None, &val.off);
+    let mut exported: Vec<&str> = schedule.sales.iter().map(|r| r.symbol.as_str()).collect();
+    exported.sort();
+    assert_eq!(exported, ["MF:100001", "TCS.NS"]);
+    assert_eq!(schedule.summary.stcg_gains, 4_000.0);
+    assert_eq!(schedule.virtual_digital_assets, ["BTC-INR"]);
+
+    // `tax advance`.
+    let s = super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &val.off).unwrap();
+    assert_eq!((s.total_stcg, s.total_ltcg), (4_000.0, 0.0));
+
+    // `harvest`: only the open lots of the same two symbols are candidates.
+    let h = super::holdings::compute_harvest(&p, &val, Market::In, today);
+    let mut candidates: Vec<&str> = h
+        .loss_candidates
+        .iter()
+        .map(|c| c.symbol.as_str())
+        .collect();
+    candidates.sort();
+    assert_eq!(candidates, ["MF:100001", "TCS.NS"]);
+    let skipped: Vec<&str> = h.other_rules.iter().map(|o| o.symbol.as_str()).collect();
+    assert!(skipped.contains(&"BTC-INR"), "harvest leaves out crypto");
+}
+
+/// Hand-calculated `harvest` cases (India, today is 2026-11-01).
+mod harvest_math {
+    use super::*;
+    use crate::commands::holdings::compute_harvest;
+
+    fn harvest(p: &Portfolio, quotes: Vec<Quote>) -> crate::commands::holdings::HarvestSummary {
+        compute_harvest(p, &valued(p, quotes), Market::In, day("2026-11-01"))
+    }
+
+    #[test]
+    fn a_losing_lot_behind_older_gains_is_not_offered_as_a_loss() {
+        // TCS: 100 @ 500 (2020) and 100 @ 1,500 (2026), price 1,200. Selling 100
+        // (FIFO) books +70,000 LTCG; selling 200 books +70,000 - 30,000 = +40,000.
+        let p = lots(&[
+            ("TCS.NS", 100.0, 500.0, "2020-01-01"),
+            ("TCS.NS", 100.0, 1500.0, "2026-05-04"),
+        ]);
+        let h = harvest(&p, vec![quote("TCS.NS", Some(1200.0), None)]);
+        assert!(h.loss_candidates.is_empty());
+        assert_eq!(h.estimated_loss_tax_saved, 0.0);
+        let b = &h.fifo_blocked[0];
+        assert_eq!(b.symbol, "TCS.NS");
+        assert_eq!(b.shares_to_sell, 200.0);
+        assert_eq!(b.net_result, 40_000.0);
+        assert_eq!(b.lot_loss, 30_000.0);
+    }
+
+    #[test]
+    fn a_loss_behind_a_bigger_loss_is_sold_through_fifo() {
+        // 100 @ 2,000 then 100 @ 1,000 (both this year), price 1,500: the first
+        // lot loses 50,000, the second gains 50,000. Selling 100 books -50,000.
+        let p = lots(&[
+            ("A.NS", 100.0, 2000.0, "2026-04-10"),
+            ("A.NS", 100.0, 1000.0, "2026-05-04"),
+        ]);
+        let h = harvest(&p, vec![quote("A.NS", Some(1500.0), None)]);
+        let c = &h.loss_candidates[0];
+        assert_eq!((c.shares, c.st_pnl, c.pnl), (100.0, -50_000.0, -50_000.0));
+        assert!(h.fifo_blocked.is_empty());
+    }
+
+    #[test]
+    fn tax_saved_comes_from_the_estimate_with_this_years_gains() {
+        // STCG 60,000 already realized this year; a 50,000 short-term loss
+        // harvested. Tax goes 12,000 + 480 cess = 12,480 -> 2,000 + 80 = 2,080.
+        let mut p = lots(&[("LOSER.NS", 100.0, 2000.0, "2026-05-04")]);
+        p.add_lot("WINNER.NS", Lot::new(100.0, 1000.0, "2026-05-04", "manual"));
+        p.sell_fifo("WINNER.NS", 100.0, 1600.0, "2026-09-10", "manual")
+            .unwrap();
+        let h = harvest(&p, vec![quote("LOSER.NS", Some(1500.0), None)]);
+        assert_eq!(h.total_st_loss_harvestable, 50_000.0);
+        assert_eq!(h.estimated_loss_tax_saved, 10_400.0);
+        assert_eq!(h.loss_candidates[0].estimated_tax_saved, 10_400.0);
+    }
+
+    #[test]
+    fn a_loss_with_nothing_to_offset_saves_nothing() {
+        let p = lots(&[("LOSER.NS", 100.0, 2000.0, "2026-05-04")]);
+        let h = harvest(&p, vec![quote("LOSER.NS", Some(1500.0), None)]);
+        assert_eq!(h.loss_candidates.len(), 1);
+        assert_eq!(h.total_st_loss_harvestable, 50_000.0);
+        assert_eq!(h.estimated_loss_tax_saved, 0.0);
+    }
+
+    #[test]
+    fn candidates_share_the_remaining_exemption() {
+        // Three long-term winners with 1,00,000 gain each; ₹1.25 lakh is exempt.
+        // The first takes 1,00,000 (saves 12.5% + 4% cess = 13,000), the second
+        // the last 25,000 (3,250), the third nothing.
+        let p = lots(&[
+            ("A.NS", 100.0, 1000.0, "2024-01-10"),
+            ("B.NS", 100.0, 1000.0, "2024-01-10"),
+            ("C.NS", 100.0, 1000.0, "2024-01-10"),
+        ]);
+        let quotes = ["A.NS", "B.NS", "C.NS"]
+            .map(|s| quote(s, Some(2000.0), None))
+            .to_vec();
+        let h = harvest(&p, quotes);
+        assert_eq!(h.gain_harvest_candidates.len(), 2);
+        let saved: Vec<f64> = h
+            .gain_harvest_candidates
+            .iter()
+            .map(|c| c.estimated_tax_saved)
+            .collect();
+        assert_eq!(saved, [13_000.0, 3_250.0]);
+        assert_eq!(h.ltcg_exemption_remaining, 125_000.0);
+    }
+
+    #[test]
+    fn us_holdings_are_not_counted_as_rupees() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", Lot::new(10.0, 200.0, "2025-01-02", "manual"));
+        p.add_lot("OLD.NS", Lot::new(10.0, 100.0, "2025-01-02", "manual"));
+        let mut aapl = quote("AAPL", Some(140.0), None);
+        aapl.currency = Some("USD".into());
+        let h = harvest(&p, vec![aapl, quote("OLD.NS", Some(90.0), None)]);
+        assert_eq!(h.other_currency, ["AAPL"]);
+        let names: Vec<&str> = h
+            .loss_candidates
+            .iter()
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(names, ["OLD.NS"]);
+        // Only the rupee holding's loss: 10 x 10 = 100.
+        assert_eq!(
+            h.total_lt_loss_harvestable + h.total_st_loss_harvestable,
+            100.0
+        );
+    }
 }
