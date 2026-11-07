@@ -935,7 +935,8 @@ pub fn merge_balance_sheet(annual: &mut Vec<Period>, summary: &Value) {
         let cl = nz(raw(item, "totalCurrentLiabilities"));
         let re = nz(raw(item, "retainedEarnings"));
         let eq = nz(raw(item, "totalStockholderEquity"));
-        let debt = nz(raw(item, "shortLongTermDebt").or_else(|| raw(item, "longTermDebt")));
+        // A reported 0 is real: a debt-free year, not missing data.
+        let debt = raw(item, "shortLongTermDebt").or_else(|| raw(item, "longTermDebt"));
 
         match annual.iter_mut().find(|p| p.end.year() == end.year()) {
             Some(p) => {

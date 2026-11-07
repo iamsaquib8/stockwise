@@ -1086,7 +1086,7 @@
 
     const zVal = isNum(alt.z_score) ? alt.z_score.toFixed(2) : (isNum(alt.z_double_prime) ? alt.z_double_prime.toFixed(2) + " (Z'')" : DASH);
     wrap.append(el('div', { class: 'stats' }, [
-      stat('Piotroski F-Score', (pio.score != null ? pio.score : DASH) + ' / ' + (pio.max_score || 9), pio.rating_label || '',
+      stat('Piotroski F-Score', (pio.score != null ? pio.score : DASH) + ' / ' + (pio.evaluated != null ? pio.evaluated : (pio.max_score || 9)), pio.rating_label || '',
         el('div', { class: 'delta ' + (pio.score >= 7 ? 'up' : pio.score <= 3 ? 'down' : ''), text: pio.rating_label || '' })),
       stat('Profitability', (pio.profitability_score != null ? pio.profitability_score : DASH) + ' / 4', 'ROA, OCF, ΔROA, Accruals'),
       stat('Leverage & Liquidity', (pio.leverage_score != null ? pio.leverage_score : DASH) + ' / 3', 'ΔLeverage, ΔCurrent Ratio, Dilution'),

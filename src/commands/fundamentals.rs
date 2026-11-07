@@ -8,7 +8,9 @@ fn altman_summary(a: &scorecard::AltmanScorecard) -> Option<String> {
     if a.is_financial {
         return Some("n/a for banks and lenders".to_string());
     }
-    let z = a.z_score?;
+    let Some(z) = a.z_score else {
+        return Some(format!("n/a (missing {})", a.missing_factors.join(", ")));
+    };
     Some(match a.zone_label.as_deref() {
         Some(label) => format!("{z:.2} — {label}"),
         None => format!("{z:.2}"),
@@ -22,8 +24,8 @@ fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &
         print_kv(
             "Piotroski F-Score",
             &format!(
-                "{}/{} ({})",
-                sc.piotroski.score, sc.piotroski.max_score, sc.piotroski.rating_label
+                "{}/{} evaluated ({})",
+                sc.piotroski.score, sc.piotroski.evaluated, sc.piotroski.rating_label
             ),
         );
         if let Some(text) = altman_summary(&sc.altman) {
