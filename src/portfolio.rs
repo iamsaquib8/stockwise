@@ -203,6 +203,10 @@ pub struct Sale {
     /// The broker sell order behind this sale (`trade sync`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_id: Option<String>,
+    /// Bought and sold on the same day (netted before any older lot was
+    /// touched). Indian tax treats it as speculative business income.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub intraday: bool,
 }
 
 impl Sale {
@@ -217,11 +221,18 @@ impl Sale {
             buy_date_estimated: lot.date_estimated,
             source: source.to_string(),
             order_id: None,
+            intraday: false,
         }
     }
 
     pub fn gain(&self) -> f64 {
         self.qty * (self.sell_price - self.buy_price)
+    }
+
+    /// A same-day buy and sell: flagged when it was recorded, or bought and
+    /// sold on one day with a real (not estimated) purchase date.
+    pub fn is_intraday(&self) -> bool {
+        self.intraday || (self.buy_date == self.sell_date && !self.buy_date_estimated)
     }
 }
 
@@ -543,10 +554,65 @@ fn replay_trades(
     let mut lots: Vec<Lot> = Vec::new();
     let mut sales = Vec::new();
     let mut unmatched = 0.0;
-    for t in trades {
-        let date = t.date.clone().unwrap_or_else(|| today.to_string());
+    let date_of_trade = |t: &ImportedTrade| t.date.clone().unwrap_or_else(|| today.to_string());
+    let mut i = 0;
+    while i < trades.len() {
+        // One day's trades (the list is sorted by date).
+        let date = date_of_trade(&trades[i]);
+        let end = trades[i..]
+            .iter()
+            .position(|t| date_of_trade(t) != date)
+            .map_or(trades.len(), |n| i + n);
+        let day = &trades[i..end];
+        i = end;
         apply_until(&mut lots, &date, &mut applied);
-        if t.sell {
+        let (buys, sells): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
+            day.iter().partition(|t| !t.sell);
+        let bought: f64 = buys.iter().map(|t| t.qty).sum();
+        let sold: f64 = sells.iter().map(|t| t.qty).sum();
+        let net = bought.min(sold);
+        let average =
+            |v: &[&ImportedTrade], qty: f64| v.iter().map(|t| t.qty * t.price).sum::<f64>() / qty;
+        if net > EPS {
+            // Bought and sold on one day: the matched quantity is an
+            // intraday sale at the day's average prices; only what is left
+            // over touches the lots.
+            let (buy_avg, sell_avg) = (average(&buys, bought), average(&sells, sold));
+            let mut sale = Sale::from_lot(
+                sym,
+                &Lot::new(net, buy_avg, date.clone(), source),
+                net,
+                &date,
+                sell_avg,
+                source,
+            );
+            sale.buy_date_estimated = buys.iter().any(|t| t.date.is_none());
+            sale.intraday = true;
+            sales.push(sale);
+            if bought - net > EPS {
+                let mut lot = Lot::new(bought - net, buy_avg, date.clone(), source);
+                lot.date_estimated = buys.iter().any(|t| t.date.is_none());
+                lots.push(lot);
+                lots.sort_by(|a, b| a.date.cmp(&b.date));
+            }
+            if sold - net > EPS {
+                let (taken, left) = take_fifo(&mut lots, sold - net, &date);
+                sales.extend(
+                    taken
+                        .iter()
+                        .map(|(lot, q)| Sale::from_lot(sym, lot, *q, &date, sell_avg, source)),
+                );
+                unmatched += left;
+            }
+            continue;
+        }
+        for t in buys {
+            let mut lot = Lot::new(t.qty, t.price, date.clone(), source);
+            lot.date_estimated = t.date.is_none();
+            lots.push(lot);
+            lots.sort_by(|a, b| a.date.cmp(&b.date));
+        }
+        for t in sells {
             let (taken, left) = take_fifo(&mut lots, t.qty, &date);
             sales.extend(
                 taken
@@ -554,11 +620,6 @@ fn replay_trades(
                     .map(|(lot, q)| Sale::from_lot(sym, lot, *q, &date, t.price, source)),
             );
             unmatched += left;
-        } else {
-            let mut lot = Lot::new(t.qty, t.price, date, source);
-            lot.date_estimated = t.date.is_none();
-            lots.push(lot);
-            lots.sort_by(|a, b| a.date.cmp(&b.date));
         }
     }
     // Bring the remaining lots up to today's share count.
@@ -599,6 +660,26 @@ fn same_state(
         == sorted(new_lots.iter().map(lot_key).collect())
         && sorted(old_sales.iter().map(|s| sale_key(s)).collect())
             == sorted(new_sales.iter().map(sale_key).collect())
+}
+
+/// Like [`take_fifo`], but shares bought on `date` itself go first: a buy and
+/// a sell on one day net against each other (intraday) before an older lot
+/// is touched. The flag is true for the slices that came from that day.
+fn take_netting(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64, bool)>, f64) {
+    let (mut same_day, mut older): (Vec<Lot>, Vec<Lot>) = std::mem::take(lots)
+        .into_iter()
+        .partition(|l| l.date == date);
+    let (netted, rest) = take_fifo(&mut same_day, qty, date);
+    let (before, left) = take_fifo(&mut older, rest, date);
+    older.extend(same_day);
+    older.sort_by(|a, b| a.date.cmp(&b.date));
+    *lots = older;
+    let taken = netted
+        .into_iter()
+        .map(|(l, q)| (l, q, true))
+        .chain(before.into_iter().map(|(l, q)| (l, q, false)))
+        .collect();
+    (taken, left)
 }
 
 impl Portfolio {
@@ -856,6 +937,21 @@ impl Portfolio {
         date: &str,
         source: &str,
     ) -> Result<Vec<Sale>> {
+        self.sell_lots(symbol, qty, price, date, source, false)
+    }
+
+    /// [`Portfolio::sell_fifo`], taking shares bought on `date` first when
+    /// `net_same_day` (a buy and sell on one day are intraday and leave the
+    /// older lots alone); those slices are flagged `intraday`.
+    fn sell_lots(
+        &mut self,
+        symbol: &str,
+        qty: f64,
+        price: f64,
+        date: &str,
+        source: &str,
+        net_same_day: bool,
+    ) -> Result<Vec<Sale>> {
         if qty <= EPS || !qty.is_finite() {
             bail!("Quantity to sell must be positive");
         }
@@ -884,14 +980,26 @@ impl Portfolio {
             }
             bail!("Cannot sell {} {}: you hold {}", qty, sym, h.shares);
         }
-        let (taken, _) = take_fifo(&mut h.lots, qty, date);
+        let taken: Vec<(Lot, f64, bool)> = if net_same_day {
+            take_netting(&mut h.lots, qty, date).0
+        } else {
+            take_fifo(&mut h.lots, qty, date)
+                .0
+                .into_iter()
+                .map(|(l, q)| (l, q, false))
+                .collect()
+        };
         h.recompute();
         if h.lots.is_empty() {
             self.holdings.retain(|h| h.symbol != sym);
         }
         let sales: Vec<Sale> = taken
             .iter()
-            .map(|(lot, q)| Sale::from_lot(&sym, lot, *q, date, price, source))
+            .map(|(lot, q, intraday)| {
+                let mut sale = Sale::from_lot(&sym, lot, *q, date, price, source);
+                sale.intraday = *intraday;
+                sale
+            })
             .collect();
         self.realized.extend(sales.iter().cloned());
         Ok(sales)
@@ -1097,7 +1205,8 @@ impl Portfolio {
     /// broker, order id and fill id) are skipped. The new fills of one order on one
     /// day are merged at their average price; orders are applied in time
     /// order: a buy becomes a lot (dated, `broker:<id>`, with its order id),
-    /// a sell comes out of the oldest lots held on that date and is
+    /// a sell comes out of the shares bought that same day first (an
+    /// intraday sale), then the oldest lots held on that date, and is
     /// recorded as realized. A sell larger than the shares held then is
     /// left out and not marked as synced, so a later run can apply it once
     /// the missing lots are added. Running this twice changes nothing.
@@ -1137,11 +1246,12 @@ impl Portfolio {
                 .min()
                 .unwrap_or_default()
         };
+        // Buys before sells on a day, so a sell nets against that day's buys.
         groups.sort_by(|a, b| {
-            (a[0].date.as_str(), first_time(a), a[0].sell).cmp(&(
+            (a[0].date.as_str(), a[0].sell, first_time(a)).cmp(&(
                 b[0].date.as_str(),
-                first_time(b),
                 b[0].sell,
+                first_time(b),
             ))
         });
 
@@ -1161,7 +1271,7 @@ impl Portfolio {
                         .sum()
                 });
                 let sold = (qty <= held + EPS)
-                    .then(|| self.sell_fifo(&head.symbol, qty, price, &head.date, &source))
+                    .then(|| self.sell_lots(&head.symbol, qty, price, &head.date, &source, true))
                     .and_then(Result::ok);
                 match sold {
                     Some(mut sales) => {
@@ -1659,6 +1769,7 @@ mod tests {
             buy_date_estimated: false,
             source: "manual".into(),
             order_id: None,
+            intraday: false,
         });
         old.save_to(&path).unwrap();
 
@@ -2185,6 +2296,150 @@ mod tests {
         let json = serde_json::to_string(&q).unwrap();
         let back: Portfolio = serde_json::from_str(&json).unwrap();
         assert_eq!(back.imported, q.imported);
+    }
+
+    #[test]
+    fn same_day_buy_and_sell_is_intraday_and_leaves_old_lots_alone() {
+        // The repro from the issue.
+        let rows = vec![
+            trade("TCS.NS", "2023-01-10", false, 100.0, 3000.0),
+            trade("TCS.NS", "2025-06-02", false, 50.0, 4000.0),
+            trade("TCS.NS", "2025-06-02", true, 50.0, 4010.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 1);
+        assert_eq!(
+            (h.shares, h.avg_cost, h.lots[0].date.as_str()),
+            (100.0, 3000.0, "2023-01-10")
+        );
+        assert_eq!(p.realized.len(), 1);
+        let s = &p.realized[0];
+        assert!(s.intraday && s.is_intraday());
+        assert_eq!(
+            (s.qty, s.buy_date.as_str(), s.sell_date.as_str()),
+            (50.0, "2025-06-02", "2025-06-02")
+        );
+        // 50 × (4010 − 4000) = ₹500, not 50 × (4010 − 3000) = ₹50,500.
+        assert_eq!(s.gain(), 500.0);
+        // Re-importing changes nothing.
+        let before = state(&p);
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(state(&p), before);
+    }
+
+    #[test]
+    fn partial_same_day_netting_keeps_the_rest_as_a_new_lot() {
+        let rows = vec![
+            trade("TCS.NS", "2023-01-10", false, 10.0, 3000.0),
+            trade("TCS.NS", "2025-06-02", false, 100.0, 4000.0),
+            trade("TCS.NS", "2025-06-02", true, 60.0, 4020.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        // 60 intraday; 40 left from the day's buy become a lot; the 2023 lot is whole.
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 2);
+        assert_eq!((h.lots[0].qty, h.lots[0].price), (10.0, 3000.0));
+        assert_eq!(
+            (h.lots[1].qty, h.lots[1].price, h.lots[1].date.as_str()),
+            (40.0, 4000.0, "2025-06-02")
+        );
+        assert_eq!(p.realized.len(), 1);
+        assert_eq!((p.realized[0].qty, p.realized[0].gain()), (60.0, 1200.0));
+    }
+
+    #[test]
+    fn a_sell_larger_than_the_days_buy_takes_the_rest_from_old_lots() {
+        // Buy 20 @ 100 and sell 50 @ 110 on one day, holding 100 @ 90 from before.
+        let rows = vec![
+            trade("X.NS", "2024-01-02", false, 100.0, 90.0),
+            trade("X.NS", "2025-06-02", false, 10.0, 100.0),
+            trade("X.NS", "2025-06-02", false, 10.0, 104.0),
+            trade("X.NS", "2025-06-02", true, 50.0, 110.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(p.realized.len(), 2);
+        let intraday = p.realized.iter().find(|s| s.intraday).unwrap();
+        // Average buy of the day 102; 20 matched.
+        assert_eq!(
+            (intraday.qty, intraday.buy_price, intraday.sell_price),
+            (20.0, 102.0, 110.0)
+        );
+        let old = p.realized.iter().find(|s| !s.intraday).unwrap();
+        assert_eq!(
+            (old.qty, old.buy_date.as_str(), old.buy_price),
+            (30.0, "2024-01-02", 90.0)
+        );
+        assert_eq!(p.holding("X.NS").unwrap().shares, 70.0);
+        // Proceeds are all accounted for: 50 × 110.
+        let proceeds: f64 = p.realized.iter().map(|s| s.qty * s.sell_price).sum();
+        assert_eq!(proceeds, 5500.0);
+    }
+
+    #[test]
+    fn intraday_days_do_not_change_other_days() {
+        // Buy on one day, sell on another: ordinary FIFO, not intraday.
+        let rows = vec![
+            trade("X.NS", "2025-06-02", false, 10.0, 100.0),
+            trade("X.NS", "2025-06-03", true, 10.0, 110.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(p.realized.len(), 1);
+        assert!(!p.realized[0].is_intraday());
+    }
+
+    #[test]
+    fn broker_fills_net_same_day_buys_and_sells_before_old_lots() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", lot(100.0, 1000.0, "2023-01-10"));
+        // The sell is listed (and timed) first; the day's buy still nets with it.
+        let fills = vec![
+            fill("S1", "T2", true, 30.0, 1520.0, "2026-10-20 10:00:00"),
+            fill("B1", "T1", false, 50.0, 1500.0, "2026-10-20 11:00:00"),
+        ];
+        let s = p.apply_broker_fills(&fills);
+        assert_eq!(s.orders.len(), 2);
+        let FillEffect::Sold { sales } = &s.orders[1].effect else {
+            panic!("expected a sale: {:?}", s.orders[1].effect);
+        };
+        assert_eq!(sales.len(), 1);
+        assert!(sales[0].intraday);
+        assert_eq!(
+            (sales[0].qty, sales[0].buy_price, sales[0].buy_date.as_str()),
+            (30.0, 1500.0, "2026-10-20")
+        );
+        let h = p.holding("INFY.NS").unwrap();
+        // 2023 lot untouched; 20 of the day's 50 remain.
+        assert_eq!(h.lots.len(), 2);
+        assert_eq!((h.lots[0].qty, h.lots[1].qty), (100.0, 20.0));
+        assert!(p.realized[0].intraday);
+        // Syncing again changes nothing.
+        assert!(p.apply_broker_fills(&fills).orders.is_empty());
+        assert_eq!(p.realized.len(), 1);
+    }
+
+    #[test]
+    fn broker_sell_without_a_same_day_buy_is_not_intraday() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", lot(10.0, 1000.0, "2024-01-10"));
+        p.apply_broker_fills(&[fill("S1", "T1", true, 4.0, 1500.0, "2026-10-20 10:00:00")]);
+        assert!(!p.realized[0].is_intraday());
+    }
+
+    #[test]
+    fn estimated_purchase_date_is_not_intraday() {
+        let mut p = Portfolio::default();
+        let mut l = lot(5.0, 100.0, "2026-10-20");
+        l.date_estimated = true;
+        p.add_lot("X.NS", l);
+        let sales = p
+            .sell_fifo("X.NS", 5.0, 110.0, "2026-10-20", "manual")
+            .unwrap();
+        assert!(!sales[0].is_intraday());
     }
 
     #[test]

@@ -226,6 +226,11 @@ pub struct IndiaSchedule {
     pub other_currency: Vec<String>,
     /// Crypto sold this year: taxed under section 115BBH (Schedule VDA), not here.
     pub virtual_digital_assets: Vec<String>,
+    /// Same-day (intraday) sales this year: speculative business income at
+    /// slab rates, left out of 111A/112A.
+    pub intraday_sales: usize,
+    /// Net gain or loss of those sales.
+    pub intraday_gain: f64,
     pub notes: Vec<String>,
 }
 
@@ -246,6 +251,16 @@ pub fn india_schedule(
         vda.iter().map(|(s, _)| s.symbol.clone()).collect();
     virtual_digital_assets.sort();
     virtual_digital_assets.dedup();
+    // Bought and sold on one day: speculative income (Sec. 43(5)), not 111A/112A.
+    let (intraday, kept): (Vec<_>, Vec<_>) = kept.into_iter().partition(|(s, _)| s.is_intraday());
+    let intraday_sales = intraday.len();
+    let intraday_gain = round(
+        intraday
+            .iter()
+            .map(|(s, scale)| s.gain() * scale)
+            .sum::<f64>(),
+        2,
+    );
     let mut rows = Vec::new();
     let mut sum = IndiaSummary::default();
     let mut buckets = tax::Buckets::default();
@@ -342,6 +357,16 @@ pub fn india_schedule(
                 .into(),
         );
     }
+    if intraday_sales > 0 {
+        notes.push(format!(
+            "Not included: {} same-day (intraday) sale(s) with a net {} of ₹{:.2} are speculative \
+             business income under section 43(5), taxed at your slab rate and reported in Schedule \
+             BP; speculative losses can only be set off against speculative gains",
+            intraday_sales,
+            if intraday_gain < 0.0 { "loss" } else { "gain" },
+            intraday_gain.abs()
+        ));
+    }
     if !virtual_digital_assets.is_empty() {
         notes.push(format!(
             "Not included (crypto is a virtual digital asset — 30% under section 115BBH, reported \
@@ -367,6 +392,8 @@ pub fn india_schedule(
         summary: sum,
         other_currency,
         virtual_digital_assets,
+        intraday_sales,
+        intraday_gain,
         notes,
     }
 }
@@ -788,6 +815,7 @@ mod tests {
             buy_date_estimated: false,
             source: "manual".into(),
             order_id: None,
+            intraday: false,
         }
     }
 
@@ -904,6 +932,38 @@ mod tests {
         assert_eq!(m.total_tax, 1_525.0);
         assert!(s.notes.iter().any(|n| n.contains("31 Jan 2018")));
         assert!(s.notes.iter().any(|n| n.contains("AAPL")));
+    }
+
+    #[test]
+    fn india_schedule_keeps_intraday_out_of_111a_and_112a() {
+        let mut intraday = sale(
+            "TCS.NS",
+            50.0,
+            ("2025-06-02", 4000.0),
+            ("2025-06-02", 4010.0),
+        );
+        intraday.intraday = true;
+        let loss = sale(
+            "INFY.NS",
+            10.0,
+            ("2025-01-15", 1900.0),
+            ("2025-08-20", 1800.0),
+        );
+        let s = india_schedule(&[intraday, loss], d("2025-04-01"), |_| None);
+        // Only the delivery sale is in the schedule and the summary.
+        assert_eq!(s.sales.len(), 1);
+        assert_eq!(s.sales[0].symbol, "INFY.NS");
+        assert_eq!(
+            (s.summary.stcg_gains, s.summary.stcg_losses),
+            (0.0, 1_000.0)
+        );
+        // 50 × (4010 − 4000) = ₹500 of speculative income, reported apart.
+        assert_eq!((s.intraday_sales, s.intraday_gain), (1, 500.0));
+        assert!(
+            s.notes
+                .iter()
+                .any(|n| n.contains("43(5)") && n.contains("500.00"))
+        );
     }
 
     #[test]

@@ -355,6 +355,10 @@ pub(crate) fn advance_tax_schedule(
         else {
             continue;
         };
+        // Same-day sales are speculative income at slab rates, not 111A/112A gains.
+        if s.is_intraday() {
+            continue;
+        }
         let is_lt = match NaiveDate::parse_from_str(&s.buy_date, "%Y-%m-%d").ok() {
             Some(buy_d) => Country::India.is_long_term(buy_d, sell_d),
             None => false,

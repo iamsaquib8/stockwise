@@ -1564,6 +1564,10 @@ pub(crate) struct TaxReport {
     pub(crate) equity_funds: Vec<String>,
     /// Left out: taxed under other rules than listed shares.
     pub(crate) other_rules: Vec<OtherRulesRow>,
+    /// India: sales bought and sold on one day. Speculative business income
+    /// at slab rates, kept out of `realized` (Sec. 111A/112A).
+    pub(crate) intraday: Vec<TaxSaleRow>,
+    pub(crate) intraday_gain: f64,
 }
 
 /// Whether Indian capital-gains tax treats `symbol` like a listed share
@@ -1633,6 +1637,8 @@ pub(crate) fn tax_report(
         other_currency: Vec::new(),
         equity_funds: Vec::new(),
         other_rules: Vec::new(),
+        intraday: Vec::new(),
+        intraday_gain: 0.0,
     };
     // Sort a symbol into listed-share rules or not (India only); true when
     // it counts.
@@ -1677,8 +1683,7 @@ pub(crate) fn tax_report(
             _ => false,
         };
         let gain = s.gain() * scale;
-        r.realized.add(gain, long);
-        r.sales.push(TaxSaleRow {
+        let row = TaxSaleRow {
             symbol: s.symbol.clone(),
             qty: s.qty,
             bought: s.buy_date.clone(),
@@ -1686,7 +1691,18 @@ pub(crate) fn tax_report(
             sold: s.sell_date.clone(),
             gain: round(gain, 2),
             term: terms.then_some(if long { "long" } else { "short" }),
-        });
+        };
+        // India: a same-day buy and sell is speculative income at slab rates.
+        if country == Country::India && s.is_intraday() {
+            r.intraday_gain += gain;
+            r.intraday.push(TaxSaleRow {
+                term: Some("intraday"),
+                ..row
+            });
+            continue;
+        }
+        r.realized.add(gain, long);
+        r.sales.push(row);
     }
 
     for h in &portfolio.holdings {
@@ -1772,6 +1788,8 @@ pub(crate) fn tax_json(
         "other_currency": report.other_currency,
         "equity_funds": report.equity_funds,
         "other_rules": report.other_rules,
+        "intraday_sales": report.intraday,
+        "intraday_gain": round(report.intraday_gain, 2),
     })
 }
 
@@ -1879,6 +1897,32 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
                 },
             );
         }
+    }
+
+    if !report.intraday.is_empty() {
+        println!(
+            "\n  {:<14} {:>9} {:<12} {:>12}  {}",
+            "Intraday".bold(),
+            "Qty".bold(),
+            "Sold".bold(),
+            "Gain".bold(),
+            "(bought and sold the same day)".dimmed()
+        );
+        for s in &report.intraday {
+            println!(
+                "  {:<14} {:>9.2} {:<12} {:>12}",
+                s.symbol.cyan(),
+                s.qty,
+                s.sold,
+                signed_tax_money(c, s.gain),
+            );
+        }
+        println!(
+            "  {} Intraday net {} is speculative business income taxed at your slab rate (Sec. 43(5)); \
+             it is not in the estimates below. Speculative losses can only be set off against speculative gains.",
+            "·".dimmed(),
+            signed_tax_money(c, report.intraday_gain),
+        );
     }
 
     // ── Unrealized: every open lot at today's price ──

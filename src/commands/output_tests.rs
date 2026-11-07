@@ -224,6 +224,47 @@ fn tax_report_splits_terms_and_skips_unpriced() {
 }
 
 #[test]
+fn tax_in_reports_intraday_apart_from_111a_and_112a() {
+    use crate::portfolio::{ImportOptions, ImportRow};
+    let row = |date: &str, sell: bool, qty: f64, price: f64| ImportRow {
+        symbol: "TCS.NS".into(),
+        qty,
+        price,
+        date: Some(date.into()),
+        sell,
+    };
+    // The issue's tradebook: 100 held since 2023, 50 bought and sold on 2025-06-02.
+    let mut p = Portfolio::default();
+    p.apply_import(
+        &[
+            row("2023-01-10", false, 100.0, 3000.0),
+            row("2025-06-02", false, 50.0, 4000.0),
+            row("2025-06-02", true, 50.0, 4010.0),
+        ],
+        ImportOptions {
+            source: "import:kite",
+            replace: false,
+            tradebook: true,
+            splits: &[],
+        },
+    );
+    let quotes = vec![quote("TCS.NS", Some(4000.0), None)];
+    let r = tax_report(Country::India, &p, &valued(&p, quotes), day("2025-07-01"));
+    // The ₹500 is speculative income: not a 111A/112A gain.
+    assert!(r.sales.is_empty());
+    assert_eq!(r.realized.st_gain + r.realized.lt_gain, 0.0);
+    assert_eq!(r.intraday.len(), 1);
+    assert_eq!(r.intraday_gain, 500.0);
+    assert_eq!(r.intraday[0].term, Some("intraday"));
+    // The 2023 lot is untouched: 100 shares, long-term.
+    assert_eq!(r.holdings[0].long_term_gain, 100_000.0);
+
+    // `tax advance` leaves it out too.
+    let s = super::planning::advance_tax_schedule(&p, Some("2025-26"), None).unwrap();
+    assert_eq!((s.total_stcg, s.total_ltcg), (0.0, 0.0));
+}
+
+#[test]
 fn movers_leave_out_quotes_without_a_change() {
     let quotes = [
         quote("A", Some(1.0), Some(3.0)),
@@ -699,6 +740,7 @@ fn goal_and_tax_export_json_shapes() {
         buy_date_estimated: false,
         source: "manual".into(),
         order_id: None,
+        intraday: false,
     };
     let india = serde_json::to_value(crate::tax_export::india_schedule(
         std::slice::from_ref(&sale),
@@ -717,6 +759,8 @@ fn goal_and_tax_export_json_shapes() {
         "summary",
         "other_currency",
         "virtual_digital_assets",
+        "intraday_sales",
+        "intraday_gain",
         "notes",
     ];
     assert_eq!(keys(&india), schedule_keys);
@@ -753,7 +797,7 @@ fn goal_and_tax_export_json_shapes() {
     let us_keys: Vec<&str> = schedule_keys
         .iter()
         .copied()
-        .filter(|k| *k != "virtual_digital_assets")
+        .filter(|k| !["virtual_digital_assets", "intraday_sales", "intraday_gain"].contains(k))
         .collect();
     assert_eq!(keys(&us), us_keys);
     assert_eq!(
