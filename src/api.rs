@@ -458,6 +458,16 @@ pub struct PriorSession {
     pub close: f64,
 }
 
+/// The session date of a bar stamped `ts` (UTC seconds) on an exchange
+/// `offset` seconds east of UTC. Three hours of slack absorb a daylight-saving
+/// change since the bar (the chart carries one offset for all of its bars),
+/// but only where there is an offset to be wrong: at offset 0 (crypto, and
+/// charts without one) a bar stamped 22:30 UTC still belongs to that UTC day.
+fn bar_date(ts: i64, offset: i64) -> Option<chrono::NaiveDate> {
+    let slack = if offset == 0 { 0 } else { 3 * 3600 };
+    Some(chrono::DateTime::from_timestamp(ts + offset + slack, 0)?.date_naive())
+}
+
 impl ChartData {
     /// High, low and close of the last *completed* session in a daily chart,
     /// for classic pivot points, which come from the previous session. While
@@ -486,7 +496,7 @@ impl ChartData {
             .enumerate()
             .filter_map(|(i, ts)| {
                 Some(PriorSession {
-                    date: chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?.date_naive(),
+                    date: bar_date(*ts, offset)?,
                     high: (*highs.get(i)?)?,
                     low: (*lows.get(i)?)?,
                     close: (*closes.get(i)?)?,
@@ -504,8 +514,7 @@ impl ChartData {
     }
 
     /// Closing prices with the session date of each bar, dated in the
-    /// exchange's time zone (`gmtoffset`; three hours of slack absorb a
-    /// daylight-saving change since). Bars without a close are skipped.
+    /// exchange's time zone (`gmtoffset`; see [`bar_date`] for the slack). Bars without a close are skipped.
     pub fn dated_closes(&self) -> Vec<(chrono::NaiveDate, f64)> {
         let offset = self.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
         let closes = self
@@ -519,10 +528,7 @@ impl ChartData {
             .unwrap_or_default()
             .iter()
             .zip(closes)
-            .filter_map(|(ts, close)| {
-                let date = chrono::DateTime::from_timestamp(ts + offset + 3 * 3600, 0)?;
-                Some((date.date_naive(), (*close)?))
-            })
+            .filter_map(|(ts, close)| Some((bar_date(*ts, offset)?, (*close)?)))
             .collect()
     }
 }
@@ -2166,5 +2172,38 @@ mod tests {
         // Without a symbol on the chart the caller's market is all there is.
         spx.meta.as_mut().unwrap().symbol = None;
         assert_eq!(spx.prior_session(now, Market::In).unwrap().close, 118.0);
+    }
+
+    /// The DST slack must not push a late UTC bar into the next day when the
+    /// chart has no exchange offset (crypto).
+    #[test]
+    fn a_bar_stamped_late_in_the_utc_day_keeps_its_date_at_offset_zero() {
+        use crate::market::Market;
+        let stamp = |s: &str| utc(s).timestamp();
+        let mut chart: ChartData = serde_json::from_value(serde_json::json!({
+            "meta": {"gmtoffset": 0, "symbol": "BTC-USD"},
+            "timestamp": [stamp("2026-11-02T22:30:00Z"), stamp("2026-11-03T22:30:00Z")],
+            "indicators": {"quote": [{
+                "high": [110.0, 120.0], "low": [100.0, 108.0], "close": [105.0, 118.0]}]}
+        }))
+        .unwrap();
+        let day = |d| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        assert_eq!(
+            chart.dated_closes(),
+            [(day(2), 105.0), (day(3), 118.0)],
+            "22:30Z is still the same UTC day"
+        );
+        // 01:00Z on the 4th: the bar of the 3rd is complete and is the prior session.
+        let p = chart
+            .prior_session(utc("2026-11-04T01:00:00Z"), Market::Crypto)
+            .unwrap();
+        assert_eq!((p.date, p.close), (day(3), 118.0));
+        // With an exchange offset the slack stays: 09:15 IST bars date as before.
+        chart.meta.as_mut().unwrap().gmtoffset = Some(19_800);
+        assert_eq!(
+            chart.dated_closes()[0].0,
+            day(3),
+            "22:30Z is 04:00 IST next day"
+        );
     }
 }
