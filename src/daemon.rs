@@ -103,6 +103,17 @@ impl RiskState {
     }
 }
 
+/// Total (booked plus open) P&L as a percentage of the entry cost
+/// (`entry_price * qty`). Zero when nothing was committed.
+fn pnl_pct_of_cost(pos: &LivePosition) -> f64 {
+    let cost = pos.entry_price * pos.qty as f64;
+    if cost > 0.0 && cost.is_finite() {
+        pos.pnl / cost * 100.0
+    } else {
+        0.0
+    }
+}
+
 /// Update a position with new price, handle T1/stop/trailing
 pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
     pos.current_price = new_price;
@@ -115,13 +126,10 @@ pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
         (pos.entry_price - new_price) * pos.remaining_qty as f64
     };
     pos.pnl = pos.booked_pnl + leg;
-    // Percentage return on entry capital (divide by entry_price, never by the
-    // current price which can be reported as 0).
-    pos.pnl_pct = if is_long {
-        ((new_price - pos.entry_price) / pos.entry_price) * 100.0
-    } else {
-        ((pos.entry_price - new_price) / pos.entry_price) * 100.0
-    };
+    // Return on the capital committed at entry: booked plus open P&L over the
+    // full entry cost, so a partly booked position is not valued as if all of
+    // it were still open at the current price.
+    pos.pnl_pct = pnl_pct_of_cost(pos);
 
     if pos.status == PositionStatus::T2Hit
         || pos.status == PositionStatus::StopHit
@@ -196,6 +204,7 @@ pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
             } else {
                 (pos.entry_price - new_price) * pos.remaining_qty as f64
             };
+        pos.pnl_pct = pnl_pct_of_cost(pos);
     }
 
     // Update trailing stop (only moves in favorable direction)
@@ -778,7 +787,52 @@ mod tests {
         // 105 crosses T1 (103): 5 booked at 103 (+15) + 5 open at 105 (+25).
         update_position(&mut pos, 105.0, Phase::Active);
         assert!((pos.pnl - 40.0).abs() < 0.01);
-        assert!((pos.pnl_pct - 5.0).abs() < 0.01);
+        // Total 40 on a cost of 10 * 100 = 1000 → 4.0%, not (105-100)/100.
+        assert!((pos.pnl_pct - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn pnl_pct_counts_the_booked_half_for_a_long() {
+        // 100 shares at 100; T1 at 110 books 50 (+500); the rest is marked at
+        // 105 (+250). Total 750 on a cost of 10,000 = +7.5% (the old formula
+        // gave +5.0%).
+        let mut pos = make_position(100.0, 110.0, 130.0, 90.0);
+        pos.qty = 100;
+        pos.remaining_qty = 100;
+        pos.trailing_stop = 50.0;
+        update_position(&mut pos, 110.0, Phase::Active);
+        assert_eq!(pos.status, PositionStatus::T1Hit);
+        assert!((pos.booked_pnl - 500.0).abs() < 1e-9);
+        // The tick that books T1 already reports the combined return:
+        // 500 + 50 * 10 = 1000 → 10.0%.
+        assert!((pos.pnl_pct - 10.0).abs() < 1e-9);
+        update_position(&mut pos, 105.0, Phase::Active);
+        assert!((pos.pnl - 750.0).abs() < 1e-9);
+        assert!((pos.pnl_pct - 7.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pnl_pct_stays_positive_when_a_booked_position_retraces() {
+        // Issue case: 10 @ 100, T1 103 books 5 (+15); price falls to 99
+        // (open leg -5). Total +10 on 1,000 = +1.0%, not -1.0%.
+        let mut pos = make_position(100.0, 103.0, 106.0, 97.0);
+        update_position(&mut pos, 103.0, Phase::Active);
+        update_position(&mut pos, 99.0, Phase::Active);
+        assert!((pos.pnl - 10.0).abs() < 1e-9);
+        assert!((pos.pnl_pct - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pnl_pct_counts_the_booked_half_for_a_short() {
+        // Short 10 @ 100, T1 97 books 5 (+15); rest marked at 98 (+10).
+        // Total +25 on 1,000 = +2.5%.
+        let mut pos = make_position(100.0, 97.0, 94.0, 103.0);
+        pos.direction = "SELL".into();
+        pos.trailing_stop = 110.0;
+        update_position(&mut pos, 97.0, Phase::Active);
+        update_position(&mut pos, 98.0, Phase::Active);
+        assert!((pos.pnl - 25.0).abs() < 1e-9);
+        assert!((pos.pnl_pct - 2.5).abs() < 1e-9);
     }
 
     #[test]
