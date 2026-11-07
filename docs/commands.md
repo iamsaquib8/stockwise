@@ -572,6 +572,16 @@ the symbol's whole list of lots and replaces them. Dates may be
 `YYYY-MM-DD`, `DD-MM-YYYY`, `DD/MM/YYYY` (`MM/DD/YYYY` with `-m us`) or
 `15-Mar-2024`; a file with an unrecognized date is refused.
 
+**Accounts.** Each lot and sale carries the demat account it came from, named
+after the broker: `import kite` and `trade … --broker zerodha` are `zerodha`,
+`import groww` is `groww`, and so on. A holdings file or tradebook only
+matches, rebuilds or sells the lots of its own account, so the same stock held
+at two brokers is two sets of lots in one holding (`portfolio lots` shows the
+account). Lots entered by hand or saved by an older version, with no account of
+their own, count as the account of their `source`, or — for manual lots — join
+the first broker that syncs the symbol. Totals and tax span all accounts.
+`portfolio sell` works on the whole holding, oldest lot first.
+
 **Groww, Upstox, CAS.** Groww and Upstox exports are snapshots (quantity
 sync, like Kite). A CAS whose transactions cover a fund's whole balance
 rebuilds it as dated lots, with redemptions as realized sales; otherwise only

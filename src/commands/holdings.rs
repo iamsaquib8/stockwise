@@ -859,6 +859,7 @@ pub(super) async fn apply_import_rows(
             replace,
             tradebook,
             splits: &splits,
+            account: None,
         },
     );
     let updated = outcomes

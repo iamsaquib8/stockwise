@@ -246,6 +246,7 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
             replace: false,
             tradebook: true,
             splits: &[],
+            account: None,
         },
     );
     let quotes = vec![quote("TCS.NS", Some(4000.0), None)];
@@ -741,6 +742,7 @@ fn goal_and_tax_export_json_shapes() {
         source: "manual".into(),
         order_id: None,
         intraday: false,
+        account: None,
     };
     let india = serde_json::to_value(crate::tax_export::india_schedule(
         std::slice::from_ref(&sale),

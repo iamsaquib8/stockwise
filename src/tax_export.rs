@@ -816,6 +816,7 @@ mod tests {
             source: "manual".into(),
             order_id: None,
             intraday: false,
+            account: None,
         }
     }
 

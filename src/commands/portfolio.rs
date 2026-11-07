@@ -1175,6 +1175,9 @@ pub async fn cmd_portfolio_lots(
                 l.date.clone()
             };
             let mut source = l.source.clone();
+            if let Some(account) = l.account_key() {
+                source.push_str(&format!(" [{account}]"));
+            }
             if !l.adjustments.is_empty() {
                 source.push_str(&format!(" (adjusted ×{})", l.adjustments.len()));
             }
@@ -1241,7 +1244,13 @@ pub async fn cmd_portfolio_lots(
                 format_price(s.buy_price, cur),
                 format_price(s.sell_price, cur),
                 signed_money(s.gain(), cur),
-                if long { "LT" } else { "ST" },
+                if s.is_intraday() {
+                    "Intra"
+                } else if long {
+                    "LT"
+                } else {
+                    "ST"
+                },
             );
         }
         let total: f64 = sales.iter().map(|s| s.gain()).sum();
