@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The crates.io and PyPI description and keywords now mention portfolio, tax and the MCP server.
 
 ### Fixed
+- `portfolio xray`: Indian stocks are now called large cap from ₹1,00,000 crore and mid cap from ₹33,000 crore (AMFI's list of December 2024), not ₹20,000 and ₹5,000 crore, so a ₹25,000 crore company shows as small cap and the market-cap split is no longer tilted to large caps ([#100](https://github.com/iamsaquib8/stockwise/issues/100)).
 - `import groww` and `import upstox`: a holdings file whose ISIN column holds text such as `₹12,34,567` no longer crashes the import; the cell is treated as not an ISIN ([#102](https://github.com/iamsaquib8/stockwise/issues/102)).
 - `import cas`: schemes you have fully redeemed are no longer skipped. When the statement covers every purchase, their redemptions are recorded as realized sales for `tax in`, `tax export in` and `tax advance`, and no holding is left. A redeemed scheme with units bought before the statement is listed as skipped, with the reason ([#90](https://github.com/iamsaquib8/stockwise/issues/90)).
 - `import`: a second tradebook for the same broker is merged with the first instead of replacing its lots and sales, so yearly Zerodha Console files can be imported in any order and re-importing a file changes nothing ([#83](https://github.com/iamsaquib8/stockwise/issues/83)).
