@@ -33,8 +33,9 @@ use crate::api::{ChartData, ChartMeta, Indicators, Quote, QuoteIndicator, Search
 use anyhow::{Context, Result, bail};
 use chrono::{Datelike, NaiveDate};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 /// A source of quotes, price history and symbol search. Symbols are always
 /// Yahoo-style (`AAPL`, `RELIANCE.BO`, `BTC-USD`, `USDINR=X`); each provider
@@ -122,18 +123,23 @@ impl ProviderKind {
         !self.key_envs().is_empty()
     }
 
-    /// Provider requests one command may make before the rest of its
-    /// symbols go to Yahoo. Free tiers are tiny (Alpha Vantage: 25 a day;
-    /// Massive: 5 a minute; Twelve Data: 8 a minute), so a scan of 30 stocks
-    /// must not burn — or wait on — the whole allowance.
-    fn per_run_budget(self) -> u32 {
+    /// Provider requests allowed per time window before the rest of the
+    /// symbols go to Yahoo, and how long the window is. Free tiers are tiny
+    /// (Alpha Vantage: 25 a day; Massive: 5 a minute; Twelve Data: 8 a
+    /// minute), so a scan of 30 stocks must not burn — or wait on — the whole
+    /// allowance: one command (a CLI run lasts seconds) gets one window's
+    /// worth. A long-running `serve`, `tui`, `mcp` or daemon gets the same
+    /// allowance again when the window ends. Alpha Vantage's 25 a day is 5
+    /// every 4 h 48 min.
+    fn allowance(self) -> (u32, Duration) {
+        const MINUTE: Duration = Duration::from_secs(60);
         match self {
-            ProviderKind::AlphaVantage => 5,
-            ProviderKind::Massive => 5,
-            ProviderKind::TwelveData => 8,
-            ProviderKind::Nse => nse::QUOTE_BATCH,
-            ProviderKind::Bse => bse::QUOTE_BATCH,
-            ProviderKind::Exchange => nse::QUOTE_BATCH,
+            ProviderKind::AlphaVantage => (5, Duration::from_secs(17_280)),
+            ProviderKind::Massive => (5, MINUTE),
+            ProviderKind::TwelveData => (8, MINUTE),
+            ProviderKind::Nse => (nse::QUOTE_BATCH, MINUTE),
+            ProviderKind::Bse => (bse::QUOTE_BATCH, MINUTE),
+            ProviderKind::Exchange => (nse::QUOTE_BATCH, MINUTE),
         }
     }
 
@@ -315,7 +321,7 @@ impl Provider {
         }
     }
 
-    /// Requests left before this run falls back to Yahoo. For the
+    /// Requests left in the current window before quotes fall back to Yahoo. For the
     /// exchanges, how many uncached symbols one quote request may ask for
     /// (0 after a refusal).
     pub fn remaining(&self) -> u32 {
@@ -325,11 +331,7 @@ impl Provider {
             Provider::Exchange(p) => p.nse.remaining().max(p.bse.remaining()),
             _ => {
                 let Some(http) = self.http() else { return 0 };
-                if http.exhausted.load(Ordering::Relaxed) {
-                    0
-                } else {
-                    http.budget.load(Ordering::Relaxed)
-                }
+                http.remaining()
             }
         }
     }
@@ -531,10 +533,90 @@ impl Exchange {
     }
 }
 
-/// Say once per run, on stderr, that a provider stopped answering.
-fn notice_once(flag: &AtomicBool, message: impl FnOnce() -> String) {
-    if !flag.swap(true, Ordering::Relaxed) {
-        eprintln!("  \u{24d8} {}", message());
+/// How long a provider is left alone after a network error, and after it
+/// refused the key.
+const NETWORK_PAUSE: Duration = Duration::from_secs(180);
+const DENIED_PAUSE: Duration = Duration::from_secs(3600);
+
+/// A provider's request allowance: `limit` requests per `window`, counted
+/// from the first request in it, plus a pause while the provider is being
+/// left alone. Times are passed in, so tests can move the clock.
+#[derive(Debug)]
+struct Allowance {
+    limit: u32,
+    window: Duration,
+    started: Option<Instant>,
+    used: u32,
+    paused_until: Option<Instant>,
+    /// The fallback notice for the current pause has been printed.
+    noticed: bool,
+}
+
+impl Allowance {
+    fn new(limit: u32, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            started: None,
+            used: 0,
+            paused_until: None,
+            noticed: false,
+        }
+    }
+
+    /// Start a new window when the last one is over, and end a pause that
+    /// has run out (the next one is announced again).
+    fn refresh(&mut self, now: Instant) {
+        if self.started.is_some_and(|s| now >= s + self.window) {
+            self.started = None;
+            self.used = 0;
+        }
+        if self.paused_until.is_some_and(|p| now >= p) {
+            self.paused_until = None;
+            self.noticed = false;
+        }
+    }
+
+    fn remaining(&mut self, now: Instant) -> u32 {
+        self.refresh(now);
+        if self.paused_until.is_some() {
+            0
+        } else {
+            self.limit.saturating_sub(self.used)
+        }
+    }
+
+    /// Spend one request, or say why none is left.
+    fn take(&mut self, now: Instant) -> Result<(), &'static str> {
+        self.refresh(now);
+        if self.paused_until.is_some() {
+            return Err("is paused for now");
+        }
+        if self.used >= self.limit {
+            // Used up: wait for the window to end instead of asking again.
+            self.paused_until = self.started.map(|s| s + self.window);
+            return Err("request allowance used up");
+        }
+        self.started.get_or_insert(now);
+        self.used += 1;
+        Ok(())
+    }
+
+    fn pause(&mut self, now: Instant, for_: Duration) {
+        let until = now + for_;
+        self.paused_until = Some(self.paused_until.map_or(until, |p| p.max(until)));
+    }
+
+    /// True the first time it is called in each pause.
+    fn announce(&mut self) -> bool {
+        !std::mem::replace(&mut self.noticed, true)
+    }
+
+    /// Tests: move every recorded time `by` into the past.
+    #[cfg(test)]
+    fn rewind(&mut self, by: Duration) {
+        self.started = self.started.map(|s| s - by);
+        self.paused_until = self.paused_until.map(|p| p - by);
     }
 }
 
@@ -616,9 +698,7 @@ pub struct Http {
     base: String,
     key: String,
     cache: Option<crate::api::SharedCache>,
-    budget: AtomicU32,
-    exhausted: AtomicBool,
-    noticed: AtomicBool,
+    allowance: Mutex<Allowance>,
 }
 
 /// How a provider wants its key.
@@ -641,9 +721,37 @@ impl Http {
             base: base.trim_end_matches('/').to_string(),
             key,
             cache: None,
-            budget: AtomicU32::new(kind.per_run_budget()),
-            exhausted: AtomicBool::new(false),
-            noticed: AtomicBool::new(false),
+            allowance: Mutex::new({
+                let (limit, window) = kind.allowance();
+                Allowance::new(limit, window)
+            }),
+        }
+    }
+
+    fn allowance(&self) -> std::sync::MutexGuard<'_, Allowance> {
+        self.allowance.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Requests left in this window (0 while paused).
+    pub fn remaining(&self) -> u32 {
+        self.allowance().remaining(Instant::now())
+    }
+
+    /// Stop using the provider for `for_`, and say so on stderr once per
+    /// pause: quotes and charts come from Yahoo meanwhile.
+    fn pause(&self, for_: Duration, why: String) {
+        let first = {
+            let mut a = self.allowance();
+            a.pause(Instant::now(), for_);
+            a.announce()
+        };
+        if first {
+            eprintln!(
+                "  \u{24d8} {}: {} — using Yahoo Finance instead, trying again in {}",
+                self.kind.name(),
+                why,
+                format_wait(for_)
+            );
         }
     }
 
@@ -671,16 +779,19 @@ impl Http {
             return Ok(json);
         }
 
-        if self.exhausted.load(Ordering::Relaxed) {
-            bail!("{} limit reached for this run", name);
-        }
-        // Take one request from the budget.
-        if self
-            .budget
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(1))
-            .is_err()
-        {
-            bail!("{} per-run request budget used up", name);
+        // Take one request from the allowance.
+        let taken = self.allowance().take(Instant::now());
+        if let Err(why) = taken {
+            if why == "request allowance used up" {
+                let wait = {
+                    let a = self.allowance();
+                    a.paused_until.map_or(Duration::ZERO, |p| {
+                        p.saturating_duration_since(Instant::now())
+                    })
+                };
+                self.pause(wait, format!("{why} (free tier)"));
+            }
+            bail!("{} {}", name, why);
         }
 
         let mut send_url = url;
@@ -696,11 +807,8 @@ impl Http {
             // Unreachable or timing out: don't make every remaining symbol
             // wait for it too.
             Err(e) => {
-                self.exhausted.store(true, Ordering::Relaxed);
                 let msg = format!("request failed ({})", e.without_url());
-                notice_once(&self.noticed, || {
-                    format!("{}: {} — using Yahoo Finance instead", name, msg)
-                });
+                self.pause(NETWORK_PAUSE, msg.clone());
                 bail!("{}: {}", name, msg);
             }
         };
@@ -743,12 +851,14 @@ impl Http {
             }
             Err(ProviderError::Other(msg)) => bail!("{}: {}", name, redact(&msg, &self.key)),
             Err(e) => {
-                // Rate limit or refused key: stop asking for the rest of the run.
-                self.exhausted.store(true, Ordering::Relaxed);
+                // Rate limit: stop asking until the window is over. Refused
+                // key: stop for a good while.
+                let pause = match e {
+                    ProviderError::RateLimited(_) => self.allowance().window,
+                    _ => DENIED_PAUSE,
+                };
                 let msg = redact(&e.to_string(), &self.key);
-                notice_once(&self.noticed, || {
-                    format!("{}: {} — using Yahoo Finance instead", name, msg)
-                });
+                self.pause(pause, msg.clone());
                 bail!("{}: {}", name, msg)
             }
         }
@@ -770,6 +880,16 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Denied(m) => write!(f, "access denied ({})", m),
             ProviderError::Other(m) => write!(f, "{}", m),
         }
+    }
+}
+
+/// "45 s", "3 min", "2 h" for a notice.
+fn format_wait(d: Duration) -> String {
+    let secs = d.as_secs().max(1);
+    match secs {
+        0..=89 => format!("{secs} s"),
+        90..=5399 => format!("{} min", secs.div_ceil(60)),
+        _ => format!("{} h", secs.div_ceil(3600)),
     }
 }
 
@@ -1069,6 +1189,11 @@ fn quote_from_bars(series: &Series) -> Option<Quote> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::MockServer;
+    use std::sync::atomic::Ordering;
+
+    /// A Massive aggregates answer with two daily bars.
+    const MASSIVE_BAR: &str = r#"{"results":[{"c":75.0875,"h":75.15,"l":73.7975,"o":74.06,"t":1577941200000,"v":135647456},{"c":74.3575,"h":75.145,"l":74.125,"o":74.2875,"t":1578027600000,"v":146535512}],"status":"OK"}"#;
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -1228,6 +1353,132 @@ mod tests {
         let plain = serde_json::to_value(Quote::default()).unwrap();
         assert!(plain.get("deliveryPercent").is_none());
         assert!(plain.get("lowerCircuit").is_none());
+    }
+
+    // #157: the free-tier allowance refills with time.
+    #[test]
+    fn allowance_refills_after_its_window() {
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut a = Allowance::new(5, Duration::from_secs(60));
+        for i in 0..5 {
+            assert_eq!(a.remaining(at(i)), 5 - i as u32);
+            assert!(a.take(at(i)).is_ok());
+        }
+        // Spent: no more, for the rest of the window (from the first request).
+        assert_eq!(a.remaining(at(30)), 0);
+        assert!(a.take(at(30)).is_err());
+        assert!(a.take(at(59)).is_err());
+        // A new window, a full allowance, an hour later too.
+        assert_eq!(a.remaining(at(60)), 5);
+        assert!(a.take(at(60)).is_ok());
+        assert_eq!(a.remaining(at(3600)), 5);
+    }
+
+    #[test]
+    fn a_pause_ends_and_is_announced_once_each_time() {
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut a = Allowance::new(8, Duration::from_secs(60));
+        a.pause(at(0), NETWORK_PAUSE);
+        assert!(a.announce());
+        assert!(!a.announce(), "once per pause");
+        assert_eq!(a.remaining(at(10)), 0);
+        assert!(a.take(at(179)).is_err());
+        // Over: usable again, and the next pause is announced again.
+        assert_eq!(a.remaining(at(180)), 8);
+        assert!(a.take(at(180)).is_ok());
+        a.pause(at(200), NETWORK_PAUSE);
+        assert!(a.announce());
+    }
+
+    #[test]
+    fn wait_times_read_naturally() {
+        assert_eq!(format_wait(Duration::from_secs(45)), "45 s");
+        assert_eq!(format_wait(Duration::from_secs(180)), "3 min");
+        assert_eq!(format_wait(Duration::from_secs(17_280)), "5 h");
+    }
+
+    #[tokio::test]
+    async fn a_spent_allowance_comes_back_with_the_window() {
+        let server = MockServer::start(vec![(200, MASSIVE_BAR.into())]).await;
+        let p = Provider::new(ProviderKind::Massive, "k".into(), Some(server.url.clone()));
+        let symbols: Vec<String> = (0..7).map(|i| format!("SYM{i}")).collect();
+        let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+        assert_eq!(p.quotes(&refs).await.unwrap().len(), 5);
+        assert_eq!(p.remaining(), 0);
+        assert_eq!(server.requests().len(), 5);
+        // A minute on, in the same process: quotes come from the provider again.
+        p.http()
+            .unwrap()
+            .allowance()
+            .rewind(Duration::from_secs(61));
+        assert_eq!(p.remaining(), 5);
+        assert_eq!(p.quotes(&["AAPL"]).await.unwrap().len(), 1);
+        assert_eq!(server.requests().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn a_network_error_pauses_the_provider_for_a_few_minutes_only() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // The first connection is cut without an answer, later ones are served.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    drop(stream);
+                    continue;
+                }
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = MASSIVE_BAR;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        let p = Provider::new(ProviderKind::Massive, "k".into(), Some(url));
+        assert!(p.quotes(&["AAPL"]).await.is_err());
+        assert_eq!(p.remaining(), 0, "paused after the error");
+        // While paused no request goes out.
+        assert!(p.quotes(&["AAPL"]).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // After the pause the provider is used again.
+        p.http()
+            .unwrap()
+            .allowance()
+            .rewind(NETWORK_PAUSE + Duration::from_secs(1));
+        assert_eq!(p.quotes(&["AAPL"]).await.unwrap().len(), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_pauses_until_the_window_is_over() {
+        let server = MockServer::start(vec![
+            (
+                429,
+                r#"{"error":"You exceeded the maximum requests per minute"}"#.into(),
+            ),
+            (200, MASSIVE_BAR.into()),
+        ])
+        .await;
+        let p = Provider::new(ProviderKind::Massive, "k".into(), Some(server.url.clone()));
+        assert!(p.quotes(&["AAPL"]).await.is_err());
+        assert_eq!(p.remaining(), 0);
+        assert!(p.quotes(&["AAPL"]).await.is_err());
+        assert_eq!(server.requests().len(), 1, "no request while paused");
+        p.http()
+            .unwrap()
+            .allowance()
+            .rewind(Duration::from_secs(61));
+        assert_eq!(p.quotes(&["AAPL"]).await.unwrap().len(), 1);
     }
 
     #[test]

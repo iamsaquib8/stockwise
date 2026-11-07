@@ -122,12 +122,21 @@ response for a test fixture, are in
 
 ## Limits and fallback
 
-- Each command spends at most a small per-run budget of provider requests —
+- Each command spends at most a small allowance of provider requests —
   5 for Alpha Vantage and Massive, 8 for Twelve Data — so one scan can't burn
-  a day's allowance or wait a minute for the next slot.
+  a day's allowance or wait a minute for the next slot. The allowance comes
+  back after a window: a minute for Massive and Twelve Data, 4 h 48 min for
+  Alpha Vantage (5 a window is its 25 a day). A long-running `serve`, `tui`,
+  `mcp` or daemon therefore keeps using the provider instead of dropping to
+  Yahoo after the first few requests.
 - If a provider reports a rate limit, refuses the key, or can't be reached, StockWise prints one
-  `ⓘ` notice on stderr, stops asking it for the rest of the run, and uses
-  Yahoo. `--json` output on stdout is unaffected.
+  `ⓘ` notice on stderr, stops asking it for a while (to the end of the window
+  after a rate limit, 3 minutes after a network error, an hour after a refused
+  key) and uses Yahoo meanwhile. A later pause prints its own notice.
+  `--json` output on stdout is unaffected.
+- A provider's quote is dated by its own trading day (Alpha Vantage's "latest
+  trading day", Twelve Data's timestamp, the day of Massive's latest bar), so
+  an end-of-day quote from yesterday is never taken for today's trade.
 - Provider answers share the Redis / in-memory cache (quotes 1–5 minutes,
   daily history 10 minutes), so repeating a command doesn't spend another request.
   API keys are never part of a cache key or an error message.
