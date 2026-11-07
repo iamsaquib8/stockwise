@@ -123,10 +123,10 @@ response for a test fixture, are in
 ## Limits and fallback
 
 - Each command spends at most a small allowance of provider requests —
-  5 for Alpha Vantage and Massive, 8 for Twelve Data — so one scan can't burn
+  4 for Alpha Vantage, 5 for Massive, 8 for Twelve Data — so one scan can't burn
   a day's allowance or wait a minute for the next slot. The allowance comes
   back after a window: a minute for Massive and Twelve Data, 4 h 48 min for
-  Alpha Vantage (5 a window is its 25 a day). A long-running `serve`, `tui`,
+  Alpha Vantage (4 a window: two windows can touch, so 5 could reach 29 in a day against its limit of 25). A long-running `serve`, `tui`,
   `mcp` or daemon therefore keeps using the provider instead of dropping to
   Yahoo after the first few requests.
 - If a provider reports a rate limit, refuses the key, or can't be reached, StockWise prints one
