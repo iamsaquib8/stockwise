@@ -337,6 +337,18 @@ fn has_analyst_data(q: &crate::api::Quote) -> bool {
         || q.number_of_analyst_opinions.is_some()
 }
 
+/// Notional sum and its label for the `deep` dividend-income row.
+///
+/// One lakh is the familiar unit for an Indian investor; elsewhere ten
+/// thousand keeps the number readable without implying rupees.
+fn dividend_income_basis(currency: Option<&str>) -> (&'static str, f64) {
+    if currency == Some("INR") {
+        ("₹1L", 100_000.0)
+    } else {
+        ("$10k", 10_000.0)
+    }
+}
+
 pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Result<()> {
     let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
@@ -995,9 +1007,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         print_kv("Yield", &format!("{:.2}%", dy * 100.0));
         let annual = dy * price;
         print_kv("Annual/Share", &format!("{}{:.2}", csym, annual));
+        let (income_label, notional) = dividend_income_basis(cur);
         print_kv(
-            "Income on {}1L",
-            &format!("{}{:.0}/year", csym, 100000.0 * dy),
+            &format!("Income on {income_label}"),
+            &format!("{}{:.0}/year", csym, notional * dy),
         );
     }
 
@@ -1337,5 +1350,12 @@ mod tests {
         assert!(!has_analyst_data(&q));
         q.number_of_analyst_opinions = Some(12);
         assert!(has_analyst_data(&q));
+    }
+
+    #[test]
+    fn dividend_income_basis_is_lakh_in_inr_and_ten_thousand_elsewhere() {
+        assert_eq!(dividend_income_basis(Some("INR")), ("₹1L", 100_000.0));
+        assert_eq!(dividend_income_basis(Some("USD")), ("$10k", 10_000.0));
+        assert_eq!(dividend_income_basis(None), ("$10k", 10_000.0));
     }
 }
