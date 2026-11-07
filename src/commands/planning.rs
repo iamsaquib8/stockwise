@@ -179,6 +179,18 @@ impl Schedule {
                 print_kv("Taxable STCG (111A)", &inr(m.taxable_stcg));
                 print_kv("LTCG exemption used", &inr(m.ltcg_exemption));
                 print_kv("Taxable LTCG (112A)", &inr(m.taxable_ltcg));
+                if m.taxable_stcg_before_23_jul_2024 > 0.0
+                    || m.taxable_ltcg_before_23_jul_2024 > 0.0
+                {
+                    print_kv(
+                        "  sales before 23 Jul 2024",
+                        &format!(
+                            "STCG {} at 15%, LTCG {} at 10%",
+                            inr(m.taxable_stcg_before_23_jul_2024),
+                            inr(m.taxable_ltcg_before_23_jul_2024)
+                        ),
+                    );
+                }
                 print_kv("Estimated tax", &inr(m.total_tax).bold().to_string());
                 if m.st_loss_carried_forward + m.lt_loss_carried_forward > 0.0 {
                     print_kv(

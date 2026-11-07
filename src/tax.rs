@@ -188,6 +188,10 @@ pub struct Estimate {
     pub lt_tax: f64,
     /// India's 4% health and education cess on `st_tax + lt_tax`; zero elsewhere.
     pub cess: f64,
+    /// India: the (short-term, long-term) taxable amounts that came from sales
+    /// before 23 July 2024, taxed at 15% and 10%. Both are included in
+    /// `st_taxable` and `lt_taxable`.
+    pub taxable_before: (f64, f64),
     /// Short-term loss set off against long-term gains.
     pub st_loss_against_lt: f64,
     /// Long-term loss set off against short-term gains (US only).
@@ -217,6 +221,24 @@ pub fn estimate(country: Country, b: Buckets) -> Estimate {
 /// depends on total income, is left out.
 pub const INDIA_CESS_RATE: f64 = 0.04;
 
+/// India's capital-gains rates changed for sales from 23 July 2024 (Finance
+/// (No. 2) Act 2024): STCG under Sec. 111A 15% -> 20%, LTCG under Sec. 112A
+/// 10% -> 12.5%.
+pub fn india_rate_change_date() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2024, 7, 23).expect("valid date")
+}
+
+/// The Sec. 112A exemption for a financial year starting in `fy_start_year`:
+/// ₹1 lakh up to FY 2023-24, ₹1.25 lakh from FY 2024-25 (for the whole year,
+/// also for sales before 23 July 2024).
+pub fn india_exemption_for_year(fy_start_year: i32) -> f64 {
+    if fy_start_year >= 2024 {
+        125_000.0
+    } else {
+        100_000.0
+    }
+}
+
 /// India (listed shares with STT, from 23 July 2024): gains and losses of
 /// the same kind net first. A net short-term loss is set off against
 /// short-term gains and then long-term gains; a long-term loss only against
@@ -224,27 +246,55 @@ pub const INDIA_CESS_RATE: f64 = 0.04;
 /// exempt; STCG is taxed at 20%, the rest of LTCG at 12.5%. Unused losses
 /// carry forward (8 years).
 fn india(b: Buckets) -> Estimate {
+    estimate_india_by_period(Buckets::default(), b, Country::India.exemption())
+}
+
+/// India with the rate change of 23 July 2024: `before` holds the gains and
+/// losses of sales before that day (STCG 15%, LTCG 10%), `after` those from
+/// it (20%, 12.5%). Set-off follows the rules of [`india`] on the pooled
+/// amounts. Losses and the `exemption` are used against the higher-rate gains
+/// first, which gives the lowest tax; the Act does not prescribe an order.
+/// `Estimate::st_taxable` and the like are the totals of both periods;
+/// [`Estimate::taxable_before`] gives the part taxed at the old rates.
+pub fn estimate_india_by_period(before: Buckets, after: Buckets, exemption: f64) -> Estimate {
+    // Net a loss against gains, `first` before `second`; returns the gains
+    // left and the loss not used.
+    fn net(loss: f64, first: f64, second: f64) -> (f64, f64, f64) {
+        let first_left = (first - loss).max(0.0);
+        let loss = (loss - first).max(0.0);
+        let second_left = (second - loss).max(0.0);
+        (first_left, second_left, (loss - second).max(0.0))
+    }
+    let (st_a, st_b, st_loss_left) = net(
+        before.st_loss + after.st_loss,
+        after.st_gain,
+        before.st_gain,
+    );
+    let (lt_a, lt_b, lt_loss_left) = net(
+        before.lt_loss + after.lt_loss,
+        after.lt_gain,
+        before.lt_gain,
+    );
+    let mut e = Estimate {
+        lt_carry: lt_loss_left,
+        ..Estimate::default()
+    };
+    // A short-term loss left over goes against long-term gains.
+    let (lt_a, lt_b, st_carry) = net(st_loss_left, lt_a, lt_b);
+    e.st_loss_against_lt = st_loss_left - st_carry;
+    e.st_carry = st_carry;
+    // The exemption, also against the higher-rate gains first.
+    let exempt_a = lt_a.min(exemption);
+    let exempt_b = lt_b.min(exemption - exempt_a);
+    e.exemption_used = exempt_a + exempt_b;
+    let (taxable_a, taxable_b) = (lt_a - exempt_a, lt_b - exempt_b);
+    e.st_taxable = st_a + st_b;
+    e.lt_net = lt_a + lt_b;
+    e.lt_taxable = taxable_a + taxable_b;
+    e.taxable_before = (st_b, taxable_b);
     let c = Country::India;
-    let mut st = b.st_gain - b.st_loss;
-    let mut lt = b.lt_gain - b.lt_loss;
-    let mut e = Estimate::default();
-    if lt < 0.0 {
-        e.lt_carry = -lt;
-        lt = 0.0;
-    }
-    if st < 0.0 {
-        let used = (-st).min(lt);
-        e.st_loss_against_lt = used;
-        e.st_carry = -st - used;
-        lt -= used;
-        st = 0.0;
-    }
-    e.st_taxable = st;
-    e.lt_net = lt;
-    e.exemption_used = lt.min(c.exemption());
-    e.lt_taxable = lt - e.exemption_used;
-    e.st_tax = e.st_taxable * c.st_rate() / 100.0;
-    e.lt_tax = e.lt_taxable * c.lt_rate() / 100.0;
+    e.st_tax = st_a * c.st_rate() / 100.0 + st_b * 15.0 / 100.0;
+    e.lt_tax = taxable_a * c.lt_rate() / 100.0 + taxable_b * 10.0 / 100.0;
     e.cess = (e.st_tax + e.lt_tax) * INDIA_CESS_RATE;
     e
 }
@@ -1149,6 +1199,72 @@ mod tests {
         // US and UK have no cess.
         assert_eq!(estimate(Country::Us, b).cess, 0.0);
         assert_eq!(estimate(Country::Uk, b).cess, 0.0);
+    }
+
+    #[test]
+    fn india_rates_follow_the_sale_date() {
+        let none = Buckets::default();
+        // STCG ₹1,00,000 sold before 23 Jul 2024: 15% = 15,000 (not 20,000).
+        let b = b(100_000.0, 0.0, 0.0, 0.0);
+        let e = estimate_india_by_period(b, none, india_exemption_for_year(2024));
+        assert!(close(e.st_tax, 15_000.0));
+        assert!(close(e.cess, 600.0));
+        assert_eq!(e.taxable_before, (100_000.0, 0.0));
+        // The same sale from 23 Jul 2024 is taxed at 20%.
+        let e = estimate_india_by_period(none, b, india_exemption_for_year(2024));
+        assert!(close(e.st_tax, 20_000.0));
+        assert_eq!(e.taxable_before, (0.0, 0.0));
+        // FY 2025-26 results are those of `estimate`.
+        assert_eq!(
+            estimate_india_by_period(none, b, 125_000.0),
+            estimate(Country::India, b)
+        );
+    }
+
+    #[test]
+    fn mixed_year_uses_old_and_new_rates() {
+        // FY 2024-25: STCG ₹1,00,000 before 23 Jul (15% = 15,000) and ₹1,00,000
+        // after (20% = 20,000).
+        let before = b(100_000.0, 0.0, 100_000.0, 0.0);
+        let after = b(100_000.0, 0.0, 100_000.0, 0.0);
+        let e = estimate_india_by_period(before, after, india_exemption_for_year(2024));
+        assert!(close(e.st_tax, 35_000.0));
+        // LTCG ₹1,00,000 each side, exemption ₹1.25 lakh used against the
+        // 12.5% gains first (all 1,00,000), then 25,000 of the 10% gains:
+        // taxable 75,000 at 10% = 7,500.
+        assert!(close(e.exemption_used, 125_000.0));
+        assert!(close(e.lt_taxable, 75_000.0));
+        assert!(close(e.lt_tax, 7_500.0));
+        assert_eq!(e.taxable_before, (100_000.0, 75_000.0));
+        assert!(close(e.cess, (35_000.0 + 7_500.0) * 0.04));
+    }
+
+    #[test]
+    fn mixed_year_losses_go_against_the_higher_rate_gains_first() {
+        // STCG 1,00,000 before and 1,00,000 after, STCL 30,000 (after):
+        // after 70,000 at 20% = 14,000, before 1,00,000 at 15% = 15,000.
+        let before = b(100_000.0, 0.0, 0.0, 0.0);
+        let after = b(100_000.0, 30_000.0, 0.0, 0.0);
+        let e = estimate_india_by_period(before, after, 125_000.0);
+        assert!(close(e.st_tax, 29_000.0));
+        // A loss larger than the new-rate gains spills into the old ones:
+        // STCL 1,30,000 vs after 1,00,000: 30,000 off the before gains,
+        // leaving 70,000 at 15% = 10,500.
+        let after = b(100_000.0, 130_000.0, 0.0, 0.0);
+        let e = estimate_india_by_period(before, after, 125_000.0);
+        assert!(close(e.st_tax, 10_500.0));
+        assert!(close(e.st_taxable, 70_000.0));
+    }
+
+    #[test]
+    fn exemption_was_one_lakh_before_fy_2024_25() {
+        assert_eq!(india_exemption_for_year(2023), 100_000.0);
+        assert_eq!(india_exemption_for_year(2024), 125_000.0);
+        // FY 2023-24: LTCG 3,00,000 - 1,00,000 = 2,00,000 at 10% = 20,000.
+        let e =
+            estimate_india_by_period(b(0.0, 0.0, 300_000.0, 0.0), Buckets::default(), 100_000.0);
+        assert!(close(e.exemption_used, 100_000.0));
+        assert!(close(e.lt_tax, 20_000.0));
     }
 
     #[test]
