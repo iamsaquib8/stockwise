@@ -1073,6 +1073,20 @@ async fn harvest_counts_the_sale_of_a_fund_no_longer_held() {
     assert_eq!(old.ltcg_exemption_remaining, 125_000.0);
 }
 
+#[test]
+fn tax_advance_for_an_old_year_uses_that_years_rate() {
+    // Bought 2023-05-01 at 100, sold 2023-08-10 at 200: STCG ₹1,00,000 before
+    // the July 2024 change, so 15% + 4% cess = ₹15,600 (not ₹20,800).
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(1000.0, 100.0, "2023-05-01", "manual"));
+    p.sell_fifo("TCS.NS", 1000.0, 200.0, "2023-08-10", "manual")
+        .unwrap();
+    let off = crate::offmarket::OffMarket::default();
+    let old = super::planning::advance_tax_schedule(&p, Some("2023-24"), &[], &off).unwrap();
+    assert_eq!(old.total_stcg, 100_000.0);
+    assert!((old.total_tax_estimated - 15_600.0).abs() < 1e-6);
+}
+
 /// Hand-calculated `harvest` cases (India, today is 2026-11-01).
 mod harvest_math {
     use super::*;

@@ -532,7 +532,7 @@ Section 234C(1)** specifies that deferment interest is not levied if the shortfa
 is due to capital gains realized after an instalment date, provided the remaining
 tax is paid in subsequent instalments. `stockwise tax advance` groups realized sales
 into the four statutory quarterly cut-offs and calculates cumulative set-offs under
-Indian equity rules (STCG @ 20%, LTCG @ 12.5% above ₹1.25L exemption):
+Indian equity rules, by sale date: from 23 July 2024 STCG @ 20% and LTCG @ 12.5%, before it 15% and 10%; the LTCG exemption is ₹1.25L (₹1L up to FY 2023-24):
 
 ```bash
 stockwise tax advance                             # current FY advance tax schedule

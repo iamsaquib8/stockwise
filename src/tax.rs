@@ -396,6 +396,24 @@ impl AdvanceTaxSale {
     }
 }
 
+/// India's tax on `sales` of the financial year starting in `fy_start_year`:
+/// sales before 23 July 2024 at the old rates, the rest at the new ones, and
+/// the exemption of that year, as `tax export in` does by sale date.
+fn india_estimate_of<'a>(
+    sales: impl Iterator<Item = &'a AdvanceTaxSale>,
+    fy_start_year: i32,
+) -> Estimate {
+    let (mut before, mut after) = (Buckets::default(), Buckets::default());
+    for s in sales {
+        if s.date < india_rate_change_date() {
+            before.add(s.gain, s.is_long_term);
+        } else {
+            after.add(s.gain, s.is_long_term);
+        }
+    }
+    estimate_india_by_period(before, after, india_exemption_for_year(fy_start_year))
+}
+
 /// An advance-tax payment. Section 234C looks at what was paid by each due
 /// date, so the date matters; a payment without one is assumed to have been
 /// made before every due date.
@@ -660,20 +678,24 @@ pub fn compute_advance_tax(
         }
         let stcg_cumulative = cum_buckets.st_gain - cum_buckets.st_loss;
         let ltcg_cumulative = cum_buckets.lt_gain - cum_buckets.lt_loss;
-        let est = estimate(Country::India, cum_buckets);
-        let cumulative_tax_estimated = est.total();
+        let cumulative_tax_estimated = india_estimate_of(
+            sales
+                .iter()
+                .filter(|s| s.date >= fy_start && s.date <= m.cutoff_date),
+            y,
+        )
+        .total();
 
         // What is due on the due date itself: the tax on gains up to that
         // day. It is the same as the cut-off figure except for Q4, whose
         // cut-off (31 Mar) is after its due date (15 Mar).
-        let mut due_buckets = Buckets::default();
-        for s in sales
-            .iter()
-            .filter(|s| s.date >= fy_start && s.date <= m.due_date)
-        {
-            due_buckets.add(s.gain, s.is_long_term);
-        }
-        let tax_at_due = estimate(Country::India, due_buckets).total();
+        let tax_at_due = india_estimate_of(
+            sales
+                .iter()
+                .filter(|s| s.date >= fy_start && s.date <= m.due_date),
+            y,
+        )
+        .total();
         let required_at_due = tax_at_due * (m.req_pct / 100.0);
 
         let min_cumulative_tax_required = cumulative_tax_estimated * (m.req_pct / 100.0);
@@ -1262,6 +1284,33 @@ mod tests {
         // 1% of ₹1,04,000.
         assert!(close(q4.sec_234c_interest, 1_040.0));
         assert_eq!(q4.status, AdvanceTaxStatus::Overdue);
+    }
+
+    #[test]
+    fn advance_tax_uses_the_rates_and_exemption_of_the_sale_date() {
+        // FY 2023-24: STCG ₹1,00,000 at 15% = 15,000 + 4% cess = ₹15,600.
+        let sales = vec![AdvanceTaxSale::new(d("2023-08-10"), 100_000.0, false)];
+        let s = compute_advance_tax(&sales, d("2023-04-01"), d("2024-04-10"), &[]);
+        assert!(close(s.total_tax_estimated, 15_600.0));
+        // LTCG ₹1,50,000 in FY 2023-24: ₹1 lakh exempt, 10% on 50,000 = 5,000
+        // + cess = ₹5,200.
+        let sales = vec![AdvanceTaxSale::new(d("2023-08-10"), 150_000.0, true)];
+        let s = compute_advance_tax(&sales, d("2023-04-01"), d("2024-04-10"), &[]);
+        assert!(close(s.total_tax_estimated, 5_200.0));
+        // FY 2024-25 has both: 1 Jun 2024 at 15% (15,000) and 1 Aug 2024 at
+        // 20% (20,000), cess 4% on 35,000 = 1,400: ₹36,400.
+        let sales = vec![
+            AdvanceTaxSale::new(d("2024-06-01"), 100_000.0, false),
+            AdvanceTaxSale::new(d("2024-08-01"), 100_000.0, false),
+        ];
+        let s = compute_advance_tax(&sales, d("2024-04-01"), d("2025-04-10"), &[]);
+        assert!(close(s.total_tax_estimated, 36_400.0));
+        // Q2 (to 15 Sep) already includes both sales; Q1 (to 15 Jun) only the first.
+        assert!(close(s.quarters[0].cumulative_tax_estimated, 15_600.0));
+        // FY 2025-26 is unchanged: STCG ₹1,00,000 at 20% + cess = ₹20,800.
+        let sales = vec![AdvanceTaxSale::new(d("2025-05-10"), 100_000.0, false)];
+        let s = compute_advance_tax(&sales, d("2025-04-01"), d("2026-04-10"), &[]);
+        assert!(close(s.total_tax_estimated, 20_800.0));
     }
 
     #[test]
