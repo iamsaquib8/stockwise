@@ -7,16 +7,22 @@ in it, and a test for "done". Target dates are aims, not promises: a release shi
 [issue](https://github.com/iamsaquib8/stockwise/issues) — the roadmap follows demand.
 
 The live view is on GitHub: [milestones](https://github.com/iamsaquib8/stockwise/milestones) for
-releases and six epics for the themes:
+releases, and eleven epics for the themes. Every open issue is a sub-issue of exactly one epic, so
+each epic shows its full list and progress.
 
-| Epic | Goal |
-|---|---|
-| [#257](https://github.com/iamsaquib8/stockwise/issues/257) Install anywhere | One command on every platform, updates included |
-| [#258](https://github.com/iamsaquib8/stockwise/issues/258) Trustworthy portfolio data | Imports never lose or corrupt lots |
-| [#259](https://github.com/iamsaquib8/stockwise/issues/259) Tax season 2026-27 | Capital gains, advance tax and income ready for ITR |
-| [#260](https://github.com/iamsaquib8/stockwise/issues/260) Neutral, accurate research | Data and transparent scores, no buy/sell calls |
-| [#261](https://github.com/iamsaquib8/stockwise/issues/261) StockWise for AI assistants | Ask about your portfolio, data kept local |
-| [#262](https://github.com/iamsaquib8/stockwise/issues/262) A simple, stable 1.0 | A small CLI and a written compatibility promise |
+| Epic | Goal | Until |
+|---|---|---|
+| [#257](https://github.com/iamsaquib8/stockwise/issues/257) Install anywhere | One command on every platform, updates included | 0.9 |
+| [#258](https://github.com/iamsaquib8/stockwise/issues/258) Trustworthy portfolio data | Imports never lose or corrupt lots | 0.10 |
+| [#259](https://github.com/iamsaquib8/stockwise/issues/259) Tax season 2026-27 | Capital gains, advance tax and income ready for ITR | 0.9 |
+| [#260](https://github.com/iamsaquib8/stockwise/issues/260) Neutral, accurate research | Data and transparent scores, no buy/sell calls, correct numbers | 0.10 |
+| [#261](https://github.com/iamsaquib8/stockwise/issues/261) StockWise for AI assistants | Ask about your portfolio, data kept local | 0.10 |
+| [#262](https://github.com/iamsaquib8/stockwise/issues/262) A simple, stable 1.0 | A small CLI ([#205](https://github.com/iamsaquib8/stockwise/issues/205)), a compatibility promise, quality gates | 0.10 |
+| [#278](https://github.com/iamsaquib8/stockwise/issues/278) Reliable market data | Sources that recover, fast commands, a live-data canary | 0.10 |
+| [#279](https://github.com/iamsaquib8/stockwise/issues/279) Security and trading safety | Private secrets, safe local servers, guarded live orders | ongoing |
+| [#280](https://github.com/iamsaquib8/stockwise/issues/280) Dashboards, alerts and practice | A dependable TUI, web dashboard, alerts and simulator | ongoing |
+| [#281](https://github.com/iamsaquib8/stockwise/issues/281) Launch and community | Be found, be tried in a minute, hear from users | 1.0 |
+| [#282](https://github.com/iamsaquib8/stockwise/issues/282) More markets and deeper research | Coverage and research depth users ask for | after 1.0 |
 
 Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 
@@ -99,6 +105,8 @@ until 1.0.
 
 ### 0.8.1 — fix what's wrong ([milestone](https://github.com/iamsaquib8/stockwise/milestone/1), target: late November 2026)
 
+Epics: [#258](https://github.com/iamsaquib8/stockwise/issues/258), [#259](https://github.com/iamsaquib8/stockwise/issues/259), [#260](https://github.com/iamsaquib8/stockwise/issues/260), [#278](https://github.com/iamsaquib8/stockwise/issues/278), [#257](https://github.com/iamsaquib8/stockwise/issues/257).
+
 Correct numbers before new features. These are the "Known issues" in the 0.8.0 release.
 
 - 📋 **No data loss on import** — a second tradebook or holdings file replacing lots
@@ -114,6 +122,8 @@ Correct numbers before new features. These are the "Known issues" in the 0.8.0 r
 Done when: no open `priority: high` issues.
 
 ### 0.9 — install anywhere, ready for tax season ([milestone](https://github.com/iamsaquib8/stockwise/milestone/2), target: before 15 December 2026)
+
+Epics: [#257](https://github.com/iamsaquib8/stockwise/issues/257), [#259](https://github.com/iamsaquib8/stockwise/issues/259), [#261](https://github.com/iamsaquib8/stockwise/issues/261), [#281](https://github.com/iamsaquib8/stockwise/issues/281).
 
 The 15 December advance-tax instalment is the first moment Indian investors look for tax tools.
 
@@ -132,6 +142,8 @@ Done when: every channel in "Coming soon" on the install page is live, and a sam
 Schedule 112A export matches a hand-checked calculation.
 
 ### 0.10 — simplify and stabilise: the 1.0 release candidate ([milestone](https://github.com/iamsaquib8/stockwise/milestone/4), target: January 2027)
+
+Epics: [#262](https://github.com/iamsaquib8/stockwise/issues/262), [#258](https://github.com/iamsaquib8/stockwise/issues/258), [#260](https://github.com/iamsaquib8/stockwise/issues/260), [#261](https://github.com/iamsaquib8/stockwise/issues/261), [#278](https://github.com/iamsaquib8/stockwise/issues/278), [#279](https://github.com/iamsaquib8/stockwise/issues/279).
 
 Feature freeze. Make the CLI small, the data safe and the promise written.
 
@@ -153,6 +165,8 @@ MCP) on macOS, Linux and Windows without a known bug in the four jobs.
 
 ### 1.0 — public launch ([milestone](https://github.com/iamsaquib8/stockwise/milestone/3), target: February 2027)
 
+Epic: [#281](https://github.com/iamsaquib8/stockwise/issues/281).
+
 Launch before the 31 March harvesting deadline and the ITR season, when the four jobs matter most.
 
 - 📋 **Show it** — an animated demo in the README ([#23](https://github.com/iamsaquib8/stockwise/issues/23)), "Open in Codespaces" ([#240](https://github.com/iamsaquib8/stockwise/issues/240)), three
@@ -166,7 +180,8 @@ Done when: 1.0 is tagged, the stability page is published, and the launch posts 
 
 ## 💡 After 1.0
 
-Planned, but only once the four jobs are solid. Ordered roughly by demand.
+Planned, but only once the four jobs are solid. Ordered roughly by demand. Most of these live in
+[#282](https://github.com/iamsaquib8/stockwise/issues/282) (more markets and deeper research) and [#280](https://github.com/iamsaquib8/stockwise/issues/280) (dashboards, alerts and practice).
 
 **Your money**
 - 📋 **Net worth** — PPF, EPF, NPS, FDs and cash next to the portfolio ([#248](https://github.com/iamsaquib8/stockwise/issues/248)); SIP tracking and a
