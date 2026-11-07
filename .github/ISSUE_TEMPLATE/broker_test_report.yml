@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for testing! `stockwise trade selftest` only **reads** from your account — it never
         places, modifies or cancels an order. See
-        [Help verify a broker](https://github.com/iamsaquib8/stockwise/blob/master/docs/brokers.md#help-verify-a-broker).
+        [Help verify a broker](https://github.com/iamsaquib8/stockwise/blob/main/docs/brokers.md#help-verify-a-broker).
 
         **Never paste credentials, API keys, access tokens, TOTP secrets, your full client id, PAN,
         phone number or e-mail.** The self-test report is already redacted — read it once before

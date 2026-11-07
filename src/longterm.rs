@@ -67,12 +67,21 @@ pub struct LongTermScore {
     pub est_annual_return: f64,
     pub projected_5y_return: f64,
     pub projected_10y_return: f64,
-    pub sip_monthly_10l_10y: f64, // SIP to ₹10L in 10 years
+    pub sip_monthly_10l_10y: f64, // SIP to reach SIP_TARGET (₹10L / $1M) in 10 years
     pub drip_multiplier_10y: f64, // dividend reinvestment multiplier over 10 years
     // Monte Carlo
     pub monte_carlo_median: f64, // median 5Y return from simulation
     pub monte_carlo_p10: f64,    // 10th percentile (bad case)
     pub monte_carlo_p90: f64,    // 90th percentile (good case)
+}
+
+/// Target of the "SIP for ₹10L / $1M in 10 years" line.
+pub const SIP_TARGET: f64 = 1_000_000.0;
+
+/// What a monthly SIP of `monthly` is worth after `years` at `annual_return_pct`
+/// a year. Each instalment grows only for the time it stays invested.
+pub fn sip_corpus(monthly: f64, years: u32, annual_return_pct: f64) -> f64 {
+    monthly * crate::goals::sip_growth_factor(years, annual_return_pct, 0.0)
 }
 
 pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermScore {
@@ -469,13 +478,9 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     let projected_5y = ((1.0 + est_annual / 100.0_f64).powi(5) - 1.0) * 100.0;
     let projected_10y = ((1.0 + est_annual / 100.0_f64).powi(10) - 1.0) * 100.0;
 
-    // SIP to ₹10L in 10 years
-    let monthly_rate = est_annual / 100.0 / 12.0;
-    let sip = if monthly_rate > 0.001 {
-        1_000_000.0 * monthly_rate / ((1.0 + monthly_rate).powf(120.0) - 1.0)
-    } else {
-        1_000_000.0 / 120.0
-    };
+    // Monthly SIP that reaches 10 lakh (₹) / 1 million ($) in 10 years. Same
+    // maths as `goal sip`: payments at the start of each month.
+    let sip = SIP_TARGET / crate::goals::sip_growth_factor(10, est_annual, 0.0);
 
     // DRIP multiplier: how much dividends add over 10 years
     let drip = if div_yield > 0.0 {
@@ -590,6 +595,36 @@ mod tests {
         q.trailing_annual_dividend_yield = Some(div);
         q.market_cap = Some(500_000_000_000.0);
         q
+    }
+
+    #[test]
+    fn sip_corpus_grows_each_instalment_for_its_own_time() {
+        // ₹15,000/month at 12% a year (1% a month), issue #67.
+        let five = sip_corpus(15_000.0, 5, 12.0);
+        let ten = sip_corpus(15_000.0, 10, 12.0);
+        assert!(
+            (five / 100_000.0 - 12.37).abs() / 12.37 < 0.005,
+            "5y {five}"
+        );
+        assert!((ten / 100_000.0 - 34.85).abs() / 34.85 < 0.005, "10y {ten}");
+        // Never more than paid in times the growth of the full period.
+        assert!(five < 15_000.0 * 60.0 * 1.12_f64.powi(5));
+    }
+
+    #[test]
+    fn sip_corpus_without_growth_is_what_was_paid_in() {
+        assert!((sip_corpus(1_000.0, 5, 0.0) - 60_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sip_to_target_matches_goal_plan() {
+        let q = mock_quote(15.0, 14.0, 0.2, 0.2, 0.02);
+        let s = score_for_longterm(&q, None);
+        let plan = crate::goals::plan_sip(SIP_TARGET, 10, s.est_annual_return, 0.0, 0.0);
+        assert!((s.sip_monthly_10l_10y - plan.monthly_sip).abs() < 1e-6);
+        // And that SIP really reaches the target.
+        let got = sip_corpus(s.sip_monthly_10l_10y, 10, s.est_annual_return);
+        assert!((got - SIP_TARGET).abs() < 1.0, "{got}");
     }
 
     #[test]

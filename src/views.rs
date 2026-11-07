@@ -190,7 +190,14 @@ pub struct QuoteSet {
 
 pub async fn quotes(src: &impl DataSource, resolved: &[String]) -> Result<QuoteSet> {
     let refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
-    let quotes = src.quotes(&refs).await?;
+    // Rows without a price (Yahoo's `quoteType: NONE` placeholders) are
+    // unknown tickers, not quotes.
+    let quotes: Vec<Quote> = src
+        .quotes(&refs)
+        .await?
+        .into_iter()
+        .filter(Quote::is_usable)
+        .collect();
     let missing = resolved
         .iter()
         .filter(|r| {
@@ -1078,6 +1085,21 @@ mod tests {
         let set = block(quotes(&f, &["TCS.NS".into(), "NOPE.NS".into()])).unwrap();
         assert_eq!(set.quotes.len(), 1);
         assert_eq!(set.missing, vec!["NOPE.NS".to_string()]);
+    }
+
+    #[test]
+    fn quotes_treats_empty_none_rows_as_missing() {
+        // Yahoo answers an unknown ticker such as 500325.BO with a row whose
+        // quoteType is NONE and every field null.
+        let mut f = Fixture::default();
+        f.quotes.push(Quote {
+            symbol: Some("500325.BO".into()),
+            quote_type: Some("NONE".into()),
+            ..Default::default()
+        });
+        let set = block(quotes(&f, &["TCS.NS".into(), "500325.BO".into()])).unwrap();
+        assert_eq!(set.quotes.len(), 1);
+        assert_eq!(set.missing, vec!["500325.BO".to_string()]);
     }
 
     #[test]

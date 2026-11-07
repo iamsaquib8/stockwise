@@ -144,4 +144,4 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 
 Every order shows a preview and asks you to type `yes`. Practise with
 `stockwise sim` first. StockWise is not financial advice — see the
-[disclaimer](https://github.com/iamsaquib8/stockwise/blob/master/DISCLAIMER.md).
+[disclaimer](https://github.com/iamsaquib8/stockwise/blob/main/DISCLAIMER.md).

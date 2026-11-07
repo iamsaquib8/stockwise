@@ -90,7 +90,6 @@ Stocks are rated Wide/Narrow/No Moat based on:
 - Detailed top 3: moat rating, risk tier, PEG, earnings yield
 - 5Y and 10Y projections with DRIP compounding
 - SIP calculator (how much/month for ₹10L in 10 years)
-- Suggested allocation across top 5 stocks (score-weighted)
 
 ---
 

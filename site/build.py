@@ -50,7 +50,7 @@ def site_target(path_from_root: str) -> str:
     if path.startswith("assets/"):
         return path + frag
     kind = "tree" if path.endswith("/") or "." not in Path(path).name else "blob"
-    return f"{REPO}/{kind}/master/{path}{frag}"
+    return f"{REPO}/{kind}/main/{path}{frag}"
 
 
 def rewrite(text: str, base: str) -> str:
@@ -173,9 +173,9 @@ def write_llms_txt() -> None:
         "",
         "Key facts for agents:",
         "",
-        "- Install: `cargo binstall stockwise`, `pipx install stockwise` / `uvx stockwise`, "
-        "Homebrew, Scoop, winget, AUR, Docker (`ghcr.io/iamsaquib8/stockwise`), or the "
-        "one-line installer. Check with `stockwise doctor`.",
+        "- Install: `cargo binstall stockwise`, the one-line installer, `.deb`/`.rpm`, Scoop, "
+        "Nix or Docker (`ghcr.io/iamsaquib8/stockwise`). PyPI, Homebrew, winget and the AUR "
+        "are not published yet. Check with `stockwise doctor`.",
         "- Bare tickers are Indian (`TCS` means `TCS.NS`); add `-m us`, `-m crypto`, `-m fx`, "
         "`-m commodity` or an exchange (`-m uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).",
         "- Add `--json` for machine-readable output (most commands; tables also take `--csv`). "
@@ -200,9 +200,9 @@ def write_llms_txt() -> None:
         "",
         f"- [MCP server and `stockwise ask`]({SITE_URL}ai.md): tools, resources, prompts, "
         "client setup for Claude Desktop, Claude Code and Cursor",
-        f"- [Agent Skill]({REPO}/blob/master/skills/stockwise/SKILL.md): how an agent should "
+        f"- [Agent Skill]({REPO}/blob/main/skills/stockwise/SKILL.md): how an agent should "
         "use the CLI and the MCP server",
-        f"- [MCP registry entry]({REPO}/blob/master/server.json): `io.github.iamsaquib8/stockwise`",
+        f"- [MCP registry entry]({REPO}/blob/main/server.json): `io.github.iamsaquib8/stockwise`",
         "",
         "## Commands",
         "",

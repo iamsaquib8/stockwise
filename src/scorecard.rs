@@ -1144,4 +1144,36 @@ mod tests {
         assert!(json_str.contains("piotroski"));
         assert!(json_str.contains("altman"));
     }
+
+    #[test]
+    fn altman_x4_uses_one_currency_for_usd_reporters() {
+        // Infosys-like: ₹ market cap, statements filed in US dollars (#207).
+        use serde_json::json;
+        let item = |d: &str, v: f64| json!({"asOfDate": d, "currencyCode": "USD", "reportedValue": {"raw": v}});
+        let ts = vec![
+            json!({"meta": {"type": ["annualTotalAssets"]},
+                   "annualTotalAssets": [item("2026-03-31", 16_446_000_000.0)]}),
+            json!({"meta": {"type": ["annualTotalLiabilitiesNetMinorityInterest"]},
+                   "annualTotalLiabilitiesNetMinorityInterest": [item("2026-03-31", 6_000_000_000.0)]}),
+        ];
+        let fx = crate::research::StatementFx::new(Some("INR"), [("USD".to_string(), 85.0)]);
+        let (_, annual) = crate::research::parse_timeseries(&ts, &fx);
+        let mut r = Research::default();
+        r.currency = Some("INR".into());
+        r.quote = Quote {
+            market_cap: Some(4.8e12),
+            ..Default::default()
+        };
+        r.annual = annual;
+        let report = generate_scorecard_report(&r);
+        let x4 = report
+            .altman
+            .components
+            .iter()
+            .find(|c| c.factor == "X4")
+            .and_then(|c| c.raw_value)
+            .unwrap();
+        // 4.8e12 / (6e9 × 85) ≈ 9.4, not ≈ 800.
+        assert!((x4 - 9.41).abs() < 0.1, "X4 = {x4}");
+    }
 }

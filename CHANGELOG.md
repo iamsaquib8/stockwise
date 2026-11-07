@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `events` / `deep` (`Needs::ALL`): fetches full research snapshot.
   - Enforced a bounded 3-second timeout (`tokio::time::timeout`) on all NSE endpoints (filings, shareholding, insider trading, corporate actions) so slow or unresponsive NSE calls log to warnings and degrade gracefully rather than hanging the CLI.
 
+### Changed
+- The crates.io and PyPI description and keywords now mention portfolio, tax and the MCP server.
+
 ### Fixed
 - `import`: a second tradebook for the same broker is merged with the first instead of replacing its lots and sales, so yearly Zerodha Console files can be imported in any order and re-importing a file changes nothing ([#83](https://github.com/iamsaquib8/stockwise/issues/83)).
 - `import` and `trade sync`: a buy and sell of the same share on one day are netted as an intraday sale before any older lot is touched, and `tax in`, `tax export in` and `tax advance` report intraday results separately instead of as 111A/112A gains from the oldest lot ([#84](https://github.com/iamsaquib8/stockwise/issues/84)).
@@ -22,12 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `import` and `portfolio add`: dated HDFC and Mindtree trades from before their mergers are now recorded as HDFCBANK (42 for 25) and LTIM (73 for 100) shares at the same total cost and date, instead of the old quantity at the old price ([#86](https://github.com/iamsaquib8/stockwise/issues/86)).
 - `tax in`, `tax export in`, `tax advance` and `harvest`: gold, silver, liquid, debt and international ETFs (such as `GOLDBEES`, `LIQUIDBEES`, `MON100`) are no longer taxed as listed shares under Sec. 111A/112A; `tax in` lists them under "taxed under other rules" and `harvest` no longer offers them for the ₹1.25 lakh exemption ([#87](https://github.com/iamsaquib8/stockwise/issues/87)).
 - `portfolio`, `import`, `trade sync`, `trade holdings` and `wealth`: commands that change your portfolio or wealth history at the same time no longer overwrite each other's changes. Each takes a lock, reloads the file and applies only its own change; a second command waits up to 30 seconds, then says so ([#93](https://github.com/iamsaquib8/stockwise/issues/93)).
+- `deep`: no longer panics (`index out of bounds`) on NSE stocks when the latest bar has a missing close ([#306](https://github.com/iamsaquib8/stockwise/issues/306)).
 - Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
 - `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):
   - Retain ETF classification even when Yahoo Finance returns no `topHoldings` or fund profile modules for NSE-listed instruments.
   - Automatically map common Indian index ETFs to their benchmark indices (`NIFTY 50`, `NIFTY NEXT 50`, `NIFTY BANK`, `NIFTY MIDCAP 150`, etc.) and attempt look-through to underlying index constituents via NSE.
   - Omit profile-less ETFs from single-stock concentration risk alerts, categorizing them properly under "Funds & ETFs Analyzed" with `(categorized by ETF profile)`.
   - Accurately categorize asset classes (`Equity`, `Commodity` for Gold/Silver ETFs, `Cash` for Liquid ETFs) and market caps (`Large Cap` for Nifty 50/Next 50, `Mid Cap` for Midcap 150) instead of flagging them as `Unclassified`.
+- `longterm`: the SIP calculator now grows each monthly instalment only for the time it stays invested (₹15,000 a month at 12% gives ₹12.37 L after 5 years, not ₹15.86 L), the "SIP for" target reads `$1M` for US stocks, and the "Suggested SIP Allocation" block is gone ([#67](https://github.com/iamsaquib8/stockwise/issues/67), [#189](https://github.com/iamsaquib8/stockwise/issues/189)).
+- Yahoo Finance: commands no longer open the Yahoo session at start-up, so `history`, `backtest` and a provider-backed `quote` still work when Yahoo refuses the session token, and commands that never touch Yahoo send no request at all ([#154](https://github.com/iamsaquib8/stockwise/issues/154)).
+- `quote`, `verdict`, `deep`, `score` and `insights`: a symbol Yahoo does not know, such as the BSE code `500325`, now gives a "not found" error with exit code 1 instead of an empty card or a verdict on a company with no price ([#206](https://github.com/iamsaquib8/stockwise/issues/206)).
+- `score`, `analyze`, `verdict` and `deep`: companies that file statements in US dollars but trade in rupees, such as Infosys, now have their statement amounts converted at the live USD/INR rate before ratios and revenue are shown, so INFY's Altman Z drops from 426 to about 8 and its revenue reads ₹47.33K Cr, not ₹504 Cr ([#207](https://github.com/iamsaquib8/stockwise/issues/207)).
+- `quote`, `compare`, `deep`, `dividends` and `divcal`: dividend yield no longer reads 0 for stocks such as RELIANCE, or 0.05% for INFY, when Yahoo's trailing figure is missing or computed from a dollar dividend; `dividends INFY` now shows 4.4% ([#208](https://github.com/iamsaquib8/stockwise/issues/208)).
 
 ## [0.8.0] - 2026-11-03
 

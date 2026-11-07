@@ -25,28 +25,32 @@ no API key.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh   # macOS, Linux, Termux
+curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh   # macOS, Linux, Termux
 cargo binstall stockwise                                                                    # or: cargo install --locked stockwise
 ```
 
 Also `.deb`/`.rpm`, Scoop, Nix and Docker — see [Install](docs/install.md) for
-every option and what is coming next (PyPI, Homebrew, winget, AUR). Then run
-`stockwise doctor` to check your setup.
+every option. PyPI, Homebrew, winget and the AUR are not published yet. Building
+from source needs Rust 1.97 or newer. Then run `stockwise doctor` to check your
+setup.
 
 ## What it does
 
 ### One portfolio, true returns
 
 ```bash
-stockwise import kite ~/Downloads/holdings.xlsx   # CSV or .xlsx from Kite, Groww, Upstox, INDmoney, CAS
+stockwise import kite ~/Downloads/holdings.xlsx   # CSV or .xlsx from Kite, Groww, Upstox, INDmoney; CAS too
 stockwise portfolio                               # live P&L, XIRR and allocation
 stockwise portfolio sell TCS 5 3900               # FIFO sale; realised P&L kept for tax
 stockwise portfolio benchmark NIFTY -p 1y         # return vs the index
+stockwise portfolio xray                          # real exposure across stocks, funds and ETFs
+stockwise portfolio target set TCS 30             # target weights; then rebalance --inflow 50000
 ```
 
 Every purchase is a lot with its own date, so holding periods, FIFO sales and
-XIRR are exact. Mutual funds are valued from AMFI's NAVs, and INR and USD
-holdings are totalled in one currency.
+XIRR are exact. Mutual funds are valued from AMFI's NAVs, and holdings in
+different currencies are totalled in one (`--base`). `rebalance --inflow` puts
+new money only into underweight holdings.
 
 ### Capital-gains tax
 
@@ -65,24 +69,37 @@ with these numbers.
 ```bash
 stockwise quote RELIANCE TCS                      # Indian stocks are the default
 stockwise quote AAPL NVDA -m us                   # US stocks; also crypto, FX and 7 global exchanges
+stockwise TCS                                     # no command needed: a one-screen overview
 stockwise deep HDFCBANK                           # fundamentals, technicals and risk for one stock
-stockwise mf search parag flexi direct            # mutual funds from AMFI, with expense ratios
+stockwise score INFY --explain                    # Piotroski F-score and Altman Z-score, with the working
+stockwise events TCS                              # filings and news timeline, and how the stock moved
+stockwise insights TCS                            # findings on ownership, growth, margins and valuation
+stockwise mf search parag flexi direct            # mutual funds from AMFI; `mf nav CODE` adds the expense ratio
 stockwise options chain NIFTY                     # option chain with IV and greeks
+stockwise options oi NIFTY                        # open-interest build-up, PCR and max pain
+stockwise ipo                                     # open and upcoming IPOs from NSE
 stockwise markets                                 # indices at a glance
 ```
 
-Every data command takes `--json` (and `--csv` for tables), so it fits in
-scripts: `stockwise portfolio --json | jq '.totals.pnl_percent'`.
+`q`, `d`, `a`, `t`, `c`, `p` and `w` are short for `quote`, `dashboard`,
+`analyze`, `technical`, `compare`, `portfolio` and `watch`. `--explain` on
+`technical`, `score` and `options oi` adds plain-English notes for beginners.
+
+Many commands take `--json`, and tables take `--csv` (`stockwise <command> --help`
+shows which), so they fit in scripts:
+`stockwise portfolio --json | jq '.totals.pnl_percent'`.
 
 ### Ask an AI about your money
 
 `stockwise mcp` is an [MCP](https://modelcontextprotocol.io) server: Claude
 Desktop, Claude Code, Cursor and other assistants can look up quotes,
-technicals, risk, mutual funds, option chains, screens and backtests, and read
-your portfolio, lots, tax estimate, calendar, watchlist and alerts — 24
-read-only tools, three resources and ready-made prompts ("review my
-portfolio", "tax-harvest check before 31 March", "explain this option chain").
-It never places orders.
+technicals, risk, scorecards, events, mutual funds, option chains, IPOs, screens
+and backtests, and read your portfolio, lots, tax estimate, advance tax,
+harvest and rebalance plans, calendar, watchlist and alerts — 34 read-only
+tools, three resources and three ready-made prompts ("review my portfolio",
+"tax-harvest check before 31 March", "explain this option chain"). It never
+places orders. `stockwise ask "question"` lets a local or cloud model call the
+same tools from your terminal.
 
 ```bash
 claude mcp add stockwise -- stockwise mcp        # Claude Code
@@ -117,16 +134,17 @@ list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assista
   scored on risk, not raw return; a paper-trading simulator.
   [Simulator](docs/simulator.md)
 - **Dashboards** — `stockwise tui` in the terminal and `stockwise serve --open`
-  in the browser, both read-only. [TUI](docs/tui.md), [web](docs/server.md)
-- **Alerts** — price, RSI, moving-average and results alerts to Telegram,
-  Slack, Discord, email or the desktop. [Alerts](docs/bots.md#notifications)
+  in the browser; neither places orders. [TUI](docs/tui.md), [web](docs/server.md)
+- **Alerts** — price, RSI, moving-average, breakout, volume and results alerts to
+  Telegram, Slack, Discord or email (desktop pop-ups need a source build with
+  `--features desktop-notify`). [Alerts](docs/bots.md#notifications)
 - **Planning** — SIP, retirement and education goals; SIP and what-if
   calculators. [Commands](docs/commands.md)
 - **Gold, SGBs and G-secs** — gold in ₹/10 g, Sovereign Gold Bonds, bond yields
   and a YTM calculator. [Markets](docs/markets.md)
-- **Live orders (optional)** — Angel One, with Zerodha, Upstox, Dhan and Fyers
-  experimental; every order shows a preview and needs a typed confirmation.
-  [Brokers](docs/brokers.md)
+- **Live orders (optional)** — Angel One; Zerodha, Upstox, Dhan and Fyers are
+  experimental and untested on a live account, as are stop-loss and GTT orders.
+  Every order shows a preview and needs a typed confirmation. [Brokers](docs/brokers.md)
 
 The [cheatsheet](docs/cheatsheet.md) has the commands people use most, and the
 [commands reference](docs/commands.md) has every option, including the
