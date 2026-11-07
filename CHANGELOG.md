@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `events` / `deep` (`Needs::ALL`): fetches full research snapshot.
   - Enforced a bounded 3-second timeout (`tokio::time::timeout`) on all NSE endpoints (filings, shareholding, insider trading, corporate actions) so slow or unresponsive NSE calls log to warnings and degrade gracefully rather than hanging the CLI.
 
+### Changed
+- `verdict`, `deep`, `analyze` and `stockwise SYMBOL` no longer print a STRONG BUY / SELL label, an entry zone, a stop-loss, a target price or risk/reward. They show six pillar scores (Strong / Moderate / Weak), a 0-100 composite and a "not a recommendation" note. In `--json`, `action`, `entry_zone`, `stop_loss`, `target_price`, `upside_pct`, `risk_pct`, `risk_reward`, the time-horizon texts and each pillar's `grade` are gone, and each pillar has a `band`. The `decision`, `signal` and `buysell` aliases are removed ([#188](https://github.com/iamsaquib8/stockwise/issues/188)).
+- `verdict`: a pillar with no data now shows "no data" and is left out of the composite instead of scoring 50 or 55, and crypto, FX and index symbols get only the technical pillar and no composite ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
+- `verdict --explain` now lists the real weights (valuation 20, growth 25, balance sheet 15, smart money 15, analyst 10, technicals 15), taken from the scores themselves, and the data sources that failed are listed under the score ([#211](https://github.com/iamsaquib8/stockwise/issues/211)).
+- `verdict`: the fixed "Confidence: 85%" is replaced by `data_coverage` (JSON) / "Data coverage" (text), the share of the score's inputs that had data ([#77](https://github.com/iamsaquib8/stockwise/issues/77)).
+- `insights`: analyst cards say "mean rating x/5" instead of "Strong Buy", and the 52-week-low card no longer calls it a "value entry".
+- The web dashboard's Research tab shows the pillar scores and data coverage instead of the buy/sell label, entry zone and stop-loss.
+
 ### Fixed
 - Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
 - `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):

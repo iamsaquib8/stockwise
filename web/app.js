@@ -976,14 +976,6 @@
 
   // ── Research Workbench ──
 
-  const VERDICT_LABELS = {
-    strong_buy: ['▲▲ STRONG BUY', 'up'],
-    buy: ['▲ BUY / ACCUMULATE', 'up'],
-    hold: ['● HOLD / ACCUMULATE ON DIPS', ''],
-    reduce: ['▼ REDUCE / TAKE PROFIT', 'down'],
-    strong_sell: ['▼▼ SELL / AVOID', 'down'],
-  };
-
   async function loadResearch() {
     const symbol = state.symbol;
     const panel = $('research-panel');
@@ -1017,42 +1009,36 @@
 
   function renderVerdictTab(r) {
     const v = r.verdict || {};
-    const cur = r.currency || v.currency;
-    const [badgeText, badgeCls] = VERDICT_LABELS[v.action] || [String(v.action || DASH), ''];
     const wrap = el('div', { class: 'research-body' });
 
-    const rrText = isNum(v.risk_reward) ? '1 : ' + v.risk_reward.toFixed(1) : DASH;
-    const targetText = isNum(v.target_price)
-      ? fmtMoney(v.target_price, cur) + (isNum(v.upside_pct) ? ' (' + fmtPct(v.upside_pct, 1) + ')' : '')
+    const bands = v.pillar_bands || {};
+    const bandText = isNum(bands.strong)
+      ? 'Strong on ' + bands.strong + ' · Moderate on ' + bands.moderate + ' · Weak on ' + bands.weak
+        + (bands.no_data ? ' · no data on ' + bands.no_data : '')
       : DASH;
-    const entryText = Array.isArray(v.entry_zone) && isNum(v.entry_zone[0]) && isNum(v.entry_zone[1])
-      ? fmtMoney(v.entry_zone[0], cur) + ' – ' + fmtMoney(v.entry_zone[1], cur)
-      : DASH;
-    const stopText = isNum(v.stop_loss)
-      ? fmtMoney(v.stop_loss, cur) + (isNum(v.risk_pct) ? ' (-' + v.risk_pct.toFixed(1) + '%)' : '')
-      : DASH;
-
     wrap.append(el('div', { class: 'stats' }, [
-      stat('Action', badgeText, null,
-        el('div', { class: 'delta ' + badgeCls, text: 'Confidence ' + (isNum(v.confidence) ? v.confidence.toFixed(0) + '%' : DASH) })),
-      stat('Composite Score', isNum(v.overall_score) ? v.overall_score.toFixed(0) + ' / 100' : DASH, '6-pillar weighted score'),
-      stat('12M Fair Value', targetText, 'Implied upside/downside'),
-      stat('Entry Zone', entryText, 'Recommended accumulation range'),
-      stat('Stop Loss', stopText, 'Downside risk guardrail'),
-      stat('Risk / Reward', rrText, 'Upside vs stop-loss distance'),
+      stat('Composite Score', isNum(v.overall_score) ? v.overall_score.toFixed(0) + ' / 100' : 'Not enough data',
+        v.note || '6-pillar weighted score'),
+      stat('Data Coverage', isNum(v.data_coverage) ? v.data_coverage.toFixed(0) + '%' : DASH,
+        'Share of the model inputs that had data'),
+      stat('Pillars', bandText, 'Strong 65+ · Moderate 45–64 · Weak below 45'),
     ]));
 
     const pillars = v.pillars || [];
     if (pillars.length) {
       wrap.append(el('div', { class: 'pillars' }, pillars.map((p) => {
-        const sc = isNum(p.score) ? p.score : 0;
-        const tone = sc >= 65 ? 'up' : sc < 45 ? 'down' : '';
+        const has = isNum(p.score);
+        const sc = has ? p.score : 0;
+        const tone = !has ? '' : sc >= 65 ? 'up' : sc < 45 ? 'down' : '';
         const fill = el('div', { class: 'pillar-fill ' + tone });
         fill.style.width = Math.max(0, Math.min(100, sc)).toFixed(0) + '%';
+        const label = has
+          ? String(p.band || '').replace(/^./, (c) => c.toUpperCase()) + ' · ' + sc.toFixed(0) + '/100'
+          : 'No data';
         return el('div', { class: 'pillar-card' }, [
           el('div', { class: 'pillar-top' }, [
-            el('strong', { text: p.name }),
-            el('span', { class: 'badge ' + tone, text: p.grade + ' · ' + sc.toFixed(0) + '/100' }),
+            el('strong', { text: p.name + ' (' + Math.round((p.weight || 0) * 100) + '%)' }),
+            el('span', { class: 'badge ' + tone, text: label }),
           ]),
           el('div', { class: 'pillar-bar' }, [fill]),
           el('p', { class: 'small muted', text: p.summary || '' }),
@@ -1065,27 +1051,30 @@
     if (bulls.length || bears.length) {
       wrap.append(el('div', { class: 'thesis-grid' }, [
         el('div', { class: 'thesis-col' }, [
-          el('h3', { class: 'small up', text: '▲ Bullish Catalysts' }),
+          el('h3', { class: 'small up', text: 'Positive drivers in the data' }),
           bulls.length
             ? el('ul', { class: 'thesis-list' }, bulls.map((b) => el('li', { text: b })))
-            : el('p', { class: 'small muted', text: 'No major bullish catalysts flagged.' }),
+            : el('p', { class: 'small muted', text: 'No positive drivers flagged.' }),
         ]),
         el('div', { class: 'thesis-col' }, [
-          el('h3', { class: 'small down', text: '▼ Key Risks & Watchpoints' }),
+          el('h3', { class: 'small down', text: 'Risks in the data' }),
           bears.length
             ? el('ul', { class: 'thesis-list' }, bears.map((b) => el('li', { text: b })))
-            : el('p', { class: 'small muted', text: 'No major structural red flags.' }),
+            : el('p', { class: 'small muted', text: 'No risks flagged.' }),
         ]),
       ]));
     }
 
-    if (v.short_term || v.medium_term || v.long_term) {
+    const warns = v.warnings || [];
+    if (warns.length) {
       wrap.append(el('div', { class: 'horizons small' }, [
-        v.short_term ? el('p', {}, [el('strong', { text: 'Short-term (1–4w): ' }), v.short_term]) : null,
-        v.medium_term ? el('p', {}, [el('strong', { text: 'Medium-term (1–6m): ' }), v.medium_term]) : null,
-        v.long_term ? el('p', {}, [el('strong', { text: 'Long-term (1–3y+): ' }), v.long_term]) : null,
+        el('p', {}, [el('strong', { text: 'Data notes: ' }), warns.join('; ')]),
       ]));
     }
+    if (v.next_catalyst) {
+      wrap.append(el('p', { class: 'small' }, [el('strong', { text: 'Next scheduled event: ' }), v.next_catalyst]));
+    }
+    wrap.append(el('p', { class: 'small muted', text: v.disclaimer || 'A score summarises the data; it is not a recommendation or investment advice.' }));
     return wrap;
   }
 
@@ -1221,7 +1210,7 @@
 
     if (!state.symbol || state.symbol.startsWith('^')) {
       $('research-title').textContent = 'Research Workbench';
-      $('research-sub').textContent = '6-pillar verdict, Piotroski & Altman scorecards, insights and corporate events';
+      $('research-sub').textContent = '6-pillar score, Piotroski & Altman scorecards, insights and corporate events';
       panel.replaceChildren(el('p', { class: 'empty', text: 'Select a company symbol from the watchlist, portfolio or search to inspect its research workbench.' }));
       return;
     }

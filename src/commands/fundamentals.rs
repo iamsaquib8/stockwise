@@ -2,11 +2,7 @@
 
 use super::*;
 
-fn print_unified_research_footer(
-    r_opt: Option<&crate::research::Research>,
-    q: &crate::api::Quote,
-    csym: &str,
-) {
+fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &crate::api::Quote) {
     if let Some(r) = r_opt {
         let sc = scorecard::generate_scorecard_report(r);
         print_section("Accounting Scorecards (Piotroski & Altman)");
@@ -54,22 +50,7 @@ fn print_unified_research_footer(
         let v = crate::verdict::generate_verdict(r, &cards);
         println!();
         println!("{}", "─".repeat(60).dimmed());
-        println!(
-            "  VERDICT: {}  (Score: {:.0}/100 · Confidence: {:.0}%)",
-            v.action.badge(),
-            v.overall_score,
-            v.confidence
-        );
-        println!(
-            "  Entry: {csym}{:.2}–{csym}{:.2}  |  Stop-Loss: {csym}{:.2}{}",
-            v.entry_zone.0,
-            v.entry_zone.1,
-            v.stop_loss,
-            v.target_price
-                .map(|t| format!("  |  Target: {csym}{t:.2}"))
-                .unwrap_or_default()
-        );
-        println!("  {}", v.action.summary_tagline().dimmed());
+        crate::verdict::print_snapshot(&v, &r.symbol);
         println!("{}", "─".repeat(60).dimmed());
     } else {
         print_section("Insights");
@@ -229,7 +210,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_kv("Volatility", &risk);
     }
 
-    print_unified_research_footer(r_opt.as_ref(), q, csym);
+    print_unified_research_footer(r_opt.as_ref(), q);
 
     // AI-powered analysis (with --ai, if the provider is available)
     let mut ai = crate::ai::AiClient::connect().await;
@@ -1139,7 +1120,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     }
 
     // ── 3. Unified Scorecards, Rich Insights & 6-Pillar Verdict ──
-    print_unified_research_footer(r_opt.as_ref(), q, csym);
+    print_unified_research_footer(r_opt.as_ref(), q);
 
     // ── 4. AI Analysis ──
     let mut ai = crate::ai::AiClient::connect().await;

@@ -248,8 +248,7 @@ enum Commands {
         out: JsonOutput,
     },
 
-    /// Definitive Buy/Sell verdict, multi-pillar scoring, targets & stop-loss
-    #[command(alias = "decision", alias = "signal", alias = "buysell")]
+    /// 6-pillar score (0-100) from valuation, growth, balance sheet, ownership, analysts and trend
     Verdict {
         symbol: String,
         /// Explain each of the 6 scoring pillars and how the composite score works
@@ -2587,7 +2586,7 @@ fn curated_quickstart_help() -> String {
 
     let sections: &[(&str, &[(&str, &str)])] = &[
         (
-            "Stock Research & Verdicts",
+            "Stock Research & Scores",
             &[
                 (
                     "quote <SYM>",
@@ -2595,7 +2594,7 @@ fn curated_quickstart_help() -> String {
                 ),
                 (
                     "verdict <SYM>",
-                    "6-pillar Buy/Hold/Sell score (0–100), entry/stop/target",
+                    "6-pillar score (0–100) with data coverage; not a recommendation",
                 ),
                 (
                     "insights <SYM>",
@@ -5524,6 +5523,22 @@ mod tests {
         assert_eq!(value_name(TaxCountry::In), "in");
         assert_eq!(value_name(AlertWhen::Above), "above");
         assert_eq!(value_name(DaemonMode::Longterm), "longterm");
+    }
+
+    #[test]
+    fn help_and_quickstart_make_no_buy_sell_claims() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let verdict = cmd.find_subcommand_mut("verdict").unwrap();
+        let about = verdict.get_about().unwrap().to_string();
+        assert!(about.contains("6-pillar score"), "{about}");
+        crate::verdict::testing::assert_neutral(&about);
+        assert_eq!(
+            verdict.get_all_aliases().count(),
+            0,
+            "verdict has no aliases"
+        );
+        crate::verdict::testing::assert_neutral(&curated_quickstart_help());
     }
 
     #[test]

@@ -53,7 +53,7 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 | Open interest build-up & walls | `stockwise options oi NIFTY --json` |
 | Put/call ratio, max pain | `stockwise options pcr NIFTY --json` · `stockwise options maxpain NIFTY --json` |
 | Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --json` |
-| 6-pillar investment verdict | `stockwise verdict TCS --json` |
+| 6-pillar score, data coverage (not a recommendation) | `stockwise verdict TCS --json` |
 | Piotroski & Altman scorecards | `stockwise scorecard TCS --json` |
 | Categorized insights & shareholding | `stockwise insights TCS --json` |
 | Corporate events & filings timeline | `stockwise events TCS --json` |

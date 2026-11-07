@@ -298,32 +298,8 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
     {
         let cards = crate::insights::generate_rich_insights(&bundle);
         let v = crate::verdict::generate_verdict(&bundle, &cards);
-        let csym = market::currency_symbol(Some(v.currency.as_str()));
-        print_section("Quick Research Snapshot (6-Pillar Verdict)");
-        print_kv(
-            "Verdict",
-            &format!(
-                "{}  (Score: {:.0}/100 · Confidence: {:.0}%)",
-                v.action.badge(),
-                v.overall_score,
-                v.confidence,
-            ),
-        );
-        let (lo, hi) = v.entry_zone;
-        if lo > 0.0 && hi > 0.0 {
-            print_kv("Entry Zone", &format!("{csym}{lo:.2} – {csym}{hi:.2}"));
-        }
-        if v.stop_loss > 0.0 {
-            let tgt = v
-                .target_price
-                .map(|t| format!(" / Target: {}", format!("{csym}{t:.2}").green()))
-                .unwrap_or_default();
-            print_kv(
-                "Stop Loss",
-                &format!("{}{}", format!("{csym}{:.2}", v.stop_loss).red(), tgt),
-            );
-        }
-        println!("  {}", v.action.summary_tagline().dimmed());
+        print_section("Quick Research Snapshot (6-Pillar Score)");
+        crate::verdict::print_snapshot(&v, &resolved);
         println!();
     }
     Ok(())
