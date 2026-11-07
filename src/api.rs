@@ -125,6 +125,30 @@ fn retry_delay(attempt: u32, retry_after: Option<&header::HeaderValue>, base_ms:
 }
 
 /// Hostname of a URL, for error messages ("query2.finance.yahoo.com", ...)
+/// A request the server refused with a status that retrying cannot fix
+/// (anything but 429 or 5xx). Kept as a type so callers can tell a missing
+/// resource from a network failure; see [`is_not_found`].
+#[derive(Debug)]
+pub struct HttpStatusError {
+    host: String,
+    status: reqwest::StatusCode,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} returned HTTP {}", self.host, self.status)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+/// True when `err` is (or wraps) an HTTP 404 from [`YahooClient`], such as a
+/// symbol Yahoo has no chart for.
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HttpStatusError>()
+        .is_some_and(|e| e.status == reqwest::StatusCode::NOT_FOUND)
+}
+
 fn host_of(url: &str) -> &str {
     url.split("://")
         .nth(1)
@@ -876,7 +900,11 @@ impl YahooClient {
                         }
                         tokio::time::sleep(retry_delay(attempt, None, 500)).await;
                     } else {
-                        bail!("{} returned HTTP {}", host_of(url), status);
+                        return Err(HttpStatusError {
+                            host: host_of(url).to_string(),
+                            status,
+                        }
+                        .into());
                     }
                 }
                 Err(_e) if !last_attempt => {

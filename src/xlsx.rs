@@ -249,38 +249,20 @@ pub fn read_first_sheet(bytes: &[u8]) -> Result<Vec<Vec<String>>> {
     Ok(sheet_rows(&xml, &shared))
 }
 
-/// Every worksheet in the `.xlsx` workbook, in central-directory order.
-pub fn read_all_sheets(bytes: &[u8]) -> Result<Vec<Vec<Vec<String>>>> {
-    let entries = central_directory(bytes)?;
-    let shared = match entries.iter().find(|e| e.name == "xl/sharedStrings.xml") {
-        Some(e) => shared_strings(&String::from_utf8_lossy(&extract(bytes, e)?)),
-        None => Vec::new(),
-    };
-    let mut sheets = Vec::new();
-    for e in entries
-        .iter()
-        .filter(|e| e.name.starts_with("xl/worksheets/") && e.name.ends_with(".xml"))
-    {
-        let xml = String::from_utf8_lossy(&extract(bytes, e)?).into_owned();
-        let rows = sheet_rows(&xml, &shared);
-        if !rows.is_empty() {
-            sheets.push(rows);
-        }
-    }
-    if sheets.is_empty() {
-        bail!("spreadsheet has no worksheet");
-    }
-    Ok(sheets)
+/// One worksheet of a workbook: its tab name and its rows of text cells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sheet {
+    pub name: String,
+    pub rows: Vec<Vec<String>>,
 }
 
-/// Convert an `.xlsx` workbook's worksheets into RFC-4180 CSV lines so that
-/// every broker CSV parser (`groww`, `upstox`, `kite`, `indmoney`, `csv`)
-/// can import `.xlsx` files directly without manual conversion.
-pub fn workbook_to_csv(bytes: &[u8]) -> Result<String> {
-    let sheets = read_all_sheets(bytes)?;
-    let mut out = String::new();
-    for sheet in sheets {
-        for row in sheet {
+impl Sheet {
+    /// The sheet as RFC-4180 CSV lines, so every broker CSV parser (`groww`,
+    /// `upstox`, `kite`, `indmoney`, `csv`, `cas`) can import it. Blank rows
+    /// are dropped.
+    pub fn to_csv(&self) -> String {
+        let mut out = String::new();
+        for row in &self.rows {
             if row.iter().all(|c| c.trim().is_empty()) {
                 continue;
             }
@@ -299,8 +281,111 @@ pub fn workbook_to_csv(bytes: &[u8]) -> Result<String> {
             }
             out.push('\n');
         }
+        out
     }
-    Ok(out)
+}
+
+/// The `(name, zip path)` of each sheet in tab order: `xl/workbook.xml` lists
+/// the sheets, and `xl/_rels/workbook.xml.rels` says which file each one is.
+fn sheet_order(entries: &[Entry], bytes: &[u8]) -> Vec<(String, String)> {
+    let read = |name: &str| -> Option<String> {
+        let e = entries.iter().find(|e| e.name == name)?;
+        Some(String::from_utf8_lossy(&extract(bytes, e).ok()?).into_owned())
+    };
+    let (Some(book), Some(rels)) = (read("xl/workbook.xml"), read("xl/_rels/workbook.xml.rels"))
+    else {
+        return Vec::new();
+    };
+    let targets: Vec<(String, String)> = rels
+        .split("<Relationship ")
+        .skip(1)
+        .filter_map(|r| {
+            let tag = format!(" {}", r.split('>').next()?);
+            Some((
+                attr(&tag, "Id")?.to_string(),
+                attr(&tag, "Target")?.to_string(),
+            ))
+        })
+        .collect();
+    book.split("<sheet ")
+        .skip(1)
+        .filter_map(|t| {
+            let tag = format!(" {}", t.split('>').next()?);
+            let name = unescape(attr(&tag, "name")?);
+            // `r:id`, or another prefix bound to the relationships namespace.
+            let id = tag
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix("r:id=\""))?
+                .trim_end_matches(['"', '/']);
+            let target = &targets.iter().find(|(i, _)| i == id)?.1;
+            let path = match target.strip_prefix('/') {
+                Some(abs) => abs.to_string(),
+                None => format!("xl/{target}"),
+            };
+            Some((name, path))
+        })
+        .collect()
+}
+
+/// Every non-empty worksheet of the `.xlsx` workbook, in tab order. When the
+/// workbook's sheet list cannot be read, the sheets come in zip order named
+/// `Sheet1`, `Sheet2`, ...
+pub fn read_workbook(bytes: &[u8]) -> Result<Vec<Sheet>> {
+    let entries = central_directory(bytes)?;
+    let shared = match entries.iter().find(|e| e.name == "xl/sharedStrings.xml") {
+        Some(e) => shared_strings(&String::from_utf8_lossy(&extract(bytes, e)?)),
+        None => Vec::new(),
+    };
+    let mut order = sheet_order(&entries, bytes);
+    order.retain(|(_, path)| entries.iter().any(|e| &e.name == path));
+    if order.is_empty() {
+        order = entries
+            .iter()
+            .filter(|e| e.name.starts_with("xl/worksheets/") && e.name.ends_with(".xml"))
+            .enumerate()
+            .map(|(i, e)| (format!("Sheet{}", i + 1), e.name.clone()))
+            .collect();
+    }
+    let mut sheets = Vec::new();
+    for (name, path) in order {
+        let e = entries.iter().find(|e| e.name == path).expect("retained");
+        let xml = String::from_utf8_lossy(&extract(bytes, e)?).into_owned();
+        let rows = sheet_rows(&xml, &shared);
+        if !rows.is_empty() {
+            sheets.push(Sheet { name, rows });
+        }
+    }
+    if sheets.is_empty() {
+        bail!("spreadsheet has no worksheet");
+    }
+    Ok(sheets)
+}
+
+/// The sheet to import: the one called `wanted` (any case), or else the first
+/// whose CSV `matches` (its header has the columns the importer needs). When
+/// none matches, the first sheet, so the importer reports what it found.
+pub fn pick_sheet<'a>(
+    sheets: &'a [Sheet],
+    wanted: Option<&str>,
+    matches: impl Fn(&str) -> bool,
+) -> Result<&'a Sheet> {
+    if let Some(wanted) = wanted {
+        return sheets
+            .iter()
+            .find(|s| s.name.trim().eq_ignore_ascii_case(wanted.trim()))
+            .with_context(|| {
+                let names: Vec<String> = sheets.iter().map(|s| format!("\"{}\"", s.name)).collect();
+                format!(
+                    "No sheet named \"{wanted}\" in the workbook. Sheets: {}",
+                    names.join(", ")
+                )
+            });
+    }
+    sheets
+        .iter()
+        .find(|s| matches(&s.to_csv()))
+        .or(sheets.first())
+        .context("spreadsheet has no worksheet")
 }
 
 #[cfg(test)]
@@ -351,9 +436,44 @@ mod tests {
 
     #[test]
     fn converts_workbook_to_rfc4180_csv() {
-        let csv = workbook_to_csv(include_bytes!("fixtures/amfi_ter_360one.xlsx")).unwrap();
+        let sheets = read_workbook(include_bytes!("fixtures/amfi_ter_360one.xlsx")).unwrap();
+        let csv = sheets[0].to_csv();
         let first_line = csv.lines().next().unwrap();
         assert!(first_line.starts_with("NSDL Scheme Code,"));
         assert!(csv.contains("360 ONE Balanced Hybrid Fund"));
+    }
+
+    #[test]
+    fn sheets_come_in_tab_order_with_their_names() {
+        // The workbook lists "Mutual Funds" (sheet2.xml) before "Equity" (sheet1.xml).
+        let sheets = read_workbook(include_bytes!("fixtures/holdings_two_sheets.xlsx")).unwrap();
+        let names: Vec<&str> = sheets.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Mutual Funds", "Equity"]);
+        assert_eq!(sheets[0].rows[0], ["Fund", "Units", "NAV", "ISIN"]);
+        assert_eq!(sheets[1].rows[1], ["INFY", "10", "1500"]);
+    }
+
+    #[test]
+    fn pick_sheet_takes_the_first_matching_header_or_the_named_sheet() {
+        let sheets = read_workbook(include_bytes!("fixtures/holdings_two_sheets.xlsx")).unwrap();
+        let has_symbol = |csv: &str| csv.to_lowercase().contains("symbol");
+        assert_eq!(
+            pick_sheet(&sheets, None, has_symbol).unwrap().name,
+            "Equity"
+        );
+        // Nothing matches: the first sheet, so the importer can say what it found.
+        assert_eq!(
+            pick_sheet(&sheets, None, |_| false).unwrap().name,
+            "Mutual Funds"
+        );
+        let named = pick_sheet(&sheets, Some(" mutual funds "), has_symbol).unwrap();
+        assert_eq!(named.name, "Mutual Funds");
+        let err = pick_sheet(&sheets, Some("Summary"), has_symbol)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("\"Equity\"") && err.contains("Summary"),
+            "{err}"
+        );
     }
 }

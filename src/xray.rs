@@ -352,10 +352,20 @@ pub fn normalize_sector(raw: Option<&str>) -> String {
     }
 }
 
+/// India market-cap cut-offs in rupees, from AMFI's half-yearly list that
+/// SEBI's categories follow (top 100 companies are large cap, ranks 101-250
+/// mid cap, the rest small cap). Rounded from the list dated December 2024
+/// (in force January to June 2025): large cap from about ₹1,00,000 Cr, mid cap
+/// from about ₹33,200 Cr. AMFI publishes new cut-offs every January and July,
+/// so update these two values (and the date here) when they move.
+pub const INDIA_LARGE_CAP_MIN_INR: f64 = 1_000_000_000_000.0; // ₹1,00,000 Cr
+pub const INDIA_MID_CAP_MIN_INR: f64 = 330_000_000_000.0; // ₹33,000 Cr
+
 /// Classify market cap into Large, Mid, or Small Cap based on quote market cap and currency.
 ///
 /// Thresholds:
-/// - India (INR): Large Cap >= ₹20,000 Cr; Mid Cap ₹5,000 Cr to ₹20,000 Cr; Small Cap < ₹5,000 Cr.
+/// - India (INR): Large Cap >= ₹1,00,000 Cr; Mid Cap ₹33,000 Cr to ₹1,00,000 Cr; Small Cap < ₹33,000 Cr
+///   (see [`INDIA_LARGE_CAP_MIN_INR`]).
 /// - US / Global (USD & others): Large Cap >= $10B; Mid Cap $2B to $10B; Small Cap < $2B.
 pub fn classify_market_cap(market_cap: Option<f64>, currency: Option<&str>) -> MarketCapCategory {
     let Some(mc) = market_cap.filter(|v| *v > 0.0) else {
@@ -363,11 +373,9 @@ pub fn classify_market_cap(market_cap: Option<f64>, currency: Option<&str>) -> M
     };
     let is_inr = currency.is_some_and(|c| c.eq_ignore_ascii_case("INR"));
     if is_inr {
-        // ₹20,000 Crore = 200,000,000,000 INR
-        // ₹5,000 Crore = 50,000,000,000 INR
-        if mc >= 200_000_000_000.0 {
+        if mc >= INDIA_LARGE_CAP_MIN_INR {
             MarketCapCategory::LargeCap
-        } else if mc >= 50_000_000_000.0 {
+        } else if mc >= INDIA_MID_CAP_MIN_INR {
             MarketCapCategory::MidCap
         } else {
             MarketCapCategory::SmallCap
@@ -1331,7 +1339,7 @@ mod tests {
                 price: 1500.0,
                 value: 150000.0,
                 sector: Some("Financial Services".to_string()),
-                market_cap: Some(1_100_000_000_000.0), // > 20000 Cr -> Large Cap
+                market_cap: Some(1_100_000_000_000.0), // ₹1,10,000 Cr -> Large Cap
                 currency: Some("INR".to_string()),
                 is_fund: false,
                 is_sgb: false,
@@ -1367,6 +1375,27 @@ mod tests {
         assert_eq!(hdfc.total_value, 154000.0);
         assert_eq!(hdfc.effective_weight_pct, 77.0);
         assert!(hdfc.is_concentrated);
+    }
+
+    #[test]
+    fn india_market_cap_cutoffs_follow_amfi() {
+        let cr = 10_000_000.0;
+        let class = |crore: f64| classify_market_cap(Some(crore * cr), Some("INR"));
+        assert_eq!(class(110_000.0), MarketCapCategory::LargeCap);
+        assert_eq!(class(100_000.0), MarketCapCategory::LargeCap);
+        assert_eq!(class(50_000.0), MarketCapCategory::MidCap);
+        assert_eq!(class(33_000.0), MarketCapCategory::MidCap);
+        assert_eq!(class(25_000.0), MarketCapCategory::SmallCap);
+        assert_eq!(class(4_000.0), MarketCapCategory::SmallCap);
+        // US cut-offs are unchanged.
+        assert_eq!(
+            classify_market_cap(Some(5e9), Some("USD")),
+            MarketCapCategory::MidCap
+        );
+        assert_eq!(
+            classify_market_cap(None, Some("INR")),
+            MarketCapCategory::Unclassified
+        );
     }
 
     #[test]

@@ -506,7 +506,126 @@ pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
 
 // ── Alerts ──
 
-pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market) -> Result<()> {
+/// Column names a generic stock-holdings import looks for.
+struct ImportColumns {
+    symbol: &'static [&'static str],
+    qty: &'static [&'static str],
+    price: &'static [&'static str],
+    /// For the error message.
+    expected: &'static str,
+}
+
+/// Column names per format, most specific first (matched as substrings).
+fn import_columns(source: &str) -> ImportColumns {
+    let (symbol, qty, price, expected): (&[&str], &[&str], &[&str], &str) = match source {
+        // Kite holdings: Instrument, Qty., Avg. cost, LTP, ...
+        // Kite tradebook: symbol, trade_date, trade_type, quantity, price, ...
+        "kite" | "zerodha" => (
+            &["instrument", "tradingsymbol", "symbol", "stock"],
+            &["qty", "qty.", "quantity", "shares"],
+            &[
+                "avg. cost",
+                "avg cost",
+                "average cost",
+                "avg_price",
+                "average price",
+                "buy avg",
+                "buy avg.",
+                "price",
+            ],
+            "Kite CSV/Excel columns. Expected: Instrument, Qty., Avg. cost",
+        ),
+        // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, ...
+        "indmoney" => (
+            &[
+                "symbol",
+                "isin",
+                "stock symbol",
+                "scrip",
+                "stock name",
+                "name",
+            ],
+            &["quantity", "qty", "shares", "units"],
+            &[
+                "avg buy price",
+                "avg price",
+                "average price",
+                "buy price",
+                "avg. buy price",
+                "average cost",
+            ],
+            "IndMoney CSV/Excel columns. Expected: Symbol/Stock Name, Quantity, Avg Buy Price",
+        ),
+        // "csv" or any unrecognized format: generic columns.
+        _ => (
+            &[
+                "symbol",
+                "stock",
+                "instrument",
+                "name",
+                "ticker",
+                "scrip",
+                "tradingsymbol",
+            ],
+            &["quantity", "qty", "qty.", "shares", "units"],
+            &[
+                "avg price",
+                "avg. price",
+                "average price",
+                "avg cost",
+                "avg. cost",
+                "buy price",
+                "price",
+                "cost",
+            ],
+            "CSV/Excel columns. Your file needs Symbol, Quantity and Average Price columns",
+        ),
+    };
+    ImportColumns {
+        symbol,
+        qty,
+        price,
+        expected,
+    }
+}
+
+/// The header row of a generic holdings export, in its first 40 lines (an
+/// `.xlsx` export may start with account details), and the columns of the
+/// symbol, quantity and price.
+fn find_stock_header(
+    lines: &[&str],
+    columns: &ImportColumns,
+) -> Option<(usize, Vec<String>, usize, usize, usize)> {
+    // Scan the first 40 lines for the header row so .xlsx exports with account preamble work seamlessly.
+    lines.iter().take(40).enumerate().find_map(|(idx, line)| {
+        let c = parse_csv_header(&line.to_lowercase());
+        let si = find_col(&c, columns.symbol)?;
+        let qi = find_col(&c, columns.qty)?;
+        let pi = find_col(&c, columns.price)?;
+        Some((idx, c, si, qi, pi))
+    })
+}
+
+/// Whether a workbook sheet (as CSV) has the header `source`'s importer needs.
+pub(super) fn sheet_has_header(source: &str, csv: &str) -> bool {
+    match source {
+        "groww" => super::imports::parse_groww(csv, Market::In).is_ok(),
+        "upstox" => super::imports::parse_upstox(csv, Market::In).is_ok(),
+        "cas" => super::imports::parse_cas(csv).is_ok(),
+        _ => {
+            let lines: Vec<&str> = csv.lines().collect();
+            find_stock_header(&lines, &import_columns(source)).is_some()
+        }
+    }
+}
+
+pub async fn cmd_import(
+    source: &str,
+    file: &str,
+    replace: bool,
+    sheet: Option<&str>,
+    market: Market,
+) -> Result<()> {
     let path = std::path::Path::new(file);
     if !path.exists() {
         println!();
@@ -574,9 +693,29 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
 
     let raw_bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", file))?;
     let content = if raw_bytes.starts_with(b"PK\x03\x04") {
-        crate::xlsx::workbook_to_csv(&raw_bytes)
-            .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?
+        let sheets = crate::xlsx::read_workbook(&raw_bytes)
+            .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?;
+        // Only one sheet is read: rows of another sheet (a mutual-fund tab, a
+        // summary) have other columns and must not be parsed with these.
+        let chosen = crate::xlsx::pick_sheet(&sheets, sheet, |csv| sheet_has_header(source, csv))?;
+        if sheets.len() > 1 {
+            let skipped: Vec<&str> = sheets
+                .iter()
+                .filter(|s| !std::ptr::eq(*s, chosen))
+                .map(|s| s.name.as_str())
+                .collect();
+            println!(
+                "  {} Using sheet \"{}\" (skipped: {}). Pick another with --sheet NAME.",
+                "·".dimmed(),
+                chosen.name,
+                skipped.join(", ")
+            );
+        }
+        chosen.to_csv()
     } else {
+        if sheet.is_some() {
+            bail!("--sheet only applies to .xlsx workbooks, and {file} is not one");
+        }
         String::from_utf8(raw_bytes)
             .with_context(|| format!("{} is not valid UTF-8 text or an .xlsx workbook", file))?
     };
@@ -616,81 +755,9 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
         bail!("{} is empty or has no data rows", file);
     }
 
-    // Column names per format, most specific first (matched as substrings).
-    let (sym_names, qty_names, price_names, expected): (&[&str], &[&str], &[&str], &str) =
-        match source {
-            // Kite holdings: Instrument, Qty., Avg. cost, LTP, ...
-            // Kite tradebook: symbol, trade_date, trade_type, quantity, price, ...
-            "kite" | "zerodha" => (
-                &["instrument", "tradingsymbol", "symbol", "stock"],
-                &["qty", "qty.", "quantity", "shares"],
-                &[
-                    "avg. cost",
-                    "avg cost",
-                    "average cost",
-                    "avg_price",
-                    "average price",
-                    "buy avg",
-                    "buy avg.",
-                    "price",
-                ],
-                "Kite CSV/Excel columns. Expected: Instrument, Qty., Avg. cost",
-            ),
-            // IndMoney: Stock Name, Symbol/ISIN, Quantity, Avg Buy Price, ...
-            "indmoney" => (
-                &[
-                    "symbol",
-                    "isin",
-                    "stock symbol",
-                    "scrip",
-                    "stock name",
-                    "name",
-                ],
-                &["quantity", "qty", "shares", "units"],
-                &[
-                    "avg buy price",
-                    "avg price",
-                    "average price",
-                    "buy price",
-                    "avg. buy price",
-                    "average cost",
-                ],
-                "IndMoney CSV/Excel columns. Expected: Symbol/Stock Name, Quantity, Avg Buy Price",
-            ),
-            // "csv" or any unrecognized format: generic columns.
-            _ => (
-                &[
-                    "symbol",
-                    "stock",
-                    "instrument",
-                    "name",
-                    "ticker",
-                    "scrip",
-                    "tradingsymbol",
-                ],
-                &["quantity", "qty", "qty.", "shares", "units"],
-                &[
-                    "avg price",
-                    "avg. price",
-                    "average price",
-                    "avg cost",
-                    "avg. cost",
-                    "buy price",
-                    "price",
-                    "cost",
-                ],
-                "CSV/Excel columns. Your file needs Symbol, Quantity and Average Price columns",
-            ),
-        };
-    // Scan the first 40 lines for the header row so .xlsx exports with account preamble work seamlessly.
-    let found_header = lines.iter().take(40).enumerate().find_map(|(idx, line)| {
-        let c = parse_csv_header(&line.to_lowercase());
-        let si = find_col(&c, sym_names)?;
-        let qi = find_col(&c, qty_names)?;
-        let pi = find_col(&c, price_names)?;
-        Some((idx, c, si, qi, pi))
-    });
-    let Some((header_idx, cols, si, qi, pi)) = found_header else {
+    let columns = import_columns(source);
+    let ImportColumns { expected, .. } = columns;
+    let Some((header_idx, cols, si, qi, pi)) = find_stock_header(&lines, &columns) else {
         bail!(
             "Could not detect {}. Found: {}",
             expected,
@@ -819,6 +886,40 @@ pub async fn cmd_import(source: &str, file: &str, replace: bool, market: Market)
     apply_import_rows(source, file, rows, side_col.is_some(), replace).await
 }
 
+/// Splits and bonuses for each dated symbol, from its first trade. A symbol
+/// Yahoo has no chart for (HTTP 404, such as a renamed ticker) is not an
+/// error: it is returned in the second list and imported without a split
+/// check. Any other failure stops the import, so nothing is changed.
+pub(super) async fn fetch_import_splits(
+    client: &YahooClient,
+    rows: &[ImportRow],
+    symbols: &[&String],
+) -> Result<(Vec<(String, Vec<crate::portfolio::Split>)>, Vec<String>)> {
+    let mut found = Vec::new();
+    let mut unchecked = Vec::new();
+    for sym in symbols {
+        let since = rows
+            .iter()
+            .filter(|r| &r.symbol == *sym)
+            .filter_map(|r| r.date.clone())
+            .min()
+            .unwrap_or_else(pf::today);
+        match super::portfolio::fetch_actions(client, sym, &since).await {
+            Ok((s, _, _)) => found.push(((*sym).clone(), s)),
+            Err(e) if crate::api::is_not_found(&e) => unchecked.push((*sym).clone()),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Could not check {} for splits, which a tradebook needs; nothing was changed. Try again when online",
+                        sym
+                    )
+                });
+            }
+        }
+    }
+    Ok((found, unchecked))
+}
+
 /// Apply parsed import rows (from any source) to the portfolio and report
 /// what changed: dated rows rebuild a symbol's lots, undated rows sync its
 /// quantity and keep existing lots. Re-importing the same rows changes
@@ -845,22 +946,15 @@ pub(super) async fn apply_import_rows(
     let mut splits = Vec::new();
     if tradebook {
         let client = YahooClient::new().await?;
-        for sym in symbols.iter().filter(|s| dated(s)) {
-            let since = rows
-                .iter()
-                .filter(|r| &r.symbol == sym)
-                .filter_map(|r| r.date.clone())
-                .min()
-                .unwrap_or_else(pf::today);
-            let (s, _, _) = super::portfolio::fetch_actions(&client, sym, &since)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Could not check {} for splits, which a tradebook needs; nothing was changed. Try again when online",
-                        sym
-                    )
-                })?;
-            splits.push((sym.clone(), s));
+        let dated_symbols: Vec<&String> = symbols.iter().filter(|s| dated(s)).collect();
+        let (found, unchecked) = fetch_import_splits(&client, &rows, &dated_symbols).await?;
+        splits = found;
+        for sym in unchecked {
+            println!(
+                "  {} {} — split check skipped: Yahoo has no price history for it, so its quantities are used as in the file",
+                "!".yellow(),
+                sym
+            );
         }
     }
 
