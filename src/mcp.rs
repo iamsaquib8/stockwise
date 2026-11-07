@@ -18,7 +18,7 @@
 //! `STOCKWISE_API_TOKEN` otherwise, like `stockwise serve`.
 
 use crate::market::Market;
-use crate::tools::ToolContext;
+use crate::tools::{ToolContext, client_error};
 use crate::views::{self, DataSource};
 use anyhow::{Context, Result};
 use rmcp::model::{
@@ -122,20 +122,6 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
             "stockwise://alerts" => serde_json::to_value(views::alerts(src).await?)?,
             other => anyhow::bail!("Unknown resource {}", other),
         })
-    }
-}
-
-/// An error as the client sees it: without the Yahoo session crumb, and
-/// without local file paths (those go to stderr, the server's log), as
-/// `serve` does.
-fn client_error(e: &anyhow::Error) -> String {
-    if e.downcast_ref::<views::LocalData>().is_some() {
-        eprintln!("stockwise mcp: {:#}", e);
-        "Could not read the local StockWise data (portfolio, watchlist or alerts); \
-         the details are in the server's log"
-            .to_string()
-    } else {
-        crate::server::redact(&format!("{:#}", e))
     }
 }
 

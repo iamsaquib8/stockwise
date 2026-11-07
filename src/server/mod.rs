@@ -69,20 +69,7 @@ impl ApiError {
     }
 }
 
-/// Drop the Yahoo session crumb from error text before it leaves the process.
-pub(crate) fn redact(msg: &str) -> String {
-    let mut out = String::with_capacity(msg.len());
-    let mut rest = msg;
-    while let Some(i) = rest.find("crumb=") {
-        out.push_str(&rest[..i + "crumb=".len()]);
-        out.push_str("REDACTED");
-        rest = &rest[i + "crumb=".len()..];
-        let end = rest.find(['&', ')', ' ']).unwrap_or(rest.len());
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
-}
+pub(crate) use crate::tools::redact;
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

@@ -370,7 +370,7 @@ error, not as an empty answer.
   credentials, API keys for other services, or data-directory files are
   included.
 - **You are told when it happens:** the first cloud request of each run prints
-  `ⓘ Sending this request's market data to <provider> (<model>)` on stderr.
+  `ⓘ Sending this request's data to <provider> (<model>): market data, and your portfolio if a tool reads it` on stderr.
 - Keys are read from the environment and sent only in request headers, never
   in URLs, logs or error messages. `doctor` names the variable it found, not
   its value.

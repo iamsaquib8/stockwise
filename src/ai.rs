@@ -141,12 +141,18 @@ pub fn configured_provider() -> Result<AiProvider> {
 fn notify_cloud_send(provider: AiProvider, model: &str) {
     static SHOWN: AtomicBool = AtomicBool::new(false);
     if !SHOWN.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "  \u{24d8} Sending this request's market data to {} ({}). Unset STOCKWISE_AI_PROVIDER to keep AI local.",
-            provider.name(),
-            model
-        );
+        eprintln!("{}", cloud_notice(provider, model));
     }
+}
+
+/// The notice before the first cloud request. `ask` and `report portfolio`
+/// can send holdings, lots and tax figures, so it says so.
+fn cloud_notice(provider: AiProvider, model: &str) -> String {
+    format!(
+        "  \u{24d8} Sending this request's data to {} ({}): market data, and your portfolio if a tool reads it. Unset STOCKWISE_AI_PROVIDER to keep AI local.",
+        provider.name(),
+        model
+    )
 }
 
 #[derive(Serialize)]
@@ -1467,5 +1473,16 @@ mod tests {
         ai.api_key = None;
         assert!(!ai.is_available().await);
         assert!(ai.unavailable_reason().contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn the_cloud_notice_says_a_portfolio_may_be_sent() {
+        let n = cloud_notice(AiProvider::Anthropic, "claude-sonnet-5-5");
+        assert!(
+            n.contains("Anthropic") && n.contains("claude-sonnet-5-5"),
+            "{n}"
+        );
+        assert!(n.contains("your portfolio if a tool reads it"), "{n}");
+        assert!(!n.contains("market data to"), "{n}");
     }
 }

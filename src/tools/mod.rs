@@ -12,6 +12,36 @@ mod handlers;
 
 pub use args::Args;
 
+/// Drop the Yahoo session crumb from error text before it leaves the process.
+pub(crate) fn redact(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while let Some(i) = rest.find("crumb=") {
+        out.push_str(&rest[..i + "crumb=".len()]);
+        out.push_str("REDACTED");
+        rest = &rest[i + "crumb=".len()..];
+        let end = rest.find(['&', ')', ' ']).unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A tool error as a client or a cloud model sees it: without the Yahoo
+/// session crumb, and without local file paths (those go to stderr, the
+/// local log). Used by `stockwise mcp` and by `ask`, whose tool results can
+/// reach a cloud provider.
+pub(crate) fn client_error(e: &anyhow::Error) -> String {
+    if e.downcast_ref::<crate::views::LocalData>().is_some() {
+        eprintln!("stockwise: {:#}", e);
+        "Could not read the local StockWise data (portfolio, watchlist or alerts); \
+         the details were kept on this machine"
+            .to_string()
+    } else {
+        redact(&format!("{:#}", e))
+    }
+}
+
 use crate::market::Market;
 use crate::views::DataSource;
 use anyhow::{Result, bail};
