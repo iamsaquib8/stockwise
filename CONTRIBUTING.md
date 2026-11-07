@@ -87,7 +87,8 @@ and fix every warning and broken link it reports.
   `--json` output. Add it to `src/tools/`, list it in
   `packaging/mcpb/manifest.json` (a test compares the two lists) and in the tool
   table in `docs/ai.md`. The tool count (`stockwise mcp --list-tools`) is written in
-  `README.md`, `docs/commands.md`, `docs/ai.md` and `docs/architecture.md`: update it.
+  `README.md`, `docs/commands.md`, `docs/ai.md`, `docs/architecture.md` and
+  `packaging/pypi/README.md`: update it.
 - Errors: return `anyhow` errors (`bail!`) instead of printing and returning
   `Ok(())`, so scripts see a non-zero exit code. Empty states (nothing in the
   portfolio yet) are not errors.
