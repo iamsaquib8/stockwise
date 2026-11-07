@@ -695,8 +695,12 @@ fn replay_trades(
         let day = &trades[i..end];
         i = end;
         apply_until(&mut lots, &date, &mut applied);
-        let (buys, sells): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
+        let (all_buys, sells): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
             day.iter().partition(|t| !t.sell);
+        // A buy without a date is dated today only as an estimate: it is not
+        // known to be the same day as a sale, so it never nets (intraday).
+        let (buys, estimated): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
+            all_buys.into_iter().partition(|t| t.date.is_some());
         let bought: f64 = buys.iter().map(|t| t.qty).sum();
         let sold: f64 = sells.iter().map(|t| t.qty).sum();
         let net = bought.min(sold);
@@ -715,17 +719,22 @@ fn replay_trades(
                 sell_avg,
                 source,
             );
-            sale.buy_date_estimated = buys.iter().any(|t| t.date.is_none());
             sale.intraday = true;
             sales.push(sale);
             if bought - net > EPS {
                 let mut lot = new_lot(bought - net, buy_avg, &date);
-                lot.date_estimated = buys.iter().any(|t| t.date.is_none());
                 // Restated only when every buy of the day was, to the same day.
                 let first = &buys[0].units_as_of;
                 if buys.iter().all(|t| &t.units_as_of == first) {
                     lot.units_as_of = first.clone();
                 }
+                lots.push(lot);
+                lots.sort_by(|a, b| a.date.cmp(&b.date));
+            }
+            for t in &estimated {
+                let mut lot = new_lot(t.qty, t.price, &date);
+                lot.date_estimated = true;
+                lot.units_as_of = t.units_as_of.clone();
                 lots.push(lot);
                 lots.sort_by(|a, b| a.date.cmp(&b.date));
             }
@@ -740,7 +749,7 @@ fn replay_trades(
             }
             continue;
         }
-        for t in buys {
+        for t in buys.into_iter().chain(estimated) {
             let mut lot = new_lot(t.qty, t.price, &date);
             lot.date_estimated = t.date.is_none();
             lot.units_as_of = t.units_as_of.clone();
@@ -837,10 +846,13 @@ fn scoped<R>(lots: &mut Vec<Lot>, scope: &Scope, f: impl FnOnce(&mut Vec<Lot>) -
 /// Like [`take_fifo`], but shares bought on `date` itself go first: a buy and
 /// a sell on one day net against each other (intraday) before an older lot
 /// is touched. The flag is true for the slices that came from that day.
+/// A lot whose date is only an estimate (`date_estimated`: a holdings
+/// snapshot or sync dated it today) is not known to be from that day, so it
+/// is taken like an older lot and never flagged.
 fn take_netting(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64, bool)>, f64) {
     let (mut same_day, mut older): (Vec<Lot>, Vec<Lot>) = std::mem::take(lots)
         .into_iter()
-        .partition(|l| l.date == date);
+        .partition(|l| l.date == date && !l.date_estimated);
     let (netted, rest) = take_fifo(&mut same_day, qty, date);
     let (before, left) = take_fifo(&mut older, rest, date);
     older.extend(same_day);
@@ -2809,6 +2821,61 @@ mod tests {
             .sell_fifo("X.NS", 5.0, 110.0, "2026-10-20", "manual")
             .unwrap();
         assert!(!sales[0].is_intraday());
+    }
+
+    #[test]
+    fn broker_sell_does_not_net_against_an_estimated_lot_dated_today() {
+        // A holdings snapshot dated 50 shares today (date_estimated): they
+        // may have been bought any day, so a sale today is not intraday and
+        // comes out of the oldest lot first.
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", lot(100.0, 1000.0, "2023-01-10"));
+        let mut est = lot(50.0, 1500.0, "2026-10-20");
+        est.date_estimated = true;
+        p.add_lot("INFY.NS", est);
+        let fills = vec![fill("S1", "T1", true, 30.0, 1520.0, "2026-10-20 10:00:00")];
+        p.apply_broker_fills(&fills);
+        assert_eq!(p.realized.len(), 1);
+        let s = &p.realized[0];
+        assert!(!s.intraday && !s.is_intraday());
+        assert_eq!((s.qty, s.buy_date.as_str()), (30.0, "2023-01-10"));
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!((h.lots[0].qty, h.lots[1].qty), (70.0, 50.0));
+
+        // With only the estimated lot held, it is sold, still not intraday.
+        let mut q = Portfolio::default();
+        let mut est = lot(50.0, 1500.0, "2026-10-20");
+        est.date_estimated = true;
+        q.add_lot("INFY.NS", est);
+        q.apply_broker_fills(&fills);
+        let s = &q.realized[0];
+        assert!(s.buy_date_estimated && !s.is_intraday());
+    }
+
+    #[test]
+    fn tradebook_buy_without_a_date_does_not_net_with_a_sale_today() {
+        let today = today();
+        let mut buy = trade("TCS.NS", &today, false, 10.0, 100.0);
+        buy.date = None;
+        let rows = vec![buy, trade("TCS.NS", &today, true, 10.0, 110.0)];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(p.realized.len(), 1);
+        let s = &p.realized[0];
+        assert!(
+            !s.intraday && !s.is_intraday(),
+            "taxed as delivery, not intraday"
+        );
+        assert!(s.buy_date_estimated);
+        assert!(p.holding("TCS.NS").is_none());
+        // A dated buy the same day still nets.
+        let rows = vec![
+            trade("TCS.NS", &today, false, 10.0, 100.0),
+            trade("TCS.NS", &today, true, 10.0, 110.0),
+        ];
+        let mut q = Portfolio::default();
+        q.apply_import(&rows, tradebook_opts("import:kite"));
+        assert!(q.realized[0].intraday);
     }
 
     fn snapshot(sym: &str, qty: f64, price: f64) -> ImportRow {

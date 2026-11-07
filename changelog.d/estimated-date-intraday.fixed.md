@@ -1,0 +1,1 @@
+- `tax in` no longer treats a sale as intraday just because a lot with an estimated purchase date (from a holdings snapshot or sync) is dated the same day; those sales stay in the 111A/112A figures.
