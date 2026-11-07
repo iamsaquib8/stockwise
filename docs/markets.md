@@ -14,7 +14,7 @@ seven more stock exchanges come from one **market table** in `src/market.rs`.
 | `jp` (`tse`) | Tokyo Stock Exchange | `.T` | JPY | Nikkei 225 | 09:00–11:30, 12:30–15:30 | 2026, 2027 |
 | `hk` (`hkex`) | Hong Kong Exchanges | `.HK` (codes padded: `5` → `0005.HK`) | HKD | Hang Seng | 09:30–12:00, 13:00–16:00; eves close 12:00 | 2026, 2027 |
 | `sg` (`sgx`) | Singapore Exchange | `.SI` | SGD | Straits Times | 09:00–12:00, 13:00–17:00; eves close 12:00 | 2026 (2027 provisional) |
-| `ca` (`tsx`) | Toronto Stock Exchange | `.TO` | CAD | S&P/TSX Composite | 09:30–16:00 ET; 24 Dec closes 13:00 | 2026 |
+| `ca` (`tsx`) | Toronto Stock Exchange | `.TO` | CAD | S&P/TSX Composite | 09:30–16:00 ET; 24 Dec closes 13:00 | 2026 (2027 provisional) |
 | `au` (`asx`) | Australian Securities Exchange | `.AX` | AUD | S&P/ASX 200 | 10:00–16:00 Sydney; 24/31 Dec close 14:10 | 2026, 2027 |
 
 ```bash
@@ -50,7 +50,7 @@ What each row holds:
   calendar, JPX's holiday page, SEHK circulars CT/075/25 and CT/077/26, ASX's
   trading calendar, TMX holiday notices, and for SGX the Ministry of Manpower
   public holidays it follows (2026 cross-checked against SGX's monthly
-  trading-day counts; 2027 provisional until SGX publishes). Years outside a
+  trading-day counts; 2027 provisional for SGX and TSX until they publish). Years outside a
   table fall back to "every weekday trades", and `markets --global` warns
   about it.
 - **Tax**: `stockwise tax` has rules for India, the US and the UK only. Other

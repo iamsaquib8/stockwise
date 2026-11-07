@@ -180,6 +180,10 @@ pub const NSE_HOLIDAYS: &[(i32, u32, u32, &str)] = &[
     (2026, 11, 24, "Prakash Gurpurb Sri Guru Nanak Dev"),
     (2026, 12, 25, "Christmas"),
     (2027, 1, 26, "Republic Day"),
+    // Good Friday follows Easter (28 Mar 2027), not a lunar date, and NSE has
+    // closed on it every year; NSE's own 2027 circular is not out yet (it
+    // comes in December), so 2027 stays provisional.
+    (2027, 3, 26, "Good Friday"),
     (2027, 4, 14, "Dr. Baba Saheb Ambedkar Jayanti"),
 ];
 
@@ -411,7 +415,18 @@ pub const SGX: HolidayTable = HolidayTable {
 };
 
 /// Toronto Stock Exchange (TMX holiday notices). Christmas Eve closes at
-/// 13:00 ET. TMX had not published 2027 when this table was written.
+/// 13:00 ET.
+///
+/// 2026 is TMX's published list. 2027 is provisional: TMX had not published
+/// it (no 2027 "TMX Group Holiday Operating Schedule" notice existed in Nov
+/// 2026; TMX issues it each December, https://www.tmx.com/en/newsroom), so
+/// the rows follow the holidays TMX observes every year: New Year's Day,
+/// Family Day (3rd Monday of February), Good Friday (Easter is 28 Mar 2027),
+/// Victoria Day (Monday before 25 May), Canada Day, Civic Holiday (1st Monday
+/// of August), Labour Day, Thanksgiving (2nd Monday of October), and Christmas
+/// and Boxing Day moved to the next weekdays because 25 and 26 Dec 2027 are a
+/// Saturday and a Sunday. Check against TMX's notice and move 2027 to
+/// `official_years` (see the module docs).
 pub const TSX: HolidayTable = HolidayTable {
     closures: &[
         (2026, 1, 1, "New Year's Day"),
@@ -424,10 +439,20 @@ pub const TSX: HolidayTable = HolidayTable {
         (2026, 10, 12, "Thanksgiving Day"),
         (2026, 12, 25, "Christmas Day"),
         (2026, 12, 28, "Boxing Day (observed)"),
+        (2027, 1, 1, "New Year's Day"),
+        (2027, 2, 15, "Family Day"),
+        (2027, 3, 26, "Good Friday"),
+        (2027, 5, 24, "Victoria Day"),
+        (2027, 7, 1, "Canada Day"),
+        (2027, 8, 2, "Civic Holiday"),
+        (2027, 9, 6, "Labour Day"),
+        (2027, 10, 11, "Thanksgiving Day"),
+        (2027, 12, 27, "Christmas Day (observed)"),
+        (2027, 12, 28, "Boxing Day (observed)"),
     ],
-    half_days: &[(2026, 12, 24)],
+    half_days: &[(2026, 12, 24), (2027, 12, 24)],
     official_years: &[2026],
-    provisional_years: &[],
+    provisional_years: &[2027],
 };
 
 /// Australian Securities Exchange trading calendar. 24 and 31 December
@@ -1131,15 +1156,31 @@ mod tests {
             CalendarCoverage::Provisional
         );
         assert!(coverage_warning(global(Sg), 2027).unwrap().contains("SGX"));
+        use crate::market::Exchange::Ca;
         assert_eq!(
-            calendar_coverage(global(crate::market::Exchange::Ca), 2027),
-            CalendarCoverage::Missing
+            calendar_coverage(global(Ca), 2027),
+            CalendarCoverage::Provisional
         );
-        assert!(
-            coverage_warning(global(crate::market::Exchange::Ca), 2027)
-                .unwrap()
-                .contains("every weekday")
+        assert!(coverage_warning(global(Ca), 2027).unwrap().contains("TSX"));
+        // TSX 2027: New Year's Day (Fri), Good Friday and the observed
+        // Christmas and Boxing Day are closed; Christmas Eve is a half day.
+        for d in [
+            date(2027, 1, 1),
+            date(2027, 3, 26),
+            date(2027, 12, 27),
+            date(2027, 12, 28),
+        ] {
+            assert!(!is_trading_day(global(Ca), d), "{d}");
+        }
+        assert!(is_trading_day(global(Ca), date(2027, 3, 25)));
+        assert!(is_trading_day(global(Ca), date(2027, 12, 24)));
+        assert_eq!(
+            hours(global(Ca), date(2027, 12, 24)).unwrap().close,
+            hm(13, 0)
         );
+        // NSE closes on Good Friday 2027 (provisional list).
+        assert!(!is_trading_day(Market::In, date(2027, 3, 26)));
+        assert!(is_trading_day(Market::In, date(2027, 3, 25)));
         // Weekday fallback in an uncovered year.
         assert!(is_trading_day(global(Jp), date(2030, 1, 7)));
         assert_eq!(
