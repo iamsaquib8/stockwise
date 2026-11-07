@@ -150,11 +150,14 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             Msg::NoQuoteFor,
             &[&missing.join(", "), &market::not_found_hint(market)],
         );
-        if suggestions.is_empty() {
-            anyhow::anyhow!("{base}")
-        } else {
-            anyhow::anyhow!("{base}\n  Did you mean: {}", suggestions.join(", "))
+        let mut msg = base;
+        if !suggestions.is_empty() {
+            msg.push_str(&format!("\n  Did you mean: {}", suggestions.join(", ")));
         }
+        if missing.iter().any(|m| market::is_bse_scrip_code(m)) {
+            msg.push_str(&format!("\n  {}", market::BSE_CODE_HINT));
+        }
+        anyhow::anyhow!("{msg}")
     };
 
     if quotes.is_empty() {

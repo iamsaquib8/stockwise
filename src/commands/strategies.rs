@@ -639,7 +639,10 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
             );
         }
         print_kv(
-            &format!("SIP for {}10L/10Y", csym),
+            &format!(
+                "SIP for {}/10Y",
+                format_large_number(longterm::SIP_TARGET, s.currency.as_deref())
+            ),
             &format!("{}{:.0}/month", csym, s.sip_monthly_10l_10y),
         );
 
@@ -656,11 +659,11 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         print_kv("Median", &mc_bar(s.monte_carlo_median));
         print_kv("Worst case (P10)", &mc_bar(s.monte_carlo_p10));
 
-        // SIP projection
+        // SIP projection: every instalment grows for its own time in the market.
         let inv_5y = monthly * 60.0;
-        let est_5y = inv_5y * (1.0 + s.projected_5y_return / 100.0);
+        let est_5y = longterm::sip_corpus(monthly, 5, s.est_annual_return);
         let inv_10y = monthly * 120.0;
-        let est_10y = inv_10y * (1.0 + s.projected_10y_return / 100.0) * s.drip_multiplier_10y;
+        let est_10y = longterm::sip_corpus(monthly, 10, s.est_annual_return);
         print_section("SIP Calculator");
         print_kv(
             &format!("{}{}/mo × 5Y", csym, monthly),
@@ -670,38 +673,18 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         );
         print_kv(
             &format!("{}{}/mo × 10Y", csym, monthly),
-            &format!(
-                "{}{:.0} → {}{:.0} (incl DRIP)",
-                csym, inv_10y, csym, est_10y
-            )
-            .green()
-            .bold()
-            .to_string(),
+            &format!("{}{:.0} → {}{:.0}", csym, inv_10y, csym, est_10y)
+                .green()
+                .bold()
+                .to_string(),
         );
-    }
-
-    // Portfolio allocation
-    print_section("Suggested SIP Allocation");
-    let top5: Vec<&longterm::LongTermScore> = scores.iter().take(5).collect();
-    let total_sc: f64 = top5.iter().map(|s| s.total_score).sum();
-    println!("  Monthly budget: {}{:.0}\n", csym, monthly);
-    for s in &top5 {
-        let pct = s.total_score / total_sc;
-        let alloc = monthly * pct;
-        let bar_len = (pct * 30.0) as usize;
-        let moat_tag = match s.moat {
-            longterm::MoatRating::Wide => " [Wide Moat]".green().to_string(),
-            longterm::MoatRating::Narrow => " [Narrow]".yellow().to_string(),
-            _ => String::new(),
-        };
         println!(
-            "  {:<14} {}{:>8.0} ({:>4.1}%) {}{}",
-            s.symbol.cyan(),
-            csym,
-            alloc,
-            pct * 100.0,
-            "█".repeat(bar_len).green(),
-            moat_tag
+            "    {}",
+            format!(
+                "at the estimated {:.1}%/yr, paid at the start of each month; DRIP is not added on top",
+                s.est_annual_return
+            )
+            .dimmed()
         );
     }
 

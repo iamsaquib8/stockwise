@@ -38,8 +38,8 @@ redistribute. StockWise's angle is different:
   secrets in your OS keyring, and AI runs locally by default.
 - **One tool across the whole journey** — research, funds, options, tax,
   backtests, practice and orders — instead of a separate app for each.
-- **Scriptable.** Every data command speaks JSON and CSV, and `stockwise serve`
-  exposes a local API.
+- **Scriptable.** Many commands take `--json` and tables take `--csv`, and
+  `stockwise serve` exposes a local API.
 - **Free and open source** (MIT).
 
 ## When to use something else

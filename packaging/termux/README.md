@@ -9,7 +9,7 @@ Two ways to get StockWise on an Android phone with
 
   ```bash
   pkg install curl
-  curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh
   ```
 
   `cargo binstall stockwise` finds the same archive. Before that release,

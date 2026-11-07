@@ -8,7 +8,7 @@ you already use to install tools; they all give you the same `stockwise`.
 macOS, Linux and Termux on Android:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh
 ```
 
 The installer picks the right build for your system, checks its SHA-256
@@ -34,7 +34,7 @@ These work today with the [latest release](https://github.com/iamsaquib8/stockwi
 ### Coming soon
 
 Prepared, each waiting on a one-time publishing step by the maintainer (see
-[packaging](https://github.com/iamsaquib8/stockwise/blob/master/packaging/README.md)):
+[packaging](https://github.com/iamsaquib8/stockwise/blob/main/packaging/README.md)):
 
 | Platform | Command |
 |----------|---------|
@@ -71,4 +71,4 @@ stockwise doctor        # data directory, network, optional Redis/Ollama/keyring
 StockWise sends no telemetry. The project counts downloads only from the
 public numbers each registry already shows (crates.io, GitHub releases,
 PyPI, Homebrew, Docker); see
-[download stats](https://github.com/iamsaquib8/stockwise/blob/master/packaging/README.md#download-stats).
+[download stats](https://github.com/iamsaquib8/stockwise/blob/main/packaging/README.md#download-stats).

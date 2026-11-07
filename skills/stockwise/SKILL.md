@@ -18,9 +18,8 @@ the user's local portfolio files. Docs: https://iamsaquib8.github.io/stockwise/
    are read-only, take checked JSON arguments and return compact JSON.
 2. **The CLI** — otherwise run `stockwise` commands with `--json`. Check that
    it is installed with `stockwise --version`; if not, tell the user how to
-   install it (`cargo binstall stockwise`, `pipx install stockwise`,
-   `brew install iamsaquib8/tap/stockwise`, or the installer on the docs site)
-   rather than installing it yourself.
+   install it (`cargo binstall stockwise`, the installer on the docs site, or a
+   `.deb`/`.rpm` from the GitHub release) rather than installing it yourself.
 
 To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mcp`
 (Claude Code), or command `stockwise` with args `["mcp"]` in other clients.
@@ -49,7 +48,7 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 | Find a mutual fund | `stockwise mf search parag flexi direct --json` |
 | Fund NAV and expense ratio | `stockwise mf nav 122639 --json` |
 | Past SIP returns (XIRR) | `stockwise mf sip 122639 5000 -p 5y --json` |
-|Option chain with greeks | `stockwise options chain NIFTY --json` |
+| Option chain with greeks | `stockwise options chain NIFTY --json` |
 | Open interest build-up & walls | `stockwise options oi NIFTY --json` |
 | Put/call ratio, max pain | `stockwise options pcr NIFTY --json` · `stockwise options maxpain NIFTY --json` |
 | Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --json` |
@@ -58,6 +57,8 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 | Categorized insights & shareholding | `stockwise insights TCS --json` |
 | Corporate events & filings timeline | `stockwise events TCS --json` |
 | The user's portfolio | `stockwise portfolio --json` |
+| Real exposure across stocks, funds and ETFs | `stockwise portfolio xray --json` |
+| Open and upcoming IPOs | `stockwise ipo --json` |
 | Portfolio rebalancing plan | `stockwise rebalance --inflow 50000 --json` |
 | Capital-gains estimate | `stockwise tax in --json` |
 | Advance tax schedule & 234C | `stockwise tax advance --json` |

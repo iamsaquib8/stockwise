@@ -31,9 +31,9 @@ stockwise mf search parag flexi direct  # mutual funds from AMFI
 stockwise tui                           # live dashboard in the terminal
 ```
 
-Mutual funds, F&O option chains, crypto and FX, portfolio XIRR and Indian
-capital-gains tax, alerts, a paper-trading simulator and optional live orders
-through Indian brokers — see the
+Mutual funds, F&O option chains, crypto and FX, portfolio XIRR and look-through
+exposure (`portfolio xray`), Indian capital-gains tax and advance tax, alerts, a
+paper-trading simulator and optional live orders through Indian brokers — see the
 [documentation](https://iamsaquib8.github.io/stockwise/) and the
 [cheatsheet](https://iamsaquib8.github.io/stockwise/cheatsheet.html).
 
@@ -54,14 +54,14 @@ See [AI](https://iamsaquib8.github.io/stockwise/ai.html) for setup and limits.
 
 ## Other ways to install
 
-Homebrew, Scoop, winget, AUR, `.deb`/`.rpm`, Docker, Nix, Termux and
+Scoop, `.deb`/`.rpm`, Docker, Nix, Termux and
 `cargo install stockwise` — see
 [Install](https://github.com/iamsaquib8/stockwise#install).
 
 > **Not financial advice.** StockWise is for education and information. See the
-> [disclaimer](https://github.com/iamsaquib8/stockwise/blob/master/DISCLAIMER.md).
+> [disclaimer](https://github.com/iamsaquib8/stockwise/blob/main/DISCLAIMER.md).
 
 MIT licensed · [Source](https://github.com/iamsaquib8/stockwise) ·
-[Changelog](https://github.com/iamsaquib8/stockwise/blob/master/CHANGELOG.md)
+[Changelog](https://github.com/iamsaquib8/stockwise/blob/main/CHANGELOG.md)
 
 <!-- mcp-name: io.github.iamsaquib8/stockwise -->

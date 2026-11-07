@@ -18,7 +18,7 @@ use crate::market::{self, Market};
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Utc};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 // ───────────────────────────────────────────────────────────────
@@ -697,8 +697,121 @@ pub const TIMESERIES_FIELDS: &[&str] = &[
     "TotalLiabilitiesNetMinorityInterest",
 ];
 
-/// Parse fundamentals-timeseries results into (quarterly, annual) periods, oldest first.
-pub fn parse_timeseries(results: &[Value]) -> (Vec<Period>, Vec<Period>) {
+/// Turns statement amounts into the quote currency. Some NSE companies
+/// (Infosys among them) report in US dollars while the share trades in rupees;
+/// Yahoo marks each statement value with its `currencyCode`.
+#[derive(Debug, Clone, Default)]
+pub struct StatementFx {
+    /// Quote currency; `None` means "take amounts as they are".
+    to: Option<String>,
+    /// Units of `to` per one unit of the key currency.
+    rates: BTreeMap<String, f64>,
+}
+
+impl StatementFx {
+    pub fn new(to: Option<&str>, rates: impl IntoIterator<Item = (String, f64)>) -> Self {
+        Self {
+            // Pence count as pounds: statements are never in pence.
+            to: to.map(|c| market::to_major(1.0, c).1),
+            rates: rates.into_iter().collect(),
+        }
+    }
+
+    /// Multiplier from `from` into the quote currency, or `None` when the
+    /// currencies differ and no rate is known.
+    pub fn factor(&self, from: &str) -> Option<f64> {
+        match &self.to {
+            None => Some(1.0),
+            Some(to) if to.eq_ignore_ascii_case(from) => Some(1.0),
+            Some(_) => self.rates.get(&from.to_ascii_uppercase()).copied(),
+        }
+    }
+}
+
+/// Currencies the statement values are reported in (`currencyCode`).
+pub fn statement_currencies(results: &[Value]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for r in results {
+        let Some(t) = r
+            .get("meta")
+            .and_then(|m| m.get("type"))
+            .and_then(|t| t.get(0))
+            .and_then(|t| t.as_str())
+        else {
+            continue;
+        };
+        for item in r.get(t).and_then(|x| x.as_array()).into_iter().flatten() {
+            if let Some(c) = item.get("currencyCode").and_then(|c| c.as_str()) {
+                out.insert(c.to_ascii_uppercase());
+            }
+        }
+    }
+    out
+}
+
+/// Currency of `financialData` (`financialCurrency`), when Yahoo says.
+pub fn financial_currency(summary: &Value) -> Option<String> {
+    text(summary.get("financialData")?, "financialCurrency").map(|c| c.to_ascii_uppercase())
+}
+
+/// Per-share and total amounts convert; share counts do not.
+fn is_monetary(field: &str) -> bool {
+    !matches!(field, "OrdinarySharesNumber" | "ShareIssued")
+}
+
+/// Convert the money fields that `financialData` reports in the company's
+/// financial currency. With no rate they are dropped rather than shown in
+/// the wrong currency.
+pub fn convert_fin(fin: &mut Fin, factor: Option<f64>) {
+    for v in [
+        &mut fin.total_cash,
+        &mut fin.total_debt,
+        &mut fin.ebitda,
+        &mut fin.fcf,
+        &mut fin.ocf,
+    ] {
+        *v = match (*v, factor) {
+            (Some(x), Some(f)) => Some(x * f),
+            _ => None,
+        };
+    }
+}
+
+/// Rates from each foreign currency to `to`, from Yahoo's `USDINR=X` style pairs.
+/// A rate that cannot be fetched is left out, with a warning.
+async fn statement_fx(
+    client: &YahooClient,
+    to: Option<&str>,
+    foreign: &BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> StatementFx {
+    let Some(to) = to else {
+        return StatementFx::default();
+    };
+    let to = market::to_major(1.0, to).1;
+    let to = to.as_str();
+    let mut rates = Vec::new();
+    for from in foreign.iter().filter(|c| !c.eq_ignore_ascii_case(to)) {
+        let pair = format!("{from}{}=X", to.to_ascii_uppercase());
+        let rate = client
+            .get_quote(&[pair.as_str()])
+            .await
+            .ok()
+            .and_then(|q| q.into_iter().find_map(|q| q.regular_market_price))
+            .filter(|r| *r > 0.0);
+        match rate {
+            Some(r) => rates.push((from.clone(), r)),
+            None => warnings.push(format!(
+                "Statements are reported in {from} and the {from}/{to} rate is unavailable, so amounts from the statements are left out"
+            )),
+        }
+    }
+    StatementFx::new(Some(to), rates)
+}
+
+/// Parse fundamentals-timeseries results into (quarterly, annual) periods,
+/// oldest first, with amounts converted to the quote currency by `fx`.
+pub fn parse_timeseries(results: &[Value], fx: &StatementFx) -> (Vec<Period>, Vec<Period>) {
     let mut q: BTreeMap<(i32, u32), Period> = BTreeMap::new();
     let mut a: BTreeMap<(i32, u32), Period> = BTreeMap::new();
     for r in results {
@@ -734,6 +847,15 @@ pub fn parse_timeseries(results: &[Value]) -> (Vec<Period>, Vec<Period>) {
                 .and_then(|x| x.as_f64())
             else {
                 continue;
+            };
+            let v = if is_monetary(field) {
+                let from = item.get("currencyCode").and_then(|c| c.as_str());
+                match from.map_or(Some(1.0), |c| fx.factor(c)) {
+                    Some(f) => v * f,
+                    None => continue,
+                }
+            } else {
+                v
             };
             let p = map
                 .entry((date.year(), date.month()))
@@ -889,7 +1011,7 @@ pub fn parse_fin(summary: &Value, quote: &Quote) -> Fin {
         ev_ebitda: raw(ks, "enterpriseToEbitda").or(quote.enterprise_to_ebitda),
         div_yield: raw(sd, "dividendYield")
             .or(raw(sd, "trailingAnnualDividendYield"))
-            .or(quote.trailing_annual_dividend_yield),
+            .or(quote.dividend_yield_fraction()),
         payout: raw(sd, "payoutRatio"),
         inst_net_buy_pct: raw(nsp, "netInstBuyingPercent"),
     }
@@ -1530,6 +1652,15 @@ pub async fn fetch_all(
 
 /// Fetch a research snapshot according to the specified data [`Needs`].
 /// `days` is the news/event lookback window.
+/// Error text for a symbol with no usable quote.
+fn not_found_message(symbol: &str) -> String {
+    if market::is_bse_scrip_code(symbol) {
+        format!("Symbol '{symbol}' not found. {}", market::BSE_CODE_HINT)
+    } else {
+        format!("Symbol '{symbol}' not found")
+    }
+}
+
 pub async fn fetch(
     client: &YahooClient,
     symbol: &str,
@@ -1542,8 +1673,8 @@ pub async fn fetch(
         .get_quote(&[symbol.as_str()])
         .await?
         .into_iter()
-        .next()
-        .with_context(|| format!("Symbol '{}' not found", symbol))?;
+        .find(Quote::is_usable)
+        .with_context(|| not_found_message(&symbol))?;
 
     let name = quote
         .long_name
@@ -1706,8 +1837,14 @@ pub async fn fetch(
     let pit = soft(pit, "NSE insider trades", &mut warnings);
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
+    // Statements may be reported in another currency than the share trades in.
+    let fin_ccy = financial_currency(&summary);
+    let mut foreign = statement_currencies(&timeseries);
+    foreign.extend(fin_ccy.clone());
+    let fx = statement_fx(client, quote.currency.as_deref(), &foreign, &mut warnings).await;
+
     let (quarters, annual) = if needs.statements {
-        let (mut q, mut a) = parse_timeseries(&timeseries);
+        let (mut q, mut a) = parse_timeseries(&timeseries, &fx);
         merge_income_statement(&mut q, &summary);
         merge_balance_sheet(&mut a, &summary);
         (q, a)
@@ -1747,8 +1884,13 @@ pub async fn fetch(
         .and_then(|p| text(p, "industry"))
         .or(quote.industry.clone());
 
+    let mut fin = parse_fin(&summary, &quote);
+    if let Some(c) = &fin_ccy {
+        convert_fin(&mut fin, fx.factor(c));
+    }
+
     Ok(Research {
-        fin: parse_fin(&summary, &quote),
+        fin,
         surprises: parse_surprises(&summary),
         estimates: parse_estimates(&summary),
         rec_trend: parse_rec_trend(&summary),
@@ -1826,7 +1968,7 @@ mod tests {
                 {"asOfDate": "2026-03-31", "reportedValue": {"raw": 40.0}}
             ]}),
         ];
-        let (mut q, a) = parse_timeseries(&ts);
+        let (mut q, a) = parse_timeseries(&ts, &StatementFx::default());
         assert_eq!(q.len(), 2);
         assert_eq!(q[1].revenue, Some(110.0));
         assert_eq!(a[0].net_income, Some(40.0));
@@ -1840,6 +1982,73 @@ mod tests {
         assert_eq!(q[2].revenue, Some(120.0)); // new latest quarter appended
         assert_eq!(q[1].revenue, Some(110.0)); // existing value preserved
         assert_eq!(q[1].net_income, Some(11.0)); // gap filled
+    }
+
+    fn usd_item(date: &str, raw: f64) -> Value {
+        json!({"asOfDate": date, "currencyCode": "USD", "reportedValue": {"raw": raw}})
+    }
+
+    fn usd_statements() -> Vec<Value> {
+        vec![
+            json!({"meta": {"type": ["quarterlyTotalRevenue"]},
+                   "quarterlyTotalRevenue": [usd_item("2026-06-30", 5_082_000_000.0)]}),
+            json!({"meta": {"type": ["annualDilutedEPS"]},
+                   "annualDilutedEPS": [usd_item("2026-03-31", 0.8)]}),
+            json!({"meta": {"type": ["annualOrdinarySharesNumber"]},
+                   "annualOrdinarySharesNumber": [
+                       {"asOfDate": "2026-03-31", "reportedValue": {"raw": 4_050_000_000.0}}]}),
+        ]
+    }
+
+    #[test]
+    fn usd_statements_convert_to_the_quote_currency() {
+        let ts = usd_statements();
+        assert_eq!(
+            statement_currencies(&ts),
+            BTreeSet::from(["USD".to_string()])
+        );
+        let fx = StatementFx::new(Some("INR"), [("USD".to_string(), 90.0)]);
+        let (q, a) = parse_timeseries(&ts, &fx);
+        assert_eq!(q[0].revenue, Some(5_082_000_000.0 * 90.0));
+        assert!((a[0].eps.unwrap() - 72.0).abs() < 1e-9);
+        // Share counts are not money.
+        assert_eq!(a[0].shares_outstanding, Some(4_050_000_000.0));
+    }
+
+    #[test]
+    fn statements_in_the_quote_currency_are_not_touched() {
+        let ts = usd_statements();
+        let fx = StatementFx::new(Some("USD"), []);
+        let (q, _) = parse_timeseries(&ts, &fx);
+        assert_eq!(q[0].revenue, Some(5_082_000_000.0));
+        // Pence quotes: statements in pounds are not converted.
+        let gbp = StatementFx::new(Some("GBp"), []);
+        assert_eq!(gbp.factor("GBP"), Some(1.0));
+    }
+
+    #[test]
+    fn statements_without_a_rate_are_left_out_not_mislabelled() {
+        let (q, a) = parse_timeseries(&usd_statements(), &StatementFx::new(Some("INR"), []));
+        assert!(q.is_empty(), "no period is made from skipped values");
+        assert_eq!(a[0].eps, None);
+        assert_eq!(a[0].shares_outstanding, Some(4_050_000_000.0));
+    }
+
+    #[test]
+    fn financial_data_money_converts_or_goes() {
+        let summary = json!({"financialData": {"financialCurrency": "usd",
+            "totalCash": {"raw": 3.0e9}, "totalDebt": {"raw": 1.0e9},
+            "ebitda": {"raw": 4.0e9}, "freeCashflow": {"raw": 2.0e9},
+            "operatingCashflow": {"raw": 3.5e9}, "debtToEquity": {"raw": 8.0}}});
+        assert_eq!(financial_currency(&summary).as_deref(), Some("USD"));
+        let mut fin = parse_fin(&summary, &Quote::default());
+        convert_fin(&mut fin, Some(90.0));
+        assert_eq!(fin.total_cash, Some(2.7e11));
+        assert_eq!(fin.ocf, Some(3.15e11));
+        assert_eq!(fin.de, Some(8.0), "ratios stay");
+        convert_fin(&mut fin, None);
+        assert_eq!(fin.total_debt, None);
+        assert_eq!(fin.de, Some(8.0));
     }
 
     #[test]
@@ -2185,5 +2394,24 @@ mod tests {
                 req.target
             );
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_symbol_without_a_quote() {
+        let none = r#"{"quoteResponse":{"result":[{"symbol":"500325.BO","quoteType":"NONE"}],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, none.into())]).await;
+        let base = server.url.clone();
+        let client =
+            YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+                let u = reqwest::Url::parse(url).unwrap();
+                format!("{}{}?{}", base, u.path(), u.query().unwrap_or(""))
+            });
+        let err = fetch(&client, "500325", Market::In, 60, Needs::VERDICT)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'500325.BO' not found"), "{msg}");
+        assert!(msg.contains("BSE scrip codes"), "{msg}");
+        assert_eq!(server.requests().len(), 1, "stops after the quote");
     }
 }

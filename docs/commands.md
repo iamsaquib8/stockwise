@@ -73,6 +73,11 @@ network, invalid config file), `2` invalid arguments.
 
 ## Start here
 
+`stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise`
+prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
+`c` (compare), `p` (portfolio), `w` (watch), `ev` (events). Common names resolve to NSE symbols
+(`SBI` → `SBIN`, `L&T` → `LT`, index names), and `quote` suggests close matches for a mistyped symbol.
+
 | Command | Description |
 |---------|-------------|
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
@@ -90,8 +95,8 @@ network, invalid config file), `2` invalid arguments.
 | `events <SYMBOL> [--days N] [--ai]` (`ev`) | Unified timeline of material corporate events, exchange filings, earnings results, and excess market reaction vs NIFTY/S&P 500 |
 | `insights <SYMBOL>` | Positive, negative and neutral findings (Growth, Valuation, Margins, Ownership, etc.) with quantified metrics and XBRL shareholding patterns |
 | `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. A description of the data, not a recommendation; `--explain` lists the weights and rules |
-| `score <SYMBOL> [--json]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards: Piotroski 9-point F-Score (out of 9) and Altman Z-Score with full formula breakdown and distress zones |
-| `technical <SYMBOL> [-p] [--json]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
+| `score <SYMBOL> [--json] [--explain]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards: Piotroski 9-point F-Score (out of 9) and Altman Z-Score with full formula breakdown and distress zones |
+| `technical <SYMBOL> [-p] [--json] [--explain]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
 | `chart <SYMBOL>` | 1W, 1M, 3M and 1Y charts at once |
 | `compare <SYMBOLS...> [--json\|--csv]` (`c`) | Two or more stocks side by side across 16 metrics |
@@ -106,6 +111,8 @@ network, invalid config file), `2` invalid arguments.
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
 | `stoploss <SYMBOL> [-e PRICE] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, R:R targets |
 | `forecast <SYMBOL> [-d DAYS] [-p]` | Linear trend projection with 95% bands — a projection, not a prediction |
+
+`--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners.
 
 ## Market
 
@@ -150,7 +157,7 @@ and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
 | `mf overlap <A> <B> [--json]` | Shared top holdings, holdings and sector overlap, and expense ratios of two funds or ETFs, e.g. `mf overlap SPY QQQ -m us` |
 | `options chain <SYMBOL> [-e DATE] [-n STRIKES] [--rate %] [--div-yield %] [--json]` | Calls and puts around the money: last price, open interest (and change on NSE/BSE), volume, IV, delta, gamma, theta, vega, rho, and the lot size. Default: nearest expiry, 10 strikes each side (`-n 0` for all) |
 | `options pcr <SYMBOL> [-e DATE] [--json]` | Put/call ratio by open interest and by volume, and the three strikes with the most call and put open interest |
-| `options oi <SYMBOL> [-e DATE] [-n N] [--json]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown |
+| `options oi <SYMBOL> [-e DATE] [-n N] [--json] [--explain]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown |
 | `options maxpain <SYMBOL> [-e DATE] [--json]` (`max-pain`) | The settlement strike at which open options pay their holders least, with the payout curve around it |
 | `options payoff <SYMBOL> [--leg LEG]... [-s PRESET] [-w WIDTH] [-e DATE] [-l LOTS] [--lot-size N] [--rate %] [--div-yield %] [--iv %] [--today] [--json]` | A multi-leg position priced from the live chain: legs with price source, IV and delta; net debit/credit; max profit and loss (or "unlimited"); breakevens; probability of profit; position greeks; and a braille P/L chart at expiry (green/red), plus today's curve with `--today`. Analysis only — no orders |
 | `options <SYMBOL> [-p]` / `options moves <SYMBOL> [-p]` | Expected 1/5/10/30-day moves and OTM strike ideas from realized volatility |
@@ -302,7 +309,7 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 | `sip <SYMBOL> <AMOUNT> [-p] [--json]` | Monthly SIP/DCA simulation with value-vs-invested chart and XIRR. Default `5y` |
 | `whatif <SYMBOL> <AMOUNT> <YYYY-MM-DD> [--json]` | What a lump sum on a past date is worth today |
 | `intraday [-s STRATEGY]` (`bot`) | 9-strategy intraday signal scanner: sector heat, trend breadth, a table of regime, score and strategy agreement, and the strategies behind the strongest signals. No position sizes, entries, stops or targets. `-s` adds a strategy file's rules as a tenth signal. Old `CAPITAL TARGET%` arguments are accepted and ignored |
-| `longterm [MONTHLY_BUDGET]` | 6-pillar scoring, Monte Carlo, SIP allocation |
+| `longterm [MONTHLY_BUDGET]` | 6-pillar scoring, Monte Carlo, SIP projections |
 | `daemon intraday [CAPITAL]` | Paper-trading loop on the NSE clock (IST, holidays included; `-m us` uses NYSE hours in ET): scan, enter at the open, trail stops every 60s, book half at T1, square off 15 minutes before the close, settle into `sim` history. Survives network blips, resumes the day after a restart, and squares off on Ctrl+C. **Never sends broker orders** |
 | `daemon longterm` | Post-market scan: scores, portfolio check, alerts, tax-harvest ideas |
 | `sim start [CAPITAL] [TARGET%]` | Start a paper session with the bot's picks (default ₹25,000, 2%) on a trading day before the close |
@@ -357,7 +364,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
 | `calendar [SYMBOLS...] [--days 30] [--holdings\|--watchlist] [--json\|--csv]` | Upcoming results, ex-dividend and dividend payment dates, splits and bonus issues for your holdings and watchlist (or the named symbols), sorted by date, with today and the next 7 days marked. See [the calendar](#results-and-corporate-calendar) |
-| `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace]` | Import broker holdings, a lot list, a tradebook or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
+| `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`, every sheet read, Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
 | `rebalance [--inflow N] [--drift N] [--json]` (or `portfolio rebalance`) | Trades to rebalance to targets (or equal weight); `--inflow` buys underweight assets with new cash without selling; `--drift` ignores minor deviations |
@@ -592,14 +599,15 @@ last year. Returns are assumptions, not promises.
 
 ## AI assistants
 
-Both use the same read-only tools (quotes, history, technicals, risk, mutual
-funds, option chains, screens, backtests, your portfolio, lots, tax estimate,
+Both use the same read-only tools (quotes, history, technicals, risk, scorecards,
+insights, events, mutual funds, option chains, IPOs, screens, backtests, your
+portfolio, lots, tax estimate, advance tax, harvest and rebalance plans,
 calendar, goals, watchlist and alerts). See [ai.md](ai.md).
 
 | Command | Description |
 |---------|-------------|
 | `ask <QUESTION> [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers. Needs a model with tool calling. `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage). The last request runs without tools, so the model must answer. Educational, not financial advice |
-| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude Desktop, Claude Code, Cursor and other assistants: 24 read-only tools, the portfolio, watchlist and alerts as resources, and three prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
+| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude Desktop, Claude Code, Cursor and other assistants: 34 read-only tools, the portfolio, watchlist and alerts as resources, and three prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
 
 ```bash
 stockwise ask "how is my portfolio doing?"
