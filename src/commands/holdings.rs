@@ -847,6 +847,7 @@ pub async fn cmd_import(
         // A merged-away ticker (HDFC, MINDTREE) is restated in the acquirer's
         // shares, keeping the cost and date; a plain rename only maps the name.
         let mut symbol_raw = symbol_raw;
+        let mut units_as_of = None;
         if market == Market::In
             && let Some(swap) = pf::merger_swap(&symbol_raw, date.as_deref(), qty, price)
         {
@@ -858,6 +859,9 @@ pub async fn cmd_import(
                 None => merged.push((swap.merger, 1)),
             }
             (symbol_raw, qty, price) = (swap.symbol, swap.qty, swap.price);
+            // The restated quantity is the acquirer's share count as of the
+            // merger: its splits up to then are already in the ratio.
+            units_as_of = Some(swap.merger.through.to_string());
         }
         rows.push(ImportRow {
             symbol: market::resolve_symbol(&symbol_raw, market),
@@ -865,6 +869,7 @@ pub async fn cmd_import(
             price,
             date,
             sell,
+            units_as_of,
         });
     }
     if rows.is_empty() {
@@ -1072,8 +1077,9 @@ pub(super) async fn apply_import_rows(
             ),
             ImportOutcome::WouldReplace => println!(
                 "  {} {} — skipped: it has lots or sales from elsewhere (manual entries, another \
-                 import, or a tradebook imported by an older version) that this file would replace. \
-                 Re-run with --replace to rebuild it from this file.",
+                 import, or a tradebook imported by an older version), or sales and trades kept \
+                 from an earlier tradebook of this source that a file of lots alone would delete. \
+                 Re-run with --replace to rebuild it from this file and delete those.",
                 "!".yellow(),
                 sym
             ),
@@ -1340,6 +1346,21 @@ struct HarvestSale {
     lt: f64,
 }
 
+/// `harvest` for `portfolio`: valued like `tax in`, so a fund sold in full
+/// (no longer held, but with realized gains) still has its AMFI mark and
+/// lands in the same Sec. 111A/112A totals. Returns the valuation too, for
+/// its price notes.
+pub(crate) async fn harvest_summary(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    market: Market,
+    today: chrono::NaiveDate,
+) -> Result<(HarvestSummary, Valuation)> {
+    let val = tax_valuation(src, portfolio, market).await?;
+    let summary = compute_harvest(portfolio, &val, market, today);
+    Ok((summary, val))
+}
+
 pub(crate) fn compute_harvest(
     portfolio: &Portfolio,
     val: &Valuation,
@@ -1591,15 +1612,9 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
         };
     }
 
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    let client = YahooClient::new().await?;
-    let val = value_holdings(&client, &symbols, market, None).await?;
     let today = chrono::Local::now().date_naive();
-    let summary = compute_harvest(&portfolio, &val, market, today);
+    let (summary, val) =
+        harvest_summary(&views::LiveSource::new(), &portfolio, market, today).await?;
 
     match fmt {
         Format::Json => return output::print_json(&summary),
