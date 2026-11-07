@@ -300,7 +300,8 @@ impl AiClient {
                 let mut ai = Self::with_provider(provider, None, None);
                 // Refuse plain http:// to another machine before anything is sent.
                 if provider == AiProvider::Ollama
-                    && let Some(problem) = remote_ollama_problem(&ollama_url(), remote_ollama_allowed())
+                    && let Some(problem) =
+                        remote_ollama_problem(&ollama_url(), remote_ollama_allowed())
                 {
                     ai.config_error = Some(problem);
                 }
@@ -1166,8 +1167,14 @@ mod tests {
             "{msg}"
         );
         // Opt-in, or HTTPS, lets it through.
-        assert_eq!(remote_ollama_problem("http://203.0.113.5:11434", true), None);
-        assert_eq!(remote_ollama_problem("https://gpu.example.com", false), None);
+        assert_eq!(
+            remote_ollama_problem("http://203.0.113.5:11434", true),
+            None
+        );
+        assert_eq!(
+            remote_ollama_problem("https://gpu.example.com", false),
+            None
+        );
         // A password in the URL never reaches a message.
         let msg = remote_ollama_problem("http://me:hunter2@203.0.113.5:11434", false).unwrap();
         assert!(!msg.contains("hunter2") && !msg.contains("me:"), "{msg}");

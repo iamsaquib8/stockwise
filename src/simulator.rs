@@ -400,7 +400,10 @@ mod tests {
         let short: SimTrade = serde_json::from_value(short).unwrap();
         assert!(crate::intraday::Direction::is_long_str(&long.direction));
         assert!(!crate::intraday::Direction::is_long_str(&short.direction));
-        assert_eq!(crate::intraday::Direction::label_of(&short.direction), "short");
+        assert_eq!(
+            crate::intraday::Direction::label_of(&short.direction),
+            "short"
+        );
     }
 
     #[test]

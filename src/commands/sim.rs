@@ -706,7 +706,9 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             let result = match r.status {
                 PositionStatus::T2Hit => format!("LEVEL 2 {}", at).green().bold().to_string(),
                 PositionStatus::StopHit if r.t1_booked => {
-                    format!("LEVEL 1, then exit level {}", at).yellow().to_string()
+                    format!("LEVEL 1, then exit level {}", at)
+                        .yellow()
+                        .to_string()
                 }
                 PositionStatus::StopHit => format!("EXIT LEVEL {}", at).red().to_string(),
                 _ => format!("Exit {}", at).dimmed().to_string(),

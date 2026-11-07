@@ -745,8 +745,14 @@ mod tests {
         assert_eq!(long.status, PositionStatus::StopHit);
         update_position(&mut short, 104.0, Phase::Active);
         assert_eq!(short.status, PositionStatus::StopHit);
-        assert_eq!(crate::intraday::Direction::label_of(&long.direction), "long");
-        assert_eq!(crate::intraday::Direction::label_of(&short.direction), "short");
+        assert_eq!(
+            crate::intraday::Direction::label_of(&long.direction),
+            "long"
+        );
+        assert_eq!(
+            crate::intraday::Direction::label_of(&short.direction),
+            "short"
+        );
         // New files use the new spelling and behave the same.
         let mut new = make_position(100.0, 103.0, 106.0, 97.0);
         new.direction = crate::intraday::Direction::Long.to_string();
@@ -786,7 +792,11 @@ mod tests {
                 pnl: -20.0,
             },
         ];
-        let mut text = events.iter().map(|e| e.text("₹")).collect::<Vec<_>>().join("\n");
+        let mut text = events
+            .iter()
+            .map(|e| e.text("₹"))
+            .collect::<Vec<_>>()
+            .join("\n");
         for s in [
             PositionStatus::Open,
             PositionStatus::T1Hit,

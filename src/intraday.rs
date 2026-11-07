@@ -31,7 +31,11 @@ impl Direction {
 
     /// `long` or `short` for a stored direction string, old spelling or new.
     pub fn label_of(s: &str) -> &'static str {
-        if Self::is_long_str(s) { "long" } else { "short" }
+        if Self::is_long_str(s) {
+            "long"
+        } else {
+            "short"
+        }
     }
 
     /// Which way the signal leans, for screens that only describe data.
@@ -1008,7 +1012,12 @@ mod tests {
         assert_eq!(format!("{}", Direction::Long), "long");
         assert_eq!(format!("{}", Direction::Short), "short");
         // Stored strings from before 0.8.1 still read the same way.
-        for (s, long) in [("BUY", true), ("SELL", false), ("long", true), ("short", false)] {
+        for (s, long) in [
+            ("BUY", true),
+            ("SELL", false),
+            ("long", true),
+            ("short", false),
+        ] {
             assert_eq!(Direction::is_long_str(s), long, "{s}");
         }
         assert_eq!(Direction::label_of("BUY"), "long");

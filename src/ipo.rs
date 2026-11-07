@@ -2114,7 +2114,8 @@ pub fn score_ipo_verdict(
         (
             50.0,
             "NO SIGNAL".to_string(),
-            "No GMP figures or positive/negative press headlines detected (weight redistributed).".to_string(),
+            "No GMP figures or positive/negative press headlines detected (weight redistributed)."
+                .to_string(),
         )
     } else {
         let mut sc: f64 = 55.0;

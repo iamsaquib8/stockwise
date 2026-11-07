@@ -52,7 +52,11 @@ fn once_on_a_settled_day_exits_immediately() {
     };
     let out = child.wait_with_output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        status.success(),
+        "{text}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         text.contains("already settled") && text.contains("--once"),
         "{text}"

@@ -1021,7 +1021,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         } else {
             format!("{:.1}%", upside).red().to_string()
         };
-        print_kv("Analyst Mean Price Estimate", &format!("{}{:.2} ({})", csym, target, u));
+        print_kv(
+            "Analyst Mean Price Estimate",
+            &format!("{}{:.2} ({})", csym, target, u),
+        );
     }
     if let Some(n) = q.number_of_analyst_opinions {
         print_kv("# Analysts", &n.to_string());

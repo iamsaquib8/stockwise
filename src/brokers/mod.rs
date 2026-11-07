@@ -955,7 +955,11 @@ mod tests {
         assert_eq!(estimate_value(&OrderKind::Market, 10, None), None);
         // A halted stock (price 0), a negative or a NaN price is no estimate.
         for bad in [0.0, -5.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(estimate_value(&OrderKind::Market, 10, Some(bad)), None, "{bad}");
+            assert_eq!(
+                estimate_value(&OrderKind::Market, 10, Some(bad)),
+                None,
+                "{bad}"
+            );
         }
         assert_eq!(
             estimate_value(&OrderKind::Limit { price: 50.0 }, 2, None),

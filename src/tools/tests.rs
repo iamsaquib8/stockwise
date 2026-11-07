@@ -541,7 +541,10 @@ async fn order_preview_quotes_symbols_a_shell_would_split() {
     );
     // Single quotes work in bash, zsh and PowerShell; cmd.exe needs double.
     let next = mm["data"]["next_step"].as_str().unwrap();
-    assert!(next.contains("cmd.exe") && next.contains("double quotes"), "{next}");
+    assert!(
+        next.contains("cmd.exe") && next.contains("double quotes"),
+        "{next}"
+    );
     // Plain symbols, hyphens included, stay unquoted.
     let bajaj = c.call("order_preview", &args("BAJAJ-AUTO")).await.unwrap();
     assert_eq!(
@@ -549,7 +552,10 @@ async fn order_preview_quotes_symbols_a_shell_would_split() {
         "stockwise trade buy BAJAJ-AUTO 2 --broker zerodha --limit 3000"
     );
     assert!(
-        !bajaj["data"]["next_step"].as_str().unwrap().contains("cmd.exe"),
+        !bajaj["data"]["next_step"]
+            .as_str()
+            .unwrap()
+            .contains("cmd.exe"),
         "no quote, no cmd.exe note"
     );
 }
@@ -557,7 +563,8 @@ async fn order_preview_quotes_symbols_a_shell_would_split() {
 #[tokio::test]
 async fn order_preview_refuses_aliases_the_trade_command_would_not_apply() {
     let mut f = Fixture::default();
-    f.quotes.push(quote("HDFCBANK.NS", Some(1700.0), 0.0, "INR"));
+    f.quotes
+        .push(quote("HDFCBANK.NS", Some(1700.0), 0.0, "INR"));
     f.quotes.push(quote("LT.NS", Some(3600.0), 0.0, "INR"));
     let mut c = ToolContext::new(f, Market::In);
     c.allow_orders = true;
@@ -565,7 +572,10 @@ async fn order_preview_refuses_aliases_the_trade_command_would_not_apply() {
     for (typed, ticker) in [("HDFC", "HDFCBANK"), ("L&T", "LT"), ("hdfc.ns", "HDFCBANK")] {
         let e = c.call("order_preview", &args(typed)).await.unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains("alias") && msg.contains(ticker), "{typed}: {msg}");
+        assert!(
+            msg.contains("alias") && msg.contains(ticker),
+            "{typed}: {msg}"
+        );
     }
     // The real ticker previews, and prices the instrument the command trades.
     let ok = c.call("order_preview", &args("HDFCBANK")).await.unwrap();

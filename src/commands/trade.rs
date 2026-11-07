@@ -1299,7 +1299,13 @@ mod tests {
     #[tokio::test]
     async fn a_zero_last_price_is_no_price_and_a_cap_refuses_the_market_order() {
         // Direct: halted, broken and negative prices are "unknown".
-        for p in [Some(0.0), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY), None] {
+        for p in [
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            None,
+        ] {
             assert_eq!(usable_price(p), None, "{p:?}");
         }
         assert_eq!(usable_price(Some(1234.5)), Some(1234.5));

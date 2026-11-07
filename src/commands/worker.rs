@@ -344,7 +344,11 @@ async fn report(events: &[Event], market: Market, notifier: &Notifier) {
         .filter(|e| matches!(e, Event::Entered { .. }))
         .count();
     if entries > 0 {
-        println!("  {} {} paper positions opened:\n", "✓".green().bold(), entries);
+        println!(
+            "  {} {} paper positions opened:\n",
+            "✓".green().bold(),
+            entries
+        );
     }
     for e in events {
         match e {
@@ -1169,7 +1173,9 @@ mod tests {
         let now = post_market();
         let mut state = open_row(now, true, true);
         let notifier = Notifier::from_env();
-        stop_intraday(&mut state, Market::In, &notifier).await.unwrap();
+        stop_intraday(&mut state, Market::In, &notifier)
+            .await
+            .unwrap();
         // The row stays Open for `sim settle`; no exit was invented.
         assert_eq!(state.positions[0].status, PositionStatus::Open);
         assert_eq!(state.open_count(), 1);
@@ -1183,16 +1189,33 @@ mod tests {
         let mut state = open_row(now, false, false);
         let mut feed = Feed::default();
         let mut scanned = false;
-        let t = tick(&mut state, Phase::PostMarket, Market::In, &mut feed, &mut scanned, now)
-            .await
-            .unwrap();
+        let t = tick(
+            &mut state,
+            Phase::PostMarket,
+            Market::In,
+            &mut feed,
+            &mut scanned,
+            now,
+        )
+        .await
+        .unwrap();
         assert!(t.done);
-        assert!(state.settled, "the day must end, or every tick reports done");
+        assert!(
+            state.settled,
+            "the day must end, or every tick reports done"
+        );
         // The next tick waits for the next session instead of returning
         // `done` with no wait.
-        let t = tick(&mut state, Phase::PostMarket, Market::In, &mut feed, &mut scanned, now)
-            .await
-            .unwrap();
+        let t = tick(
+            &mut state,
+            Phase::PostMarket,
+            Market::In,
+            &mut feed,
+            &mut scanned,
+            now,
+        )
+        .await
+        .unwrap();
         assert!(!t.done);
         assert!(t.wait >= Duration::from_secs(60), "{:?}", t.wait);
     }
