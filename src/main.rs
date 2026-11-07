@@ -367,9 +367,10 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         period: String,
     },
 
-    /// Fibonacci retracement levels
+    /// Fibonacci retracement levels (last 21, 63 and 126 trading days)
     Fibs {
         symbol: String,
+        /// Ignored: `fibs` always reads a year of daily bars
         #[arg(short, long, default_value = "1mo", value_parser = PERIODS)]
         period: String,
     },
@@ -2729,6 +2730,8 @@ fn parse_bare_symbol_invocation(
     let mut market = default_market;
     let mut fmt = Format::Table;
     let mut symbol: Option<String> = None;
+    // `-m`/`--market` given on the command line (not just a default market).
+    let mut market_flag = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -2736,9 +2739,11 @@ fn parse_bare_symbol_invocation(
         if a == "-m" || a == "--market" {
             let val = args.get(i + 1)?;
             market = Market::from_str(val, true).ok()?;
+            market_flag = true;
             i += 2;
         } else if let Some(val) = a.strip_prefix("--market=") {
             market = Market::from_str(val, true).ok()?;
+            market_flag = true;
             i += 1;
         } else if a == "--json" {
             if fmt == Format::Csv {
@@ -2764,15 +2769,22 @@ fn parse_bare_symbol_invocation(
     }
 
     let sym = symbol?;
-    // Reject if it matches any known subcommand or alias (case-insensitive).
-    let lower = sym.to_ascii_lowercase();
+    // A word that is exactly a command or alias is that command: clap already
+    // took it, so only a mistake can leave it here. A word that matches one
+    // only in a different case is a ticker when it is all capitals and either
+    // one letter (`C`, `T`, `A`: a ticker, since the lowercase letter is the
+    // alias) or an explicit `-m` says it is one (`stockwise ALL -m us`).
+    // Anything else (`Quote`, `QUOTE`, `growht`) stays a clap error, which
+    // suggests the command. `stockwise quote C` always works.
+    let upper = sym.to_ascii_uppercase();
+    let capitals = sym == upper && sym.chars().any(|c| c.is_ascii_alphabetic());
+    let ticker_wins = capitals && (sym.len() == 1 || market_flag);
     for sc in cmd.get_subcommands() {
-        if sc.get_name().eq_ignore_ascii_case(&lower)
-            || sc
-                .get_all_aliases()
-                .any(|al| al.eq_ignore_ascii_case(&lower))
-        {
-            return None;
+        let names = std::iter::once(sc.get_name()).chain(sc.get_all_aliases());
+        for name in names {
+            if name == sym || (name.eq_ignore_ascii_case(&sym) && !ticker_wins) {
+                return None;
+            }
         }
     }
     // Accept if the user typed an uppercase/numeric/suffixed ticker (e.g. RELIANCE, TCS.NS, ^NSEI, 500325)
@@ -2784,7 +2796,6 @@ fn parse_bare_symbol_invocation(
     if !valid_chars {
         return None;
     }
-    let upper = sym.to_ascii_uppercase();
     let is_known_alias = market::resolve_index_alias(&upper, market).is_some()
         || market::normalize_india_ticker(&upper) != upper
         || market::SYMBOL_DIRECTORY.iter().any(|(s, _)| {
@@ -5627,5 +5638,60 @@ mod tests {
             parse_bare_symbol_invocation(&s(&["stockwise", "growht"]), Market::In),
             None
         );
+        // Single-letter US tickers: the uppercase letter is a ticker even
+        // though the lowercase one is a command alias (#147).
+        for t in ["C", "T", "D", "A", "W", "P", "Q"] {
+            assert_eq!(
+                parse_bare_symbol_invocation(&s(&["stockwise", t, "-m", "us"]), Market::In),
+                Some((t.into(), Market::Us, Format::Table)),
+                "{t}"
+            );
+        }
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "C", "--json", "-m", "us"]), Market::In),
+            Some(("C".into(), Market::Us, Format::Json))
+        );
+        // The default market counts too (config or STOCKWISE_MARKET).
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "T"]), Market::Us),
+            Some(("T".into(), Market::Us, Format::Table))
+        );
+        // A longer word that is a command in capitals is a ticker only with
+        // an explicit -m (Allstate is `ALL`, UiPath `PATH`); otherwise clap
+        // reports the mistake and suggests the command.
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "PATH", "-m", "us"]), Market::In),
+            Some(("PATH".into(), Market::Us, Format::Table))
+        );
+        assert_eq!(
+            parse_bare_symbol_invocation(&s(&["stockwise", "QUOTE"]), Market::In),
+            None
+        );
+        // A command typed exactly, or in mixed case, is never a ticker.
+        for word in ["quote", "c", "Quote", "Compare"] {
+            assert_eq!(
+                parse_bare_symbol_invocation(&s(&["stockwise", word, "-m", "us"]), Market::In),
+                None,
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowercase_single_letter_aliases_still_run_commands() {
+        // `c` is `compare`, `q` is `quote`: clap takes them before any
+        // bare-symbol fallback, and `C` is not a command, so it errors in
+        // clap and reaches the fallback.
+        let cli = Cli::try_parse_from(["stockwise", "c", "TCS", "INFY"]).unwrap();
+        assert!(matches!(cli.command, Commands::Compare { .. }));
+        let cli = Cli::try_parse_from(["stockwise", "q", "C", "-m", "us"]).unwrap();
+        assert!(matches!(cli.command, Commands::Quote { .. }));
+        // The escape for a ticker that shares a name: `quote C`.
+        let cli = Cli::try_parse_from(["stockwise", "quote", "C", "-m", "us"]).unwrap();
+        assert!(matches!(cli.command, Commands::Quote { .. }));
+        let Err(err) = Cli::try_parse_from(["stockwise", "C", "-m", "us"]) else {
+            panic!("`C` must not parse as a command");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

@@ -1004,70 +1004,80 @@ pub async fn cmd_support(symbol: &str, period: &str, market: Market) -> Result<(
 
 // ── Volume Profile ──
 
-pub async fn cmd_fibs(symbol: &str, period: &str, market: Market) -> Result<()> {
+/// The look-backs `fibs` reports, in daily bars (trading days): one, three and
+/// six months at 21 trading days a month.
+const FIB_WINDOWS: [(usize, &str); 3] = [(21, "1 Month"), (63, "3 Month"), (126, "6 Month")];
+
+/// Swing high and low for each [`FIB_WINDOWS`] entry that has enough bars,
+/// as `(bars, label, (swing_high, swing_low))`. `highs` and `lows` are daily
+/// bars, oldest first, and each window looks at its own last `bars` of them.
+fn fib_swings(highs: &[f64], lows: &[f64]) -> Vec<(usize, &'static str, (f64, f64))> {
+    FIB_WINDOWS
+        .iter()
+        .filter_map(|&(bars, label)| {
+            technical::find_swing_points(highs, lows, bars).map(|swing| (bars, label, swing))
+        })
+        .collect()
+}
+
+/// `fibs`: retracement levels for the last 21, 63 and 126 trading days. It
+/// always fetches a year of daily bars, so the three sections differ whatever
+/// `-p` says; `period` is only accepted so existing scripts keep working.
+pub async fn cmd_fibs(symbol: &str, _period: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-    let chart = client
-        .get_chart(&resolved, period, period_to_interval(period))
-        .await?;
+    let chart = client.get_chart(&resolved, "1y", "1d").await?;
     let cur = chart.meta.as_ref().and_then(|m| m.currency.as_deref());
     let csym = market::currency_symbol(cur);
-    let highs: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|q| q.high.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
-    let lows: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|q| q.low.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
-    let closes: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|q| q.close.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
-    if closes.len() < 20 {
-        bail!("Not enough price data — try a longer period with -p");
+    let quote = chart.indicators.quote.first();
+    // Keep a bar only when high, low and close are all present, so the
+    // three series stay aligned.
+    let (mut highs, mut lows, mut closes) = (Vec::new(), Vec::new(), Vec::new());
+    if let Some(q) = quote {
+        let (h, l, c) = (q.high.as_deref(), q.low.as_deref(), q.close.as_deref());
+        if let (Some(h), Some(l), Some(c)) = (h, l, c) {
+            for ((h, l), c) in h.iter().zip(l).zip(c) {
+                if let (Some(h), Some(l), Some(c)) = (h, l, c) {
+                    highs.push(*h);
+                    lows.push(*l);
+                    closes.push(*c);
+                }
+            }
+        }
     }
+    let swings = fib_swings(&highs, &lows);
+    let Some(&current) = closes.last().filter(|_| !swings.is_empty()) else {
+        bail!(
+            "Not enough price data — {resolved} has fewer than {} daily bars",
+            FIB_WINDOWS[0].0
+        );
+    };
 
-    let current = *closes.last().unwrap();
-
-    // Find swing points from different lookbacks
     print_header(&format!("Fibonacci Retracement: {}", resolved));
     println!("  Current: {}\n", format_price(current, cur).bold());
 
-    for (lookback, label) in [(30, "1 Month"), (60, "3 Month"), (120, "6 Month")] {
-        let lb = lookback.min(highs.len());
-        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, lb) {
-            let fibs = technical::fibonacci_levels(sh, sl);
-            print_section(&format!(
-                "{} Swing ({}{:.2} → {}{:.2})",
-                label, csym, sh, csym, sl
-            ));
-            let levels = [
-                ("0.0% (High)", sh),
-                ("23.6%", fibs[0]),
-                ("38.2%", fibs[1]),
-                ("50.0%", fibs[2]),
-                ("61.8%", fibs[3]),
-                ("78.6%", fibs[4]),
-                ("100% (Low)", sl),
-            ];
-            for (name, val) in &levels {
-                let marker = if (current - val).abs() / current < 0.01 {
-                    " ← YOU ARE HERE".yellow().bold().to_string()
-                } else {
-                    String::new()
-                };
-                print_kv(name, &format!("{}{:.2}{}", csym, val, marker));
-            }
+    for (bars, label, (sh, sl)) in swings {
+        let fibs = technical::fibonacci_levels(sh, sl);
+        print_section(&format!(
+            "{} Swing, last {} trading days ({}{:.2} → {}{:.2})",
+            label, bars, csym, sh, csym, sl
+        ));
+        let levels = [
+            ("0.0% (High)", sh),
+            ("23.6%", fibs[0]),
+            ("38.2%", fibs[1]),
+            ("50.0%", fibs[2]),
+            ("61.8%", fibs[3]),
+            ("78.6%", fibs[4]),
+            ("100% (Low)", sl),
+        ];
+        for (name, val) in &levels {
+            let marker = if (current - val).abs() / current < 0.01 {
+                " ← YOU ARE HERE".yellow().bold().to_string()
+            } else {
+                String::new()
+            };
+            print_kv(name, &format!("{}{:.2}{}", csym, val, marker));
         }
     }
     println!();
@@ -1407,3 +1417,46 @@ pub async fn cmd_stoploss(
 }
 
 // ── Peers Comparison ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `n` daily bars rising one point a day: bar `i` has high `100 + i` and
+    /// low `95 + i`.
+    fn rising_bars(n: usize) -> (Vec<f64>, Vec<f64>) {
+        let highs: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
+        let lows = highs.iter().map(|h| h - 5.0).collect();
+        (highs, lows)
+    }
+
+    #[test]
+    fn fib_sections_use_their_own_window() {
+        // 130 bars: the last is index 129, high 229. The window of N bars
+        // starts at index 130 - N, whose low is 95 + (130 - N), so:
+        //   21 bars  -> low 95 + 109 = 204
+        //   63 bars  -> low 95 + 67  = 162
+        //   126 bars -> low 95 + 4   = 99
+        let (highs, lows) = rising_bars(130);
+        let swings = fib_swings(&highs, &lows);
+        let got: Vec<(usize, &str, (f64, f64))> = swings;
+        assert_eq!(
+            got,
+            vec![
+                (21, "1 Month", (229.0, 204.0)),
+                (63, "3 Month", (229.0, 162.0)),
+                (126, "6 Month", (229.0, 99.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fib_sections_skip_windows_longer_than_the_history() {
+        // 100 bars cover 21 and 63 but not 126; 20 bars cover none.
+        let (h, l) = rising_bars(100);
+        let labels: Vec<_> = fib_swings(&h, &l).iter().map(|s| s.1).collect();
+        assert_eq!(labels, ["1 Month", "3 Month"]);
+        let (h, l) = rising_bars(20);
+        assert!(fib_swings(&h, &l).is_empty());
+    }
+}

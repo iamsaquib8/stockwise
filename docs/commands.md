@@ -75,7 +75,11 @@ network, invalid config file), `2` invalid arguments.
 
 `stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise`
 prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
-`c` (compare), `p` (portfolio), `w` (watch), `ev` (events). Common names resolve to NSE symbols
+`c` (compare), `p` (portfolio), `w` (watch), `ev` (events). The aliases are lowercase: a capital
+single letter is a ticker, so `stockwise C -m us` (Citigroup), `T`, `D`, `A` and `W` work as bare
+symbols, and `stockwise c TCS INFY` still compares. A longer ticker that spells a command, such as
+`ALL` or `PATH`, is a symbol when you give `-m` (`stockwise PATH -m us`). `stockwise quote C -m us`
+always works. Common names resolve to NSE symbols
 (`SBI` → `SBIN`, `L&T` → `LT`, index names), and `quote` suggests close matches for a mistyped symbol.
 
 | Command | Description |
@@ -106,7 +110,7 @@ prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), 
 | `returns <SYMBOL> [--json\|--csv]` | 1W–5Y returns. The annualized figure (CAGR) uses the calendar time between the first and last bar, and is shown only for spans of a year or more (`null` otherwise) |
 | `patterns <SYMBOL> [-p]` | Candlestick patterns (doji, hammer, engulfing, morning star) |
 | `support <SYMBOL> [-p]` | Pivot points (R1–R3, S1–S3) from the last completed daily session (named on screen), whatever `-p` is, + Fibonacci levels |
-| `fibs <SYMBOL> [-p]` | Fibonacci retracement with a "you are here" marker |
+| `fibs <SYMBOL>` | Fibonacci retracement with a "you are here" marker, for the last 21, 63 and 126 trading days (1, 3 and 6 months of daily bars). Always reads a year of daily bars; `-p` is accepted but ignored |
 | `volume <SYMBOL> [-p]` (`vol`) | OBV, A/D line, volume ratio, volume bars |
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
 | `stoploss <SYMBOL> [-e PRICE] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, R:R targets |

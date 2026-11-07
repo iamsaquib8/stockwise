@@ -358,19 +358,9 @@ pub(crate) fn sharpe(curve: &[f64], periods_per_year: f64) -> Option<f64> {
 }
 
 /// `technical::sortino_ratio` (risk-free 0) with a chosen bars-per-year.
+/// Delegates so the downside deviation (taken over all periods) is defined once.
 pub(crate) fn sortino(curve: &[f64], periods_per_year: f64) -> Option<f64> {
-    let r = technical::daily_returns(curve);
-    if r.len() < 2 {
-        return None;
-    }
-    let mean = r.iter().sum::<f64>() / r.len() as f64;
-    let down: Vec<f64> = r.iter().filter(|x| **x < 0.0).copied().collect();
-    if down.is_empty() {
-        return None;
-    }
-    let dsd = (down.iter().map(|x| x * x).sum::<f64>() / down.len() as f64).sqrt()
-        * periods_per_year.sqrt();
-    (dsd != 0.0).then(|| mean * periods_per_year / dsd)
+    technical::sortino_ratio_with(curve, 0.0, periods_per_year)
 }
 
 // ── Simulation ──
@@ -1113,6 +1103,18 @@ mod tests {
         assert_eq!(bars_per_year(["TCS.NS", "AAPL"]), 252.0);
         assert_eq!(bars_per_year(["AAPL", "BTC-USD"]), 365.0);
         assert_eq!(bars_per_year(["EURUSD=X"]), 260.0);
+    }
+
+    #[test]
+    fn sortino_divides_downside_by_all_periods() {
+        // Returns +10%, -10%, +10%, +10%: mean 5%, one -10% shortfall, so the
+        // downside deviation is sqrt(0.01 / 4) = 5% per period (not 10%, which
+        // is what dividing by the single down period gave). Daily crypto bars:
+        // 0.05 * 365 / (0.05 * sqrt(365)) = sqrt(365).
+        let curve = [100.0, 110.0, 99.0, 108.9, 119.79];
+        let s = sortino(&curve, 365.0).unwrap();
+        assert!((s - 365.0_f64.sqrt()).abs() < 1e-9, "got {s}");
+        assert_eq!(sortino(&[100.0, 101.0, 102.0, 103.0], 252.0), None);
     }
 
     #[test]
