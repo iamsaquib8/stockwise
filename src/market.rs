@@ -1036,6 +1036,39 @@ pub fn currency_symbol(currency: Option<&str>) -> &'static str {
     }
 }
 
+/// Rough US dollars in one unit of `currency` (pence for `GBp`). Used only to
+/// compare an amount with a size threshold written in dollars (market cap,
+/// cash, insider trades), never for money shown to a user, so an
+/// order-of-magnitude rate is enough and is not fetched live. `None` for a
+/// currency not in the table: the caller should skip the comparison.
+pub fn approx_usd_per_unit(currency: &str) -> Option<f64> {
+    Some(match currency {
+        "USD" => 1.0,
+        "EUR" => 1.08,
+        "GBP" => 1.27,
+        "GBp" | "GBX" => 0.0127,
+        "CHF" => 1.1,
+        "CAD" => 0.73,
+        "AUD" => 0.65,
+        "SGD" => 0.74,
+        "HKD" => 0.128,
+        "CNY" => 0.14,
+        "INR" => 0.0114,
+        "JPY" => 0.0067,
+        "KRW" => 0.00072,
+        "TWD" => 0.031,
+        "BRL" => 0.18,
+        _ => return None,
+    })
+}
+
+/// `amount` of `currency` in US dollars, roughly (see
+/// [`approx_usd_per_unit`]). `currency` None is taken as dollars, like a bare
+/// US ticker.
+pub fn approx_usd(amount: f64, currency: Option<&str>) -> Option<f64> {
+    Some(amount * approx_usd_per_unit(currency.unwrap_or("USD"))?)
+}
+
 /// A minor currency unit Yahoo quotes in, as (major currency, minor units
 /// per major unit): London's pence `GBp` (also written `GBX`) → (`GBP`, 100).
 pub fn minor_unit(currency: &str) -> Option<(&'static str, f64)> {

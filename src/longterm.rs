@@ -381,8 +381,18 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         }
     }
 
-    // Market cap (large cap = safer)
-    if let Some(mc) = q.market_cap {
+    // Market cap (large cap = safer). The cut-offs are US dollars: the cap is
+    // converted from the quote currency, so the same size scores the same in
+    // rupees, euros or dollars. A currency we cannot convert gets no points.
+    let currency = q.currency.as_deref().or_else(|| {
+        q.symbol
+            .as_deref()
+            .and_then(crate::portfolio::symbol_currency)
+    });
+    let market_cap_usd = q
+        .market_cap
+        .and_then(|mc| crate::market::approx_usd(mc, currency));
+    if let Some(mc) = market_cap_usd {
         if mc > 500_000_000_000.0 {
             safety += 10.0; // mega cap
         } else if mc > 100_000_000_000.0 {
@@ -410,9 +420,7 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // ══════════════════════════════════════════
 
     // Additional moat signals from market cap dominance
-    if let Some(mc) = q.market_cap
-        && mc > 1_000_000_000_000.0
-    {
+    if market_cap_usd.is_some_and(|mc| mc > 1_000_000_000_000.0) {
         moat_points += 1; // mega-cap likely has moat
     }
 
@@ -718,5 +726,32 @@ mod tests {
         assert!(p90 > p10);
         assert!(median > p10);
         assert!(p90 > median);
+    }
+
+    #[test]
+    fn market_cap_cutoffs_are_dollars_in_any_currency() {
+        let capped = |cap: f64, cur: &str, sym: &str| {
+            let mut q = mock_quote(15.0, 14.0, 0.2, 0.2, 0.02);
+            q.symbol = Some(sym.into());
+            q.currency = Some(cur.into());
+            q.market_cap = Some(cap);
+            score_for_longterm(&q, None)
+        };
+        // $600B is mega cap (+10 safety); so is the same size in rupees.
+        let usd = capped(6.0e11, "USD", "BIG");
+        let inr = capped(6.0e11 / 0.0114, "INR", "BIG.NS");
+        assert_eq!(usd.safety_score, inr.safety_score);
+        // A $5B company is small (< $10B); so is ₹5,000 crore (about $570M)...
+        let small_us = capped(5.0e9, "USD", "MID");
+        let small_in = capped(5.0e10, "INR", "SMALL.NS");
+        assert!(small_us.risk_flags.iter().any(|f| f.contains("Small-cap")));
+        assert!(small_in.risk_flags.iter().any(|f| f.contains("Small-cap")));
+        // ...but ₹5 lakh crore (about $57B) is neither flagged nor a mega cap.
+        let large_in = capped(5.0e12, "INR", "LARGE.NS");
+        assert!(!large_in.risk_flags.iter().any(|f| f.contains("Small-cap")));
+        // A rupee cap over ₹1 lakh crore no longer earns the $1T moat point.
+        let moaty_in = capped(1.5e12, "INR", "A.NS");
+        let moaty_us = capped(1.5e12, "USD", "A");
+        assert!(moaty_us.moat as u8 >= moaty_in.moat as u8);
     }
 }

@@ -290,8 +290,10 @@ fn balance_sheet(r: &Research) -> PillarScore {
         b.add(15.0, "Financial sector capital structure".into());
     }
 
+    // The cut-off is US dollars; the amount is in the quote currency.
     if let Some(cash) = r.fin.total_cash
-        && cash > 10_000_000_000.0
+        && crate::market::approx_usd(cash, r.currency.as_deref())
+            .is_some_and(|c| c > 10_000_000_000.0)
     {
         b.add(10.0, "Substantial cash reserves".into());
     }
@@ -356,9 +358,11 @@ fn ownership(r: &Research) -> PillarScore {
         .filter(|t| !t.is_buy)
         .map(|t| t.value)
         .sum();
-    if insider_buys > 100_000.0 && insider_buys > insider_sells {
+    // Cut-offs are US dollars; trades are in the quote currency.
+    let usd = |v: f64| crate::market::approx_usd(v, r.currency.as_deref()).unwrap_or(0.0);
+    if usd(insider_buys) > 100_000.0 && insider_buys > insider_sells {
         b.add(15.0, "Recent insider open-market buying".into());
-    } else if insider_sells > 5_000_000.0 && insider_buys < 50_000.0 {
+    } else if usd(insider_sells) > 5_000_000.0 && usd(insider_buys) < 50_000.0 {
         b.add(-10.0, "Insider selling observed".into());
     }
     b.finish("Smart Money & Ownership", W_OWNERSHIP, 10.0, 95.0)
@@ -1079,5 +1083,41 @@ mod tests {
     fn disclaimer_says_not_a_recommendation() {
         let v = generate_verdict(&Research::default(), &[]);
         assert!(v.disclaimer.contains("not a recommendation"));
+    }
+
+    #[test]
+    fn size_cutoffs_mean_the_same_in_any_currency() {
+        // Only an insider trade, so the bonus shows in the pillar's score.
+        let insider = |value: f64, cur: &str| {
+            let mut r = Research::default();
+            r.currency = Some(cur.into());
+            r.insiders = vec![InsiderTxn {
+                ts: 0,
+                name: "A".into(),
+                relation: "Director".into(),
+                is_buy: true,
+                shares: 1.0,
+                value,
+            }];
+            ownership(&r).score
+        };
+        // A 1.5 lakh rupee (about $1,700) buy is nowhere near the $100,000
+        // line, but 1,00,001 rupees used to clear a 1e5 line written for dollars.
+        assert_eq!(insider(150_000.0, "INR"), insider(1_700.0, "USD"));
+        assert_eq!(insider(150_000.0, "INR"), insider(0.0, "USD"));
+        // ₹1 crore (about $114,000) is a real insider purchase; so is $114,000.
+        assert_eq!(insider(10_000_000.0, "INR"), insider(114_000.0, "USD"));
+        assert!(insider(114_000.0, "USD") > insider(1_700.0, "USD"));
+        // Cash: ₹1,00,000 crore (about $11.4B) is substantial, ₹1,000 crore is not.
+        let cash = |value: f64, cur: &str| {
+            let mut r = full_stock();
+            r.currency = Some(cur.into());
+            r.fin.total_cash = Some(value);
+            balance_sheet(&r).score
+        };
+        assert!(cash(1.0e12, "INR") > cash(1.0e10, "INR"));
+        assert_eq!(cash(1.0e12, "INR"), cash(1.14e10, "USD"));
+        // A currency with no rate gets no points either way.
+        assert_eq!(cash(1.0e15, "XXX"), cash(1.0, "XXX"));
     }
 }
