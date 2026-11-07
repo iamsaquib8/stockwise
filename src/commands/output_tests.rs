@@ -363,10 +363,45 @@ fn movers_leave_out_quotes_without_a_change() {
     let g: Vec<&str> = gainers.iter().map(|r| r.symbol.as_str()).collect();
     let l: Vec<&str> = losers.iter().map(|r| r.symbol.as_str()).collect();
     assert_eq!(g, ["A", "E"]);
-    assert_eq!(l, ["C", "E"]);
+    assert_eq!(l, ["C"]);
     assert_eq!((gainers[0].side, gainers[0].rank), ("gainer", 1));
     assert_eq!((losers[0].side, losers[0].rank), ("loser", 1));
     assert_columns::<MoverRow>(&gainers[0]);
+}
+
+#[test]
+fn movers_never_mix_rising_and_falling_sides() {
+    // Broad up day: the smallest changes are still positive — they must not
+    // appear under losers.
+    let up_day = [
+        quote("UP1", Some(1.0), Some(2.0)),
+        quote("UP2", Some(1.0), Some(1.0)),
+        quote("UP3", Some(1.0), Some(0.1)),
+        quote("FLAT", Some(1.0), Some(0.0)),
+    ];
+    let (gainers, losers) = mover_rows(&up_day, 10);
+    assert!(losers.is_empty(), "no negative changes → no losers");
+    assert!(gainers.iter().all(|r| r.change_percent > 0.0));
+    assert_eq!(
+        gainers
+            .iter()
+            .map(|r| r.symbol.as_str())
+            .collect::<Vec<_>>(),
+        ["UP1", "UP2", "UP3"]
+    );
+
+    let down_day = [
+        quote("DN1", Some(1.0), Some(-0.1)),
+        quote("DN2", Some(1.0), Some(-1.0)),
+        quote("DN3", Some(1.0), Some(-2.0)),
+    ];
+    let (gainers, losers) = mover_rows(&down_day, 10);
+    assert!(gainers.is_empty(), "no positive changes → no gainers");
+    assert_eq!(
+        losers.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>(),
+        ["DN3", "DN2", "DN1"]
+    );
+    assert!(losers.iter().all(|r| r.change_percent < 0.0));
 }
 
 #[test]
