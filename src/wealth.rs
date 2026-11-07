@@ -9,7 +9,7 @@ pub struct Snapshot {
     pub holdings_count: usize,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WealthHistory {
     pub snapshots: Vec<Snapshot>,
 }
@@ -18,6 +18,15 @@ impl WealthHistory {
     /// History of the active portfolio (each named portfolio has its own).
     pub fn load() -> Result<Self> {
         crate::store::load(&crate::portfolio::scoped_file("wealth_history.json"))
+    }
+
+    /// Change the history under a lock, on the file as it is now (see
+    /// [`crate::store::update`]).
+    pub fn update<R>(change: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        crate::store::update(
+            &crate::portfolio::scoped_file("wealth_history.json"),
+            change,
+        )
     }
 
     pub fn save(&self) -> Result<()> {

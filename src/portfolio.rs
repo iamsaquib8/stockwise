@@ -850,6 +850,19 @@ impl Portfolio {
         Self::load_from(&crate::store::path(&file_name(name))?)
     }
 
+    /// Change the active portfolio under a lock: take `<file>.lock`, load the
+    /// current copy, apply `change`, save, unlock. Another command that
+    /// saved in the meantime is kept, not overwritten. Do network work first
+    /// and apply only its result here; a change that fails saves nothing.
+    pub fn update<R>(change: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        let path = crate::store::path(&file_name(active()))?;
+        let _lock = crate::store::lock(&path)?;
+        let mut p = Self::load_from(&path)?;
+        let out = change(&mut p)?;
+        p.save_to(&path)?;
+        Ok(out)
+    }
+
     /// Save to the *active* portfolio's file — not necessarily the one a
     /// `load_named` call read.
     pub fn save(&self) -> Result<()> {

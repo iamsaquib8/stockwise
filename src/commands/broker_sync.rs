@@ -393,7 +393,13 @@ pub async fn cmd_trade_sync(
     }
 
     if apply && changed {
-        after.save()?;
+        // The fills were worked out on the portfolio loaded before the
+        // network calls: apply them to the file as it is now, under a lock.
+        // Fills already synced are skipped, so this is safe to repeat.
+        Portfolio::update(|p| {
+            p.apply_broker_fills(&fills);
+            Ok(())
+        })?;
     }
     let name = crate::portfolio::active().unwrap_or("default");
 

@@ -90,9 +90,10 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market) -> Resu
                 // Wealth snapshot — skipped when a price is missing, so the
                 // history never records a fake drop.
                 if unpriced == 0 {
-                    let mut wealth = crate::wealth::WealthHistory::load()?;
-                    wealth.add_snapshot(total_value, total_cost, portfolio.holdings.len());
-                    wealth.save()?;
+                    crate::wealth::WealthHistory::update(|w| {
+                        w.add_snapshot(total_value, total_cost, portfolio.holdings.len());
+                        Ok(())
+                    })?;
                 } else {
                     println!(
                         "    {} {} holding(s) without a live price — wealth snapshot skipped.",

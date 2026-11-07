@@ -830,7 +830,7 @@ pub(super) async fn apply_import_rows(
     tradebook: bool,
     replace: bool,
 ) -> Result<()> {
-    let mut portfolio = Portfolio::load()?;
+    let portfolio = Portfolio::load()?;
     let dated = |sym: &str| {
         rows.iter()
             .any(|r| r.symbol == sym && (r.date.is_some() || r.sell))
@@ -880,16 +880,23 @@ pub(super) async fn apply_import_rows(
         .filter(|r| !blocked.iter().any(|(s, _)| *s == r.symbol))
         .collect();
 
-    let outcomes = portfolio.apply_import(
-        &rows,
-        ImportOptions {
-            source: &format!("import:{}", source),
-            replace,
-            tradebook,
-            splits: &splits,
-            account: None,
-        },
-    );
+    // The splits and pending-split checks above took time: apply the rows to
+    // the file as it is now, under a lock, so a change saved meanwhile (a
+    // `portfolio add`, a sync) is kept.
+    let (outcomes, current) = Portfolio::update(|p| {
+        let outcomes = p.apply_import(
+            &rows,
+            ImportOptions {
+                source: &format!("import:{}", source),
+                replace,
+                tradebook,
+                splits: &splits,
+                account: None,
+            },
+        );
+        Ok((outcomes, p.clone()))
+    })?;
+    let portfolio = current;
     let updated = outcomes
         .iter()
         .filter(|(_, o)| {
@@ -899,14 +906,6 @@ pub(super) async fn apply_import_rows(
             )
         })
         .count();
-    // Trades a sell has no buy for yet are kept for the next file, so that
-    // outcome is saved too.
-    let kept_trades = outcomes
-        .iter()
-        .any(|(_, o)| matches!(o, ImportOutcome::Unmatched { .. }));
-    if updated > 0 || kept_trades {
-        portfolio.save()?;
-    }
 
     let mut undated = false;
     for (sym, outcome) in &outcomes {
@@ -1056,7 +1055,6 @@ pub(super) fn find_col(cols: &[String], names: &[&str]) -> Option<usize> {
 
 pub async fn cmd_wealth(market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
-    let mut history = WealthHistory::load()?;
 
     if portfolio.holdings.is_empty() {
         println!("\n  {}", "Portfolio is empty. Add holdings first.".dimmed());
@@ -1092,8 +1090,10 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
     }
 
     // Save today's snapshot
-    history.add_snapshot(total_value, total_cost, portfolio.holdings.len());
-    history.save()?;
+    let history = WealthHistory::update(|h| {
+        h.add_snapshot(total_value, total_cost, portfolio.holdings.len());
+        Ok(h.clone())
+    })?;
 
     let cur = Some(val.base());
     let csym = market::currency_symbol(cur);

@@ -48,7 +48,8 @@ src/
                      Streamable HTTP transports (`mcp` feature)
   ask.rs             `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
                      /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent)
-  store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME)
+  store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME); `update` locks a file
+                     (`<file>.lock`) around load-change-save — do network work first, then update
   config.rs          Optional config.toml: defaults for market, AI, cache, data dir, periods
   output.rs          --json / --csv rendering (Format, CsvRow, RFC 4180 quoting)
   portfolio.rs       Lots, FIFO sales, splits/dividends, XIRR cash flows, FX, named portfolios

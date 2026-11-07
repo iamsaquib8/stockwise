@@ -43,6 +43,80 @@ pub fn save<T: Serialize>(file: &str, value: &T, private: bool) -> Result<()> {
     save_to(&path(file)?, value, private)
 }
 
+/// How long [`lock`] waits for another StockWise process before giving up.
+const LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An exclusive lock on one data file, held until it is dropped.
+pub struct Lock {
+    _file: std::fs::File,
+}
+
+/// Take an exclusive lock for read-modify-write of `path`, on `<path>.lock`
+/// (the data file itself is replaced by rename, so it can't carry the lock).
+/// Waits for another process that holds it; after 30 seconds it fails with a
+/// message instead of overwriting that process's change.
+pub fn lock(path: &Path) -> Result<Lock> {
+    lock_for(path, LOCK_TIMEOUT)
+}
+
+fn lock_for(path: &Path, timeout: std::time::Duration) -> Result<Lock> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Cannot create directory {}", dir.display()))?;
+    }
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let lock_path = PathBuf::from(name);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("Cannot open {}", lock_path.display()))?;
+    let start = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Lock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if start.elapsed() >= timeout {
+                    anyhow::bail!(
+                        "{} is being updated by another StockWise command (waited {} s). Try again in a moment.",
+                        path.display(),
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("Cannot lock {}", lock_path.display()));
+            }
+        }
+    }
+}
+
+/// Read-modify-write `file` safely: take its lock, load the current copy,
+/// apply `change`, save, unlock. Do slow work (network calls) before calling
+/// this and apply only the result inside `change`, so the lock is short and
+/// a change another command saved in the meantime is kept.
+pub fn update<T, R>(file: &str, change: impl FnOnce(&mut T) -> Result<R>) -> Result<R>
+where
+    T: DeserializeOwned + Serialize + Default,
+{
+    update_at(&path(file)?, change)
+}
+
+/// [`update`] for a file given by path.
+pub fn update_at<T, R>(path: &Path, change: impl FnOnce(&mut T) -> Result<R>) -> Result<R>
+where
+    T: DeserializeOwned + Serialize + Default,
+{
+    let _lock = lock(path)?;
+    let mut value: T = load_from(path)?;
+    let out = change(&mut value)?;
+    save_to(path, &value, false)?;
+    Ok(out)
+}
+
 pub fn load_from<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
     if !path.exists() {
         return Ok(T::default());
@@ -155,6 +229,88 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn updates_from_threads_keep_every_change() {
+        let dir = temp_dir("update");
+        let path = dir.join("doc.json");
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        update_at(&path, |doc: &mut Doc| {
+                            doc.items.push(format!("{t}-{i}"));
+                            // Hold the lock a moment so the writers really overlap.
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let doc: Doc = load_from(&path).unwrap();
+        let mut seen = doc.items.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!((doc.items.len(), seen.len()), (80, 80));
+    }
+
+    #[test]
+    fn a_second_writer_waits_then_fails_with_a_clear_message() {
+        let dir = temp_dir("lock-timeout");
+        let path = dir.join("doc.json");
+        let held = lock(&path).unwrap();
+        let err = lock_for(&path, std::time::Duration::from_millis(100))
+            .err()
+            .expect("the lock is taken")
+            .to_string();
+        assert!(err.contains("another StockWise command"), "{err}");
+        // Once the first writer is done the lock is free again.
+        drop(held);
+        assert!(lock_for(&path, std::time::Duration::from_millis(100)).is_ok());
+    }
+
+    #[test]
+    fn update_changes_the_file_as_it_is_now_and_keeps_it_on_error() {
+        let dir = temp_dir("update-fn");
+        let path = dir.join("doc.json");
+        save_to(
+            &path,
+            &Doc {
+                items: vec!["a".into()],
+            },
+            false,
+        )
+        .unwrap();
+        // The slow part of a command ran on an older copy...
+        let stale: Doc = load_from(&path).unwrap();
+        // ...while another command saved a change.
+        update_at(&path, |d: &mut Doc| {
+            d.items.push("b".into());
+            Ok(())
+        })
+        .unwrap();
+        // Applying the result of the slow part to the current file keeps both.
+        update_at(&path, |d: &mut Doc| {
+            d.items.extend(stale.items.iter().map(|i| format!("{i}2")));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(load_from::<Doc>(&path).unwrap().items, ["a", "b", "a2"]);
+        // A failing change saves nothing and releases the lock.
+        let err = update_at(&path, |d: &mut Doc| -> Result<()> {
+            d.items.clear();
+            anyhow::bail!("nope")
+        });
+        assert!(err.is_err());
+        assert_eq!(load_from::<Doc>(&path).unwrap().items.len(), 3);
+        assert!(lock_for(&path, std::time::Duration::from_millis(100)).is_ok());
     }
 
     #[test]
