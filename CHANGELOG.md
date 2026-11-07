@@ -26,60 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] - 2026-11-03
 
 ### Added
-- `stockwise portfolio xray` / `portfolio x-ray` ([#51](https://github.com/iamsaquib8/stockwise/issues/51)) — Portfolio X-Ray for look-through overlap across direct stocks, mutual funds, and ETFs:
-  - **Look-Through Constituent Aggregation**:
-    - Decomposes mutual funds and ETFs into underlying company constituents using Yahoo `topHoldings` and AMC disclosure files (`disclosures/<symbol>.json`).
-    - Calculates true effective company exposure across wrappers:
-      $\text{Weight}_{\text{effective}}(S) = \frac{\text{DirectValue}(S) + \sum_{F} \text{FundValue}(F) \times w_{F}(S)}{\text{TotalPortfolioValue}}$
-    - Canonical ticker normalization across Indian (`.NS`, `.BO`) and international symbols.
-    - Top effective stock exposures table displaying Direct Value, Fund Value, Total Value, Effective Weight, and contributing funds.
-  - **Risk Concentration Alerts**:
-    - Automatic detection and highlighted warning banners for any company exceeding 10.0% of total portfolio value (high concentration risk).
-    - Clear attribution of direct vs fund look-through weighting contributing to the concentration breach.
-  - **Macro Allocation Breakdown**:
-    - Broad Asset Class Split: % Equity vs % Debt vs % Gold/Commodity vs % Cash/Liquid.
-    - Market Cap Split: % Large Cap vs % Mid Cap vs % Small Cap (with market-appropriate thresholds for INR and USD).
-    - Sector Concentration: Exposure aggregated across standardized GICS sectors from direct equity sectors and fund sector weightings.
-  - Full machine-readable `--json` output and CLI aliases (`xray`, `x-ray`).
-- `stockwise score` / `stockwise scorecard` / `stockwise fundamental score` ([#50](https://github.com/iamsaquib8/stockwise/issues/50)) — transparent accounting scorecards for Piotroski 9-Point F-Score and Altman Z-Score:
-  - **Piotroski 9-Point F-Score**:
-    - Complete evaluation across Profitability (Positive Net Income, Positive ROA, Operating Cash Flow > 0, Cash Flow > Net Income), Leverage/Liquidity (Lower Debt Ratio YoY, Higher Current Ratio YoY, No Common Share Dilution), and Operating Efficiency (Gross Margin Expansion YoY, Higher Asset Turnover YoY).
-    - Transparent criteria table showing exact formulas, actual company values (YoY comparisons, margin delta in bps, debt-free badges), pass/fail signal (+1 / 0), and category subtotals.
-    - Institutional rating classification: `Very Strong` (8–9), `Moderate / Stable` (5–7), `Weak / High Risk` (0–4).
-  - **Altman Z-Score Discriminant Model**:
-    - Full 5-factor breakdown: Working Capital / Assets ($X_1$), Retained Earnings / Assets ($X_2$), EBIT / Assets ($X_3$), Market Cap / Liabilities ($X_4$), and Sales Turnover ($X_5$).
-    - Weighted contribution per factor, overall Z-score, and distress zone classification: `Safe Zone` ($Z > 2.99$), `Grey Zone` ($1.81 \le Z \le 2.99$), and `Distress Zone` ($Z < 1.81$).
-    - Emerging-market and service non-manufacturing $Z''$-score model ($6.56 X_1 + 3.26 X_2 + 6.72 X_3 + 1.05 X_4$).
-    - Automatic detection and advisory notes for financial institutions (banks and lending institutions with deposit leverage).
-  - Full machine-readable `--json` output and CLI aliases (`scorecard`, `score`, `f-score`, `z-score`).
-- `stockwise options oi` / `stockwise fno oi` ([#49](https://github.com/iamsaquib8/stockwise/issues/49)) — open-interest analytics, institutional build-up classification, and PCR tracking:
-  - Classifies price and open-interest changes across strikes into the 4 standard institutional build-up regimes:
-    - **Long Build-up (`LB`)**: Price ↑, OI ↑ (Aggressive long buying / bullish continuation).
-    - **Short Covering (`SC`)**: Price ↑, OI ↓ (Short sellers closing positions / short squeeze).
-    - **Short Build-up (`SB`)**: Price ↓, OI ↑ (Aggressive call/put writing / bearish continuation).
-    - **Long Unwinding (`LU`)**: Price ↓, OI ↓ (Long holders booking profits/cutting losses).
-  - Dedicated `oi` command (`stockwise fno oi <SYMBOL> [-n TOP] [--json]`) showing Put-Call Ratio (OI & Volume) with market sentiment interpretation, Max Pain strike and distance from spot, top Call resistance walls and Put support walls (with strike, OI, % share, ΔOI, build-up type, and LTP), and aggregate build-up volume breakdown across calls and puts.
-  - Enhanced `stockwise options chain` / `stockwise fno chain` with a `Type` column displaying color-coded build-up badges (`LB`, `SC`, `SB`, `LU`) alongside strike OI change, top-level PCR and Max Pain metrics in the header, and an institutional build-up interpretation legend in the footer.
-  - Full machine-readable `--json` output across both table views and programmatic analytics.
-- `stockwise tax advance` ([#46](https://github.com/iamsaquib8/stockwise/issues/46)) — quarterly advance tax instalment schedule and interest estimator under Indian Income-tax Act (Section 208, 211, 234B/C):
-  - Statutory quarterly schedule for the 15 Jun (15%), 15 Sep (45%), 15 Dec (75%), and 15 Mar (100%) instalment deadlines.
-  - Capital-gains quarterly bucketing and cumulative set-off rules under Section 234C(1) proviso, protecting taxpayers from deferment interest on gains realized later in the year.
-  - Section 208 threshold check (advance tax applies only when estimated tax liability ≥ ₹10,000).
-  - Status tracking (`Paid`, `Pending`, `Upcoming`) based on evaluation date and optional `--paid <AMOUNT>` flag.
-  - Section 234C deferment interest calculator (3% for Q1–Q3, 1% for Q4 on shortfalls below safe-harbour levels) and Section 234B assessment-year interest check.
-  - Full machine-readable `--json` output and support for arbitrary financial years via `--fy <YEAR>` (e.g. `2025-26`, `AY2026-27`).
-- `stockwise portfolio target` and enhanced `rebalance` engine ([#47](https://github.com/iamsaquib8/stockwise/issues/47)):
-  - Target-allocation weights saved in the portfolio by stock (`portfolio target set TCS 25`) or sector (`portfolio target set Technology 30`), with pro-rata sector distribution and automatic normalization.
-  - Inflow-only / buy-only rebalancing via `--inflow <AMOUNT>` (e.g. `rebalance --inflow 50000`): uses continuous water-filling to allocate fresh capital (SIPs, bonuses) exclusively to underweight holdings without issuing any sell orders or triggering capital-gains taxes.
-  - Drift tolerance band (`--drift <PERCENT>` and `portfolio target drift <PERCENT>`): suppresses rebalancing churn for holdings within configurable drift bands (e.g. ±2%).
-  - Full machine-readable `--json` output across `rebalance` and `portfolio target show`.
-- `stockwise ipo` is now an Indian IPO workbench instead of a news search, on NSE's public IPO pages (Mainboard and SME, labelled):
-  - **Board** (`stockwise ipo [--board all|mainboard|sme] [--recent N]`): issues open for bidding, upcoming issues and recent listings with price band, lot size, minimum application, issue size, live QIB/NII/retail subscription, a quick signal, an IPO-market regime (share of recent listings above issue price, NIFTY, India VIX) and press headlines.
-  - **Deep analysis** (`stockwise ipo <SYMBOL> [--capital 2.5L]`): fresh issue vs offer for sale, anchor and lead managers; subscription by category including the mutual-fund share of QIB bids, bNII/sNII and the retail cut-off share; demand by price across NSE + BSE; and links to the prospectus, anchor report and the registrar's allotment page.
-  - **Dual verdict**: a 6-pillar score (smart money 30%, issue structure 20%, HNI/retail demand 15%, board and lead-manager quality 15%, street signals 10%, IPO regime 10%) that gives a *listing-gain* verdict and a separate *long-term* verdict, with timing guidance (QIBs bid late on the closing day) and the red flags behind them.
-  - **SEBI allotment odds**: retail, sNII and bNII odds from the live subscription, and with `--capital` a plan that compares one PAN against several family PANs. SME issues show their ₹2 lakh-plus minimum and lot-only exit warning.
-  - GMP and broker calls are read from news headlines only, shown as unofficial and left out of the score when no headline reports them.
-  - `--json` on both views; MCP and `stockwise ask` tools `ipo_board` and `ipo_analyze`.
+- `portfolio xray` shows your real exposure to each company across direct holdings, mutual funds
+  and ETFs, flags any company above 10% of the portfolio, and splits the portfolio by asset class,
+  market cap and sector ([#51](https://github.com/iamsaquib8/stockwise/issues/51)).
+- `score` shows the Piotroski F-score and the Altman Z-score with every input and formula, and
+  notes when a model does not suit a bank ([#50](https://github.com/iamsaquib8/stockwise/issues/50)).
+- `options oi` classifies open-interest changes as long build-up, short covering, short build-up
+  or long unwinding, with PCR and max pain; `options chain` shows the same tag per strike ([#49](https://github.com/iamsaquib8/stockwise/issues/49)).
+- `tax advance` lists the four advance-tax instalments with what is due, and estimates Sec. 234C
+  interest on shortfalls ([#46](https://github.com/iamsaquib8/stockwise/issues/46)).
+- `portfolio target` sets target weights by stock or sector. `rebalance --inflow` puts new money
+  only into underweight holdings, and `--drift` ignores small deviations ([#47](https://github.com/iamsaquib8/stockwise/issues/47)).
+- `ipo` shows open, upcoming and recently listed IPOs from NSE, and for one issue: subscription by
+  category, allotment odds, anchor and lead managers, and a scored summary. Grey-market premiums
+  are shown only when news headlines report them, labelled unofficial.
 
 - Faster everyday use ([#54](https://github.com/iamsaquib8/stockwise/issues/54), [#55](https://github.com/iamsaquib8/stockwise/issues/55)):
   - `stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise` prints a quick start.
@@ -110,23 +70,15 @@ These are open and planned for the next release. Check the linked issues before 
 
 ## [0.7.0] - 2026-11-01
 
-Stock key events timeline, INDmoney-style quantified impact cards, and institutional 6-pillar Buy/Sell decision verdict engine for Indian (NSE/BSE) and US equities.
-
 ### Added
-- `stockwise events <SYMBOL> [--days N] [--ai]` (`ev`) — interactive, unified timeline of material events and exchange disclosures:
-  - Direct integration with NSE corporate announcements API and financial news RSS feeds.
-  - Regex financial figure extraction (revenues, PAT, order inflow values, price targets).
-  - Market reaction and excess return calculation against benchmark indices (NIFTY 50 for India, S&P 500 for US).
-  - Event classification (`Results`, `Orders`, `Analyst`, `Regulatory`, `M&A`, etc.) and upcoming corporate radar.
-- `stockwise insights <SYMBOL>` — INDmoney-style categorized impact cards (`POSITIVE IMPACT`, `NEGATIVE IMPACT`, `NEUTRAL IMPACT`):
-  - Quantitative metrics spanning 9 analysis dimensions: Ownership, Financial Growth, Margins, Valuation, Solvency & Health, Analyst Ratings, Technical Momentum, Dividends, and Newsflow.
-  - Live NSE XBRL shareholding pattern parsing for FII, DII, and promoter holdings/pledges.
-  - US market support (`-m us`) with SEC insider transactions and institutional holding trends.
-- `stockwise verdict <SYMBOL>` (`decision`, `signal`, `buysell`) — definitive institutional-grade decision engine:
-  - 6-pillar weighted scoring model (0–100): Valuation & Margin of Safety (20%), Growth & Financial Quality (25%), Solvency & Financial Health (15%), Smart Money & Ownership (15%), Analyst Conviction (10%), Technical Momentum & Trend (15%).
-  - Clear actionable verdicts (`STRONG BUY`, `BUY / ACCUMULATE`, `HOLD / NEUTRAL`, `REDUCE / TAKE PROFIT`, `STRONG SELL`).
-  - Automated entry zone, stop-loss level, target price, upside %, and risk-reward ratio computation.
-  - Multi-horizon guidance (1–4 weeks, 1–6 months, 1–3 years) and synthesized bull vs. bear thesis.
+- `events <SYMBOL>` (`ev`): a timeline of company announcements from NSE and news feeds, with
+  figures pulled from the text, the market's reaction against NIFTY 50 or the S&P 500, and
+  upcoming events.
+- `insights <SYMBOL>`: positive, negative and neutral findings across nine areas (ownership,
+  growth, margins, valuation, balance sheet, analysts, momentum, dividends, news), with NSE
+  shareholding data for India and SEC insider and institutional data for the US.
+- `verdict <SYMBOL>`: a 0–100 score from six weighted pillars with a BUY-to-SELL label, entry
+  zone, stop-loss and target. These labels are being replaced with neutral scores ([#188](https://github.com/iamsaquib8/stockwise/issues/188)).
 
 ### Fixed
 - Windows main-thread stack overflow (`thread 'main' has overflowed its stack`) by running the CLI entrypoint and Tokio worker threads on an explicit 8 MiB stack and heap-pinning the command dispatch state machine.

@@ -62,7 +62,9 @@ cargo test                 # all tests green
 cargo test --features wasm-plugins
 ```
 
-- Keep PRs focused; one logical change per PR.
+- Keep PRs focused: one issue per PR, ideally under about 400 changed lines, with
+  `Closes #N` in the description. Split larger work into a series.
+- Review your own diff before asking for review, and never merge with failing CI.
 - Add tests for new behavior — CLI parsing tests live in `src/main.rs`, pure logic tests next to the code.
 - Update `docs/`, `README.md`, and `CHANGELOG.md` (`[Unreleased]`) when behavior
   changes.
@@ -100,10 +102,33 @@ your fixtures with `mock::assert_fixture_shapes`, so `trade selftest` can tell
 testers when a live response differs. Anything that only reads from a real account
 (`trade selftest`, `trade sync`) must run on a `brokers::readonly::ReadOnly` session.
 
+## Changelog entries
+
+Add one entry under `[Unreleased]` for each user-visible change:
+
+- One to three lines, in plain language, saying what the user can now do or what
+  was wrong. Start with the command name in backticks.
+- Link the issue: `([#123](https://github.com/iamsaquib8/stockwise/issues/123))`.
+- No marketing words ("powerful", "2.0", "institutional-grade"), no formulas and
+  no nested lists. Details belong in `docs/`.
+- Credit outside contributors: `Thanks [@name](https://github.com/name).`
+
 ## Commit messages
 
-Conventional-ish prefixes keep the changelog easy: `feat:`, `fix:`, `docs:`,
-`test:`, `refactor:`, `chore:`.
+Use a type and an optional scope, then a short imperative summary under about 72
+characters: `fix(tax): treat gold ETFs as non-equity`. Types: `feat`, `fix`,
+`docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`. Explain the why in the
+body when it isn't obvious.
+
+## How this project is built
+
+StockWise is maintained by one person with help from AI coding assistants
+(commits made with one carry a `Co-Authored-By` line). The same rules apply to
+every change, however it was written: a human reads the diff, CI must pass, new
+behavior needs tests, and numbers that affect money (tax, XIRR, imports) are
+checked against a hand calculation or a fixture. If you use an assistant for a
+contribution, that's fine — you are responsible for understanding and testing
+what you submit.
 
 ## Reporting bugs / requesting features
 

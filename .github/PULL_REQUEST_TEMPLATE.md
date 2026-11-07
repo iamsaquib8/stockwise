@@ -18,5 +18,6 @@
 - [ ] `cargo clippy --all-targets -- -D warnings` — clean
 - [ ] `cargo test` — all tests pass
 - [ ] Added/updated tests for the change
-- [ ] Updated `docs/`, `README.md`, and `CHANGELOG.md` (`[Unreleased]`) as needed
+- [ ] One issue per PR, and I have read the whole diff myself
+- [ ] Updated `docs/` and a one-line `CHANGELOG.md` entry under `[Unreleased]` (see CONTRIBUTING)
 - [ ] No real credentials, API keys, or personal portfolio data committed
