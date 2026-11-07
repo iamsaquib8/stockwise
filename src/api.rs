@@ -245,6 +245,19 @@ pub struct QuoteResponseInner {
     pub result: Vec<Quote>,
 }
 
+impl Quote {
+    /// Yahoo answers an unknown ticker such as `500325.BO` with a row whose
+    /// `quoteType` is `NONE` and every other field null. It is not a quote.
+    pub fn is_placeholder(&self) -> bool {
+        self.quote_type.as_deref() == Some("NONE")
+    }
+
+    /// A row that describes a real instrument with a price.
+    pub fn is_usable(&self) -> bool {
+        !self.is_placeholder() && self.regular_market_price.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Quote {
@@ -902,7 +915,12 @@ impl YahooClient {
         let body = self.fetch(&url, Duration::from_secs(30)).await?; // cache 30s for quotes
         let resp: QuoteResponse =
             serde_json::from_str(&body).context("Failed to parse quote response")?;
-        Ok(resp.quote_response.result)
+        Ok(resp
+            .quote_response
+            .result
+            .into_iter()
+            .filter(|q| !q.is_placeholder())
+            .collect())
     }
 
     /// Price history. A configured data provider serves daily, weekly and
@@ -1438,5 +1456,26 @@ mod tests {
         assert_eq!(quotes.len(), 1);
         assert_eq!(quotes[0].symbol.as_deref(), Some("RELIANCE.NS"));
         assert_eq!(quotes[0].data_source.as_deref(), Some("NSE"));
+    }
+
+    #[tokio::test]
+    async fn yahoo_quote_drops_none_placeholder_rows() {
+        let body = r#"{"quoteResponse":{"result":[
+            {"symbol":"500325.BO","quoteType":"NONE"},
+            {"symbol":"RELIANCE.BO","quoteType":"EQUITY","regularMarketPrice":1450.0}
+        ],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        let got = client
+            .yahoo_quote(&["500325.BO", "RELIANCE.BO"])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].symbol.as_deref(), Some("RELIANCE.BO"));
+        assert!(got[0].is_usable());
     }
 }

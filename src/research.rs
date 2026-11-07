@@ -1530,6 +1530,15 @@ pub async fn fetch_all(
 
 /// Fetch a research snapshot according to the specified data [`Needs`].
 /// `days` is the news/event lookback window.
+/// Error text for a symbol with no usable quote.
+fn not_found_message(symbol: &str) -> String {
+    if market::is_bse_scrip_code(symbol) {
+        format!("Symbol '{symbol}' not found. {}", market::BSE_CODE_HINT)
+    } else {
+        format!("Symbol '{symbol}' not found")
+    }
+}
+
 pub async fn fetch(
     client: &YahooClient,
     symbol: &str,
@@ -1542,8 +1551,8 @@ pub async fn fetch(
         .get_quote(&[symbol.as_str()])
         .await?
         .into_iter()
-        .next()
-        .with_context(|| format!("Symbol '{}' not found", symbol))?;
+        .find(Quote::is_usable)
+        .with_context(|| not_found_message(&symbol))?;
 
     let name = quote
         .long_name
@@ -2185,5 +2194,24 @@ mod tests {
                 req.target
             );
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_symbol_without_a_quote() {
+        let none = r#"{"quoteResponse":{"result":[{"symbol":"500325.BO","quoteType":"NONE"}],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, none.into())]).await;
+        let base = server.url.clone();
+        let client =
+            YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
+                let u = reqwest::Url::parse(url).unwrap();
+                format!("{}{}?{}", base, u.path(), u.query().unwrap_or(""))
+            });
+        let err = fetch(&client, "500325", Market::In, 60, Needs::VERDICT)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'500325.BO' not found"), "{msg}");
+        assert!(msg.contains("BSE scrip codes"), "{msg}");
+        assert_eq!(server.requests().len(), 1, "stops after the quote");
     }
 }
