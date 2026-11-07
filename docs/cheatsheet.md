@@ -28,7 +28,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 |---|---|
 | Fundamentals in plain English | `stockwise analyze INFY` |
 | Key events & filings timeline | `stockwise events LT` |
-| INDmoney-style impact cards | `stockwise insights LT` |
+| Positive and negative findings | `stockwise insights LT` |
 | Actionable Buy/Sell verdict | `stockwise verdict LT` · `stockwise verdict LT --explain` |
 | Piotroski F-score & Altman Z-score | `stockwise score INFY --explain` · `stockwise scorecard TCS --json` |
 | Open and upcoming IPOs | `stockwise ipo` |
