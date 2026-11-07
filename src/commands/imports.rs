@@ -844,6 +844,7 @@ pub(super) fn to_import_rows(
                 price: t.price,
                 date: Some(t.date.clone()),
                 sell: t.sell,
+                units_as_of: None,
             }));
             continue;
         }
@@ -865,6 +866,7 @@ pub(super) fn to_import_rows(
             price,
             date: None,
             sell: false,
+            units_as_of: None,
         });
     }
     (rows, skipped)
@@ -1340,6 +1342,7 @@ X AMC,1,P,X Fund,,INF000000001,1,2024-05-01,Purchase,1000,10,100,110,PURCHASE,\n
             price: 4109.58,
             date: Some("2022-06-01".into()),
             sell: false,
+            units_as_of: None,
         }
     }
 

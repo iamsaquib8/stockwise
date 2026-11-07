@@ -847,6 +847,7 @@ pub async fn cmd_import(
         // A merged-away ticker (HDFC, MINDTREE) is restated in the acquirer's
         // shares, keeping the cost and date; a plain rename only maps the name.
         let mut symbol_raw = symbol_raw;
+        let mut units_as_of = None;
         if market == Market::In
             && let Some(swap) = pf::merger_swap(&symbol_raw, date.as_deref(), qty, price)
         {
@@ -858,6 +859,9 @@ pub async fn cmd_import(
                 None => merged.push((swap.merger, 1)),
             }
             (symbol_raw, qty, price) = (swap.symbol, swap.qty, swap.price);
+            // The restated quantity is the acquirer's share count as of the
+            // merger: its splits up to then are already in the ratio.
+            units_as_of = Some(swap.merger.through.to_string());
         }
         rows.push(ImportRow {
             symbol: market::resolve_symbol(&symbol_raw, market),
@@ -865,6 +869,7 @@ pub async fn cmd_import(
             price,
             date,
             sell,
+            units_as_of,
         });
     }
     if rows.is_empty() {

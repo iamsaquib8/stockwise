@@ -410,6 +410,10 @@ pub struct ImportRow {
     pub date: Option<String>,
     /// A sell row from a tradebook.
     pub sell: bool,
+    /// For a row restated after a merger ([`merger_swap`]): the merger's last
+    /// trade date. The quantity is already in the acquirer's share count on
+    /// that day, so splits and bonuses up to it must not be applied again.
+    pub units_as_of: Option<String>,
 }
 
 /// A trade from an imported tradebook, kept so the next file for the same
@@ -429,6 +433,9 @@ pub struct ImportedTrade {
     /// The demat account the file belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// See [`ImportRow::units_as_of`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_as_of: Option<String>,
 }
 
 impl ImportedTrade {
@@ -437,6 +444,7 @@ impl ImportedTrade {
             && self.qty == other.qty
             && self.price == other.price
             && self.date == other.date
+            && self.units_as_of == other.units_as_of
     }
 }
 
@@ -713,6 +721,11 @@ fn replay_trades(
             if bought - net > EPS {
                 let mut lot = new_lot(bought - net, buy_avg, &date);
                 lot.date_estimated = buys.iter().any(|t| t.date.is_none());
+                // Restated only when every buy of the day was, to the same day.
+                let first = &buys[0].units_as_of;
+                if buys.iter().all(|t| &t.units_as_of == first) {
+                    lot.units_as_of = first.clone();
+                }
                 lots.push(lot);
                 lots.sort_by(|a, b| a.date.cmp(&b.date));
             }
@@ -730,6 +743,7 @@ fn replay_trades(
         for t in buys {
             let mut lot = new_lot(t.qty, t.price, &date);
             lot.date_estimated = t.date.is_none();
+            lot.units_as_of = t.units_as_of.clone();
             lots.push(lot);
             lots.sort_by(|a, b| a.date.cmp(&b.date));
         }
@@ -1350,6 +1364,7 @@ impl Portfolio {
                     price: r.price,
                     date: r.date.clone(),
                     account: account.map(str::to_string),
+                    units_as_of: r.units_as_of.clone(),
                 })
                 .collect();
             let stored: Vec<ImportedTrade> = if ledger && !opts.replace {
@@ -2273,6 +2288,7 @@ mod tests {
             price: 3500.0,
             date: None,
             sell: false,
+            units_as_of: None,
         }];
         let mut p = Portfolio::default();
         p.apply_import(&rows, opts("import:kite"));
@@ -2289,6 +2305,7 @@ mod tests {
             price,
             date: Some(date.into()),
             sell,
+            units_as_of: None,
         };
         let rows = vec![
             row("2024-05-01", 5.0, 1500.0, false),
@@ -2340,6 +2357,7 @@ mod tests {
                 price: 2800.0,
                 date: Some("2023-05-02".into()),
                 sell: false,
+                units_as_of: None,
             },
             ImportRow {
                 symbol: "RELIANCE.NS".into(),
@@ -2347,6 +2365,7 @@ mod tests {
                 price: 1500.0,
                 date: Some("2025-01-10".into()),
                 sell: true,
+                units_as_of: None,
             },
         ];
         let splits = vec![("RELIANCE.NS".to_string(), vec![split_2_for_1()])];
@@ -2384,6 +2403,7 @@ mod tests {
             price,
             date: Some(date.into()),
             sell,
+            units_as_of: None,
         }
     }
 
@@ -2741,6 +2761,7 @@ mod tests {
             price,
             date: None,
             sell: false,
+            units_as_of: None,
         }
     }
 
@@ -3020,6 +3041,135 @@ mod tests {
         assert_eq!(p.realized[0].buy_date, "2023-03-01");
     }
 
+    fn hdfc_split_2019() -> Split {
+        Split {
+            date: "2019-09-19".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+        }
+    }
+
+    fn hdfcbank_bonus_2025() -> Split {
+        Split {
+            date: "2025-08-26".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+        }
+    }
+
+    /// "HDFC buy 25 at 2000 on 2018-05-10" the way an import restates it.
+    fn merged_hdfc_row() -> ImportRow {
+        let swap = merger_swap("HDFC", Some("2018-05-10"), 25.0, 2000.0).unwrap();
+        ImportRow {
+            units_as_of: Some(swap.merger.through.to_string()),
+            ..trade("HDFCBANK", "2018-05-10", false, swap.qty, swap.price)
+        }
+    }
+
+    #[test]
+    fn merged_hdfc_lot_does_not_get_the_pre_merger_split_again() {
+        // 25 HDFC → 42 HDFCBANK at 2000 × 25 / 42 = 1190.476, cost 50,000.
+        // The 42 are already in HDFC Bank's share count after the 2019 2:1
+        // split, so only a split after the 2023-07-13 merger applies.
+        let mut p = Portfolio::default();
+        let splits = vec![(
+            "HDFCBANK".to_string(),
+            vec![hdfc_split_2019(), hdfcbank_bonus_2025()],
+        )];
+        let opts = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        // The sale (after all splits) makes this a tradebook.
+        let rows = [
+            merged_hdfc_row(),
+            trade("HDFCBANK", "2025-09-10", true, 2.0, 900.0),
+        ];
+        let out = p.apply_import(&rows, opts);
+        assert!(
+            matches!(out[0].1, ImportOutcome::Lots { splits: 1, .. }),
+            "{:?}",
+            out
+        );
+        let l = &p.holding("HDFCBANK").unwrap().lots[0];
+        // 42 × 2 (2025 bonus only) − 2 sold; cost per share 1190.476 / 2.
+        assert!((l.qty - 82.0).abs() < 1e-9, "{}", l.qty);
+        assert!((l.price - 50_000.0 / 84.0).abs() < 1e-6, "{}", l.price);
+        assert_eq!(l.adjustments, vec!["2025-08-26:2:1".to_string()]);
+        assert_eq!(l.date, "2018-05-10");
+    }
+
+    #[test]
+    fn merged_hdfc_lot_with_only_old_splits_stays_42_at_1190() {
+        let mut p = Portfolio::default();
+        let splits = vec![("HDFCBANK".to_string(), vec![hdfc_split_2019()])];
+        let opts = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        let rows = [merged_hdfc_row()];
+        p.apply_import(&rows, opts);
+        let l = &p.holding("HDFCBANK").unwrap().lots[0];
+        assert_eq!(l.qty, 42.0);
+        assert!((l.price - 1_190.476_190).abs() < 1e-5, "{}", l.price);
+        assert!(l.adjustments.is_empty());
+        // The same row without the marker is the bug: 84 shares at half the price.
+        let mut q = Portfolio::default();
+        let unmarked = [ImportRow {
+            units_as_of: None,
+            ..merged_hdfc_row()
+        }];
+        let opts = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        q.apply_import(&unmarked, opts);
+        assert_eq!(q.holding("HDFCBANK").unwrap().lots[0].qty, 84.0);
+    }
+
+    #[test]
+    fn merged_trades_keep_their_marker_across_reimports() {
+        let mut p = Portfolio::default();
+        let splits = vec![("HDFCBANK".to_string(), vec![hdfc_split_2019()])];
+        for _ in 0..2 {
+            let opts = ImportOptions {
+                splits: &splits,
+                ..tradebook_opts("import:kite")
+            };
+            p.apply_import(&[merged_hdfc_row()], opts);
+        }
+        assert_eq!(p.imported.len(), 1);
+        assert_eq!(p.imported[0].units_as_of.as_deref(), Some("2023-07-13"));
+        assert_eq!(p.holding("HDFCBANK").unwrap().lots[0].qty, 42.0);
+    }
+
+    #[test]
+    fn apply_split_skips_a_merged_lot_for_splits_up_to_the_merger() {
+        // A lot added by `portfolio add HDFC --date 2018-05-10`.
+        let mut p = Portfolio::default();
+        let mut merged = lot(42.0, 50_000.0 / 42.0, "2018-05-10");
+        merged.units_as_of = Some("2023-07-13".into());
+        p.add_lot("HDFCBANK.NS", merged);
+        assert_eq!(p.apply_split("HDFCBANK.NS", &hdfc_split_2019()), 0);
+        assert_eq!(p.apply_split("HDFCBANK.NS", &hdfcbank_bonus_2025()), 1);
+        let l = &p.holding("HDFCBANK.NS").unwrap().lots[0];
+        assert_eq!(l.qty, 84.0);
+        assert!((l.cost() - 50_000.0).abs() < 1e-6);
+        // On the merger's own record date the split is still not applied.
+        let on_through = Split {
+            date: "2023-07-13".into(),
+            ..hdfc_split_2019()
+        };
+        assert!(!on_through.pending_for(&lot_with_units("2018-05-10", "2023-07-13")));
+    }
+
+    fn lot_with_units(date: &str, units_as_of: &str) -> Lot {
+        Lot {
+            units_as_of: Some(units_as_of.into()),
+            ..lot(1.0, 1.0, date)
+        }
+    }
+
     #[test]
     fn partial_tradebook_leaves_the_holding_alone() {
         let rows = vec![ImportRow {
@@ -3028,6 +3178,7 @@ mod tests {
             price: 10.0,
             date: Some("2024-01-01".into()),
             sell: true,
+            units_as_of: None,
         }];
         let mut p = Portfolio::default();
         p.add_lot("X", lot(5.0, 8.0, "2023-01-01"));

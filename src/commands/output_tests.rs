@@ -232,6 +232,7 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
         price,
         date: Some(date.into()),
         sell,
+        units_as_of: None,
     };
     // The issue's tradebook: 100 held since 2023, 50 bought and sold on 2025-06-02.
     let mut p = Portfolio::default();
