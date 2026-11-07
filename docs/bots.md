@@ -50,9 +50,9 @@ stockwise -m us bot 5000 1  # US market, $5K, 1% target
 
 ---
 
-## Long-Term Wealth Bot
+## Long-Term Scores
 
-6-pillar fundamental scoring with Monte Carlo simulation.
+6-pillar scoring of the market's stock universe with a Monte Carlo illustration. It shows data and how each score was built: no buy, sell or hold calls, no entries, stops or targets, and no allocation advice.
 
 ```bash
 stockwise longterm 15000         # ₹15K/month SIP budget
@@ -66,13 +66,13 @@ stockwise -m us longterm 1000    # US market, $1K/month
 | Valuation | 18% | P/E, PEG ratio, P/B, forward P/E compression, EV/EBITDA, earnings yield |
 | Growth | 22% | Revenue growth, quarterly earnings growth, EPS trajectory |
 | Quality | 25% | Profit margins, ROE, debt/equity, current ratio |
-| Momentum | 10% | Golden/Death cross, analyst consensus, target upside |
+| Momentum | 10% | Price against the 50- and 200-day averages, analyst mean rating, analyst mean price estimate against the price |
 | Dividend | 10% | Yield level, DRIP compounding |
 | Safety | 15% | Beta, market cap, historical volatility, debt levels |
 
 ### Moat Analysis
 
-Stocks are rated Wide/Narrow/No Moat based on:
+Stocks get Wide/Narrow/No Moat signals from these rules:
 - Profit margins >25% (pricing power)
 - ROE >25% (capital efficiency)
 - Revenue growth >25% (market dominance)
@@ -86,10 +86,11 @@ Stocks are rated Wide/Narrow/No Moat based on:
 
 ### Output
 
-- Top 12 stocks ranked across all 6 pillars
-- Detailed top 3: moat rating, risk tier, PEG, earnings yield
-- 5Y and 10Y projections with DRIP compounding
-- SIP calculator (how much/month for ₹10L in 10 years)
+- Top 12 names ranked by composite score, with each pillar's score (a dash where the pillar had no data; `n/a` when under half the weight had data)
+- Detailed top 3: score band, data coverage, risk level (Lower / Moderate / Higher), PEG, earnings yield, and the facts that added or took away points
+- 5Y and 10Y growth at an *assumed* annual return set from the score (not a forecast), with dividends reinvested
+- SIP arithmetic (the monthly amount that would reach ₹10L in 10 years at that rate, and what your budget compounds to)
+- A simulated 5-year range: 10th percentile, median and 90th percentile
 
 ---
 
@@ -241,11 +242,11 @@ stockwise daemon longterm
 ```
 
 Runs 5 steps:
-1. Score 30 stocks on 6 pillars + Monte Carlo
+1. Score 30 stocks on 6 pillars + Monte Carlo and print the three highest scores
 2. Check portfolio value, snapshot wealth tracker
 3. Check all price alerts
-4. Scan for tax-loss harvest opportunities
-5. Generate AI investment memo via Ollama
+4. List holdings priced below their average cost
+5. Generate AI research notes via Ollama
 
 Run daily after market close, or weekly for deep analysis.
 
