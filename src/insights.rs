@@ -742,14 +742,13 @@ pub fn generate_rich_insights(r: &Research) -> Vec<InsightCard> {
             cards.push(InsightCard {
                 impact: Impact::Positive,
                 category: InsightCategory::Analysts,
-                title: "Overwhelming Buy Consensus".to_string(),
+                title: "Strongly Positive Analyst Consensus".to_string(),
                 description: format!(
-                    "Analyst rating score is {:.2}/5 ({}) backed by {} Wall St / Dalal St opinions",
+                    "Analyst mean rating is {:.2}/5 (1 = most positive) from {} Wall St / Dalal St opinions",
                     rec,
-                    r.fin.rec_key.as_deref().unwrap_or("Strong Buy"),
                     r.fin.n_analysts.unwrap_or(0.0) as u32
                 ),
-                metric: Some("Strong Buy".to_string()),
+                metric: Some(format!("Mean rating {rec:.1}/5")),
                 importance: 4,
             });
         } else if rec >= 3.6 {
@@ -758,8 +757,8 @@ pub fn generate_rich_insights(r: &Research) -> Vec<InsightCard> {
                 category: InsightCategory::Analysts,
                 title: "Cautious Analyst Sentiment".to_string(),
                 description: format!(
-                    "Consensus rating stands at {:.2}/5 ({}) with multiple analysts in Hold or Underperform territory",
-                    rec, r.fin.rec_key.as_deref().unwrap_or("Underperform")
+                    "Analyst mean rating stands at {:.2}/5 (1 = most positive), at the cautious end of the scale",
+                    rec
                 ),
                 metric: Some("Bearish Stance".to_string()),
                 importance: 4,
@@ -858,7 +857,7 @@ pub fn generate_rich_insights(r: &Research) -> Vec<InsightCard> {
                     category: InsightCategory::Technicals,
                     title: "Testing 52-Week Lows".to_string(),
                     description: format!(
-                        "Trading near its 52-week low ({}{:.2}) — potential value entry if support holds, but currently lacking momentum",
+                        "Trading near its 52-week low ({}{:.2}) — lacking momentum so far; watch whether support holds",
                         csym, lo
                     ),
                     metric: Some(format!("{:.0}% of 52W range", pos * 100.0)),

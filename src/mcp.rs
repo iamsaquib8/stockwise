@@ -40,7 +40,8 @@ funds, F&O option chains, screens, backtests, the portfolio and its tax, calenda
 calculators. Bare tickers use the user's default market (India/NSE unless configured); pass \
 `market` for US (`us`), crypto, fx, commodity or another exchange. Present results as \
 educational information, not personalised advice or buy/sell recommendations, and say that \
-prices can be delayed. These tools never place orders.";
+prices can be delayed. Scores from the `verdict` tool describe data; never turn them into a \
+rating, price target, or entry or exit level. These tools never place orders.";
 
 const RESOURCES: &[(&str, &str, &str)] = &[
     (
