@@ -39,20 +39,17 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                 });
                 scores.push(crate::longterm::score_for_longterm(q, hist.as_deref()));
             }
-            scores.sort_by(|a, b| {
-                b.total_score
-                    .partial_cmp(&a.total_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            println!(
-                "    Top 3: {}",
-                scores
-                    .iter()
-                    .take(3)
-                    .map(|s| format!("{} ({:.0})", s.symbol, s.total_score))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            crate::longterm::rank(&mut scores);
+            let highest: Vec<String> = scores
+                .iter()
+                .filter_map(|s| s.total().map(|t| format!("{} ({:.0})", s.symbol, t)))
+                .take(3)
+                .collect();
+            if highest.is_empty() {
+                println!("    No stock had enough data for a score.");
+            } else {
+                println!("    Highest scores: {}", highest.join(", "));
+            }
 
             // 2. Check portfolio
             println!("  [2/5] Checking portfolio...");
@@ -140,7 +137,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             }
 
             // 4. Tax harvest check
-            println!("  [4/5] Tax harvest scan...");
+            println!("  [4/5] Holdings priced below cost...");
             if !portfolio.holdings.is_empty() {
                 let p_syms: Vec<String> = portfolio
                     .holdings
@@ -156,7 +153,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                     .collect();
                 if !losers.is_empty() {
                     println!(
-                        "    {} positions with losses (harvest candidates): {}",
+                        "    {} holdings priced below their average cost: {}",
                         losers.len(),
                         losers
                             .iter()
@@ -165,7 +162,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                             .join(", ")
                     );
                 } else {
-                    println!("    No tax-loss harvest opportunities.");
+                    println!("    No holding is priced below its average cost.");
                 }
             }
 
@@ -174,10 +171,16 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             let mut ai = crate::ai::AiClient::connect().await;
             if ai.is_available().await {
                 let mut data = String::new();
-                for s in scores.iter().take(10) {
+                for s in scores.iter().filter(|s| s.total().is_some()).take(10) {
                     data.push_str(&format!(
-                        "{}: score={:.0}, moat={}, 5Y={:+.0}%, risk={}\n",
-                        s.symbol, s.total_score, s.moat, s.projected_5y_return, s.risk_tier
+                        "{}: score={:.0}/100, data coverage={:.0}%, moat signals={}, risk level={}, 5Y at an assumed {:.1}%/yr={:+.0}%\n",
+                        s.symbol,
+                        s.total_score,
+                        s.data_coverage,
+                        s.moat,
+                        s.risk_tier,
+                        s.est_annual_return,
+                        s.projected_5y_return
                     ));
                 }
                 if let Ok(report) = ai.generate_longterm_report(&data).await {
@@ -200,7 +203,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                 "stockwise daemon intraday [CAPITAL]".bold()
             );
             println!(
-                "    {} — Daily long-term analysis (run after market close)",
+                "    {} — Daily long-term score scan (run after market close)",
                 "stockwise daemon longterm".bold()
             );
             println!();

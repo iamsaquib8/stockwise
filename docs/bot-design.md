@@ -4,7 +4,7 @@
 
 ### What exists today
 
-- **On-demand scanners** (`intraday`, `longterm`): scan once, suggest, exit.
+- **On-demand scanners** (`intraday`, `longterm`): scan once, show the scores, exit.
 - **`daemon intraday`**: a paper-only worker on the exchange clock (IST /
   ET, holidays included) that enters at the open, manages positions every
   60 seconds, squares off before the close and settles into the simulator
@@ -42,11 +42,10 @@ Two persistent background workers that run throughout the day:
 │                                                      │
 │  4:00 PM  Scan all stocks, score on 6 pillars        │
 │  4:01     Run Monte Carlo on top candidates           │
-│  4:02     Check portfolio: rebalance needed?          │
+│  4:02     Portfolio value, wealth snapshot            │
 │  4:03     Check alerts: any triggered?                │
-│  4:04     Tax harvest check: any losses to book?      │
-│  4:05     Generate AI report → save to file           │
-│  4:06     Snapshot portfolio value (wealth tracker)    │
+│  4:04     Holdings priced below their average cost    │
+│  4:05     AI research notes (optional)                │
 │                                                      │
 │  Runs once daily, optionally weekly deep scan         │
 └─────────────────────────────────────────────────────┘
@@ -181,59 +180,43 @@ SCAN (4:00 PM)
 
 PORTFOLIO CHECK (4:02 PM)
 ├── Fetch current holdings from portfolio.json
-├── Calculate current allocation %
-├── Compare to target allocation
-├── Flag: over-allocated (>25% in one stock)
-├── Show the tax position of each lot (gains and losses)
-└── Show the drift from the target allocation, without suggesting trades
+├── Value them in the market's currency
+└── Snapshot the value in wealth_history.json (skipped when a price is missing)
 
-ALERT CHECK (4:04 PM)
-├── Check all price alerts
-├── Report any holding at its 52-week low or high
-└── Check earnings growth deceleration warnings
+ALERT CHECK (4:03 PM)
+└── Check all price alerts
+
+HOLDINGS BELOW COST (4:04 PM)
+└── List holdings whose price is under their average cost
 
 REPORT (4:05 PM)
-├── Generate an AI summary of the data via Ollama
-├── Save report to reports/ folder with date
-├── Print summary to terminal
-└── Snapshot portfolio value in wealth_history.json
-
-WEEKLY DEEP SCAN (Sundays)
-├── Run full 6-pillar scoring on extended universe (50+ stocks)
-├── Cross-check with backtest results (which strategies work on which stocks)
-├── Sector performance comparison (which sectors led and lagged)
-├── Generate a weekly data summary via AI
-└── Update the score history
+└── Optional AI research notes via Ollama (score, data coverage, moat signals,
+    risk level), printed to the terminal
 ```
+
+Not built: weekly deep scan, saved reports, allocation or rebalance output.
+`longterm` and `daemon longterm` show scores and the facts behind them. They do
+not allocate a budget, rank names as picks, place orders or say when to act.
 
 ### Score bands
 
-StockWise shows scores and the data behind them. It never turns a score into a
-buy, sell or hold call, an allocation or an order (see [DISCLAIMER.md](../DISCLAIMER.md)).
+The composite and each pillar use the same descriptive bands as `verdict`. A
+band describes the score; it is not an instruction.
 
 ```
-Pillar score 65 and above   → "Strong" band
-Pillar score 45 to 64       → "Moderate" band
-Pillar score below 45       → "Weak" band
+Score 65 and above   Strong
+Score 45 to 64       Moderate
+Score below 45       Weak
+No inputs            No data (the composite shows n/a under 50% data coverage)
 ```
 
-The composite and the pillar bands come from `stockwise verdict`; the
-`--explain` flag lists the weights and rules. The moat rating, the holding
-status and the tax impact of an existing position are shown next to the score
-as separate facts.
+### SIP arithmetic
 
-### SIP review (planned, reporting only)
-
-```
-Every month (1st trading day):
-├── Read the user's own SIP list and this month's budget
-├── Show the latest scores for each stock on the list
-├── Show each price's distance from its 200-day average
-└── Record what the user bought (via `portfolio add` or `trade sync`)
-```
-
-The review never splits the budget, never suggests an amount and never places
-orders.
+`longterm` compounds your monthly budget at an *assumed* annual return that is
+set from the composite score (a rule of thumb, not a forecast) and shows the
+monthly amount that would reach 10 lakh / 1 million in 10 years at that rate.
+Every instalment grows only for the time it stays invested. It places no
+orders and does not size a position.
 
 ---
 
