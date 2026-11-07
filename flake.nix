@@ -54,7 +54,7 @@
 
           meta = {
             inherit (crate) description homepage;
-            changelog = "https://github.com/iamsaquib8/stockwise/blob/master/CHANGELOG.md";
+            changelog = "https://github.com/iamsaquib8/stockwise/blob/main/CHANGELOG.md";
             license = pkgs.lib.licenses.mit;
             mainProgram = "stockwise";
             platforms = systems;

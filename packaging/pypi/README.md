@@ -59,9 +59,9 @@ Scoop, `.deb`/`.rpm`, Docker, Nix, Termux and
 [Install](https://github.com/iamsaquib8/stockwise#install).
 
 > **Not financial advice.** StockWise is for education and information. See the
-> [disclaimer](https://github.com/iamsaquib8/stockwise/blob/master/DISCLAIMER.md).
+> [disclaimer](https://github.com/iamsaquib8/stockwise/blob/main/DISCLAIMER.md).
 
 MIT licensed · [Source](https://github.com/iamsaquib8/stockwise) ·
-[Changelog](https://github.com/iamsaquib8/stockwise/blob/master/CHANGELOG.md)
+[Changelog](https://github.com/iamsaquib8/stockwise/blob/main/CHANGELOG.md)
 
 <!-- mcp-name: io.github.iamsaquib8/stockwise -->

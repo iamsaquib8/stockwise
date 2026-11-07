@@ -6,7 +6,7 @@ portfolio tracking in one fast binary. No API keys, no account.
 
 This image is a mirror of `ghcr.io/iamsaquib8/stockwise`: the same
 multi-arch image (linux/amd64, linux/arm64), built from the
-[Dockerfile](https://github.com/iamsaquib8/stockwise/blob/master/Dockerfile)
+[Dockerfile](https://github.com/iamsaquib8/stockwise/blob/main/Dockerfile)
 on every release.
 
 ```bash
@@ -27,4 +27,4 @@ Documentation: <https://iamsaquib8.github.io/stockwise/> ·
 Source: <https://github.com/iamsaquib8/stockwise> · MIT licensed.
 
 > **Not financial advice.** StockWise is for education and information. See the
-> [disclaimer](https://github.com/iamsaquib8/stockwise/blob/master/DISCLAIMER.md).
+> [disclaimer](https://github.com/iamsaquib8/stockwise/blob/main/DISCLAIMER.md).

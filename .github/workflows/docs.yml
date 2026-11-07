@@ -1,12 +1,12 @@
 name: Docs
 
 # Builds the mdBook site from docs/ and publishes it to GitHub Pages on every
-# push to master. Pull requests only build it, to catch broken pages.
+# push to main. Pull requests only build it, to catch broken pages.
 # One-time setup: Settings → Pages → Source: "GitHub Actions".
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "docs/**"
       - "site/**"

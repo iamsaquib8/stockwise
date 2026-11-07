@@ -25,7 +25,7 @@ no API key.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/master/install.sh | sh   # macOS, Linux, Termux
+curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh   # macOS, Linux, Termux
 cargo binstall stockwise                                                                    # or: cargo install --locked stockwise
 ```
 
