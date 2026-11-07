@@ -33,29 +33,6 @@
       ]
     },
     {
-      "registryType": "pypi",
-      "identifier": "stockwise",
-      "version": "0.8.0",
-      "runtimeHint": "uvx",
-      "transport": {
-        "type": "stdio"
-      },
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "mcp"
-        }
-      ],
-      "environmentVariables": [
-        {
-          "name": "STOCKWISE_MARKET",
-          "description": "Market for bare tickers: in (NSE, the default), us, crypto, fx, commodity, uk, de, jp, hk, sg, ca or au",
-          "isRequired": false,
-          "default": "in"
-        }
-      ]
-    },
-    {
       "registryType": "oci",
       "identifier": "ghcr.io/iamsaquib8/stockwise:0.8.0",
       "transport": {
