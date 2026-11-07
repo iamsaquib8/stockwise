@@ -161,7 +161,8 @@ The [cheatsheet](docs/cheatsheet.md) has the commands people use most, and the
 ## Docs
 
 **[iamsaquib8.github.io/stockwise](https://iamsaquib8.github.io/stockwise/)** —
-install, cheatsheet, commands, markets, AI, backtesting, brokers, and
+install, cheatsheet, commands, markets, AI, backtesting, brokers,
+[troubleshooting](docs/troubleshooting.md), and
 [how StockWise compares](docs/comparison.md) with other tools.
 
 ## Contributing
