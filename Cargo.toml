@@ -4,13 +4,13 @@ version = "0.8.0"
 edition = "2024"
 rust-version = "1.97"
 authors = ["iamsaquib8 <saquibulhassan6@gmail.com>"]
-description = "Stock market toolkit for your terminal — NSE/BSE and US stocks, mutual funds, F&O, crypto and FX: quotes, charts, screeners, backtests, SIP/XIRR, paper trading, portfolio and tax."
+description = "Stock market toolkit for your terminal — NSE/BSE and US stocks, mutual funds, F&O, crypto and FX: quotes, charts, backtests, portfolio with lots and XIRR, Indian capital-gains tax, paper trading and an MCP server for AI assistants."
 documentation = "https://iamsaquib8.github.io/stockwise/"
 homepage = "https://github.com/iamsaquib8/stockwise"
 repository = "https://github.com/iamsaquib8/stockwise"
 readme = "README.md"
 license = "MIT"
-keywords = ["stocks", "trading", "finance", "cli", "stock-market"]
+keywords = ["stocks", "portfolio", "tax", "india", "mcp"]
 categories = ["command-line-utilities", "finance"]
 exclude = ["assets/", "docs/", "site/", ".github/", "*.tape", "install.sh", "packaging/", "Dockerfile", ".dockerignore", "flake.nix", "flake.lock", "pyproject.toml", "scripts/"]
 
