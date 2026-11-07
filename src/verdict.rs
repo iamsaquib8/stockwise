@@ -793,10 +793,14 @@ pub(crate) mod testing {
         "risk / reward",
         "risk-reward",
         "reduce",
+        "avoid",
+        "subscribe",
+        "apply",
     ];
 
     /// Panics when `text` contains advice wording. "buying" and "selling" are
-    /// allowed as plain descriptions of insider and institutional flows.
+    /// allowed as plain descriptions of insider and institutional flows, and
+    /// "subscribed" / "application" are not the call words "subscribe" / "apply".
     pub fn assert_neutral(text: &str) {
         let lower = text.to_lowercase();
         for word in FORBIDDEN {
