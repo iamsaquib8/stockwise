@@ -5,7 +5,7 @@
 //! indices. Every value arrives as a string, and errors arrive as HTTP 200
 //! with an `Information`, `Note` or `Error Message` key.
 
-use super::{Auth, Bar, Http, ProviderError, Series, int, num};
+use super::{Auth, Bar, Http, ProviderError, Series, int, num, trade_time};
 use crate::api::{Quote, SearchResult};
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -142,6 +142,9 @@ impl AlphaVantage {
                     .await?;
                 Ok(parse_global_quote(&json).map(|mut q| {
                     q.currency = equity_currency(&sym).map(str::to_string);
+                    // End-of-day data: dated by the day it is for, not today.
+                    q.regular_market_time =
+                        latest_trading_day(&json).and_then(|d| trade_time(symbol, d));
                     q
                 }))
             }
@@ -256,6 +259,15 @@ pub fn parse_global_quote(json: &serde_json::Value) -> Option<Quote> {
         regular_market_change_percent: num(&g["10. change percent"]),
         ..Default::default()
     })
+}
+
+/// The day a `GLOBAL_QUOTE` answer is for (`07. latest trading day`).
+pub fn latest_trading_day(json: &serde_json::Value) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(
+        json["Global Quote"]["07. latest trading day"].as_str()?,
+        "%Y-%m-%d",
+    )
+    .ok()
 }
 
 pub fn parse_exchange_rate(json: &serde_json::Value) -> Option<Quote> {
@@ -424,6 +436,8 @@ mod tests {
         assert_eq!(quotes.len(), 1);
         assert_eq!(quotes[0].symbol.as_deref(), Some("IBM"));
         assert_eq!(quotes[0].data_source.as_deref(), Some("Alpha Vantage"));
+        // Dated by "latest trading day" (Mon 19 Oct 2026, IBM closes 16:00 ET).
+        assert_eq!(quotes[0].regular_market_time, Some(1_792_440_000));
         let reqs = server.requests();
         assert_eq!(reqs.len(), 1);
         assert!(

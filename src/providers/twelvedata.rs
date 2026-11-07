@@ -155,6 +155,8 @@ pub fn parse_quote(json: &serde_json::Value) -> Option<Quote> {
     Some(Quote {
         short_name: json["name"].as_str().map(str::to_string),
         regular_market_price: Some(price),
+        // The time of the bar the price belongs to, not the time of the call.
+        regular_market_time: json["timestamp"].as_i64(),
         regular_market_open: num(&json["open"]),
         regular_market_day_high: num(&json["high"]),
         regular_market_day_low: num(&json["low"]),
@@ -258,6 +260,7 @@ mod tests {
     #[test]
     fn parses_quote_fixture_with_string_numbers() {
         let q = parse_quote(&serde_json::from_str(QUOTE).unwrap()).unwrap();
+        assert_eq!(q.regular_market_time, Some(1_792_503_000));
         assert_eq!(q.regular_market_price, Some(339.21));
         assert_eq!(q.regular_market_change, Some(-3.73));
         assert_eq!(q.regular_market_change_percent, Some(-1.087655));

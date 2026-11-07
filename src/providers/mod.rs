@@ -538,11 +538,25 @@ fn notice_once(flag: &AtomicBool, message: impl FnOnce() -> String) {
     }
 }
 
+/// When an end-of-day quote for trading day `date` was struck, as Unix
+/// seconds: the close of that day on the symbol's exchange, so the quote's
+/// trade date (the exchange's calendar day of this time) is `date`. Symbols
+/// with no exchange calendar (crypto, FX) and days the calendar lists as
+/// closed get noon UTC of `date`.
+pub fn trade_time(symbol: &str, date: NaiveDate) -> Option<i64> {
+    crate::alerts::alert_market(symbol)
+        .and_then(|m| crate::clock::close_at(m, date))
+        .map(|t| t.timestamp())
+        .or_else(|| date.and_hms_opt(12, 0, 0).map(|t| t.and_utc().timestamp()))
+}
+
 /// Overlay a provider quote on Yahoo's quote for the same symbol. Price and
 /// day fields come from the provider; everything it lacks (name, 52-week
 /// range, fundamentals, currency) stays Yahoo's. If the provider gave a price
 /// but no change, the change is recomputed against Yahoo's previous close so
-/// price and change never disagree.
+/// price and change never disagree. The trade time comes with the price: an
+/// end-of-day quote from yesterday keeps yesterday's date instead of
+/// borrowing the time of Yahoo's live trade.
 pub fn merge_quote(provider: Quote, yahoo: Option<Quote>) -> Quote {
     let Some(mut q) = yahoo else {
         return provider;
@@ -554,6 +568,7 @@ pub fn merge_quote(provider: Quote, yahoo: Option<Quote>) -> Quote {
     }
     take!(
         regular_market_price,
+        regular_market_time,
         regular_market_open,
         regular_market_day_high,
         regular_market_day_low,
@@ -1213,6 +1228,49 @@ mod tests {
         let plain = serde_json::to_value(Quote::default()).unwrap();
         assert!(plain.get("deliveryPercent").is_none());
         assert!(plain.get("lowerCircuit").is_none());
+    }
+
+    #[test]
+    fn merge_keeps_the_providers_trade_time_with_its_price() {
+        // Massive's free plan: yesterday's close. Yahoo's quote is live today.
+        let yesterday = d("2026-10-20");
+        let provider = Quote {
+            regular_market_price: Some(339.21),
+            regular_market_time: trade_time("AAPL", yesterday),
+            data_source: Some("Massive".into()),
+            ..Default::default()
+        };
+        let today_live = 1_792_700_000; // 21 Oct 2026, during the NY session
+        let yahoo = Quote {
+            regular_market_price: Some(341.0),
+            regular_market_time: Some(today_live),
+            ..Default::default()
+        };
+        let q = merge_quote(provider.clone(), Some(yahoo.clone()));
+        assert_eq!(q.regular_market_time, trade_time("AAPL", yesterday));
+        let traded = chrono::DateTime::from_timestamp(q.regular_market_time.unwrap(), 0)
+            .map(|t| crate::calendar::exchange_today("AAPL", t));
+        assert_eq!(traded, Some(yesterday));
+        // A provider with no trade time leaves Yahoo's alone.
+        let no_time = Quote {
+            regular_market_time: None,
+            ..provider
+        };
+        let q = merge_quote(no_time, Some(yahoo));
+        assert_eq!(q.regular_market_time, Some(today_live));
+    }
+
+    #[test]
+    fn trade_time_is_the_exchange_close_of_that_day() {
+        // Tue 20 Oct 2026: NYSE closes 16:00 EDT = 20:00 UTC.
+        let day = d("2026-10-20");
+        assert_eq!(trade_time("AAPL", day), Some(1_792_526_400));
+        // NSE closes 15:30 IST = 10:00 UTC (Wed 21 Oct; the 20th is Dussehra).
+        assert_eq!(trade_time("TCS.NS", d("2026-10-21")), Some(1_792_576_800));
+        // Crypto has no calendar, and neither does a day NSE is closed:
+        // noon UTC of the day.
+        assert_eq!(trade_time("BTC-USD", day), Some(1_792_497_600));
+        assert_eq!(trade_time("TCS.NS", day), Some(1_792_497_600));
     }
 
     #[test]
