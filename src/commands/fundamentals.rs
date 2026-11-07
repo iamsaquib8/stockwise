@@ -1034,10 +1034,12 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         }
 
         // Support/Resistance
-        let n = highs.len();
-        if n > 1 {
-            let (pivot, r1, r2, _r3, s1, s2, _s3) =
-                technical::pivot_points(highs[n - 1], lows[n - 1], closes[n - 1]);
+        // Bars with a missing close (today's, while the market is open) are
+        // dropped from `closes` only, so index each series from its own end.
+        if highs.len() > 1
+            && let (Some(&h), Some(&l), Some(&c)) = (highs.last(), lows.last(), closes.last())
+        {
+            let (pivot, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(h, l, c);
             print_section("Support & Resistance");
             print_kv("R2", &format!("{}{:.2}", csym, r2).red().to_string());
             print_kv("R1", &format!("{}{:.2}", csym, r1).red().to_string());
@@ -1047,7 +1049,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         }
 
         // Fibonacci
-        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, 60.min(n)) {
+        if let Some((sh, sl)) = technical::find_swing_points(&highs, &lows, 60.min(highs.len())) {
             let fibs = technical::fibonacci_levels(sh, sl);
             print_section("Fibonacci (3M swing)");
             for (name, val) in [

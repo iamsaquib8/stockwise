@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The web dashboard's Research tab shows the pillar scores and data coverage instead of the buy/sell label, entry zone and stop-loss.
 
 ### Fixed
+- `deep`: no longer crashes with "index out of bounds" in Support & Resistance when the latest bar has no close yet, so the report reaches the score.
 - Strip the request URL from Yahoo fetch errors before displaying or returning them, preventing session `crumb` tokens from appearing in error text.
 - `portfolio xray`: recognize Indian ETFs (such as `NIFTYBEES`, `JUNIORBEES`, `BANKBEES`, `MID150BEES`, `GOLDBEES`, `LIQUIDBEES`) and profile-less ETFs as funds rather than treating them as single concentrated stocks ([#220](https://github.com/iamsaquib8/stockwise/issues/220)):
   - Retain ETF classification even when Yahoo Finance returns no `topHoldings` or fund profile modules for NSE-listed instruments.
