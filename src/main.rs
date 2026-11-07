@@ -871,6 +871,9 @@ enum PortfolioCmd {
         /// Purchase date, YYYY-MM-DD (default: today) — used for LTCG/STCG and XIRR
         #[arg(long)]
         date: Option<String>,
+        /// Save even if Yahoo Finance does not know the ticker
+        #[arg(long)]
+        force: bool,
     },
     /// Record a sale: oldest lots first (FIFO), realized P&L kept for `tax`
     Sell {
@@ -1150,6 +1153,9 @@ enum WatchCmd {
     Add {
         #[arg(required = true, num_args = 1..)]
         symbols: Vec<String>,
+        /// Save even if Yahoo Finance does not know the ticker
+        #[arg(long)]
+        force: bool,
     },
     /// Remove tickers from the watchlist
     #[command(alias = "rm")]
@@ -1216,6 +1222,9 @@ enum AlertCmd {
         /// RSI period (default 14) or volume-average length (default 20)
         #[arg(long, value_parser = clap::value_parser!(u32).range(2..=200))]
         period: Option<u32>,
+        /// Save even if Yahoo Finance does not know the ticker
+        #[arg(long)]
+        force: bool,
     },
     /// Remove an alert by its number from `alert list`
     #[command(alias = "rm")]
@@ -3445,7 +3454,10 @@ async fn dispatch(
                 shares,
                 cost,
                 date,
-            }) => commands::cmd_portfolio_add(&symbol, shares, cost, date.as_deref(), m).await,
+                force,
+            }) => {
+                commands::cmd_portfolio_add(&symbol, shares, cost, date.as_deref(), force, m).await
+            }
             Some(PortfolioCmd::Sell {
                 symbol,
                 shares,
@@ -3506,9 +3518,11 @@ async fn dispatch(
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
-            Some(WatchCmd::Add { symbols }) => commands::cmd_watchlist("add", &symbols, m).await,
+            Some(WatchCmd::Add { symbols, force }) => {
+                commands::cmd_watchlist("add", &symbols, force, m).await
+            }
             Some(WatchCmd::Remove { symbols }) => {
-                commands::cmd_watchlist("remove", &symbols, m).await
+                commands::cmd_watchlist("remove", &symbols, false, m).await
             }
             Some(WatchCmd::Show { out: show }) => commands::cmd_watchlist_show(out.or(show)).await,
             None => commands::cmd_watchlist_show(out.into()).await,
@@ -3519,10 +3533,11 @@ async fn dispatch(
                 condition,
                 target,
                 period,
+                force,
             }) => {
                 let condition = value_name(condition);
                 let period = period.map(|p| p as usize);
-                commands::cmd_alert_add(&symbol, &condition, target, period, m).await
+                commands::cmd_alert_add(&symbol, &condition, target, period, force, m).await
             }
             Some(AlertCmd::Remove { index }) => commands::cmd_alert_remove(index),
             Some(AlertCmd::Check { out: check }) => commands::cmd_alert_check(out.or(check)).await,

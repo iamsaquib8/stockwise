@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `peers`, `compare`, `deep` and `analyze`: sector, profit margin, debt/equity, revenue growth, beta and analyst ratings are now read from Yahoo's company summary, so `peers TCS` lists IT peers and `compare` no longer shows rows of N/A. Rows and sections with no data at all are left out ([#209](https://github.com/iamsaquib8/stockwise/issues/209)).
 - `deep` and `analyze`: banks and lenders no longer show an Altman Z "Distress Zone" next to a strong score; they show "n/a for banks and lenders", and `score` says the same. The doubled brackets in the zone label are gone ([#212](https://github.com/iamsaquib8/stockwise/issues/212)).
 - `forecast`: the default history is now 6 months instead of one, so `forecast TCS` prints a projection instead of "Not enough price data". The error now says how many days it found, and the `SYMBOL` argument has a help line ([#215](https://github.com/iamsaquib8/stockwise/issues/215)).
+- `watch add`, `portfolio add` and `alert add` now refuse a ticker Yahoo does not know (for example `RELIANC`) and name the likely one, instead of saving it silently; `--force` saves it anyway, and funds, SGBs and offline use are not blocked. `technical`, `history`, `risk` and the other chart commands say "No price history for ZZQQXX.NS" instead of "HTTP 404" ([#216](https://github.com/iamsaquib8/stockwise/issues/216)).
 
 ## [0.8.0] - 2026-11-03
 

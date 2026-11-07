@@ -903,6 +903,7 @@ pub async fn cmd_portfolio_add(
     shares: f64,
     cost: f64,
     date: Option<&str>,
+    force: bool,
     market: Market,
 ) -> Result<()> {
     if !(shares > 0.0 && shares.is_finite()) {
@@ -939,6 +940,7 @@ pub async fn cmd_portfolio_add(
         (symbol, shares, cost) = (swap.symbol, swap.qty, swap.price);
     }
     let resolved = market::resolve_symbol(&symbol, market);
+    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
     let holding = Portfolio::update(|p| {
         p.add_lot(&resolved, Lot::new(shares, cost, &date, "manual"));
         Ok(p.holding(&resolved).cloned())
