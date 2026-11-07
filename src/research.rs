@@ -1011,7 +1011,7 @@ pub fn parse_fin(summary: &Value, quote: &Quote) -> Fin {
         ev_ebitda: raw(ks, "enterpriseToEbitda").or(quote.enterprise_to_ebitda),
         div_yield: raw(sd, "dividendYield")
             .or(raw(sd, "trailingAnnualDividendYield"))
-            .or(quote.trailing_annual_dividend_yield),
+            .or(quote.dividend_yield_fraction()),
         payout: raw(sd, "payoutRatio"),
         inst_net_buy_pct: raw(nsp, "netInstBuyingPercent"),
     }

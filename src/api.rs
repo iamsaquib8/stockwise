@@ -252,6 +252,30 @@ impl Quote {
         self.quote_type.as_deref() == Some("NONE")
     }
 
+    /// Dividend yield as a fraction (0.0448 = 4.48%).
+    ///
+    /// Yahoo's `trailingAnnualDividendYield` is 0 for many NSE stocks
+    /// (RELIANCE, M&M) and for Infosys it divides a dollar dividend by a rupee
+    /// price (0.0005). Its `dividendYield` field, a percentage, is right in
+    /// those cases. Use the trailing figure when it is positive and within a
+    /// factor of two of `dividendYield / 100`, otherwise that one.
+    pub fn dividend_yield_fraction(&self) -> Option<f64> {
+        let trailing = self
+            .trailing_annual_dividend_yield
+            .filter(|v| v.is_finite() && *v > 0.0);
+        let reported = self
+            .dividend_yield
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|v| v / 100.0);
+        match (trailing, reported) {
+            (Some(t), Some(r)) if (0.5..=2.0).contains(&(t / r)) => Some(t),
+            (_, Some(r)) => Some(r),
+            (Some(t), None) => Some(t),
+            // Nothing positive: keep what Yahoo said (0 or absent).
+            (None, None) => self.trailing_annual_dividend_yield,
+        }
+    }
+
     /// A row that describes a real instrument with a price.
     pub fn is_usable(&self) -> bool {
         !self.is_placeholder() && self.regular_market_price.is_some()
@@ -920,6 +944,11 @@ impl YahooClient {
             .result
             .into_iter()
             .filter(|q| !q.is_placeholder())
+            .map(|mut q| {
+                // Every reader takes the yield from this field; make it right.
+                q.trailing_annual_dividend_yield = q.dividend_yield_fraction();
+                q
+            })
             .collect())
     }
 
@@ -1477,5 +1506,59 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].symbol.as_deref(), Some("RELIANCE.BO"));
         assert!(got[0].is_usable());
+    }
+
+    #[test]
+    fn dividend_yield_fraction_covers_zero_mismatch_and_normal() {
+        let q = |trailing: Option<f64>, reported: Option<f64>| Quote {
+            trailing_annual_dividend_yield: trailing,
+            dividend_yield: reported,
+            ..Default::default()
+        };
+        // RELIANCE: trailing 0, dividendYield 0.46 (percent).
+        let y = q(Some(0.0), Some(0.46)).dividend_yield_fraction().unwrap();
+        assert!((y - 0.0046).abs() < 1e-12);
+        // INFY: a dollar dividend over a rupee price, 0.00046 against 4.48%.
+        let y = q(Some(0.00046), Some(4.48))
+            .dividend_yield_fraction()
+            .unwrap();
+        assert!((y - 0.0448).abs() < 1e-12);
+        // Normal: the two agree, so the trailing figure wins.
+        let y = q(Some(0.0152), Some(1.5))
+            .dividend_yield_fraction()
+            .unwrap();
+        assert!((y - 0.0152).abs() < 1e-12);
+        // Only one of them.
+        assert_eq!(q(Some(0.02), None).dividend_yield_fraction(), Some(0.02));
+        assert_eq!(q(None, Some(2.0)).dividend_yield_fraction(), Some(0.02));
+        // A non-payer stays a zero, an unknown stays unknown.
+        assert_eq!(q(Some(0.0), None).dividend_yield_fraction(), Some(0.0));
+        assert_eq!(q(None, None).dividend_yield_fraction(), None);
+    }
+
+    #[tokio::test]
+    async fn yahoo_quote_fixes_the_trailing_dividend_yield() {
+        let body = r#"{"quoteResponse":{"result":[
+            {"symbol":"RELIANCE.NS","quoteType":"EQUITY","regularMarketPrice":1318.0,
+             "trailingAnnualDividendYield":0.0,"dividendYield":0.46},
+            {"symbol":"INFY.NS","quoteType":"EQUITY","regularMarketPrice":1181.0,
+             "trailingAnnualDividendYield":0.00046,"dividendYield":4.48}
+        ],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        let got = client
+            .yahoo_quote(&["RELIANCE.NS", "INFY.NS"])
+            .await
+            .unwrap();
+        let yields: Vec<f64> = got
+            .iter()
+            .map(|q| q.trailing_annual_dividend_yield.unwrap())
+            .collect();
+        assert!((yields[0] - 0.0046).abs() < 1e-12);
+        assert!((yields[1] - 0.0448).abs() < 1e-12);
     }
 }
