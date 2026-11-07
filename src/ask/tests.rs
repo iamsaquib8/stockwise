@@ -6,6 +6,7 @@ use super::*;
 use crate::market::Market;
 use crate::testutil::MockServer;
 use crate::views::fixtures::Fixture;
+use std::time::Duration;
 
 fn ctx() -> ToolContext<Fixture> {
     ToolContext::new(Fixture::default(), Market::In)
@@ -537,4 +538,106 @@ async fn ollama_answers_before_the_context_window_fills() {
     assert!(reqs[1].json().get("tools").is_none());
     assert!(t.stopped_early.unwrap().contains("context window"));
     assert!(reqs[0].json()["options"]["num_predict"].as_u64().unwrap() <= 4_096);
+}
+
+/// A source whose quotes take longer for some symbols; records the order in
+/// which the lookups finish.
+struct Slow {
+    done: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::views::DataSource for Slow {
+    async fn quotes(&self, symbols: &[&str]) -> Result<Vec<crate::api::Quote>> {
+        let sym = symbols[0].to_string();
+        let ms = if sym.starts_with("TCS") { 600 } else { 150 };
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        self.done.lock().unwrap().push(sym.clone());
+        Ok(vec![crate::api::Quote {
+            symbol: Some(sym),
+            regular_market_price: Some(100.0),
+            ..Default::default()
+        }])
+    }
+    async fn chart(&self, _: &str, _: &str, _: &str) -> Result<crate::api::ChartData> {
+        anyhow::bail!("down")
+    }
+    async fn search(&self, _: &str) -> Result<Vec<crate::api::SearchResult>> {
+        anyhow::bail!("down")
+    }
+    fn portfolio(&self) -> Result<crate::portfolio::Portfolio> {
+        Ok(Default::default())
+    }
+}
+
+#[tokio::test]
+async fn the_tool_calls_of_one_turn_overlap_and_keep_their_order() {
+    let three_quotes = json!({
+        "message": {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "quote", "arguments": {"symbols": ["TCS"]}}},
+            {"function": {"name": "quote", "arguments": {"symbols": ["INFY"]}}},
+            {"function": {"name": "quote", "arguments": {"symbols": ["WIPRO"]}}}
+        ]},
+    });
+    let answer = json!({"message": {"role": "assistant", "content": "All three are quoted."}});
+    let server = MockServer::start(vec![
+        (200, three_quotes.to_string()),
+        (200, answer.to_string()),
+    ])
+    .await;
+    let ai = client(AiProvider::Ollama, &server.url);
+    let ctx = ToolContext::new(
+        Slow {
+            done: Default::default(),
+        },
+        Market::In,
+    );
+    let started = std::time::Instant::now();
+    let t = ask(&ai, &ctx, "Quote them", &AskOptions::default())
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    // One after another this takes 600 + 150 + 150 ms; together, about 600.
+    assert!(took < Duration::from_millis(800), "took {took:?}");
+    // The short lookups finished first, but steps follow the model's order.
+    assert_eq!(
+        *ctx.source.done.lock().unwrap(),
+        ["INFY.NS", "WIPRO.NS", "TCS.NS"]
+    );
+    let args: Vec<String> = t.steps.iter().map(|s| s.arguments.to_string()).collect();
+    assert!(args[0].contains("TCS") && args[1].contains("INFY") && args[2].contains("WIPRO"));
+    assert!(t.steps.iter().all(|s| s.ok));
+    assert_eq!(t.usage.tool_calls, 3);
+    // So do the results sent back to the model.
+    let msgs = server.requests()[1].json()["messages"].clone();
+    let sent: Vec<String> = (3..6)
+        .map(|i| msgs[i]["content"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        sent[0].contains("TCS.NS") && sent[1].contains("INFY.NS") && sent[2].contains("WIPRO.NS")
+    );
+}
+
+#[tokio::test]
+async fn the_tool_call_limit_still_counts_each_call_when_they_run_together() {
+    let three = json!({
+        "message": {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "watchlist", "arguments": {}}},
+            {"function": {"name": "alerts_list", "arguments": {}}},
+            {"function": {"name": "watchlist", "arguments": {}}}
+        ]},
+    });
+    let answer = json!({"message": {"role": "assistant", "content": "Done."}});
+    let (t, _) = run(
+        AiProvider::Ollama,
+        vec![three, answer],
+        AskOptions {
+            max_tool_calls: 2,
+            ..Default::default()
+        },
+    )
+    .await;
+    let t = t.unwrap();
+    assert_eq!(t.usage.tool_calls, 2);
+    assert!(t.steps[0].ok && t.steps[1].ok);
+    assert!(t.steps[2].error.as_deref().unwrap().contains("limit"));
 }
