@@ -403,12 +403,15 @@ impl SectorMembers {
     }
 }
 
+/// Quotes served from `cache.db` with each one's age in seconds.
+struct StoredQuotes {
+    quotes: Vec<crate::api::Quote>,
+    age_secs: std::collections::HashMap<String, i64>,
+}
+
 /// The last stored `market_snapshots` rows of `symbols`, of any age: the
 /// offline answer when no live quote is available. `None` when none match.
-fn stored_quotes(
-    symbols: &[String],
-    cap: Option<market::CapFilter>,
-) -> Option<Vec<crate::api::Quote>> {
+fn stored_quotes(symbols: &[String], cap: Option<market::CapFilter>) -> Option<StoredQuotes> {
     let filter = crate::db::SnapshotFilter {
         market: Some("in".to_string()),
         cap_tier: cap.and_then(market::CapFilter::tier),
@@ -417,12 +420,44 @@ fn stored_quotes(
     let rows = crate::db::with_db(|d| d.query_snapshots(&filter))?;
     let wanted: std::collections::HashSet<String> =
         symbols.iter().map(|s| s.to_ascii_uppercase()).collect();
-    let quotes: Vec<crate::api::Quote> = rows
+    let now = chrono::Utc::now().timestamp();
+    let rows: Vec<_> = rows
         .iter()
         .filter(|r| wanted.contains(&r.symbol.to_ascii_uppercase()))
+        .collect();
+    let age_secs = rows
+        .iter()
+        .map(|r| (r.symbol.to_ascii_uppercase(), (now - r.updated_at).max(0)))
+        .collect();
+    let quotes: Vec<crate::api::Quote> = rows
+        .into_iter()
         .map(crate::worker::quote_from_snapshot)
         .collect();
-    (!quotes.is_empty()).then_some(quotes)
+    (!quotes.is_empty()).then_some(StoredQuotes { quotes, age_secs })
+}
+
+/// One member in `sectors <NAME> --json/--csv`: a `screen` row, plus the
+/// age of the price when it came from `cache.db` instead of a live quote.
+#[derive(Debug, Serialize)]
+pub(crate) struct SectorMemberRow {
+    #[serde(flatten)]
+    row: ScreenRow,
+    price_age_secs: Option<i64>,
+}
+
+impl CsvRow for SectorMemberRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "symbol",
+        "name",
+        "price",
+        "change_percent",
+        "pe",
+        "market_cap",
+        "dividend_yield",
+        "currency",
+        "cap_tier",
+        "price_age_secs",
+    ];
 }
 
 /// `sectors <NAME>`: the sector index's members with their cap tier,
@@ -459,21 +494,41 @@ async fn cmd_sector_members(
         // NSE answered, so one more request is cheap: NSE's snapshot quotes
         // carry no market cap, and tiers come from the saved membership.
         if market::IndiaMembership::load().is_empty() {
-            let _ = scan_nse_index(&client, "NIFTY 500", None).await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                scan_nse_index(&client, "NIFTY 500", None),
+            )
+            .await;
         }
     }
+    let mut ages = std::collections::HashMap::new();
     let mut quotes = match scan_quotes(&client, market, &scan, cap, true).await {
         Ok(q) => q,
         Err(e) => match stored_quotes(&scan.symbols, cap) {
-            Some(q) => {
+            Some(st) => {
+                let oldest = st.age_secs.values().max().copied().unwrap_or(0);
                 eprintln!(
-                    "  \u{24d8} No live quotes ({:#}); using the last prices stored in cache.db.",
-                    e
+                    "  \u{24d8} No live quotes ({:#}); using prices stored in cache.db (oldest {} min old).",
+                    e,
+                    oldest / 60
                 );
-                q
+                ages = st.age_secs;
+                st.quotes
             }
             None => return Err(e),
         },
+    };
+    let member_rows = |quotes: &[crate::api::Quote]| -> Vec<SectorMemberRow> {
+        quotes
+            .iter()
+            .map(|q| SectorMemberRow {
+                row: ScreenRow::from(q),
+                price_age_secs: q
+                    .symbol
+                    .as_ref()
+                    .and_then(|s| ages.get(&s.to_ascii_uppercase()).copied()),
+            })
+            .collect()
     };
     quotes.sort_by(|a, b| {
         let key = |q: &crate::api::Quote| q.regular_market_change_percent.unwrap_or(f64::MIN);
@@ -481,12 +536,10 @@ async fn cmd_sector_members(
     });
     match fmt {
         Format::Json => {
-            let rows: Vec<ScreenRow> = quotes.iter().map(ScreenRow::from).collect();
-            return output::print_json(&rows);
+            return output::print_json(&member_rows(&quotes));
         }
         Format::Csv => {
-            let rows: Vec<ScreenRow> = quotes.iter().map(ScreenRow::from).collect();
-            return output::print_csv(&rows);
+            return output::print_csv(&member_rows(&quotes));
         }
         Format::Table => {}
     }

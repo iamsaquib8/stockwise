@@ -41,6 +41,10 @@ fn stockwise(home: &Path, args: &[&str]) -> Output {
         // Anything that does reach for the network fails at once.
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("HTTP_PROXY", "http://127.0.0.1:9")
+        // No inherited setting may route around that proxy.
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env_remove("REQUEST_METHOD")
         .env("NO_COLOR", "1")
         .output()
         .expect("run stockwise")
@@ -275,6 +279,11 @@ fn sector_members_fall_back_to_old_stored_prices_offline() {
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         let rows = v.as_array().unwrap();
         assert!(!rows.is_empty(), "{args:?}");
+        // Stored prices say how old they are.
+        assert!(
+            rows.iter()
+                .all(|r| r["price_age_secs"].as_i64().unwrap() >= 86_400)
+        );
         if args.contains(&"--cap") {
             assert!(rows.iter().all(|r| r["cap_tier"] == "large"), "{v}");
         } else {
