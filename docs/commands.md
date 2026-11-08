@@ -133,9 +133,9 @@ always works. Common names resolve to NSE symbols
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--json\|--csv]` | Top gainers and losers among 30 large caps, or an NSE index's members (see below) |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers among 30 large caps, or an NSE index's members (see below), with a cap-tier column |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX]` | Heatmap of the 30-stock universe, or an NSE index's members |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the 30-stock universe, or an NSE index's members |
 | `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
 | `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
 | `rotation` | Sector rotation vs 50-day average |
@@ -147,18 +147,45 @@ always works. Common names resolve to NSE symbols
 | `surprise` | Earnings momentum — accelerating vs decelerating |
 | `matrix` | Quality vs growth quadrants |
 | `picks` | The highest-scoring large caps on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
-| `screen <CATEGORY> [--universe INDEX] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
+| `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
 **`--universe`** (Indian market): scan the current members of an NSE index
 instead of the built-in 30 large caps — `nifty50`, `niftynext50` (`next50`),
-`nifty100`, `banknifty` (`niftybank`) or `niftyit`. The member list comes from
-NSE's website (one request) whichever data provider you use; prices still come
-from your provider, and with `STOCKWISE_DATA_PROVIDER=nse` or `exchange` the
-members' prices arrive with that same request. When NSE can't be reached or
+`nifty100`, `banknifty` (`niftybank`), `niftyit`, `nifty500`, `midcap150` or
+`smallcap250`. NSE's website lists the members and prices them in one bulk
+request (all 500 of `nifty500`), whichever data provider you use. `movers` and
+`heatmap` rank from that snapshot alone, so they work when Yahoo Finance is
+unreachable; `screen` needs P/E and market cap too, so it asks Yahoo for them
+and falls back to the snapshot (no P/E or market cap) when Yahoo fails. Every
+scan also saves the prices into `cache.db` (`market_snapshots`) and the index
+members for the cap tiers below. When NSE can't be reached or
 refuses, StockWise says so on stderr and scans a built-in list instead (the 30
 large caps for `nifty50` / `nifty100`, a built-in member list for `banknifty`
 and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
+
+**Cap tiers** (`mega`, `large`, `mid`, `small`, `micro`): a badge such as
+`[Large]` next to the market cap in `quote`, `deep`, `analyze` and `compare`
+(and a `Cap` column in `movers`, `screen` and `portfolio`), and a `cap_tier`
+field in their `--json` / `--csv` (`unknown` when there is no market cap, or
+no exchange rate for the currency). Indian stocks follow the SEBI/AMFI ranks
+when the index members are known: NIFTY 100 is large (the top 10, or above
+₹5,00,000 Cr, is mega), NIFTY MIDCAP 150 is mid, NIFTY SMALLCAP 250 is small
+and anything outside NIFTY 500 is micro. Scanning those indexes with
+`--universe` saves their members (`cap_membership.json` in the data
+directory); until then, and offline, rupee cut-offs decide (large from
+₹1,00,000 Cr, mid from ₹33,000 Cr, small from ₹10,000 Cr). Every other market
+converts the market cap to dollars at the built-in approximate rates (London
+pence `GBp` and Japanese yen `JPY` included): mega from $200B, large from
+$10B, mid from $2B, small from $300M. A display and filtering aid, not a
+regulatory classification.
+
+**`--cap all|mega|large|mid|small|micro`** keeps one tier in `movers`,
+`heatmap` and `screen`. With a tier, `-m in` and `-m us` scans read fresh
+(under 30 minutes old) `market_snapshots` rows from `cache.db` when `cache
+warm` or the worker has stored most of the market's list, with no request at
+all; otherwise they scan live. There is no per-sector drilldown command yet,
+so `--cap` has nothing to filter there.
 
 ## Funds & F&O
 
@@ -876,7 +903,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 
 | Command | `--json` | `--csv` — one row per |
 |---------|----------|-----------------------|
-| `quote` | `[quote]` — Yahoo's quote fields, plus `dataSource` when another provider supplied the price, and `deliveryPercent`, `lowerCircuit`, `upperCircuit` when NSE did ([data-providers.md](data-providers.md#nse-and-bse)) | quote: `symbol, name, currency, price, change, change_percent, open, day_low, day_high, year_low, year_high, volume, avg_volume_3m, market_cap, pe_ttm, eps_ttm, dividend_yield, delivery_percent, lower_circuit, upper_circuit` (the last three empty unless NSE answered) |
+| `quote` | `[quote]` — Yahoo's quote fields, plus `cap_tier` and `dataSource` when another provider supplied the price, and `deliveryPercent`, `lowerCircuit`, `upperCircuit` when NSE did ([data-providers.md](data-providers.md#nse-and-bse)) | quote: `symbol, name, currency, price, change, change_percent, open, day_low, day_high, year_low, year_high, volume, avg_volume_3m, market_cap, cap_tier, pe_ttm, eps_ttm, dividend_yield, delivery_percent, lower_circuit, upper_circuit` (the last three empty unless NSE answered) |
 | `markets` | `[{region, symbol, name, price, change, change_percent, currency}]` — `region` is `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Germany`, `Japan`, `Hong Kong`, `Singapore`, `Canada`, `Australia`) or `Global`. The India 10-year yield is the row with `symbol` `IN10Y`: `price` is the yield in percent, `currency` and `change` are null | index |
 | `search` | `[hit]` — Yahoo's search fields | hit: `symbol, name, quote_type, exchange` |
 | `commodity` / `commodity spot` | `[{metal, unit, price, currency, change_percent, source}]` — `metal` is `gold` or `silver`; `unit` is `USD/oz`, `INR/g`, `INR/10g` or `INR/kg` | row |
@@ -888,12 +915,12 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `history` | `{symbol, currency, period, interval, bars: [{time, open, high, low, close, volume}]}` | bar |
 | `technical` | `{symbol, currency, period, interval, bars, price, sma_10, sma_20, sma_50, sma_100, sma_200, ema_12, ema_26, rsi_14, rsi_signal, macd: {line, signal, histogram, trend}, bollinger: {upper, middle, lower, position}, atr_14, atr_percent, vwap, bias: {verdict, bullish, bearish}}` — `position` is `above_upper`, `below_lower` or `within`; `verdict` is `bullish`, `bearish` or `neutral` | — |
 | `risk` | `{symbol, currency, period, interval, bars, price, return_percent, volatility_percent, risk_level, sharpe, sortino, calmar, max_drawdown: {percent, peak_price, trough_price, trading_days}, var_95_percent, var_99_percent}` — `risk_level` is `low`, `moderate`, `high` or `very_high` | — |
-| `compare` | `[{symbol, name, currency, price, change_percent, market_cap, pe_ttm, pe_forward, eps_ttm, price_to_book, dividend_yield, profit_margin, revenue_growth, debt_to_equity, beta, year_high, year_low, sma_50, analyst_mean_rating}]` — the table's transpose | stock |
+| `compare` | `[{symbol, name, currency, price, change_percent, market_cap, cap_tier, pe_ttm, pe_forward, eps_ttm, price_to_book, dividend_yield, profit_margin, revenue_growth, debt_to_equity, beta, year_high, year_low, sma_50, analyst_mean_rating}]` — the table's transpose | stock |
 | `correlate` | `{period, interval, symbols: [..], matrix: [[..]]}` — `matrix[i][j]` pairs `symbols[i]` and `symbols[j]` | symbol: `symbol, <SYM1>, <SYM2>, ...` |
 | `returns` | `{symbol, currency, price, returns: [{period, label, start_price, end_price, return_percent, annualized_percent, growth_of_100000}]}` — `annualized_percent` is `null` for spans under a year | period |
-| `movers` | `{gainers: [row], losers: [row]}`, row = `{side, rank, symbol, price, change_percent, volume, currency}` | stock, gainers then losers |
+| `movers` | `{gainers: [row], losers: [row]}`, row = `{side, rank, symbol, price, change_percent, volume, currency, cap_tier}` | stock, gainers then losers |
 | `sectors` | `[{sector, symbol, price, change_percent, currency}]`, best first | sector |
-| `screen` | `[{symbol, name, price, change_percent, pe, market_cap, dividend_yield, currency}]` | match |
+| `screen` | `[{symbol, name, price, change_percent, pe, market_cap, dividend_yield, currency, cap_tier}]` | match |
 | `dividends` | `{symbol, currency, price, pays_dividend, dividend_yield_percent, annual_dividend_per_share, income: [{invested, shares, annual_income, monthly_income}], drip: [{year, shares, growth_percent}]}` | — |
 | `backtest` | `{symbol, currency, strategy, period, interval, bars, start, end, fill, capital, start_value, end_value, total_return_percent, cagr_percent, max_drawdown_percent, sharpe, sortino, exposure_percent, trade_count, win_rate_percent, avg_win_percent, avg_loss_percent, profit_factor, costs_paid, gross_return_percent, buy_hold_return_percent, alpha_percent, skipped_entries, costs, cost_model, rules, trades: [trade], equity: [{date, value}]}` — returns are after costs except `gross_return_percent`; `portfolio` and `walkforward` shapes are in [backtesting.md](backtesting.md#json-output). trade = `{symbol, entry_date, exit_date, qty, entry_price, exit_price, gross_pnl, costs, net_pnl, pnl_percent, bars_held, exit_reason}` | trade (every form) |
 | `sip` | `{symbol, currency, period, interval, monthly_amount, months, total_invested, final_value, profit, total_return_percent, xirr_percent, total_units, avg_cost, current_price}` | — |

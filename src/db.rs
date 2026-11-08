@@ -44,62 +44,7 @@ pub fn path() -> Result<PathBuf> {
     store::path(FILE_NAME)
 }
 
-/// Market-cap bucket. Cut-offs are rough local-currency bands for filtering
-/// and display, not a regulatory classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapTier {
-    Mega,
-    Large,
-    Mid,
-    Small,
-    Micro,
-}
-
-impl CapTier {
-    /// Lower-case name stored in `market_snapshots.cap_tier`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CapTier::Mega => "mega",
-            CapTier::Large => "large",
-            CapTier::Mid => "mid",
-            CapTier::Small => "small",
-            CapTier::Micro => "micro",
-        }
-    }
-
-    /// Parse a tier name, case-insensitively.
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s.trim().to_ascii_lowercase().as_str() {
-            "mega" => CapTier::Mega,
-            "large" => CapTier::Large,
-            "mid" => CapTier::Mid,
-            "small" => CapTier::Small,
-            "micro" => CapTier::Micro,
-            _ => return None,
-        })
-    }
-
-    /// Bucket for a market cap in the market's own currency. `market` is
-    /// `in` (INR) or anything else (USD).
-    pub fn classify(market: &str, mcap: f64) -> Self {
-        let (mega, large, mid, small) = if market == "in" {
-            (1.0e13, 5.0e11, 1.5e11, 3.0e10)
-        } else {
-            (2.0e11, 1.0e10, 2.0e9, 3.0e8)
-        };
-        if mcap >= mega {
-            CapTier::Mega
-        } else if mcap >= large {
-            CapTier::Large
-        } else if mcap >= mid {
-            CapTier::Mid
-        } else if mcap >= small {
-            CapTier::Small
-        } else {
-            CapTier::Micro
-        }
-    }
-}
+pub use crate::market::CapTier;
 
 /// One row of `market_snapshots`.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -325,7 +270,10 @@ impl CacheDb {
 
     // ── market_snapshots ──
 
-    /// Insert or replace snapshots by `(symbol, market)` in one transaction.
+    /// Insert or update snapshots by `(symbol, market)` in one transaction. A
+    /// field the new row lacks keeps its stored value (a bulk index feed has
+    /// prices but no P/E), so fundamentals are never blanked by a price scan.
+    /// Day values (price, change, rvol) are always replaced.
     pub fn upsert_snapshots(&mut self, rows: &[Snapshot]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -333,11 +281,15 @@ impl CacheDb {
                 "INSERT INTO market_snapshots (symbol, market, name, sector, industry, cap_tier,
                      mcap, price, change_1d, rvol, pe, roe, div_yield, updated_at)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-                 ON CONFLICT(symbol, market) DO UPDATE SET name=excluded.name,
-                     sector=excluded.sector, industry=excluded.industry,
-                     cap_tier=excluded.cap_tier, mcap=excluded.mcap, price=excluded.price,
-                     change_1d=excluded.change_1d, rvol=excluded.rvol, pe=excluded.pe,
-                     roe=excluded.roe, div_yield=excluded.div_yield,
+                 ON CONFLICT(symbol, market) DO UPDATE SET
+                     name=CASE WHEN excluded.name = '' THEN name ELSE excluded.name END,
+                     sector=COALESCE(excluded.sector, sector),
+                     industry=COALESCE(excluded.industry, industry),
+                     cap_tier=COALESCE(excluded.cap_tier, cap_tier),
+                     mcap=COALESCE(excluded.mcap, mcap), price=excluded.price,
+                     change_1d=excluded.change_1d, rvol=excluded.rvol,
+                     pe=COALESCE(excluded.pe, pe), roe=COALESCE(excluded.roe, roe),
+                     div_yield=COALESCE(excluded.div_yield, div_yield),
                      updated_at=excluded.updated_at",
             )?;
             for r in rows {
@@ -820,7 +772,16 @@ mod tests {
             market: market.into(),
             name: format!("Stock {i}"),
             sector: Some(if i.is_multiple_of(2) { "Tech" } else { "Banks" }.into()),
-            cap_tier: Some(CapTier::classify(market, mcap).as_str().into()),
+            cap_tier: Some(
+                CapTier::classify(
+                    "",
+                    Some(mcap),
+                    Some(if market == "in" { "INR" } else { "USD" }),
+                    None,
+                )
+                .as_str()
+                .into(),
+            ),
             mcap: Some(mcap),
             price: Some(100.0 + i as f64),
             change_1d: Some((i % 7) as f64 - 3.0),
@@ -886,13 +847,42 @@ mod tests {
     }
 
     #[test]
-    fn cap_tiers_classify_by_market() {
-        assert_eq!(CapTier::classify("in", 2.0e13), CapTier::Mega);
-        assert_eq!(CapTier::classify("in", 6.0e11), CapTier::Large);
-        assert_eq!(CapTier::classify("us", 5.0e9), CapTier::Mid);
-        assert_eq!(CapTier::classify("us", 1.0e6), CapTier::Micro);
-        assert_eq!(CapTier::parse("Small"), Some(CapTier::Small));
-        assert_eq!(CapTier::parse("huge"), None);
+    fn a_price_only_upsert_keeps_stored_fundamentals() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        let full = Snapshot {
+            symbol: "TCS.NS".into(),
+            market: "in".into(),
+            name: "TCS".into(),
+            sector: Some("Technology".into()),
+            cap_tier: Some("large".into()),
+            mcap: Some(1.4e13),
+            price: Some(3000.0),
+            pe: Some(28.0),
+            updated_at: 1,
+            ..Default::default()
+        };
+        db.upsert_snapshots(&[full]).unwrap();
+        // An NSE bulk row: price and change only.
+        let bulk = Snapshot {
+            symbol: "TCS.NS".into(),
+            market: "in".into(),
+            price: Some(3100.0),
+            change_1d: Some(1.5),
+            updated_at: 2,
+            ..Default::default()
+        };
+        db.upsert_snapshots(&[bulk]).unwrap();
+        let rows = db.query_snapshots(&SnapshotFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.price, Some(3100.0));
+        assert_eq!(r.change_1d, Some(1.5));
+        assert_eq!(r.name, "TCS");
+        assert_eq!(r.sector.as_deref(), Some("Technology"));
+        assert_eq!(r.cap_tier.as_deref(), Some("large"));
+        assert_eq!(r.pe, Some(28.0));
+        assert_eq!(r.mcap, Some(1.4e13));
+        assert_eq!(r.updated_at, 2);
     }
 
     #[test]

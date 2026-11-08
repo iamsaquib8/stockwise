@@ -114,12 +114,6 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
             _ => "other".to_string(),
         }
     };
-    // Cap tiers exist for INR and USD caps only; Yahoo reports `marketCap` in
-    // the quote currency, so any other currency gets no tier.
-    let tier_applies = matches!(
-        (market.as_str(), currency.as_deref()),
-        ("in", None | Some("INR")) | ("us", None | Some("USD"))
-    );
     let rvol = match (q.regular_market_volume, q.average_daily_volume_3_month) {
         (Some(v), Some(avg)) if avg > 0 => Some(v as f64 / avg as f64),
         _ => None,
@@ -132,10 +126,17 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
             .unwrap_or_default(),
         sector: q.sector.clone(),
         industry: q.industry.clone(),
-        cap_tier: q
-            .market_cap
-            .filter(|_| tier_applies)
-            .map(|m| CapTier::classify(&market, m).as_str().to_string()),
+        cap_tier: Some(
+            CapTier::classify(
+                &symbol,
+                q.market_cap,
+                q.currency.as_deref(),
+                crate::market::IndiaMembership::shared().as_deref(),
+            )
+            .as_str()
+            .to_string(),
+        )
+        .filter(|t| t != "unknown"),
         mcap: q.market_cap,
         price: Some(price),
         change_1d: q.regular_market_change_percent,
@@ -147,6 +148,32 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
         symbol,
         market,
     })
+}
+
+/// A quote rebuilt from a `market_snapshots` row, for scans served from the
+/// cache. Volume and the other live fields stay empty; the currency is the
+/// market's own (`in` rows are rupees, `us` rows dollars) and `None` for a
+/// market whose rows may be in any currency.
+pub fn quote_from_snapshot(s: &Snapshot) -> Quote {
+    Quote {
+        symbol: Some(s.symbol.clone()),
+        short_name: (!s.name.is_empty()).then(|| s.name.clone()),
+        sector: s.sector.clone(),
+        industry: s.industry.clone(),
+        currency: match s.market.as_str() {
+            "in" => Some("INR".into()),
+            "us" => Some("USD".into()),
+            _ => None,
+        },
+        regular_market_price: s.price,
+        regular_market_change_percent: s.change_1d,
+        market_cap: s.mcap,
+        trailing_pe: s.pe,
+        return_on_equity: s.roe.map(|r| r / 100.0),
+        trailing_annual_dividend_yield: s.div_yield.map(|d| d / 100.0),
+        data_source: Some("cache.db".into()),
+        ..Default::default()
+    }
 }
 
 /// Store usable quotes as `market_snapshots` rows; returns how many.
@@ -832,7 +859,8 @@ mod tests {
     fn snapshot_maps_units_and_buckets() {
         let s = snapshot_from_quote("us", &quote("TCS.NS", 3500.0)).unwrap();
         assert_eq!(s.market, "in");
-        assert_eq!(s.cap_tier.as_deref(), Some("large"));
+        // ₹60,000 Cr: above the ₹33,000 Cr mid-cap cut-off, below ₹1,00,000 Cr.
+        assert_eq!(s.cap_tier.as_deref(), Some("mid"));
         assert_eq!(s.rvol, Some(2.0));
         assert!((s.roe.unwrap() - 18.0).abs() < 1e-9);
         assert_eq!(s.name, "Tata Consultancy");
@@ -856,18 +884,47 @@ mod tests {
             (aapl.market.as_str(), aapl.cap_tier.as_deref()),
             ("us", Some("mega"))
         );
-        // A global market keeps its label but gets no tier (caps in JPY).
+        // A global market keeps its label; the tier converts the JPY cap
+        // (¥600 billion is about $4B).
         let toyota = snapshot_from_quote("jp", &with("7203.T", "JPY")).unwrap();
-        assert_eq!((toyota.market.as_str(), toyota.cap_tier), ("jp", None));
+        assert_eq!(
+            (toyota.market.as_str(), toyota.cap_tier.as_deref()),
+            ("jp", Some("mid"))
+        );
         // An unknown currency under the home market is not filed as `in`.
         let sap = snapshot_from_quote("in", &with("SAP.F", "EUR")).unwrap();
-        assert_eq!((sap.market.as_str(), sap.cap_tier), ("other", None));
+        assert_eq!(
+            (sap.market.as_str(), sap.cap_tier.as_deref()),
+            ("other", Some("mega"))
+        );
         // A German holding is a German row even under a Japanese worker.
         let sap_jp = snapshot_from_quote("jp", &with("SAP.DE", "EUR")).unwrap();
-        assert_eq!((sap_jp.market.as_str(), sap_jp.cap_tier), ("de", None));
-        // `.NS` with a mismatched currency still gets no tier.
+        assert_eq!(sap_jp.market, "de");
+        // London pence convert as pence: 600 billion pence is £6B, a mid cap.
+        let lse = snapshot_from_quote("in", &with("VOD.L", "GBp")).unwrap();
+        assert_eq!(lse.cap_tier.as_deref(), Some("mid"));
+        // A `.NS` symbol is an Indian stock whatever the currency says.
         let odd = snapshot_from_quote("us", &with("X.NS", "USD")).unwrap();
-        assert_eq!((odd.market.as_str(), odd.cap_tier), ("in", None));
+        assert_eq!(
+            (odd.market.as_str(), odd.cap_tier.as_deref()),
+            ("in", Some("mid"))
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trips_into_a_quote() {
+        let row = snapshot_from_quote("in", &quote("TCS.NS", 3000.0)).unwrap();
+        let q = quote_from_snapshot(&row);
+        assert_eq!(q.symbol.as_deref(), Some("TCS.NS"));
+        assert_eq!(q.currency.as_deref(), Some("INR"));
+        assert_eq!(q.regular_market_price, Some(3000.0));
+        assert_eq!(q.market_cap, Some(6.0e11));
+        assert_eq!(q.trailing_pe, Some(22.0));
+        assert!((q.return_on_equity.unwrap() - 0.18).abs() < 1e-9);
+        // A global row has no known currency.
+        let mut other = row;
+        other.market = "uk".into();
+        assert_eq!(quote_from_snapshot(&other).currency, None);
     }
 
     #[test]

@@ -1479,15 +1479,24 @@ impl YahooClient {
     /// them right after costs no further NSE requests. Errors are not
     /// announced: the caller decides what to fall back to.
     pub async fn index_constituents(&self, index: &str) -> Result<Vec<String>> {
-        let nse = match self.provider.as_ref().and_then(|p| p.nse()) {
+        self.nse_client().constituents(index).await
+    }
+
+    /// An NSE index with its members' quotes from one bulk request (NIFTY 500
+    /// prices 500 stocks at once). No Yahoo call; errors are not announced.
+    pub async fn index_snapshot(&self, index: &str) -> Result<providers::nse::IndexSnapshot> {
+        self.nse_client().index_snapshot(index).await
+    }
+
+    fn nse_client(&self) -> &providers::nse::Nse {
+        match self.provider.as_ref().and_then(|p| p.nse()) {
             Some(nse) => nse,
             None => self.nse.get_or_init(|| {
                 let nse = providers::nse::Nse::new(providers::nse::shared_session());
                 nse.session().set_cache(self.cache.clone());
                 nse
             }),
-        };
-        nse.constituents(index).await
+        }
     }
 
     /// Symbol search: the data provider's matches when it has any, else

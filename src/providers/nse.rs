@@ -1197,6 +1197,40 @@ mod tests {
         );
     }
 
+    /// NIFTY 500 prices all 500 members in one request, with no Yahoo call
+    /// and no request per member.
+    #[tokio::test]
+    async fn nifty_500_is_one_bulk_request() {
+        let mut data = vec![serde_json::json!({
+            "symbol": "NIFTY 500", "priority": 1, "lastPrice": 22000.0, "pChange": 0.4
+        })];
+        for i in 0..500 {
+            data.push(serde_json::json!({
+                "symbol": format!("STK{i}"), "lastPrice": 100.0 + i as f64,
+                "pChange": (i % 7) as f64 - 3.0, "totalTradedVolume": 1000 + i,
+                "meta": {"companyName": format!("Stock {i}")}
+            }));
+        }
+        let body = serde_json::json!({"name": "NIFTY 500", "data": data}).to_string();
+        let server = MockServer::start(vec![(200, body)]).await;
+        let nse = nse_at(&server);
+        let snap = nse.index_snapshot("NIFTY 500").await.unwrap();
+        assert_eq!(snap.members.len(), 500);
+        assert!(snap.index.is_some());
+        let syms: Vec<&str> = snap
+            .members
+            .iter()
+            .filter_map(|q| q.symbol.as_deref())
+            .collect();
+        assert_eq!(syms[499], "STK499.NS");
+        assert_eq!(nse.quote_cost(&syms), 0);
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            server.requests()[0].target,
+            "/api/equity-stockIndices?index=NIFTY+500"
+        );
+    }
+
     #[tokio::test]
     async fn indices_share_one_request() {
         let server = MockServer::start(vec![(

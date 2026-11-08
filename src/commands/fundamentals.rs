@@ -98,7 +98,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
-            "quote": q,
+            "quote": market::quote_json(q),
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
@@ -134,8 +134,12 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
     }
     print_kv(
         "Market Cap",
-        &q.market_cap
-            .map_or("N/A".to_string(), |v| format_large_number(v, cur)),
+        &match (q.market_cap, market::cap_badge(q)) {
+            (Some(v), Some(b)) => format!("{}  {}", format_large_number(v, cur), b.dimmed()),
+            (Some(v), None) => format_large_number(v, cur),
+            (None, Some(b)) => format!("N/A  {}", b.dimmed()),
+            (None, None) => "N/A".to_string(),
+        },
     );
     if let Some(exchange) = &q.exchange {
         print_kv("Exchange", exchange);
@@ -265,6 +269,7 @@ pub(crate) struct CompareRow {
     pub(crate) price: Option<f64>,
     pub(crate) change_percent: Option<f64>,
     pub(crate) market_cap: Option<f64>,
+    pub(crate) cap_tier: &'static str,
     pub(crate) pe_ttm: Option<f64>,
     pub(crate) pe_forward: Option<f64>,
     pub(crate) eps_ttm: Option<f64>,
@@ -289,6 +294,7 @@ impl CsvRow for CompareRow {
         "price",
         "change_percent",
         "market_cap",
+        "cap_tier",
         "pe_ttm",
         "pe_forward",
         "eps_ttm",
@@ -314,6 +320,7 @@ impl From<&crate::api::Quote> for CompareRow {
             price: q.regular_market_price,
             change_percent: q.regular_market_change_percent,
             market_cap: q.market_cap,
+            cap_tier: market::cap_tier_of(q).as_str(),
             pe_ttm: q.trailing_pe,
             pe_forward: q.forward_pe,
             eps_ttm: q.eps_trailing_twelve_months,
@@ -415,6 +422,13 @@ pub async fn cmd_compare(symbols: &[String], market: Market, fmt: Format) -> Res
                 q.market_cap.map_or("N/A".into(), |v| {
                     format_large_number(v, q.currency.as_deref())
                 })
+            }),
+        ),
+        (
+            "Cap tier",
+            Box::new(|q| {
+                market::cap_badge(q)
+                    .map_or("N/A".into(), |b| b.trim_matches(['[', ']']).to_string())
             }),
         ),
         (
@@ -884,7 +898,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         let out = serde_json::json!({
             "symbol": resolved,
             "period": period,
-            "quote": q,
+            "quote": market::quote_json(q),
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
@@ -923,8 +937,12 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     }
     print_kv(
         "Market Cap",
-        &q.market_cap
-            .map_or("N/A".into(), |v| format_large_number(v, cur)),
+        &match (q.market_cap, market::cap_badge(q)) {
+            (Some(v), Some(b)) => format!("{}  {}", format_large_number(v, cur), b.dimmed()),
+            (Some(v), None) => format_large_number(v, cur),
+            (None, Some(b)) => format!("N/A  {}", b.dimmed()),
+            (None, None) => "N/A".into(),
+        },
     );
 
     // Price
@@ -1623,7 +1641,8 @@ pub async fn cmd_results(
             }
             (s, "portfolio and watchlist".to_string())
         } else {
-            super::markets::scan_symbols(&client, market, universe).await?
+            let scan = super::markets::scan_symbols(&client, market, universe).await?;
+            (scan.symbols, scan.scope)
         };
         let board = results::season(&client, &symbols, &title, market, store, sort).await;
         return match fmt {
