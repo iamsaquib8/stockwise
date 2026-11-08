@@ -106,7 +106,16 @@ pub(super) async fn scan_symbols(
             bulk: Vec::new(),
         });
     };
-    let index = u.nse_index();
+    scan_nse_index(client, u.nse_index(), u.fallback()).await
+}
+
+/// One NSE index's members and their bulk quotes; `fallback` is the
+/// built-in member list used when NSE can't answer.
+async fn scan_nse_index(
+    client: &YahooClient,
+    index: &str,
+    fallback: Option<Vec<String>>,
+) -> Result<Scan> {
     let snap = match client.index_snapshot(index).await {
         Ok(s) if s.members.iter().any(|q| q.symbol.is_some()) => Ok(s),
         Ok(_) => Err(anyhow::anyhow!("NSE listed no members for {}", index)),
@@ -127,7 +136,7 @@ pub(super) async fn scan_symbols(
                 bulk: snap.members,
             })
         }
-        Err(e) => match u.fallback() {
+        Err(e) => match fallback {
             Some(list) => {
                 eprintln!(
                     "  \u{24d8} {}",
@@ -344,8 +353,120 @@ impl CsvRow for SectorRow {
         &["sector", "symbol", "price", "change_percent", "currency"];
 }
 
-pub async fn cmd_sectors(market: Market, fmt: Format) -> Result<()> {
+/// The NSE index behind an Indian sector and its built-in member list.
+fn india_sector_index(name: &str) -> Option<(&'static str, &'static str, Option<Vec<String>>)> {
+    let (_, short) = market::INDIA_SECTOR_INDICES
+        .iter()
+        .find(|(sym, short)| short.eq_ignore_ascii_case(name) || sym.eq_ignore_ascii_case(name))?;
+    let (index, u) = match *short {
+        "IT" => ("NIFTY IT", Some(market::Universe::NiftyIt)),
+        "Bank" => ("NIFTY BANK", Some(market::Universe::BankNifty)),
+        "Pharma" => ("NIFTY PHARMA", None),
+        "Auto" => ("NIFTY AUTO", None),
+        "FMCG" => ("NIFTY FMCG", None),
+        "Metal" => ("NIFTY METAL", None),
+        "Realty" => ("NIFTY REALTY", None),
+        "Energy" => ("NIFTY ENERGY", None),
+        _ => return None,
+    };
+    Some((short, index, u.and_then(market::Universe::fallback)))
+}
+
+/// `sectors <NAME>`: the sector index's members with their cap tier,
+/// biggest mover first, cut to `--cap`.
+async fn cmd_sector_members(
+    market: Market,
+    name: &str,
+    cap: Option<market::CapFilter>,
+    fmt: Format,
+) -> Result<()> {
+    if market != Market::In {
+        bail!(
+            "sector members are listed for the Indian market only (-m in), not {}",
+            market.label()
+        );
+    }
+    let Some((short, index, fallback)) = india_sector_index(name) else {
+        let names: Vec<&str> = market::INDIA_SECTOR_INDICES
+            .iter()
+            .map(|(_, n)| *n)
+            .collect();
+        bail!(
+            "Sector '{}' not found; try one of: {}",
+            name,
+            names.join(", ")
+        );
+    };
+    let client = YahooClient::new().await?;
+    let scan = scan_nse_index(&client, index, fallback).await?;
+    let mut quotes = scan_quotes(&client, market, &scan, cap, true).await?;
+    quotes.sort_by(|a, b| {
+        let key = |q: &crate::api::Quote| q.regular_market_change_percent.unwrap_or(f64::MIN);
+        key(b).total_cmp(&key(a))
+    });
+    match fmt {
+        Format::Json => {
+            let rows: Vec<ScreenRow> = quotes.iter().map(ScreenRow::from).collect();
+            return output::print_json(&rows);
+        }
+        Format::Csv => {
+            let rows: Vec<ScreenRow> = quotes.iter().map(ScreenRow::from).collect();
+            return output::print_csv(&rows);
+        }
+        Format::Table => {}
+    }
+    print_header(&format!("{} — {}", short, cap_scope(index, cap)));
+    if quotes.is_empty() {
+        println!("  {}", "No members in this tier.".dimmed());
+        return Ok(());
+    }
+    println!(
+        "  {:<14} {:>10} {:>10} {:>14} {:>6}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Change %".bold(),
+        "Market Cap".bold(),
+        "Cap".bold()
+    );
+    println!("  {}", "─".repeat(59).dimmed());
+    for q in &quotes {
+        let sym = q.symbol.as_deref().unwrap_or("???");
+        let cur = q.currency.as_deref();
+        let pct = q.regular_market_change_percent.unwrap_or(0.0);
+        let pct_str = format!("{:+.2}%", pct);
+        println!(
+            "  {:<14} {:>10} {:>10} {:>14} {:>6}",
+            sym.cyan(),
+            format_price(q.regular_market_price.unwrap_or(0.0), cur),
+            if pct >= 0.0 {
+                pct_str.green()
+            } else {
+                pct_str.red()
+            },
+            q.market_cap
+                .map_or("N/A".to_string(), |v| format_large_number(v, cur)),
+            market::cap_tier_of(q).badge().dimmed()
+        );
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn cmd_sectors(
+    market: Market,
+    name: Option<String>,
+    cap: Option<market::CapFilter>,
+    fmt: Format,
+) -> Result<()> {
     market.require_sectors("sectors")?;
+    if let Some(n) = name {
+        return cmd_sector_members(market, &n, cap, fmt).await;
+    }
+    if cap.is_some() {
+        bail!(
+            "--cap filters a sector's members: name one, e.g. `stockwise sectors bank --cap mid`"
+        );
+    }
     let client = YahooClient::new().await?;
     let sectors = market.sectors();
     let title = format!("{} Sector Performance", market.label());

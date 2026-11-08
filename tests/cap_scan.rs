@@ -168,3 +168,53 @@ fn unknown_cap_value_is_rejected() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--cap"));
 }
+
+#[test]
+fn sector_members_filter_by_cap_from_snapshots() {
+    let home = scratch("sector");
+    seed(&home);
+    // NSE is unreachable here: NIFTY BANK falls back to the built-in list,
+    // priced from the seeded snapshots.
+    let run = |cap: &str| {
+        let out = stockwise(
+            &home,
+            &["-m", "in", "sectors", "bank", "--cap", cap, "--json"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut syms: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                assert_eq!(r["cap_tier"], cap, "{r}");
+                r["symbol"].as_str().unwrap().to_string()
+            })
+            .collect();
+        syms.sort();
+        syms
+    };
+    assert_eq!(
+        run("large"),
+        ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS", "SBIN.NS"]
+    );
+    assert_eq!(run("mid"), ["AXISBANK.NS", "INDUSINDBK.NS"]);
+}
+
+#[test]
+fn sector_cap_needs_a_sector_and_the_indian_market() {
+    let home = scratch("sector-bad");
+    let out = stockwise(&home, &["-m", "in", "sectors", "--cap", "mid"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("name one"));
+    let out = stockwise(&home, &["-m", "in", "sectors", "nonsense"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not found"));
+    let out = stockwise(&home, &["-m", "us", "sectors", "bank"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Indian market only"));
+}
