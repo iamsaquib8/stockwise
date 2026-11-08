@@ -94,11 +94,29 @@ pub fn tracked_symbols() -> Vec<String> {
 pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> {
     let symbol = q.symbol.clone()?;
     let price = q.regular_market_price?;
+    // The row's market comes from the symbol or the quote's currency, not
+    // from the worker's market: a held `AAPL` is a US row under `-m in`.
+    let currency = q.currency.as_deref().map(str::to_ascii_uppercase);
     let market = if symbol.ends_with(".NS") || symbol.ends_with(".BO") {
         "in".to_string()
     } else {
-        default_market.to_string()
+        match currency.as_deref() {
+            Some("INR") => "in".to_string(),
+            Some("USD") => "us".to_string(),
+            // No currency to go by, or a global market's own label.
+            None => default_market.to_string(),
+            // Another currency: keep a global market's own label, but never
+            // file it under the home market of the worker.
+            _ if !matches!(default_market, "in" | "us") => default_market.to_string(),
+            _ => "other".to_string(),
+        }
     };
+    // Cap tiers exist for INR and USD caps only; Yahoo reports `marketCap` in
+    // the quote currency, so any other currency gets no tier.
+    let tier_applies = matches!(
+        (market.as_str(), currency.as_deref()),
+        ("in", None | Some("INR")) | ("us", None | Some("USD"))
+    );
     let rvol = match (q.regular_market_volume, q.average_daily_volume_3_month) {
         (Some(v), Some(avg)) if avg > 0 => Some(v as f64 / avg as f64),
         _ => None,
@@ -113,6 +131,7 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
         industry: q.industry.clone(),
         cap_tier: q
             .market_cap
+            .filter(|_| tier_applies)
             .map(|m| CapTier::classify(&market, m).as_str().to_string()),
         mcap: q.market_cap,
         price: Some(price),
@@ -432,7 +451,16 @@ pub async fn eod_sync(
     mut progress: impl FnMut(f64) -> bool,
 ) -> Result<String> {
     let symbols = tracked_symbols();
-    let snapshots = refresh_snapshots(client, market, &symbols, |p| progress(p * 0.5)).await?;
+    let mut cancelled = false;
+    let snapshots = refresh_snapshots(client, market, &symbols, |p| {
+        let keep = progress(p * 0.5);
+        cancelled |= !keep;
+        keep
+    })
+    .await?;
+    if cancelled {
+        bail!("cancelled");
+    }
 
     // Fund NAVs for held `MF:<code>` symbols, from the cached AMFI file.
     let portfolio = Portfolio::load()?;
@@ -453,7 +481,10 @@ pub async fn eod_sync(
             }
         }
     }
-    progress(75.0);
+    // Nothing below (wealth history) is written for a cancelled task.
+    if !progress(75.0) {
+        bail!("cancelled");
+    }
 
     // Wealth history, only when every holding has a price.
     let mut wealth = false;
@@ -797,6 +828,30 @@ mod tests {
         let mut none = quote("X", 1.0);
         none.regular_market_price = None;
         assert!(snapshot_from_quote("us", &none).is_none());
+    }
+
+    #[test]
+    fn snapshot_market_and_tier_follow_the_quote_not_the_worker() {
+        let with = |symbol: &str, currency: &str| {
+            let mut q = quote(symbol, 10.0);
+            q.currency = Some(currency.into());
+            q
+        };
+        // A held US stock under an Indian worker is a US row with a US tier.
+        let aapl = snapshot_from_quote("in", &with("AAPL", "USD")).unwrap();
+        assert_eq!(
+            (aapl.market.as_str(), aapl.cap_tier.as_deref()),
+            ("us", Some("mega"))
+        );
+        // A global market keeps its label but gets no tier (caps in JPY).
+        let toyota = snapshot_from_quote("jp", &with("7203.T", "JPY")).unwrap();
+        assert_eq!((toyota.market.as_str(), toyota.cap_tier), ("jp", None));
+        // An unknown currency under the home market is not filed as `in`.
+        let sap = snapshot_from_quote("in", &with("SAP.DE", "EUR")).unwrap();
+        assert_eq!((sap.market.as_str(), sap.cap_tier), ("other", None));
+        // `.NS` with a mismatched currency still gets no tier.
+        let odd = snapshot_from_quote("us", &with("X.NS", "USD")).unwrap();
+        assert_eq!((odd.market.as_str(), odd.cap_tier), ("in", None));
     }
 
     #[test]
