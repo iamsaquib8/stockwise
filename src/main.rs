@@ -4280,6 +4280,7 @@ async fn run_goal(action: Option<GoalCmd>, m: Market) -> anyhow::Result<()> {
             holdings,
             return_pct,
         } => commands::cmd_goal_add(commands::GoalAdd {
+            currency: commands::market_currency(m).to_string(),
             name,
             target,
             by,

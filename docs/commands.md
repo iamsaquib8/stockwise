@@ -721,6 +721,8 @@ file is kept once as `portfolio.json.bak`.
 | `goal add NAME --target AMOUNT --by YYYY-MM[-DD] [--inflation PCT] [--holdings SYM,...] [--return PCT]` | Save a goal in `goals.json` (a `--inflation` target is in today's money) |
 | `goal [list] [--json]` · `goal show NAME [--json]` · `goal remove NAME` | Saved goals with months left, the live value of their linked holdings, the funded share and the SIP still needed; one goal in full; remove one |
 
+Saved goals keep the currency of the market they were added in (`-m in` for ₹) and are listed only under that market; with `--inflation` the target is in the money of the day it was added. `goal swp` assumes every unit is a long-term holding (12.5% above the exemption, no short-term rate or exit load).
+
 `--from-portfolio` and `--holdings` value the portfolio (or the named holdings, such as `MF:122639` or `NIFTYBEES`) at live prices, or at cost when offline, and use that as existing savings; they replace `--savings`. Taxes and exit loads are estimates, not advice; `--tax` defaults to debt up to 60 months and equity beyond, with a 1% exit load on equity lots held under 12 months in India.
 
 ```bash

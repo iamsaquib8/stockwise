@@ -238,7 +238,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `goal_sip` / `goal_education` | SIP for a goal: horizon-matched return, tax at redemption, outcome bands | `goal sip\|education --json` |
 | `goal_retire` | Retirement corpus and SIP, withdrawal rate, survival after a 30% first-day fall, year-1 SWP vs FD tax (no outcome bands) | `goal retire --json` |
 | `goal_swp` / `goal_prepay` | Withdrawal runway (SWP vs FD tax); loan prepayment against a SIP | `goal swp\|prepay --json` |
-| `goal_list` | Your saved goals with live funded share | `goal list --json` |
+| `goal_list` | Your saved goals with funded share from live prices, or from cost basis offline (see `valued_at`) | `goal list --json` |
 | `alerts_list` | Your alerts checked against live data | `alert check --json` |
 | `watchlist` | Your watchlist with live prices | `watch --json` |
 

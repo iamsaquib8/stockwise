@@ -1481,12 +1481,24 @@ fn swp_path(
     };
     let (mut value, mut cost) = (corpus, cost.min(corpus));
     let (mut withdrawn, mut total_tax) = (0.0, 0.0);
-    let (mut year_gain, mut year_start) = (0.0, corpus);
+    let (mut year_gain, mut year_start, mut year_paid) = (0.0, corpus, 0.0);
     let months = years * 12;
     let mut paid = 0;
+    // Tax for the year so far: gains realised (SWP) or interest earned (FD).
+    let year_tax = |gain: f64, value: f64, start: f64, paid_in_year: f64| {
+        if gain_taxed {
+            (gain - exemption).max(0.0) * lt
+        } else {
+            (value - start + paid_in_year).max(0.0) * slab_pct / 100.0 * cess
+        }
+    };
     for m in 0..months {
         let pay = monthly * (1.0 + inflation_pct / 100.0).powi((m / 12) as i32);
         if value < pay - 1e-6 {
+            // The money ran out part-way through the year: tax that part.
+            let tax = year_tax(year_gain, value, year_start, year_paid).min(value);
+            value -= tax;
+            total_tax += tax;
             break;
         }
         if gain_taxed {
@@ -1496,19 +1508,14 @@ fn swp_path(
         }
         value = (value - pay) * (1.0 + i);
         withdrawn += pay;
+        year_paid += pay;
         paid += 1;
         if (m + 1) % 12 == 0 {
-            let tax = if gain_taxed {
-                (year_gain - exemption).max(0.0) * lt
-            } else {
-                ((value - year_start + withdrawn_in_year(monthly, inflation_pct, m)).max(0.0))
-                    * slab_pct
-                    / 100.0
-                    * cess
-            };
+            let tax = year_tax(year_gain, value, year_start, year_paid);
             value = (value - tax).max(0.0);
             total_tax += tax;
             year_gain = 0.0;
+            year_paid = 0.0;
             year_start = value;
         }
     }
@@ -1519,11 +1526,6 @@ fn swp_path(
         total_withdrawn: withdrawn,
         total_tax,
     }
-}
-
-/// Withdrawals paid in the 12 months ending with month `m` (0-based).
-fn withdrawn_in_year(monthly: f64, inflation_pct: f64, m: u32) -> f64 {
-    12.0 * monthly * (1.0 + inflation_pct / 100.0).powi((m / 12) as i32)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1760,6 +1762,9 @@ pub struct SavedGoal {
     pub return_pct: Option<f64>,
     #[serde(default)]
     pub created: String,
+    /// Currency of `target`; goals saved before this field have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, serde::Deserialize)]
@@ -2288,6 +2293,20 @@ mod tests {
     }
 
     #[test]
+    fn swp_taxes_the_part_year_before_the_money_runs_out() {
+        // $1 M costing $0.5 M, $400 k a month at 0%: two payments, then empty.
+        // Half of each payment is gain: $400 k of gain at 20% long-term = $80 k.
+        let p = plan_swp(1e6, Some(5e5), 4e5, 0.0, 0.0, 1, 0.0, 24.0, Region::Us);
+        assert_eq!(p.swp.runway_months, 2);
+        assert!(near(p.swp.total_tax, 80_000.0, 1e-6), "{}", p.swp.total_tax);
+        assert!(
+            near(p.swp.final_value, 120_000.0, 1e-6),
+            "{}",
+            p.swp.final_value
+        );
+    }
+
+    #[test]
     fn emergency_fund_builds_the_gap() {
         let e = plan_emergency(50_000.0, 6, 100_000.0, 12, 6.75);
         assert_eq!(e.target, 300_000.0);
@@ -2339,6 +2358,7 @@ mod tests {
                 holdings: vec!["NIFTYBEES".into()],
                 return_pct: None,
                 created: "2026-11-08".into(),
+                currency: Some("INR".into()),
             }],
         };
         assert!(store.find("house").is_some());

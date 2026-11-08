@@ -2426,13 +2426,37 @@ pub(crate) struct GoalRow {
     status: &'static str,
 }
 
-fn goal_due(today: NaiveDate, by: &str) -> Option<NaiveDate> {
-    let mut parts = by.split('-');
+fn goal_due(by: &str) -> Option<NaiveDate> {
+    let mut parts = by.trim().split('-');
     let y = parts.next()?.parse().ok()?;
     let mo = parts.next()?.parse().ok()?;
     let d = parts.next().map_or(Some(1), |d| d.parse().ok())?;
-    let _ = today;
     NaiveDate::from_ymd_opt(y, mo, d)
+}
+
+/// The target on the due date. With inflation the saved target is in the
+/// money of the day the goal was created, so it grows from then, not from
+/// today.
+fn saved_target_future(g: &goals::SavedGoal, due: Option<NaiveDate>, months_left: u32) -> f64 {
+    let Some(infl) = g.inflation_pct.filter(|i| *i > 0.0) else {
+        return g.target;
+    };
+    let from_creation = goal_due(&g.created)
+        .zip(due)
+        .and_then(|(created, due)| goals::months_between(created, due));
+    goals::inflate_months(g.target, infl, from_creation.unwrap_or(months_left))
+}
+
+/// Saved goals are in the currency they were saved in.
+fn check_goal_currency(g: &goals::SavedGoal, market: Market) -> Result<()> {
+    match &g.currency {
+        Some(c) if c != market_currency(market) => bail!(
+            "Goal `{}` is in {c}: use the market that matches (e.g. -m {})",
+            g.name,
+            if c == "INR" { "in" } else { "us" }
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn saved_request(
@@ -2441,8 +2465,12 @@ fn saved_request(
     savings: f64,
     market: Market,
 ) -> goals::SipRequest {
-    let mut req = goals::SipRequest::new(g.target, months, goal_region(market));
-    req.inflation_pct = g.inflation_pct;
+    let due = goal_due(&g.by);
+    let mut req = goals::SipRequest::new(
+        saved_target_future(g, due, months),
+        months,
+        goal_region(market),
+    );
     req.return_pct = g.return_pct;
     req.savings = savings;
     req
@@ -2458,7 +2486,12 @@ pub(crate) async fn goal_rows(
     let today = chrono::Local::now().date_naive();
     let mut rows = Vec::new();
     for g in &store.goals {
-        let months_left = goal_due(today, &g.by)
+        if let Err(e) = check_goal_currency(g, market) {
+            eprintln!("  ! Skipped: {e}");
+            continue;
+        }
+        let due = goal_due(&g.by);
+        let months_left = due
             .and_then(|d| goals::months_between(today, d))
             .unwrap_or(0);
         let (linked, valued_at) = if g.holdings.is_empty() {
@@ -2467,8 +2500,7 @@ pub(crate) async fn goal_rows(
             let l = linked_value(src, &g.holdings, market, false).await?;
             (l.value, if l.live { "market" } else { "cost" })
         };
-        let infl = g.inflation_pct.unwrap_or(0.0);
-        let target_future = goals::inflate_months(g.target, infl, months_left);
+        let target_future = saved_target_future(g, due, months_left);
         let region = goal_region(market);
         let ret = g
             .return_pct
@@ -2480,7 +2512,7 @@ pub(crate) async fn goal_rows(
         };
         let status = if sip <= 0.0 {
             "funded"
-        } else if months_left == 0 {
+        } else if months_left == 0 && due.is_none_or(|d| d <= today) {
             "overdue"
         } else {
             "needs_sip"
@@ -2507,6 +2539,7 @@ pub(crate) async fn goal_rows(
 }
 
 pub struct GoalAdd {
+    pub currency: String,
     pub name: String,
     pub target: f64,
     pub by: String,
@@ -2524,11 +2557,12 @@ pub fn cmd_goal_add(a: GoalAdd) -> Result<()> {
     let saved = goals::SavedGoal {
         name: a.name.trim().to_string(),
         target: a.target,
-        by: a.by,
+        by: a.by.trim().to_string(),
         inflation_pct: a.inflation_pct,
         holdings: a.holdings,
         return_pct: a.return_pct,
         created: today.to_string(),
+        currency: Some(a.currency),
     };
     store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
         if s.find(&saved.name).is_some() {
@@ -2616,6 +2650,7 @@ pub async fn cmd_goal_show(name: &str, market: Market, json: bool) -> Result<()>
         .find(name)
         .ok_or_else(|| anyhow::anyhow!("No saved goal named `{name}`"))?
         .clone();
+    check_goal_currency(&g, market)?;
     let today = chrono::Local::now().date_naive();
     let months = goals::months_until(today, &g.by).map_err(anyhow::Error::msg)?;
     let linked = if g.holdings.is_empty() {
@@ -2970,6 +3005,42 @@ mod tests {
         assert!(names_holding(&h("MF:122639"), "MF:122639"));
         assert!(!names_holding(&h("NIFTYBEES.NS"), "NIFTY"));
         assert!(!names_holding(&h("TCS.NS"), "INFY"));
+    }
+
+    fn saved(infl: Option<f64>, created: &str, currency: Option<&str>) -> goals::SavedGoal {
+        goals::SavedGoal {
+            name: "g".into(),
+            target: 1_000_000.0,
+            by: " 2031-06 ".into(),
+            inflation_pct: infl,
+            holdings: Vec::new(),
+            return_pct: None,
+            created: created.into(),
+            currency: currency.map(String::from),
+        }
+    }
+
+    #[test]
+    fn saved_goal_dates_are_trimmed_and_inflated_from_creation() {
+        assert_eq!(goal_due(" 2031-06 "), NaiveDate::from_ymd_opt(2031, 6, 1));
+        let due = goal_due("2031-06");
+        // Created 5 years (60 months) before the due date; 4 months left now.
+        let g = saved(Some(6.0), "2026-06-01", None);
+        let want = 1_000_000.0 * 1.06f64.powi(5);
+        assert!((saved_target_future(&g, due, 4) - want).abs() < 1.0);
+        // No inflation: the target as saved.
+        assert_eq!(
+            saved_target_future(&saved(None, "2026-06-01", None), due, 4),
+            1e6
+        );
+    }
+
+    #[test]
+    fn saved_goals_stay_in_their_currency() {
+        let g = saved(None, "2026-06-01", Some("INR"));
+        assert!(check_goal_currency(&g, Market::In).is_ok());
+        assert!(check_goal_currency(&g, Market::Us).is_err());
+        assert!(check_goal_currency(&saved(None, "2026-06-01", None), Market::Us).is_ok());
     }
 
     #[test]
