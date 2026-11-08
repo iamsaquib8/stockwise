@@ -9,10 +9,12 @@ fn run(args: &[&str]) -> (bool, String) {
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("stockwise-results-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), "").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_stockwise"))
         .arg("results")
         .args(args)
         .env("STOCKWISE_HOME", &dir)
+        .env("STOCKWISE_CONFIG", dir.join("config.toml"))
         .env_remove("STOCKWISE_MARKET")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
