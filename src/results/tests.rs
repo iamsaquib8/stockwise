@@ -414,7 +414,7 @@ fn memory_db() -> L2 {
 async fn a_bank_shows_nii_asset_quality_and_the_surprise() {
     let server = crate::testutil::MockServer::start_routed(bank_server()).await;
     let client = client_for(&server.url);
-    let c = collect(&client, "HDFCBANK", Market::In, None, false)
+    let c = collect(&client, "HDFCBANK", Market::In, None, false, true)
         .await
         .unwrap();
     assert!(c.is_financial);
@@ -453,6 +453,7 @@ async fn a_failing_nse_list_leaves_the_bank_rows_out_with_a_note() {
         Market::In,
         None,
         false,
+        true,
     )
     .await
     .unwrap();
@@ -475,9 +476,16 @@ async fn a_non_bank_never_asks_nse() {
         ("/v7/finance/quote", quote_body("Technology", "IT Services")),
     ];
     let server = crate::testutil::MockServer::start_routed(routes).await;
-    let c = collect(&client_for(&server.url), "TCS", Market::In, None, false)
-        .await
-        .unwrap();
+    let c = collect(
+        &client_for(&server.url),
+        "TCS",
+        Market::In,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(c.quarterly.len(), 10);
     assert!(
         server
@@ -501,9 +509,16 @@ async fn timeseries_is_asked_with_explicit_period_bounds_for_many_years() {
         ("/v7/finance/quote", quote_body("Technology", "IT Services")),
     ];
     let server = crate::testutil::MockServer::start_routed(routes).await;
-    collect(&client_for(&server.url), "TCS", Market::In, None, false)
-        .await
-        .unwrap();
+    collect(
+        &client_for(&server.url),
+        "TCS",
+        Market::In,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     let req = server
         .requests()
         .into_iter()
@@ -539,9 +554,16 @@ async fn a_repeat_call_is_served_from_financial_results_without_a_request() {
     ];
     let server = crate::testutil::MockServer::start_routed(routes).await;
     let db = memory_db();
-    let first = collect(&client_for(&server.url), "TCS", Market::In, Some(db), false)
-        .await
-        .unwrap();
+    let first = collect(
+        &client_for(&server.url),
+        "TCS",
+        Market::In,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     assert!(!first.from_cache);
     let stored = db.lock().unwrap().get_results("TCS.NS").unwrap();
     assert_eq!(stored.len(), 10, "every fetched quarter is persisted");
@@ -551,9 +573,16 @@ async fn a_repeat_call_is_served_from_financial_results_without_a_request() {
         .filter(|r| r.target.contains("timeseries") || r.target.contains("quoteSummary"))
         .count();
 
-    let second = collect(&client_for(&server.url), "TCS", Market::In, Some(db), false)
-        .await
-        .unwrap();
+    let second = collect(
+        &client_for(&server.url),
+        "TCS",
+        Market::In,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     assert!(second.from_cache);
     assert_eq!(
         serde_json::to_value(&second.quarterly).unwrap(),
@@ -711,4 +740,86 @@ fn us_quarters_are_labelled_by_calendar_quarter() {
     assert_eq!(views.len(), 8);
     assert_eq!(views.last().unwrap().quarter, "Q3 2026");
     assert_eq!(views.last().unwrap().yoy.revenue, Some(16.0));
+}
+
+#[test]
+fn a_set_with_no_shared_quarter_still_shows_the_newest() {
+    let a = collected(
+        "A.NS",
+        vec![
+            q("2025-09-30", 100.0, 10.0, None),
+            q("2026-09-30", 120.0, 15.0, None),
+        ],
+    );
+    let b = collected(
+        "B.NS",
+        vec![
+            q("2025-06-30", 100.0, 10.0, None),
+            q("2026-06-30", 110.0, 11.0, None),
+        ],
+    );
+    let board = scoreboard("t", 2, vec![], &[a, b], Sort::Date);
+    assert_eq!(board.reported, 1);
+    assert_eq!(board.pending, vec!["B.NS"]);
+}
+
+#[tokio::test]
+async fn a_cache_hit_keeps_the_statement_currency() {
+    let routes = vec![
+        (
+            "fundamentals-timeseries",
+            json!({"timeseries": {"result": nonbank_series()}}).to_string(),
+        ),
+        (
+            "quoteSummary",
+            json!({"quoteSummary": {"result": [{}]}}).to_string(),
+        ),
+        // Quote currency differs from the statements' INR.
+        (
+            "/v7/finance/quote",
+            quote_body("Technology", "IT Services").replace("INR", "GBp"),
+        ),
+    ];
+    let server = crate::testutil::MockServer::start_routed(routes).await;
+    let db = memory_db();
+    for _ in 0..2 {
+        let c = collect(
+            &client_for(&server.url),
+            "TCS",
+            Market::In,
+            Some(db),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.currency.as_deref(), Some("INR"));
+    }
+}
+
+#[tokio::test]
+async fn saved_symbols_are_not_resolved_again() {
+    let routes = vec![
+        (
+            "fundamentals-timeseries",
+            json!({"timeseries": {"result": nonbank_series()}}).to_string(),
+        ),
+        (
+            "quoteSummary",
+            json!({"quoteSummary": {"result": [{}]}}).to_string(),
+        ),
+        ("/v7/finance/quote", quote_body("Technology", "IT Services")),
+    ];
+    let server = crate::testutil::MockServer::start_routed(routes).await;
+    let c = collect(
+        &client_for(&server.url),
+        "AAPL",
+        Market::In,
+        None,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.symbol, "AAPL");
 }

@@ -1631,7 +1631,7 @@ pub async fn cmd_results(
     }
     let symbol = symbol.unwrap_or_default();
     let client = YahooClient::new().await?;
-    let c = results::collect(&client, symbol, market, store, !annual).await?;
+    let c = results::collect(&client, symbol, market, store, !annual, true).await?;
     if annual && c.annual.is_empty() {
         bail!("No annual results found for {}", c.symbol);
     }

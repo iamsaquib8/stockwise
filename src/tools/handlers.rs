@@ -339,6 +339,7 @@ async fn quarterly_results(src: &impl DataSource, a: &Args, m: Market) -> Result
         m,
         crate::results::default_store(),
         !annual,
+        true,
     )
     .await?;
     Ok(if annual {

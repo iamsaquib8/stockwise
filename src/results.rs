@@ -93,6 +93,12 @@ pub struct ResultPeriod {
     pub reaction: Option<ResultReaction>,
     /// Day the result was announced, when `events` found it (unix seconds).
     pub result_ts: Option<i64>,
+    /// Currency the amounts are reported in.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// The result-date and reaction lookup ran (found or not).
+    #[serde(default)]
+    pub reaction_checked: bool,
     #[serde(skip)]
     ebitda: Option<f64>,
     #[serde(skip)]
@@ -248,6 +254,12 @@ pub fn parse_statements(results: &[Value]) -> Statements {
                 .entry((date.year(), date.month()))
                 .or_insert_with(|| ResultPeriod::new(date));
             set_field(p, field, v);
+            if field != "DilutedEPS"
+                && p.currency.is_none()
+                && let Some(c) = item.get("currencyCode").and_then(|c| c.as_str())
+            {
+                p.currency = Some(c.to_string());
+            }
         }
     }
     let fin = |m: BTreeMap<(i32, u32), ResultPeriod>| {
@@ -573,8 +585,15 @@ pub async fn collect(
     market: Market,
     store: Option<L2>,
     reaction: bool,
+    resolve: bool,
 ) -> Result<Collected> {
-    let symbol = market::resolve_symbol(symbol, market);
+    // Saved holdings and index members are already full symbols (a US
+    // holding `AAPL` must not become `AAPL.NS`): only typed ones resolve.
+    let symbol = if resolve {
+        market::resolve_symbol(symbol, market)
+    } else {
+        symbol.to_string()
+    };
     let base = symbol.split('.').next().unwrap_or(&symbol).to_string();
     let is_india = symbol.ends_with(".NS") || symbol.ends_with(".BO");
 
@@ -598,10 +617,14 @@ pub async fn collect(
     if let Some(db) = store
         && let Ok(guard) = db.lock()
         && let Some((quarterly, annual)) = load_periods(&guard, &symbol, CACHE_TTL_SECS)
-        && (!reaction || quarterly.iter().any(|p| p.result_ts.is_some()))
+        && (!reaction || quarterly.iter().any(|p| p.reaction_checked))
     {
         return Ok(Collected {
-            currency: quote.currency.clone(),
+            currency: quarterly
+                .iter()
+                .rev()
+                .find_map(|p| p.currency.clone())
+                .or(quote.currency.clone()),
             symbol,
             name,
             is_india,
@@ -650,7 +673,12 @@ pub async fn collect(
             corporate_actions: false,
         };
         match research::fetch(client, &symbol, market, REACTION_DAYS, needs).await {
-            Ok(r) => attach_reactions(&mut st.quarterly, &r),
+            Ok(r) => {
+                attach_reactions(&mut st.quarterly, &r);
+                st.quarterly
+                    .iter_mut()
+                    .for_each(|p| p.reaction_checked = true);
+            }
             Err(e) => warnings.push(format!(
                 "Result dates and price reaction unavailable: {e:#}"
             )),
@@ -699,14 +727,16 @@ pub async fn season(
     sort: Sort,
 ) -> Scoreboard {
     use futures_util::StreamExt;
-    let outcomes: Vec<(String, Result<Collected>)> = futures_util::stream::iter(
-        symbols
-            .iter()
-            .map(|s| async move { (s.clone(), collect(client, s, market, store, false).await) }),
-    )
-    .buffered(PARALLEL)
-    .collect()
-    .await;
+    let outcomes: Vec<(String, Result<Collected>)> =
+        futures_util::stream::iter(symbols.iter().map(|s| async move {
+            (
+                s.clone(),
+                collect(client, s, market, store, false, false).await,
+            )
+        }))
+        .buffered(PARALLEL)
+        .collect()
+        .await;
     let (mut ok, mut failed) = (Vec::new(), Vec::new());
     for (s, r) in outcomes {
         match r {
@@ -1249,7 +1279,9 @@ pub fn scoreboard(
     let active = ends
         .iter()
         .rev()
-        .find(|e| ends.iter().filter(|o| near(**o, **e)).count() >= 2.min(ends.len()));
+        .find(|e| ends.iter().filter(|o| near(**o, **e)).count() >= 2.min(ends.len()))
+        // No shared quarter yet: the newest one, the rest are pending.
+        .or(ends.last());
     let mut board = Scoreboard {
         title: title.to_string(),
         total,
