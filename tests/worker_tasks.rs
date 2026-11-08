@@ -141,12 +141,18 @@ fn a_stop_file_shuts_the_worker_down_cleanly() {
     ok(&home, &["worker", "start"]);
     std::fs::write(home.join("worker.stop"), b"stop").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !ok(&home, &["worker", "status"]).contains("not running") {
-        assert!(Instant::now() < deadline, "worker ignored the stop file");
+    // "Not running" can show a moment before the worker has removed its
+    // files, so wait for the cleanup too: no pid file, no stop request left.
+    loop {
+        let stopped = ok(&home, &["worker", "status"]).contains("not running");
+        if stopped && !home.join("worker.pid").exists() && !home.join("worker.stop").exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker ignored the stop file or did not clean up"
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
-    // It cleaned up after itself: no pid file, no leftover stop request.
-    assert!(!home.join("worker.pid").exists());
-    assert!(!home.join("worker.stop").exists());
     let _ = std::fs::remove_dir_all(&home);
 }

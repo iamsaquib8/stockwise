@@ -663,8 +663,12 @@ fn wait_ready(child: &mut std::process::Child, log_path: &std::path::Path) -> Re
             return Ok(child.id());
         }
         if std::time::Instant::now() >= deadline {
+            // A failed start must not leave a worker that comes up later:
+            // end the child and reap it before reporting.
+            let _ = child.kill();
+            let _ = child.wait();
             bail!(
-                "The worker did not report ready within 10 s; see {}",
+                "The worker did not report ready within 10 s and was stopped; see {}",
                 log_path.display()
             );
         }
