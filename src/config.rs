@@ -497,9 +497,77 @@ pub fn init(path: &Path, force: bool) -> Result<()> {
     std::fs::write(path, TEMPLATE).with_context(|| format!("Cannot write {}", path.display()))
 }
 
+/// Set `market = "<value>"` in the config file at `path`, creating it from
+/// [`TEMPLATE`] when missing. An active `market` line is replaced, else the
+/// template's commented one, else a new line goes on top. Other lines and
+/// comments are kept.
+pub fn set_market(path: &Path, value: &str) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    let new_line = format!("market = \"{value}\"");
+    let is_key = |l: &str, prefix: &str| {
+        l.strip_prefix(prefix)
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    // Only top-level keys count: stop at the first table header.
+    let top = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let at = lines[..top]
+        .iter()
+        .position(|l| is_key(l.trim_start(), "market"))
+        .or_else(|| {
+            lines[..top]
+                .iter()
+                .position(|l| is_key(l.trim_start(), "# market"))
+        });
+    match at {
+        Some(i) => lines[i] = new_line,
+        None => lines.insert(0, new_line),
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Cannot create directory {}", dir.display()))?;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_market_fills_the_template_line_and_parses() {
+        let dir = std::env::temp_dir().join(format!("sw-setmarket-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+        set_market(&file, "us").unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.lines().any(|l| l == "market = \"us\""), "{text}");
+        assert_eq!(parse(&text, CMDS).unwrap().market.as_deref(), Some("us"));
+        // Replaces an active line, keeps other settings.
+        std::fs::write(
+            &file,
+            "market = \"in\"\nai = true\n[periods]\n# deep = \"3mo\"\n",
+        )
+        .unwrap();
+        set_market(&file, "us").unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!((c.market.as_deref(), c.ai), (Some("us"), Some(true)));
+        // No market line at all: one is added.
+        std::fs::write(&file, "ai = true\n").unwrap();
+        set_market(&file, "in").unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!((c.market.as_deref(), c.ai), (Some("in"), Some(true)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const CMDS: &[&str] = &[
         "deep",

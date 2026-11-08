@@ -220,6 +220,17 @@ enum Commands {
     /// Check your setup: data directory, network, cache, AI, broker
     Doctor,
 
+    /// First run: pick a market, import holdings, optionally connect an AI assistant
+    Init {
+        /// Holdings to import, as SOURCE:FILE (kite, groww, upstox, indmoney,
+        /// cas), e.g. groww:holdings.csv. Repeatable.
+        #[arg(long = "import", value_name = "SOURCE:FILE")]
+        imports: Vec<String>,
+        /// Skip the Claude / Cursor (MCP) step
+        #[arg(long)]
+        no_mcp: bool,
+    },
+
     // ── Analysis ──
     /// Fundamental analysis with plain-English insights
     #[command(alias = "a")]
@@ -2416,7 +2427,15 @@ fn value_name<T: ValueEnum>(v: T) -> String {
 const GROUPS: &[(&str, &[&str])] = &[
     (
         "Start here",
-        &["quote", "deep", "markets", "dashboard", "search", "doctor"],
+        &[
+            "quote",
+            "deep",
+            "markets",
+            "dashboard",
+            "search",
+            "doctor",
+            "init",
+        ],
     ),
     (
         "Analysis",
@@ -2589,7 +2608,7 @@ fn build_cli() -> clap::Command {
 }
 
 /// Curated quick-start overview printed when `stockwise` is run with no arguments.
-fn curated_quickstart_help() -> String {
+fn curated_quickstart_help(new_user: bool) -> String {
     use colored::Colorize;
     let mut out = String::new();
     out.push_str(&format!(
@@ -2598,6 +2617,13 @@ fn curated_quickstart_help() -> String {
         "Terminal Stock Research, Portfolio, F&O & Tax Workbench".dimmed()
     ));
     out.push_str(&format!("  {}\n\n", "─".repeat(66).dimmed()));
+    if new_user {
+        out.push_str(&format!(
+            "  {} Run {} to pick a market and import your holdings.\n\n",
+            "New here?".bold().green(),
+            "stockwise init".cyan().bold()
+        ));
+    }
     out.push_str(&format!(
         "  {}  {}\n",
         "Quick Lookup:".bold().yellow(),
@@ -2955,7 +2981,10 @@ async fn async_main() {
     i18n::set_lang(lang, source);
     let mut cmd = with_config_defaults(build_cli(), config::get());
     if args.len() == 1 {
-        print!("{}", curated_quickstart_help());
+        let new_user = portfolio::Portfolio::load()
+            .map(|p| p.holdings.is_empty())
+            .unwrap_or(false);
+        print!("{}", curated_quickstart_help(new_user));
         return;
     }
     if args.iter().any(|a| a == "--help-all") {
@@ -2999,7 +3028,10 @@ async fn async_main() {
     if let config::Status::Invalid(msg) = &cfg_state.status
         && !matches!(
             cli.command,
-            Commands::Config { .. } | Commands::Doctor | Commands::Completions { .. }
+            Commands::Config { .. }
+                | Commands::Init { .. }
+                | Commands::Doctor
+                | Commands::Completions { .. }
         )
     {
         eprintln!("\n  {} {}\n", colored::Colorize::red("Error:"), msg);
@@ -3059,6 +3091,9 @@ async fn dispatch(
         Commands::Dashboard => commands::cmd_dashboard(m).await,
         Commands::Search { query, out } => commands::cmd_search(&query, out.into()).await,
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
+        Commands::Init { imports, no_mcp } => {
+            commands::cmd_init(m, sources.market == config::Source::Flag, &imports, no_mcp).await
+        }
 
         Commands::Analyze { symbol, out } => commands::cmd_analyze(&symbol, m, out.json).await,
         Commands::Events {
@@ -5660,12 +5695,20 @@ mod tests {
             0,
             "verdict has no aliases"
         );
-        crate::verdict::testing::assert_neutral(&curated_quickstart_help());
+        crate::verdict::testing::assert_neutral(&curated_quickstart_help(false));
+    }
+
+    #[test]
+    fn quickstart_points_new_users_to_init() {
+        let new = curated_quickstart_help(true);
+        assert!(new.contains("New here?") && new.contains("stockwise init"));
+        assert!(!curated_quickstart_help(false).contains("New here?"));
+        crate::verdict::testing::assert_neutral(&new);
     }
 
     #[test]
     fn bare_symbol_and_quickstart_help_work() {
-        let help = curated_quickstart_help();
+        let help = curated_quickstart_help(false);
         assert!(help.contains("StockWise"));
         assert!(help.contains("verdict <SYM>"));
         assert!(help.contains("--help-all"));
