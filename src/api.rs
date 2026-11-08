@@ -1392,10 +1392,13 @@ impl YahooClient {
         let body = self.fetch(&url, Duration::from_secs(600)).await?;
         let resp: ChartResponse =
             serde_json::from_str(&body).context("Failed to parse chart response")?;
-        resp.chart
+        let chart = resp
+            .chart
             .result
             .and_then(|r| r.into_iter().next())
-            .context("No chart data returned")
+            .context("No chart data returned")?;
+        self.store_bars(symbol, interval, &chart).await;
+        Ok(chart)
     }
 
     /// Dividends and splits for `symbol` from `since` (Unix seconds) to today.
@@ -2156,6 +2159,33 @@ mod tests {
             (bars[1].ts, bars[1].close, bars[1].volume),
             (200, 2.5, 20.0)
         );
+    }
+
+    #[tokio::test]
+    async fn range_chart_bars_are_stored_too() {
+        let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100],
+            "indicators":{"quote":[{"open":[1.0],"high":[2.0],"low":[0.5],
+            "close":[1.5],"volume":[10]}]}}],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let db: crate::db::L2 = Box::leak(Box::new(Mutex::new(
+            crate::db::CacheDb::open_in_memory().unwrap(),
+        )));
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.cache = Arc::new(tokio::sync::Mutex::new(HybridCache::with_l2(db)));
+        client
+            .get_chart_between("TCS.NS", 0, 1000, "5m")
+            .await
+            .unwrap();
+        let bars = db
+            .lock()
+            .unwrap()
+            .get_bars("TCS.NS", "5m", 0, 1000)
+            .unwrap();
+        assert_eq!(bars.len(), 1);
     }
 
     #[test]

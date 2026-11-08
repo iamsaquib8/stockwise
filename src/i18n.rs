@@ -316,7 +316,7 @@ messages! {
     DoctorExchangeNote => "NSE/BSE website data is unofficial; when they refuse automated requests, Yahoo answers", "NSE/BSE वेबसाइट का डेटा अनौपचारिक है; जब वे स्वचालित अनुरोध रोकते हैं, तब Yahoo जवाब देता है";
     DoctorRedis => "Redis cache", "Redis कैश";
     DoctorConnected => "connected", "जुड़ा हुआ";
-    DoctorRedisNotUsed => "not used (optional; set STOCKWISE_REDIS_URL to enable — cache.db is used instead)", "उपयोग में नहीं (वैकल्पिक; मेमोरी कैश चल रहा है)";
+    DoctorRedisNotUsed => "not used (optional; set STOCKWISE_REDIS_URL to enable — cache.db is used instead)", "उपयोग में नहीं (वैकल्पिक; चालू करने के लिए STOCKWISE_REDIS_URL सेट करें — अभी cache.db इस्तेमाल हो रहा है)";
     DoctorAi => "AI", "AI";
     DoctorOllamaReady => "Ollama model {0} ready — use `report` or add --ai", "Ollama मॉडल {0} तैयार — `report` चलाएँ या --ai जोड़ें";
     DoctorOllamaNoModel => "Ollama is running, but model {0} is not pulled — run `ollama pull {0}`", "Ollama चल रहा है, पर मॉडल {0} डाउनलोड नहीं है — `ollama pull {0}` चलाएँ";
