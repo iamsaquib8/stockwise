@@ -658,6 +658,12 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Break the task store, to test that failures are reported.
+    #[cfg(test)]
+    pub fn drop_tasks_table_for_test(&self) {
+        self.conn.execute("DROP TABLE tasks", []).unwrap();
+    }
+
     /// Entry counts and sizes for `cache status`.
     pub fn stats(&self, file_bytes: u64) -> Result<CacheStats> {
         let (entries, fresh, bytes): (i64, i64, i64) = self.conn.query_row(

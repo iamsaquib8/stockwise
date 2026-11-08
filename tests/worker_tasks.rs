@@ -1,8 +1,8 @@
 //! `worker` and `tasks` against the real binary and a scratch data directory:
 //! a queued `run` task is picked up by the background worker, finishes with
-//! its output stored, and a queued task can be cancelled. No network.
-
-#![cfg(unix)]
+//! its output stored, and a queued task can be cancelled. No network. These
+//! also run on Windows CI, which exercises `worker start` and the graceful
+//! stop-file shutdown there.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

@@ -724,8 +724,10 @@ pub async fn stop() -> Result<bool> {
                 let _ = std::fs::remove_file(crate::store::path(STOP_FILE)?);
                 // A force-killed worker could not release its claimed task:
                 // requeue (warm/eod) or fail (run) whatever it left running.
-                db::with_db(|d| d.requeue_stale_tasks(0));
+                // A failure is reported, not hidden behind "stopped".
+                let recovered = reconcile_tasks(db::l2());
                 drop(free);
+                recovered?;
                 return Ok(true);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -737,6 +739,19 @@ pub async fn stop() -> Result<bool> {
     let _ = std::fs::remove_file(pid_path()?);
     drop(guard);
     Ok(false)
+}
+
+/// Requeue or fail the tasks a force-killed worker left `running` (`warm` and
+/// `eod` go back in the queue; a `run` command is failed, never repeated).
+/// Returns how many were requeued. An error means a task may still say
+/// `running`; a disabled `cache.db` has no tasks to recover.
+fn reconcile_tasks(l2: Option<db::L2>) -> Result<u64> {
+    let Some(l2) = l2 else { return Ok(0) };
+    let db = l2
+        .lock()
+        .map_err(|_| anyhow::anyhow!("cache.db is locked by a panicked thread"))?;
+    db.requeue_stale_tasks(0)
+        .context("The worker stopped, but a task it was running could not be recovered")
 }
 
 /// What `worker status` prints.
@@ -994,6 +1009,35 @@ mod tests {
         let closed = Utc.with_ymd_and_hms(2026, 3, 4, 14, 0, 0).unwrap();
         assert_eq!(tick_interval(Market::In, open), OPEN_TICK);
         assert_eq!(tick_interval(Market::In, closed), CLOSED_TICK);
+    }
+
+    #[test]
+    fn task_recovery_reports_failures() {
+        let healthy: db::L2 = Box::leak(Box::new(std::sync::Mutex::new(
+            db::CacheDb::open_in_memory().unwrap(),
+        )));
+        {
+            let d = healthy.lock().unwrap();
+            let warm = d.enqueue_task("warm", "w", "{}").unwrap();
+            let run = d.enqueue_task("run", "r", "{}").unwrap();
+            d.claim_task().unwrap();
+            d.claim_task().unwrap();
+            assert_eq!(warm + 1, run);
+        }
+        // Idempotent work is requeued, a command is failed; the count is reported.
+        assert_eq!(reconcile_tasks(Some(healthy)).unwrap(), 1);
+        // A disabled store has nothing to recover.
+        assert_eq!(reconcile_tasks(None).unwrap(), 0);
+        // A broken store is an error, never a silent success.
+        let broken: db::L2 = Box::leak(Box::new(std::sync::Mutex::new(
+            db::CacheDb::open_in_memory().unwrap(),
+        )));
+        broken.lock().unwrap().drop_tasks_table_for_test();
+        let err = reconcile_tasks(Some(broken)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("could not be recovered"),
+            "{err:#}"
+        );
     }
 
     #[test]
