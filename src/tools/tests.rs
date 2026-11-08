@@ -108,6 +108,7 @@ fn tool_names_are_unique_and_valid() {
         "scorecard",
         "insights",
         "events",
+        "quarterly_results",
         "options_oi",
         "tax_advance",
         "harvest",

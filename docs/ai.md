@@ -204,7 +204,7 @@ the data directory. Add them to `args` or the client's `env`.
 
 ### Tools
 
-There are 34 tools. Every tool only reads. Each result is JSON with the data, a short "not
+There are 35 tools. Every tool only reads. Each result is JSON with the data, a short "not
 financial advice" `note`, and `truncated` when long lists were shortened.
 Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 `commodity`, `uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).
@@ -219,6 +219,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `scorecard` | Piotroski F-score and Altman Z-score with every criterion and its formula | `score --json` |
 | `insights` | Positive, negative and neutral findings plus the shareholding split for one ticker | `insights --json` |
 | `events` | Recent and upcoming corporate events with the price reaction around each | `events --json` |
+| `quarterly_results` | Last 8+ quarters (or fiscal years) of results with YoY, QoQ, margin change, TTM, EPS vs consensus, bank NII and NPA | `results --json` |
 | `search` | Tickers matching a company name | `search --json` |
 | `markets` | Index levels; optional crypto, FX and global benchmarks | `markets --json` |
 | `mf_search` / `mf_nav` / `mf_sip` | Mutual fund search, NAV with expense ratio, past SIP returns with XIRR (by AMFI code or ISIN) | `mf search/nav/sip --json` |

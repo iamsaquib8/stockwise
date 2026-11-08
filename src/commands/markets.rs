@@ -65,7 +65,7 @@ pub(crate) fn mover_rows(quotes: &[crate::api::Quote], n: usize) -> (Vec<MoverRo
 }
 
 /// `--universe` names NSE indices: fail before any request elsewhere.
-fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<()> {
+pub(super) fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<()> {
     if universe.is_some() && market != Market::In {
         bail!(
             "--universe lists NSE index members; use it with the Indian market (-m in), not {}",
@@ -78,7 +78,7 @@ fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<
 /// Symbols a scan covers and its title: the members of an NSE index with
 /// `--universe` (from NSE; the built-in list when NSE can't answer), else
 /// the market's built-in list.
-async fn scan_symbols(
+pub(super) async fn scan_symbols(
     client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,
