@@ -273,6 +273,7 @@ impl CacheDb {
     /// Insert or update snapshots by `(symbol, market)` in one transaction. A
     /// field the new row lacks keeps its stored value (a bulk index feed has
     /// prices but no P/E), so fundamentals are never blanked by a price scan.
+    /// Day values (price, change, rvol) are always replaced.
     pub fn upsert_snapshots(&mut self, rows: &[Snapshot]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -286,7 +287,7 @@ impl CacheDb {
                      industry=COALESCE(excluded.industry, industry),
                      cap_tier=COALESCE(excluded.cap_tier, cap_tier),
                      mcap=COALESCE(excluded.mcap, mcap), price=excluded.price,
-                     change_1d=excluded.change_1d, rvol=COALESCE(excluded.rvol, rvol),
+                     change_1d=excluded.change_1d, rvol=excluded.rvol,
                      pe=COALESCE(excluded.pe, pe), roe=COALESCE(excluded.roe, roe),
                      div_yield=COALESCE(excluded.div_yield, div_yield),
                      updated_at=excluded.updated_at",

@@ -328,7 +328,8 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             &match (q.market_cap, market::cap_badge(q)) {
                 (Some(v), Some(b)) => format!("{}  {}", format_large_number(v, cur), b.dimmed()),
                 (Some(v), None) => format_large_number(v, cur),
-                (None, _) => na(),
+                (None, Some(b)) => format!("{}  {}", na(), b.dimmed()),
+                (None, None) => na(),
             },
         );
         print_kv(t(Msg::PeTtm), &format_optional_f64(q.trailing_pe, ""));

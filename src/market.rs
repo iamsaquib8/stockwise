@@ -1418,7 +1418,11 @@ impl CapTier {
         let upper = symbol.to_ascii_uppercase();
         let india = currency == Some("INR") || upper.ends_with(".NS") || upper.ends_with(".BO");
         if india {
-            if let Some(t) = members.and_then(|m| m.tier(&upper, mcap)) {
+            // Index members are NSE symbols: a `.BO` listing or an INR
+            // instrument that is not a stock falls through to the cut-offs.
+            if upper.ends_with(".NS")
+                && let Some(t) = members.and_then(|m| m.tier(&upper, mcap))
+            {
                 return t;
             }
             return match mcap.filter(|v| *v > 0.0) {
@@ -1463,8 +1467,13 @@ impl CapTier {
 
 /// Tier of a quote, using the NSE membership cached by earlier index scans.
 pub fn cap_tier_of(q: &crate::api::Quote) -> CapTier {
+    let symbol = q.symbol.as_deref().unwrap_or("");
+    // A fund or bond priced in rupees has no market cap to tier.
+    if crate::offmarket::is_off_market(symbol) {
+        return CapTier::Unknown;
+    }
     CapTier::classify(
-        q.symbol.as_deref().unwrap_or(""),
+        symbol,
         q.market_cap,
         q.currency.as_deref(),
         IndiaMembership::shared(),
@@ -1544,6 +1553,10 @@ pub struct IndiaMembership {
     pub midcap150: Vec<String>,
     pub smallcap250: Vec<String>,
     pub nifty500: Vec<String>,
+    /// NIFTY 100 / MIDCAP 150 / SMALLCAP 250 were cut from the NIFTY 500
+    /// order (ranks 1-100, 101-250, 251-500), not scanned themselves.
+    #[serde(default)]
+    pub derived: bool,
 }
 
 impl IndiaMembership {
@@ -1611,6 +1624,23 @@ impl IndiaMembership {
             _ => return,
         };
         *list = symbols.iter().map(|s| s.to_ascii_uppercase()).collect();
+        match index {
+            "NIFTY 500" => {
+                // NSE lists NIFTY 500 by market cap, which is the SEBI rank
+                // order: cut it into the three bands until the real index
+                // lists have been scanned.
+                if self.derived || (self.nifty100.is_empty() && self.midcap150.is_empty()) {
+                    let all = self.nifty500.clone();
+                    let cut =
+                        |a: usize, b: usize| all.iter().skip(a).take(b - a).cloned().collect();
+                    self.nifty100 = cut(0, 100);
+                    self.midcap150 = cut(100, 250);
+                    self.smallcap250 = cut(250, 500);
+                    self.derived = true;
+                }
+            }
+            _ => self.derived = false,
+        }
     }
 
     /// Save one index's members next to the others (best effort).
@@ -1732,6 +1762,39 @@ mod tests {
             syms(super::filter_by_cap(quotes, Some(CapFilter::Micro))),
             ["D"]
         );
+    }
+
+    #[test]
+    fn nifty_500_scan_derives_rank_bands_and_only_for_nse_symbols() {
+        let mut m = IndiaMembership::default();
+        let all: Vec<String> = (0..500).map(|i| format!("R{i}.NS")).collect();
+        m.set("NIFTY 500", &all);
+        let c = |s: &str| CapTier::classify(s, None, Some("INR"), Some(&m));
+        assert_eq!(c("R50.NS"), CapTier::Large);
+        assert_eq!(c("R100.NS"), CapTier::Mid);
+        assert_eq!(c("R249.NS"), CapTier::Mid);
+        assert_eq!(c("R250.NS"), CapTier::Small);
+        assert_eq!(c("OUT.NS"), CapTier::Micro);
+        // A BSE listing or an INR crypto pair is not an NSE index member.
+        assert_eq!(c("RELIANCE.BO"), CapTier::Unknown);
+        assert_eq!(c("BTC-INR"), CapTier::Unknown);
+        // A real MIDCAP 150 scan replaces the derived band.
+        m.set("NIFTY MIDCAP 150", &["R300.NS".to_string()]);
+        assert!(!m.derived);
+        assert_eq!(
+            CapTier::classify("R300.NS", None, Some("INR"), Some(&m)),
+            CapTier::Mid
+        );
+    }
+
+    #[test]
+    fn funds_have_no_cap_tier() {
+        let q = crate::api::Quote {
+            symbol: Some("MF:INF179K01XQ0".into()),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        assert_eq!(super::cap_tier_of(&q), CapTier::Unknown);
     }
 
     #[test]

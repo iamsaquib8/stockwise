@@ -7,12 +7,28 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn scratch(name: &str) -> PathBuf {
+/// A scratch data directory, removed when the test ends.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("stockwise-cap-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.toml"), "").unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn stockwise(home: &Path, args: &[&str]) -> Output {
@@ -30,6 +46,40 @@ fn stockwise(home: &Path, args: &[&str]) -> Output {
         .expect("run stockwise")
 }
 
+/// The market's built-in list (the symbols a plain scan covers).
+const NSE_LIST: [&str; 30] = [
+    "RELIANCE",
+    "TCS",
+    "HDFCBANK",
+    "INFY",
+    "ICICIBANK",
+    "HINDUNILVR",
+    "SBIN",
+    "BHARTIARTL",
+    "ITC",
+    "KOTAKBANK",
+    "LT",
+    "AXISBANK",
+    "ASIANPAINT",
+    "MARUTI",
+    "TITAN",
+    "SUNPHARMA",
+    "TMPV",
+    "BAJFINANCE",
+    "WIPRO",
+    "HCLTECH",
+    "ONGC",
+    "NTPC",
+    "POWERGRID",
+    "TATASTEEL",
+    "ADANIENT",
+    "ULTRACEMCO",
+    "JSWSTEEL",
+    "TECHM",
+    "INDUSINDBK",
+    "DRREDDY",
+];
+
 /// 30 Indian rows: ten large, twenty mid, changes alternating in sign.
 fn seed(home: &Path) {
     // The first run creates cache.db with its tables.
@@ -44,7 +94,7 @@ fn seed(home: &Path) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    for i in 0..30 {
+    for (i, name) in NSE_LIST.iter().enumerate() {
         let (tier, mcap) = if i < 10 {
             ("large", 2.0e12)
         } else {
@@ -58,7 +108,7 @@ fn seed(home: &Path) {
         conn.execute(
             "INSERT INTO market_snapshots (symbol, market, name, cap_tier, mcap, price, change_1d, updated_at)
              VALUES (?1, 'in', ?2, ?3, ?4, 100.0, ?5, ?6)",
-            rusqlite::params![format!("S{i}.NS"), format!("Stock {i}"), tier, mcap, change, now],
+            rusqlite::params![format!("{name}.NS"), format!("Stock {i}"), tier, mcap, change, now],
         )
         .unwrap();
     }
@@ -84,12 +134,8 @@ fn movers_cap_reads_fresh_snapshots_without_network() {
     assert!(!rows.is_empty());
     for r in &rows {
         assert_eq!(r["cap_tier"], "mid", "{r}");
-        let n: u32 = r["symbol"].as_str().unwrap()[1..]
-            .split('.')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
+        let sym = r["symbol"].as_str().unwrap().trim_end_matches(".NS");
+        let n = NSE_LIST.iter().position(|s| *s == sym).unwrap();
         assert!(n >= 10, "large stock in a mid scan: {r}");
     }
     let err = String::from_utf8_lossy(&out.stderr);

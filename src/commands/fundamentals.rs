@@ -136,7 +136,8 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         &match (q.market_cap, market::cap_badge(q)) {
             (Some(v), Some(b)) => format!("{}  {}", format_large_number(v, cur), b.dimmed()),
             (Some(v), None) => format_large_number(v, cur),
-            (None, _) => "N/A".to_string(),
+            (None, Some(b)) => format!("N/A  {}", b.dimmed()),
+            (None, None) => "N/A".to_string(),
         },
     );
     if let Some(exchange) = &q.exchange {
@@ -938,7 +939,8 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         &match (q.market_cap, market::cap_badge(q)) {
             (Some(v), Some(b)) => format!("{}  {}", format_large_number(v, cur), b.dimmed()),
             (Some(v), None) => format_large_number(v, cur),
-            (None, _) => "N/A".into(),
+            (None, Some(b)) => format!("N/A  {}", b.dimmed()),
+            (None, None) => "N/A".into(),
         },
     );
 

@@ -174,7 +174,11 @@ fn store_bulk_snapshots(quotes: &[crate::api::Quote]) {
 /// Quotes of a `--cap` scan from fresh `market_snapshots` rows, when the
 /// worker or an earlier scan stored enough of the market's built-in list:
 /// no request at all. `None` means "scan live".
-fn cached_cap_quotes(market: Market, cap: market::CapFilter) -> Option<Vec<crate::api::Quote>> {
+fn cached_cap_quotes(
+    market: Market,
+    cap: market::CapFilter,
+    scanned: &[String],
+) -> Option<Vec<crate::api::Quote>> {
     let tier = cap.tier()?;
     if !matches!(market, Market::In | Market::Us) {
         return None;
@@ -194,12 +198,17 @@ fn cached_cap_quotes(market: Market, cap: market::CapFilter) -> Option<Vec<crate
         })?;
         Ok((all, rows))
     })?;
-    // Part of the list only: a scan of it would miss most of the market.
-    if all.len() * 2 < market.universe().len() {
+    // Only the symbols this scan covers (not a bigger index scanned
+    // earlier), and only when most of them are stored.
+    let wanted: std::collections::HashSet<String> =
+        scanned.iter().map(|s| s.to_ascii_uppercase()).collect();
+    let in_scan = |r: &&crate::db::Snapshot| wanted.contains(&r.symbol.to_ascii_uppercase());
+    if all.iter().filter(in_scan).count() * 2 < wanted.len() {
         return None;
     }
     Some(
         rows.iter()
+            .filter(in_scan)
             .map(crate::worker::quote_from_snapshot)
             .collect(),
     )
@@ -218,7 +227,7 @@ async fn scan_quotes(
 ) -> Result<Vec<crate::api::Quote>> {
     if scan.bulk.is_empty()
         && let Some(c) = cap
-        && let Some(cached) = cached_cap_quotes(market, c)
+        && let Some(cached) = cached_cap_quotes(market, c, &scan.symbols)
     {
         eprintln!(
             "  \u{24d8} {} from cache.db (updated in the last {} min).",
