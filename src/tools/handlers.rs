@@ -34,6 +34,7 @@ pub(super) async fn run<D: DataSource>(
         "scorecard" => scorecard(src, a, m).await,
         "insights" => insights(src, a, m).await,
         "events" => events(src, a, m).await,
+        "quarterly_results" => quarterly_results(src, a, m).await,
         "search" => search(src, a).await,
         "markets" => Ok(json!({
             "indices": views::markets(src, m, a.bool("crypto"), a.bool("fx"), a.bool("global")).await?
@@ -327,6 +328,24 @@ async fn events(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
         "upcoming": upcoming,
         "events": evts,
     }))
+}
+
+async fn quarterly_results(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let n = a.usize_or("quarters", 8);
+    let annual = a.bool("annual");
+    let c = crate::results::collect(
+        src.yahoo().await?,
+        a.need_str("symbol")?,
+        m,
+        crate::results::default_store(),
+        !annual,
+    )
+    .await?;
+    Ok(if annual {
+        crate::results::annual_json(&c, n)
+    } else {
+        crate::results::quarterly_json(&c, n)
+    })
 }
 
 async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {

@@ -362,6 +362,32 @@ pub const TOOLS: &[Tool] = &[
         personal: false,
     },
     Tool {
+        name: "quarterly_results",
+        title: "Quarterly and annual financial results",
+        description: "Last 8 or more quarters (or fiscal years with annual=true) of reported \
+                      results for one ticker: revenue, operating profit and margin, other income, \
+                      interest, depreciation, pre-tax profit, tax rate, net profit and diluted \
+                      EPS, with year-on-year and quarter-on-quarter growth, margin change in \
+                      basis points, a trailing-twelve-month column and EPS against consensus. \
+                      Banks add net interest income and gross/net NPA when filed. Annual adds \
+                      cash flow, ROE, ROCE and 3/5/10-year CAGR. Records source and currency.",
+        params: &[
+            SYMBOL,
+            opt(
+                "quarters",
+                Kind::Integer { min: 1, max: 40 },
+                "Quarters (or fiscal years with annual) to return, default 8",
+            ),
+            opt(
+                "annual",
+                Kind::Bool,
+                "Fiscal years with cash flow and returns instead of quarters",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
         name: "search",
         title: "Find a ticker",
         description: "Search tickers by company name (\"tata motors\", \"apple\"). Use before \

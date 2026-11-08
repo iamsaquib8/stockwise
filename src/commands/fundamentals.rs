@@ -1,6 +1,7 @@
 //! Company fundamentals: analysis, comparisons, peers, dividends, insider activity, and the all-in-one `deep` report.
 
 use super::*;
+use crate::results;
 
 /// The Altman line for `deep` and `analyze`. The industrial Z-score does not
 /// describe banks and lenders, so they get a note instead of a zone label.
@@ -1276,6 +1277,389 @@ pub async fn cmd_fundamental_score(
         }
     }
     Ok(())
+}
+
+// ── Results ──
+
+/// Signed money, e.g. `-₹1.20K Cr`.
+fn money(v: Option<f64>, currency: Option<&str>) -> String {
+    match v {
+        None => "-".into(),
+        Some(v) if v < 0.0 => format!("-{}", format_large_number(-v, currency)),
+        Some(v) => format_large_number(v, currency),
+    }
+}
+
+fn num(v: Option<f64>, places: usize) -> String {
+    v.map_or("-".into(), |v| format!("{v:.places$}"))
+}
+
+fn signed(v: Option<f64>, places: usize, suffix: &str) -> String {
+    v.map_or("-".into(), |v| format!("{v:+.places$}{suffix}"))
+}
+
+/// Print a table with a label column and right-aligned cells.
+fn print_grid(columns: &[String], rows: &[(String, Vec<String>)]) {
+    const W: usize = 11;
+    print!("  {:<22}", "");
+    for c in columns {
+        print!("{:>W$}", c.bold());
+    }
+    println!();
+    for (label, cells) in rows {
+        if cells.iter().all(|c| c == "-") {
+            continue;
+        }
+        print!("  {:<22}", label);
+        for c in cells {
+            print!("{c:>W$}");
+        }
+        println!();
+    }
+}
+
+fn print_quarterly(c: &results::Collected, n: usize) {
+    let views = results::quarter_views(&c.quarterly, n, c.is_india);
+    let ttm = results::ttm(&c.quarterly).map(results::ttm_rounded);
+    let ccy = c.currency.as_deref();
+    let mut columns: Vec<String> = views.iter().map(|v| v.quarter.clone()).collect();
+    if ttm.is_some() {
+        columns.push("TTM".into());
+    }
+    let mut rows: Vec<(String, Vec<String>)> = Vec::new();
+    // `cell` makes one cell per quarter, `t` the TTM cell.
+    let mut row =
+        |label: &str, cell: &dyn Fn(&results::QuarterView) -> String, t: Option<String>| {
+            let mut cells: Vec<String> = views.iter().map(cell).collect();
+            if ttm.is_some() {
+                cells.push(t.unwrap_or_else(|| "-".into()));
+            }
+            rows.push((label.to_string(), cells));
+        };
+    let tt = ttm.as_ref();
+    row(
+        "Revenue",
+        &|v| money(v.period.revenue, ccy),
+        tt.map(|t| money(t.revenue, ccy)),
+    );
+    row(
+        "Net interest income",
+        &|v| money(v.period.nii, ccy),
+        tt.map(|t| money(t.nii, ccy)),
+    );
+    row(
+        "Operating profit",
+        &|v| money(v.period.operating_profit, ccy),
+        tt.map(|t| money(t.operating_profit, ccy)),
+    );
+    row(
+        "OPM %",
+        &|v| num(v.opm_pct, 1),
+        tt.map(|t| num(t.opm_pct, 1)),
+    );
+    row(
+        "Other income",
+        &|v| money(v.period.other_income, ccy),
+        tt.map(|t| money(t.other_income, ccy)),
+    );
+    row(
+        "Interest",
+        &|v| money(v.period.interest, ccy),
+        tt.map(|t| money(t.interest, ccy)),
+    );
+    row(
+        "Depreciation",
+        &|v| money(v.period.depreciation, ccy),
+        tt.map(|t| money(t.depreciation, ccy)),
+    );
+    row(
+        "Profit before tax",
+        &|v| money(v.period.pbt, ccy),
+        tt.map(|t| money(t.pbt, ccy)),
+    );
+    row(
+        "Tax %",
+        &|v| num(v.tax_pct, 1),
+        tt.map(|t| num(t.tax_pct, 1)),
+    );
+    row(
+        "Net profit",
+        &|v| money(v.period.pat, ccy),
+        tt.map(|t| money(t.pat, ccy)),
+    );
+    row(
+        "Diluted EPS",
+        &|v| num(v.period.eps, 2),
+        tt.map(|t| num(t.eps, 2)),
+    );
+    row("Gross NPA %", &|v| num(v.period.gnpa_pct, 2), None);
+    row("Net NPA %", &|v| num(v.period.nnpa_pct, 2), None);
+    print_grid(&columns, &rows);
+
+    let mut growth: Vec<(String, Vec<String>)> = Vec::new();
+    let mut g = |label: &str, cell: &dyn Fn(&results::QuarterView) -> String| {
+        let mut cells: Vec<String> = views.iter().map(cell).collect();
+        if ttm.is_some() {
+            cells.push("-".into());
+        }
+        growth.push((label.to_string(), cells));
+    };
+    g("Revenue YoY %", &|v| signed(v.yoy.revenue, 1, ""));
+    g("Revenue QoQ %", &|v| signed(v.qoq.revenue, 1, ""));
+    g("Operating profit YoY %", &|v| {
+        signed(v.yoy.operating_profit, 1, "")
+    });
+    g("Net profit YoY %", &|v| signed(v.yoy.pat, 1, ""));
+    g("Net profit QoQ %", &|v| signed(v.qoq.pat, 1, ""));
+    g("EPS YoY %", &|v| signed(v.yoy.eps, 1, ""));
+    g("OPM change YoY (bps)", &|v| signed(v.opm_bps_yoy, 0, ""));
+    g("OPM change QoQ (bps)", &|v| signed(v.opm_bps_qoq, 0, ""));
+    print_section("Growth");
+    print_grid(&columns, &growth);
+
+    if views.iter().any(|v| v.period.surprise.is_some()) {
+        let mut sur: Vec<(String, Vec<String>)> = Vec::new();
+        let mut s = |label: &str, cell: &dyn Fn(&results::QuarterView) -> String| {
+            let mut cells: Vec<String> = views.iter().map(cell).collect();
+            if ttm.is_some() {
+                cells.push("-".into());
+            }
+            sur.push((label.to_string(), cells));
+        };
+        s("EPS estimate", &|v| {
+            num(v.period.surprise.as_ref().map(|x| x.estimate), 2)
+        });
+        s("EPS surprise %", &|v| {
+            signed(
+                v.period.surprise.as_ref().map(|x| x.surprise * 100.0),
+                1,
+                "",
+            )
+        });
+        s("Versus estimate", &|v| {
+            v.period
+                .surprise
+                .as_ref()
+                .map_or("-".into(), |x| x.outcome.to_uppercase())
+        });
+        let ex = |f: fn(&results::ResultReaction) -> Option<f64>| {
+            move |v: &results::QuarterView| {
+                signed(
+                    v.period.reaction.as_ref().and_then(f).map(|x| x * 100.0),
+                    1,
+                    "",
+                )
+            }
+        };
+        s("1-day vs index %", &ex(|r| r.one_day_excess));
+        s("5-day vs index %", &ex(|r| r.five_day_excess));
+        print_section("Against consensus (EPS)");
+        print_grid(&columns, &sur);
+    }
+}
+
+fn print_annual(c: &results::Collected, n: usize) {
+    let views = results::annual_views(&c.annual, n, c.is_india);
+    let ccy = c.currency.as_deref();
+    let columns: Vec<String> = views.iter().map(|v| v.fiscal_year.clone()).collect();
+    let cells = |f: &dyn Fn(&results::AnnualView) -> String| views.iter().map(f).collect();
+    let rows: Vec<(String, Vec<String>)> = vec![
+        ("Revenue".into(), cells(&|v| money(v.period.revenue, ccy))),
+        (
+            "Operating profit".into(),
+            cells(&|v| money(v.period.operating_profit, ccy)),
+        ),
+        ("OPM %".into(), cells(&|v| num(v.opm_pct, 1))),
+        ("Net profit".into(), cells(&|v| money(v.period.pat, ccy))),
+        ("Diluted EPS".into(), cells(&|v| num(v.period.eps, 2))),
+        (
+            "Revenue YoY %".into(),
+            cells(&|v| signed(v.revenue_yoy_pct, 1, "")),
+        ),
+        (
+            "Net profit YoY %".into(),
+            cells(&|v| signed(v.pat_yoy_pct, 1, "")),
+        ),
+        (
+            "Operating cash flow".into(),
+            cells(&|v| money(v.period.ocf, ccy)),
+        ),
+        ("Capex".into(), cells(&|v| money(v.period.capex, ccy))),
+        (
+            "Free cash flow".into(),
+            cells(&|v| money(v.period.fcf, ccy)),
+        ),
+        ("CFO / PAT %".into(), cells(&|v| num(v.cfo_to_pat_pct, 0))),
+        ("ROE %".into(), cells(&|v| num(v.roe_pct, 1))),
+        ("ROCE %".into(), cells(&|v| num(v.roce_pct, 1))),
+    ];
+    print_grid(&columns, &rows);
+    let cagr = results::cagrs(&c.annual);
+    if !cagr.is_empty() {
+        print_section("Compound annual growth");
+        for g in cagr {
+            println!(
+                "  {:>2}Y   revenue {:>8}   net profit {:>8}   EPS {:>8}",
+                g.years,
+                signed(g.revenue_pct, 1, "%"),
+                signed(g.pat_pct, 1, "%"),
+                signed(g.eps_pct, 1, "%"),
+            );
+        }
+    }
+}
+
+fn print_results_footer(c: &results::Collected) {
+    println!();
+    println!(
+        "  {}",
+        format!(
+            "Source: {} · Currency: {} · Amounts as reported (consolidated where filed) · Not investment advice",
+            c.sources.join(", "),
+            c.currency.as_deref().unwrap_or("unknown"),
+        )
+        .dimmed()
+    );
+    for w in &c.warnings {
+        eprintln!("  {} {}", "ⓘ".dimmed(), w);
+    }
+}
+
+fn print_scoreboard(b: &results::Scoreboard) {
+    print_header(&format!(
+        "Results season: {} ({})",
+        b.title,
+        b.quarter.as_deref().unwrap_or("no quarter yet")
+    ));
+    if b.reported == 0 {
+        println!("  No results found for {} symbols.", b.total);
+        return;
+    }
+    let agg = &b.aggregate;
+    println!(
+        "  {}/{} reported {}: revenue {} YoY, operating profit {} YoY, net profit {} YoY",
+        b.reported,
+        b.total,
+        b.quarter.as_deref().unwrap_or(""),
+        signed(agg.revenue_yoy_pct, 1, "%"),
+        signed(agg.operating_profit_yoy_pct, 1, "%"),
+        signed(agg.pat_yoy_pct, 1, "%"),
+    );
+    println!(
+        "  EPS vs consensus: {} beat / {} in-line / {} miss",
+        b.beats, b.in_line, b.misses
+    );
+    println!();
+    println!(
+        "  {:<14}{:>10}{:>10}{:>10}{:>11}{:>10}{:>10}",
+        "Symbol", "Quarter", "Rev YoY%", "OP YoY%", "PAT YoY%", "OPM bps", "vs est"
+    );
+    for r in &b.reporters {
+        println!(
+            "  {:<14}{:>10}{:>10}{:>10}{:>11}{:>10}{:>10}",
+            r.symbol,
+            r.quarter,
+            signed(r.revenue_yoy_pct, 1, ""),
+            signed(r.operating_profit_yoy_pct, 1, ""),
+            signed(r.pat_yoy_pct, 1, ""),
+            signed(r.opm_bps_yoy, 0, ""),
+            r.outcome.as_deref().unwrap_or("-").to_uppercase(),
+        );
+    }
+    if !b.pending.is_empty() {
+        println!(
+            "\n  {} {}",
+            "Not yet reported:".dimmed(),
+            b.pending.join(", ")
+        );
+    }
+    if !b.failed.is_empty() {
+        eprintln!("  ⓘ No data for: {}", b.failed.join(", "));
+    }
+}
+
+/// `results SYMBOL`, `results --holdings` and `results --universe INDEX`.
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_results(
+    symbol: Option<&str>,
+    quarters: usize,
+    annual: bool,
+    holdings: bool,
+    universe: Option<market::Universe>,
+    sort: results::Sort,
+    market: Market,
+    fmt: Format,
+) -> Result<()> {
+    if !(1..=40).contains(&quarters) {
+        bail!("--quarters takes 1 to 40");
+    }
+    let store = results::default_store();
+    if symbol.is_none() {
+        if annual {
+            bail!("--annual shows one symbol's fiscal years; name a symbol");
+        }
+        if !holdings && universe.is_none() {
+            bail!("Name a symbol, or use --holdings or --universe nifty50");
+        }
+        super::markets::check_universe(market, universe)?;
+        let client = YahooClient::new().await?;
+        let (symbols, title) = if holdings {
+            let mut s: Vec<String> = Portfolio::load()?
+                .holdings
+                .into_iter()
+                .map(|h| h.symbol)
+                .collect();
+            s.extend(Watchlist::load()?.symbols);
+            let mut seen = std::collections::HashSet::new();
+            s.retain(|x| seen.insert(x.clone()));
+            if s.is_empty() {
+                bail!("No holdings or watchlist symbols yet. Add some, or use --universe");
+            }
+            (s, "portfolio and watchlist".to_string())
+        } else {
+            super::markets::scan_symbols(&client, market, universe).await?
+        };
+        let board = results::season(&client, &symbols, &title, market, store, sort).await;
+        return match fmt {
+            Format::Json => output::print_json(&board),
+            Format::Csv => output::print_csv(&results::reporters_csv(&board)),
+            Format::Table => {
+                print_scoreboard(&board);
+                Ok(())
+            }
+        };
+    }
+    let symbol = symbol.unwrap_or_default();
+    let client = YahooClient::new().await?;
+    let c = results::collect(&client, symbol, market, store, !annual).await?;
+    if annual && c.annual.is_empty() {
+        bail!("No annual results found for {}", c.symbol);
+    }
+    match (fmt, annual) {
+        (Format::Json, false) => output::print_json(&results::quarterly_json(&c, quarters)),
+        (Format::Json, true) => output::print_json(&results::annual_json(&c, quarters)),
+        (Format::Csv, false) => output::print_csv(&results::quarterly_csv(&c, quarters)),
+        (Format::Csv, true) => output::print_csv(&results::annual_csv(&c, quarters)),
+        (Format::Table, _) => {
+            print_header(&format!(
+                "{}: {} ({})",
+                if annual {
+                    "Annual results"
+                } else {
+                    "Quarterly results"
+                },
+                c.symbol,
+                c.name
+            ));
+            if annual {
+                print_annual(&c, quarters);
+            } else {
+                print_quarterly(&c, quarters);
+            }
+            print_results_footer(&c);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

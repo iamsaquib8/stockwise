@@ -63,6 +63,10 @@
       "description": "Corporate events & disclosures. Recent and upcoming corporate events for one ticker with 1-day and 5-day price reaction."
     },
     {
+      "name": "quarterly_results",
+      "description": "Quarterly and annual financial results. Last 8 or more quarters (or fiscal years) of results for one ticker with growth, margins, trailing twelve months and EPS against consensus."
+    },
+    {
       "name": "search",
       "description": "Find a ticker. Search tickers by company name (\"tata motors\", \"apple\")."
     },

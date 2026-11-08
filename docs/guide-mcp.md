@@ -13,7 +13,7 @@ Claude Code, Claude Desktop, Cursor or another.
 
 ## What the assistant can and cannot do
 
-- **It can read.** The 34 tools cover quotes, history, technicals, risk,
+- **It can read.** The 35 tools cover quotes, history, technicals, risk,
   scorecards, events, mutual funds, option chains, IPOs, screens, backtests,
   your portfolio and lots, tax estimate, advance tax, harvest and rebalance
   plans, calendar, watchlist and alerts.
