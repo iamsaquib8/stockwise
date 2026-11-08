@@ -55,7 +55,16 @@ fn queued_task_runs_in_the_worker_and_keeps_its_output() {
 
     let _worker = Worker(&home);
     ok(&home, &["worker", "start"]);
-    assert!(ok(&home, &["worker", "status"]).contains("running"));
+    // `start` returns before the child writes its pid file; "not running"
+    // also contains "running", so wait for the pid itself.
+    let started = Instant::now() + Duration::from_secs(5);
+    loop {
+        if ok(&home, &["worker", "status"]).contains("(pid ") {
+            break;
+        }
+        assert!(Instant::now() < started, "worker never reported a pid");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let task = loop {

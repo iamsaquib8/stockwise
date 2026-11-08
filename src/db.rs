@@ -607,14 +607,40 @@ impl CacheDb {
         Ok(n > 0)
     }
 
-    /// Tasks left `running` by a worker that died: back to `queued`.
+    /// Tasks left `running` by a worker that died. Idempotent kinds (`warm`,
+    /// `eod`) go back to `queued`; others (a `run` command may already have
+    /// changed state) are marked `failed` rather than run twice. Returns how
+    /// many were requeued.
     pub fn requeue_stale_tasks(&self, older_than_secs: i64) -> Result<u64> {
+        let (cutoff, now) = (now_secs() - older_than_secs, now_secs());
+        self.conn.execute(
+            "UPDATE tasks SET status='failed', error='worker stopped while this was running',
+                 updated_at=?2
+             WHERE status='running' AND updated_at < ?1 AND kind NOT IN ('warm','eod')",
+            params![cutoff, now],
+        )?;
         let n = self.conn.execute(
             "UPDATE tasks SET status='queued', updated_at=?2
-             WHERE status='running' AND updated_at < ?1",
-            params![now_secs() - older_than_secs, now_secs()],
+             WHERE status='running' AND updated_at < ?1 AND kind IN ('warm','eod')",
+            params![cutoff, now],
         )?;
         Ok(n as u64)
+    }
+
+    /// Release a task whose worker is shutting down: requeue it when it is
+    /// safe to run again, else mark it failed.
+    pub fn release_task(&self, id: i64) -> Result<()> {
+        let now = now_secs();
+        self.conn.execute(
+            "UPDATE tasks SET status = CASE WHEN kind IN ('warm','eod') THEN 'queued' ELSE 'failed' END,
+                 error = CASE WHEN kind IN ('warm','eod') THEN NULL
+                              ELSE 'interrupted by worker shutdown' END,
+                 progress_pct = CASE WHEN kind IN ('warm','eod') THEN 0 ELSE progress_pct END,
+                 updated_at=?2
+             WHERE id=?1 AND status='running'",
+            params![id, now],
+        )?;
+        Ok(())
     }
 
     pub fn stats(&self, file_bytes: u64) -> Result<CacheStats> {
@@ -915,17 +941,33 @@ mod tests {
             db.get_task(c).unwrap().unwrap().error.as_deref(),
             Some("boom")
         );
-        // A task stuck in `running` is requeued once it is old enough.
-        let d = db.enqueue_task("y", "", "{}").unwrap();
+        // A stuck idempotent task is requeued once it is old enough.
+        let d = db.enqueue_task("warm", "", "{}").unwrap();
+        let r = db.enqueue_task("run", "", "{}").unwrap();
+        db.claim_task().unwrap();
         db.claim_task().unwrap();
         db.conn
             .execute(
-                "UPDATE tasks SET updated_at = updated_at - 1000 WHERE id=?1",
-                params![d],
+                "UPDATE tasks SET updated_at = updated_at - 1000 WHERE id IN (?1, ?2)",
+                params![d, r],
             )
             .unwrap();
         assert_eq!(db.requeue_stale_tasks(600).unwrap(), 1);
         assert_eq!(db.get_task(d).unwrap().unwrap().status, "queued");
+        // A `run` command is never run twice: failed, not requeued.
+        let run = db.get_task(r).unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.error.unwrap().contains("worker stopped"));
+        // Shutdown release follows the same rule.
+        db.claim_task().unwrap();
+        db.release_task(d).unwrap();
+        assert_eq!(db.get_task(d).unwrap().unwrap().status, "queued");
+        // Take it out of the queue so the next claim is the `run` task.
+        assert!(db.cancel_task(d).unwrap());
+        let r2 = db.enqueue_task("run", "", "{}").unwrap();
+        db.claim_task().unwrap();
+        db.release_task(r2).unwrap();
+        assert_eq!(db.get_task(r2).unwrap().unwrap().status, "failed");
         assert_eq!(db.list_tasks(2).unwrap().len(), 2);
     }
 

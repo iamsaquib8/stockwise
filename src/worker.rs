@@ -239,15 +239,15 @@ pub fn spawn_ticker(market: Market, bus: Bus) -> tokio::task::JoinHandle<()> {
 pub fn spawn_task_watcher(bus: Bus) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut seen: HashMap<i64, (String, i64)> = HashMap::new();
+        // The first completed poll only records what exists; it is not news.
+        let mut primed = false;
         loop {
             if let Some(tasks) = db::with_db(|d| d.list_tasks(50)) {
                 for t in tasks {
                     let key = (t.status.clone(), t.progress_pct as i64);
-                    // The first pass only records; it is not news.
-                    let first = seen.is_empty();
                     if seen.get(&t.id) != Some(&key) {
                         seen.insert(t.id, key);
-                        if !first {
+                        if primed {
                             let _ = bus.send(LiveEvent::Task {
                                 task: TaskUpdate {
                                     id: t.id,
@@ -259,6 +259,7 @@ pub fn spawn_task_watcher(bus: Bus) -> tokio::task::JoinHandle<()> {
                         }
                     }
                 }
+                primed = true;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -395,9 +396,12 @@ pub async fn execute(task: &Task) -> Result<String> {
 }
 
 /// Claim and run queued tasks until none are left.
-pub async fn drain_tasks() {
+pub async fn drain_tasks(current: &std::sync::atomic::AtomicI64) {
+    use std::sync::atomic::Ordering;
     while let Some(task) = db::with_db(|d| d.claim_task()).flatten() {
+        current.store(task.id, Ordering::SeqCst);
         let outcome = execute(&task).await;
+        current.store(0, Ordering::SeqCst);
         db::with_db(|d| match &outcome {
             Ok(r) => d.finish_task(task.id, Ok(r)),
             Err(e) => d.finish_task(task.id, Err(&format!("{e:#}"))),
@@ -612,9 +616,12 @@ pub async fn run_worker(market: Market) -> Result<()> {
 
     let bus = bus();
     let ticker = spawn_ticker(market, bus.clone());
+    // The task the executor is running, so shutdown can release it.
+    let current = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let in_flight = current.clone();
     let executor = tokio::spawn(async move {
         loop {
-            drain_tasks().await;
+            drain_tasks(&in_flight).await;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
@@ -628,14 +635,15 @@ pub async fn run_worker(market: Market) -> Result<()> {
     );
     loop {
         let now = Utc::now();
-        if clock::is_open(market, now) {
-            let due = state
-                .last_alert_pass
-                .is_none_or(|t| now.timestamp() - t >= OPEN_TICK.as_secs() as i64);
-            if due && let Some(w) = alerts.as_mut() {
-                let _ = w.pass(market).await;
-                state.last_alert_pass = Some(now.timestamp());
-            }
+        // `check_alerts` skips each alert whose own market is closed, so this
+        // is only rate-limited: a worker started with `-m in` still serves
+        // US alerts during the US session.
+        let due = state
+            .last_alert_pass
+            .is_none_or(|t| now.timestamp() - t >= OPEN_TICK.as_secs() as i64);
+        if due && let Some(w) = alerts.as_mut() {
+            let _ = w.pass(market).await;
+            state.last_alert_pass = Some(now.timestamp());
         }
         if let Some(date) = eod_due(market, now, &state) {
             let has_work = Portfolio::load().is_ok_and(|p| !p.holdings.is_empty())
@@ -653,6 +661,13 @@ pub async fn run_worker(market: Market) -> Result<()> {
     }
     ticker.abort();
     executor.abort();
+    // Do not leave the interrupted task `running` forever: idempotent kinds
+    // go back in the queue; a `run` command may have changed state, so it is
+    // marked failed instead of being run twice.
+    let id = current.load(std::sync::atomic::Ordering::SeqCst);
+    if id > 0 {
+        db::with_db(|d| d.release_task(id));
+    }
     let _ = std::fs::remove_file(pid_path()?);
     println!("worker stopped");
     Ok(())
