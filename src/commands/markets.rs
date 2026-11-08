@@ -403,6 +403,28 @@ impl SectorMembers {
     }
 }
 
+/// The last stored `market_snapshots` rows of `symbols`, of any age: the
+/// offline answer when no live quote is available. `None` when none match.
+fn stored_quotes(
+    symbols: &[String],
+    cap: Option<market::CapFilter>,
+) -> Option<Vec<crate::api::Quote>> {
+    let filter = crate::db::SnapshotFilter {
+        market: Some("in".to_string()),
+        cap_tier: cap.and_then(market::CapFilter::tier),
+        ..Default::default()
+    };
+    let rows = crate::db::with_db(|d| d.query_snapshots(&filter))?;
+    let wanted: std::collections::HashSet<String> =
+        symbols.iter().map(|s| s.to_ascii_uppercase()).collect();
+    let quotes: Vec<crate::api::Quote> = rows
+        .iter()
+        .filter(|r| wanted.contains(&r.symbol.to_ascii_uppercase()))
+        .map(crate::worker::quote_from_snapshot)
+        .collect();
+    (!quotes.is_empty()).then_some(quotes)
+}
+
 /// `sectors <NAME>`: the sector index's members with their cap tier,
 /// biggest mover first, cut to `--cap`.
 async fn cmd_sector_members(
@@ -439,7 +461,19 @@ async fn cmd_sector_members(
     if scan.live() {
         SectorMembers::save(index, &scan.symbols);
     }
-    let mut quotes = scan_quotes(&client, market, &scan, cap, true).await?;
+    let mut quotes = match scan_quotes(&client, market, &scan, cap, true).await {
+        Ok(q) => q,
+        Err(e) => match stored_quotes(&scan.symbols, cap) {
+            Some(q) => {
+                eprintln!(
+                    "  \u{24d8} No live quotes ({:#}); using the last prices stored in cache.db.",
+                    e
+                );
+                q
+            }
+            None => return Err(e),
+        },
+    };
     quotes.sort_by(|a, b| {
         let key = |q: &crate::api::Quote| q.regular_market_change_percent.unwrap_or(f64::MIN);
         key(b).total_cmp(&key(a))

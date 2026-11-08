@@ -249,3 +249,36 @@ fn sector_without_a_built_in_list_uses_the_saved_members_offline() {
     syms.sort();
     assert_eq!(syms, ["DRREDDY.NS", "SUNPHARMA.NS"]);
 }
+
+#[test]
+fn sector_members_fall_back_to_old_stored_prices_offline() {
+    let home = scratch("sector-stale");
+    seed(&home);
+    // Snapshots a day old: too old for a `--cap` cache hit, still the last prices.
+    let conn = rusqlite::Connection::open(home.join("cache.db")).unwrap();
+    conn.execute(
+        "UPDATE market_snapshots SET updated_at = updated_at - 86400",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    for args in [
+        vec!["-m", "in", "sectors", "bank", "--json"],
+        vec!["-m", "in", "sectors", "bank", "--cap", "large", "--json"],
+    ] {
+        let out = stockwise(&home, &args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let rows = v.as_array().unwrap();
+        assert!(!rows.is_empty(), "{args:?}");
+        if args.contains(&"--cap") {
+            assert!(rows.iter().all(|r| r["cap_tier"] == "large"), "{v}");
+        } else {
+            assert_eq!(rows.len(), 6, "{v}");
+        }
+    }
+}
