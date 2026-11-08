@@ -105,7 +105,7 @@ pub async fn cmd_events(
 
     println!();
     println!(
-        "  {} For actionable Buy/Sell guidance, run '{}'",
+        "  {} See the scored summary: '{}'",
         "💡".yellow(),
         format!("stockwise verdict {}", symbol).cyan()
     );
