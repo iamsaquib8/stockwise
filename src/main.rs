@@ -46,6 +46,7 @@ mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;
+mod pme;
 mod portfolio;
 mod practice;
 mod providers;
@@ -929,6 +930,13 @@ enum PortfolioCmd {
         benchmark: Option<String>,
         #[arg(short, long, default_value = "1y", value_parser = BENCHMARK_PERIODS)]
         period: String,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Public Market Equivalent (Index Twin): mirror exact cash flows into a benchmark index
+    Pme {
+        /// Benchmark index or ETF [default: NIFTY for India, SP500 for US]
+        benchmark: Option<String>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -3505,6 +3513,18 @@ async fn dispatch(
                     m,
                     base.as_deref(),
                     bench.into(),
+                )
+                .await
+            }
+            Some(PortfolioCmd::Pme {
+                benchmark,
+                out: pme_out,
+            }) => {
+                commands::cmd_portfolio_pme(
+                    benchmark.as_deref(),
+                    m,
+                    base.as_deref(),
+                    pme_out.into(),
                 )
                 .await
             }

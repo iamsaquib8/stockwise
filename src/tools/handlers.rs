@@ -66,6 +66,7 @@ pub(super) async fn run<D: DataSource>(
         "tax_advance" => tax_advance(src, a).await,
         "harvest" => harvest(src, m).await,
         "rebalance" => rebalance(src, a, m).await,
+        "portfolio_pme" => portfolio_pme(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
         "ipo_board" => ipo_board(src, a).await,
         "ipo_analyze" => ipo_analyze(src, a).await,
@@ -657,6 +658,13 @@ async fn rebalance(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> 
     let (plan, _) =
         commands::rebalance_plan(src, &p, &[], a.f64("inflow"), a.f64("drift"), m).await?;
     Ok(serde_json::to_value(plan)?)
+}
+
+async fn portfolio_pme(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let report =
+        commands::portfolio_pme_report(src, &p, a.str("benchmark"), m, a.str("base")).await?;
+    Ok(serde_json::to_value(report)?)
 }
 
 async fn calendar(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
