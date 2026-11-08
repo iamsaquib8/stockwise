@@ -1,0 +1,1 @@
+- `sectors <NAME> [--cap all|mega|large|mid|small|micro]` lists an Indian sector's member stocks with their cap tier (`cap_tier` in `--json`/`--csv`).

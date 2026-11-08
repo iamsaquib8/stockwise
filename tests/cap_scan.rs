@@ -41,6 +41,10 @@ fn stockwise(home: &Path, args: &[&str]) -> Output {
         // Anything that does reach for the network fails at once.
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("HTTP_PROXY", "http://127.0.0.1:9")
+        // No inherited setting may route around that proxy.
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env_remove("REQUEST_METHOD")
         .env("NO_COLOR", "1")
         .output()
         .expect("run stockwise")
@@ -167,4 +171,128 @@ fn unknown_cap_value_is_rejected() {
     let out = stockwise(&home, &["movers", "--cap", "huge"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--cap"));
+}
+
+#[test]
+fn sector_members_filter_by_cap_from_snapshots() {
+    let home = scratch("sector");
+    seed(&home);
+    // NSE is unreachable here: NIFTY BANK falls back to the built-in list,
+    // priced from the seeded snapshots.
+    let run = |cap: &str| {
+        let out = stockwise(
+            &home,
+            &["-m", "in", "sectors", "bank", "--cap", cap, "--json"],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut syms: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                assert_eq!(r["cap_tier"], cap, "{r}");
+                // Fresh snapshots are stored prices too: they carry their age.
+                assert!(
+                    r["price_age_secs"].as_i64().is_some_and(|a| a < 3600),
+                    "{r}"
+                );
+                r["symbol"].as_str().unwrap().to_string()
+            })
+            .collect();
+        syms.sort();
+        syms
+    };
+    assert_eq!(
+        run("large"),
+        ["HDFCBANK.NS", "ICICIBANK.NS", "KOTAKBANK.NS", "SBIN.NS"]
+    );
+    assert_eq!(run("mid"), ["AXISBANK.NS", "INDUSINDBK.NS"]);
+}
+
+#[test]
+fn sector_cap_needs_a_sector_and_the_indian_market() {
+    let home = scratch("sector-bad");
+    let out = stockwise(&home, &["-m", "in", "sectors", "--cap", "mid"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("name one"));
+    let out = stockwise(&home, &["-m", "in", "sectors", "nonsense"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not found"));
+    let out = stockwise(&home, &["-m", "us", "sectors", "bank"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Indian market only"));
+}
+
+#[test]
+fn sector_without_a_built_in_list_uses_the_saved_members_offline() {
+    let home = scratch("sector-saved");
+    seed(&home);
+    let args = ["-m", "in", "sectors", "pharma", "--cap", "mid", "--json"];
+    // Nothing saved yet and NSE unreachable: a clear error.
+    let out = stockwise(&home, &args);
+    assert!(!out.status.success());
+    // A live listing saves the members; here the file stands in for it.
+    std::fs::write(
+        home.join("sector_members.json"),
+        r#"{"NIFTY PHARMA":["SUNPHARMA.NS","DRREDDY.NS"]}"#,
+    )
+    .unwrap();
+    let out = stockwise(&home, &args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut syms: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["symbol"].as_str().unwrap())
+        .collect();
+    syms.sort();
+    assert_eq!(syms, ["DRREDDY.NS", "SUNPHARMA.NS"]);
+}
+
+#[test]
+fn sector_members_fall_back_to_old_stored_prices_offline() {
+    let home = scratch("sector-stale");
+    seed(&home);
+    // Snapshots a day old: too old for a `--cap` cache hit, still the last prices.
+    let conn = rusqlite::Connection::open(home.join("cache.db")).unwrap();
+    conn.execute(
+        "UPDATE market_snapshots SET updated_at = updated_at - 86400",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    for args in [
+        vec!["-m", "in", "sectors", "bank", "--json"],
+        vec!["-m", "in", "sectors", "bank", "--cap", "large", "--json"],
+    ] {
+        let out = stockwise(&home, &args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let rows = v.as_array().unwrap();
+        assert!(!rows.is_empty(), "{args:?}");
+        // Stored prices say how old they are.
+        assert!(
+            rows.iter()
+                .all(|r| r["price_age_secs"].as_i64().unwrap() >= 86_400)
+        );
+        if args.contains(&"--cap") {
+            assert!(rows.iter().all(|r| r["cap_tier"] == "large"), "{v}");
+        } else {
+            assert_eq!(rows.len(), 6, "{v}");
+        }
+    }
 }
