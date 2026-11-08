@@ -241,8 +241,8 @@ fn hhmmss(market: Market, at: DateTime<Utc>) -> String {
     clock::local(market, at).format("%H:%M:%S").to_string()
 }
 
-/// One Yahoo client for the life of a worker loop, rebuilt after repeated
-/// failures (the session crumb can expire in a long-running process).
+/// One Yahoo client for the life of a worker loop. The client renews its own
+/// session crumb, so a failed tick only changes the retry delay.
 #[derive(Default)]
 pub(super) struct Feed {
     client: Option<YahooClient>,
@@ -260,9 +260,6 @@ impl Feed {
     /// Record a failed tick; returns how long to wait before the retry.
     pub(super) fn failed(&mut self) -> Duration {
         self.failures += 1;
-        if self.failures.is_multiple_of(3) {
-            self.client = None;
-        }
         crate::daemon::retry_delay(self.failures)
     }
 
@@ -1055,6 +1052,26 @@ mod tests {
         assert!(msg.title.contains("kill switch"));
         assert_eq!(msg.body.lines().count(), 2);
         assert!(events_message(&[], "₹").is_none());
+    }
+
+    #[test]
+    fn failed_ticks_keep_the_client_and_only_back_off() {
+        let mut feed = Feed {
+            client: Some(YahooClient::for_tests_with_client(
+                reqwest::Client::new(),
+                "c",
+            )),
+            failures: 0,
+        };
+        for _ in 0..3 {
+            assert!(feed.failed() > Duration::ZERO);
+        }
+        assert!(
+            feed.client.is_some(),
+            "the session renews itself; repeated failures must not drop the client"
+        );
+        feed.succeeded();
+        assert_eq!(feed.failures, 0);
     }
 
     #[tokio::test]
