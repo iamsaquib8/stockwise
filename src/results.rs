@@ -106,6 +106,7 @@ pub struct ResultPeriod {
 }
 
 impl ResultPeriod {
+    /// An empty period ending on `end`.
     fn new(end: NaiveDate) -> Self {
         Self {
             end,
@@ -113,14 +114,17 @@ impl ResultPeriod {
         }
     }
 
+    /// Operating profit over revenue, as a fraction.
     pub fn opm(&self) -> Option<f64> {
         ratio(self.operating_profit, self.revenue)
     }
 
+    /// Tax over pre-tax profit, as a fraction; none for a loss.
     pub fn tax_rate(&self) -> Option<f64> {
         ratio(self.tax, self.pbt).filter(|_| self.pbt.is_some_and(|p| p > 0.0))
     }
 
+    /// Derive operating profit and free cash flow once all fields are read.
     fn finalize(&mut self) {
         // Operating profit before other income, as Screener shows it.
         self.operating_profit = match (self.op_income, self.depreciation) {
@@ -135,6 +139,7 @@ impl ResultPeriod {
     }
 }
 
+/// `n / d`, none unless `d` is positive.
 fn ratio(n: Option<f64>, d: Option<f64>) -> Option<f64> {
     match (n, d) {
         (Some(n), Some(d)) if d > 0.0 => Some(n / d),
@@ -177,6 +182,7 @@ pub const FIELDS: &[&str] = &[
     "EBIT",
 ];
 
+/// Store one Yahoo timeseries value on the field it names.
 fn set_field(p: &mut ResultPeriod, field: &str, v: f64) {
     match field {
         "TotalRevenue" => p.revenue = Some(v),
@@ -280,6 +286,7 @@ pub fn parse_statements(results: &[Value]) -> Statements {
 // Surprise and reaction
 // ───────────────────────────────────────────────────────────────
 
+/// Whether two quarter ends are the same quarter, allowing calendar drift.
 fn near(a: NaiveDate, b: NaiveDate) -> bool {
     (a - b).num_days().abs() <= DATE_TOLERANCE
 }
@@ -372,6 +379,7 @@ pub struct NseFiling {
     pub consolidated: bool,
 }
 
+/// Parse NSE's `30-Sep-2026` dates, in any letter case.
 fn nse_date(s: &str) -> Option<NaiveDate> {
     let s = s.split_whitespace().next()?;
     let mut norm = s.to_lowercase();
@@ -463,6 +471,7 @@ pub fn parse_bank_xbrl(xml: &str) -> (Option<f64>, Option<f64>) {
     (get("gross"), get("net"))
 }
 
+/// Fill GNPA/NNPA on `quarters` from the NSE filings; returns how many were filled.
 async fn nse_asset_quality(
     client: &YahooClient,
     base: &str,
@@ -571,6 +580,7 @@ pub struct Collected {
     pub from_cache: bool,
 }
 
+/// Banks, lenders and insurers, where revenue and margin mean something else.
 fn financial_sector(sector: &str, industry: &str) -> bool {
     let s = format!("{sector} {industry}").to_lowercase();
     s.contains("financial") || s.contains("bank") || s.contains("insurance") || s.contains("credit")
@@ -760,6 +770,7 @@ pub struct Growth {
     pub eps: Option<f64>,
 }
 
+/// Growth of each headline row of `cur` over `prev`.
 fn growth_between(cur: &ResultPeriod, prev: Option<&ResultPeriod>) -> Growth {
     let Some(p) = prev else {
         return Growth::default();
@@ -772,6 +783,7 @@ fn growth_between(cur: &ResultPeriod, prev: Option<&ResultPeriod>) -> Growth {
     }
 }
 
+/// The period about `days` before `end`, if one is on hand.
 fn find_back(all: &[ResultPeriod], end: NaiveDate, days: i64) -> Option<&ResultPeriod> {
     let target = end - chrono::Duration::days(days);
     all.iter()
@@ -779,6 +791,7 @@ fn find_back(all: &[ResultPeriod], end: NaiveDate, days: i64) -> Option<&ResultP
         .min_by_key(|p| (p.end - target).num_days().abs())
 }
 
+/// Difference of two fractions in basis points.
 fn bps(cur: Option<f64>, prev: Option<f64>) -> Option<f64> {
     Some((cur? - prev?) * 10_000.0)
 }
@@ -814,6 +827,7 @@ pub struct Ttm {
     pub nii: Option<f64>,
 }
 
+/// Sum of `f` over the quarters; none if any is missing.
 fn sum4(q: &[ResultPeriod], f: impl Fn(&ResultPeriod) -> Option<f64>) -> Option<f64> {
     q.iter().map(f).sum::<Option<f64>>()
 }
@@ -874,6 +888,7 @@ pub fn quarter_views(all: &[ResultPeriod], n: usize, is_india: bool) -> Vec<Quar
         .collect()
 }
 
+/// Growth fractions as rounded percents.
 fn pct_growth(g: Growth) -> Growth {
     let f = |v: Option<f64>| round_opt(v.map(|x| x * 100.0), 2);
     Growth {
@@ -974,6 +989,7 @@ impl CsvRow for QuarterCsv {
     ];
 }
 
+/// One flat CSV row per displayed quarter.
 pub fn quarterly_csv(c: &Collected, n: usize) -> Vec<QuarterCsv> {
     quarter_views(&c.quarterly, n, c.is_india)
         .into_iter()
@@ -1055,6 +1071,7 @@ pub struct Cagr {
     pub eps_pct: Option<f64>,
 }
 
+/// `FY26` (India, Apr-Mar) or `FY2026` (calendar year end).
 fn fiscal_year_label(end: NaiveDate, is_india: bool) -> String {
     if is_india {
         // FY27 = Apr 2026 to Mar 2027
@@ -1069,6 +1086,7 @@ fn fiscal_year_label(end: NaiveDate, is_india: bool) -> String {
     }
 }
 
+/// The last `n` fiscal years with growth, cash conversion and returns.
 pub fn annual_views(all: &[ResultPeriod], n: usize, is_india: bool) -> Vec<AnnualView> {
     let start = all.len().saturating_sub(n);
     (start..all.len())
@@ -1104,6 +1122,7 @@ pub fn annual_views(all: &[ResultPeriod], n: usize, is_india: bool) -> Vec<Annua
         .collect()
 }
 
+/// Compound annual growth in percent; none unless both ends are positive.
 fn cagr_of(cur: Option<f64>, base: Option<f64>, years: u32) -> Option<f64> {
     match (cur, base) {
         (Some(c), Some(b)) if c > 0.0 && b > 0.0 => {
@@ -1136,6 +1155,7 @@ pub fn cagrs(all: &[ResultPeriod]) -> Vec<Cagr> {
         .collect()
 }
 
+/// The annual report as JSON.
 pub fn annual_json(c: &Collected, n: usize) -> Value {
     serde_json::json!({
         "symbol": c.symbol,
@@ -1192,6 +1212,7 @@ impl CsvRow for AnnualCsv {
     ];
 }
 
+/// One flat CSV row per displayed fiscal year.
 pub fn annual_csv(c: &Collected, n: usize) -> Vec<AnnualCsv> {
     annual_views(&c.annual, n, c.is_india)
         .into_iter()
@@ -1356,6 +1377,7 @@ impl Agg {
             self.n += 1;
         }
     }
+    /// Percent growth of the summed current over the summed base.
     fn growth(&self) -> Option<f64> {
         (self.n > 0).then(|| (self.cur / self.prev - 1.0) * 100.0)
     }
@@ -1374,6 +1396,7 @@ pub enum Sort {
     Surprise,
 }
 
+/// Order the reporters table (newest first, then by the chosen key).
 fn sort_reporters(rows: &mut [Reporter], sort: Sort) {
     let key = |r: &Reporter| match sort {
         Sort::Date => None,
@@ -1423,6 +1446,7 @@ impl CsvRow for ReporterCsv {
     ];
 }
 
+/// One flat CSV row per reporter.
 pub fn reporters_csv(b: &Scoreboard) -> Vec<ReporterCsv> {
     b.reporters
         .iter()
