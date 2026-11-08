@@ -4651,6 +4651,23 @@ async fn run_goal(action: Option<GoalCmd>, m: Market) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// Test runner threads on Windows default to a 1 MiB stack. Parsing heavy
+    /// clap command trees can exceed that in debug builds, so run those tests
+    /// on an explicit [`MAIN_STACK_SIZE`] thread.
+    fn run_on_large_stack<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        std::thread::Builder::new()
+            .name("test-large-stack".into())
+            .stack_size(MAIN_STACK_SIZE)
+            .spawn(f)
+            .expect("spawn test thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e))
+    }
+
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
@@ -5047,139 +5064,141 @@ mod tests {
 
     #[test]
     fn backtest_forms_parse() {
-        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
+        run_on_large_stack(|| {
+            let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.command);
 
-        // The original single-symbol form still works.
-        match parse(&["stockwise", "backtest", "TCS", "-s", "rsi"]) {
-            Ok(Commands::Backtest(a)) => {
-                assert!(a.action.is_none());
-                assert_eq!(a.symbol.as_deref(), Some("TCS"));
-                assert_eq!(a.flags.strategy, "rsi");
-                assert_eq!(a.period, "2y");
+            // The original single-symbol form still works.
+            match parse(&["stockwise", "backtest", "TCS", "-s", "rsi"]) {
+                Ok(Commands::Backtest(a)) => {
+                    assert!(a.action.is_none());
+                    assert_eq!(a.symbol.as_deref(), Some("TCS"));
+                    assert_eq!(a.flags.strategy, "rsi");
+                    assert_eq!(a.period, "2y");
+                }
+                _ => panic!("backtest TCS -s rsi should parse as a single-symbol backtest"),
             }
-            _ => panic!("backtest TCS -s rsi should parse as a single-symbol backtest"),
-        }
-        assert!(parse(&["stockwise", "backtest"]).is_err());
+            assert!(parse(&["stockwise", "backtest"]).is_err());
 
-        match parse(&[
-            "stockwise",
-            "backtest",
-            "portfolio",
-            "TCS",
-            "INFY",
-            "-s",
-            "sma",
-            "--weights",
-            "0.6,0.4",
-            "--rebalance",
-            "monthly",
-            "--json",
-        ]) {
-            Ok(Commands::Backtest(a)) => match a.action {
-                Some(BacktestCmd::Portfolio {
-                    symbols,
-                    weights,
-                    flags,
-                    ..
-                }) => {
-                    assert_eq!(symbols, ["TCS", "INFY"]);
-                    assert_eq!(weights, backtest::engine::Weights::Fixed(vec![0.6, 0.4]));
-                    assert!(flags.out.json);
-                }
-                _ => panic!("expected backtest portfolio"),
-            },
-            _ => panic!("backtest portfolio should parse"),
-        }
-        assert!(parse(&["stockwise", "backtest", "portfolio"]).is_err());
-
-        match parse(&[
-            "stockwise",
-            "backtest",
-            "walkforward",
-            "INFY",
-            "--train",
-            "1y",
-            "--test",
-            "3mo",
-        ]) {
-            Ok(Commands::Backtest(a)) => match a.action {
-                Some(BacktestCmd::Walkforward { train, test, .. }) => {
-                    assert_eq!((train.bars(252.0), test.bars(252.0)), (252, 63));
-                }
-                _ => panic!("expected backtest walkforward"),
-            },
-            _ => panic!("backtest walkforward should parse"),
-        }
-
-        for args in [
-            vec!["stockwise", "backtest", "strategies"],
-            vec!["stockwise", "backtest", "strategies", "my.toml", "--json"],
-            vec!["stockwise", "backtest", "wf", "TCS"],
-            vec![
-                "stockwise",
-                "backtest",
-                "TCS",
-                "-s",
-                "file:my.toml",
-                "-P",
-                "oversold=25",
-            ],
-            vec![
-                "stockwise",
-                "backtest",
-                "TCS",
-                "--costs",
-                "in-intraday",
-                "--fill",
-                "close",
-            ],
-            vec![
-                "stockwise",
-                "backtest",
-                "TCS",
-                "--costs",
-                "none",
-                "--capital",
-                "50000",
-            ],
-            vec!["stockwise", "backtest", "TCS", "--brokerage", "20,0.03%"],
-            vec!["stockwise", "backtest", "AAPL", "-m", "us", "--costs", "us"],
-            vec!["stockwise", "backtest", "portfolio", "TCS", "INFY", "--csv"],
-            vec!["stockwise", "backtest", "wf", "TCS", "--csv"],
-        ] {
-            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} should parse");
-        }
-        for args in [
-            vec!["stockwise", "backtest", "TCS", "--costs", "zerodha"],
-            vec!["stockwise", "backtest", "TCS", "--fill", "open"],
-            vec!["stockwise", "backtest", "TCS", "--capital", "0"],
-            vec!["stockwise", "backtest", "TCS", "--capital", "1e300"],
-            vec!["stockwise", "backtest", "TCS", "--slippage-bps", "20000"],
-            vec!["stockwise", "backtest", "TCS", "--slippage-bps", "-1"],
-            vec!["stockwise", "backtest", "TCS", "--brokerage", "lots"],
-            vec!["stockwise", "backtest", "TCS", "-P", "oversold"],
-            vec![
-                "stockwise",
-                "backtest",
-                "walkforward",
-                "TCS",
-                "--train",
-                "1q",
-            ],
-            vec![
+            match parse(&[
                 "stockwise",
                 "backtest",
                 "portfolio",
-                "A",
-                "B",
+                "TCS",
+                "INFY",
+                "-s",
+                "sma",
                 "--weights",
-                "x",
-            ],
-            vec!["stockwise", "backtest", "TCS", "portfolio"],
-            vec!["stockwise", "backtest", "TCS", "--json", "--csv"],
-        ] {
-            assert!(Cli::try_parse_from(&args).is_err(), "{args:?} should fail");
-        }
+                "0.6,0.4",
+                "--rebalance",
+                "monthly",
+                "--json",
+            ]) {
+                Ok(Commands::Backtest(a)) => match a.action {
+                    Some(BacktestCmd::Portfolio {
+                        symbols,
+                        weights,
+                        flags,
+                        ..
+                    }) => {
+                        assert_eq!(symbols, ["TCS", "INFY"]);
+                        assert_eq!(weights, backtest::engine::Weights::Fixed(vec![0.6, 0.4]));
+                        assert!(flags.out.json);
+                    }
+                    _ => panic!("expected backtest portfolio"),
+                },
+                _ => panic!("backtest portfolio should parse"),
+            }
+            assert!(parse(&["stockwise", "backtest", "portfolio"]).is_err());
+
+            match parse(&[
+                "stockwise",
+                "backtest",
+                "walkforward",
+                "INFY",
+                "--train",
+                "1y",
+                "--test",
+                "3mo",
+            ]) {
+                Ok(Commands::Backtest(a)) => match a.action {
+                    Some(BacktestCmd::Walkforward { train, test, .. }) => {
+                        assert_eq!((train.bars(252.0), test.bars(252.0)), (252, 63));
+                    }
+                    _ => panic!("expected backtest walkforward"),
+                },
+                _ => panic!("backtest walkforward should parse"),
+            }
+
+            for args in [
+                vec!["stockwise", "backtest", "strategies"],
+                vec!["stockwise", "backtest", "strategies", "my.toml", "--json"],
+                vec!["stockwise", "backtest", "wf", "TCS"],
+                vec![
+                    "stockwise",
+                    "backtest",
+                    "TCS",
+                    "-s",
+                    "file:my.toml",
+                    "-P",
+                    "oversold=25",
+                ],
+                vec![
+                    "stockwise",
+                    "backtest",
+                    "TCS",
+                    "--costs",
+                    "in-intraday",
+                    "--fill",
+                    "close",
+                ],
+                vec![
+                    "stockwise",
+                    "backtest",
+                    "TCS",
+                    "--costs",
+                    "none",
+                    "--capital",
+                    "50000",
+                ],
+                vec!["stockwise", "backtest", "TCS", "--brokerage", "20,0.03%"],
+                vec!["stockwise", "backtest", "AAPL", "-m", "us", "--costs", "us"],
+                vec!["stockwise", "backtest", "portfolio", "TCS", "INFY", "--csv"],
+                vec!["stockwise", "backtest", "wf", "TCS", "--csv"],
+            ] {
+                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} should parse");
+            }
+            for args in [
+                vec!["stockwise", "backtest", "TCS", "--costs", "zerodha"],
+                vec!["stockwise", "backtest", "TCS", "--fill", "open"],
+                vec!["stockwise", "backtest", "TCS", "--capital", "0"],
+                vec!["stockwise", "backtest", "TCS", "--capital", "1e300"],
+                vec!["stockwise", "backtest", "TCS", "--slippage-bps", "20000"],
+                vec!["stockwise", "backtest", "TCS", "--slippage-bps", "-1"],
+                vec!["stockwise", "backtest", "TCS", "--brokerage", "lots"],
+                vec!["stockwise", "backtest", "TCS", "-P", "oversold"],
+                vec![
+                    "stockwise",
+                    "backtest",
+                    "walkforward",
+                    "TCS",
+                    "--train",
+                    "1q",
+                ],
+                vec![
+                    "stockwise",
+                    "backtest",
+                    "portfolio",
+                    "A",
+                    "B",
+                    "--weights",
+                    "x",
+                ],
+                vec!["stockwise", "backtest", "TCS", "portfolio"],
+                vec!["stockwise", "backtest", "TCS", "--json", "--csv"],
+            ] {
+                assert!(Cli::try_parse_from(&args).is_err(), "{args:?} should fail");
+            }
+        });
     }
 
     #[test]
