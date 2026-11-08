@@ -1,0 +1,6 @@
+# Windsurf Cascade Rules for StockWise Ecosystem
+- Language: Pure Rust 1.97. No Python runtime dependencies.
+- Financial Precision: Integer minor units (`i64`) or `rust_decimal::Decimal` for money. `f64` only for analytical ratios.
+- Compliance: Never provide stock tips, price targets, or financial advice.
+- Quality Gates: Run `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` on every task.
+- Refer to `stockwise-harness/AGENTS.md` for complete architectural instructions.

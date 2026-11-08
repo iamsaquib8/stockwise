@@ -1,1 +1,58 @@
-/target
+# Build & compilation artifacts
+/target/
+*.rs.bk
+
+# Local SQLite WAL database & query cache
+cache.db
+cache.db-wal
+cache.db-shm
+cache.db-*
+*.duckdb
+*.parquet
+/data/
+
+# Local portfolio & user financial data (privacy protection)
+portfolio.json
+portfolio.json.*
+goals.json
+goals.json.*
+alerts.json
+alerts.json.*
+watchlist.json
+watchlist.json.*
+*.age
+
+# Machine learning model weights & large binary caches
+*.gguf
+*.onnx
+*.safetensors
+*.bin
+/models/
+
+# Secrets, private keys & environment configs
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.sig
+credentials.json
+token.json
+
+# Operating System & Editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# AI tools local session logs & caches (keep rule files tracked)
+.claude/
+.gemini/
+*.log
