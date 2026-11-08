@@ -1821,6 +1821,9 @@ fn pct_label(x: f64) -> String {
 
 /// "1 year", "18 months", "2 years 6 months".
 fn duration_label(months: u32) -> String {
+    if months == 0 {
+        return tf(Msg::DurMonths, &[&0]);
+    }
     let (y, m) = goals::duration_parts(months);
     let mut parts = Vec::new();
     match y {
@@ -1834,6 +1837,21 @@ fn duration_label(months: u32) -> String {
         n => parts.push(tf(Msg::DurMonths, &[&n])),
     }
     parts.join(" ")
+}
+
+/// Equity and arbitrage tax rules exist for India and the US only.
+pub(crate) fn check_tax_region(tax: Option<goals::TaxKind>, market: Market) -> Result<()> {
+    if goal_region(market) == goals::Region::Other
+        && matches!(
+            tax,
+            Some(goals::TaxKind::Equity | goals::TaxKind::Arbitrage)
+        )
+    {
+        bail!(
+            "--tax equity and arbitrage have rules for India (-m in) and the US (-m us) only; use --tax debt with --slab, or --tax none"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn goal_region(market: Market) -> goals::Region {
@@ -2295,30 +2313,60 @@ pub struct Linked {
 
 /// The portfolio's holdings named in `symbols` (all when empty), valued at
 /// live prices when `src` is there, else at cost.
+///
+/// With `strict`, a named holding missing from the portfolio is an error
+/// (explicit `--holdings`); saved goals skip holdings that were removed.
+/// Values are in the market's currency; offline, holdings in another
+/// currency are left out and named.
 pub(crate) async fn linked_value(
     src: Option<&impl views::DataSource>,
     symbols: &[String],
     market: Market,
+    strict: bool,
 ) -> Result<Linked> {
     let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() {
+    if strict && portfolio.holdings.is_empty() {
         bail!("The portfolio is empty: add holdings with `stockwise portfolio add`");
     }
     let mut chosen = portfolio.clone();
     if !symbols.is_empty() {
-        for s in symbols {
-            if !portfolio.holdings.iter().any(|h| names_holding(h, s)) {
-                bail!("No holding named `{s}` in the portfolio");
+        if strict {
+            for s in symbols {
+                if !portfolio.holdings.iter().any(|h| names_holding(h, s)) {
+                    bail!("No holding named `{s}` in the portfolio");
+                }
             }
         }
         chosen
             .holdings
             .retain(|h| symbols.iter().any(|s| names_holding(h, s)));
     }
+    if chosen.holdings.is_empty() {
+        return Ok(Linked {
+            value: 0.0,
+            cost: 0.0,
+            live: true,
+        });
+    }
     let names: Vec<String> = chosen.holdings.iter().map(|h| h.symbol.clone()).collect();
-    let (val, live) = value_or_offline(src, &names, market, None).await;
+    let base = market_currency(market);
+    let (val, live) = value_or_offline(src, &names, market, Some(base)).await;
     if !live {
-        let cost: f64 = chosen.holdings.iter().map(|h| h.cost_basis()).sum();
+        let (same, other): (Vec<_>, Vec<_>) = chosen
+            .holdings
+            .iter()
+            .partition(|h| pf::symbol_currency(&h.symbol).is_none_or(|c| c == base));
+        if !other.is_empty() {
+            eprintln!(
+                "  ! Left out of the linked value (not in {base}, no exchange rate offline): {}",
+                other
+                    .iter()
+                    .map(|h| h.symbol.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let cost: f64 = same.iter().map(|h| h.cost_basis()).sum();
         return Ok(Linked {
             value: cost,
             cost,
@@ -2351,7 +2399,7 @@ pub async fn goal_linked(
         return Ok(None);
     }
     let client = YahooClient::new().await.ok();
-    let linked = linked_value(client.as_ref(), holdings, market).await?;
+    let linked = linked_value(client.as_ref(), holdings, market, true).await?;
     if !linked.live {
         eprintln!("  ! {}", t(Msg::GoalLinkedOffline));
     }
@@ -2371,6 +2419,8 @@ pub(crate) struct GoalRow {
     months_left: u32,
     holdings: Vec<String>,
     linked_value: f64,
+    /// `market` (live prices), `cost` (offline) or `none` (no holdings linked).
+    valued_at: &'static str,
     funded_pct: f64,
     monthly_sip: f64,
     status: &'static str,
@@ -2411,10 +2461,11 @@ pub(crate) async fn goal_rows(
         let months_left = goal_due(today, &g.by)
             .and_then(|d| goals::months_between(today, d))
             .unwrap_or(0);
-        let linked = if g.holdings.is_empty() {
-            0.0
+        let (linked, valued_at) = if g.holdings.is_empty() {
+            (0.0, "none")
         } else {
-            linked_value(src, &g.holdings, market).await?.value
+            let l = linked_value(src, &g.holdings, market, false).await?;
+            (l.value, if l.live { "market" } else { "cost" })
         };
         let infl = g.inflation_pct.unwrap_or(0.0);
         let target_future = goals::inflate_months(g.target, infl, months_left);
@@ -2442,6 +2493,7 @@ pub(crate) async fn goal_rows(
             months_left,
             holdings: g.holdings.clone(),
             linked_value: linked,
+            valued_at,
             funded_pct: if target_future > 0.0 {
                 linked / target_future * 100.0
             } else {
@@ -2504,7 +2556,12 @@ pub fn cmd_goal_remove(name: &str) -> Result<()> {
 
 pub async fn cmd_goal_list(market: Market, json: bool) -> Result<()> {
     let currency = market_currency(market);
-    let client = YahooClient::new().await.ok();
+    let store: goals::GoalStore = store::load(GOALS_FILE)?;
+    let client = if store.goals.iter().any(|g| !g.holdings.is_empty()) {
+        YahooClient::new().await.ok()
+    } else {
+        None
+    };
     let rows = goal_rows(client.as_ref(), market).await?;
     if json {
         return print_goal_json_list(currency, &rows);
@@ -2561,11 +2618,11 @@ pub async fn cmd_goal_show(name: &str, market: Market, json: bool) -> Result<()>
         .clone();
     let today = chrono::Local::now().date_naive();
     let months = goals::months_until(today, &g.by).map_err(anyhow::Error::msg)?;
-    let client = YahooClient::new().await.ok();
     let linked = if g.holdings.is_empty() {
         0.0
     } else {
-        linked_value(client.as_ref(), &g.holdings, market)
+        let client = YahooClient::new().await.ok();
+        linked_value(client.as_ref(), &g.holdings, market, false)
             .await?
             .value
     };
@@ -2636,7 +2693,7 @@ pub fn cmd_goal_swp(a: SwpArgs, market: Market, json: bool) -> Result<()> {
         (Msg::SwpFd, &plan.fd, a.fd_return_pct),
     ] {
         print_section(&format!("{} — {}", t(label), pct_label(rate)));
-        let when = duration_label(path.runway_months.max(1));
+        let when = duration_label(path.runway_months);
         let line = if path.lasts {
             tf(Msg::SwpLasts, &[&duration_label(a.years * 12)])
                 .green()
@@ -2755,13 +2812,10 @@ pub fn cmd_goal_prepay(a: PrepayArgs, market: Market, json: bool) -> Result<()> 
     let m = |x: f64| goal_money(x, currency);
     print_header(t(Msg::PrepayTitle));
     print_kv(t(Msg::PrepayEmi), &per_month(p.emi, currency));
-    print_kv(
-        t(Msg::PrepayTenure),
-        &duration_label(p.new_tenure_months.max(1)),
-    );
+    print_kv(t(Msg::PrepayTenure), &duration_label(p.new_tenure_months));
     print_kv(
         t(Msg::PrepayTenureSaved),
-        &duration_label(p.tenure_saved_months.max(1)),
+        &duration_label(p.tenure_saved_months),
     );
     print_kv(
         t(Msg::PrepayInterestSaved),
@@ -2919,7 +2973,18 @@ mod tests {
     }
 
     #[test]
+    fn equity_tax_needs_india_or_us() {
+        use goals::TaxKind::*;
+        assert!(check_tax_region(Some(Equity), Market::In).is_ok());
+        assert!(check_tax_region(Some(Arbitrage), Market::Us).is_ok());
+        assert!(check_tax_region(Some(Debt), Market::Crypto).is_ok());
+        assert!(check_tax_region(None, Market::Crypto).is_ok());
+        assert!(check_tax_region(Some(Equity), Market::Crypto).is_err());
+    }
+
+    #[test]
     fn durations_use_singular_and_plural_forms() {
+        assert_eq!(duration_label(0), "0 months");
         assert_eq!(duration_label(1), "1 month");
         assert_eq!(duration_label(6), "6 months");
         assert_eq!(duration_label(12), "1 year");

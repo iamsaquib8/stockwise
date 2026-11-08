@@ -1217,7 +1217,12 @@ pub struct SwpDrag {
 }
 
 pub fn swp_drag(annual: f64, gain_fraction: f64, slab_pct: f64, region: Region) -> SwpDrag {
-    let rules = TaxRules::new(region, TaxKind::Equity, slab_pct, 0.0);
+    let kind = if region == Region::Other {
+        TaxKind::None
+    } else {
+        TaxKind::Equity
+    };
+    let rules = TaxRules::new(region, kind, slab_pct, 0.0);
     let (_, lt, exemption) = rules.rates();
     let cess = if region == Region::India {
         1.0 + INDIA_CESS_RATE
@@ -1462,7 +1467,12 @@ fn swp_path(
     region: Region,
 ) -> SwpPath {
     let i = monthly_rate(return_pct);
-    let eq = TaxRules::new(region, TaxKind::Equity, slab_pct, 0.0);
+    let kind = if region == Region::Other {
+        TaxKind::None
+    } else {
+        TaxKind::Equity
+    };
+    let eq = TaxRules::new(region, kind, slab_pct, 0.0);
     let (_, lt, exemption) = eq.rates();
     let cess = if region == Region::India {
         1.0 + INDIA_CESS_RATE

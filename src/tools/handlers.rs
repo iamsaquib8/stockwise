@@ -741,6 +741,7 @@ fn sip_request(a: &Args, target: f64, months: u32) -> crate::goals::SipRequest {
 }
 
 fn goal_sip(a: &Args, m: Market) -> Result<Value> {
+    commands::check_tax_region(tax_kind(a), m)?;
     let months = goal_months(a)?;
     let mut req = sip_request(a, a.need_f64("target")?, months);
     req.inflation_pct = a.f64("inflation_pct");
@@ -769,6 +770,7 @@ fn goal_retire(a: &Args, m: Market) -> Result<Value> {
 }
 
 fn goal_education(a: &Args, m: Market) -> Result<Value> {
+    commands::check_tax_region(tax_kind(a), m)?;
     let months = goal_months(a)?;
     let cost = a.need_f64("cost")?;
     let req = sip_request(a, cost, months);
@@ -794,6 +796,7 @@ fn goal_swp(a: &Args, m: Market) -> Result<Value> {
 }
 
 fn goal_prepay(a: &Args, m: Market) -> Result<Value> {
+    commands::check_tax_region(tax_kind(a), m)?;
     let (extra, lump_sum) = (pct(a, "extra", 0.0), pct(a, "lump_sum", 0.0));
     if extra <= 0.0 && lump_sum <= 0.0 {
         bail!("Give 'extra' (a monthly amount) and/or 'lump_sum'");

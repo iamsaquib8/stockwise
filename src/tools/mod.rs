@@ -1093,8 +1093,8 @@ pub const TOOLS: &[Tool] = &[
         name: "goal_list",
         title: "Saved goals",
         description: "The user's saved goals (goals.json) with months left, target after \
-                      inflation, live value of the linked holdings, funded share and the monthly \
-                      SIP still needed.",
+                      inflation, value of the linked holdings (live prices, or cost basis offline: see \
+                      `valued_at`), funded share and the monthly SIP still needed.",
         params: &[MARKET],
         personal: true,
     },

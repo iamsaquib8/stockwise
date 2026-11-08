@@ -172,7 +172,7 @@
     },
     {
       "name": "goal_list",
-      "description": "Saved goals. The user's saved goals with months left, live value of linked holdings, funded share and the monthly SIP still needed."
+      "description": "Saved goals. The user's saved goals with months left, value of linked holdings (live prices, or cost basis when offline: see valued_at), funded share and the monthly SIP still needed."
     },
     {
       "name": "alerts_list",

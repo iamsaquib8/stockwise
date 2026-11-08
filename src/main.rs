@@ -4112,6 +4112,7 @@ async fn run_goal(action: Option<GoalCmd>, m: Market) -> anyhow::Result<()> {
             sip,
             link,
         } => {
+            commands::check_tax_region(tax.tax, m)?;
             let months = horizon.months()?;
             let (savings, _) = goal_savings(sip.savings, &link, m).await?;
             let req = sip_request(
@@ -4170,6 +4171,7 @@ async fn run_goal(action: Option<GoalCmd>, m: Market) -> anyhow::Result<()> {
             sip,
             link,
         } => {
+            commands::check_tax_region(tax.tax, m)?;
             let months = horizon.months()?;
             let (savings, _) = goal_savings(sip.savings, &link, m).await?;
             let req = sip_request(
@@ -4251,6 +4253,7 @@ async fn run_goal(action: Option<GoalCmd>, m: Market) -> anyhow::Result<()> {
             tax,
             out,
         } => {
+            commands::check_tax_region(tax.tax, m)?;
             if extra.is_none() && lump_sum.is_none() {
                 anyhow::bail!("Give --extra (a monthly amount) and/or --lump-sum");
             }
