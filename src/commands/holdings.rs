@@ -1766,18 +1766,24 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
 // ── Tax ──
 
 fn money(csym: &str, amount: f64) -> String {
-    if amount < 0.0 {
-        format!("-{}{:.0}", csym, -amount)
+    let (sign, magnitude) = if amount < 0.0 {
+        ("-", -amount)
     } else {
-        format!("{}{:.0}", csym, amount)
-    }
+        ("", amount)
+    };
+    let body = crate::display::group_number(&format!("{magnitude:.0}"), csym == "\u{20B9}");
+    format!("{sign}{csym}{body}")
 }
 
 fn signed_tax_money(csym: &str, amount: f64) -> String {
+    let body = format!(
+        "{csym}{}",
+        crate::display::group_number(&format!("{:.0}", amount.abs()), csym == "\u{20B9}")
+    );
     if amount >= 0.0 {
-        format!("+{}{:.0}", csym, amount).green().to_string()
+        format!("+{body}").green().to_string()
     } else {
-        format!("-{}{:.0}", csym, -amount).red().to_string()
+        format!("-{body}").red().to_string()
     }
 }
 
@@ -1785,7 +1791,12 @@ fn signed_tax_money(csym: &str, amount: f64) -> String {
 fn print_tax_estimate(country: Country, b: &tax::Buckets) {
     let e = tax::estimate(country, *b);
     let c = country.currency_symbol();
-    let m = |x: f64| format!("{}{:.2}", c, x);
+    let m = |x: f64| {
+        format!(
+            "{c}{}",
+            crate::display::group_number(&format!("{x:.2}"), c == "\u{20B9}")
+        )
+    };
     if country.long_term_months().is_some() {
         print_kv(
             "Short-term gains / losses",

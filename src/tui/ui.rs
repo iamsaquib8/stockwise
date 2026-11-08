@@ -1073,13 +1073,13 @@ mod tests {
         for want in [
             "Watchlist (2)",
             "RELIANCE",
-            "₹1300.00",
+            "₹1,300.00",
             "RELIANCE · 1mo ▲8.00%",
             "1:1d",
             "3:1mo",
             "Portfolio",
             "Portfolio · 1 unpriced",
-            "Value ₹48500.00  P&L +₹5500.00 (+12.79%)",
+            "Value ₹48,500.00  P&L +₹5,500.00 (+12.79%)",
             "DELISTED",
             "N/A",
             "Alerts (1 of 3 triggered)",
@@ -1104,7 +1104,7 @@ mod tests {
         let screen = text(&draw(&app, 140, 40, Theme::new(true)));
         assert!(screen.contains("NIFTY 50 24800 ▲0.50%"), "{screen}");
         assert!(screen.contains("Avg"));
-        assert!(screen.contains("+₹6000.00"), "TCS P&L column\n{screen}");
+        assert!(screen.contains("+₹6,000.00"), "TCS P&L column\n{screen}");
     }
 
     #[test]

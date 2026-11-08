@@ -6,13 +6,54 @@ pub fn format_price(val: f64, currency: Option<&str>) -> String {
     with_currency(val, currency, 2)
 }
 
-/// `val` with `dp` decimals and its currency: `₹1350.75`, `HK$142.50`, or
-/// `118.20p` for London prices quoted in pence (`GBp`).
+/// Group the integer digits of an already-formatted number: `"125000.5"` →
+/// `"1,25,000.5"` (Indian lakhs) or `"125,000.5"` (thousands).
+pub fn group_number(text: &str, indian: bool) -> String {
+    grouped_decimal(text, indian)
+}
+
+/// Group the integer digits of an already-formatted number: `125000.5` →
+/// `1,25,000.5` (Indian lakhs) or `125,000.5` (thousands).
+fn grouped_decimal(text: &str, indian: bool) -> String {
+    let (sign, rest) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text),
+    };
+    let (int_part, frac) = match rest.split_once('.') {
+        Some((int_part, frac)) => (int_part, Some(frac)),
+        None => (rest, None),
+    };
+    // Grouping is cosmetic; a string too long for u64 is left as it is.
+    let grouped = if int_part.len() > 3 {
+        int_part
+            .parse::<u64>()
+            .map(|n| {
+                let n = n as f64;
+                if indian {
+                    crate::goals::indian_grouping(n)
+                } else {
+                    crate::goals::western_grouping(n)
+                }
+            })
+            .unwrap_or_else(|_| int_part.to_string())
+    } else {
+        int_part.to_string()
+    };
+    match frac {
+        Some(frac) => format!("{sign}{grouped}.{frac}"),
+        None => format!("{sign}{grouped}"),
+    }
+}
+
+/// `val` with `dp` decimals and its currency: `₹1,350.75`, `HK$142.50`, or
+/// `118.20p` for London prices quoted in pence (`GBp`). Digits group in
+/// lakhs for INR and in thousands otherwise.
 fn with_currency(val: f64, currency: Option<&str>, dp: usize) -> String {
     if currency.and_then(market::minor_unit).is_some() {
         return format!("{:.*}p", dp, val);
     }
-    format!("{}{:.*}", market::currency_symbol(currency), dp, val)
+    let body = grouped_decimal(&format!("{:.*}", dp, val), market::is_inr(currency));
+    format!("{}{}", market::currency_symbol(currency), body)
 }
 
 /// Decimal places for a price: stocks and indices use 2, FX pairs 4, and
@@ -30,9 +71,14 @@ pub fn price_decimals(class: AssetClass, price: f64) -> usize {
 }
 
 /// Like `format_price`, with the precision `symbol`'s asset class needs
-/// (`USDINR=X` → ₹84.1234, `DOGE-USD` → $0.1234).
+/// (`USDINR=X` → ₹84.1234, `DOGE-USD` → $0.1234). An index level is a point
+/// score, not a price, so it prints as a plain grouped number.
 pub fn format_asset_price(val: f64, currency: Option<&str>, symbol: &str) -> String {
-    let dp = price_decimals(AssetClass::of(symbol), val);
+    let class = AssetClass::of(symbol);
+    let dp = price_decimals(class, val);
+    if class == AssetClass::Index {
+        return grouped_decimal(&format!("{:.*}", dp, val), false);
+    }
     with_currency(val, currency, dp)
 }
 
@@ -251,7 +297,7 @@ mod tests {
     #[test]
     fn test_format_price_inr() {
         let result = format_price(1350.75, Some("INR"));
-        assert!(result.contains("1350.75"));
+        assert!(result.contains("1,350.75"));
         assert!(result.contains("\u{20B9}"));
     }
 
@@ -431,16 +477,46 @@ mod tests {
         );
         assert_eq!(
             format_asset_price(104_250.5, Some("USD"), "BTC-USD"),
-            "$104250.50"
+            "$104,250.50"
         );
         assert_eq!(
             format_asset_price(3500.0, Some("INR"), "TCS.NS"),
-            "\u{20B9}3500.00"
+            "\u{20B9}3,500.00"
         );
         assert_eq!(
             format_asset_price(150.25, Some("JPY"), "USDJPY=X"),
             "\u{00A5}150.2500"
         );
+    }
+
+    #[test]
+    fn index_levels_print_as_grouped_points_without_a_currency() {
+        // An index level is a point score, not a price you can pay.
+        assert_eq!(
+            format_asset_price(23_810.85, Some("INR"), "^NSEI"),
+            "23,810.85"
+        );
+        assert_eq!(format_asset_price(21.47, Some("USD"), "^VIX"), "21.47");
+        assert_eq!(
+            format_asset_price(5_432.1, Some("USD"), "^GSPC"),
+            "5,432.10"
+        );
+    }
+
+    #[test]
+    fn money_groups_digits_by_currency() {
+        // INR groups in lakhs and crores; everything else in thousands.
+        assert_eq!(format_price(120_092.03, Some("INR")), "\u{20B9}1,20,092.03");
+        assert_eq!(format_price(125_000.0, Some("INR")), "\u{20B9}1,25,000.00");
+        assert_eq!(format_price(3_500.0, Some("INR")), "\u{20B9}3,500.00");
+        assert_eq!(format_price(104_250.5, Some("USD")), "$104,250.50");
+        assert_eq!(format_price(999.99, Some("USD")), "$999.99");
+        // The sign stays in front of the digits and grouping keeps working.
+        assert_eq!(
+            format_price(-123_456.78, Some("INR")),
+            "\u{20B9}-1,23,456.78"
+        );
+        assert_eq!(format_price(-1_234.5, Some("USD")), "$-1,234.50");
     }
 
     #[test]
@@ -458,7 +534,7 @@ mod tests {
         assert_eq!(format_price(74.44, Some("SGD")), "S$74.44");
         assert_eq!(format_price(281.77, Some("CAD")), "C$281.77");
         assert_eq!(format_price(55.05, Some("AUD")), "A$55.05");
-        assert_eq!(format_price(3105.0, Some("JPY")), "\u{00A5}3105.00");
+        assert_eq!(format_price(3105.0, Some("JPY")), "\u{00A5}3,105.00");
         assert_eq!(format_price(214.4, Some("EUR")), "\u{20AC}214.40");
     }
 
