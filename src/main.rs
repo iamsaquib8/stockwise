@@ -36,6 +36,7 @@ mod goals;
 mod greeks;
 mod gsec;
 mod i18n;
+mod income;
 mod insights;
 mod intraday;
 mod ipo;
@@ -736,6 +737,20 @@ stockwise options TCS                     expected moves (same as `options moves
         out: TableOutput,
     },
 
+    /// 12-month dividend, coupon & passive-income calendar, Yield-on-Cost (YoC) and payout safety
+    Income {
+        #[command(subcommand)]
+        action: Option<IncomeAction>,
+        /// Number of months to forecast/project (default: 12)
+        #[arg(long, default_value = "12", value_parser = clap::value_parser!(u32).range(1..=60))]
+        months: u32,
+        /// Break down projected income by individual holding
+        #[arg(long)]
+        by_holding: bool,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+
     /// Export portfolio or watchlist to CSV in the current directory
     Export {
         #[arg(value_enum, ignore_case = true)]
@@ -1159,6 +1174,28 @@ enum PortfolioCmd {
         #[arg(long)]
         json: bool,
     },
+    /// 12-month dividend, coupon & passive-income calendar and Yield-on-Cost (YoC)
+    Income {
+        /// Number of months to forecast/project (default: 12)
+        #[arg(long, default_value = "12", value_parser = clap::value_parser!(u32).range(1..=60))]
+        months: u32,
+        /// Break down projected income by individual holding
+        #[arg(long)]
+        by_holding: bool,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Alias for `portfolio income`
+    Dividends {
+        /// Number of months to forecast/project (default: 12)
+        #[arg(long, default_value = "12", value_parser = clap::value_parser!(u32).range(1..=60))]
+        months: u32,
+        /// Break down projected income by individual holding
+        #[arg(long)]
+        by_holding: bool,
+        #[command(flatten)]
+        out: TableOutput,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1564,6 +1601,18 @@ fn currency_code(s: &str) -> Result<String, String> {
     } else {
         Err(format!("'{s}' is not a 3-letter currency code"))
     }
+}
+
+#[derive(Subcommand)]
+enum IncomeAction {
+    /// Upcoming ex-dividend, record and payment dates for held and watchlisted stocks
+    Upcoming {
+        /// How many days ahead to look (default: 60)
+        #[arg(long, default_value = "60", value_parser = clap::value_parser!(u32).range(1..=365))]
+        days: u32,
+        #[command(flatten)]
+        out: TableOutput,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2916,6 +2965,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "harvest",
             "tax",
             "divcal",
+            "income",
             "pcorr",
         ],
     ),
@@ -4083,6 +4133,16 @@ async fn dispatch(
             Some(PortfolioCmd::Xray { json }) => {
                 commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await
             }
+            Some(PortfolioCmd::Income {
+                months,
+                by_holding,
+                out: inc_out,
+            }) => commands::cmd_income(months, by_holding, m, out.or(inc_out)).await,
+            Some(PortfolioCmd::Dividends {
+                months,
+                by_holding,
+                out: inc_out,
+            }) => commands::cmd_income(months, by_holding, m, out.or(inc_out)).await,
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
@@ -4129,6 +4189,17 @@ async fn dispatch(
             };
             commands::cmd_calendar(&symbols, days, scope, m, out.into()).await
         }
+        Commands::Income {
+            action,
+            months,
+            by_holding,
+            out,
+        } => match action {
+            Some(IncomeAction::Upcoming { days, out: up_out }) => {
+                commands::cmd_income_upcoming(days, m, out.or(up_out)).await
+            }
+            None => commands::cmd_income(months, by_holding, m, out.into()).await,
+        },
         Commands::Export { what } => commands::cmd_export(&value_name(what), m).await,
         Commands::Import {
             source,

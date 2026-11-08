@@ -836,6 +836,26 @@ pub const TOOLS: &[Tool] = &[
         personal: true,
     },
     Tool {
+        name: "income_calendar",
+        title: "Dividend, coupon and passive-income calendar",
+        description: "12-month trailing and projected dividend, coupon and passive-income calendar, \
+                      Yield-on-Cost (YoC), and dividend payout safety checks.",
+        params: &[
+            opt(
+                "months",
+                Kind::Integer { min: 1, max: 60 },
+                "Months to forecast (default 12)",
+            ),
+            opt(
+                "by_holding",
+                Kind::Bool,
+                "Whether to include holding-by-holding breakdown (default true)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
         name: "calendar",
         title: "Results and dividends calendar",
         description: "Upcoming results dates, ex-dividend dates and splits for given tickers, or \
