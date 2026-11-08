@@ -312,17 +312,25 @@ pub(super) fn parse_rss(xml: &str, source_tag: &'static str) -> Vec<NewsItem> {
             // Title: try CDATA first, then plain
             let title_raw = between(item, "<title><![CDATA[", "]]></title>")
                 .or_else(|| between(item, "<title>", "</title>"))?;
-            let title = rss_clean(title_raw);
-            if title.is_empty() {
-                return None;
-            }
+            let mut title = rss_clean(title_raw);
 
-            // Publisher from <source ...>Name</source> or hardcode source_tag
+            // Publisher from <source ...>Name</source> or hardcode source_tag.
+            // The tag body starts with the rest of the opening tag (attributes
+            // like url="..."), so take everything after the first '>'.
             let publisher = between(item, "<source", "</source>")
-                .and_then(|s| between(s, ">", "\n").or_else(|| Some(s.trim())))
+                .and_then(|s| s.split_once('>').map(|(_, name)| name))
                 .map(rss_clean)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| source_tag.to_string());
+
+            // Google News repeats the publisher as a " - Publisher" suffix
+            let suffix = format!(" - {}", publisher);
+            if title.ends_with(&suffix) {
+                title.truncate(title.len() - suffix.len());
+            }
+            if title.is_empty() {
+                return None;
+            }
 
             // Timestamp from <pubDate>
             let timestamp = between(item, "<pubDate>", "</pubDate>")
@@ -1435,6 +1443,30 @@ pub async fn cmd_sectorcmp(sector1: &str, sector2: &str, market: Market) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_rss_google_news_source_url_shows_publisher_only() {
+        let xml = r#"<rss><channel><item><title>Share Market Today: Nifty 50, Bank Nifty - Liquide Blog</title>
+<link>https://x</link><pubDate>Mon, 02 Nov 2026 11:32:00 GMT</pubDate>
+<source url="https://blog.liquide.life">Liquide Blog</source></item></channel></rss>"#;
+        let items = parse_rss(xml, "Google News");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].publisher, "Liquide Blog");
+        assert_eq!(items[0].title, "Share Market Today: Nifty 50, Bank Nifty");
+    }
+
+    #[test]
+    fn parse_rss_source_without_attributes_or_tag() {
+        let xml = r#"<rss><channel><item><title>L&amp;T wins mega order - Economic Times</title>
+<source>Economic Times</source></item>
+<item><title>Plain headline</title></item></channel></rss>"#;
+        let items = parse_rss(xml, "Yahoo RSS");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].publisher, "Economic Times");
+        assert_eq!(items[0].title, "L&T wins mega order");
+        assert_eq!(items[1].publisher, "Yahoo RSS");
+        assert_eq!(items[1].title, "Plain headline");
+    }
 
     #[test]
     fn universes_are_for_the_indian_market_only() {
