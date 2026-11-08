@@ -600,20 +600,23 @@ async fn download_ter(client: &reqwest::Client) -> Result<TerTable> {
     bail!("AMFI published no TER data for {}", tried.join(" or "))
 }
 
+/// The saved TER table, if it is at most `max_age` old and holds records.
+fn cached_ter(path: &Path, max_age: Duration) -> Option<TerTable> {
+    if !is_fresh(path, max_age) {
+        return None;
+    }
+    let mut t: TerTable = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    (!t.records.is_empty()).then(|| {
+        t.reindex();
+        t
+    })
+}
+
 /// Latest TER of every scheme (AMFI's disclosure, cached for a day). The
 /// first download of the day takes a while: AMFI builds a ~3 MB export.
 pub async fn load_ter() -> Result<TerTable> {
     let path = cache_path("amfi_ter.json")?;
-    let cached = || -> Option<TerTable> {
-        let mut t: TerTable = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
-        (!t.records.is_empty()).then(|| {
-            t.reindex();
-            t
-        })
-    };
-    if is_fresh(&path, TER_CACHE_MAX_AGE)
-        && let Some(t) = cached()
-    {
+    if let Some(t) = cached_ter(&path, TER_CACHE_MAX_AGE) {
         return Ok(t);
     }
     eprintln!("  Downloading AMFI's expense-ratio (TER) disclosure (once a day, ~3 MB)...");
@@ -624,7 +627,7 @@ pub async fn load_ter() -> Result<TerTable> {
             }
             Ok(t)
         }
-        Err(e) => match cached() {
+        Err(e) => match cached_ter(&path, STALE_MAX_AGE) {
             Some(t) => {
                 eprintln!(
                     "  Warning: {e:#}; using TERs cached from {}",
@@ -632,6 +635,10 @@ pub async fn load_ter() -> Result<TerTable> {
                 );
                 Ok(t)
             }
+            None if path.exists() && !is_fresh(&path, STALE_MAX_AGE) => bail!(
+                "{e:#}; the TER copy saved more than {} days ago is too old to use",
+                STALE_MAX_AGE.as_secs() / 86_400
+            ),
             None => Err(e),
         },
     }
@@ -1933,6 +1940,35 @@ HDFC Mutual Fund
             .unwrap();
         assert_eq!(text, NAVALL);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), NAVALL);
+    }
+
+    #[test]
+    fn a_saved_ter_copy_is_used_for_a_week_at_most() {
+        let dir = scratch_dir("ter-age");
+        let path = dir.join("amfi_ter.json");
+        let record = TerRecord {
+            name: "Parag Parikh Flexi Cap Fund - Direct Plan - Growth".into(),
+            nsdl_code: None,
+            category: None,
+            date: NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(),
+            regular: None,
+            direct: Some(TerCosts {
+                total: 0.62,
+                base: None,
+                brokerage: None,
+                transaction: None,
+                statutory_levies: None,
+            }),
+        };
+        let json = serde_json::to_string(&TerTable::new("10-2026".into(), vec![record])).unwrap();
+        write_aged(&path, &json, 6);
+        assert!(cached_ter(&path, STALE_MAX_AGE).is_some());
+        write_aged(&path, &json, 8);
+        assert!(cached_ter(&path, STALE_MAX_AGE).is_none());
+        // An empty table is no saved copy at all, however new it is.
+        let empty = serde_json::to_string(&TerTable::default()).unwrap();
+        write_aged(&path, &empty, 0);
+        assert!(cached_ter(&path, STALE_MAX_AGE).is_none());
     }
 
     #[tokio::test]
