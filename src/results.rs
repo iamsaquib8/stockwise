@@ -814,7 +814,12 @@ async fn collect_with(
     if st.quarterly.is_empty() && client.has_router() {
         match client.provider_statements(&symbol).await {
             Ok((fallback, name)) => {
+                // Keep annual rows Yahoo or EDGAR already gave.
+                let annual = std::mem::take(&mut st.annual);
                 st = fallback;
+                if st.annual.is_empty() {
+                    st.annual = annual;
+                }
                 sources.push(format!(
                     "{name} income, balance-sheet and cash-flow statements"
                 ));
