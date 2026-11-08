@@ -371,12 +371,15 @@ pub fn attach_reactions(quarters: &mut [ResultPeriod], r: &research::Research) {
 // NSE filings (bank asset quality)
 // ───────────────────────────────────────────────────────────────
 
-/// One entry of NSE's `corporates-financial-results` list.
+/// One quarter of NSE's `corporates-financial-results` list: the
+/// consolidated filing, else the standalone one, and the standalone one
+/// as a second source when the consolidated filing leaves the ratios empty.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NseFiling {
     pub to_date: NaiveDate,
     pub xbrl: String,
     pub consolidated: bool,
+    pub standalone: Option<String>,
 }
 
 /// Parse NSE's `30-Sep-2026` dates, in any letter case.
@@ -393,14 +396,15 @@ fn nse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(&norm, "%d-%b-%Y").ok()
 }
 
-/// Quarterly filings with an XBRL link, newest first. One filing per
-/// quarter end: consolidated beats standalone, a later revision beats an
-/// earlier one.
+/// Quarterly filings with an XBRL file, newest first. NSE lists every
+/// filing newest first and gives rows without a file an `.../xbrl/-` link;
+/// of several revisions of one filing the first (latest) one is used.
 pub fn parse_nse_filings(v: &Value) -> Vec<NseFiling> {
     let rows = v
         .as_array()
         .or_else(|| v.get("data").and_then(|d| d.as_array()));
-    let mut by_date: BTreeMap<NaiveDate, NseFiling> = BTreeMap::new();
+    // (consolidated, standalone) per quarter end.
+    let mut by_date: BTreeMap<NaiveDate, (Option<String>, Option<String>)> = BTreeMap::new();
     for e in rows.into_iter().flatten() {
         let get = |keys: &[&str]| {
             keys.iter()
@@ -411,30 +415,45 @@ pub fn parse_nse_filings(v: &Value) -> Vec<NseFiling> {
         let Some(to_date) = get(&["toDate", "to_date", "qe_Date"]).and_then(nse_date) else {
             continue;
         };
-        let Some(xbrl) = get(&["xbrl", "xbrlLink"]) else {
+        let Some(xbrl) = get(&["xbrl", "xbrlLink"]).filter(|x| x.to_lowercase().ends_with(".xml"))
+        else {
             continue;
         };
         let consolidated = get(&["consolidated"])
             .map(|c| c.eq_ignore_ascii_case("consolidated"))
             .unwrap_or(false);
-        let f = NseFiling {
-            to_date,
-            xbrl: xbrl.to_string(),
-            consolidated,
+        let slot = by_date.entry(to_date).or_default();
+        let slot = if consolidated {
+            &mut slot.0
+        } else {
+            &mut slot.1
         };
-        match by_date.get(&to_date) {
-            Some(old) if old.consolidated && !f.consolidated => {}
-            _ => {
-                by_date.insert(to_date, f);
-            }
-        }
+        slot.get_or_insert_with(|| xbrl.to_string());
     }
-    by_date.into_values().rev().collect()
+    by_date
+        .into_iter()
+        .rev()
+        .filter_map(|(to_date, (cons, solo))| match (cons, solo) {
+            (Some(c), solo) => Some(NseFiling {
+                to_date,
+                xbrl: c,
+                consolidated: true,
+                standalone: solo,
+            }),
+            (None, Some(s)) => Some(NseFiling {
+                to_date,
+                xbrl: s,
+                consolidated: false,
+                standalone: None,
+            }),
+            (None, None) => None,
+        })
+        .collect()
 }
 
-/// First numeric value of an element whose name contains every needle
-/// (case-insensitive), in a filing's XBRL.
-fn xbrl_number(xml: &str, needles: &[&str]) -> Option<f64> {
+/// The first value of the XBRL fact `local_name` in the current-quarter
+/// context (`OneD`), whatever its namespace prefix.
+fn xbrl_fact(xml: &str, local_name: &str) -> Option<f64> {
     let mut rest = xml;
     while let Some(i) = rest.find('<') {
         rest = &rest[i + 1..];
@@ -444,11 +463,11 @@ fn xbrl_number(xml: &str, needles: &[&str]) -> Option<f64> {
             .split(|c: char| c.is_whitespace() || c == '/')
             .next()
             .unwrap_or("");
-        let local = name.rsplit(':').next().unwrap_or("").to_lowercase();
-        if !local.is_empty()
+        let local = name.rsplit(':').next().unwrap_or("");
+        if local.eq_ignore_ascii_case(local_name)
             && !name.starts_with('/')
             && !tag.ends_with('/')
-            && needles.iter().all(|n| local.contains(n))
+            && tag.contains("contextRef=\"OneD\"")
         {
             let body = &rest[gt + 1..];
             if let Some(lt) = body.find('<')
@@ -462,13 +481,18 @@ fn xbrl_number(xml: &str, needles: &[&str]) -> Option<f64> {
 }
 
 /// Gross and net NPA (percent) from a bank's result XBRL.
+///
+/// NSE's banking format (`in-bse-fin`) files them as fractions in
+/// `PercentageOfGrossNpa` and `PercentageOfNpa` (the net ratio): `0.0142`
+/// is 1.42%. A consolidated filing can carry `0.00` placeholders instead
+/// of the ratios; a bank never has none, so a zero reads as "not filed".
 pub fn parse_bank_xbrl(xml: &str) -> (Option<f64>, Option<f64>) {
-    // Filed as a percent (1.24 means 1.24%), as the filing's ratio rows are.
-    let get = |kind: &str| {
-        xbrl_number(xml, &[kind, "npa", "percent"])
-            .or_else(|| xbrl_number(xml, &[kind, "npa", "ratio"]))
+    let get = |tag: &str| {
+        xbrl_fact(xml, tag)
+            .filter(|v| *v > 0.0)
+            .map(|v| (v * 1e6).round() / 1e4)
     };
-    (get("gross"), get("net"))
+    (get("PercentageOfGrossNpa"), get("PercentageOfNpa"))
 }
 
 /// Fill GNPA/NNPA on `quarters` from the NSE filings; returns how many were filled.
@@ -492,20 +516,23 @@ async fn nse_asset_quality(
         let Some(p) = quarters.iter_mut().find(|p| near(p.end, f.to_date)) else {
             continue;
         };
-        let xml = match tokio::time::timeout(
-            Duration::from_secs(4),
-            client.nse_get_text(&f.xbrl, Duration::from_secs(7 * 86_400)),
-        )
-        .await
-        {
-            Ok(Ok(x)) => x,
-            _ => continue,
-        };
-        let (g, n) = parse_bank_xbrl(&xml);
-        if g.is_some() || n.is_some() {
-            p.gnpa_pct = g;
-            p.nnpa_pct = n;
-            filled += 1;
+        for url in std::iter::once(&f.xbrl).chain(f.standalone.as_ref()) {
+            let xml = match tokio::time::timeout(
+                Duration::from_secs(4),
+                client.nse_get_text(url, Duration::from_secs(7 * 86_400)),
+            )
+            .await
+            {
+                Ok(Ok(x)) => x,
+                _ => continue,
+            };
+            let (g, n) = parse_bank_xbrl(&xml);
+            if g.is_some() || n.is_some() {
+                p.gnpa_pct = g;
+                p.nnpa_pct = n;
+                filled += 1;
+                break;
+            }
         }
     }
     Ok(filled)

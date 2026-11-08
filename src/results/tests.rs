@@ -290,15 +290,31 @@ fn fiscal_year_labels() {
 
 // ── Banks ──
 
-const BANK_XBRL: &str = r#"<xbrli:xbrl xmlns:xbrli="x">
-<in-capmkt:PercentageOfGrossNpa contextRef="OneD">1.24</in-capmkt:PercentageOfGrossNpa>
-<in-capmkt:PercentageOfNetNpa contextRef="OneD">0.33</in-capmkt:PercentageOfNetNpa>
-<in-capmkt:ProfitLossForThePeriod contextRef="OneD">17616</in-capmkt:ProfitLossForThePeriod>
-</xbrli:xbrl>"#;
+// Trimmed real NSE files for HDFC Bank, Q3 FY25 (31-Dec-2024): the filing
+// list, and the consolidated and standalone banking-format XBRL. The
+// consolidated file carries 0.00 placeholders for the NPA ratios.
+const NSE_LIST: &str = include_str!("../fixtures/nse_results_hdfcbank.json");
+const XBRL_CONSOLIDATED: &str = include_str!("../fixtures/nse_bank_xbrl_hdfcbank_consolidated.xml");
+const BANK_XBRL: &str = include_str!("../fixtures/nse_bank_xbrl_hdfcbank_standalone.xml");
 
 #[test]
-fn bank_xbrl_gives_gross_and_net_npa() {
-    assert_eq!(parse_bank_xbrl(BANK_XBRL), (Some(1.24), Some(0.33)));
+fn bank_xbrl_gives_gross_and_net_npa_as_percent() {
+    // Filed as fractions: 0.0142 and 0.0046.
+    assert_eq!(parse_bank_xbrl(BANK_XBRL), (Some(1.42), Some(0.46)));
+}
+
+#[test]
+fn consolidated_placeholder_zeros_are_not_ratios() {
+    assert_eq!(parse_bank_xbrl(XBRL_CONSOLIDATED), (None, None));
+}
+
+#[test]
+fn only_the_current_quarter_context_counts() {
+    let xml = r#"<x:a xmlns:x="u">
+<x:PercentageOfGrossNpa contextRef="FourD">0.0900</x:PercentageOfGrossNpa>
+<x:PercentageOfGrossNpa contextRef="OneD" unitRef="pure">0.0207</x:PercentageOfGrossNpa>
+<x:PercentageOfNpa contextRef="OneD">0.0053</x:PercentageOfNpa></x:a>"#;
+    assert_eq!(parse_bank_xbrl(xml), (Some(2.07), Some(0.53)));
 }
 
 #[test]
@@ -307,19 +323,44 @@ fn xbrl_without_npa_gives_nothing() {
 }
 
 #[test]
+fn the_real_nse_list_gives_the_filing_with_a_standalone_fallback() {
+    let v: Value = serde_json::from_str(NSE_LIST).unwrap();
+    let f = parse_nse_filings(&v);
+    // The row without a file (`.../xbrl/-`) is skipped.
+    assert!(f.iter().all(|x| x.xbrl.ends_with(".xml")));
+    assert_eq!(f[0].to_date, d("2024-12-31"));
+    assert!(f[0].consolidated);
+    assert!(
+        f[0].xbrl
+            .ends_with("BANKING_117525_1359016_23012025122721.xml")
+    );
+    assert!(
+        f[0].standalone
+            .as_deref()
+            .unwrap()
+            .ends_with("BANKING_117524_1359008_23012025122553.xml")
+    );
+}
+
+#[test]
 fn nse_filings_keep_one_per_quarter_and_prefer_consolidated() {
     let v = json!([
         {"toDate": "30-Sep-2026", "xbrl": "https://x/solo.xml", "consolidated": "Non-Consolidated"},
         {"toDate": "30-Sep-2026", "xbrl": "https://x/cons.xml", "consolidated": "Consolidated"},
-        {"toDate": "30-Jun-2026", "xbrl": "https://x/jun.xml", "consolidated": "Consolidated"},
+        {"toDate": "30-Sep-2026", "xbrl": "https://x/cons-old.xml", "consolidated": "Consolidated"},
+        {"toDate": "30-Jun-2026", "xbrl": "https://x/jun.xml", "consolidated": "Non-Consolidated"},
         {"toDate": "31-Mar-2026", "xbrl": "-"},
+        {"toDate": "31-Dec-2025", "xbrl": "https://nsearchives.nseindia.com/corporate/xbrl/-", "consolidated": "Consolidated"},
         {"toDate": "garbage", "xbrl": "https://x/bad.xml"}
     ]);
     let f = parse_nse_filings(&v);
     assert_eq!(f.len(), 2);
     assert_eq!(f[0].to_date, d("2026-09-30"));
+    // The list is newest first: the first revision wins.
     assert_eq!(f[0].xbrl, "https://x/cons.xml");
+    assert_eq!(f[0].standalone.as_deref(), Some("https://x/solo.xml"));
     assert_eq!(f[1].to_date, d("2026-06-30"));
+    assert!(!f[1].consolidated);
 }
 
 /// Eight quarters of bank statements.
@@ -416,6 +457,45 @@ fn bank_server() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Consolidated placeholders (0.00) make a quarter fall back to the
+/// standalone filing.
+#[tokio::test]
+async fn a_zero_consolidated_filing_falls_back_to_standalone() {
+    let mut routes = bank_server();
+    let filings: Vec<Value> = vec![
+        json!({"toDate": "31-Dec-2025", "consolidated": "Consolidated",
+            "xbrl": "https://nsearchives.nseindia.com/x/cons.xml"}),
+        json!({"toDate": "31-Dec-2025", "consolidated": "Non-Consolidated",
+            "xbrl": "https://nsearchives.nseindia.com/x/solo.xml"}),
+    ];
+    routes.retain(|(n, _)| *n != "corporates-financial-results");
+    routes.insert(
+        0,
+        (
+            "corporates-financial-results",
+            Value::Array(filings).to_string(),
+        ),
+    );
+    routes.insert(0, ("cons.xml", XBRL_CONSOLIDATED.to_string()));
+    let server = crate::testutil::MockServer::start_routed(routes).await;
+    let c = collect(
+        &client_for(&server.url),
+        "HDFCBANK",
+        Market::In,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let q = c
+        .quarterly
+        .iter()
+        .find(|p| p.end == d("2025-12-31"))
+        .unwrap();
+    assert_eq!((q.gnpa_pct, q.nnpa_pct), (Some(1.42), Some(0.46)));
+}
+
 /// An in-memory `cache.db` that lives for the test run.
 fn memory_db() -> L2 {
     Box::leak(Box::new(Mutex::new(CacheDb::open_in_memory().unwrap())))
@@ -432,7 +512,7 @@ async fn a_bank_shows_nii_asset_quality_and_the_surprise() {
     assert_eq!(c.quarterly.len(), 8);
     let last = c.quarterly.last().unwrap();
     assert_eq!(last.nii, Some(3000.0 + 50.0 * 7.0));
-    assert_eq!((last.gnpa_pct, last.nnpa_pct), (Some(1.24), Some(0.33)));
+    assert_eq!((last.gnpa_pct, last.nnpa_pct), (Some(1.42), Some(0.46)));
     // Banks have no operating profit: no OPM either.
     assert_eq!(last.opm(), None);
     // 1767139200 = 2025-12-31.
@@ -446,7 +526,7 @@ async fn a_bank_shows_nii_asset_quality_and_the_surprise() {
     assert!(c.sources.iter().any(|s| s.contains("NSE")));
     // JSON and CSV carry the bank rows.
     let j = quarterly_json(&c, 8);
-    assert_eq!(j["quarters"][7]["gnpa_pct"], 1.24);
+    assert_eq!(j["quarters"][7]["gnpa_pct"], 1.42);
     assert_eq!(j["currency"], "INR");
     let csv = output::to_csv(&quarterly_csv(&c, 8)).unwrap();
     assert!(csv.lines().next().unwrap().contains("gnpa_pct"));
