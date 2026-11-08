@@ -1196,7 +1196,8 @@ pub fn survival_months(
     let mut left = corpus * (1.0 - crash_pct / 100.0);
     for m in 0..max_months {
         let pay = first_monthly * (1.0 + inflation_pct / 100.0).powi((m / 12) as i32);
-        if left < pay - 1e-6 {
+        // Float noise at the last payment must not cost a month.
+        if left < pay - corpus.abs() * 1e-9 - 1e-6 {
             return m;
         }
         left = (left - pay) * (1.0 + i);

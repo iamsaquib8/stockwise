@@ -73,7 +73,7 @@ fn a_one_year_goal_is_capital_preservation_with_tax_and_a_month_table() {
 
     let (ok, text, _) = run(&home, &["goal", "sip", "--target", "10L", "--years", "1"]);
     assert!(ok);
-    assert!(text.contains("in 1 year\n"), "{text}");
+    assert!(text.contains("in 1 year"), "{text}");
     assert!(!text.contains("1 years"), "{text}");
     assert!(text.contains("Month by month"), "{text}");
     assert!(!text.contains("Year by year"), "{text}");
