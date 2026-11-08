@@ -661,6 +661,9 @@ pub async fn run_worker(market: Market) -> Result<()> {
     }
     ticker.abort();
     executor.abort();
+    // Wait for the cancellation to finish: only then is `current` final and
+    // the child of a `run` task killed (kill_on_drop).
+    let _ = executor.await;
     // Do not leave the interrupted task `running` forever: idempotent kinds
     // go back in the queue; a `run` command may have changed state, so it is
     // marked failed instead of being run twice.
