@@ -22,6 +22,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Gainers and losers | `stockwise movers` |
 | Sector performance | `stockwise sectors` |
 | Find a ticker by name | `stockwise search "tata motors"` |
+| First-run setup: market, holdings import, MCP snippet | `stockwise init` (no prompts without a TTY: `init --market in --import groww:FILE --no-mcp`) |
 | Check your setup | `stockwise doctor` |
 
 ## Analysis

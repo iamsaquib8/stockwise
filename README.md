@@ -32,8 +32,8 @@ cargo binstall stockwise                                                        
 Also `.deb`/`.rpm`, Scoop, Nix and Docker — see [Install](docs/install.md) for
 every option, and the [five-minute quickstart](docs/quickstart.md) for your
 first commands. PyPI, Homebrew, winget and the AUR are not published yet. Building
-from source needs Rust 1.97 or newer. Then run `stockwise doctor` to check your
-setup.
+from source needs Rust 1.97 or newer. Then run `stockwise init` to pick a market
+and import your holdings (or `stockwise doctor` to check your setup).
 
 ## What it does
 
