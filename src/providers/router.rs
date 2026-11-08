@@ -240,6 +240,12 @@ pub fn fill_quote(base: &mut Quote, other: &Quote) -> bool {
     changed
 }
 
+/// A quote missing a field a backup quote can supply: the market cap that
+/// decides the cap tier, or the previous close the change is measured from.
+fn has_gap(q: &Quote) -> bool {
+    q.market_cap.is_none() || q.regular_market_previous_close.is_none()
+}
+
 fn same(q: &Quote, symbol: &str) -> bool {
     q.symbol
         .as_deref()
@@ -324,7 +330,7 @@ impl Router {
     /// Quotes for `symbols`, in request order: `have` (what Yahoo gave,
     /// named `base`) plus whatever the router adds. A symbol without a usable
     /// quote goes to the best provider that covers it and has calls left;
-    /// then, for a short request, a quote still missing its market cap is
+    /// then, for a short request, a quote still missing its market cap or previous close is
     /// filled by the other providers' quotes and profiles. Quotes a provider
     /// touched carry `meta.sources`.
     pub async fn complete(&self, symbols: &[&str], have: Vec<Quote>, base: &str) -> Vec<Quote> {
@@ -377,7 +383,7 @@ impl Router {
             for p in self.serving(Capability::Quote, symbols.len()) {
                 let ask: Vec<&str> = (0..symbols.len())
                     .filter(|&i| {
-                        slots[i].as_ref().is_some_and(|q| q.market_cap.is_none())
+                        slots[i].as_ref().is_some_and(has_gap)
                             && !tried[i].contains(&p.kind())
                             && p.kind().quote_carries_market_cap()
                             && p.supports(symbols[i])
@@ -679,11 +685,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_previous_close_is_filled_though_the_market_cap_is_there() {
+        let fmp = MockServer::start(vec![(
+            200,
+            r#"[{"symbol":"AAPL","price":261.0,"previousClose":263,"marketCap":3.9e12}]"#.into(),
+        )])
+        .await;
+        let router = Router::new(vec![provider(ProviderKind::Fmp, &fmp.url)]);
+        let mut yahoo = q("AAPL", Some(260.0));
+        yahoo.market_cap = Some(3.8e12);
+        let out = router
+            .complete(&["AAPL"], vec![yahoo], "Yahoo Finance")
+            .await;
+        assert_eq!(out[0].regular_market_price, Some(260.0));
+        assert_eq!(out[0].market_cap, Some(3.8e12));
+        assert_eq!(out[0].regular_market_previous_close, Some(263.0));
+        assert_eq!(
+            out[0].meta.as_ref().unwrap().sources,
+            ["Yahoo Finance", "Financial Modeling Prep"]
+        );
+    }
+
+    #[tokio::test]
     async fn complete_quotes_cost_no_requests_and_carry_no_meta() {
         let finnhub = MockServer::start(vec![(200, "{}".into())]).await;
         let router = Router::new(vec![provider(ProviderKind::Finnhub, &finnhub.url)]);
         let mut full = q("AAPL", Some(260.0));
         full.market_cap = Some(1e12);
+        full.regular_market_previous_close = Some(259.0);
         let out = router
             .complete(&["AAPL"], vec![full], "Yahoo Finance")
             .await;
