@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review settings. Rules mirror CLAUDE.md and DISCLAIMER.md.
+language: en-US
+early_access: false
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+  review_status: false
+  collapse_walkthrough: true
+  request_changes_workflow: false
+  path_filters:
+    - "!Cargo.lock"
+    - "!changelog.d/**"
+    - "!site/**"
+    - "!assets/**"
+    - "!**/fixtures/**"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        Pure Rust, 2024 edition. CI already enforces `cargo fmt`, `cargo clippy -D warnings`
+        and `cargo test`: do not comment on formatting or lints.
+        - Money is integer minor units (i64) or rust_decimal::Decimal. Flag f64 used for money;
+          f64 is fine for analytical ratios (XIRR, Sharpe, beta).
+        - Flag any output, string or doc that reads as financial advice, a stock pick, a
+          buy/sell recommendation or a price target (see DISCLAIMER.md).
+        - Core commands must work offline from local files. Flag runtime telemetry, new
+          network calls on offline paths, or secrets written to logs or URLs.
+        - Flag committed raw market-data series (OHLCV) outside test fixtures.
+        - Use anyhow::Result in the binary; do not add unwrap/expect on user input or I/O.
+    - path: "tests/**"
+      instructions: |
+        Integration tests run the real binary against a scratch STOCKWISE_HOME. Flag tests that
+        touch the network, the real data directory, or leave child processes running.
+    - path: "docs/**"
+      instructions: "Check that commands, flags and output shown match the code."
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+chat:
+  auto_reply: true
