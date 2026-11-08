@@ -16,6 +16,7 @@ mod api;
 mod ask;
 mod backtest;
 mod benchmark;
+mod bleed;
 mod bonds;
 mod brokers;
 mod calendar;
@@ -55,6 +56,7 @@ mod rebalance;
 mod research;
 mod results;
 mod scorecard;
+mod sellpreview;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
@@ -754,6 +756,10 @@ stockwise options TCS                     expected moves (same as `options moves
         /// (default: the first whose header fits the importer)
         #[arg(long, value_name = "NAME")]
         sheet: Option<String>,
+        /// For `cas` with a .pdf: the statement password (else STOCKWISE_CAS_PASSWORD,
+        /// else a hidden prompt). Needs casparser on PATH. Use `-` as FILE to read casparser output from stdin
+        #[arg(long, value_name = "PASSWORD")]
+        password: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -1077,6 +1083,9 @@ enum PortfolioCmd {
         /// Sale date, YYYY-MM-DD (default: today)
         #[arg(long)]
         date: Option<String>,
+        /// Show the FIFO lots, tax and LTCG countdown without recording the sale
+        #[arg(long, alias = "dry-run")]
+        preview: bool,
     },
     /// A holding's lots, sales and dividends; --lot N --date fixes a purchase date
     Lots {
@@ -2134,6 +2143,15 @@ enum MfCmd {
         #[arg(short, long, default_value = "5y", value_parser = mf_period)]
         period: String,
         /// Print JSON instead of a chart
+        #[arg(long)]
+        json: bool,
+    },
+    /// Held Regular-plan funds vs their Direct twin: TER gap, yearly and 10-year cost, tax-free switch units
+    Bleed {
+        /// Gross annual return (percent, before TER) for the compounded 10-year figure
+        #[arg(long = "return", value_name = "PERCENT", default_value_t = 10.0)]
+        assumed_return: f64,
+        /// Print JSON instead of a table
         #[arg(long)]
         json: bool,
     },
@@ -3760,6 +3778,10 @@ async fn dispatch(
                 commands::cmd_mf_screen(&category.join(" "), plan, sort, max_ter, limit, max, json)
                     .await
             }
+            MfCmd::Bleed {
+                assumed_return,
+                json,
+            } => commands::cmd_mf_bleed(assumed_return, json, m).await,
             MfCmd::Overlap { a, b, json } => commands::cmd_mf_overlap(&a, &b, m, json).await,
         },
         Commands::Options {
@@ -3986,6 +4008,17 @@ async fn dispatch(
                 shares,
                 price,
                 date,
+                preview,
+            }) if preview => {
+                commands::cmd_portfolio_sell_preview(&symbol, shares, price, date.as_deref(), m)
+                    .await
+            }
+            Some(PortfolioCmd::Sell {
+                symbol,
+                shares,
+                price,
+                date,
+                ..
             }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
             Some(PortfolioCmd::Lots { symbol, lot, date }) => {
                 commands::cmd_portfolio_lots(&symbol, lot, date.as_deref(), m).await
@@ -4102,7 +4135,15 @@ async fn dispatch(
             file,
             replace,
             sheet,
-        } => commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await,
+            password,
+        } => {
+            if matches!(source, ImportSource::Cas) {
+                commands::cmd_import_cas(&file, password.as_deref(), replace, sheet.as_deref(), m)
+                    .await
+            } else {
+                commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await
+            }
+        }
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance {
             inflow,
@@ -5327,6 +5368,16 @@ mod tests {
                 "2023-04-12",
             ],
             vec!["stockwise", "portfolio", "sell", "TCS", "5"],
+            vec!["stockwise", "portfolio", "sell", "TCS", "5", "--preview"],
+            vec![
+                "stockwise",
+                "portfolio",
+                "sell",
+                "TCS",
+                "5",
+                "3900",
+                "--dry-run",
+            ],
             vec![
                 "stockwise",
                 "portfolio",

@@ -143,6 +143,14 @@
       "description": "Public Market Equivalent (Index Twin). Mirrors the user's exact cash flows into a passive benchmark (SPY, VOO, VWCE, NIFTY 50) to compute Kaplan-Schoar PME, Direct Alpha and benchmark twin value."
     },
     {
+      "name": "portfolio_sell_preview",
+      "description": "Preview a sale without recording it: departing FIFO lots, short- vs long-term tax with the Sec. 112A exemption and cess, a long-term countdown and a mutual-fund exit-load check."
+    },
+    {
+      "name": "mf_bleed",
+      "description": "Held Regular-plan funds vs their Direct twin: TER gap, yearly and 10-year cost, and units that can switch tax-free."
+    },
+    {
       "name": "calendar",
       "description": "Results and dividends calendar. Upcoming results dates, ex-dividend dates and splits for given tickers, or for the user's holdings and watchlist when none are given."
     },

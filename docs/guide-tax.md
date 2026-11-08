@@ -89,6 +89,60 @@ stockwise harvest
 This is a list of what the arithmetic allows. It is not advice to trade.
 Brokerage, STT and your own view of each stock are not in the numbers.
 
+## Preview a sale before you record it
+
+`portfolio sell` records the sale. Add `--preview` (alias `--dry-run`) to see
+what it would do and change nothing: `portfolio.json` is not touched.
+
+```
+stockwise portfolio sell TCS 12 4000 --preview
+```
+
+The preview prints:
+
+- **The departing lots**, oldest first (FIFO): lot number, purchase date,
+  days held, quantity, cost, gain or loss, and ST or LT. Lot numbers match
+  `portfolio lots`.
+- **The tax the sale adds** on top of gains already recorded this tax year,
+  from the same rules as `tax in`: short-term gain at 20%, long-term gain at
+  12.5% after the ₹1.25 lakh Sec. 112A exemption still unused this year, the
+  31 Jan 2018 grandfathered cost for old lots, and 4% cess. Other countries
+  use their own rates. Funds and ETFs taxed under other rules show lots and
+  gains only, with the reason.
+- **A long-term countdown.** A lot within 45 days of turning long-term is
+  listed with the day it turns and how much lower the tax would be if the
+  same sale happened then, at the same price. A holding of exactly 12 months
+  is still short-term; the first long-term day is the next one.
+- **A mutual-fund exit-load check.** Units held under 365 days are flagged
+  with a typical 1% exit load. Schemes differ, so check the factsheet.
+
+The price defaults to the live quote (a fund's latest AMFI NAV). A past
+`--date` needs a price. The same preview is the MCP tool
+`portfolio_sell_preview`. These are arithmetic on your records, not advice.
+
+## Regular vs Direct fund cost
+
+```
+stockwise mf bleed [--return 10] [--json]
+```
+
+For each held Regular-plan growth fund, `mf bleed` finds the Direct growth
+plan of the same scheme and reads both expense ratios from AMFI's TER
+disclosure. It shows the gap, the yearly rupee cost of the gap on today's
+value, and the 10-year compounded difference at a gross return you choose
+(`--return`, default 10% a year, no new money). It then splits the units by
+age:
+
+- Units held more than 12 months, and how many of them redeem with ₹0 tax
+  inside this year's unused Sec. 112A exemption (oldest units first).
+- Younger units, with the day each lot turns long-term and, for a switch
+  today, the tax, the exit load and the months of TER saved needed to cover
+  them.
+
+A switch is a redemption plus a purchase, so it can create tax. Funds that
+are not equity-oriented are shown without the tax split. `portfolio` prints
+a one-line pointer when you hold a Regular plan. MCP tool: `mf_bleed`.
+
 ## 3. Check advance tax
 
 Advance tax is due when the estimated tax for the year is ₹10,000 or more.
