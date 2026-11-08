@@ -18,6 +18,7 @@ use crate::db::{CacheDb, L2};
 use crate::events::{self, Kind};
 use crate::market::{self, Market};
 use crate::output::{CsvRow, round_opt};
+use crate::providers::edgar;
 use crate::research::{self, Needs, Series};
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
@@ -99,6 +100,9 @@ pub struct ResultPeriod {
     /// The result-date and reaction lookup ran (found or not).
     #[serde(default)]
     pub reaction_checked: bool,
+    /// Filled from SEC EDGAR filings (the rest is Yahoo).
+    #[serde(default)]
+    pub edgar: bool,
     #[serde(skip)]
     ebitda: Option<f64>,
     #[serde(skip)]
@@ -512,6 +516,56 @@ async fn nse_asset_quality(
 }
 
 // ───────────────────────────────────────────────────────────────
+// SEC EDGAR merge
+// ───────────────────────────────────────────────────────────────
+
+/// Copy what EDGAR reports onto `p`; fields EDGAR lacks stay as they are.
+fn apply_edgar(p: &mut ResultPeriod, e: &edgar::Period) {
+    let set = |dst: &mut Option<f64>, v: Option<f64>| {
+        if v.is_some() {
+            *dst = v;
+        }
+    };
+    set(&mut p.revenue, e.revenue);
+    set(&mut p.operating_profit, e.operating_income);
+    set(&mut p.pat, e.net_income);
+    set(&mut p.eps, e.diluted_eps);
+    set(&mut p.ocf, e.operating_cash_flow);
+    set(&mut p.capex, e.capex);
+    // Yahoo's free cash flow belonged to its own cash-flow figures.
+    if e.operating_cash_flow.is_some() && e.capex.is_some() {
+        p.fcf = None;
+        p.finalize();
+    }
+    p.edgar = true;
+    if p.currency.is_none() {
+        p.currency = Some("USD".into());
+    }
+}
+
+/// Merge EDGAR periods into `rows` (oldest first): EDGAR wins the fields it
+/// has, Yahoo keeps the rest, and quarters only EDGAR has are added.
+fn merge_edgar_rows(rows: &mut Vec<ResultPeriod>, edgar: &[edgar::Period]) {
+    for e in edgar {
+        match rows.iter_mut().find(|p| near(p.end, e.end)) {
+            Some(p) => apply_edgar(p, e),
+            None => {
+                let mut p = ResultPeriod::new(e.end);
+                apply_edgar(&mut p, e);
+                rows.push(p);
+            }
+        }
+    }
+    rows.sort_by_key(|p| p.end);
+}
+
+fn merge_edgar(st: &mut Statements, e: &edgar::Statements) {
+    merge_edgar_rows(&mut st.quarterly, &e.quarterly);
+    merge_edgar_rows(&mut st.annual, &e.annual);
+    st.currency.get_or_insert_with(|| "USD".into());
+}
+
+// ───────────────────────────────────────────────────────────────
 // Cache (`financial_results`)
 // ───────────────────────────────────────────────────────────────
 
@@ -533,7 +587,8 @@ pub fn store_periods(db: L2, symbol: &str, quarterly: &[ResultPeriod], annual: &
     for (rows, is_annual) in [(quarterly, false), (annual, true)] {
         for p in rows {
             if let Ok(json) = serde_json::to_string(p) {
-                let _ = db.put_result(symbol, &p.end.to_string(), is_annual, "yahoo", &json);
+                let source = if p.edgar { "edgar" } else { "yahoo" };
+                let _ = db.put_result(symbol, &p.end.to_string(), is_annual, source, &json);
             }
         }
     }
@@ -597,6 +652,21 @@ pub async fn collect(
     reaction: bool,
     resolve: bool,
 ) -> Result<Collected> {
+    collect_with(client, symbol, market, store, reaction, resolve, true).await
+}
+
+/// [`collect`], with SEC EDGAR optional: the scoreboard reads only the
+/// latest quarter of many symbols, where a multi-megabyte filing history
+/// each would cost more than it adds.
+async fn collect_with(
+    client: &YahooClient,
+    symbol: &str,
+    market: Market,
+    store: Option<L2>,
+    reaction: bool,
+    resolve: bool,
+    use_edgar: bool,
+) -> Result<Collected> {
     // Saved holdings and index members are already full symbols (a US
     // holding `AAPL` must not become `AAPL.NS`): only typed ones resolve.
     let symbol = if resolve {
@@ -629,6 +699,11 @@ pub async fn collect(
         && let Some((quarterly, annual)) = load_periods(&guard, &symbol, CACHE_TTL_SECS)
         && (!reaction || quarterly.iter().any(|p| p.reaction_checked))
     {
+        let source = if quarterly.iter().any(|p| p.edgar) {
+            "cache.db (Yahoo Finance, SEC EDGAR)"
+        } else {
+            "cache.db (Yahoo Finance)"
+        };
         return Ok(Collected {
             currency: quarterly
                 .iter()
@@ -641,7 +716,7 @@ pub async fn collect(
             is_financial,
             quarterly,
             annual,
-            sources: vec!["cache.db (Yahoo Finance)".into()],
+            sources: vec![source.into()],
             warnings: vec![],
             from_cache: true,
         });
@@ -653,15 +728,44 @@ pub async fn collect(
         .flat_map(|f| [format!("quarterly{f}"), format!("annual{f}")])
         .collect();
     let type_refs: Vec<&str> = types.iter().map(String::as_str).collect();
-    let (series, summary) = tokio::join!(
+    let want_edgar = use_edgar && market == Market::Us && !is_india;
+    let (series, summary, filings) = tokio::join!(
         // Explicit period timestamps: eleven years back, not Yahoo's default
         // handful of quarters.
         client.fundamentals_timeseries(&symbol, &type_refs, 365 * 11),
         client.quote_summary(&symbol, &["earningsHistory"]),
+        async {
+            if want_edgar {
+                edgar::fetch(client, &symbol).await
+            } else {
+                Ok(None)
+            }
+        },
     );
-    let series = series.context("Yahoo financial statements unavailable")?;
-    let mut st = parse_statements(&series);
-    let mut sources = vec!["Yahoo Finance fundamentals-timeseries".to_string()];
+    let filings = match filings {
+        Ok(f) => f,
+        Err(e) => {
+            warnings.push(format!("SEC EDGAR unavailable: {e:#}"));
+            None
+        }
+    };
+    let mut sources = Vec::new();
+    let mut st = match series {
+        Ok(series) => {
+            sources.push("Yahoo Finance fundamentals-timeseries".to_string());
+            parse_statements(&series)
+        }
+        // EDGAR alone still gives a full history.
+        Err(e) if filings.is_some() => {
+            warnings.push(format!("Yahoo financial statements unavailable: {e:#}"));
+            Statements::default()
+        }
+        Err(e) => return Err(e.context("Yahoo financial statements unavailable")),
+    };
+    if let Some(f) = &filings {
+        merge_edgar(&mut st, f);
+        sources.push("SEC EDGAR companyfacts (XBRL, 10-K/10-Q)".into());
+    }
     match summary {
         Ok(s) => {
             let surprises = research::parse_surprises(&s);
@@ -741,7 +845,7 @@ pub async fn season(
         futures_util::stream::iter(symbols.iter().map(|s| async move {
             (
                 s.clone(),
-                collect(client, s, market, store, false, false).await,
+                collect_with(client, s, market, store, false, false, false).await,
             )
         }))
         .buffered(PARALLEL)

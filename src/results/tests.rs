@@ -836,3 +836,183 @@ async fn saved_symbols_are_not_resolved_again() {
     .unwrap();
     assert_eq!(c.symbol, "AAPL");
 }
+
+// ── SEC EDGAR ──
+
+/// A US quote (the symbol is fixed by the test client's routes).
+fn us_quote_body() -> String {
+    json!({"quoteResponse": {"result": [{
+        "symbol": "ACME", "quoteType": "EQUITY", "longName": "Calendar Corp",
+        "currency": "USD", "regularMarketPrice": 50.0,
+        "sector": "Technology", "industry": "Software"
+    }]}})
+    .to_string()
+}
+
+/// Yahoo's last four US quarters: revenue 999 (EDGAR says otherwise), with
+/// a pre-tax figure only Yahoo has, and a 2025-12-31 quarter EDGAR has not
+/// filed yet.
+fn us_yahoo_series() -> Vec<Value> {
+    let ends = ["2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"];
+    let rows = |v: f64| -> Vec<(String, f64)> { ends.iter().map(|e| (e.to_string(), v)).collect() };
+    vec![
+        series("quarterly", "TotalRevenue", &rows(999.0), "USD"),
+        series("quarterly", "PretaxIncome", &rows(7.0), "USD"),
+        series("quarterly", "FreeCashFlow", &rows(1.0), "USD"),
+    ]
+}
+
+fn us_routes(edgar: bool) -> Vec<(&'static str, String)> {
+    let mut routes = vec![
+        (
+            "fundamentals-timeseries",
+            json!({"timeseries": {"result": us_yahoo_series()}}).to_string(),
+        ),
+        (
+            "quoteSummary",
+            json!({"quoteSummary": {"result": [{}]}}).to_string(),
+        ),
+        ("/v7/finance/quote", us_quote_body()),
+    ];
+    if edgar {
+        routes.push((
+            "company_tickers.json",
+            json!({"0": {"cik_str": 1234, "ticker": "ACME", "title": "Calendar Corp"}}).to_string(),
+        ));
+        routes.push((
+            "companyfacts/CIK0000001234.json",
+            crate::providers::edgar::tests::calendar_filer(),
+        ));
+    }
+    routes
+}
+
+#[tokio::test]
+async fn us_results_use_edgar_for_the_long_history_and_yahoo_for_the_rest() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let db = memory_db();
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    // 15 EDGAR quarters plus the one only Yahoo has.
+    assert_eq!(c.quarterly.len(), 16);
+    assert_eq!(c.annual.len(), 3);
+    assert!(c.sources.iter().any(|s| s.contains("SEC EDGAR")));
+    assert!(c.sources.iter().any(|s| s.contains("Yahoo")));
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    let q = |end: &str| c.quarterly.iter().find(|p| p.end == d(end)).unwrap();
+    // EDGAR wins what it has, Yahoo keeps what EDGAR lacks.
+    assert_eq!(q("2025-03-31").revenue, Some(220.0));
+    assert_eq!(q("2025-03-31").pbt, Some(7.0));
+    assert_eq!(q("2022-12-31").revenue, Some(130.0));
+    assert_eq!(q("2025-12-31").revenue, Some(999.0));
+    assert!(!q("2025-12-31").edgar && q("2025-09-30").edgar);
+    // Free cash flow follows the EDGAR cash flow and capex.
+    let p = q("2025-09-30");
+    assert_eq!(p.fcf, Some(p.ocf.unwrap() - p.capex.unwrap().abs()));
+    // Every period lands in cache.db, tagged with the source.
+    let stored = db.lock().unwrap().get_results("ACME").unwrap();
+    assert_eq!(stored.len(), 16 + 3);
+    let tags = stored
+        .iter()
+        .filter(|(e, _, j)| j.contains("\"edgar\":true") && !e.is_empty());
+    assert_eq!(tags.count(), 15 + 3);
+    // EDGAR was asked politely and with a client name.
+    let sec: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.target.contains("company"))
+        .collect();
+    assert_eq!(sec.len(), 2);
+    for r in &sec {
+        let ua = r.header("user-agent").unwrap();
+        assert!(ua.starts_with("stockwise/") && !ua.contains('@'), "{ua}");
+    }
+    // The second call is served from cache.db, naming both sources.
+    let again = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(again.from_cache);
+    assert_eq!(again.quarterly.len(), 16);
+    assert!(again.sources[0].contains("SEC EDGAR"));
+}
+
+#[tokio::test]
+async fn a_failing_edgar_leaves_yahoo_results_with_a_note() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(false)).await;
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.quarterly.len(), 4);
+    assert!(c.warnings.iter().any(|w| w.contains("SEC EDGAR")));
+    assert!(!c.sources.iter().any(|s| s.contains("EDGAR")));
+}
+
+#[tokio::test]
+async fn edgar_alone_carries_the_results_when_yahoo_statements_fail() {
+    let mut routes = us_routes(true);
+    routes.retain(|(n, _)| *n != "fundamentals-timeseries");
+    let server = crate::testutil::MockServer::start_routed(routes).await;
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.quarterly.len(), 15);
+    assert_eq!(c.currency.as_deref(), Some("USD"));
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("Yahoo financial statements"))
+    );
+}
+
+#[tokio::test]
+async fn other_markets_and_the_scoreboard_never_ask_edgar() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let client = client_for(&server.url);
+    collect(&client, "ACME", Market::In, None, false, true)
+        .await
+        .unwrap();
+    season(
+        &client,
+        &["ACME".to_string()],
+        "Test",
+        Market::Us,
+        None,
+        Sort::Date,
+    )
+    .await;
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| !r.target.contains("company_tickers") && !r.target.contains("companyfacts"))
+    );
+}
