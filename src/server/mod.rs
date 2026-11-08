@@ -898,10 +898,15 @@ mod tests {
             get_json(&app, "/api/history/TCS?period=7x").await.0,
             StatusCode::BAD_REQUEST
         );
-        // Unknown symbol: Yahoo answers 404, which surfaces as a data error.
+        // Unknown symbol: Yahoo answers 404, a missing resource, not an outage.
         let (status, v) = get_json(&app, "/api/history/NOPE").await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(v["error"].as_str().unwrap().contains("404"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("No price history for NOPE.NS")
+        );
     }
 
     #[tokio::test]

@@ -774,6 +774,12 @@ impl std::fmt::Display for NoPriceHistory {
 
 impl std::error::Error for NoPriceHistory {}
 
+/// A typed "no chart for this symbol" error, for sources other than the Yahoo
+/// client (tests, alternative providers). [`is_not_found`] recognises it.
+pub(crate) fn no_history_error(symbol: &str) -> anyhow::Error {
+    anyhow::Error::new(NoPriceHistory(no_history_message(symbol)))
+}
+
 /// What a chart request for a ticker Yahoo does not know says instead of
 /// the raw "HTTP 404", with built-in "did you mean" names where it has them.
 fn no_history_message(symbol: &str) -> String {
