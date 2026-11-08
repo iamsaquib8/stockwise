@@ -137,6 +137,24 @@ pub(crate) fn setting_rows(
         };
         rows.push(row(&format!("notify.{}", key), value, source));
     }
+    // Keys of the keyed providers that back Yahoo up: only whether one is
+    // set, never its value.
+    for kind in [
+        crate::providers::ProviderKind::Finnhub,
+        crate::providers::ProviderKind::Fmp,
+    ] {
+        if let Some(env) = kind
+            .key_envs()
+            .iter()
+            .find(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+        {
+            rows.push(row(
+                &env.to_ascii_lowercase(),
+                "(set)".to_string(),
+                Source::Env,
+            ));
+        }
+    }
     for (command, period) in periods {
         let source = if cfg.periods.contains_key(command) {
             Source::File

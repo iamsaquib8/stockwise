@@ -107,7 +107,7 @@ pub struct ResultPeriod {
 
 impl ResultPeriod {
     /// An empty period ending on `end`.
-    fn new(end: NaiveDate) -> Self {
+    pub(crate) fn new(end: NaiveDate) -> Self {
         Self {
             end,
             ..Default::default()
@@ -659,18 +659,56 @@ pub async fn collect(
         client.fundamentals_timeseries(&symbol, &type_refs, 365 * 11),
         client.quote_summary(&symbol, &["earningsHistory"]),
     );
-    let series = series.context("Yahoo financial statements unavailable")?;
-    let mut st = parse_statements(&series);
-    let mut sources = vec!["Yahoo Finance fundamentals-timeseries".to_string()];
+    let (mut st, mut sources) = match series {
+        Ok(series) => (
+            parse_statements(&series),
+            vec!["Yahoo Finance fundamentals-timeseries".to_string()],
+        ),
+        Err(e) if !client.has_router() => {
+            return Err(e.context("Yahoo financial statements unavailable"));
+        }
+        Err(e) => (
+            Statements::default(),
+            vec![format!("Yahoo Finance unavailable ({e:#})")],
+        ),
+    };
+    // Yahoo failed or had no quarters: the keyed providers' statements.
+    if st.quarterly.is_empty() && client.has_router() {
+        match client.provider_statements(&symbol).await {
+            Ok((fallback, name)) => {
+                st = fallback;
+                sources = vec![format!(
+                    "{name} income, balance-sheet and cash-flow statements"
+                )];
+            }
+            Err(e) => {
+                return Err(e.context(format!(
+                    "Yahoo financial statements unavailable and no keyed provider had {symbol}"
+                )));
+            }
+        }
+    }
+    let mut surprises = Vec::new();
     match summary {
         Ok(s) => {
-            let surprises = research::parse_surprises(&s);
+            surprises = research::parse_surprises(&s);
             if !surprises.is_empty() {
-                attach_surprises(&mut st.quarterly, &surprises);
                 sources.push("Yahoo Finance earningsHistory".into());
             }
         }
         Err(e) => warnings.push(format!("Consensus estimates unavailable: {e:#}")),
+    }
+    // No surprises from Yahoo: a keyed provider's earnings history.
+    if surprises.is_empty()
+        && client.has_router()
+        && let Ok((f, names)) = client.provider_fundamentals(&symbol).await
+        && !f.surprises.is_empty()
+    {
+        surprises = f.surprises;
+        sources.push(format!("{} earnings surprises", names.join(" + ")));
+    }
+    if !surprises.is_empty() {
+        attach_surprises(&mut st.quarterly, &surprises);
     }
 
     if reaction {

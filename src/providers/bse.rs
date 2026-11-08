@@ -257,6 +257,58 @@ pub fn parse_price_csv(csv: &str) -> Result<Vec<Bar>, &'static str> {
         .collect())
 }
 
+/// One corporate announcement filed with BSE.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Announcement {
+    pub code: String,
+    pub company: String,
+    pub headline: String,
+    /// BSE's category (`Result`, `Board Meeting`, ...).
+    pub category: String,
+    /// Day it was filed.
+    pub date: NaiveDate,
+    /// Link to the filed PDF, when there is one.
+    pub attachment: Option<String>,
+}
+
+/// Where BSE keeps announcement PDFs.
+const ATTACHMENTS: &str = "https://www.bseindia.com/xml-data/corpfiling/AttachLive";
+
+/// `AnnGetData` → announcements, newest first as BSE sends them. BSE wraps
+/// the rows in `{"Table": [...]}`; each has `SCRIP_CD`, `SLONGNAME`,
+/// `NEWSSUB` (or `HEADLINE`), `CATEGORYNAME`, `NEWS_DT` (an ISO date-time)
+/// and `ATTACHMENTNAME`. Built from the format open-source BSE clients read;
+/// not confirmed against the live site. Anything else is a format change.
+pub fn parse_announcements(json: &Value) -> Result<Vec<Announcement>, &'static str> {
+    let rows = json["Table"]
+        .as_array()
+        .ok_or("announcements: no Table list")?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let code = match &r["SCRIP_CD"] {
+                Value::String(s) => s.trim().to_string(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            let date =
+                NaiveDate::parse_from_str(r["NEWS_DT"].as_str()?.get(..10)?, "%Y-%m-%d").ok()?;
+            let text = |k: &str| r[k].as_str().map(str::trim).filter(|t| !t.is_empty());
+            Some(Announcement {
+                code,
+                company: text("SLONGNAME").unwrap_or_default().to_string(),
+                headline: text("NEWSSUB")
+                    .or_else(|| text("HEADLINE"))
+                    .unwrap_or_default()
+                    .to_string(),
+                category: text("CATEGORYNAME").unwrap_or_default().to_string(),
+                date,
+                attachment: text("ATTACHMENTNAME").map(|a| format!("{ATTACHMENTS}/{a}")),
+            })
+        })
+        .collect())
+}
+
 // ── Client ──
 
 /// The BSE provider: quotes, intraday and daily charts and search through
@@ -348,6 +400,76 @@ impl Bse {
                 .find(|s| s.id == id)
                 .map(|s| s.code.clone())),
         }
+    }
+
+    /// `.BO` symbols of one BSE group's active equities (`A`, `B`, `T`, ...):
+    /// a snapshot of who is in the group, from the scrip list endpoint's
+    /// `Group` filter. Prices come separately.
+    pub async fn group_members(&self, group: &str) -> Result<Vec<String>> {
+        let group = group.trim().to_ascii_uppercase();
+        if group.is_empty() || !group.chars().all(|c| c.is_ascii_alphanumeric()) {
+            anyhow::bail!("BSE group must be a letter or two, like A or B");
+        }
+        let json = self
+            .session
+            .get_json(
+                "/ListofScripData/w",
+                &[
+                    ("Group", &group),
+                    ("Scripcode", ""),
+                    ("industry", ""),
+                    ("segment", "Equity"),
+                    ("status", "Active"),
+                ],
+                Duration::from_secs(3_600),
+            )
+            .await
+            .map_err(|e| self.fail(e))?;
+        let scrips = parse_scrip_list(&json).map_err(|w| self.format_changed(w))?;
+        if scrips.is_empty() {
+            return Err(self.format_changed("group list is empty"));
+        }
+        Ok(scrips
+            .into_iter()
+            .map(|s| format!("{}.BO", if s.id.is_empty() { &s.code } else { &s.id }))
+            .collect())
+    }
+
+    /// Announcements a company filed in the last `days` days; with
+    /// `results_only`, just the quarterly and annual results.
+    pub async fn announcements(
+        &self,
+        symbol: &str,
+        days: i64,
+        results_only: bool,
+    ) -> Result<Vec<Announcement>> {
+        let code = self
+            .code(symbol)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("BSE lists no scrip {}", symbol))?;
+        let today = (chrono::Utc::now() + chrono::Duration::seconds(IST_OFFSET)).date_naive();
+        let from = (today - chrono::Duration::days(days.clamp(1, 366)))
+            .format("%Y%m%d")
+            .to_string();
+        let to = today.format("%Y%m%d").to_string();
+        let json = self
+            .session
+            .get_json(
+                "/AnnGetData/w",
+                &[
+                    ("strCat", if results_only { "Result" } else { "-1" }),
+                    ("strPrevDate", &from),
+                    ("strScrip", &code),
+                    ("strSearch", "P"),
+                    ("strToDate", &to),
+                    ("strType", "C"),
+                    ("pageno", "1"),
+                ],
+                Duration::from_secs(600),
+            )
+            .await
+            .map_err(|e| self.fail(e))?;
+        parse_announcements(&json).map_err(|w| self.format_changed(w))
     }
 
     pub async fn quotes(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
@@ -655,5 +777,69 @@ mod tests {
         let by_id = bse.search("reliance").await.unwrap();
         assert_eq!(by_id[0].exchange.as_deref(), Some("BSE"));
         assert_eq!(server.requests().len(), 1, "the scrip list is loaded once");
+    }
+}
+
+#[cfg(test)]
+mod filings_tests {
+    use super::*;
+    use crate::providers::session::DiskCache;
+    use crate::testutil::MockServer;
+
+    const ANNOUNCEMENTS: &str = r#"{"Table":[
+        {"SCRIP_CD":500325,"SLONGNAME":"Reliance Industries Ltd","NEWSSUB":"Unaudited Financial Results for the quarter ended 30 September 2025","CATEGORYNAME":"Result","NEWS_DT":"2025-10-17T15:08:35.43","ATTACHMENTNAME":"abc-123.pdf"},
+        {"SCRIP_CD":"500325","SLONGNAME":"Reliance Industries Ltd","HEADLINE":"Board Meeting Intimation","CATEGORYNAME":"Board Meeting","NEWS_DT":"2025-10-03T10:00:00"},
+        {"SCRIP_CD":"500325","NEWSSUB":"no date"}
+    ],"Table1":[{"ROWCNT":2}]}"#;
+
+    fn bse_at(server: &MockServer) -> Bse {
+        Bse::new(Arc::new(Session::for_tests(
+            site(&server.url),
+            DiskCache::Off,
+        )))
+    }
+
+    #[test]
+    fn announcements_read_the_table_and_skip_undated_rows() {
+        let rows = parse_announcements(&serde_json::from_str(ANNOUNCEMENTS).unwrap()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].code, "500325");
+        assert_eq!(rows[0].category, "Result");
+        assert_eq!(rows[0].date.to_string(), "2025-10-17");
+        assert_eq!(
+            rows[0].attachment.as_deref(),
+            Some("https://www.bseindia.com/xml-data/corpfiling/AttachLive/abc-123.pdf")
+        );
+        assert_eq!(rows[1].headline, "Board Meeting Intimation");
+        assert_eq!(rows[1].attachment, None);
+        assert!(parse_announcements(&serde_json::json!({"rows": []})).is_err());
+    }
+
+    #[tokio::test]
+    async fn results_ask_for_the_result_category_of_one_scrip() {
+        let server = MockServer::start(vec![(200, ANNOUNCEMENTS.into())]).await;
+        let rows = bse_at(&server)
+            .announcements("500325.BO", 90, true)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let target = &server.requests()[0].target;
+        assert!(target.starts_with("/AnnGetData/w?"));
+        assert!(target.contains("strCat=Result"));
+        assert!(target.contains("strScrip=500325"));
+    }
+
+    #[tokio::test]
+    async fn a_group_lists_its_members_as_bo_symbols() {
+        let server = MockServer::start(vec![(
+            200,
+            include_str!("fixtures/bse_scrip_list.json").into(),
+        )])
+        .await;
+        let bse = bse_at(&server);
+        let members = bse.group_members("a").await.unwrap();
+        assert_eq!(members[0], "RELIANCE.BO");
+        assert!(server.requests()[0].target.contains("Group=A"));
+        assert!(bse.group_members("A; drop").await.is_err());
     }
 }

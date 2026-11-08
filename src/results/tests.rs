@@ -836,3 +836,76 @@ async fn saved_symbols_are_not_resolved_again() {
     .unwrap();
     assert_eq!(c.symbol, "AAPL");
 }
+
+#[tokio::test]
+async fn results_fall_back_to_keyed_providers_when_yahoo_has_no_statements() {
+    use crate::providers::{Provider, ProviderKind, router::Router};
+    // Yahoo answers the quote only: statements and earnings 404.
+    let yahoo = crate::testutil::MockServer::start_routed(vec![(
+        "/v7/finance/quote",
+        json!({"quoteResponse": {"result": [{
+            "symbol": "AAPL", "quoteType": "EQUITY", "longName": "Apple Inc.",
+            "currency": "USD", "regularMarketPrice": 260.0, "marketCap": 3.9e12
+        }]}})
+        .to_string(),
+    )])
+    .await;
+    let income = json!([
+        {"date": "2025-06-28", "period": "Q3", "reportedCurrency": "USD", "revenue": 94036.0, "netIncome": 23434.0, "epsDiluted": 1.57},
+        {"date": "2025-09-27", "period": "Q4", "reportedCurrency": "USD", "revenue": 102466.0, "netIncome": 27466.0, "epsDiluted": 1.85},
+        {"date": "2025-09-27", "period": "FY", "reportedCurrency": "USD", "revenue": 416161.0, "netIncome": 112010.0}
+    ]);
+    let fmp = crate::testutil::MockServer::start_routed(vec![
+        ("/income-statement", income.to_string()),
+        ("/balance-sheet-statement", "[]".into()),
+        ("/cash-flow-statement", "[]".into()),
+    ])
+    .await;
+    let finnhub = crate::testutil::MockServer::start_routed(vec![
+        ("/stock/profile2", r#"{"name":"Apple Inc"}"#.into()),
+        ("/stock/recommendation", "[]".into()),
+        (
+            "/stock/earnings",
+            r#"[{"actual":1.85,"estimate":1.7,"period":"2025-09-30","surprisePercent":8.8}]"#
+                .into(),
+        ),
+    ])
+    .await;
+    let router = Router::new(vec![
+        Provider::new(ProviderKind::Fmp, "k".into(), Some(fmp.url.clone())),
+        Provider::new(ProviderKind::Finnhub, "k".into(), Some(finnhub.url.clone())),
+    ]);
+    let client = client_for(&yahoo.url).with_router(router);
+    let c = collect(&client, "AAPL", Market::Us, None, false, true)
+        .await
+        .unwrap();
+    assert_eq!(c.quarterly.len(), 2);
+    assert_eq!(c.annual.len(), 1);
+    assert_eq!(c.currency.as_deref(), Some("USD"));
+    assert!(
+        c.sources
+            .iter()
+            .any(|s| s.contains("Financial Modeling Prep"))
+    );
+    assert!(
+        c.sources
+            .iter()
+            .any(|s| s.contains("Finnhub earnings surprises"))
+    );
+    let s = c.quarterly[1].surprise.as_ref().expect("surprise attached");
+    assert_eq!(s.outcome, "beat");
+}
+
+#[tokio::test]
+async fn results_error_stays_the_yahoo_one_without_keyed_providers() {
+    let yahoo = crate::testutil::MockServer::start_routed(vec![(
+        "/v7/finance/quote",
+        quote_body("Technology", "Software"),
+    )])
+    .await;
+    let client = client_for(&yahoo.url);
+    let err = collect(&client, "HDFCBANK", Market::In, None, false, true)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("Yahoo financial statements unavailable"));
+}

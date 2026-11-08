@@ -18,14 +18,25 @@
 //! | NSE website   | `nse`                     | — (no key)            | NSE stocks (`.NS`), NSE indices |
 //! | BSE website   | `bse`                     | — (no key)            | BSE stocks (`.BO`, scrip codes) |
 //! | NSE + BSE     | `exchange`                | — (no key)            | `.NS` and NSE indices on NSE, `.BO` on BSE |
+//! | Finnhub       | `finnhub`                 | `FINNHUB_API_KEY`     | US quotes, profile, analyst trend, surprises |
+//! | FMP           | `fmp`                     | `FMP_API_KEY`         | quotes, profile, statements, screener |
+//!
+//! Beyond `STOCKWISE_DATA_PROVIDER`, [`router::Router`] routes each
+//! capability (quote, fundamentals, statements, screener) to the best
+//! configured provider, falling back down the list and merging fields, with
+//! `meta.sources` naming every contributor. Finnhub and FMP join it whenever
+//! their key variable is set.
 //!
 //! The exchange providers read the JSON endpoints behind nseindia.com and
 //! bseindia.com through one polite session per site (`session.rs`).
 
 pub mod alphavantage;
 pub mod bse;
+pub mod finnhub;
+pub mod fmp;
 pub mod massive;
 pub mod nse;
+pub mod router;
 pub mod session;
 pub mod twelvedata;
 
@@ -58,6 +69,51 @@ pub trait MarketData {
 
     /// Find symbols by name or ticker.
     fn search(&self, query: &str) -> impl Future<Output = Result<Vec<SearchResult>>> + Send;
+
+    /// What this source can be asked for; the router only calls the methods
+    /// below on a source that lists the matching capability.
+    fn capabilities(&self) -> &'static [router::Capability] {
+        &[
+            router::Capability::Quote,
+            router::Capability::Chart,
+            router::Capability::Search,
+        ]
+    }
+
+    /// Company profile: name, market cap, sector, industry.
+    fn profile(
+        &self,
+        _symbol: &str,
+    ) -> impl Future<Output = Result<Option<router::Profile>>> + Send {
+        std::future::ready(Err(anyhow::anyhow!(
+            "{} has no company profiles",
+            self.name()
+        )))
+    }
+
+    /// Profile, analyst recommendation trend and earnings surprises.
+    fn fundamentals(
+        &self,
+        _symbol: &str,
+    ) -> impl Future<Output = Result<Option<router::Fundamentals>>> + Send {
+        std::future::ready(Err(anyhow::anyhow!("{} has no fundamentals", self.name())))
+    }
+
+    /// Quarterly and annual statements, oldest first.
+    fn statements(
+        &self,
+        _symbol: &str,
+    ) -> impl Future<Output = Result<crate::results::Statements>> + Send {
+        std::future::ready(Err(anyhow::anyhow!("{} has no statements", self.name())))
+    }
+
+    /// Companies matching a screen, as quotes.
+    fn screener(
+        &self,
+        _query: &router::ScreenQuery,
+    ) -> impl Future<Output = Result<Vec<Quote>>> + Send {
+        std::future::ready(Err(anyhow::anyhow!("{} has no screener", self.name())))
+    }
 }
 
 /// The alternative providers. Yahoo is not listed: it is the default.
@@ -66,6 +122,10 @@ pub enum ProviderKind {
     AlphaVantage,
     Massive,
     TwelveData,
+    /// Finnhub (`FINNHUB_API_KEY`).
+    Finnhub,
+    /// Financial Modeling Prep (`FMP_API_KEY`).
+    Fmp,
     /// NSE's website (no key).
     Nse,
     /// BSE's website (no key).
@@ -85,6 +145,8 @@ impl ProviderKind {
             "alphavantage" | "av" => Some(ProviderKind::AlphaVantage),
             "massive" | "polygon" | "polygonio" => Some(ProviderKind::Massive),
             "twelvedata" | "12data" => Some(ProviderKind::TwelveData),
+            "finnhub" => Some(ProviderKind::Finnhub),
+            "fmp" | "financialmodelingprep" => Some(ProviderKind::Fmp),
             "nse" | "nseindia" => Some(ProviderKind::Nse),
             "bse" | "bseindia" => Some(ProviderKind::Bse),
             "exchange" | "exchanges" | "nsebse" | "nse+bse" => Some(ProviderKind::Exchange),
@@ -97,6 +159,8 @@ impl ProviderKind {
             ProviderKind::AlphaVantage => "Alpha Vantage",
             ProviderKind::Massive => "Massive (Polygon.io)",
             ProviderKind::TwelveData => "Twelve Data",
+            ProviderKind::Finnhub => "Finnhub",
+            ProviderKind::Fmp => "Financial Modeling Prep",
             ProviderKind::Nse => "NSE",
             ProviderKind::Bse => "BSE",
             ProviderKind::Exchange => "NSE + BSE",
@@ -110,6 +174,8 @@ impl ProviderKind {
             ProviderKind::AlphaVantage => &["ALPHAVANTAGE_API_KEY", "ALPHA_VANTAGE_API_KEY"],
             ProviderKind::Massive => &["MASSIVE_API_KEY", "POLYGON_API_KEY"],
             ProviderKind::TwelveData => &["TWELVEDATA_API_KEY", "TWELVE_DATA_API_KEY"],
+            ProviderKind::Finnhub => &["FINNHUB_API_KEY"],
+            ProviderKind::Fmp => &["FMP_API_KEY"],
             ProviderKind::Nse | ProviderKind::Bse | ProviderKind::Exchange => &[],
         }
     }
@@ -139,6 +205,12 @@ impl ProviderKind {
             ProviderKind::AlphaVantage => (4, Duration::from_secs(17_280)),
             ProviderKind::Massive => (5, MINUTE),
             ProviderKind::TwelveData => (8, MINUTE),
+            // Free plan: 60 calls a minute.
+            ProviderKind::Finnhub => (60, MINUTE),
+            // Free plan: 250 calls a day, so 16 every 2 hours: even a burst at
+            // the end of one window and the start of the next stays under it
+            // (13 windows touch any 24 hours: 208).
+            ProviderKind::Fmp => (16, Duration::from_secs(7_200)),
             ProviderKind::Nse => (nse::QUOTE_BATCH, MINUTE),
             ProviderKind::Bse => (bse::QUOTE_BATCH, MINUTE),
             ProviderKind::Exchange => (nse::QUOTE_BATCH, MINUTE),
@@ -154,6 +226,8 @@ impl ProviderKind {
             ProviderKind::AlphaVantage => Some(140),
             ProviderKind::Massive => Some(730),
             ProviderKind::TwelveData => None,
+            // Neither serves charts (see `capabilities`).
+            ProviderKind::Finnhub | ProviderKind::Fmp => Some(0),
             ProviderKind::Nse | ProviderKind::Exchange => Some(nse::HISTORY_DAYS),
             ProviderKind::Bse => Some(bse::HISTORY_DAYS),
         }
@@ -214,6 +288,8 @@ pub enum Provider {
     AlphaVantage(alphavantage::AlphaVantage),
     Massive(massive::Massive),
     TwelveData(twelvedata::TwelveData),
+    Finnhub(finnhub::Finnhub),
+    Fmp(fmp::Fmp),
     Nse(nse::Nse),
     Bse(bse::Bse),
     Exchange(Exchange),
@@ -264,6 +340,10 @@ impl Provider {
             ProviderKind::TwelveData => {
                 Provider::TwelveData(twelvedata::TwelveData::new(http(twelvedata::BASE_URL)))
             }
+            ProviderKind::Finnhub => {
+                Provider::Finnhub(finnhub::Finnhub::new(http(finnhub::BASE_URL)))
+            }
+            ProviderKind::Fmp => Provider::Fmp(fmp::Fmp::new(http(fmp::BASE_URL))),
             ProviderKind::Nse => Provider::Nse(nse()),
             ProviderKind::Bse => Provider::Bse(bse()),
             ProviderKind::Exchange => Provider::Exchange(Exchange {
@@ -279,6 +359,8 @@ impl Provider {
             Provider::AlphaVantage(p) => Some(&p.http),
             Provider::Massive(p) => Some(&p.http),
             Provider::TwelveData(p) => Some(&p.http),
+            Provider::Finnhub(p) => Some(&p.http),
+            Provider::Fmp(p) => Some(&p.http),
             Provider::Nse(_) | Provider::Bse(_) | Provider::Exchange(_) => None,
         }
     }
@@ -291,6 +373,8 @@ impl Provider {
             Provider::AlphaVantage(p) => p.http.kind,
             Provider::Massive(p) => p.http.kind,
             Provider::TwelveData(p) => p.http.kind,
+            Provider::Finnhub(p) => p.http.kind,
+            Provider::Fmp(p) => p.http.kind,
         }
     }
 
@@ -301,6 +385,8 @@ impl Provider {
             Provider::AlphaVantage(p) => p.http.cache = Some(cache),
             Provider::Massive(p) => p.http.cache = Some(cache),
             Provider::TwelveData(p) => p.http.cache = Some(cache),
+            Provider::Finnhub(p) => p.http.cache = Some(cache),
+            Provider::Fmp(p) => p.http.cache = Some(cache),
             Provider::Nse(p) => p.session().set_cache(cache),
             Provider::Bse(p) => p.session().set_cache(cache),
             Provider::Exchange(p) => {
@@ -317,6 +403,8 @@ impl Provider {
             Provider::AlphaVantage(_) => alphavantage::target(symbol).is_some(),
             Provider::Massive(_) => massive::ticker(symbol).is_some(),
             Provider::TwelveData(_) => twelvedata::target(symbol).is_some(),
+            Provider::Finnhub(_) => finnhub::ticker(symbol).is_some(),
+            Provider::Fmp(_) => fmp::ticker(symbol).is_some(),
             Provider::Nse(p) => p.supports(symbol),
             Provider::Bse(p) => p.supports(symbol),
             Provider::Exchange(p) => p.nse.supports(symbol) || p.bse.supports(symbol),
@@ -352,6 +440,8 @@ impl Provider {
                 (ns.is_empty() || p.nse.quote_cost(&ns) <= p.nse.remaining())
                     && (bo.is_empty() || p.bse.quote_cost(&bo) <= p.bse.remaining())
             }
+            // One batch request prices every symbol.
+            Provider::Fmp(_) => self.remaining() >= 1,
             _ => symbols.len() as u32 <= self.remaining(),
         }
     }
@@ -387,6 +477,13 @@ impl MarketData for Provider {
             Provider::Nse(p) => return p.quotes(symbols).await,
             Provider::Bse(p) => return p.quotes(symbols).await,
             Provider::Exchange(p) => return p.quotes(symbols).await,
+            Provider::Fmp(p) => {
+                let mut quotes = p.quotes(symbols).await?;
+                quotes
+                    .iter_mut()
+                    .for_each(|q| q.data_source = Some(self.name().to_string()));
+                return Ok(quotes);
+            }
             _ => {}
         }
         let mut out = Vec::new();
@@ -395,7 +492,10 @@ impl MarketData for Provider {
                 Provider::AlphaVantage(p) => p.quote(symbol).await,
                 Provider::Massive(p) => p.quote(symbol).await,
                 Provider::TwelveData(p) => p.quote(symbol).await,
-                Provider::Nse(_) | Provider::Bse(_) | Provider::Exchange(_) => unreachable!(),
+                Provider::Finnhub(p) => p.quote(symbol).await,
+                Provider::Nse(_) | Provider::Bse(_) | Provider::Exchange(_) | Provider::Fmp(_) => {
+                    unreachable!()
+                }
             };
             match quote {
                 Ok(Some(mut q)) => {
@@ -432,6 +532,9 @@ impl MarketData for Provider {
                 return p.nse.chart(symbol, range, interval).await;
             }
             Provider::Exchange(p) => return p.bse.chart(symbol, range, interval).await,
+            Provider::Finnhub(_) | Provider::Fmp(_) => {
+                bail!("{} serves no price history", self.name());
+            }
             _ => {}
         }
         let Some(step) = Resample::for_interval(interval) else {
@@ -453,7 +556,11 @@ impl MarketData for Provider {
             Provider::AlphaVantage(p) => p.daily(symbol, start).await?,
             Provider::Massive(p) => p.daily(symbol, start).await?,
             Provider::TwelveData(p) => p.daily(symbol, start).await?,
-            Provider::Nse(_) | Provider::Bse(_) | Provider::Exchange(_) => unreachable!(),
+            Provider::Nse(_)
+            | Provider::Bse(_)
+            | Provider::Exchange(_)
+            | Provider::Finnhub(_)
+            | Provider::Fmp(_) => unreachable!(),
         };
         let series = series.since(start);
         if !series.covers(start) {
@@ -475,6 +582,49 @@ impl MarketData for Provider {
             Provider::Nse(p) => p.search(query).await,
             Provider::Bse(p) => p.search(query).await,
             Provider::Exchange(p) => p.search(query).await,
+            Provider::Finnhub(_) | Provider::Fmp(_) => {
+                bail!("{} does not search symbols", self.name())
+            }
+        }
+    }
+
+    fn capabilities(&self) -> &'static [router::Capability] {
+        self.kind().capabilities()
+    }
+
+    async fn profile(&self, symbol: &str) -> Result<Option<router::Profile>> {
+        match self {
+            Provider::Finnhub(p) => p.profile(symbol).await,
+            Provider::Fmp(p) => p.profile(symbol).await,
+            _ => bail!("{} has no company profiles", self.name()),
+        }
+    }
+
+    async fn fundamentals(&self, symbol: &str) -> Result<Option<router::Fundamentals>> {
+        match self {
+            Provider::Finnhub(p) => p.fundamentals(symbol).await,
+            Provider::Fmp(p) => Ok(p
+                .profile(symbol)
+                .await?
+                .map(|profile| router::Fundamentals {
+                    profile: Some(profile),
+                    ..Default::default()
+                })),
+            _ => bail!("{} has no fundamentals", self.name()),
+        }
+    }
+
+    async fn statements(&self, symbol: &str) -> Result<crate::results::Statements> {
+        match self {
+            Provider::Fmp(p) => p.statements(symbol).await,
+            _ => bail!("{} has no statements", self.name()),
+        }
+    }
+
+    async fn screener(&self, query: &router::ScreenQuery) -> Result<Vec<Quote>> {
+        match self {
+            Provider::Fmp(p) => p.screener(query).await,
+            _ => bail!("{} has no screener", self.name()),
         }
     }
 }
@@ -1422,6 +1572,31 @@ mod tests {
     }
 
     // The provider's own limit is 25 a day.
+    #[test]
+    fn fmp_never_exceeds_250_requests_in_any_24_hours() {
+        let (limit, window) = ProviderKind::Fmp.allowance();
+        let worst = worst_case_per_day(limit, window);
+        assert!(worst <= 250, "{worst} requests in 24 h");
+    }
+
+    #[test]
+    fn finnhub_and_fmp_are_named_by_provider_and_key() {
+        assert_eq!(ProviderKind::parse("Finnhub"), Some(ProviderKind::Finnhub));
+        assert_eq!(
+            ProviderKind::parse("financial-modeling-prep"),
+            Some(ProviderKind::Fmp)
+        );
+        assert_eq!(ProviderKind::Finnhub.key_env(), "FINNHUB_API_KEY");
+        assert_eq!(ProviderKind::Fmp.key_env(), "FMP_API_KEY");
+        assert!(matches!(
+            Selection::from_lookup(|k| match k {
+                "STOCKWISE_DATA_PROVIDER" => Some("fmp".into()),
+                _ => None,
+            }),
+            Selection::MissingKey(ProviderKind::Fmp)
+        ));
+    }
+
     #[test]
     fn alpha_vantage_never_exceeds_25_requests_in_any_24_hours() {
         let (limit, window) = ProviderKind::AlphaVantage.allowance();

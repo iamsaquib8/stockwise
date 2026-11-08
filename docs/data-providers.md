@@ -23,6 +23,8 @@ stockwise quote AAPL -m us  # ends with "Data: Twelve Data"
 | NSE website | `nse` | — | unofficial; ≤3 requests/s | NSE stocks (`.NS`) and NSE indices (`^NSEI`, `^NSEBANK`, ...) — see [NSE and BSE](#nse-and-bse) |
 | BSE website | `bse` | — | unofficial; ≤3 requests/s | BSE stocks (`RELIANCE.BO`, `500325.BO`) |
 | NSE + BSE | `exchange` | — | as above | `.NS` and NSE indices from NSE, `.BO` from BSE, everything else from Yahoo |
+| Finnhub | `finnhub` | `FINNHUB_API_KEY` | 60 calls/min | US quotes, company profile (market cap, industry), analyst recommendation trends, earnings surprises — see [Backup providers](#backup-providers-finnhub-and-fmp) |
+| Financial Modeling Prep | `fmp` | `FMP_API_KEY` | 250 calls/day; mostly US listings | Quotes (one request for a whole list), company profile, quarterly and annual income / balance-sheet / cash-flow statements, company screener |
 
 Free-tier limits are the providers' own and change over time; check their
 pricing pages. Twelve Data's free plan is licensed for internal, non-display
@@ -120,6 +122,63 @@ the built-in lists stand in.
 The fields StockWise reads from each endpoint, and how to record a fresh
 response for a test fixture, are in
 [exchange-responses.md](exchange-responses.md).
+
+## Backup providers (Finnhub and FMP)
+
+Set a key and the provider joins a **router** that backs Yahoo up — no
+`STOCKWISE_DATA_PROVIDER` needed (name one there and it becomes the primary
+provider instead):
+
+```bash
+export FINNHUB_API_KEY=...   # US quotes, profile, analyst trend, earnings surprises
+export FMP_API_KEY=...       # quotes, statements, screener
+stockwise doctor             # "Backup providers: Finnhub answered for AAPL (210 ms)"
+stockwise config show        # finnhub_api_key (set) — the value is never shown
+```
+
+Keys stay in the environment. They are sent in a header (Finnhub) or added to
+the request when it is sent (FMP), and never reach a cache key, a log line or
+an error message.
+
+Each capability goes to the best configured provider that covers the symbol
+and still has calls left in its free-tier window, then down the list:
+
+| Capability | Order | Used by |
+|---|---|---|
+| Quote | Finnhub, then FMP for one to five symbols; FMP first for longer lists (one batch request) | `quote`, scans and every command that quotes, **when Yahoo fails or lacks a symbol** |
+| Fundamentals (profile, analyst trend, surprises) | Finnhub, FMP | missing market cap on a short quote list; earnings surprises in `results` when Yahoo has none |
+| Statements (quarterly, annual) | FMP | `results`, when Yahoo's statements are unavailable |
+| Screener | FMP | US scans (`movers`, `screen`, `heatmap`, `--cap`) when Yahoo fails: FMP lists the companies, the keyed providers price them |
+| Chart, search | — | stay with Yahoo and the primary provider |
+
+**Field-level merge.** When two sources each supply part of a quote — Finnhub
+the price, FMP the market cap, or Yahoo the price and Finnhub's profile the
+market cap — the first source to answer keeps its fields and the others fill
+only what is empty. `--json` quotes then carry `meta.sources`, in the order
+the sources answered: `{"meta": {"sources": ["Yahoo Finance", "Finnhub"]}}`.
+Quotes Yahoo answered completely cost no backup request and carry no `meta`.
+Only lists of ten symbols or fewer get holes filled (one extra request each);
+bigger tables stay as the first source gave them, so one table never burns a
+free tier.
+
+**Free-tier windows.** Finnhub gets 60 calls a minute; FMP gets 16 every two
+hours (its 250 a day, with room for two windows to touch). A provider with no
+calls left in its window is skipped for the next one, not waited for. A rate
+limit or refused key pauses the provider and prints one `ⓘ` notice.
+
+**Built from documentation.** The Finnhub and FMP clients follow the
+providers' documented response formats (Finnhub `/quote`, `/stock/profile2`,
+`/stock/recommendation`, `/stock/earnings`; FMP's `stable` API:
+`batch-quote`, `profile`, `income-statement`, `balance-sheet-statement`,
+`cash-flow-statement`, `company-screener`). They are tested against recorded
+shapes, not against the live services. Free plans do not reach every
+exchange or endpoint; a refused request falls through to the next source.
+
+**BSE filings.** The BSE provider also reads a scrip's corporate
+announcements and quarterly-result filings (`AnnGetData`) and the members of a
+BSE group (`ListofScripData` with `Group`). These follow the format
+open-source BSE clients read and are unconfirmed against the live site. BSE 500
+snapshots are not read yet.
 
 ## Limits and fallback
 
