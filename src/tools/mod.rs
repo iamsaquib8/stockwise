@@ -753,6 +753,49 @@ pub const TOOLS: &[Tool] = &[
         personal: true,
     },
     Tool {
+        name: "portfolio_sell_preview",
+        title: "Pre-sell FIFO lot & tax preview",
+        description: "Preview departing FIFO lots, exact STCG/LTCG tax + cess, remaining ₹1.25L \
+                      Sec. 112A exemption, LTCG countdown alert, and mutual fund exit-load window \
+                      without modifying the portfolio.",
+        params: &[
+            req(
+                "symbol",
+                Kind::Str,
+                "Holding ticker (e.g. TCS.NS, AAPL, MF:118955)",
+            ),
+            req(
+                "shares",
+                Kind::Number {
+                    min: 0.0001,
+                    max: 1e9,
+                },
+                "Number of shares or mutual fund units to sell",
+            ),
+            opt(
+                "price",
+                Kind::Number {
+                    min: 0.01,
+                    max: 1e9,
+                },
+                "Sale price per share (default: live market price or NAV)",
+            ),
+            opt("date", Kind::Str, "Sale date, YYYY-MM-DD (default: today)"),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "mf_bleed",
+        title: "Mutual fund commission bleed & switch analyzer",
+        description: "Analyze held Regular mutual funds against their Direct twin schemes: TER \
+                      gap from AMFI disclosures, annual commission bleed (₹/year), 10-year \
+                      compounded wealth drag, and FIFO tax-free switch breakdown with remaining \
+                      ₹1.25L LTCG exemption.",
+        params: &[MARKET],
+        personal: true,
+    },
+    Tool {
         name: "calendar",
         title: "Results and dividends calendar",
         description: "Upcoming results dates, ex-dividend dates and splits for given tickers, or \

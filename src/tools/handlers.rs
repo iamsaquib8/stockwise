@@ -67,6 +67,8 @@ pub(super) async fn run<D: DataSource>(
         "harvest" => harvest(src, m).await,
         "rebalance" => rebalance(src, a, m).await,
         "portfolio_pme" => portfolio_pme(src, a, m).await,
+        "portfolio_sell_preview" => portfolio_sell_preview(src, a, m).await,
+        "mf_bleed" => mf_bleed(src).await,
         "calendar" => calendar(src, a, m).await,
         "ipo_board" => ipo_board(src, a).await,
         "ipo_analyze" => ipo_analyze(src, a).await,
@@ -667,6 +669,49 @@ async fn portfolio_pme(src: &impl DataSource, a: &Args, m: Market) -> Result<Val
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let report =
         commands::portfolio_pme_report(src, &p, a.str("benchmark"), m, a.str("base")).await?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn portfolio_sell_preview(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let sym = a.need_str("symbol")?;
+    let shares = a.need_f64("shares")?;
+    let price = a.f64("price");
+    let date = a.str("date");
+    let report = commands::compute_sell_preview(&p, sym, shares, price, date, m).await?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn mf_bleed(src: &impl DataSource) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let (schemes, ter) = tokio::join!(crate::funds::load_amfi(), crate::funds::load_ter());
+    let schemes = schemes?;
+    let ter_table = ter.ok();
+    let today = chrono::Local::now().date_naive();
+
+    let (year_start, year_end) = crate::tax::Country::India.tax_year(today);
+    let mut realized_ltcg = 0.0;
+    for s in p.realized.iter().filter(|s| {
+        crate::portfolio::parse_date(&s.sell_date).is_ok_and(|d| d >= year_start && d <= year_end)
+    }) {
+        if let (Ok(b), Ok(d)) = (
+            crate::portfolio::parse_date(&s.buy_date),
+            crate::portfolio::parse_date(&s.sell_date),
+        ) && crate::tax::Country::India.is_long_term(b, d)
+            && s.gain() > 0.0
+        {
+            realized_ltcg += s.gain();
+        }
+    }
+    let remaining_exemption = (125_000.0 - realized_ltcg).max(0.0);
+
+    let report = crate::mf_bleed::compute_mf_bleed(
+        &p,
+        &schemes,
+        ter_table.as_ref(),
+        today,
+        remaining_exemption,
+    );
     Ok(serde_json::to_value(report)?)
 }
 

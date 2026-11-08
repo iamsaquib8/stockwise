@@ -4,6 +4,8 @@
 
 use super::*;
 use crate::funds::{self, Scheme, SchemeTer, TerTable};
+use crate::portfolio as pf;
+use crate::tax;
 
 /// How `mf screen` filters plans.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -939,6 +941,154 @@ pub async fn cmd_mf_overlap(a: &str, b: &str, market: Market, json: bool) -> Res
     );
     println!();
     Ok(())
+}
+
+pub async fn cmd_mf_bleed(out: Format) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let (schemes, ter) = tokio::join!(funds::load_amfi(), funds::load_ter());
+    let schemes = schemes?;
+    let ter_table = ter.ok();
+    let today = chrono::Local::now().date_naive();
+
+    let (year_start, year_end) = tax::Country::India.tax_year(today);
+    let mut realized_ltcg = 0.0;
+    for s in portfolio
+        .realized
+        .iter()
+        .filter(|s| pf::parse_date(&s.sell_date).is_ok_and(|d| d >= year_start && d <= year_end))
+    {
+        if let (Ok(b), Ok(d)) = (pf::parse_date(&s.buy_date), pf::parse_date(&s.sell_date))
+            && tax::Country::India.is_long_term(b, d)
+            && s.gain() > 0.0
+        {
+            realized_ltcg += s.gain();
+        }
+    }
+    let remaining_exemption = (125_000.0 - realized_ltcg).max(0.0);
+
+    let report = crate::mf_bleed::compute_mf_bleed(
+        &portfolio,
+        &schemes,
+        ter_table.as_ref(),
+        today,
+        remaining_exemption,
+    );
+
+    match out {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Csv => println!("{}", output::to_csv(&report.schemes)?),
+        Format::Table => print_mf_bleed_table(&report, remaining_exemption),
+    }
+    Ok(())
+}
+
+fn print_mf_bleed_table(report: &crate::mf_bleed::MfBleedReport, remaining_exemption: f64) {
+    println!();
+    println!(
+        "  {} Regular vs Direct Mutual Fund Commission Bleed",
+        "→".cyan()
+    );
+    println!();
+    if report.schemes.is_empty() {
+        println!(
+            "  {} No Regular mutual fund schemes found in your portfolio.",
+            "✓".green()
+        );
+        println!(
+            "    All mutual fund holdings are already in Direct plans (0% trail commission bleed)!"
+        );
+        println!();
+        return;
+    }
+
+    println!(
+        "  {:<36}  {:>7}  {:>7}  {:>7}  {:>12}  {:>11}  {:>11}",
+        "Regular Scheme", "Reg TER", "Dir TER", "TER Gap", "Value", "₹ Bleed/Yr", "10Y Drag"
+    );
+    println!("  {}", "─".repeat(95));
+    for s in &report.schemes {
+        let name_trunc = if s.regular_name.len() > 34 {
+            format!("{}…", &s.regular_name[..33])
+        } else {
+            s.regular_name.clone()
+        };
+        println!(
+            "  {:<36}  {:>6.2}%  {:>6.2}%  {:>6.2}%  {:>12}  {:>11}  {:>11}",
+            name_trunc,
+            s.regular_ter_pct,
+            s.direct_ter_pct,
+            s.ter_gap_pct,
+            format_price(s.current_value, Some("INR")),
+            format_price(s.annual_bleed, Some("INR")).red(),
+            format_price(s.ten_year_drag, Some("INR")).yellow()
+        );
+        if let Some(ref d_name) = s.direct_name {
+            println!(
+                "    ↳ Direct twin: {} (MF:{})",
+                d_name.dimmed(),
+                s.direct_code.unwrap_or(0)
+            );
+        }
+        if s.tax_free_switch_units > 0.0 {
+            println!(
+                "    {} Tax-Free Switch: {} units ({}) can be switched today with ₹0 tax (Sec. 112A).",
+                "✓".green(),
+                s.tax_free_switch_units,
+                format_price(s.tax_free_switch_value, Some("INR"))
+            );
+        }
+        if s.units_locked_stcg > 0.0 {
+            let days_hint = s
+                .days_to_stcg_unlock
+                .map_or(String::new(), |d| format!(" (in {} days)", d));
+            let unlock_date_str = s.earliest_stcg_unlock_date.as_deref().unwrap_or("later");
+            println!(
+                "    {} Locked in STCG: {} units turn Long-Term on {}{}.",
+                "·".dimmed(),
+                s.units_locked_stcg,
+                unlock_date_str,
+                days_hint
+            );
+            if let Some(be) = s.breakeven_months_early_switch {
+                println!(
+                    "      Early switch breakeven: {:.1} months of commission savings pays off the STCG tax.",
+                    be
+                );
+            }
+        }
+    }
+    println!("  {}", "─".repeat(95));
+    println!();
+    print_kv(
+        "Total Regular MF Value",
+        &format_price(report.total_regular_value, Some("INR")),
+    );
+    print_kv(
+        "Total Annual Commission Bleed",
+        &format_price(report.total_annual_bleed, Some("INR"))
+            .red()
+            .bold()
+            .to_string(),
+    );
+    print_kv(
+        "Total 10-Year Compounded Drag",
+        &format_price(report.total_10y_drag, Some("INR"))
+            .yellow()
+            .bold()
+            .to_string(),
+    );
+    print_kv(
+        "Available ₹0 Tax Switch Capacity",
+        &format_price(report.total_tax_free_switch_value, Some("INR"))
+            .green()
+            .bold()
+            .to_string(),
+    );
+    print_kv(
+        "Remaining Sec. 112A LTCG Exemption",
+        &format_price(remaining_exemption, Some("INR")),
+    );
+    println!();
 }
 
 #[cfg(test)]

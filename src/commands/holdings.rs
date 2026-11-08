@@ -628,105 +628,168 @@ pub(super) fn sheet_has_header(source: &str, csv: &str) -> bool {
     }
 }
 
+fn run_casparser_pdf(pdf_path: &std::path::Path, password: Option<&str>) -> Result<String> {
+    let check = std::process::Command::new("casparser")
+        .arg("--version")
+        .output();
+    if check.is_err() {
+        bail!(
+            "Password-protected PDF statements require `casparser`.\n\n\
+             To import this file, convert it or pipe directly to stockwise:\n  \
+             casparser \"{}\" -p \"<PASSWORD>\" -o json | stockwise import cas -\n\n\
+             Or install casparser on your PATH:\n  \
+             pip install casparser   (or: pipx install casparser)",
+            pdf_path.display()
+        );
+    }
+
+    let pass = match password {
+        Some(p) => p.to_string(),
+        None => std::env::var("STOCKWISE_CAS_PASSWORD").unwrap_or_default(),
+    };
+    if pass.is_empty() {
+        bail!(
+            "PDF CAS is password-protected. Provide --password <PASSWORD> (e.g. your PAN in uppercase or DOB) or set STOCKWISE_CAS_PASSWORD"
+        );
+    }
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_json = tmp_dir.join(format!("stockwise_cas_{}.json", std::process::id()));
+    let status = std::process::Command::new("casparser")
+        .arg(pdf_path)
+        .arg("-p")
+        .arg(&pass)
+        .arg("-o")
+        .arg(&tmp_json)
+        .output()
+        .with_context(|| "Failed to execute casparser")?;
+
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        let _ = std::fs::remove_file(&tmp_json);
+        bail!("casparser failed to parse PDF: {}\n{}", stderr, stdout);
+    }
+
+    let json_content = std::fs::read_to_string(&tmp_json)
+        .with_context(|| format!("Failed to read casparser output {}", tmp_json.display()))?;
+    let _ = std::fs::remove_file(&tmp_json);
+    Ok(json_content)
+}
+
 pub async fn cmd_import(
     source: &str,
     file: &str,
     replace: bool,
     sheet: Option<&str>,
+    password: Option<&str>,
     market: Market,
 ) -> Result<()> {
-    let path = std::path::Path::new(file);
-    if !path.exists() {
-        println!();
-        println!("  {} How to export your holdings:", "→".cyan());
-        match source {
-            "kite" | "zerodha" => {
-                println!(
-                    "    1. Login to {} → Portfolio → Holdings",
-                    "kite.zerodha.com".cyan()
-                );
-                println!(
-                    "    2. Click the {} icon (top-right of holdings table)",
-                    "download/export".bold()
-                );
-                println!("    3. Save the CSV file");
-                println!("    4. Run: stockwise import kite <path-to-file.csv>");
-            }
-            "indmoney" => {
-                println!("    1. Open {} app → Portfolio → Stocks", "IndMoney".cyan());
-                println!(
-                    "    2. Tap {} → Download Statement / Export",
-                    "⋮ (menu)".bold()
-                );
-                println!("    3. Save the CSV/Excel file");
-                println!("    4. Run: stockwise import indmoney <path-to-file.csv>");
-            }
-            "groww" => {
-                println!("    1. Open {} → Stocks → Holdings", "groww.in".cyan());
-                println!(
-                    "    2. Click {} to get the holdings statement (.xlsx or .csv)",
-                    "Download".bold()
-                );
-                println!("    3. Run: stockwise import groww <path-to-file.xlsx>");
-            }
-            "upstox" => {
-                println!(
-                    "    1. Open {} → Portfolio → Holdings",
-                    "pro.upstox.com".cyan()
-                );
-                println!(
-                    "    2. Click {} and save the .xlsx or .csv file",
-                    "Download".bold()
-                );
-                println!("    3. Run: stockwise import upstox <path-to-file.xlsx>");
-            }
-            "cas" => {
-                println!(
-                    "    1. Request a detailed CAS from {} or {} (emailed as a password-protected PDF)",
-                    "camsonline.com".cyan(),
-                    "kfintech.com".cyan()
-                );
-                println!(
-                    "    2. Convert it with casparser: {}",
-                    "pip install casparser && casparser CAS.pdf -p <password> -o cas.json".bold()
-                );
-                println!("    3. Run: stockwise import cas cas.json");
-            }
-            _ => {
-                println!("    Provide a CSV with columns: Symbol, Quantity, Average Price");
-                println!("    Run: stockwise import csv <path-to-file.csv>");
-            }
-        }
-        bail!("File not found: {}", file);
-    }
-
-    let raw_bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", file))?;
-    let content = if raw_bytes.starts_with(b"PK\x03\x04") {
-        let sheets = crate::xlsx::read_workbook(&raw_bytes)
-            .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?;
-        // Only one sheet is read: rows of another sheet (a mutual-fund tab, a
-        // summary) have other columns and must not be parsed with these.
-        let chosen = crate::xlsx::pick_sheet(&sheets, sheet, |csv| sheet_has_header(source, csv))?;
-        if sheets.len() > 1 {
-            let skipped: Vec<&str> = sheets
-                .iter()
-                .filter(|s| !std::ptr::eq(*s, chosen))
-                .map(|s| s.name.as_str())
-                .collect();
-            println!(
-                "  {} Using sheet \"{}\" (skipped: {}). Pick another with --sheet NAME.",
-                "·".dimmed(),
-                chosen.name,
-                skipped.join(", ")
-            );
-        }
-        chosen.to_csv()
+    let content = if file == "-" {
+        use std::io::Read;
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .context("Failed to read import data from stdin")?;
+        buffer
     } else {
-        if sheet.is_some() {
-            bail!("--sheet only applies to .xlsx workbooks, and {file} is not one");
+        let path = std::path::Path::new(file);
+        if !path.exists() {
+            println!();
+            println!("  {} How to export your holdings:", "→".cyan());
+            match source {
+                "kite" | "zerodha" => {
+                    println!(
+                        "    1. Login to {} → Portfolio → Holdings",
+                        "kite.zerodha.com".cyan()
+                    );
+                    println!(
+                        "    2. Click the {} icon (top-right of holdings table)",
+                        "download/export".bold()
+                    );
+                    println!("    3. Save the CSV file");
+                    println!("    4. Run: stockwise import kite <path-to-file.csv>");
+                }
+                "indmoney" => {
+                    println!("    1. Open {} app → Portfolio → Stocks", "IndMoney".cyan());
+                    println!(
+                        "    2. Tap {} → Download Statement / Export",
+                        "⋮ (menu)".bold()
+                    );
+                    println!("    3. Save the CSV/Excel file");
+                    println!("    4. Run: stockwise import indmoney <path-to-file.csv>");
+                }
+                "groww" => {
+                    println!("    1. Open {} → Stocks → Holdings", "groww.in".cyan());
+                    println!(
+                        "    2. Click {} to get the holdings statement (.xlsx or .csv)",
+                        "Download".bold()
+                    );
+                    println!("    3. Run: stockwise import groww <path-to-file.xlsx>");
+                }
+                "upstox" => {
+                    println!(
+                        "    1. Open {} → Portfolio → Holdings",
+                        "pro.upstox.com".cyan()
+                    );
+                    println!(
+                        "    2. Click {} and save the .xlsx or .csv file",
+                        "Download".bold()
+                    );
+                    println!("    3. Run: stockwise import upstox <path-to-file.xlsx>");
+                }
+                "cas" => {
+                    println!(
+                        "    1. Request a detailed CAS from {} or {} (emailed as a password-protected PDF)",
+                        "camsonline.com".cyan(),
+                        "kfintech.com".cyan()
+                    );
+                    println!(
+                        "    2. Convert it with casparser: {}",
+                        "pip install casparser && casparser CAS.pdf -p <password> -o cas.json"
+                            .bold()
+                    );
+                    println!(
+                        "    3. Run: stockwise import cas cas.json (or pass the PDF directly with --password)"
+                    );
+                }
+                _ => {
+                    println!("    Provide a CSV with columns: Symbol, Quantity, Average Price");
+                    println!("    Run: stockwise import csv <path-to-file.csv>");
+                }
+            }
+            bail!("File not found: {}", file);
         }
-        String::from_utf8(raw_bytes)
-            .with_context(|| format!("{} is not valid UTF-8 text or an .xlsx workbook", file))?
+
+        let raw_bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", file))?;
+        if raw_bytes.starts_with(b"%PDF-") || file.to_lowercase().ends_with(".pdf") {
+            run_casparser_pdf(path, password)?
+        } else if raw_bytes.starts_with(b"PK\x03\x04") {
+            let sheets = crate::xlsx::read_workbook(&raw_bytes)
+                .with_context(|| format!("Failed to read Excel (.xlsx) workbook {}", file))?;
+            let chosen =
+                crate::xlsx::pick_sheet(&sheets, sheet, |csv| sheet_has_header(source, csv))?;
+            if sheets.len() > 1 {
+                let skipped: Vec<&str> = sheets
+                    .iter()
+                    .filter(|s| !std::ptr::eq(*s, chosen))
+                    .map(|s| s.name.as_str())
+                    .collect();
+                println!(
+                    "  {} Using sheet \"{}\" (skipped: {}). Pick another with --sheet NAME.",
+                    "·".dimmed(),
+                    chosen.name,
+                    skipped.join(", ")
+                );
+            }
+            chosen.to_csv()
+        } else {
+            if sheet.is_some() {
+                bail!("--sheet only applies to .xlsx workbooks, and {file} is not one");
+            }
+            String::from_utf8(raw_bytes)
+                .with_context(|| format!("{} is not valid UTF-8 text or an .xlsx workbook", file))?
+        }
     };
     match source {
         "groww" => {

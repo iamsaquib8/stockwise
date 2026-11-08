@@ -124,7 +124,7 @@ pub async fn cmd_init(
         specs.push((source, file));
     }
     for (source, file) in &specs {
-        cmd_import(source, file, false, None, market).await?;
+        cmd_import(source, file, false, None, None, market).await?;
     }
     if !specs.is_empty() {
         print_holdings()?;

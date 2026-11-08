@@ -139,6 +139,14 @@
       "description": "Public Market Equivalent (Index Twin). Mirrors the user's exact cash flows into a passive benchmark (SPY, VOO, VWCE, NIFTY 50) to compute Kaplan-Schoar PME, Direct Alpha and benchmark twin value."
     },
     {
+      "name": "portfolio_sell_preview",
+      "description": "Pre-sell FIFO lot & tax preview. Preview departing FIFO lots, exact STCG/LTCG tax and 4% cess, remaining ₹1.25L Sec. 112A exemption, and LTCG threshold countdown without modifying portfolio."
+    },
+    {
+      "name": "mf_bleed",
+      "description": "Mutual fund commission bleed & switch analyzer. Discloses TER gap between held Regular funds and Direct twins, annual commission bleed, 10-year drag, and FIFO tax-free switch capacity."
+    },
+    {
       "name": "calendar",
       "description": "Results and dividends calendar. Upcoming results dates, ex-dividend dates and splits for given tickers, or for the user's holdings and watchlist when none are given."
     },

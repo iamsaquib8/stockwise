@@ -42,6 +42,7 @@ mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod mf_bleed;
 mod notify;
 mod offmarket;
 mod output;
@@ -705,7 +706,7 @@ stockwise options TCS                     expected moves (same as `options moves
     Import {
         #[arg(value_enum, ignore_case = true)]
         source: ImportSource,
-        /// Path to the exported CSV file (or casparser JSON/CSV for `cas`)
+        /// Path to the exported CSV file (or casparser JSON/CSV for `cas`, or '-' for stdin)
         file: String,
         /// Rebuild holdings from a dated file even if that replaces lots or
         /// sales recorded another way (manual entries, another import)
@@ -715,6 +716,9 @@ stockwise options TCS                     expected moves (same as `options moves
         /// (default: the first whose header fits the importer)
         #[arg(long, value_name = "NAME")]
         sheet: Option<String>,
+        /// Password for encrypted PDF CAS files (e.g. PAN or DOB)
+        #[arg(long, value_name = "PASSWORD")]
+        password: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -1038,6 +1042,11 @@ enum PortfolioCmd {
         /// Sale date, YYYY-MM-DD (default: today)
         #[arg(long)]
         date: Option<String>,
+        /// Preview departing FIFO lots, STCG/LTCG tax and countdown without selling
+        #[arg(long, alias = "dry-run")]
+        preview: bool,
+        #[command(flatten)]
+        out: JsonOutput,
     },
     /// A holding's lots, sales and dividends; --lot N --date fixes a purchase date
     Lots {
@@ -1110,6 +1119,11 @@ enum PortfolioCmd {
         /// Print X-Ray report as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Analyze commission bleed of held Regular mutual funds vs Direct twin
+    Bleed {
+        #[command(flatten)]
+        out: JsonOutput,
     },
 }
 
@@ -2130,6 +2144,11 @@ enum MfCmd {
         /// Print JSON instead of a table
         #[arg(long)]
         json: bool,
+    },
+    /// Analyze commission bleed of held Regular mutual funds vs Direct twin
+    Bleed {
+        #[command(flatten)]
+        out: JsonOutput,
     },
 }
 
@@ -3697,6 +3716,7 @@ async fn dispatch(
                     .await
             }
             MfCmd::Overlap { a, b, json } => commands::cmd_mf_overlap(&a, &b, m, json).await,
+            MfCmd::Bleed { out } => commands::cmd_mf_bleed(out.into()).await,
         },
         Commands::Options {
             action,
@@ -3922,7 +3942,20 @@ async fn dispatch(
                 shares,
                 price,
                 date,
-            }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
+                preview,
+                out,
+            }) => {
+                commands::cmd_portfolio_sell(
+                    &symbol,
+                    shares,
+                    price,
+                    date.as_deref(),
+                    preview,
+                    out.into(),
+                    m,
+                )
+                .await
+            }
             Some(PortfolioCmd::Lots { symbol, lot, date }) => {
                 commands::cmd_portfolio_lots(&symbol, lot, date.as_deref(), m).await
             }
@@ -3986,6 +4019,7 @@ async fn dispatch(
             Some(PortfolioCmd::Xray { json }) => {
                 commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await
             }
+            Some(PortfolioCmd::Bleed { out }) => commands::cmd_portfolio_bleed(m, out.into()).await,
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
@@ -4038,7 +4072,18 @@ async fn dispatch(
             file,
             replace,
             sheet,
-        } => commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await,
+            password,
+        } => {
+            commands::cmd_import(
+                &value_name(source),
+                &file,
+                replace,
+                sheet.as_deref(),
+                password.as_deref(),
+                m,
+            )
+            .await
+        }
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance {
             inflow,

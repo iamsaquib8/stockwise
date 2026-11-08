@@ -1210,6 +1210,18 @@ impl Portfolio {
         self.sell_lots(symbol, qty, price, date, source, None, false)
     }
 
+    /// Preview FIFO sales without modifying this portfolio.
+    pub fn preview_sell_fifo(
+        &self,
+        symbol: &str,
+        qty: f64,
+        price: f64,
+        date: &str,
+    ) -> Result<Vec<Sale>> {
+        let mut clone = self.clone();
+        clone.sell_fifo(symbol, qty, price, date, "preview")
+    }
+
     /// [`Portfolio::sell_fifo`] from one account's lots only (`None`: any),
     /// taking shares bought on `date` first when `net_same_day` (a buy and
     /// sell on one day are intraday and leave the older lots alone); those
@@ -2212,6 +2224,23 @@ mod tests {
         assert_eq!(h.lots.len(), 1);
         assert_eq!(h.lots[0].date, "2024-01-01");
         assert_eq!(h.avg_cost, 1500.0);
+    }
+
+    #[test]
+    fn preview_sell_fifo_leaves_portfolio_unmodified() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", lot(10.0, 1000.0, "2022-01-01"));
+        p.add_lot("INFY.NS", lot(10.0, 1500.0, "2024-01-01"));
+        let sales = p
+            .preview_sell_fifo("INFY.NS", 15.0, 1600.0, "2024-06-01")
+            .unwrap();
+        assert_eq!(sales.len(), 2);
+        assert_eq!(sales[0].gain(), 6000.0);
+        assert_eq!(sales[1].gain(), 500.0);
+        // Portfolio itself is completely untouched
+        assert_eq!(p.holding("INFY.NS").unwrap().shares, 20.0);
+        assert_eq!(p.holding("INFY.NS").unwrap().lots.len(), 2);
+        assert!(p.realized.is_empty());
     }
 
     #[test]

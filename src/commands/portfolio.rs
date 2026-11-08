@@ -9,6 +9,7 @@ use crate::offmarket::{self, Mark, OffMarket, PriceSource};
 use crate::portfolio::{self as pf, DividendEvent, Fx, Lot, Split};
 use crate::rebalance::{HoldingInput, RebalanceActionType};
 use crate::tax;
+use crate::tax_export;
 use crate::xray::{self, XrayInputHolding};
 
 // ── Valuation ──
@@ -1122,17 +1123,486 @@ fn sell_history_hint(symbol: &str) -> String {
     )
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SellPreviewLot {
+    pub lot_index: usize,
+    pub buy_date: String,
+    pub days_held: i64,
+    pub qty: f64,
+    pub buy_price: f64,
+    pub cost_basis: f64,
+    pub sell_price: f64,
+    pub gain: f64,
+    pub term: &'static str,
+    pub grandfathered: bool,
+    pub days_to_ltcg: Option<i64>,
+    pub tax_savings_if_waited: Option<f64>,
+}
+
+impl CsvRow for SellPreviewLot {
+    const COLUMNS: &'static [&'static str] = &[
+        "lot_index",
+        "buy_date",
+        "days_held",
+        "qty",
+        "buy_price",
+        "cost_basis",
+        "sell_price",
+        "gain",
+        "term",
+        "grandfathered",
+        "days_to_ltcg",
+        "tax_savings_if_waited",
+    ];
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CountdownWarning {
+    pub lot_index: usize,
+    pub qty: f64,
+    pub buy_date: String,
+    pub days_held: i64,
+    pub days_to_ltcg: i64,
+    pub ltcg_date: String,
+    pub estimated_tax_savings: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExitLoadWarning {
+    pub units_affected: f64,
+    pub typical_rate_pct: f64,
+    pub estimated_deduction: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SellPreviewReport {
+    pub symbol: String,
+    pub currency: String,
+    pub shares: f64,
+    pub sale_price: f64,
+    pub sale_date: String,
+    pub total_proceeds: f64,
+    pub total_cost: f64,
+    pub net_pnl: f64,
+    pub stcg_gain: f64,
+    pub stcg_tax: f64,
+    pub ltcg_gain: f64,
+    pub ltcg_exemption_applied: f64,
+    pub taxable_ltcg: f64,
+    pub ltcg_tax: f64,
+    pub cess: f64,
+    pub total_tax: f64,
+    pub net_proceeds_after_tax: f64,
+    pub lots: Vec<SellPreviewLot>,
+    pub countdown_warnings: Vec<CountdownWarning>,
+    pub exit_load_warning: Option<ExitLoadWarning>,
+}
+
+pub async fn compute_sell_preview(
+    portfolio: &Portfolio,
+    symbol: &str,
+    shares: f64,
+    price: Option<f64>,
+    date: Option<&str>,
+    market: Market,
+) -> Result<SellPreviewReport> {
+    let resolved = held_symbol(portfolio, symbol, market);
+    if portfolio.holding(&resolved).is_none() {
+        bail!("{} is not in your portfolio", resolved);
+    }
+    let today_str = pf::today();
+    let sale_date_str = match date {
+        Some(d) => pf::parse_date(d)?.to_string(),
+        None => today_str.clone(),
+    };
+    let sold_date = pf::parse_date(&sale_date_str)?;
+
+    let cur = pf::symbol_currency(&resolved).unwrap_or_else(|| {
+        if resolved.ends_with(".NS") || resolved.ends_with(".BO") || resolved.starts_with("MF:") {
+            "INR"
+        } else {
+            "USD"
+        }
+    });
+
+    let effective_price = match price {
+        Some(p) => p,
+        None => {
+            let client = YahooClient::new().await;
+            match client {
+                Ok(c) => {
+                    let val =
+                        value_holdings(&c, std::slice::from_ref(&resolved), market, None).await?;
+                    val.price(&resolved).with_context(|| {
+                        format!(
+                            "No live price for {}; give the sale price: stockwise portfolio sell {} {} <PRICE>",
+                            resolved, symbol, shares
+                        )
+                    })?
+                }
+                Err(_) => {
+                    if let Some(id) = offmarket::fund_id(&resolved) {
+                        if let Ok(code) = id.parse::<u32>() {
+                            let schemes = funds::load_amfi().await?;
+                            schemes
+                                .iter()
+                                .find(|s| s.code == code)
+                                .and_then(|s| s.nav)
+                                .with_context(|| format!("Could not get NAV for {resolved}"))?
+                        } else {
+                            bail!("Could not get live price for {resolved}; please supply price.");
+                        }
+                    } else {
+                        bail!("Could not get live price for {resolved}; please supply price.");
+                    }
+                }
+            }
+        }
+    };
+
+    let sales = portfolio.preview_sell_fifo(&resolved, shares, effective_price, &sale_date_str)?;
+
+    let country = if cur == "INR" {
+        tax::Country::India
+    } else if cur == "GBP" || cur == "GBp" {
+        tax::Country::Uk
+    } else {
+        tax::Country::Us
+    };
+
+    let (year_start, year_end) = country.tax_year(sold_date);
+    let mut realized_ltcg_this_year = 0.0;
+    for s in portfolio
+        .realized
+        .iter()
+        .filter(|s| pf::parse_date(&s.sell_date).is_ok_and(|d| d >= year_start && d <= year_end))
+    {
+        if let (Ok(b), Ok(d)) = (pf::parse_date(&s.buy_date), pf::parse_date(&s.sell_date))
+            && country.is_long_term(b, d)
+            && s.gain() > 0.0
+        {
+            realized_ltcg_this_year += s.gain();
+        }
+    }
+    let remaining_exemption = (country.exemption() - realized_ltcg_this_year).max(0.0);
+
+    let fmv = if country == tax::Country::India {
+        let fmv_map = super::planning::fmv_31_jan_2018(std::slice::from_ref(&resolved)).await;
+        fmv_map
+            .into_iter()
+            .find(|(s, _)| s == &resolved)
+            .map(|(_, p)| p)
+    } else {
+        None
+    };
+
+    let mut preview_lots = Vec::new();
+    let mut countdown_warnings = Vec::new();
+    let mut stcg_gain = 0.0;
+    let mut ltcg_gain = 0.0;
+    let mut total_cost = 0.0;
+    let mut units_under_365 = 0.0;
+
+    for (idx, s) in sales.iter().enumerate() {
+        let buy_date = pf::parse_date(&s.buy_date)?;
+        let days_held = (sold_date - buy_date).num_days();
+        let long = country.is_long_term(buy_date, sold_date);
+        let grandfathered = long && fmv.is_some() && tax_export::is_grandfathered_date(&s.buy_date);
+        let unit_cost =
+            tax_export::lot_unit_cost(&s.buy_date, long, s.buy_price, s.sell_price, fmv);
+        let cost_basis = s.qty * unit_cost;
+        let gain = s.qty * (s.sell_price - unit_cost);
+
+        total_cost += cost_basis;
+
+        if days_held < 365 {
+            units_under_365 += s.qty;
+        }
+
+        let mut days_to_ltcg = None;
+        let mut tax_savings_if_waited = None;
+
+        if long {
+            ltcg_gain += gain;
+        } else {
+            stcg_gain += gain;
+            let ltcg_date = buy_date
+                .checked_add_months(chrono::Months::new(12))
+                .and_then(|d| d.succ_opt())
+                .unwrap_or_else(|| buy_date + chrono::Duration::days(366));
+            let days_left = (ltcg_date - sold_date).num_days();
+            if days_left > 0 && days_left <= 45 {
+                days_to_ltcg = Some(days_left);
+                if gain > 0.0 {
+                    let stcg_tax_lot = gain
+                        * (country.st_rate() / 100.0)
+                        * (if country == tax::Country::India {
+                            1.04
+                        } else {
+                            1.0
+                        });
+                    let ltcg_taxable = (gain - remaining_exemption).max(0.0);
+                    let ltcg_tax_lot = ltcg_taxable
+                        * (country.lt_rate() / 100.0)
+                        * (if country == tax::Country::India {
+                            1.04
+                        } else {
+                            1.0
+                        });
+                    let saved = (stcg_tax_lot - ltcg_tax_lot).max(0.0);
+                    tax_savings_if_waited = Some(saved);
+                    countdown_warnings.push(CountdownWarning {
+                        lot_index: idx + 1,
+                        qty: s.qty,
+                        buy_date: s.buy_date.clone(),
+                        days_held,
+                        days_to_ltcg: days_left,
+                        ltcg_date: ltcg_date.format("%Y-%m-%d").to_string(),
+                        estimated_tax_savings: saved,
+                    });
+                }
+            }
+        }
+
+        preview_lots.push(SellPreviewLot {
+            lot_index: idx + 1,
+            buy_date: s.buy_date.clone(),
+            days_held,
+            qty: s.qty,
+            buy_price: s.buy_price,
+            cost_basis,
+            sell_price: s.sell_price,
+            gain,
+            term: if grandfathered {
+                "long (grandfathered)"
+            } else if long {
+                "long"
+            } else {
+                "short"
+            },
+            grandfathered,
+            days_to_ltcg,
+            tax_savings_if_waited,
+        });
+    }
+
+    let total_proceeds = shares * effective_price;
+    let net_pnl = total_proceeds - total_cost;
+
+    let st_rate = country.st_rate() / 100.0;
+    let lt_rate = country.lt_rate() / 100.0;
+
+    let stcg_tax = stcg_gain.max(0.0) * st_rate;
+    let ltcg_exemption_applied = ltcg_gain.max(0.0).min(remaining_exemption);
+    let taxable_ltcg = (ltcg_gain.max(0.0) - remaining_exemption).max(0.0);
+    let ltcg_tax = taxable_ltcg * lt_rate;
+
+    let cess_rate = if country == tax::Country::India {
+        0.04
+    } else {
+        0.0
+    };
+    let cess = (stcg_tax + ltcg_tax) * cess_rate;
+    let total_tax = stcg_tax + ltcg_tax + cess;
+    let net_proceeds_after_tax = total_proceeds - total_tax;
+
+    let exit_load_warning = if (resolved.starts_with("MF:") || offmarket::is_off_market(&resolved))
+        && units_under_365 > 0.0
+    {
+        let est_deduction = units_under_365 * effective_price * 0.01;
+        Some(ExitLoadWarning {
+            units_affected: units_under_365,
+            typical_rate_pct: 1.0,
+            estimated_deduction: est_deduction,
+        })
+    } else {
+        None
+    };
+
+    Ok(SellPreviewReport {
+        symbol: resolved,
+        currency: cur.to_string(),
+        shares,
+        sale_price: effective_price,
+        sale_date: sale_date_str,
+        total_proceeds,
+        total_cost,
+        net_pnl,
+        stcg_gain,
+        stcg_tax,
+        ltcg_gain,
+        ltcg_exemption_applied,
+        taxable_ltcg,
+        ltcg_tax,
+        cess,
+        total_tax,
+        net_proceeds_after_tax,
+        lots: preview_lots,
+        countdown_warnings,
+        exit_load_warning,
+    })
+}
+
+fn print_sell_preview(report: &SellPreviewReport) {
+    let cur = Some(report.currency.as_str());
+    println!();
+    println!(
+        "  {} Pre-sell FIFO & Tax Preview for {} {} at {} on {}",
+        "→".cyan(),
+        report.shares,
+        report.symbol.cyan(),
+        format_price(report.sale_price, cur),
+        report.sale_date
+    );
+    println!();
+    println!("  Departing FIFO Lots:");
+    println!(
+        "  {:>3}  {:<10}  {:>5}  {:>8}  {:>12}  {:>12}  {:>13}  {:>12}  {:<16}",
+        "#",
+        "Bought",
+        "Days",
+        "Shares",
+        "Unit Cost",
+        "Cost Basis",
+        "Sale Value",
+        "Gain / Loss",
+        "Term"
+    );
+    println!("  {}", "─".repeat(95));
+    for lot in &report.lots {
+        let term_label = if lot.grandfathered {
+            format!("{} {}", lot.term, "†".yellow())
+        } else if let Some(days) = lot.days_to_ltcg {
+            format!("short (LT in {}d)", days)
+        } else {
+            lot.term.to_string()
+        };
+        println!(
+            "  {:>3}  {:<10}  {:>5}  {:>8}  {:>12}  {:>12}  {:>13}  {:>12}  {:<16}",
+            lot.lot_index,
+            lot.buy_date,
+            lot.days_held,
+            lot.qty,
+            format_price(lot.buy_price, cur),
+            format_price(lot.cost_basis, cur),
+            format_price(lot.qty * lot.sell_price, cur),
+            signed_money(lot.gain, cur),
+            term_label.dimmed()
+        );
+    }
+    println!("  {}", "─".repeat(95));
+
+    for w in &report.countdown_warnings {
+        println!();
+        println!(
+            "  {} Lot #{} ({} shares bought {}, {} days held) turns Long-Term in {} days (on {}).",
+            "!".yellow().bold(),
+            w.lot_index,
+            w.qty,
+            w.buy_date,
+            w.days_held,
+            w.days_to_ltcg,
+            w.ltcg_date
+        );
+        println!(
+            "    Waiting saves {} in tax (20% STCG → 12.5% LTCG / Sec. 112A).",
+            signed_money(w.estimated_tax_savings, cur).green()
+        );
+    }
+
+    if let Some(ref exit) = report.exit_load_warning {
+        println!();
+        println!(
+            "  {} Mutual Fund Exit Load: {} units held < 365 days.",
+            "!".yellow().bold(),
+            exit.units_affected
+        );
+        println!(
+            "    Typical exit load (1.00%) may deduct ~{}.",
+            format_price(exit.estimated_deduction, cur).yellow()
+        );
+    }
+
+    println!();
+    println!("  Estimated Tax Breakdown ({}):", report.currency);
+    print_kv("Total Proceeds", &format_price(report.total_proceeds, cur));
+    print_kv("Total Cost Basis", &format_price(report.total_cost, cur));
+    print_kv("Net Realized P&L", &signed_money(report.net_pnl, cur));
+    print_kv(
+        "STCG Gain",
+        &format!(
+            "{}  (Tax @ 20%: {})",
+            signed_money(report.stcg_gain, cur),
+            format_price(report.stcg_tax, cur)
+        ),
+    );
+    print_kv("LTCG Gain", &signed_money(report.ltcg_gain, cur));
+    if report.ltcg_exemption_applied > 0.0 {
+        print_kv(
+            "Sec. 112A Exemption Applied",
+            &format!("-{}", format_price(report.ltcg_exemption_applied, cur)),
+        );
+    }
+    print_kv(
+        "Taxable LTCG",
+        &format!(
+            "{}  (Tax @ 12.5%: {})",
+            format_price(report.taxable_ltcg, cur),
+            format_price(report.ltcg_tax, cur)
+        ),
+    );
+    if report.cess > 0.0 {
+        print_kv(
+            "Health & Education Cess (4%)",
+            &format_price(report.cess, cur),
+        );
+    }
+    print_kv(
+        "Total Estimated Tax",
+        &format_price(report.total_tax, cur).bold().to_string(),
+    );
+    print_kv(
+        "Net Proceeds After Tax",
+        &format_price(report.net_proceeds_after_tax, cur)
+            .green()
+            .bold()
+            .to_string(),
+    );
+    println!();
+    println!(
+        "  {}",
+        "(Dry-run preview: portfolio.json was NOT modified)"
+            .dimmed()
+            .italic()
+    );
+}
+
+pub async fn cmd_portfolio_bleed(_market: Market, out: Format) -> Result<()> {
+    super::funds::cmd_mf_bleed(out).await
+}
+
 pub async fn cmd_portfolio_sell(
     symbol: &str,
     shares: f64,
     price: Option<f64>,
     date: Option<&str>,
+    preview: bool,
+    out: Format,
     market: Market,
 ) -> Result<()> {
     let portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
     if portfolio.holding(&resolved).is_none() {
         bail!("{} is not in your portfolio", resolved);
+    }
+    if preview || out != Format::Table {
+        let report = compute_sell_preview(&portfolio, symbol, shares, price, date, market).await?;
+        match out {
+            Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            Format::Csv => println!("{}", output::to_csv(&report.lots)?),
+            Format::Table => print_sell_preview(&report),
+        }
+        return Ok(());
     }
     let today = pf::today();
     let date = match date {

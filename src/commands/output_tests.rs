@@ -1373,3 +1373,89 @@ async fn pme_empty_portfolio_returns_zero_report() {
     assert_eq!(report.summary.twin_value, 0.0);
     assert!(report.holdings.is_empty());
 }
+
+#[test]
+fn sell_preview_csv_row_columns_match_fields() {
+    let row = super::portfolio::SellPreviewLot {
+        lot_index: 1,
+        buy_date: "2025-01-10".into(),
+        days_held: 300,
+        qty: 10.0,
+        buy_price: 1000.0,
+        cost_basis: 10000.0,
+        sell_price: 1500.0,
+        gain: 5000.0,
+        term: "short",
+        grandfathered: false,
+        days_to_ltcg: Some(65),
+        tax_savings_if_waited: Some(500.0),
+    };
+    assert_columns(&row);
+}
+
+#[test]
+fn mf_bleed_csv_row_columns_match_fields() {
+    let row = crate::mf_bleed::MfBleedScheme {
+        regular_code: 118955,
+        regular_name: "Fund Regular".into(),
+        direct_code: Some(118956),
+        direct_name: Some("Fund Direct".into()),
+        units: 100.0,
+        current_nav: 50.0,
+        current_value: 5000.0,
+        regular_ter_pct: 1.8,
+        direct_ter_pct: 0.9,
+        ter_gap_pct: 0.9,
+        annual_bleed: 45.0,
+        ten_year_drag: 1200.0,
+        units_eligible_ltcg: 50.0,
+        ltcg_on_eligible_units: 500.0,
+        tax_free_switch_units: 50.0,
+        tax_free_switch_value: 2500.0,
+        units_locked_stcg: 50.0,
+        earliest_stcg_unlock_date: Some("2027-01-01".into()),
+        days_to_stcg_unlock: Some(50),
+        breakeven_months_early_switch: Some(6.0),
+    };
+    assert_columns(&row);
+}
+
+#[tokio::test]
+async fn sell_preview_computes_exact_departing_lots_and_countdown() {
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(10.0, 1000.0, "2024-01-01", "manual"));
+    p.add_lot("TCS.NS", Lot::new(10.0, 1200.0, "2025-11-20", "manual"));
+
+    let report = super::portfolio::compute_sell_preview(
+        &p,
+        "TCS.NS",
+        15.0,
+        Some(2000.0),
+        Some("2026-11-08"),
+        Market::In,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.shares, 15.0);
+    assert_eq!(report.sale_price, 2000.0);
+    assert_eq!(report.total_proceeds, 30_000.0);
+    assert_eq!(report.lots.len(), 2);
+
+    assert_eq!(report.lots[0].qty, 10.0);
+    assert_eq!(report.lots[0].term, "long");
+    assert_eq!(report.lots[0].gain, 10_000.0);
+
+    assert_eq!(report.lots[1].qty, 5.0);
+    assert_eq!(report.lots[1].term, "short");
+    assert_eq!(report.lots[1].gain, 4_000.0);
+    assert!(report.lots[1].days_to_ltcg.is_some());
+    assert_eq!(report.lots[1].days_to_ltcg.unwrap(), 13);
+
+    assert_eq!(report.countdown_warnings.len(), 1);
+    assert_eq!(report.countdown_warnings[0].days_to_ltcg, 13);
+    assert!(report.countdown_warnings[0].estimated_tax_savings > 0.0);
+
+    assert_eq!(p.holding("TCS.NS").unwrap().shares, 20.0);
+    assert!(p.realized.is_empty());
+}
