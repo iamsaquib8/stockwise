@@ -610,33 +610,62 @@ pub fn start(market: Market) -> Result<u32> {
             .process_group(0)
             .spawn()
             .context("Cannot start the worker")?;
-        // The child acknowledges by taking the lock and writing its pid. A
-        // child that exits first (lock lost to a concurrent start, unwritable
-        // data directory) is a failed start, not a success.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                bail!(
-                    "The worker exited while starting ({status}); see {}",
-                    log_path.display()
-                );
-            }
-            if running_pid() == Some(child.id()) {
-                return Ok(child.id());
-            }
-            if std::time::Instant::now() >= deadline {
-                bail!(
-                    "The worker did not report ready within 10 s; see {}",
-                    log_path.display()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        // The child acknowledges by taking the lock and writing its pid; a
+        // child that exits first (lost the lock, unwritable data dir) is a
+        // failed start, not a success.
+        wait_ready(&mut child, &log_path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, and the
+        // terminal's Ctrl+C does not reach it.
+        const DETACHED: u32 = 0x0000_0008 | 0x0000_0200;
+        let exe = std::env::current_exe().context("Cannot find the stockwise executable")?;
+        let log_path = crate::store::path(LOG_FILE)?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("Cannot open {}", log_path.display()))?;
+        let mut child = std::process::Command::new(exe)
+            .args(["-m", &crate::value_name(market), "worker", "run"])
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .creation_flags(DETACHED)
+            .spawn()
+            .context("Cannot start the worker")?;
+        wait_ready(&mut child, &log_path)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = market;
-        bail!("`worker start` needs Unix; run `stockwise worker run` in a terminal instead")
+        bail!("`worker start` is not supported here; run `stockwise worker run` instead")
+    }
+}
+
+/// Wait for a freshly spawned worker to own the lock and write its pid, or
+/// report that it exited first / never became ready.
+fn wait_ready(child: &mut std::process::Child, log_path: &std::path::Path) -> Result<u32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            bail!(
+                "The worker exited while starting ({status}); see {}",
+                log_path.display()
+            );
+        }
+        if running_pid() == Some(child.id()) {
+            return Ok(child.id());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "The worker did not report ready within 10 s; see {}",
+                log_path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -661,8 +690,22 @@ pub async fn stop() -> Result<bool> {
                 .arg(pid.to_string())
                 .status();
         }
+        #[cfg(windows)]
+        {
+            // No console to signal: end the process; its lock is released by
+            // the OS and the pid file is removed below.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
         for _ in 0..50 {
-            if let Some(_free) = try_own()? {
+            if let Some(free) = try_own()? {
+                // Killed workers cannot clean up after themselves: remove
+                // the pid file while we hold the lock.
+                let _ = std::fs::remove_file(pid_path()?);
+                drop(free);
                 return Ok(true);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
