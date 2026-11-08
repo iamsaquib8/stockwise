@@ -817,7 +817,16 @@ async fn collect_with(
                 // Keep annual rows Yahoo or EDGAR already gave.
                 let annual = std::mem::take(&mut st.annual);
                 st = fallback;
-                if st.annual.is_empty() {
+                // Only when they report in the same currency: the sheet shows
+                // one currency for all amounts.
+                let same_currency = |a: &[ResultPeriod], q: &[ResultPeriod]| {
+                    let ccy = |v: &[ResultPeriod]| v.iter().find_map(|p| p.currency.clone());
+                    match (ccy(a), ccy(q)) {
+                        (Some(x), Some(y)) => x.eq_ignore_ascii_case(&y),
+                        _ => true,
+                    }
+                };
+                if st.annual.is_empty() && same_currency(&annual, &st.quarterly) {
                     st.annual = annual;
                 }
                 sources.push(format!(
