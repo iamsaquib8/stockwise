@@ -1576,7 +1576,9 @@ mod tests {
     #[test]
     fn fmp_never_exceeds_250_requests_in_any_24_hours() {
         let (limit, window) = ProviderKind::Fmp.allowance();
-        let worst = worst_case_per_day(limit, window);
+        // Any 24 hours touch at most 24 h / window + 1 windows, each allowed
+        // `limit` requests (the brute-force search above is too big here).
+        let worst = limit as u64 * (86_400u64.div_ceil(window.as_secs()) + 1);
         assert!(worst <= 250, "{worst} requests in 24 h");
     }
 
