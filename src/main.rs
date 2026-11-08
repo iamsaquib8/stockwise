@@ -16,6 +16,7 @@ mod api;
 mod ask;
 mod backtest;
 mod benchmark;
+mod bleed;
 mod bonds;
 mod brokers;
 mod calendar;
@@ -2102,6 +2103,15 @@ enum MfCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Held Regular-plan funds vs their Direct twin: TER gap, yearly and 10-year cost, tax-free switch units
+    Bleed {
+        /// Gross annual return (percent, before TER) for the compounded 10-year figure
+        #[arg(long = "return", value_name = "PERCENT", default_value_t = 10.0)]
+        assumed_return: f64,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Rank a category's growth funds by 1Y/3Y/5Y return or expense ratio (bare: list categories)
     Screen {
         /// Category words, e.g. `flexi cap`, `elss`, `liquid`, `equity etf`
@@ -3700,6 +3710,10 @@ async fn dispatch(
                 commands::cmd_mf_screen(&category.join(" "), plan, sort, max_ter, limit, max, json)
                     .await
             }
+            MfCmd::Bleed {
+                assumed_return,
+                json,
+            } => commands::cmd_mf_bleed(assumed_return, json, m).await,
             MfCmd::Overlap { a, b, json } => commands::cmd_mf_overlap(&a, &b, m, json).await,
         },
         Commands::Options {

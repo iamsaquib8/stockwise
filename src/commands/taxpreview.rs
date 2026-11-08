@@ -336,3 +336,180 @@ pub(crate) fn sell_preview_json(out: &PreviewOutcome) -> serde_json::Value {
         "notes": out.notes,
     })
 }
+
+// ── mf bleed ──
+
+/// The Regular-vs-Direct report for the funds in `portfolio` (reads AMFI's
+/// NAV and TER files, which are cached; writes nothing).
+pub(crate) async fn build_bleed_report(
+    portfolio: &Portfolio,
+    assumed_return_pct: f64,
+    market: Market,
+) -> Result<crate::bleed::BleedReport> {
+    if !(0.0..=30.0).contains(&assumed_return_pct) {
+        bail!("--return must be between 0 and 30 (percent a year)");
+    }
+    let (schemes, ter) = tokio::join!(crate::funds::load_amfi_shared(), crate::funds::load_ter());
+    let schemes = schemes?;
+    let ter = ter.context("expense ratios (TER) are needed to compare Regular and Direct plans")?;
+    let today = chrono::Local::now().date_naive();
+    let realized = match tax_valuation(&views::LiveSource::new(), portfolio, market).await {
+        Ok(val) => tax_report(Country::India, portfolio, &val, today).realized,
+        Err(_) => tax::Buckets::default(),
+    };
+    Ok(crate::bleed::report(
+        portfolio,
+        &schemes,
+        &ter,
+        assumed_return_pct / 100.0,
+        today,
+        realized,
+    ))
+}
+
+fn pct2(frac: f64) -> String {
+    format!("{:.2}%", frac * 100.0)
+}
+
+pub async fn cmd_mf_bleed(assumed_return_pct: f64, json: bool, market: Market) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    if !portfolio
+        .holdings
+        .iter()
+        .any(|h| offmarket::is_fund(&h.symbol))
+    {
+        if json {
+            return output::print_json(&build_empty_bleed());
+        }
+        println!(
+            "\n  {}",
+            "No mutual funds in the portfolio. Import a CAS with `stockwise import cas FILE` or add one with `stockwise portfolio add MF:<code> ...`."
+                .dimmed()
+        );
+        return Ok(());
+    }
+    let report = build_bleed_report(&portfolio, assumed_return_pct, market).await?;
+    if json {
+        return output::print_json(&report);
+    }
+    print_bleed_report(&report);
+    Ok(())
+}
+
+fn build_empty_bleed() -> serde_json::Value {
+    serde_json::json!({ "funds": [], "skipped": [], "annual_bleed": 0.0, "drag_10y": 0.0 })
+}
+
+pub(crate) fn print_bleed_report(r: &crate::bleed::BleedReport) {
+    let inr = Some("INR");
+    print_header("Regular vs Direct plan cost (mutual funds)");
+    if r.funds.is_empty() {
+        println!(
+            "  {}",
+            "No held Regular growth plan with disclosed TERs found.".dimmed()
+        );
+    }
+    for f in &r.funds {
+        let b = &f.bleed;
+        print_section(&f.name);
+        match &f.twin {
+            Some(t) => print_kv("Direct twin", &format!("{} (AMFI {})", t.name, t.code)),
+            None => print_kv(
+                "Direct twin",
+                &"not found in AMFI's NAV file".dimmed().to_string(),
+            ),
+        }
+        print_kv(
+            "Value / cost",
+            &format!(
+                "{} / {}",
+                format_price(b.value, inr),
+                format_price(b.cost, inr)
+            ),
+        );
+        print_kv(
+            "TER regular / direct",
+            &format!(
+                "{} / {}  (gap {})",
+                pct2(b.ter_regular),
+                pct2(b.ter_direct),
+                pct2(b.ter_gap)
+            ),
+        );
+        print_kv(
+            "Cost of the gap a year",
+            &format_price(b.annual_bleed, inr).bold().to_string(),
+        );
+        print_kv(
+            &format!("{}Y compounded drag", crate::bleed::DRAG_YEARS),
+            &format!(
+                "{} (Direct ends higher by this much at an assumed {:.1}% gross a year, no new money)",
+                format_price(b.drag_10y, inr),
+                b.assumed_return * 100.0
+            ),
+        );
+        let s = &b.switch;
+        println!();
+        println!(
+            "  {} units held more than 12 months: {:.3} of {:.3}",
+            "Switch headroom —".bold(),
+            s.long_term_units,
+            s.units_total
+        );
+        if s.tax_modeled {
+            println!(
+                "    {:.3} of them redeem with ₹0 tax inside the Sec. 112A exemption ({} left this year; gain {}).",
+                s.tax_free_units,
+                format_price(s.exemption_left, inr),
+                format_price(s.tax_free_gain, inr)
+            );
+            println!(
+                "    Tax if all {:.3} long-term units redeem today: {}.",
+                s.long_term_units,
+                format_price(s.tax_all_long_term, inr)
+            );
+        } else {
+            println!(
+                "    {}",
+                "Not an equity-oriented fund: redemption tax follows other rules and is not computed here."
+                    .dimmed()
+            );
+        }
+        for e in &s.early {
+            let be = e
+                .breakeven_months
+                .map_or("n/a".into(), |m| format!("{m:.1} months"));
+            println!(
+                "    Lot #{}: {:.3} units bought {} ({} days) turn long-term on {}. Switching today: tax {}, exit load {} (typical 1% under 365 days), TER saved {} a year, breakeven {}.",
+                e.lot_no,
+                e.units,
+                e.bought,
+                e.days_held,
+                e.long_term_on,
+                format_price(e.tax_today, inr),
+                format_price(e.exit_load, inr),
+                format_price(e.annual_ter_saved, inr),
+                be
+            );
+        }
+    }
+    if r.funds.len() > 1 {
+        print_section("Total");
+        print_kv("Gap cost a year", &format_price(r.annual_bleed, inr));
+        print_kv(
+            &format!("{}Y drag", crate::bleed::DRAG_YEARS),
+            &format_price(r.drag_10y, inr),
+        );
+    }
+    for s in &r.skipped {
+        println!("  {} {}: {}", "!".yellow(), s.symbol, s.reason);
+    }
+    println!(
+        "\n  {}",
+        format!(
+            "TERs: AMFI disclosure {}. Switching Regular to Direct is a redemption and a purchase: it can create capital-gains tax and an exit load. Exit-load terms differ by scheme; check the factsheet. Figures are arithmetic on disclosed data, not advice.",
+            r.ter_month
+        )
+        .dimmed()
+    );
+}
