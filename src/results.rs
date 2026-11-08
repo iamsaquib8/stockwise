@@ -103,6 +103,10 @@ pub struct ResultPeriod {
     /// Filled from SEC EDGAR filings (the rest is Yahoo).
     #[serde(default)]
     pub edgar: bool,
+    /// EDGAR was asked for this symbol (found or not), so a cached copy
+    /// is complete for requests that use it.
+    #[serde(default)]
+    pub edgar_checked: bool,
     #[serde(skip)]
     ebitda: Option<f64>,
     #[serde(skip)]
@@ -533,9 +537,9 @@ fn apply_edgar(p: &mut ResultPeriod, e: &edgar::Period) {
     set(&mut p.ocf, e.operating_cash_flow);
     set(&mut p.capex, e.capex);
     // Yahoo's free cash flow belonged to its own cash-flow figures.
-    if e.operating_cash_flow.is_some() && e.capex.is_some() {
-        p.fcf = None;
-        p.finalize();
+    // (`finalize` is not rerun: it would replace the EDGAR operating profit.)
+    if let (Some(o), Some(c)) = (e.operating_cash_flow, e.capex) {
+        p.fcf = Some(o - c.abs());
     }
     p.edgar = true;
     if p.currency.is_none() {
@@ -694,10 +698,12 @@ async fn collect_with(
     );
     let is_india = is_india || market::is_inr(quote.currency.as_deref());
 
+    let want_edgar = use_edgar && market == Market::Us && !is_india;
     if let Some(db) = store
         && let Ok(guard) = db.lock()
         && let Some((quarterly, annual)) = load_periods(&guard, &symbol, CACHE_TTL_SECS)
         && (!reaction || quarterly.iter().any(|p| p.reaction_checked))
+        && (!want_edgar || quarterly.iter().any(|p| p.edgar_checked))
     {
         let source = if quarterly.iter().any(|p| p.edgar) {
             "cache.db (Yahoo Finance, SEC EDGAR)"
@@ -728,7 +734,6 @@ async fn collect_with(
         .flat_map(|f| [format!("quarterly{f}"), format!("annual{f}")])
         .collect();
     let type_refs: Vec<&str> = types.iter().map(String::as_str).collect();
-    let want_edgar = use_edgar && market == Market::Us && !is_india;
     let (series, summary, filings) = tokio::join!(
         // Explicit period timestamps: eleven years back, not Yahoo's default
         // handful of quarters.
@@ -742,10 +747,14 @@ async fn collect_with(
             }
         },
     );
+    // A source that failed leaves a partial result that is not cached,
+    // so a retry can fill it in.
+    let mut partial = false;
     let filings = match filings {
         Ok(f) => f,
         Err(e) => {
             warnings.push(format!("SEC EDGAR unavailable: {e:#}"));
+            partial = true;
             None
         }
     };
@@ -758,6 +767,7 @@ async fn collect_with(
         // EDGAR alone still gives a full history.
         Err(e) if filings.is_some() => {
             warnings.push(format!("Yahoo financial statements unavailable: {e:#}"));
+            partial = true;
             Statements::default()
         }
         Err(e) => return Err(e.context("Yahoo financial statements unavailable")),
@@ -810,7 +820,15 @@ async fn collect_with(
     if st.quarterly.is_empty() {
         anyhow::bail!("No quarterly results found for {symbol}");
     }
-    if let Some(db) = store {
+    if want_edgar && !partial {
+        st.quarterly
+            .iter_mut()
+            .chain(st.annual.iter_mut())
+            .for_each(|p| p.edgar_checked = true);
+    }
+    if let Some(db) = store
+        && !partial
+    {
         store_periods(db, &symbol, &st.quarterly, &st.annual);
     }
     Ok(Collected {

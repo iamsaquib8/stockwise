@@ -1016,3 +1016,61 @@ async fn other_markets_and_the_scoreboard_never_ask_edgar() {
             .all(|r| !r.target.contains("company_tickers") && !r.target.contains("companyfacts"))
     );
 }
+
+#[tokio::test]
+async fn edgar_operating_profit_survives_the_merge() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let p = c
+        .quarterly
+        .iter()
+        .find(|p| p.end == d("2022-12-31"))
+        .unwrap();
+    assert_eq!(p.operating_profit, Some(13.0));
+    assert!(p.fcf.is_some());
+}
+
+#[tokio::test]
+async fn partial_results_and_scoreboard_entries_are_not_served_to_edgar_requests() {
+    // EDGAR down: nothing is cached.
+    let server = crate::testutil::MockServer::start_routed(us_routes(false)).await;
+    let db = memory_db();
+    collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(db.lock().unwrap().get_results("ACME").unwrap().is_empty());
+    // A scoreboard run caches Yahoo only; a results request still asks EDGAR.
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let db = memory_db();
+    let client = client_for(&server.url);
+    season(
+        &client,
+        &["ACME".to_string()],
+        "T",
+        Market::Us,
+        Some(db),
+        Sort::Date,
+    )
+    .await;
+    let c = collect(&client, "ACME", Market::Us, Some(db), false, true)
+        .await
+        .unwrap();
+    assert!(!c.from_cache);
+    assert_eq!(c.quarterly.len(), 16);
+}
