@@ -68,7 +68,7 @@ pub(crate) fn mover_rows(quotes: &[crate::api::Quote], n: usize) -> (Vec<MoverRo
 }
 
 /// `--universe` names NSE indices: fail before any request elsewhere.
-fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<()> {
+pub(super) fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<()> {
     if universe.is_some() && market != Market::In {
         bail!(
             "--universe lists NSE index members; use it with the Indian market (-m in), not {}",
@@ -80,9 +80,9 @@ fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<
 
 /// What a scan covers: the symbols, its title and, for an NSE index, the
 /// members' quotes that came with the one bulk request.
-struct Scan {
-    symbols: Vec<String>,
-    scope: String,
+pub(super) struct Scan {
+    pub(super) symbols: Vec<String>,
+    pub(super) scope: String,
     bulk: Vec<crate::api::Quote>,
 }
 
@@ -94,7 +94,7 @@ const SNAPSHOT_MAX_AGE_SECS: i64 = 30 * 60;
 /// list when NSE can't answer), else the market's built-in list. Index
 /// members are saved for the India cap tiers and the prices feed
 /// `market_snapshots`.
-async fn scan_symbols(
+pub(super) async fn scan_symbols(
     client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,

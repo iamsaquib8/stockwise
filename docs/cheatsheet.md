@@ -38,6 +38,8 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 |---|---|
 | Fundamentals in plain English | `stockwise analyze INFY` |
 | Key events & filings timeline | `stockwise events LT` |
+| Last 8 quarters: YoY, QoQ, OPM, TTM, beat/miss | `stockwise results TCS` · `results AAPL -m us --quarters 12` · `results TCS --annual` |
+| Earnings-season scoreboard | `stockwise results --universe nifty50` · `results --holdings --csv` |
 | Positive and negative findings | `stockwise insights LT` |
 | 6-pillar score (not a recommendation) | `stockwise verdict LT` · `stockwise verdict LT --explain` |
 | Piotroski F-score & Altman Z-score | `stockwise score INFY --explain` · `stockwise scorecard TCS --json` |

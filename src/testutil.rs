@@ -83,6 +83,37 @@ impl MockServer {
         Self { url, requests }
     }
 
+    /// Answer by request path: the first `(needle, body)` whose needle is
+    /// in the request target wins; anything else is a 404. Unlike
+    /// [`MockServer::start`] the answer does not depend on request order,
+    /// for code that makes parallel requests.
+    pub async fn start_routed(routes: Vec<(&'static str, String)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let log = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let Some(req) = read_request(&mut stream).await else {
+                    continue;
+                };
+                let hit = routes.iter().find(|(n, _)| req.target.contains(n));
+                log.lock().unwrap().push(req);
+                let (status, body) = match hit {
+                    Some((_, b)) => (200, b.as_str()),
+                    None => (404, "{}"),
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        Self { url, requests }
+    }
+
     pub fn requests(&self) -> Vec<Recorded> {
         self.requests.lock().unwrap().clone()
     }

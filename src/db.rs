@@ -475,6 +475,16 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Seconds since the newest write for `symbol`; `None` when it has none.
+    pub fn results_age(&self, symbol: &str) -> Result<Option<i64>> {
+        let newest: Option<i64> = self.conn.query_row(
+            "SELECT MAX(updated_at) FROM financial_results WHERE symbol=?1",
+            params![symbol],
+            |r| r.get(0),
+        )?;
+        Ok(newest.map(|t| now_secs() - t))
+    }
+
     /// `(period_end, is_annual, payload_json)`, newest period first.
     pub fn get_results(&self, symbol: &str) -> Result<Vec<(String, bool, String)>> {
         let mut st = self.conn.prepare_cached(

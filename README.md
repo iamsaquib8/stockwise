@@ -104,7 +104,7 @@ shows which), so they fit in scripts:
 Desktop, Claude Code, Cursor and other assistants can look up quotes,
 technicals, risk, scorecards, events, mutual funds, option chains, IPOs, screens
 and backtests, and read your portfolio, lots, tax estimate, advance tax,
-harvest and rebalance plans, calendar, watchlist and alerts — 34 read-only
+harvest and rebalance plans, calendar, watchlist and alerts — 35 read-only
 tools, three resources and three ready-made prompts ("review my portfolio",
 "tax-harvest check before 31 March", "explain this option chain"). It never
 places orders. `stockwise ask "question"` lets a local or cloud model call the

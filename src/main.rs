@@ -53,6 +53,7 @@ mod practice;
 mod providers;
 mod rebalance;
 mod research;
+mod results;
 mod scorecard;
 #[cfg(feature = "server")]
 mod server;
@@ -517,6 +518,35 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Only this market-cap tier: all, mega, large, mid, small or micro
         #[arg(long, value_enum, ignore_case = true)]
         cap: Option<market::CapFilter>,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Last 8-12 quarters (or fiscal years) of results with YoY, QoQ, TTM and beat/miss; --holdings or --universe for the season scoreboard
+    #[command(after_help = "Examples:\n  \
+stockwise results TCS                      Last 8 quarters with YoY, QoQ, OPM, TTM\n  \
+stockwise results AAPL -m us --quarters 12 12 quarters, EPS vs consensus\n  \
+stockwise results HDFCBANK --csv           Banks add NII and GNPA/NNPA when filed\n  \
+stockwise results TCS --annual             Fiscal years: CFO/PAT, FCF, ROE, ROCE, CAGR\n  \
+stockwise results --universe nifty50       Season scoreboard: aggregate YoY, beat/in-line/miss\n  \
+stockwise results --holdings --json        Same for your holdings and watchlist")]
+    Results {
+        /// Ticker, e.g. TCS (India) or AAPL with -m us
+        symbol: Option<String>,
+        /// Quarters (or with --annual, fiscal years) to show
+        #[arg(long, short = 'q', default_value_t = 8)]
+        quarters: usize,
+        /// Fiscal years instead of quarters
+        #[arg(long)]
+        annual: bool,
+        /// Scoreboard over holdings and watchlist (`--portfolio NAME` picks which portfolio)
+        #[arg(long, conflicts_with_all = ["symbol", "universe"])]
+        holdings: bool,
+        /// Scoreboard over an NSE index's members
+        #[arg(long, value_enum, ignore_case = true, conflicts_with = "symbol")]
+        universe: Option<market::Universe>,
+        /// Scoreboard order
+        #[arg(long, value_enum, ignore_case = true, default_value = "date")]
+        sort: results::Sort,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -2843,6 +2873,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "picks",
             "screen",
             "dividends",
+            "results",
         ],
     ),
     ("Funds & F&O", &["mf", "options"]),
@@ -3626,6 +3657,27 @@ async fn dispatch(
             cap,
             out,
         } => commands::cmd_screen(&value_name(category), m, universe, cap, out.into()).await,
+        Commands::Results {
+            symbol,
+            quarters,
+            annual,
+            holdings,
+            universe,
+            sort,
+            out,
+        } => {
+            commands::cmd_results(
+                symbol.as_deref(),
+                quarters,
+                annual,
+                holdings,
+                universe,
+                sort,
+                m,
+                out.into(),
+            )
+            .await
+        }
         Commands::Dividends { symbol, out } => {
             commands::cmd_dividends(&symbol, m, out.into()).await
         }
@@ -5818,6 +5870,17 @@ mod tests {
             vec!["stockwise", "events", "TCS", "--csv"],
             vec!["stockwise", "analyze", "TCS", "--json"],
             vec!["stockwise", "deep", "TCS", "--json"],
+            vec!["stockwise", "results", "TCS", "--quarters", "12", "--csv"],
+            vec!["stockwise", "results", "TCS", "--annual", "--json"],
+            vec![
+                "stockwise",
+                "results",
+                "--universe",
+                "nifty50",
+                "--sort",
+                "pat",
+            ],
+            vec!["stockwise", "results", "--holdings", "--json"],
             vec!["stockwise", "technical", "TCS", "--explain"],
             vec!["stockwise", "harvest", "--json"],
             vec!["stockwise", "harvest", "--csv"],
