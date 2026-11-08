@@ -487,6 +487,9 @@ struct WorkerState {
     /// [`filing_id`]); a symbol absent here has not been looked at yet.
     #[serde(default)]
     filings_seen: HashMap<String, Vec<String>>,
+    /// Where the next sync resumes over already-seen symbols for filing checks.
+    #[serde(default)]
+    filing_cursor: usize,
 }
 
 /// After the close: refresh tracked snapshots, append today's NAV for held
@@ -889,6 +892,26 @@ fn record_filings(seen: &mut HashMap<String, Vec<String>>, symbol: String, ids: 
     }
 }
 
+/// Which holdings to check for filings this sync: symbols never looked at
+/// first (a new holding is recorded promptly), then the remaining slots go
+/// round-robin over the seen ones from `cursor`, so a per-sync cap still
+/// reaches every holding over successive syncs. `held` is sorted. Returns the
+/// picks and the next cursor.
+fn pick_filing_checks(
+    held: &[String],
+    seen: &HashMap<String, Vec<String>>,
+    cursor: usize,
+    cap: usize,
+) -> (Vec<String>, usize) {
+    let (unseen, seen_list): (Vec<String>, Vec<String>) =
+        held.iter().cloned().partition(|s| !seen.contains_key(s));
+    let mut picked: Vec<String> = unseen.into_iter().take(cap).collect();
+    let room = cap - picked.len();
+    let (rest, next) = rotate(&seen_list, cursor, room);
+    picked.extend(rest);
+    (picked, next)
+}
+
 /// After the close: LTCG notices for held lots and a notice for each newly
 /// reported quarter of a held stock, sent through the configured channels.
 /// A notice is remembered only once delivered (or when no channel is
@@ -948,8 +971,14 @@ async fn notify_after_close(
     held.sort();
     held.dedup();
     state.filings_seen.retain(|s, _| held.contains(s));
-    held.sort_by_key(|s| state.filings_seen.contains_key(s));
-    for symbol in held.into_iter().take(FILING_CHECKS_PER_SYNC) {
+    let (to_check, next) = pick_filing_checks(
+        &held,
+        &state.filings_seen,
+        state.filing_cursor,
+        FILING_CHECKS_PER_SYNC,
+    );
+    state.filing_cursor = next;
+    for symbol in to_check {
         if !keep_going() {
             bail!("cancelled");
         }
@@ -998,6 +1027,7 @@ async fn notify_after_close(
     latest.last_results = state.last_results;
     latest.result_cursor = state.result_cursor;
     latest.filings_seen = state.filings_seen;
+    latest.filing_cursor = state.filing_cursor;
     crate::store::save(STATE_FILE, &latest, false)?;
     Ok(NoticeCounts {
         total: sent,
@@ -1897,6 +1927,36 @@ mod tests {
         let c = clip(&long, 50);
         assert!(c.chars().count() <= 51 && c.ends_with('…'), "{c}");
         assert_eq!(clip("a  b\nc", 50), "a b c");
+    }
+
+    #[test]
+    fn filing_checks_cover_every_holding_over_successive_syncs() {
+        let held: Vec<String> = (0..25).map(|i| format!("S{i:02}.NS")).collect();
+        let mut seen: HashMap<String, Vec<String>> = HashMap::new();
+        let mut cursor = 0;
+        let mut checked: std::collections::HashSet<String> = Default::default();
+        // Every sync records what it checked, as the worker does on success.
+        for _ in 0..6 {
+            let (picks, next) = pick_filing_checks(&held, &seen, cursor, 20);
+            assert!(picks.len() <= 20);
+            cursor = next;
+            for p in picks {
+                checked.insert(p.clone());
+                seen.insert(p, Vec::new());
+            }
+        }
+        assert_eq!(checked.len(), 25, "every holding is eventually checked");
+        // Unseen symbols always come first.
+        let mut partial = HashMap::new();
+        partial.insert("S00.NS".to_string(), Vec::new());
+        let (picks, _) = pick_filing_checks(&held[..3], &partial, 0, 2);
+        assert_eq!(picks, vec!["S01.NS".to_string(), "S02.NS".to_string()]);
+        // Steady state alternates instead of repeating the first 20.
+        let all_seen: HashMap<String, Vec<String>> =
+            held.iter().map(|s| (s.clone(), Vec::new())).collect();
+        let (first, next) = pick_filing_checks(&held, &all_seen, 0, 20);
+        let (second, _) = pick_filing_checks(&held, &all_seen, next, 20);
+        assert!(second.contains(&"S24.NS".to_string()) && !first.contains(&"S24.NS".to_string()));
     }
 
     #[test]
