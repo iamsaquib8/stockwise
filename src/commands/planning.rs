@@ -4,7 +4,7 @@
 //! retirement and education calculators). The math lives in `tax_export.rs`,
 //! `benchmark.rs` and `goals.rs`.
 
-use super::portfolio::{fx_pair, market_currency, portfolio_title};
+use super::portfolio::{fx_pair, market_currency, portfolio_title, signed_money};
 use super::*;
 use crate::api::{ChartData, ChartResponse};
 use crate::benchmark::{self, Analysis, HoldingDays};
@@ -1443,6 +1443,348 @@ fn truncate_text(text: &str, width: usize) -> String {
         let cut: String = text.chars().take(width.saturating_sub(1)).collect();
         format!("{}…", cut)
     }
+}
+
+// ── Public Market Equivalent (PME) / Index Twin ──
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PmeRow {
+    pub symbol: String,
+    pub actual_value: f64,
+    pub twin_value: f64,
+    pub value_added: f64,
+    pub pme_ratio: Option<f64>,
+    pub direct_alpha_percent: Option<f64>,
+    pub actual_xirr_percent: Option<f64>,
+    pub twin_xirr_percent: Option<f64>,
+}
+
+impl CsvRow for PmeRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "symbol",
+        "actual_value",
+        "twin_value",
+        "value_added",
+        "pme_ratio",
+        "direct_alpha_percent",
+        "actual_xirr_percent",
+        "twin_xirr_percent",
+    ];
+}
+
+/// Compute the Public Market Equivalent (Index Twin) analysis for `portfolio`.
+pub async fn portfolio_pme_report(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    bench: Option<&str>,
+    market: Market,
+    base: Option<&str>,
+) -> Result<crate::pme::PmeReport> {
+    let (bench_symbol, bench_name) = resolve_benchmark(bench, market);
+    let symbols = portfolio.symbols_with_history();
+    let base = match base {
+        Some(b) => b.to_uppercase(),
+        None => {
+            let mut cur: Vec<&str> = symbols
+                .iter()
+                .filter_map(|s| pf::symbol_currency(s))
+                .map(|c| if c == "GBp" { "GBP" } else { c })
+                .collect();
+            cur.sort();
+            cur.dedup();
+            match cur.as_slice() {
+                [one] => one.to_string(),
+                _ => market_currency(market).to_string(),
+            }
+        }
+    };
+
+    let today = chrono::Local::now().date_naive();
+    if symbols.is_empty() {
+        return Ok(crate::pme::PmeReport {
+            summary: crate::pme::PmeSummary {
+                benchmark_symbol: bench_symbol,
+                benchmark_name: bench_name,
+                base_currency: base,
+                start_date: today.to_string(),
+                end_date: today.to_string(),
+                total_invested: 0.0,
+                total_distributed: 0.0,
+                actual_value: 0.0,
+                twin_value: 0.0,
+                value_added: 0.0,
+                kaplan_schoar_pme: None,
+                direct_alpha_percent: None,
+                portfolio_xirr_percent: None,
+                twin_xirr_percent: None,
+                twin_shares: 0.0,
+                benchmark_end_price: 0.0,
+            },
+            holdings: Vec::new(),
+        });
+    }
+
+    let val = super::portfolio::value_holdings(src, &symbols, market, Some(&base)).await?;
+
+    let mut all_flows: Vec<(NaiveDate, f64)> = Vec::new();
+    let mut holding_flows: Vec<(String, Vec<(NaiveDate, f64)>)> = Vec::new();
+
+    for sym in &symbols {
+        let raw_flows = portfolio.cash_flows(sym);
+        let mut base_flows = Vec::new();
+        for (d, amt) in raw_flows {
+            if let Some(converted) = val.to_base(sym, amt) {
+                base_flows.push((d, converted));
+                all_flows.push((d, converted));
+            }
+        }
+        holding_flows.push((sym.clone(), base_flows));
+    }
+    all_flows.sort_by_key(|f| f.0);
+
+    let start_date = match all_flows.first() {
+        Some(f) => f.0,
+        None => today,
+    };
+
+    let client = src.yahoo().await?;
+    let bench_hist = daily_history(client, &bench_symbol, Span::Since(start_date))
+        .await
+        .with_context(|| format!("No price history for the benchmark {}", bench_symbol))?;
+    if bench_hist.closes.len() < 2 {
+        bail!(
+            "Not enough price history for the benchmark {}",
+            bench_symbol
+        );
+    }
+
+    let calendar: Vec<NaiveDate> = bench_hist.closes.iter().map(|c| c.0).collect();
+    let bench_currency = bench_hist.currency.clone();
+
+    let mut bench_closes = bench_hist.closes.clone();
+    if let Some(cur) = bench_currency.as_deref().filter(|c| *c != base) {
+        if let Some(fx) = fx_series(client, cur, &base, &calendar).await {
+            bench_closes = bench_closes
+                .into_iter()
+                .zip(fx)
+                .filter_map(|((d, p), r)| Some((d, p * r?)))
+                .collect();
+        } else {
+            bail!(
+                "No {}→{} exchange-rate history to compare with {}",
+                cur,
+                base,
+                bench_name
+            );
+        }
+    }
+
+    let actual_portfolio_value = val.totals(portfolio).value;
+    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, &bench_closes, today)
+        .context("Could not compute PME for portfolio")?;
+
+    let (twin_shares, _) =
+        crate::pme::twin_shares_and_value(&all_flows, &bench_closes, today).unwrap_or((0.0, 0.0));
+    let bench_end_price = crate::pme::benchmark_price_on(&bench_closes, today).unwrap_or(0.0);
+
+    let mut total_invested = 0.0;
+    let mut total_distributed = 0.0;
+    for &(_, amt) in &all_flows {
+        if amt < 0.0 {
+            total_invested += -amt;
+        } else {
+            total_distributed += amt;
+        }
+    }
+
+    let summary = crate::pme::PmeSummary {
+        benchmark_symbol: bench_symbol,
+        benchmark_name: bench_name,
+        base_currency: base,
+        start_date: start_date.to_string(),
+        end_date: today.to_string(),
+        total_invested: round(total_invested, 2),
+        total_distributed: round(total_distributed, 2),
+        actual_value: round(actual_portfolio_value, 2),
+        twin_value: round(pme_res.twin_value, 2),
+        value_added: round(pme_res.value_added, 2),
+        kaplan_schoar_pme: pme_res.pme_ratio.map(|r| round(r, 4)),
+        direct_alpha_percent: pme_res.direct_alpha_percent.map(|a| round(a, 2)),
+        portfolio_xirr_percent: pme_res.actual_xirr_percent.map(|x| round(x, 2)),
+        twin_xirr_percent: pme_res.twin_xirr_percent.map(|x| round(x, 2)),
+        twin_shares: round(twin_shares, 4),
+        benchmark_end_price: round(bench_end_price, 2),
+    };
+
+    let mut holdings = Vec::new();
+    for (sym, flows) in holding_flows {
+        if flows.is_empty() {
+            continue;
+        }
+        let h_val = portfolio.holding(&sym).map_or(0.0, |h| {
+            val.price(&sym)
+                .map_or(0.0, |p| val.to_base(&sym, p * h.shares).unwrap_or(0.0))
+        });
+        if let Some(res) = crate::pme::compute_pme(&flows, h_val, &bench_closes, today) {
+            holdings.push(crate::pme::HoldingPme {
+                symbol: sym,
+                actual_value: round(res.actual_value, 2),
+                twin_value: round(res.twin_value, 2),
+                value_added: round(res.value_added, 2),
+                pme_ratio: res.pme_ratio.map(|r| round(r, 4)),
+                direct_alpha_percent: res.direct_alpha_percent.map(|a| round(a, 2)),
+                actual_xirr_percent: res.actual_xirr_percent.map(|x| round(x, 2)),
+                twin_xirr_percent: res.twin_xirr_percent.map(|x| round(x, 2)),
+                cashflows_count: flows.len(),
+            });
+        }
+    }
+    holdings.sort_by(|a, b| b.value_added.total_cmp(&a.value_added));
+
+    Ok(crate::pme::PmeReport { summary, holdings })
+}
+
+/// Run `stockwise portfolio pme`: mirror historical cash flows into a benchmark index.
+pub async fn cmd_portfolio_pme(
+    bench: Option<&str>,
+    market: Market,
+    base: Option<&str>,
+    fmt: Format,
+) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let report =
+        portfolio_pme_report(&views::LiveSource::new(), &portfolio, bench, market, base).await?;
+
+    let s = &report.summary;
+    let rows: Vec<PmeRow> = report
+        .holdings
+        .iter()
+        .map(|h| PmeRow {
+            symbol: h.symbol.clone(),
+            actual_value: h.actual_value,
+            twin_value: h.twin_value,
+            value_added: h.value_added,
+            pme_ratio: h.pme_ratio,
+            direct_alpha_percent: h.direct_alpha_percent,
+            actual_xirr_percent: h.actual_xirr_percent,
+            twin_xirr_percent: h.twin_xirr_percent,
+        })
+        .collect();
+
+    match fmt {
+        Format::Json => return output::print_json(&report),
+        Format::Csv => return output::print_csv(&rows),
+        Format::Table => {}
+    }
+
+    if report.holdings.is_empty() && s.actual_value == 0.0 {
+        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
+        return Ok(());
+    }
+
+    let base_cur = Some(s.base_currency.as_str());
+    print_header(&portfolio_title(&format!(
+        "Public Market Equivalent (Index Twin) vs {}",
+        s.benchmark_name
+    )));
+
+    print_kv(
+        "Benchmark",
+        &format!("{} ({})", s.benchmark_name, s.benchmark_symbol),
+    );
+    print_kv("Period", &format!("{} → {}", s.start_date, s.end_date));
+    print_kv("Base Currency", &s.base_currency);
+    print_kv("Total Invested", &format_price(s.total_invested, base_cur));
+    print_kv(
+        "Total Distributed",
+        &format_price(s.total_distributed, base_cur),
+    );
+    println!();
+    print_kv(
+        "Portfolio Value",
+        &format_price(s.actual_value, base_cur).bold().to_string(),
+    );
+    print_kv("Index Twin Value", &format_price(s.twin_value, base_cur));
+    let va_str = signed_money(s.value_added, base_cur);
+    let va_styled = if s.value_added >= 0.0 {
+        va_str.green().bold()
+    } else {
+        va_str.red().bold()
+    };
+    print_kv("Value Added / Alpha", &va_styled.to_string());
+    println!();
+
+    if let Some(pme) = s.kaplan_schoar_pme {
+        let pme_str = format!("{:.4}", pme);
+        let styled = if pme >= 1.0 {
+            pme_str.green().bold()
+        } else {
+            pme_str.red().bold()
+        };
+        print_kv(
+            "Kaplan-Schoar PME",
+            &format!("{} (> 1.0000 = beat the index)", styled),
+        );
+    }
+    if let Some(alpha) = s.direct_alpha_percent {
+        let alpha_str = format!("{:+.2}% p.a.", alpha);
+        let styled = if alpha >= 0.0 {
+            alpha_str.green().bold()
+        } else {
+            alpha_str.red().bold()
+        };
+        print_kv("Direct Alpha", &styled.to_string());
+    }
+    if let Some(px) = s.portfolio_xirr_percent {
+        let tx_str = s
+            .twin_xirr_percent
+            .map_or("N/A".into(), |tx| format!("{:.2}%", tx));
+        print_kv(
+            "Portfolio XIRR",
+            &format!("{:.2}% (vs Twin XIRR {})", px, tx_str),
+        );
+    }
+
+    if !report.holdings.is_empty() {
+        print_section("Holdings vs Benchmark Twin");
+        println!(
+            "  {} {} {} {} {} {}",
+            pad_end("Symbol", 14).bold(),
+            pad_start("Actual Value", 14).bold(),
+            pad_start("Twin Value", 14).bold(),
+            pad_start("Value Added", 15).bold(),
+            pad_start("KS-PME", 10).bold(),
+            pad_start("Direct Alpha", 14).bold(),
+        );
+        for h in &report.holdings {
+            let va = signed_money(h.value_added, base_cur);
+            let va_cell = if h.value_added >= 0.0 {
+                va.green()
+            } else {
+                va.red()
+            };
+            let pme_cell = h.pme_ratio.map_or("-".to_string(), |r| format!("{:.4}", r));
+            let alpha_cell = h.direct_alpha_percent.map_or("-".to_string(), |a| {
+                let s = format!("{:+.2}%", a);
+                if a >= 0.0 {
+                    s.green().to_string()
+                } else {
+                    s.red().to_string()
+                }
+            });
+            println!(
+                "  {} {} {} {} {} {}",
+                pad_end(&h.symbol, 14).cyan(),
+                pad_start(&format_price(h.actual_value, base_cur), 14),
+                pad_start(&format_price(h.twin_value, base_cur), 14),
+                pad_start(&va_cell.to_string(), 15),
+                pad_start(&pme_cell, 10),
+                pad_start(&alpha_cell, 14),
+            );
+        }
+    }
+    println!();
+    Ok(())
 }
 
 // ── Goals ──

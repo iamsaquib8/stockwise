@@ -47,6 +47,7 @@ mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;
+mod pme;
 mod portfolio;
 mod practice;
 mod providers;
@@ -238,6 +239,17 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+
+    /// First run: pick a market, import holdings, optionally connect an AI assistant
+    Init {
+        /// Holdings to import, as SOURCE:FILE (kite, groww, upstox, indmoney,
+        /// cas), e.g. groww:holdings.csv. Repeatable.
+        #[arg(long = "import", value_name = "SOURCE:FILE")]
+        imports: Vec<String>,
+        /// Skip the Claude / Cursor (MCP) step
+        #[arg(long)]
+        no_mcp: bool,
     },
 
     // ── Analysis ──
@@ -1053,6 +1065,13 @@ enum PortfolioCmd {
         benchmark: Option<String>,
         #[arg(short, long, default_value = "1y", value_parser = BENCHMARK_PERIODS)]
         period: String,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Public Market Equivalent (Index Twin): mirror exact cash flows into a benchmark index
+    Pme {
+        /// Benchmark index or ETF [default: NIFTY for India, SP500 for US]
+        benchmark: Option<String>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -2550,6 +2569,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "cache",
             "worker",
             "tasks",
+            "init",
         ],
     ),
     (
@@ -2723,7 +2743,7 @@ fn build_cli() -> clap::Command {
 }
 
 /// Curated quick-start overview printed when `stockwise` is run with no arguments.
-fn curated_quickstart_help() -> String {
+fn curated_quickstart_help(new_user: bool) -> String {
     use colored::Colorize;
     let mut out = String::new();
     out.push_str(&format!(
@@ -2732,6 +2752,13 @@ fn curated_quickstart_help() -> String {
         "Terminal Stock Research, Portfolio, F&O & Tax Workbench".dimmed()
     ));
     out.push_str(&format!("  {}\n\n", "─".repeat(66).dimmed()));
+    if new_user {
+        out.push_str(&format!(
+            "  {} Run {} to pick a market and import your holdings.\n\n",
+            "New here?".bold().green(),
+            "stockwise init".cyan().bold()
+        ));
+    }
     out.push_str(&format!(
         "  {}  {}\n",
         "Quick Lookup:".bold().yellow(),
@@ -3089,7 +3116,10 @@ async fn async_main() {
     i18n::set_lang(lang, source);
     let mut cmd = with_config_defaults(build_cli(), config::get());
     if args.len() == 1 {
-        print!("{}", curated_quickstart_help());
+        let new_user = portfolio::Portfolio::load()
+            .map(|p| p.holdings.is_empty())
+            .unwrap_or(false);
+        print!("{}", curated_quickstart_help(new_user));
         return;
     }
     if args.iter().any(|a| a == "--help-all") {
@@ -3133,7 +3163,10 @@ async fn async_main() {
     if let config::Status::Invalid(msg) = &cfg_state.status
         && !matches!(
             cli.command,
-            Commands::Config { .. } | Commands::Doctor | Commands::Completions { .. }
+            Commands::Config { .. }
+                | Commands::Init { .. }
+                | Commands::Doctor
+                | Commands::Completions { .. }
         )
     {
         eprintln!("\n  {} {}\n", colored::Colorize::red("Error:"), msg);
@@ -3244,6 +3277,9 @@ async fn dispatch(
             TasksAction::Cancel { id } => commands::cmd_tasks_cancel(id),
             TasksAction::Add { kind, args } => commands::cmd_tasks_add(kind, &args, m),
         },
+        Commands::Init { imports, no_mcp } => {
+            commands::cmd_init(m, sources.market == config::Source::Flag, &imports, no_mcp).await
+        }
 
         Commands::Analyze { symbol, out } => commands::cmd_analyze(&symbol, m, out.json).await,
         Commands::Events {
@@ -3690,6 +3726,18 @@ async fn dispatch(
                     m,
                     base.as_deref(),
                     bench.into(),
+                )
+                .await
+            }
+            Some(PortfolioCmd::Pme {
+                benchmark,
+                out: pme_out,
+            }) => {
+                commands::cmd_portfolio_pme(
+                    benchmark.as_deref(),
+                    m,
+                    base.as_deref(),
+                    pme_out.into(),
                 )
                 .await
             }
@@ -5845,12 +5893,20 @@ mod tests {
             0,
             "verdict has no aliases"
         );
-        crate::verdict::testing::assert_neutral(&curated_quickstart_help());
+        crate::verdict::testing::assert_neutral(&curated_quickstart_help(false));
+    }
+
+    #[test]
+    fn quickstart_points_new_users_to_init() {
+        let new = curated_quickstart_help(true);
+        assert!(new.contains("New here?") && new.contains("stockwise init"));
+        assert!(!curated_quickstart_help(false).contains("New here?"));
+        crate::verdict::testing::assert_neutral(&new);
     }
 
     #[test]
     fn bare_symbol_and_quickstart_help_work() {
-        let help = curated_quickstart_help();
+        let help = curated_quickstart_help(false);
         assert!(help.contains("StockWise"));
         assert!(help.contains("verdict <SYM>"));
         assert!(help.contains("--help-all"));

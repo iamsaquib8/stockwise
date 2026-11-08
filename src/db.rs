@@ -759,7 +759,7 @@ mod tests {
             symbol: format!("S{i}"),
             market: market.into(),
             name: format!("Stock {i}"),
-            sector: Some(if i % 2 == 0 { "Tech" } else { "Banks" }.into()),
+            sector: Some(if i.is_multiple_of(2) { "Tech" } else { "Banks" }.into()),
             cap_tier: Some(CapTier::classify(market, mcap).as_str().into()),
             mcap: Some(mcap),
             price: Some(100.0 + i as f64),

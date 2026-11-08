@@ -686,6 +686,29 @@ pub const TOOLS: &[Tool] = &[
         personal: true,
     },
     Tool {
+        name: "portfolio_pme",
+        title: "Public Market Equivalent (Index Twin)",
+        description: "Public Market Equivalent (PME) / Index Twin analysis: mirrors the user's \
+                      exact historical portfolio cash flows (buys, sells, dividends) on matching \
+                      dates into a passive benchmark (e.g. SPY, VOO, VWCE, NIFTY, NIFTYBEES). \
+                      Computes Kaplan-Schoar PME, Direct Alpha, Index Twin terminal value, and \
+                      exact net currency value added/lost vs the passive index.",
+        params: &[
+            opt(
+                "benchmark",
+                Kind::Str,
+                "Benchmark ticker or index (e.g. SPY, VOO, VWCE, NIFTY, NIFTYBEES, ^GSPC)",
+            ),
+            opt(
+                "base",
+                Kind::Enum(&["inr", "usd", "eur", "gbp"]),
+                "Currency for cash flows and valuation (default: portfolio base currency)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
         name: "calendar",
         title: "Results and dividends calendar",
         description: "Upcoming results dates, ex-dividend dates and splits for given tickers, or \

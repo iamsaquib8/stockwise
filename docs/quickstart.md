@@ -8,6 +8,7 @@ long it takes.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh
+stockwise init      # pick a market, import holdings, optional AI assistant
 stockwise doctor
 ```
 

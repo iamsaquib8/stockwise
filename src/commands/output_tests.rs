@@ -1299,3 +1299,32 @@ fn harvest_and_advance_tax_use_the_grandfathered_cost() {
     assert_eq!(h.ltcg_exemption_remaining, 65_000.0);
     assert_eq!(h.gain_harvest_candidates[0].lt_pnl, 40_000.0);
 }
+
+#[test]
+fn pme_csv_row_columns_match_fields() {
+    let row = super::planning::PmeRow {
+        symbol: "AAPL".into(),
+        actual_value: 1200.0,
+        twin_value: 1100.0,
+        value_added: 100.0,
+        pme_ratio: Some(1.0909),
+        direct_alpha_percent: Some(4.25),
+        actual_xirr_percent: Some(18.5),
+        twin_xirr_percent: Some(14.0),
+    };
+    assert_columns(&row);
+}
+
+#[tokio::test]
+async fn pme_empty_portfolio_returns_zero_report() {
+    let p = Portfolio::default();
+    let src = views::fixtures::Fixture::default();
+    let report =
+        super::planning::portfolio_pme_report(&src, &p, Some("SPY"), Market::Us, Some("USD"))
+            .await
+            .unwrap();
+    assert_eq!(report.summary.total_invested, 0.0);
+    assert_eq!(report.summary.actual_value, 0.0);
+    assert_eq!(report.summary.twin_value, 0.0);
+    assert!(report.holdings.is_empty());
+}
