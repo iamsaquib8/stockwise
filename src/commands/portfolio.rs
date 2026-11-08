@@ -30,6 +30,9 @@ pub(crate) struct Valuation {
     pub quotes: Vec<Quote>,
     pub fx: Fx,
     pub off: OffMarket,
+    /// 31 Jan 2018 prices (Section 112A grandfathering) for the symbols whose
+    /// old lots need one; only `tax_valuation` fills it.
+    pub fmv_2018: Vec<(String, f64)>,
 }
 
 /// Cost and value in the base currency, leaving out holdings without a live
@@ -87,6 +90,14 @@ impl Valuation {
 
     pub fn price(&self, symbol: &str) -> Option<f64> {
         self.quote(symbol).and_then(|q| q.regular_market_price)
+    }
+
+    /// The 31 Jan 2018 price of `symbol`, when it was looked up and found.
+    pub fn fmv_2018(&self, symbol: &str) -> Option<f64> {
+        self.fmv_2018
+            .iter()
+            .find(|(s, _)| s == symbol)
+            .map(|(_, v)| *v)
     }
 
     /// How a holding outside Yahoo was priced (funds, SGBs).
@@ -280,6 +291,7 @@ impl Valuation {
             quotes,
             fx: Fx::new(market_currency(market)),
             off: OffMarket::default(),
+            fmv_2018: Vec::new(),
         };
         let currencies = v.currencies(symbols);
         let base = match base {

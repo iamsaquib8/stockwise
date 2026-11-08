@@ -4,6 +4,7 @@ use super::portfolio::{ESTIMATED_DATE_HINT, Valuation, portfolio_title, value_ho
 use super::*;
 use crate::portfolio::{self as pf, ImportOptions, ImportOutcome, ImportRow, SyncChange};
 use crate::tax::{self, Country};
+use crate::tax_export;
 
 pub async fn cmd_watchlist(
     action: &str,
@@ -1416,10 +1417,16 @@ pub(crate) fn compute_harvest(
             .iter()
             .map(|l| {
                 let long = parse_date(&l.date).is_some_and(|d| country.is_long_term(d, today));
+                let fmv = if country == Country::India {
+                    val.fmv_2018(&h.symbol)
+                } else {
+                    None
+                };
+                let unit_cost = tax_export::lot_unit_cost(&l.date, long, l.price, price, fmv);
                 (
                     l.qty,
                     l.qty * l.price * scale,
-                    l.qty * (price - l.price) * scale,
+                    l.qty * (price - unit_cost) * scale,
                     long,
                 )
             })
@@ -1508,7 +1515,7 @@ pub(crate) fn compute_harvest(
             losing.push((row, sale));
         } else if exemption_limit > 0.0 && lt_pnl > 0.0 {
             // The long-term lots are the oldest, so FIFO reaches them first.
-            let pnl = (price - h.avg_cost) * h.shares * scale;
+            let pnl = lots.iter().map(|l| l.2).sum::<f64>();
             let pnl_pct = if h.avg_cost > 0.0 {
                 ((price / h.avg_cost) - 1.0) * 100.0
             } else {
@@ -1869,6 +1876,9 @@ pub(crate) struct TaxSaleRow {
     pub(crate) sold: String,
     pub(crate) gain: f64,
     pub(crate) term: Option<&'static str>,
+    /// The gain uses the Section 112A grandfathered cost (31 Jan 2018 price).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) grandfathered: bool,
 }
 
 /// One open holding in `tax --json/--csv`: what selling it today would
@@ -2014,8 +2024,16 @@ pub(crate) fn tax_report(
             (Some(b), Some(d)) => country.is_long_term(b, d),
             _ => false,
         };
-        let gain = s.gain() * scale;
+        let fmv = if country == Country::India {
+            val.fmv_2018(&s.symbol)
+        } else {
+            None
+        };
+        let unit_cost =
+            tax_export::lot_unit_cost(&s.buy_date, long, s.buy_price, s.sell_price, fmv);
+        let gain = s.qty * (s.sell_price - unit_cost) * scale;
         let row = TaxSaleRow {
+            grandfathered: fmv.is_some() && unit_cost != s.buy_price,
             symbol: s.symbol.clone(),
             qty: s.qty,
             bought: s.buy_date.clone(),
@@ -2052,8 +2070,14 @@ pub(crate) fn tax_report(
         };
         let (mut st, mut lt) = (0.0, 0.0);
         for l in &h.lots {
-            let gain = l.qty * (price - l.price) * scale;
             let long = date(&l.date).is_some_and(|d| country.is_long_term(d, today));
+            let fmv = if country == Country::India {
+                val.fmv_2018(&h.symbol)
+            } else {
+                None
+            };
+            let unit_cost = tax_export::lot_unit_cost(&l.date, long, l.price, price, fmv);
+            let gain = l.qty * (price - unit_cost) * scale;
             r.unrealized.add(gain, long);
             if long {
                 lt += gain;
@@ -2144,11 +2168,43 @@ pub(crate) async fn tax_valuation(
             symbols.push(s.symbol.clone());
         }
     }
-    if symbols.is_empty() {
-        Ok(Valuation::new(Vec::new(), &[], market, None))
+    let mut val = if symbols.is_empty() {
+        Valuation::new(Vec::new(), &[], market, None)
     } else {
-        value_holdings(src, &symbols, market, None).await
+        value_holdings(src, &symbols, market, None).await?
+    };
+    val.fmv_2018 = grandfathering_prices(portfolio).await;
+    Ok(val)
+}
+
+/// The 31 Jan 2018 price of every rupee symbol with an old lot that Indian
+/// grandfathering could apply to: open lots, and long-term sales of this tax
+/// year. Looked up once and cached; none when no lot is that old.
+async fn grandfathering_prices(portfolio: &Portfolio) -> Vec<(String, f64)> {
+    let rupee = |s: &str| pf::symbol_currency(s) == Some("INR");
+    let mut symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| {
+            h.lots
+                .iter()
+                .any(|l| tax_export::is_grandfathered_date(&l.date))
+        })
+        .map(|h| h.symbol.clone())
+        .collect();
+    let today = chrono::Local::now().date_naive();
+    let start = Country::India.tax_year(today).0;
+    symbols.extend(tax_export::grandfathered_symbols(
+        &portfolio.realized,
+        start,
+    ));
+    symbols.retain(|s| rupee(s) && !s.to_uppercase().ends_with("-INR"));
+    symbols.sort();
+    symbols.dedup();
+    if symbols.is_empty() {
+        return Vec::new();
     }
+    super::planning::fmv_31_jan_2018(&symbols).await
 }
 
 /// Capital-gains estimate for the current tax year: gains realized by
@@ -2222,10 +2278,18 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
                 s.sold,
                 signed_tax_money(c, s.gain),
                 match s.term {
+                    Some("long") if s.grandfathered => "LT†",
                     Some("long") => "LT",
                     Some(_) => "ST",
                     None => "",
                 },
+            );
+        }
+        if report.sales.iter().any(|s| s.grandfathered) {
+            println!(
+                "  {}",
+                "† Bought by 31 Jan 2018: cost raised to the 31 Jan 2018 price where that lowers the gain (Section 112A)."
+                    .dimmed()
             );
         }
     }
@@ -2385,7 +2449,7 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     let caveat = match country {
         Country::India => {
             "ESTIMATE for listed shares with STT paid (Sec. 111A/112A rates from 23 Jul 2024), FIFO lots. \
-             Includes the 4% cess; excludes surcharge, pre-2018 grandfathering, brought-forward losses, and bonus-share \
+             Includes the 4% cess; excludes surcharge, brought-forward losses, and bonus-share \
              cost rules. Consult a chartered accountant."
         }
         Country::Us => {

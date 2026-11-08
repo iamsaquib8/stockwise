@@ -269,11 +269,14 @@ pub async fn cmd_tax_export(
             sold.dedup();
             let isins = lookup_isins(&sold).await;
             let marks = sale_marks(&views::LiveSource::new(), &sold).await;
-            Schedule::India(tax_export::india_schedule(
+            let old = tax_export::grandfathered_symbols(&portfolio.realized, start);
+            let fmvs = fmv_31_jan_2018(&old).await;
+            Schedule::India(tax_export::india_schedule_with_fmv(
                 &portfolio.realized,
                 start,
                 |sym| isins.iter().find(|(s, _)| s == sym).map(|(_, i)| i.clone()),
                 &marks,
+                |sym| fmvs.iter().find(|(s, _)| s == sym).map(|(_, v)| *v),
             ))
         }
         _ => Schedule::Us(tax_export::us_schedule(&portfolio.realized, start)),
@@ -327,6 +330,77 @@ pub async fn cmd_tax_export(
     Ok(())
 }
 
+/// The 31 Jan 2018 price of each symbol (Section 112A grandfathering): the
+/// day's highest price for a listed share (Yahoo), the NAV for a mutual fund
+/// (AMFI via mfapi). A price never changes, so it is cached for good; a
+/// symbol without one is left out and keeps its actual cost.
+pub(crate) async fn fmv_31_jan_2018(symbols: &[String]) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for sym in symbols {
+        let cache = format!(
+            "fmv2018_{}.txt",
+            sym.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        );
+        let forever = std::time::Duration::from_secs(u64::MAX / 4);
+        let valid = |t: &str| t.trim().parse::<f64>().is_ok_and(|v| v > 0.0);
+        if let Some(page) = crate::pagecache::read(&cache, forever, valid)
+            && let Ok(v) = page.text.trim().parse::<f64>()
+        {
+            out.push((sym.clone(), v));
+            continue;
+        }
+        let price = if let Some(id) = crate::offmarket::fund_id(sym) {
+            fund_nav_31_jan_2018(id).await
+        } else {
+            let (from, to) = tax_export::fmv_window();
+            match views::DataSource::yahoo(&views::LiveSource::new()).await {
+                Ok(y) => y
+                    .get_chart_between(sym, from, to, "1d")
+                    .await
+                    .ok()
+                    .map(|c| views::history_from_chart(c, sym, "", "1d"))
+                    .and_then(|h| tax_export::fmv_from_bars(&h.bars)),
+                Err(_) => None,
+            }
+        };
+        if let Some(v) = price {
+            crate::pagecache::write(&cache, &v.to_string());
+            out.push((sym.clone(), v));
+        }
+    }
+    out
+}
+
+/// The NAV of AMFI scheme `id` on 31 Jan 2018 (the last one on or before it).
+/// None for an ISIN id or when the history cannot be read.
+async fn fund_nav_31_jan_2018(id: &str) -> Option<f64> {
+    let code: u32 = id.parse().ok()?;
+    let client = crate::pagecache::client(std::time::Duration::from_secs(20)).ok()?;
+    let hist = crate::funds::load_history(&client, code).await.ok()?;
+    let day = NaiveDate::from_ymd_opt(2018, 1, 31)?;
+    crate::funds::nav_on_or_before(&hist.navs, day)
+        .filter(|(d, _)| (day - *d).num_days() <= 7)
+        .map(|(_, nav)| nav)
+}
+
+/// The 31 Jan 2018 prices `advance_tax_schedule` needs: one per rupee symbol
+/// sold from a lot bought on or before that day, whatever the tax year.
+pub(crate) async fn advance_fmvs(portfolio: &Portfolio) -> Vec<(String, f64)> {
+    let mut symbols: Vec<String> = portfolio
+        .realized
+        .iter()
+        .filter(|s| {
+            tax_export::is_grandfathered_date(&s.buy_date)
+                && pf::symbol_currency(&s.symbol) == Some("INR")
+                && !s.symbol.to_uppercase().ends_with("-INR")
+        })
+        .map(|s| s.symbol.clone())
+        .collect();
+    symbols.sort();
+    symbols.dedup();
+    fmv_31_jan_2018(&symbols).await
+}
+
 /// AMFI marks (categories) for the funds and SGBs among `symbols`, so the tax
 /// commands that have no valuation can tell equity-oriented funds from the
 /// rest. Never fails: a symbol without a mark is classified as unknown.
@@ -353,6 +427,7 @@ pub(crate) fn advance_tax_schedule(
     fy: Option<&str>,
     payments: &[tax::AdvancePayment],
     marks: &crate::offmarket::OffMarket,
+    fmvs: &[(String, f64)],
 ) -> Result<tax::AdvanceTaxSchedule> {
     if payments.iter().any(|p| p.amount < 0.0) {
         bail!("Advance tax paid amount cannot be negative");
@@ -405,7 +480,12 @@ pub(crate) fn advance_tax_schedule(
             Some(buy_d) => Country::India.is_long_term(buy_d, sell_d),
             None => false,
         };
-        advance_sales.push(tax::AdvanceTaxSale::new(sell_d, s.gain() * scale, is_lt));
+        // Long-term lots bought by 31 Jan 2018 use the grandfathered cost.
+        let fmv = fmvs.iter().find(|(f, _)| *f == s.symbol).map(|(_, v)| *v);
+        let unit_cost =
+            tax_export::lot_unit_cost(&s.buy_date, is_lt, s.buy_price, s.sell_price, fmv);
+        let gain = s.qty * (s.sell_price - unit_cost);
+        advance_sales.push(tax::AdvanceTaxSale::new(sell_d, gain * scale, is_lt));
     }
 
     Ok(tax::compute_advance_tax(
@@ -430,7 +510,8 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: &[String], json: bool) -> R
         .map(|s| s.symbol.clone())
         .collect();
     let marks = sale_marks(&views::LiveSource::new(), &year_symbols).await;
-    let schedule = advance_tax_schedule(&portfolio, fy, &payments, &marks)?;
+    let fmvs = advance_fmvs(&portfolio).await;
+    let schedule = advance_tax_schedule(&portfolio, fy, &payments, &marks, &fmvs)?;
 
     if json {
         return output::print_json(&schedule);

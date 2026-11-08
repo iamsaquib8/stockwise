@@ -262,8 +262,9 @@ fn tax_in_reports_intraday_apart_from_111a_and_112a() {
     assert_eq!(r.holdings[0].long_term_gain, 100_000.0);
 
     // `tax advance` leaves it out too.
-    let s = super::planning::advance_tax_schedule(&p, Some("2025-26"), &[], &Default::default())
-        .unwrap();
+    let s =
+        super::planning::advance_tax_schedule(&p, Some("2025-26"), &[], &Default::default(), &[])
+            .unwrap();
     assert_eq!((s.total_stcg, s.total_ltcg), (0.0, 0.0));
 }
 
@@ -345,8 +346,9 @@ fn tax_export_and_advance_tax_skip_non_equity_etfs() {
     assert_eq!(schedule.summary.stcg_gains, 1_500.0);
     assert!(schedule.notes.iter().any(|n| n.contains("GOLDBEES.NS")));
     // Only the NIFTYBEES gain is in the advance-tax base.
-    let adv = super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &Default::default())
-        .unwrap();
+    let adv =
+        super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &Default::default(), &[])
+            .unwrap();
     assert_eq!((adv.total_stcg, adv.total_ltcg), (1_500.0, 0.0));
 }
 
@@ -968,6 +970,7 @@ fn goal_and_tax_export_json_shapes() {
             "purchase_date",
             "purchase_price",
             "cost",
+            "actual_cost",
             "holding_days",
             "gain",
             "grandfathered",
@@ -1075,7 +1078,7 @@ fn india_tax_commands_classify_the_same_portfolio_alike() {
     assert_eq!(schedule.virtual_digital_assets, ["BTC-INR"]);
 
     // `tax advance`.
-    let s = super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &val.off).unwrap();
+    let s = super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &val.off, &[]).unwrap();
     assert_eq!((s.total_stcg, s.total_ltcg), (4_000.0, 0.0));
 
     // `harvest`: only the open lots of the same two symbols are candidates.
@@ -1128,7 +1131,7 @@ fn tax_advance_for_an_old_year_uses_that_years_rate() {
     p.sell_fifo("TCS.NS", 1000.0, 200.0, "2023-08-10", "manual")
         .unwrap();
     let off = crate::offmarket::OffMarket::default();
-    let old = super::planning::advance_tax_schedule(&p, Some("2023-24"), &[], &off).unwrap();
+    let old = super::planning::advance_tax_schedule(&p, Some("2023-24"), &[], &off, &[]).unwrap();
     assert_eq!(old.total_stcg, 100_000.0);
     assert!((old.total_tax_estimated - 15_600.0).abs() < 1e-6);
 }
@@ -1242,4 +1245,57 @@ mod harvest_math {
             100.0
         );
     }
+}
+
+/// 100 shares bought in 2015 at 800: 60 sold on 2026-06-10 at 2,000, 40 held
+/// and priced at 2,000. The 31 Jan 2018 price was 1,000.
+fn grandfathered_portfolio() -> Portfolio {
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(100.0, 800.0, "2015-03-02", "manual"));
+    p.sell_fifo("TCS.NS", 60.0, 2000.0, "2026-06-10", "manual")
+        .unwrap();
+    p
+}
+
+#[test]
+fn tax_in_uses_the_grandfathered_cost_for_sales_and_open_lots() {
+    let p = grandfathered_portfolio();
+    let today = day("2026-11-01");
+    let quotes = || vec![quote("TCS.NS", Some(2000.0), None)];
+
+    let plain = tax_report(Country::India, &p, &valued(&p, quotes()), today);
+    assert_eq!(plain.sales[0].gain, 72_000.0);
+    assert!(!plain.sales[0].grandfathered);
+    assert_eq!(plain.holdings[0].long_term_gain, 48_000.0);
+
+    let mut val = valued(&p, quotes());
+    val.fmv_2018 = vec![("TCS.NS".into(), 1000.0)];
+    let r = tax_report(Country::India, &p, &val, today);
+    assert_eq!(r.sales[0].gain, 60_000.0, "60 × (2,000 − 1,000)");
+    assert!(r.sales[0].grandfathered);
+    assert_eq!(r.realized.lt_gain, 60_000.0);
+    assert_eq!(r.holdings[0].long_term_gain, 40_000.0);
+}
+
+#[test]
+fn harvest_and_advance_tax_use_the_grandfathered_cost() {
+    let p = grandfathered_portfolio();
+    let fmvs = vec![("TCS.NS".to_string(), 1000.0)];
+
+    let s =
+        super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &Default::default(), &fmvs)
+            .unwrap();
+    assert_eq!(s.total_ltcg, 60_000.0);
+    let s =
+        super::planning::advance_tax_schedule(&p, Some("2026-27"), &[], &Default::default(), &[])
+            .unwrap();
+    assert_eq!(s.total_ltcg, 72_000.0);
+
+    let mut val = valued(&p, vec![quote("TCS.NS", Some(2000.0), None)]);
+    val.fmv_2018 = fmvs;
+    let h = super::holdings::compute_harvest(&p, &val, Market::In, day("2026-11-01"));
+    // Exemption left: 1,25,000 − 60,000, the part of the held 40 shares' gain
+    // (40,000) that fits is all of it.
+    assert_eq!(h.ltcg_exemption_remaining, 65_000.0);
+    assert_eq!(h.gain_harvest_candidates[0].lt_pnl, 40_000.0);
 }
