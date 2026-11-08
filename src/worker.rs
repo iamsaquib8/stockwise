@@ -131,7 +131,7 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
                 &symbol,
                 q.market_cap,
                 q.currency.as_deref(),
-                crate::market::IndiaMembership::shared(),
+                crate::market::IndiaMembership::shared().as_deref(),
             )
             .as_str()
             .to_string(),

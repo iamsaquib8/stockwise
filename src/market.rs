@@ -1476,7 +1476,7 @@ pub fn cap_tier_of(q: &crate::api::Quote) -> CapTier {
         symbol,
         q.market_cap,
         q.currency.as_deref(),
-        IndiaMembership::shared(),
+        IndiaMembership::shared().as_deref(),
     )
 }
 
@@ -1560,20 +1560,35 @@ pub struct IndiaMembership {
 }
 
 impl IndiaMembership {
-    /// Saved membership, loaded once per run; `None` when nothing is saved
-    /// or the data directory is unreadable.
-    pub fn shared() -> Option<&'static IndiaMembership> {
+    /// Saved membership, reloaded when another process rewrites the file
+    /// (a long-running worker sees a later index scan); `None` when nothing
+    /// is saved or the data directory is unreadable.
+    pub fn shared() -> Option<std::sync::Arc<IndiaMembership>> {
         // Unit tests never read the real data directory.
         if cfg!(test) {
             return None;
         }
-        static CELL: OnceLock<Option<IndiaMembership>> = OnceLock::new();
-        CELL.get_or_init(|| {
-            crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
-                .ok()
-                .filter(|m| !m.is_empty())
-        })
-        .as_ref()
+        type Cached = Option<(
+            Option<std::time::SystemTime>,
+            Option<std::sync::Arc<IndiaMembership>>,
+        )>;
+        static CELL: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+        let mtime = crate::store::path(MEMBERSHIP_FILE)
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        let mut cell = CELL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((seen, value)) = cell.as_ref()
+            && *seen == mtime
+        {
+            return value.clone();
+        }
+        let value = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
+            .ok()
+            .filter(|m| !m.is_empty())
+            .map(std::sync::Arc::new);
+        *cell = Some((mtime, value.clone()));
+        value
     }
 
     /// Saved membership read now (not the once-per-run copy).
