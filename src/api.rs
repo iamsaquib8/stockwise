@@ -161,9 +161,17 @@ fn host_of(url: &str) -> &str {
 
 // ── Hybrid Cache: Redis (primary) + In-Memory (fallback) ──
 
+/// The in-memory fallback is bounded so a long-lived `serve`, `tui`, `mcp` or
+/// `ask` process cannot grow with every researched symbol. Redis, when
+/// configured, keeps the long-lived copies.
+const MEMORY_CACHE_MAX_ENTRIES: usize = 500;
+const MEMORY_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const MEMORY_CACHE_MAX_TTL: Duration = Duration::from_secs(3600);
+
 struct CacheEntry {
     data: String,
     expires: Instant,
+    inserted: Instant,
 }
 
 pub(crate) struct HybridCache {
@@ -244,18 +252,58 @@ impl HybridCache {
                 .await;
         }
 
-        // Also write to memory (fast path for same-session reads)
-        if self.memory.len() > 200 {
-            let now = Instant::now();
-            self.memory.retain(|_, v| now < v.expires);
-        }
+        // Also write to memory (fast path for same-session reads). The
+        // in-memory copy is capped in count, bytes and TTL; Redis above keeps
+        // the full-lived entry.
+        let ttl = ttl.min(MEMORY_CACHE_MAX_TTL);
+        self.make_room(key.len() + data.len());
+        let now = Instant::now();
         self.memory.insert(
             key,
             CacheEntry {
                 data,
-                expires: Instant::now() + ttl,
+                expires: now + ttl,
+                inserted: now,
             },
         );
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.memory
+            .iter()
+            .map(|(key, entry)| key.len() + entry.data.len())
+            .sum()
+    }
+
+    /// Drop expired entries, then the oldest, until one more entry of `extra`
+    /// bytes fits under the count and byte caps.
+    fn make_room(&mut self, extra: usize) {
+        if self.memory.len() < MEMORY_CACHE_MAX_ENTRIES
+            && self.memory_bytes() + extra <= MEMORY_CACHE_MAX_BYTES
+        {
+            return;
+        }
+        let now = Instant::now();
+        self.memory.retain(|_, entry| now < entry.expires);
+        if self.memory.len() < MEMORY_CACHE_MAX_ENTRIES
+            && self.memory_bytes() + extra <= MEMORY_CACHE_MAX_BYTES
+        {
+            return;
+        }
+        let mut by_age: Vec<(Instant, String)> = self
+            .memory
+            .iter()
+            .map(|(key, entry)| (entry.inserted, key.clone()))
+            .collect();
+        by_age.sort_by_key(|(inserted, _)| *inserted);
+        for (_, key) in by_age {
+            if self.memory.len() < MEMORY_CACHE_MAX_ENTRIES
+                && self.memory_bytes() + extra <= MEMORY_CACHE_MAX_BYTES
+            {
+                break;
+            }
+            self.memory.remove(&key);
+        }
     }
 }
 
@@ -1486,6 +1534,33 @@ fn combine_quotes(symbols: &[&str], from_provider: Vec<Quote>, yahoo: Vec<Quote>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn memory_cache_stays_under_its_caps() {
+        let mut cache = HybridCache::in_memory();
+        let week = Duration::from_secs(7 * 24 * 3600);
+
+        // A long TTL is capped in memory; Redis would keep the full TTL.
+        cache.set("ttl".into(), "v".into(), week).await;
+        let capped = cache.memory["ttl"].expires;
+        assert!(capped <= Instant::now() + MEMORY_CACHE_MAX_TTL + Duration::from_secs(1));
+
+        for i in 0..(MEMORY_CACHE_MAX_ENTRIES + 20) {
+            cache
+                .set(format!("key{i}"), format!("value{i}"), week)
+                .await;
+        }
+        assert_eq!(cache.memory.len(), MEMORY_CACHE_MAX_ENTRIES);
+        assert!(cache.memory_bytes() <= MEMORY_CACHE_MAX_BYTES);
+        // The oldest entries made room for the newest.
+        assert!(cache.get("ttl").await.is_none());
+        assert!(cache.get("key0").await.is_none());
+        let newest = format!("key{}", MEMORY_CACHE_MAX_ENTRIES + 19);
+        assert_eq!(
+            cache.get(&newest).await.as_deref(),
+            Some(format!("value{}", MEMORY_CACHE_MAX_ENTRIES + 19).as_str())
+        );
+    }
 
     #[test]
     fn combine_quotes_overlays_provider_prices_in_request_order() {
