@@ -143,7 +143,7 @@ Year-end (31 Dec US/EU/CA tax-loss harvesting cutoff, December US/Indian estimat
 - 📋 **Institutional Backtest Engine v2, On-Demand ML Model Hub (`stockwise model`) & Strategy Base-Rate Atlas** ([#383](https://github.com/iamsaquib8/stockwise/issues/383), [#394](https://github.com/iamsaquib8/stockwise/issues/394), [#395](https://github.com/iamsaquib8/stockwise/issues/395)) — multi-timeframe (`5m`–`1wk`), shorting & fractional shares, ATR/vol-target/Kelly sizing, Chandelier/trailing stops, sovereign `Rf` cash sweep & `--after-tax` tearsheets, cross-asset benchmark/VIX regime filters, `filed_at` point-in-time fundamental rules, Purged/Embargoed walk-forward (`CPCV`) + **Deflated Sharpe (`DSR`)**, Monte Carlo drawdown distributions, `backtest compare` & `--universe` runs over `stockwise data sync`, empirical survivorship-free **Strategy Base-Rate Atlas**, and **on-demand local models** (`stockwise model pull`, built-in pure-Rust `GARCH(1,1)` + `HMM` regime, `chronos-bolt` quantile cones, `finbert` filing scorer, and `onnx:`/`lgbm:` BYO models with mandatory **`training_cutoff` leakage guards**)
 - 📋 **Global & regional soft launch** — how-to, local-first privacy and year-end portfolio-checkup posts across `r/commandline`, `r/Bogleheads`, `r/UKPersonalFinance`, `r/Finanzen`, `r/PersonalFinanceCanada`, `r/algotrading`, `r/IndiaInvestments`, `r/developersIndia` and TradingQnA ([#200](https://github.com/iamsaquib8/stockwise/issues/200))
 
-Done when: every channel in "Coming soon" on the install page is live, every data command emits `--json`/`--csv`, `stockwise init` + `stockwise use` + `profile` + `portfolio checkup` work end-to-end across global and Indian portfolios, and hand-checked reference portfolios pass tax exports across US (Form 8949 / `HIFO` / Wash Sale), UK (Section 104 / SA108), Canada (`ACB`), and India (Schedule 112A).
+Done when: every channel in "Coming soon" on the install page is live, every data command emits `--json`/`--csv`, `stockwise init` + `stockwise use` + `profile` + `portfolio checkup` + `backtest` v2 (`#394`) + `stockwise model` (`#395`, including `training_cutoff` OOS leakage guards) work end-to-end across global and Indian portfolios, and hand-checked reference portfolios pass tax exports across US (Form 8949 / `HIFO` / Wash Sale), UK (Section 104 / SA108), Canada (`ACB`), and India (Schedule 112A).
 
 ### 0.10 — simplify and stabilise: the 1.0 release candidate ([milestone](https://github.com/iamsaquib8/stockwise/milestone/4), target: January 2027)
 
@@ -170,7 +170,7 @@ MCP) on macOS, Linux and Windows without a known bug in the four jobs.
 
 Epic: [#281](https://github.com/iamsaquib8/stockwise/issues/281).
 
-Launch before the 31 March harvesting deadline and the ITR season, when the four jobs matter most.
+Launch into Q1 global & regional tax/investing season (US Form 8949 / IRA window, UK 5 April ISA/CGT deadline, Canadian RRSP/ACB filing, and India's 31 March harvesting & ITR window), when the four jobs matter most.
 
 - 📋 **Show it** — "Open in Codespaces" ([#240](https://github.com/iamsaquib8/stockwise/issues/240)) and three
   task guides for the core jobs ([#201](https://github.com/iamsaquib8/stockwise/issues/201))
