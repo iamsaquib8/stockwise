@@ -474,6 +474,12 @@ struct WorkerState {
     last_eod: Option<String>,
     #[serde(default)]
     last_alert_pass: Option<i64>,
+    /// LTCG notices already sent (`SYMBOL#lot:date:kind`), each sent once.
+    #[serde(default)]
+    ltcg_notified: Vec<String>,
+    /// Newest quarter end seen per held symbol, to spot a new result.
+    #[serde(default)]
+    last_results: HashMap<String, String>,
 }
 
 /// After the close: refresh tracked snapshots, append today's NAV for held
@@ -549,13 +555,214 @@ pub async fn eod_sync(
             }
         }
     }
+    let notices = notify_after_close(client, market, || progress(97.0)).await?;
     progress(100.0);
     Ok(serde_json::json!({
         "snapshots": snapshots,
         "fund_navs": navs,
         "wealth_snapshot": wealth,
+        "notifications": notices,
     })
     .to_string())
+}
+
+// ── Post-close notifications ──
+
+/// How many days ahead a lot's turn to long-term is announced.
+const LTCG_HEADS_UP_DAYS: i64 = 7;
+/// Held symbols checked for new results per post-close sync.
+const RESULT_CHECKS_PER_SYNC: usize = 20;
+/// Sent keys kept, so the state file stays small.
+const MAX_NOTIFIED: usize = 500;
+
+/// The tax country whose holding-period rule applies to a market.
+fn tax_country(market: Market) -> Option<crate::tax::Country> {
+    match market {
+        Market::In => Some(crate::tax::Country::India),
+        Market::Us => Some(crate::tax::Country::Us),
+        Market::Global(crate::market::Exchange::Uk) => Some(crate::tax::Country::Uk),
+        _ => None,
+    }
+}
+
+/// Notices for lots about to turn long-term (within [`LTCG_HEADS_UP_DAYS`])
+/// and for lots that have turned since a heads-up. Each lot and stage is
+/// reported once: `notified` remembers it (`SYMBOL#lot:bought:long_term_on:
+/// kind`). The countdown skips a lot once it is long-term, so the "now"
+/// notice comes from a remembered heads-up. Facts and dates only; what to do
+/// about them is the holder's call.
+fn ltcg_notices(
+    portfolio: &Portfolio,
+    country: crate::tax::Country,
+    today: chrono::NaiveDate,
+    notified: &mut Vec<String>,
+) -> Vec<crate::notify::Message> {
+    let mut out = Vec::new();
+    for c in crate::sellpreview::ltcg_countdown(portfolio, country, today, LTCG_HEADS_UP_DAYS) {
+        let key = format!(
+            "{}#{}:{}:{}:soon",
+            c.symbol, c.lot_no, c.bought, c.long_term_on
+        );
+        if notified.contains(&key) {
+            continue;
+        }
+        notified.push(key);
+        out.push(crate::notify::Message::new(
+            format!("Lot turns long-term soon: {}", c.symbol),
+            format!(
+                "Lot #{} of {} ({} units, bought {}, held {} days) turns long-term on {} (in {} days). \
+                 `stockwise portfolio sell {} <QTY> --preview` shows the tax on a sale.",
+                c.lot_no, c.symbol, c.qty, c.bought, c.days_held, c.long_term_on,
+                c.days_to_long_term, c.symbol
+            ),
+        ));
+    }
+    // A remembered heads-up whose date has come: the lot is long-term now.
+    let due: Vec<String> = notified
+        .iter()
+        .filter(|k| k.ends_with(":soon"))
+        .cloned()
+        .collect();
+    for key in due {
+        let Some((head, rest)) = key.split_once('#') else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.trim_end_matches(":soon").split(':').collect();
+        let [lot_no, bought, on] = parts[..] else {
+            continue;
+        };
+        let (Ok(lot_no), Ok(on_date)) = (
+            lot_no.parse::<usize>(),
+            chrono::NaiveDate::parse_from_str(on, "%Y-%m-%d"),
+        ) else {
+            continue;
+        };
+        if on_date > today {
+            continue;
+        }
+        let done = format!("{head}#{rest}").replace(":soon", ":now");
+        if notified.contains(&done) {
+            continue;
+        }
+        // Only if that very lot is still held.
+        let still_held = portfolio
+            .holding(head)
+            .and_then(|h| h.lots.get(lot_no - 1))
+            .filter(|l| l.date == bought);
+        if let Some(l) = still_held {
+            out.push(crate::notify::Message::new(
+                format!("Lot is now long-term: {head}"),
+                format!(
+                    "Lot #{lot_no} of {head} ({} units, bought {bought}) is long-term from {on}. \
+                     `stockwise portfolio sell {head} <QTY> --preview` shows the tax on a sale.",
+                    l.qty
+                ),
+            ));
+        }
+        notified.push(done);
+    }
+    if notified.len() > MAX_NOTIFIED {
+        let drop = notified.len() - MAX_NOTIFIED;
+        notified.drain(..drop);
+    }
+    out
+}
+
+/// A notice when `collected` has a quarter newer than the one recorded for
+/// its symbol. The first sight of a symbol only records, so turning the
+/// worker on does not announce old results.
+fn result_notice(
+    seen: &mut HashMap<String, String>,
+    collected: &crate::results::Collected,
+) -> Option<crate::notify::Message> {
+    let latest = collected.quarterly.iter().max_by_key(|p| p.end)?;
+    let end = latest.end.to_string();
+    let previous = seen.insert(collected.symbol.clone(), end.clone());
+    if previous.is_none() || previous.as_deref() == Some(&end) {
+        return None;
+    }
+    let year_ago = collected
+        .quarterly
+        .iter()
+        .find(|p| p.end == latest.end - chrono::Months::new(12));
+    let pct = |cur: Option<f64>, prev: Option<f64>| {
+        crate::results::growth(cur, prev)
+            .map_or("n/a".to_string(), |g| format!("{:+.1}%", g * 100.0))
+    };
+    let num = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{v:.0}"));
+    let cur = collected.currency.as_deref().unwrap_or("");
+    Some(crate::notify::Message::new(
+        format!("New quarterly result: {}", collected.symbol),
+        format!(
+            "{} reported the quarter ended {end}: revenue {cur} {} ({} YoY), net profit {cur} {} ({} YoY). \
+             `stockwise results {}` shows the full table.",
+            collected.name,
+            num(latest.revenue),
+            pct(latest.revenue, year_ago.and_then(|p| p.revenue)),
+            num(latest.pat),
+            pct(latest.pat, year_ago.and_then(|p| p.pat)),
+            collected.symbol
+        ),
+    ))
+}
+
+/// After the close: LTCG notices for held lots and a notice for each newly
+/// reported quarter of a held stock, sent through the configured channels.
+/// Returns how many notices were produced. `keep_going` is the task's
+/// cancel check, asked before each network step.
+async fn notify_after_close(
+    client: &YahooClient,
+    market: Market,
+    mut keep_going: impl FnMut() -> bool,
+) -> Result<usize> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.holdings.is_empty() {
+        return Ok(0);
+    }
+    let notifier = crate::notify::Notifier::from_env();
+    let mut state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
+    let mut notices = Vec::new();
+
+    if let Some(country) = tax_country(market) {
+        let today = clock::session_date(market, Utc::now());
+        notices.extend(ltcg_notices(
+            &portfolio,
+            country,
+            today,
+            &mut state.ltcg_notified,
+        ));
+    }
+
+    let store = crate::results::default_store();
+    let symbols: Vec<String> = tracked_symbols()
+        .into_iter()
+        .filter(|s| portfolio.holdings.iter().any(|h| &h.symbol == s))
+        .take(RESULT_CHECKS_PER_SYNC)
+        .collect();
+    for symbol in symbols {
+        if !keep_going() {
+            bail!("cancelled");
+        }
+        if let Ok(c) = crate::results::collect(client, &symbol, market, store, false, false).await
+            && let Some(msg) = result_notice(&mut state.last_results, &c)
+        {
+            notices.push(msg);
+        }
+    }
+
+    if !keep_going() {
+        bail!("cancelled");
+    }
+    for msg in &notices {
+        notifier.send_logged(msg).await;
+    }
+    // Saved only after sending, and only the keys of this run: a failed run
+    // repeats its notices instead of dropping them.
+    let mut latest: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
+    latest.ltcg_notified = state.ltcg_notified;
+    latest.last_results = state.last_results;
+    crate::store::save(STATE_FILE, &latest, false)?;
+    Ok(notices.len())
 }
 
 /// The session date whose post-close sync is due, if any: the market closed
@@ -903,6 +1110,11 @@ pub async fn run_worker(market: Market) -> Result<()> {
             if has_work && let Ok(client) = YahooClient::new().await {
                 let _ = eod_sync(&client, market, |_| true).await;
             }
+            // The sync saved its notification state: reload it, then record
+            // the date, so neither write erases the other.
+            let alert_pass = state.last_alert_pass;
+            state = crate::store::load(STATE_FILE).unwrap_or_default();
+            state.last_alert_pass = alert_pass;
             state.last_eod = Some(date);
             let _ = crate::store::save(STATE_FILE, &state, false);
         }
@@ -1099,6 +1311,123 @@ mod tests {
             format!("{err:#}").contains("could not be recovered"),
             "{err:#}"
         );
+    }
+
+    fn held(symbol: &str, bought: &str) -> Portfolio {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            symbol,
+            crate::portfolio::Lot::new(10.0, 100.0, bought, "manual"),
+        );
+        p
+    }
+
+    #[test]
+    fn ltcg_notices_fire_once_per_lot_and_stage() {
+        use chrono::NaiveDate;
+        let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let india = crate::tax::Country::India;
+        // Bought 2025-12-20: the first long-term day is 2026-12-21.
+        let p = held("TCS.NS", "2025-12-20");
+        let mut seen = Vec::new();
+        // 20 days out: nothing yet.
+        assert!(ltcg_notices(&p, india, day("2026-12-01"), &mut seen).is_empty());
+        // Inside the week: one heads-up, then silence on later passes.
+        let soon = ltcg_notices(&p, india, day("2026-12-15"), &mut seen);
+        assert_eq!(soon.len(), 1);
+        assert!(soon[0].title.contains("soon") && soon[0].body.contains("2026-12-21"));
+        assert!(ltcg_notices(&p, india, day("2026-12-16"), &mut seen).is_empty());
+        // Once it has turned: one "now long-term" notice, then silence.
+        let now = ltcg_notices(&p, india, day("2026-12-21"), &mut seen);
+        assert_eq!(now.len(), 1, "{now:?}");
+        assert!(now[0].title.contains("now long-term"), "{}", now[0].title);
+        assert!(ltcg_notices(&p, india, day("2026-12-22"), &mut seen).is_empty());
+        // Notices state facts and name a command, not a recommendation (the
+        // command's own name, `portfolio sell`, is not advice wording).
+        for m in [&soon[0], &now[0]] {
+            crate::verdict::testing::assert_neutral(&m.body.replace("portfolio sell", "portfolio"));
+        }
+    }
+
+    #[test]
+    fn a_sold_lot_gets_no_now_notice() {
+        use chrono::NaiveDate;
+        let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let india = crate::tax::Country::India;
+        let mut seen = Vec::new();
+        let p = held("TCS.NS", "2025-12-20");
+        assert_eq!(
+            ltcg_notices(&p, india, day("2026-12-15"), &mut seen).len(),
+            1
+        );
+        // The lot is gone by the time it would have turned.
+        let empty = Portfolio::default();
+        assert!(ltcg_notices(&empty, india, day("2026-12-22"), &mut seen).is_empty());
+    }
+
+    #[test]
+    fn ltcg_notices_skip_funds_and_uk() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 12, 18).unwrap();
+        let fund = held("MF:120503", "2025-12-20");
+        assert!(ltcg_notices(&fund, crate::tax::Country::India, today, &mut Vec::new()).is_empty());
+        let uk = held("VOD.L", "2025-12-20");
+        assert!(ltcg_notices(&uk, crate::tax::Country::Uk, today, &mut Vec::new()).is_empty());
+    }
+
+    fn collected(symbol: &str, ends: &[(&str, f64, f64)]) -> crate::results::Collected {
+        let quarterly = ends
+            .iter()
+            .map(|(e, rev, pat)| {
+                // Some fields are private to `results`: start from the default.
+                let mut p = crate::results::ResultPeriod::default();
+                p.end = chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d").unwrap();
+                p.revenue = Some(*rev);
+                p.pat = Some(*pat);
+                p
+            })
+            .collect();
+        crate::results::Collected {
+            symbol: symbol.into(),
+            name: "Tata Consultancy".into(),
+            currency: Some("INR".into()),
+            is_india: true,
+            is_financial: false,
+            quarterly,
+            annual: Vec::new(),
+            sources: Vec::new(),
+            warnings: Vec::new(),
+            from_cache: false,
+        }
+    }
+
+    #[test]
+    fn a_new_quarter_is_announced_once_and_the_first_sight_is_silent() {
+        let mut seen = HashMap::new();
+        let old = collected("TCS.NS", &[("2025-09-30", 1000.0, 100.0)]);
+        // First sight: recorded, not announced.
+        assert!(result_notice(&mut seen, &old).is_none());
+        assert!(result_notice(&mut seen, &old).is_none());
+        let new = collected(
+            "TCS.NS",
+            &[("2025-09-30", 1000.0, 100.0), ("2026-09-30", 1100.0, 120.0)],
+        );
+        let msg = result_notice(&mut seen, &new).expect("a new quarter is announced");
+        assert!(msg.title.contains("TCS.NS"));
+        assert!(msg.body.contains("2026-09-30"));
+        assert!(
+            msg.body.contains("+10.0% YoY") && msg.body.contains("+20.0% YoY"),
+            "{}",
+            msg.body
+        );
+        assert!(result_notice(&mut seen, &new).is_none(), "announced once");
+    }
+
+    #[test]
+    fn tax_country_follows_the_market() {
+        assert_eq!(tax_country(Market::In), Some(crate::tax::Country::India));
+        assert_eq!(tax_country(Market::Us), Some(crate::tax::Country::Us));
+        assert_eq!(tax_country(Market::Crypto), None);
     }
 
     #[test]
