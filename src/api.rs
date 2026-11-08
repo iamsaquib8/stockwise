@@ -56,10 +56,15 @@ fn fetch_failure_message(url: &str, error: reqwest::Error) -> String {
 /// persistent cache. An empty env var has always meant "off", so it counts
 /// as set.
 pub fn redis_url() -> String {
-    std::env::var("STOCKWISE_REDIS_URL")
-        .ok()
-        .or_else(|| crate::config::get().redis_url.clone())
-        .unwrap_or_else(|| "off".into())
+    redis_url_from(
+        std::env::var("STOCKWISE_REDIS_URL").ok(),
+        crate::config::get().redis_url.clone(),
+    )
+}
+
+/// The precedence behind [`redis_url`]: env, then config file, else `off`.
+fn redis_url_from(env: Option<String>, file: Option<String>) -> String {
+    env.or(file).unwrap_or_else(|| "off".into())
 }
 
 /// Connect to the optional Redis cache.
@@ -2190,14 +2195,21 @@ mod tests {
 
     #[test]
     fn redis_is_off_unless_configured() {
-        // Not asserting the env here (other tests may set it); the pure
-        // fallback is what changed.
+        // No env, no config: off. The old default was a local Redis.
+        assert_eq!(redis_url_from(None, None), "off");
+        // The environment wins over the file; an empty value still counts
+        // as set (it has always meant "off").
         assert_eq!(
-            std::env::var("STOCKWISE_REDIS_URL")
-                .ok()
-                .or_else(|| crate::config::get().redis_url.clone())
-                .unwrap_or_else(|| "off".into()),
-            redis_url()
+            redis_url_from(Some("redis://h:1/".into()), Some("redis://f:2/".into())),
+            "redis://h:1/"
+        );
+        assert_eq!(
+            redis_url_from(None, Some("redis://f:2/".into())),
+            "redis://f:2/"
+        );
+        assert_eq!(
+            redis_url_from(Some(String::new()), Some("redis://f:2/".into())),
+            ""
         );
     }
 

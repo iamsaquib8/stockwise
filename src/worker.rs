@@ -27,6 +27,9 @@ use tokio::sync::broadcast;
 const STATE_FILE: &str = "worker_state.json";
 const PID_FILE: &str = "worker.pid";
 const LOCK_FILE: &str = "worker.lock";
+/// Written by `worker stop` where there is no signal to send (Windows): the
+/// worker sees it and shuts down through its normal cleanup.
+const STOP_FILE: &str = "worker.stop";
 const LOG_FILE: &str = "worker.log";
 /// Refresh period while the exchange is open, and when it is closed.
 const OPEN_TICK: Duration = Duration::from_secs(30);
@@ -692,19 +695,36 @@ pub async fn stop() -> Result<bool> {
         }
         #[cfg(windows)]
         {
-            // No console to signal: end the process; its lock is released by
-            // the OS and the pid file is removed below.
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            // No console to signal: ask through the stop file, so the worker
+            // releases its task and cleans up like on SIGTERM. Only if it
+            // does not react within 10 s is the whole process tree ended.
+            let _ = std::fs::write(crate::store::path(STOP_FILE)?, b"stop");
+            let mut graceful = false;
+            for _ in 0..100 {
+                if let Some(free) = try_own()? {
+                    drop(free);
+                    graceful = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if !graceful {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
         for _ in 0..50 {
             if let Some(free) = try_own()? {
                 // Killed workers cannot clean up after themselves: remove
                 // the pid file while we hold the lock.
                 let _ = std::fs::remove_file(pid_path()?);
+                let _ = std::fs::remove_file(crate::store::path(STOP_FILE)?);
+                // A force-killed worker could not release its claimed task:
+                // requeue (warm/eod) or fail (run) whatever it left running.
+                db::with_db(|d| d.requeue_stale_tasks(0));
                 drop(free);
                 return Ok(true);
             }
@@ -758,6 +778,16 @@ fn load_alerts(last_error: &mut Option<String>) -> Option<crate::commands::Alert
     }
 }
 
+/// Resolves once `worker stop` has left the stop file (polled twice a second).
+async fn stop_requested() {
+    let Ok(path) = crate::store::path(STOP_FILE) else {
+        return std::future::pending().await;
+    };
+    while !path.exists() {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// The foreground worker: ticker, task executor, alert checks, post-close
 /// sync. Runs until Ctrl+C or SIGTERM.
 pub async fn run_worker(market: Market) -> Result<()> {
@@ -765,6 +795,8 @@ pub async fn run_worker(market: Market) -> Result<()> {
     let Some(_owner) = try_own()? else {
         bail!("Another worker is already running");
     };
+    // A stop request left from before this start must not stop the new worker.
+    let _ = std::fs::remove_file(crate::store::path(STOP_FILE)?);
     std::fs::write(pid_path()?, std::process::id().to_string())
         .context("Cannot write the worker pid file")?;
     let mut shutdown = crate::daemon::Shutdown::install("State is saved after every step.");
@@ -831,6 +863,7 @@ pub async fn run_worker(market: Market) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             _ = shutdown.wait() => break,
+            _ = stop_requested() => break,
         }
     }
     ticker.abort();
@@ -847,6 +880,7 @@ pub async fn run_worker(market: Market) -> Result<()> {
     }
     // Still holding the lock: no newer worker can have written a pid file.
     let _ = std::fs::remove_file(pid_path()?);
+    let _ = std::fs::remove_file(crate::store::path(STOP_FILE)?);
     println!("worker stopped");
     Ok(())
 }
