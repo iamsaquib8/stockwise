@@ -677,8 +677,16 @@ fn result_notice(
 ) -> Option<crate::notify::Message> {
     let latest = collected.quarterly.iter().max_by_key(|p| p.end)?;
     let end = latest.end.to_string();
-    let previous = seen.insert(collected.symbol.clone(), end.clone());
-    if previous.is_none() || previous.as_deref() == Some(&end) {
+    let previous = seen
+        .get(&collected.symbol)
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+    // Only a later quarter moves the record forward: a pass that returns
+    // fewer quarters (fallback source, partial payload) must neither announce
+    // an old one nor lower the record, or the next full pass repeats it.
+    if previous.is_none_or(|p| latest.end > p) {
+        seen.insert(collected.symbol.clone(), end.clone());
+    }
+    if previous.is_none() || previous.is_some_and(|p| latest.end <= p) {
         return None;
     }
     let year_ago = collected
@@ -1421,6 +1429,11 @@ mod tests {
             msg.body
         );
         assert!(result_notice(&mut seen, &new).is_none(), "announced once");
+        // A later pass with fewer quarters (partial payload) is silent and
+        // does not lower the record, so the next full pass is silent too.
+        assert!(result_notice(&mut seen, &old).is_none());
+        assert_eq!(seen["TCS.NS"], "2026-09-30");
+        assert!(result_notice(&mut seen, &new).is_none());
     }
 
     #[test]
