@@ -9,7 +9,9 @@ use super::*;
 use crate::api::{ChartData, ChartResponse};
 use crate::benchmark::{self, Analysis, HoldingDays};
 use crate::goals::{self, SipPlan};
+use crate::i18n::{Lang, tf_in};
 use crate::portfolio::{self as pf, Split};
+use crate::store;
 use crate::tax::{self, Country};
 use crate::tax_export::{self, IndiaSchedule, UsSchedule};
 use chrono::NaiveDate;
@@ -1817,6 +1819,49 @@ fn pct_label(x: f64) -> String {
     tf(Msg::GoalPerYear, &[&s])
 }
 
+/// "1 year", "18 months", "2 years 6 months".
+fn duration_label(months: u32) -> String {
+    if months == 0 {
+        return tf(Msg::DurMonths, &[&0]);
+    }
+    let (y, m) = goals::duration_parts(months);
+    let mut parts = Vec::new();
+    match y {
+        0 => {}
+        1 => parts.push(t(Msg::DurYear1).to_string()),
+        n => parts.push(tf(Msg::DurYears, &[&n])),
+    }
+    match m {
+        0 => {}
+        1 => parts.push(t(Msg::DurMonth1).to_string()),
+        n => parts.push(tf(Msg::DurMonths, &[&n])),
+    }
+    parts.join(" ")
+}
+
+/// Equity and arbitrage tax rules exist for India and the US only.
+pub(crate) fn check_tax_region(tax: Option<goals::TaxKind>, market: Market) -> Result<()> {
+    if goal_region(market) == goals::Region::Other
+        && matches!(
+            tax,
+            Some(goals::TaxKind::Equity | goals::TaxKind::Arbitrage)
+        )
+    {
+        bail!(
+            "--tax equity and arbitrage have rules for India (-m in) and the US (-m us) only; use --tax debt with --slab, or --tax none"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn goal_region(market: Market) -> goals::Region {
+    match market {
+        Market::In => goals::Region::India,
+        Market::Us => goals::Region::Us,
+        _ => goals::Region::Other,
+    }
+}
+
 /// `goal <kind> --json`: the plan rounded to paise/cents, with its kind and
 /// currency.
 pub(crate) fn goal_json(
@@ -1837,22 +1882,60 @@ fn print_goal_json(kind: &str, currency: &str, plan: &impl Serialize) -> Result<
     output::print_json(&goal_json(kind, currency, plan)?)
 }
 
-/// The SIP part shared by every goal: what to invest, the totals, and the
-/// year-by-year schedule.
-fn print_sip_plan(p: &SipPlan, currency: &str) {
+/// The report for a SIP request: region and the cached T-bill yield filled
+/// in, and the English warnings `--json` carries.
+pub(crate) fn goal_sip_report(mut req: goals::SipRequest, market: Market) -> goals::SipReport {
+    req.region = goal_region(market);
+    if req.region == goals::Region::India && req.tbill_pct.is_none() {
+        req.tbill_pct = crate::gsec::cached_tbill_364();
+    }
+    let mut report = goals::report_sip(&req);
+    let currency = market_currency(market);
+    if let Some(w) = mismatch_text(&report, currency, Lang::En) {
+        report.warnings.push(w);
+    }
+    report
+}
+
+fn mismatch_text(r: &goals::SipReport, currency: &str, lang: Lang) -> Option<String> {
+    let w = r.mismatch.as_ref()?;
+    let m = |x: f64| goal_money(x, currency);
+    Some(tf_in(
+        lang,
+        Msg::GoalWarnMismatch,
+        &[
+            &format!("{}", (w.return_pct * 100.0).round() / 100.0),
+            &m(w.p10),
+            &format!("{:.0}", w.shortfall_prob_pct),
+            &format!("{}", (w.safe_return_pct * 100.0).round() / 100.0),
+            &m(w.safe_monthly_sip),
+        ],
+    ))
+}
+
+fn per_month(x: f64, currency: &str) -> String {
+    tf(Msg::GoalPerMonth, &[&goal_money(x, currency)])
+}
+
+/// The SIP part every goal shares: savings, return, what to invest and the
+/// totals.
+fn print_sip_core(p: &SipPlan, currency: &str) {
     let m = |x: f64| goal_money(x, currency);
     if p.savings > 0.0 {
         print_kv(t(Msg::GoalSavings), &m(p.savings));
         print_kv(t(Msg::GoalSavingsGrowTo), &m(p.savings_future_value));
     }
     print_kv(t(Msg::GoalExpectedReturn), &pct_label(p.annual_return_pct));
+    if p.annual_return_pct > 0.0 {
+        print_kv(t(Msg::GoalEffective), &pct_label(p.effective_annual_pct));
+    }
     if p.monthly_sip <= 0.0 {
         println!("\n  {}", t(Msg::GoalCovered).green());
         return;
     }
     print_kv(
         t(Msg::GoalMonthlySip),
-        &tf(Msg::GoalPerMonth, &[&m(p.monthly_sip)])
+        &per_month(p.monthly_sip, currency)
             .bold()
             .green()
             .to_string(),
@@ -1861,13 +1944,52 @@ fn print_sip_plan(p: &SipPlan, currency: &str) {
         print_kv(t(Msg::GoalStepUp), &pct_label(p.step_up_pct));
         print_kv(
             t(Msg::GoalFinalSip),
-            &tf(Msg::GoalPerMonth, &[&m(p.final_monthly_sip)]),
+            &per_month(p.final_monthly_sip, currency),
         );
     }
     print_kv(t(Msg::GoalTotalInvested), &m(p.total_invested));
     print_kv(t(Msg::GoalWealthGained), &m(p.gains));
     print_kv(t(Msg::GoalLumpSum), &m(p.lump_sum_today));
+}
 
+/// Month by month up to 24 months, quarter by quarter up to 36, then year by
+/// year (every fifth year above 20).
+fn print_schedule(p: &SipPlan, currency: &str) {
+    if p.monthly_sip <= 0.0 {
+        return;
+    }
+    let m = |x: f64| goal_money(x, currency);
+    if p.months <= 36 {
+        print_section(t(if p.months <= 24 {
+            Msg::GoalMonthByMonth
+        } else {
+            Msg::GoalQuarterly
+        }));
+        println!(
+            "  {} {} {} {} {}",
+            pad_start(t(Msg::GoalMonth), 6).bold(),
+            pad_start(t(Msg::GoalSipColumn), 18).bold(),
+            pad_start(t(Msg::GoalInvested), 14).bold(),
+            pad_start(t(Msg::Value), 14).bold(),
+            pad_start(t(Msg::GoalLongLots), 10).bold(),
+        );
+        let step = if p.months <= 24 { 1 } else { 3 };
+        for r in p
+            .periods
+            .iter()
+            .filter(|r| r.month % step == 0 || r.month == p.months)
+        {
+            println!(
+                "  {} {} {} {} {}",
+                pad_start(&r.month.to_string(), 6),
+                pad_start(&m(r.monthly_sip), 18),
+                pad_start(&m(r.invested), 14),
+                pad_start(&m(r.value), 14).cyan(),
+                pad_start(&r.lots_long_term.to_string(), 10),
+            );
+        }
+        return;
+    }
     print_section(t(Msg::GoalYearByYear));
     println!(
         "  {} {} {} {}",
@@ -1891,79 +2013,237 @@ fn print_sip_plan(p: &SipPlan, currency: &str) {
     }
 }
 
-/// `goal sip`: the monthly SIP that reaches `target` in `years`.
-pub fn cmd_goal_sip(
-    target: f64,
-    years: u32,
-    return_pct: f64,
-    step_up_pct: f64,
-    savings: f64,
-    market: Market,
-    json: bool,
-) -> Result<()> {
+fn band_text(b: &goals::Band, currency: &str) -> String {
+    format!(
+        "{} / {} / {}",
+        goal_money(b.p10, currency),
+        goal_money(b.p50, currency),
+        goal_money(b.p90, currency)
+    )
+}
+
+/// A full SIP report: plan, return basis, tax, bands, sensitivity, schedule.
+fn print_sip_report(r: &goals::SipReport, currency: &str) {
+    let m = |x: f64| goal_money(x, currency);
+    let p = &r.plan;
+    if r.target_today.is_some() {
+        print_kv(t(Msg::GoalInflation), &pct_label(r.inflation_pct));
+        print_kv(
+            t(Msg::GoalTargetToday),
+            &m(r.target_today.unwrap_or(p.target)),
+        );
+        print_kv(
+            t(Msg::GoalTargetFuture),
+            &m(p.target).bold().yellow().to_string(),
+        );
+    }
+    let basis = if r.regime.source == "user" {
+        pct_label(r.regime.return_pct)
+    } else {
+        format!("{} — {}", r.regime.name, pct_label(r.regime.return_pct))
+    };
+    print_kv(t(Msg::GoalRegime), &basis);
+    if let Some(g) = &r.glide {
+        print_kv(
+            t(Msg::GoalGlide),
+            &tf(Msg::GoalGlideValue, &[&g.to_pct, &duration_label(g.months)]),
+        );
+    }
+    print_sip_core(p, currency);
+    if p.monthly_sip <= 0.0 {
+        println!();
+        return;
+    }
+    if let Some(tax) = &r.tax {
+        print_section(&tf(Msg::GoalTaxLine, &[&tax.kind.label()]));
+        let gross = p.periods.last().map_or(0.0, |x| x.value);
+        print_kv(t(Msg::GoalGrossCorpus), &m(gross));
+        print_kv(
+            t(Msg::GoalTaxAndLoad),
+            &format!("{} + {}", m(tax.tax), m(tax.exit_load)),
+        );
+        print_kv(
+            t(Msg::GoalNetInHand),
+            &m(r.net_after_tax.unwrap_or(gross))
+                .bold()
+                .green()
+                .to_string(),
+        );
+        print_kv(
+            t(Msg::GoalLotsLine),
+            &format!("{} / {}", tax.short_term_lots, tax.long_term_lots),
+        );
+        if let Some(net_sip) = r.monthly_sip_for_net_target {
+            print_kv(t(Msg::GoalPostTaxSip), &per_month(net_sip, currency));
+        }
+        if !r.tax_compare.is_empty() {
+            let parts: Vec<String> = r.tax_compare.iter().map(|c| m(c.net_after_tax)).collect();
+            print_kv(t(Msg::GoalCompare), &parts.join(" vs "));
+        }
+    }
+    print_section(t(Msg::GoalBands));
+    let bands = &r.percentiles;
+    print_kv(t(Msg::Value), &band_text(&bands.gross, currency));
+    if let Some(n) = &bands.net {
+        print_kv(t(Msg::GoalBandsNet), &band_text(n, currency));
+    }
+    print_kv(
+        t(Msg::GoalSuccess),
+        &format!("{:.0}%", bands.success_prob_pct),
+    );
+    let s = &r.sensitivity;
+    if s.len() == 3 {
+        print_kv(
+            &tf(
+                Msg::GoalSensitivity,
+                &[&s[0].return_pct, &s[1].return_pct, &s[2].return_pct],
+            ),
+            &format!(
+                "{} / {} / {}",
+                m(s[0].monthly_sip),
+                m(s[1].monthly_sip),
+                m(s[2].monthly_sip)
+            ),
+        );
+    }
+    if let Some(real) = r.real_value_today {
+        print_kv(&tf(Msg::GoalPurchasing, &[&r.real_value_cpi_pct]), &m(real));
+    }
+    if let Some(w) = mismatch_text(r, currency, crate::i18n::lang()) {
+        println!("\n  {} {}", "!".yellow(), w.yellow());
+    }
+    print_schedule(p, currency);
+}
+
+fn print_assumptions() {
+    println!("\n  {}\n", t(Msg::GoalAssumptions).dimmed().italic());
+}
+
+/// `goal sip`: the monthly SIP that reaches `target`, tax-aware and matched
+/// to the horizon.
+pub fn cmd_goal_sip(req: goals::SipRequest, market: Market, json: bool) -> Result<()> {
     let currency = market_currency(market);
-    let plan = goals::plan_sip(target, years, return_pct, step_up_pct, savings);
+    let report = goal_sip_report(req, market);
     if json {
-        return print_goal_json("sip", currency, &plan);
+        return print_goal_json("sip", currency, &report);
     }
     print_header(&tf(
         Msg::GoalSipTitle,
-        &[&goal_money(target, currency), &years],
+        &[
+            &goal_money(report.target_today.unwrap_or(report.plan.target), currency),
+            &duration_label(report.plan.months),
+        ],
     ));
-    print_sip_plan(&plan, currency);
-    println!("\n  {}\n", t(Msg::GoalAssumptions).dimmed().italic());
+    print_sip_report(&report, currency);
+    print_assumptions();
     Ok(())
+}
+
+pub struct RetireArgs {
+    pub monthly_expense: f64,
+    pub years_to_retire: u32,
+    pub years_in_retirement: u32,
+    pub inflation_pct: f64,
+    pub return_pre_pct: f64,
+    pub return_post_pct: f64,
+    pub step_up_pct: f64,
+    pub savings: f64,
+    pub monthly_income: f64,
+    pub buffer_years: u32,
+    pub legacy: f64,
+}
+
+pub(crate) fn retire_plan(a: &RetireArgs, market: Market) -> goals::RetirePlan {
+    goals::plan_retirement_with(
+        a.monthly_expense,
+        a.years_to_retire,
+        a.years_in_retirement,
+        a.inflation_pct,
+        a.return_pre_pct,
+        a.return_post_pct,
+        a.step_up_pct,
+        a.savings,
+        &goals::RetireOpts {
+            monthly_income: a.monthly_income,
+            buffer_years: a.buffer_years,
+            legacy: a.legacy,
+            region: goal_region(market),
+            slab_pct: goal_region(market).default_slab_pct(),
+        },
+    )
 }
 
 /// `goal retire`: the corpus that pays today's monthly expense, grown by
 /// inflation, through retirement, and the SIP that builds it.
-pub fn cmd_goal_retire(
-    monthly_expense: f64,
-    years_to_retire: u32,
-    years_in_retirement: u32,
-    inflation_pct: f64,
-    return_pre_pct: f64,
-    return_post_pct: f64,
-    step_up_pct: f64,
-    savings: f64,
-    market: Market,
-    json: bool,
-) -> Result<()> {
+pub fn cmd_goal_retire(a: RetireArgs, market: Market, json: bool) -> Result<()> {
     let currency = market_currency(market);
-    let plan = goals::plan_retirement(
-        monthly_expense,
-        years_to_retire,
-        years_in_retirement,
-        inflation_pct,
-        return_pre_pct,
-        return_post_pct,
-        step_up_pct,
-        savings,
-    );
+    let plan = retire_plan(&a, market);
     if json {
         return print_goal_json("retire", currency, &plan);
     }
     let m = |x: f64| goal_money(x, currency);
-    print_header(&tf(Msg::GoalRetireTitle, &[&years_to_retire]));
-    let monthly = |x: f64| tf(Msg::GoalPerMonth, &[&m(x)]);
-    print_kv(t(Msg::GoalExpenseToday), &monthly(monthly_expense));
-    print_kv(t(Msg::GoalInflation), &pct_label(inflation_pct));
+    print_header(&tf(
+        Msg::GoalRetireTitle,
+        &[&duration_label(a.years_to_retire * 12)],
+    ));
+    print_kv(
+        t(Msg::GoalExpenseToday),
+        &per_month(a.monthly_expense, currency),
+    );
+    if a.monthly_income > 0.0 {
+        print_kv(
+            t(Msg::GoalIncomeOffset),
+            &per_month(a.monthly_income, currency),
+        );
+    }
+    print_kv(t(Msg::GoalInflation), &pct_label(a.inflation_pct));
     print_kv(
         t(Msg::GoalExpenseAtRetirement),
-        &monthly(plan.monthly_expense_at_retirement),
+        &per_month(plan.monthly_expense_at_retirement, currency),
     );
+    if a.monthly_income > 0.0 {
+        print_kv(
+            t(Msg::GoalNeedAtRetirement),
+            &per_month(plan.monthly_need_at_retirement, currency),
+        );
+    }
     print_kv(
         t(Msg::GoalYearsInRetirement),
-        &years_in_retirement.to_string(),
+        &a.years_in_retirement.to_string(),
     );
-    print_kv(t(Msg::GoalReturnAfter), &pct_label(return_post_pct));
+    if a.buffer_years > 0 {
+        print_kv(t(Msg::GoalBufferYears), &a.buffer_years.to_string());
+    }
+    if a.legacy > 0.0 {
+        print_kv(t(Msg::GoalLegacy), &m(a.legacy));
+    }
+    print_kv(t(Msg::GoalReturnAfter), &pct_label(a.return_post_pct));
     print_kv(
         t(Msg::GoalCorpusNeeded),
         &m(plan.corpus).bold().yellow().to_string(),
     );
+    print_kv(
+        t(Msg::GoalWithdrawalRate),
+        &format!("{:.2}%", plan.initial_withdrawal_rate_pct),
+    );
+    print_kv(
+        t(Msg::GoalSurvives),
+        &duration_label((plan.survival_years * 12.0).round() as u32),
+    );
+    print_kv(
+        t(Msg::GoalCrashSurvives),
+        &duration_label((plan.crash_survival_years * 12.0).round() as u32),
+    );
+    if let Some(d) = &plan.swp_drag {
+        print_kv(
+            t(Msg::GoalSwpDrag),
+            &format!("{} vs {}", m(d.swp_tax), m(d.fd_tax)),
+        );
+    }
     print_section(t(Msg::GoalReturnBefore));
-    print_sip_plan(&plan.sip, currency);
-    println!("\n  {}\n", t(Msg::GoalAssumptions).dimmed().italic());
+    print_sip_core(&plan.sip, currency);
+    print_schedule(&plan.sip, currency);
+    print_assumptions();
     Ok(())
 }
 
@@ -1971,29 +2251,599 @@ pub fn cmd_goal_retire(
 /// that pays it.
 pub fn cmd_goal_education(
     cost: f64,
-    years: u32,
     inflation_pct: f64,
-    return_pct: f64,
-    step_up_pct: f64,
-    savings: f64,
+    req: goals::SipRequest,
     market: Market,
     json: bool,
 ) -> Result<()> {
     let currency = market_currency(market);
-    let plan = goals::plan_education(cost, years, inflation_pct, return_pct, step_up_pct, savings);
+    let plan = education_plan(cost, inflation_pct, req, market);
     if json {
         return print_goal_json("education", currency, &plan);
     }
     let m = |x: f64| goal_money(x, currency);
-    print_header(&tf(Msg::GoalEducationTitle, &[&years]));
+    let label = duration_label(plan.months);
+    print_header(&tf(Msg::GoalEducationTitle, &[&label]));
     print_kv(t(Msg::GoalCostToday), &m(cost));
     print_kv(t(Msg::GoalInflation), &pct_label(inflation_pct));
     print_kv(
-        &tf(Msg::GoalFutureCost, &[&years]),
+        &tf(Msg::GoalFutureCost, &[&label]),
         &m(plan.future_cost).bold().yellow().to_string(),
     );
-    print_sip_plan(&plan.sip, currency);
-    println!("\n  {}\n", t(Msg::GoalAssumptions).dimmed().italic());
+    print_sip_report(&plan.sip, currency);
+    print_assumptions();
+    Ok(())
+}
+
+pub(crate) fn education_plan(
+    cost: f64,
+    inflation_pct: f64,
+    mut req: goals::SipRequest,
+    market: Market,
+) -> goals::EducationPlan {
+    req.region = goal_region(market);
+    if req.region == goals::Region::India && req.tbill_pct.is_none() {
+        req.tbill_pct = crate::gsec::cached_tbill_364();
+    }
+    let mut plan = goals::plan_education(cost, req.months, inflation_pct, req);
+    if let Some(w) = mismatch_text(&plan.sip, market_currency(market), Lang::En) {
+        plan.sip.warnings.push(w);
+    }
+    plan
+}
+
+// ── Linked holdings ──
+
+/// Whether `symbol` (`NIFTYBEES`, `MF:122639`) names the holding.
+fn names_holding(h: &pf::Holding, symbol: &str) -> bool {
+    let (have, want) = (h.symbol.to_uppercase(), symbol.trim().to_uppercase());
+    have == want
+        || have
+            .strip_prefix(&want)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// What linked holdings are worth, and what they cost.
+pub struct Linked {
+    pub value: f64,
+    pub cost: f64,
+    /// Prices were live; otherwise `value` is the cost basis.
+    pub live: bool,
+}
+
+/// The portfolio's holdings named in `symbols` (all when empty), valued at
+/// live prices when `src` is there, else at cost.
+///
+/// With `strict`, a named holding missing from the portfolio is an error
+/// (explicit `--holdings`); saved goals skip holdings that were removed.
+/// Values are in the market's currency; offline, holdings in another
+/// currency are left out and named.
+pub(crate) async fn linked_value(
+    src: Option<&impl views::DataSource>,
+    symbols: &[String],
+    market: Market,
+    strict: bool,
+) -> Result<Linked> {
+    let portfolio = Portfolio::load()?;
+    if strict && portfolio.holdings.is_empty() {
+        bail!("The portfolio is empty: add holdings with `stockwise portfolio add`");
+    }
+    let mut chosen = portfolio.clone();
+    if !symbols.is_empty() {
+        if strict {
+            for s in symbols {
+                if !portfolio.holdings.iter().any(|h| names_holding(h, s)) {
+                    bail!("No holding named `{s}` in the portfolio");
+                }
+            }
+        }
+        chosen
+            .holdings
+            .retain(|h| symbols.iter().any(|s| names_holding(h, s)));
+    }
+    if chosen.holdings.is_empty() {
+        return Ok(Linked {
+            value: 0.0,
+            cost: 0.0,
+            live: true,
+        });
+    }
+    let names: Vec<String> = chosen.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let base = market_currency(market);
+    let (val, live) = value_or_offline(src, &names, market, Some(base)).await;
+    if !live {
+        let (same, other): (Vec<_>, Vec<_>) = chosen
+            .holdings
+            .iter()
+            .partition(|h| pf::symbol_currency(&h.symbol).is_none_or(|c| c == base));
+        if !other.is_empty() {
+            eprintln!(
+                "  ! Left out of the linked value (not in {base}, no exchange rate offline): {}",
+                other
+                    .iter()
+                    .map(|h| h.symbol.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let cost: f64 = same.iter().map(|h| h.cost_basis()).sum();
+        return Ok(Linked {
+            value: cost,
+            cost,
+            live: false,
+        });
+    }
+    let totals = val.totals(&chosen);
+    if !totals.unpriced.is_empty() || !totals.unconverted.is_empty() {
+        eprintln!(
+            "  ! Left out of the linked value (no price or exchange rate): {}",
+            [totals.unpriced.clone(), totals.unconverted.clone()]
+                .concat()
+                .join(", ")
+        );
+    }
+    Ok(Linked {
+        value: totals.value,
+        cost: totals.cost,
+        live: true,
+    })
+}
+
+/// Savings from `--from-portfolio` / `--holdings`, when either is given.
+pub async fn goal_linked(
+    from_portfolio: bool,
+    holdings: &[String],
+    market: Market,
+) -> Result<Option<Linked>> {
+    if !from_portfolio && holdings.is_empty() {
+        return Ok(None);
+    }
+    let client = YahooClient::new().await.ok();
+    let linked = linked_value(client.as_ref(), holdings, market, true).await?;
+    if !linked.live {
+        eprintln!("  ! {}", t(Msg::GoalLinkedOffline));
+    }
+    Ok(Some(linked))
+}
+
+// ── Saved goals ──
+
+const GOALS_FILE: &str = "goals.json";
+
+#[derive(Serialize)]
+pub(crate) struct GoalRow {
+    name: String,
+    target: f64,
+    target_future: f64,
+    by: String,
+    months_left: u32,
+    holdings: Vec<String>,
+    linked_value: f64,
+    /// `market` (live prices), `cost` (offline) or `none` (no holdings linked).
+    valued_at: &'static str,
+    funded_pct: f64,
+    monthly_sip: f64,
+    status: &'static str,
+}
+
+fn goal_due(today: NaiveDate, by: &str) -> Option<NaiveDate> {
+    let mut parts = by.split('-');
+    let y = parts.next()?.parse().ok()?;
+    let mo = parts.next()?.parse().ok()?;
+    let d = parts.next().map_or(Some(1), |d| d.parse().ok())?;
+    let _ = today;
+    NaiveDate::from_ymd_opt(y, mo, d)
+}
+
+fn saved_request(
+    g: &goals::SavedGoal,
+    months: u32,
+    savings: f64,
+    market: Market,
+) -> goals::SipRequest {
+    let mut req = goals::SipRequest::new(g.target, months, goal_region(market));
+    req.inflation_pct = g.inflation_pct;
+    req.return_pct = g.return_pct;
+    req.savings = savings;
+    req
+}
+
+/// Every saved goal with its live linked value, funded share and the SIP
+/// still needed.
+pub(crate) async fn goal_rows(
+    src: Option<&impl views::DataSource>,
+    market: Market,
+) -> Result<Vec<GoalRow>> {
+    let store: goals::GoalStore = store::load(GOALS_FILE)?;
+    let today = chrono::Local::now().date_naive();
+    let mut rows = Vec::new();
+    for g in &store.goals {
+        let months_left = goal_due(today, &g.by)
+            .and_then(|d| goals::months_between(today, d))
+            .unwrap_or(0);
+        let (linked, valued_at) = if g.holdings.is_empty() {
+            (0.0, "none")
+        } else {
+            let l = linked_value(src, &g.holdings, market, false).await?;
+            (l.value, if l.live { "market" } else { "cost" })
+        };
+        let infl = g.inflation_pct.unwrap_or(0.0);
+        let target_future = goals::inflate_months(g.target, infl, months_left);
+        let region = goal_region(market);
+        let ret = g
+            .return_pct
+            .unwrap_or(goals::baseline(months_left.max(1), region, None).return_pct);
+        let sip = if months_left == 0 {
+            (target_future - linked).max(0.0)
+        } else {
+            goals::plan_sip_months(target_future, months_left, ret, 0.0, linked, None).monthly_sip
+        };
+        let status = if sip <= 0.0 {
+            "funded"
+        } else if months_left == 0 {
+            "overdue"
+        } else {
+            "needs_sip"
+        };
+        rows.push(GoalRow {
+            name: g.name.clone(),
+            target: g.target,
+            target_future,
+            by: g.by.clone(),
+            months_left,
+            holdings: g.holdings.clone(),
+            linked_value: linked,
+            valued_at,
+            funded_pct: if target_future > 0.0 {
+                linked / target_future * 100.0
+            } else {
+                0.0
+            },
+            monthly_sip: sip,
+            status,
+        });
+    }
+    Ok(rows)
+}
+
+pub struct GoalAdd {
+    pub name: String,
+    pub target: f64,
+    pub by: String,
+    pub inflation_pct: Option<f64>,
+    pub holdings: Vec<String>,
+    pub return_pct: Option<f64>,
+}
+
+pub fn cmd_goal_add(a: GoalAdd) -> Result<()> {
+    let today = chrono::Local::now().date_naive();
+    goals::months_until(today, &a.by).map_err(anyhow::Error::msg)?;
+    if a.name.trim().is_empty() {
+        bail!("The goal needs a name");
+    }
+    let saved = goals::SavedGoal {
+        name: a.name.trim().to_string(),
+        target: a.target,
+        by: a.by,
+        inflation_pct: a.inflation_pct,
+        holdings: a.holdings,
+        return_pct: a.return_pct,
+        created: today.to_string(),
+    };
+    store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
+        if s.find(&saved.name).is_some() {
+            bail!("A goal named `{}` exists: remove it first", saved.name);
+        }
+        s.goals.push(saved.clone());
+        Ok(())
+    })?;
+    println!("\n  {}\n", tf(Msg::GoalAddedSaved, &[&saved.name]).green());
+    Ok(())
+}
+
+pub fn cmd_goal_remove(name: &str) -> Result<()> {
+    store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
+        let before = s.goals.len();
+        s.goals.retain(|g| !g.name.eq_ignore_ascii_case(name));
+        if s.goals.len() == before {
+            bail!("No saved goal named `{name}`");
+        }
+        Ok(())
+    })?;
+    println!("\n  {}\n", tf(Msg::GoalRemovedSaved, &[&name]));
+    Ok(())
+}
+
+pub async fn cmd_goal_list(market: Market, json: bool) -> Result<()> {
+    let currency = market_currency(market);
+    let store: goals::GoalStore = store::load(GOALS_FILE)?;
+    let client = if store.goals.iter().any(|g| !g.holdings.is_empty()) {
+        YahooClient::new().await.ok()
+    } else {
+        None
+    };
+    let rows = goal_rows(client.as_ref(), market).await?;
+    if json {
+        return print_goal_json_list(currency, &rows);
+    }
+    if rows.is_empty() {
+        println!("\n  {}\n", t(Msg::GoalNone).dimmed());
+        return Ok(());
+    }
+    print_header(t(Msg::GoalsTitle));
+    println!(
+        "  {} {} {} {} {} {} {} {}",
+        pad_end(t(Msg::GoalColName), 14).bold(),
+        pad_start(t(Msg::GoalColTarget), 12).bold(),
+        pad_start(t(Msg::GoalColDue), 10).bold(),
+        pad_start(t(Msg::GoalColLeft), 6).bold(),
+        pad_start(t(Msg::GoalColLinked), 13).bold(),
+        pad_start(t(Msg::GoalColFunded), 8).bold(),
+        pad_start(t(Msg::GoalColSip), 14).bold(),
+        t(Msg::GoalColStatus).bold(),
+    );
+    for r in &rows {
+        let status = match r.status {
+            "funded" => t(Msg::GoalFunded).green(),
+            "overdue" => t(Msg::GoalOverdue).red(),
+            _ => t(Msg::GoalNeedsSip).yellow(),
+        };
+        println!(
+            "  {} {} {} {} {} {} {} {}",
+            pad_end(&r.name, 14).cyan(),
+            pad_start(&goal_money(r.target_future, currency), 12),
+            pad_start(&r.by, 10),
+            pad_start(&r.months_left.to_string(), 6),
+            pad_start(&goal_money(r.linked_value, currency), 13),
+            pad_start(&format!("{:.0}%", r.funded_pct), 8),
+            pad_start(&goal_money(r.monthly_sip, currency), 14),
+            status,
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn print_goal_json_list(currency: &str, rows: &[GoalRow]) -> Result<()> {
+    let mut v = serde_json::to_value(rows)?;
+    round_floats(&mut v, 2);
+    output::print_json(&serde_json::json!({"goal": "list", "currency": currency, "goals": v}))
+}
+
+pub async fn cmd_goal_show(name: &str, market: Market, json: bool) -> Result<()> {
+    let store: goals::GoalStore = store::load(GOALS_FILE)?;
+    let g = store
+        .find(name)
+        .ok_or_else(|| anyhow::anyhow!("No saved goal named `{name}`"))?
+        .clone();
+    let today = chrono::Local::now().date_naive();
+    let months = goals::months_until(today, &g.by).map_err(anyhow::Error::msg)?;
+    let linked = if g.holdings.is_empty() {
+        0.0
+    } else {
+        let client = YahooClient::new().await.ok();
+        linked_value(client.as_ref(), &g.holdings, market, false)
+            .await?
+            .value
+    };
+    let report = goal_sip_report(saved_request(&g, months, linked, market), market);
+    let currency = market_currency(market);
+    if json {
+        return print_goal_json(
+            "show",
+            currency,
+            &serde_json::json!({
+                "name": g.name, "by": g.by, "holdings": g.holdings, "linked_value": linked, "plan": report,
+            }),
+        );
+    }
+    print_header(&format!("{} — {}", g.name, g.by));
+    if linked > 0.0 {
+        print_kv(t(Msg::GoalColLinked), &goal_money(linked, currency));
+    }
+    print_sip_report(&report, currency);
+    print_assumptions();
+    Ok(())
+}
+
+// ── SWP, emergency fund, prepayment ──
+
+pub struct SwpArgs {
+    pub corpus: f64,
+    pub cost: Option<f64>,
+    pub withdrawal: f64,
+    pub inflation_pct: f64,
+    pub return_pct: f64,
+    pub years: u32,
+    pub fd_return_pct: f64,
+    pub slab_pct: f64,
+}
+
+pub(crate) fn swp_plan(a: &SwpArgs, market: Market) -> goals::SwpPlan {
+    goals::plan_swp(
+        a.corpus,
+        a.cost,
+        a.withdrawal,
+        a.inflation_pct,
+        a.return_pct,
+        a.years,
+        a.fd_return_pct,
+        a.slab_pct,
+        goal_region(market),
+    )
+}
+
+pub fn cmd_goal_swp(a: SwpArgs, market: Market, json: bool) -> Result<()> {
+    let currency = market_currency(market);
+    let plan = swp_plan(&a, market);
+    if json {
+        return print_goal_json("swp", currency, &plan);
+    }
+    let m = |x: f64| goal_money(x, currency);
+    print_header(t(Msg::SwpTitle));
+    print_kv(t(Msg::SwpCorpus), &m(a.corpus));
+    print_kv(t(Msg::SwpWithdrawal), &per_month(a.withdrawal, currency));
+    print_kv(t(Msg::GoalInflation), &pct_label(a.inflation_pct));
+    print_kv(
+        t(Msg::GoalWithdrawalRate),
+        &format!("{:.2}%", plan.initial_withdrawal_rate_pct),
+    );
+    for (label, path, rate) in [
+        (Msg::SwpEquity, &plan.swp, a.return_pct),
+        (Msg::SwpFd, &plan.fd, a.fd_return_pct),
+    ] {
+        print_section(&format!("{} — {}", t(label), pct_label(rate)));
+        let when = duration_label(path.runway_months);
+        let line = if path.lasts {
+            tf(Msg::SwpLasts, &[&duration_label(a.years * 12)])
+                .green()
+                .to_string()
+        } else {
+            tf(Msg::SwpRunsOut, &[&when]).red().to_string()
+        };
+        println!("  {line}");
+        println!(
+            "  {}",
+            tf(Msg::SwpLeft, &[&m(path.final_value), &m(path.total_tax)])
+        );
+    }
+    println!();
+    Ok(())
+}
+
+pub(crate) fn emergency_plan(
+    monthly_expense: f64,
+    months_cover: u32,
+    liquid: f64,
+    horizon_months: u32,
+    return_pct: Option<f64>,
+    market: Market,
+) -> goals::EmergencyPlan {
+    let region = goal_region(market);
+    let tbill = (region == goals::Region::India)
+        .then(crate::gsec::cached_tbill_364)
+        .flatten();
+    let ret =
+        return_pct.unwrap_or_else(|| goals::baseline(horizon_months, region, tbill).return_pct);
+    goals::plan_emergency(monthly_expense, months_cover, liquid, horizon_months, ret)
+}
+
+pub fn cmd_goal_emergency(plan: goals::EmergencyPlan, market: Market, json: bool) -> Result<()> {
+    let currency = market_currency(market);
+    if json {
+        return print_goal_json("emergency", currency, &plan);
+    }
+    let m = |x: f64| goal_money(x, currency);
+    print_header(t(Msg::EmergencyTitle));
+    print_kv(
+        t(Msg::GoalExpenseToday),
+        &per_month(plan.monthly_expense, currency),
+    );
+    print_kv(
+        t(Msg::EmergencyTarget),
+        &format!("{} ({})", m(plan.target), duration_label(plan.months_cover)),
+    );
+    print_kv(
+        t(Msg::EmergencyHave),
+        &format!("{} ({:.0}%)", m(plan.liquid), plan.funded_pct),
+    );
+    if plan.build.monthly_sip <= 0.0 {
+        println!("\n  {}\n", t(Msg::GoalCovered).green());
+        return Ok(());
+    }
+    print_kv(
+        t(Msg::GoalExpectedReturn),
+        &pct_label(plan.build.annual_return_pct),
+    );
+    print_kv(
+        t(Msg::EmergencyBuild),
+        &per_month(plan.build.monthly_sip, currency)
+            .bold()
+            .green()
+            .to_string(),
+    );
+    print_schedule(&plan.build, currency);
+    println!();
+    Ok(())
+}
+
+pub struct PrepayArgs {
+    pub principal: f64,
+    pub loan_rate_pct: f64,
+    pub remaining_months: u32,
+    pub extra: f64,
+    pub lump_sum: f64,
+    pub return_pct: Option<f64>,
+    pub tax: Option<goals::TaxKind>,
+    pub slab_pct: Option<f64>,
+}
+
+pub(crate) fn prepay_plan(a: &PrepayArgs, market: Market) -> goals::PrepayPlan {
+    let region = goal_region(market);
+    let regime = goals::regime_for(a.remaining_months, region, None, a.return_pct);
+    let kind = a
+        .tax
+        .unwrap_or_else(|| goals::default_tax_kind(regime.kind, region));
+    let slab = a.slab_pct.unwrap_or_else(|| region.default_slab_pct());
+    let rules = goals::TaxRules::new(
+        region,
+        kind,
+        slab,
+        goals::default_exit_load_pct(kind, region),
+    );
+    goals::plan_prepay(
+        a.principal,
+        a.loan_rate_pct,
+        a.remaining_months,
+        a.extra,
+        a.lump_sum,
+        regime.return_pct,
+        regime.vol_pct,
+        &rules,
+    )
+}
+
+pub fn cmd_goal_prepay(a: PrepayArgs, market: Market, json: bool) -> Result<()> {
+    let currency = market_currency(market);
+    let p = prepay_plan(&a, market);
+    if json {
+        return print_goal_json("prepay", currency, &p);
+    }
+    let m = |x: f64| goal_money(x, currency);
+    print_header(t(Msg::PrepayTitle));
+    print_kv(t(Msg::PrepayEmi), &per_month(p.emi, currency));
+    print_kv(t(Msg::PrepayTenure), &duration_label(p.new_tenure_months));
+    print_kv(
+        t(Msg::PrepayTenureSaved),
+        &duration_label(p.tenure_saved_months),
+    );
+    print_kv(
+        t(Msg::PrepayInterestSaved),
+        &m(p.interest_saved).bold().green().to_string(),
+    );
+    print_section(&pct_label(p.sip_return_pct));
+    print_kv(t(Msg::PrepaySipNet), &m(p.sip_net));
+    print_kv(t(Msg::PrepayEquivalent), &m(p.prepay_equivalent));
+    print_kv(
+        t(Msg::GoalBands),
+        &band_text(
+            p.sip_percentiles
+                .net
+                .as_ref()
+                .unwrap_or(&p.sip_percentiles.gross),
+            currency,
+        ),
+    );
+    print_kv(
+        t(Msg::PrepayChance),
+        &format!("{:.0}%", p.sip_percentiles.success_prob_pct),
+    );
+    print_kv(
+        t(Msg::PrepayBreakeven),
+        &p.breakeven_return_pct
+            .map_or_else(|| t(Msg::PrepayNoBreakeven).to_string(), pct_label),
+    );
+    print_assumptions();
     Ok(())
 }
 
@@ -2105,6 +2955,42 @@ mod tests {
         assert_eq!(goal_money(1_234.0, "USD"), "$1,234");
         assert_eq!(pct_label(12.0), "12% a year");
         assert_eq!(pct_label(6.5), "6.5% a year");
+    }
+
+    #[test]
+    fn linked_holdings_match_by_symbol_or_exchange_suffix() {
+        let h = |s: &str| pf::Holding {
+            symbol: s.into(),
+            shares: 1.0,
+            avg_cost: 1.0,
+            added_at: String::new(),
+            lots: Vec::new(),
+        };
+        assert!(names_holding(&h("NIFTYBEES.NS"), "niftybees"));
+        assert!(names_holding(&h("MF:122639"), "MF:122639"));
+        assert!(!names_holding(&h("NIFTYBEES.NS"), "NIFTY"));
+        assert!(!names_holding(&h("TCS.NS"), "INFY"));
+    }
+
+    #[test]
+    fn equity_tax_needs_india_or_us() {
+        use goals::TaxKind::*;
+        assert!(check_tax_region(Some(Equity), Market::In).is_ok());
+        assert!(check_tax_region(Some(Arbitrage), Market::Us).is_ok());
+        assert!(check_tax_region(Some(Debt), Market::Crypto).is_ok());
+        assert!(check_tax_region(Option::None, Market::Crypto).is_ok());
+        assert!(check_tax_region(Some(Equity), Market::Crypto).is_err());
+    }
+
+    #[test]
+    fn durations_use_singular_and_plural_forms() {
+        assert_eq!(duration_label(0), "0 months");
+        assert_eq!(duration_label(1), "1 month");
+        assert_eq!(duration_label(6), "6 months");
+        assert_eq!(duration_label(12), "1 year");
+        assert_eq!(duration_label(18), "1 year 6 months");
+        assert_eq!(duration_label(24), "2 years");
+        assert_eq!(duration_label(25), "2 years 1 month");
     }
 
     #[test]

@@ -871,13 +871,22 @@ fn benchmark_json_and_csv_shapes() {
 
 #[test]
 fn goal_and_tax_export_json_shapes() {
+    // Existing keys stay; new ones are only added (docs/commands.md lists both).
+    let has = |v: &serde_json::Value, wanted: &[&str]| {
+        let have = keys(v);
+        for w in wanted {
+            assert!(have.contains(w), "missing `{w}` in {have:?}");
+        }
+    };
     let plan = serde_json::to_value(crate::goals::plan_sip(1e7, 2, 12.0, 10.0, 0.0)).unwrap();
-    assert_eq!(
-        keys(&plan),
-        [
+    has(
+        &plan,
+        &[
             "target",
             "years",
+            "months",
             "annual_return_pct",
+            "effective_annual_pct",
             "step_up_pct",
             "savings",
             "savings_future_value",
@@ -886,20 +895,53 @@ fn goal_and_tax_export_json_shapes() {
             "total_invested",
             "gains",
             "lump_sum_today",
-            "schedule"
-        ]
+            "schedule",
+        ],
     );
     assert_eq!(
         keys(&plan["schedule"][0]),
         ["year", "monthly_sip", "invested", "value"]
     );
+    let report = serde_json::to_value(crate::goals::report_sip(&crate::goals::SipRequest::new(
+        1e6,
+        12,
+        crate::goals::Region::India,
+    )))
+    .unwrap();
+    has(
+        &report,
+        &[
+            "target",
+            "monthly_sip",
+            "total_invested",
+            "gains",
+            "lump_sum_today",
+            "schedule",
+            "monthly_schedule",
+            "regime",
+            "tax",
+            "net_after_tax",
+            "monthly_sip_for_net_target",
+            "percentiles",
+            "sensitivity",
+            "warnings",
+        ],
+    );
+    has(
+        &report["percentiles"],
+        &["p10", "p50", "p90", "success_prob_pct"],
+    );
+    assert_eq!(
+        keys(&report["sensitivity"][0]),
+        ["return_pct", "monthly_sip"]
+    );
     let retire = serde_json::to_value(crate::goals::plan_retirement(
         80_000.0, 20, 30, 6.0, 12.0, 7.0, 0.0, 0.0,
     ))
     .unwrap();
-    assert_eq!(
-        keys(&retire),
-        [
+    has(
+        &retire,
+        &[
             "monthly_expense_today",
             "years_to_retire",
             "years_in_retirement",
@@ -908,14 +950,17 @@ fn goal_and_tax_export_json_shapes() {
             "return_post_pct",
             "monthly_expense_at_retirement",
             "corpus",
-            "sip"
-        ]
+            "sip",
+            "initial_withdrawal_rate_pct",
+            "crash_survival_years",
+        ],
     );
-    let edu =
-        serde_json::to_value(crate::goals::plan_education(25e5, 10, 8.0, 12.0, 0.0, 0.0)).unwrap();
-    assert_eq!(
-        keys(&edu),
-        ["cost_today", "years", "inflation_pct", "future_cost", "sip"]
+    let mut req = crate::goals::SipRequest::new(0.0, 0, crate::goals::Region::India);
+    req.return_pct = Some(12.0);
+    let edu = serde_json::to_value(crate::goals::plan_education(25e5, 120, 8.0, req)).unwrap();
+    has(
+        &edu,
+        &["cost_today", "years", "inflation_pct", "future_cost", "sip"],
     );
 
     let sale = crate::portfolio::Sale {

@@ -73,6 +73,9 @@ pub(super) async fn run<D: DataSource>(
         "goal_sip" => goal_sip(a, m),
         "goal_retire" => goal_retire(a, m),
         "goal_education" => goal_education(a, m),
+        "goal_swp" => goal_swp(a, m),
+        "goal_prepay" => goal_prepay(a, m),
+        "goal_list" => goal_list(src, m).await,
         "alerts_list" => Ok(json!({ "alerts": views::alerts(src).await? })),
         "watchlist" => Ok(json!({ "watchlist": views::watchlist(src).await? })),
         "order_preview" => order_preview(src, a).await,
@@ -703,41 +706,142 @@ fn pct(a: &Args, name: &str, default: f64) -> f64 {
     a.f64(name).unwrap_or(default)
 }
 
+/// Months to the goal from `years`, `months` or `by`.
+fn goal_months(a: &Args) -> Result<u32> {
+    let given = ["years", "months", "by"]
+        .iter()
+        .filter(|k| a.str(k).is_some() || a.f64(k).is_some())
+        .count();
+    if given > 1 {
+        bail!("Give only one of 'years', 'months' or 'by'");
+    }
+    if let Some(y) = a.i64("years") {
+        return Ok(y as u32 * 12);
+    }
+    if let Some(m) = a.i64("months") {
+        return Ok(m as u32);
+    }
+    if let Some(by) = a.str("by") {
+        return crate::goals::months_until(chrono::Local::now().date_naive(), by)
+            .map_err(anyhow::Error::msg);
+    }
+    bail!("Missing required argument 'years' (or give 'months' or 'by')")
+}
+
+fn tax_kind(a: &Args) -> Option<crate::goals::TaxKind> {
+    use clap::ValueEnum;
+    a.str("tax")
+        .and_then(|k| crate::goals::TaxKind::from_str(k, true).ok())
+}
+
+fn sip_request(a: &Args, target: f64, months: u32) -> crate::goals::SipRequest {
+    let mut req = crate::goals::SipRequest::new(target, months, crate::goals::Region::Other);
+    req.return_pct = a.f64("return_pct");
+    req.step_up_pct = pct(a, "step_up_pct", 0.0);
+    req.savings = pct(a, "savings", 0.0);
+    req.tax_kind = tax_kind(a);
+    req.slab_pct = a.f64("slab_pct");
+    req.exit_load_pct = a.f64("exit_load_pct");
+    req.net = a.bool("net");
+    req.glide = a.bool("glide_path");
+    req
+}
+
 fn goal_sip(a: &Args, m: Market) -> Result<Value> {
-    let plan = crate::goals::plan_sip(
-        a.need_f64("target")?,
-        a.i64("years").unwrap_or(1) as u32,
-        pct(a, "return_pct", 12.0),
-        pct(a, "step_up_pct", 0.0),
-        pct(a, "savings", 0.0),
-    );
-    commands::goal_json("sip", commands::market_currency(m), &plan)
+    commands::check_tax_region(tax_kind(a), m)?;
+    let months = goal_months(a)?;
+    let mut req = sip_request(a, a.need_f64("target")?, months);
+    req.inflation_pct = a.f64("inflation_pct");
+    let report = commands::goal_sip_report(req, m);
+    commands::goal_json("sip", commands::market_currency(m), &report)
 }
 
 fn goal_retire(a: &Args, m: Market) -> Result<Value> {
-    let plan = crate::goals::plan_retirement(
-        a.need_f64("monthly_expense")?,
-        a.i64("years_to_retire").unwrap_or(1) as u32,
-        a.i64("years_in_retirement").unwrap_or(1) as u32,
-        pct(a, "inflation_pct", 6.0),
-        pct(a, "return_pre_pct", 12.0),
-        pct(a, "return_post_pct", 7.0),
-        pct(a, "step_up_pct", 0.0),
-        pct(a, "savings", 0.0),
+    let plan = commands::retire_plan(
+        &commands::RetireArgs {
+            monthly_expense: a.need_f64("monthly_expense")?,
+            years_to_retire: a.i64("years_to_retire").unwrap_or(1) as u32,
+            years_in_retirement: a.i64("years_in_retirement").unwrap_or(1) as u32,
+            inflation_pct: pct(a, "inflation_pct", 6.0),
+            return_pre_pct: pct(a, "return_pre_pct", 12.0),
+            return_post_pct: pct(a, "return_post_pct", 7.0),
+            step_up_pct: pct(a, "step_up_pct", 0.0),
+            savings: pct(a, "savings", 0.0),
+            monthly_income: pct(a, "monthly_income", 0.0),
+            buffer_years: a.i64("buffer_years").unwrap_or(0) as u32,
+            legacy: pct(a, "legacy", 0.0),
+        },
+        m,
     );
     commands::goal_json("retire", commands::market_currency(m), &plan)
 }
 
 fn goal_education(a: &Args, m: Market) -> Result<Value> {
-    let plan = crate::goals::plan_education(
-        a.need_f64("cost")?,
-        a.i64("years").unwrap_or(1) as u32,
-        pct(a, "inflation_pct", 8.0),
-        pct(a, "return_pct", 12.0),
-        pct(a, "step_up_pct", 0.0),
-        pct(a, "savings", 0.0),
-    );
+    commands::check_tax_region(tax_kind(a), m)?;
+    let months = goal_months(a)?;
+    let cost = a.need_f64("cost")?;
+    let req = sip_request(a, cost, months);
+    let plan = commands::education_plan(cost, pct(a, "inflation_pct", 8.0), req, m);
     commands::goal_json("education", commands::market_currency(m), &plan)
+}
+
+fn goal_swp(a: &Args, m: Market) -> Result<Value> {
+    let plan = commands::swp_plan(
+        &commands::SwpArgs {
+            corpus: a.need_f64("corpus")?,
+            cost: a.f64("cost"),
+            withdrawal: a.need_f64("withdrawal")?,
+            inflation_pct: pct(a, "inflation_pct", 6.0),
+            return_pct: pct(a, "return_pct", 10.0),
+            years: a.i64("years").unwrap_or(30) as u32,
+            fd_return_pct: pct(a, "fd_return_pct", 7.0),
+            slab_pct: pct(a, "slab_pct", 30.0),
+        },
+        m,
+    );
+    commands::goal_json("swp", commands::market_currency(m), &plan)
+}
+
+fn goal_prepay(a: &Args, m: Market) -> Result<Value> {
+    commands::check_tax_region(tax_kind(a), m)?;
+    let (extra, lump_sum) = (pct(a, "extra", 0.0), pct(a, "lump_sum", 0.0));
+    if extra <= 0.0 && lump_sum <= 0.0 {
+        bail!("Give 'extra' (a monthly amount) and/or 'lump_sum'");
+    }
+    let plan = commands::prepay_plan(
+        &commands::PrepayArgs {
+            principal: a.need_f64("principal")?,
+            loan_rate_pct: a.need_f64("loan_rate_pct")?,
+            remaining_months: a.i64("remaining_months").unwrap_or(1) as u32,
+            extra,
+            lump_sum,
+            return_pct: a.f64("return_pct"),
+            tax: tax_kind(a),
+            slab_pct: a.f64("slab_pct"),
+        },
+        m,
+    );
+    commands::goal_json("prepay", commands::market_currency(m), &plan)
+}
+
+async fn goal_list(src: &impl DataSource, m: Market) -> Result<Value> {
+    let rows = commands::goal_rows(Some(src), m).await?;
+    let mut v = serde_json::to_value(&rows)?;
+    round_json(&mut v);
+    Ok(json!({"goal": "list", "currency": commands::market_currency(m), "goals": v}))
+}
+
+fn round_json(v: &mut Value) {
+    match v {
+        Value::Number(n) if n.is_f64() => {
+            if let Some(x) = n.as_f64() {
+                *v = json!((x * 100.0).round() / 100.0);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(round_json),
+        Value::Object(o) => o.values_mut().for_each(round_json),
+        _ => {}
+    }
 }
 
 /// The symbol as a shell word. `&` (M&M, J&KBANK) is a command separator in

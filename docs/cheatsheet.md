@@ -108,6 +108,10 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | SIP needed for a target | `stockwise goal sip --target 1cr --years 15` |
 | Retirement corpus and SIP | `stockwise goal retire --monthly-expense 80000 --years-to-retire 20 --years-in-retirement 30` |
 | Education fund | `stockwise goal education --cost 25L --years 10` |
+| Short goal, ₹10L in hand after tax | `stockwise goal sip --target 10L --months 9 --net` |
+| Save a goal, track it | `stockwise goal add house --target 50L --by 2031-06` · `stockwise goal list` |
+| How long a corpus lasts | `stockwise goal swp --corpus 1cr --withdrawal 50k` |
+| Prepay a loan or invest | `stockwise goal prepay --principal 50L --loan-rate 9 --remaining-months 240 --extra 10k` |
 | What a past SIP became | `stockwise sip NIFTYBEES 5000 -p 5y` |
 | What a lump sum became | `stockwise whatif TCS 100000 2015-01-01` |
 

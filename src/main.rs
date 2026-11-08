@@ -764,15 +764,24 @@ stockwise tax advance --fy 2025-26 --paid 25000   track shortfall and 234C inter
     Pcorr,
 
     // ── Planning ──
-    /// Goal planner: SIP for a target corpus, retirement and education calculators
+    /// Goal planner: horizon-aware, post-tax SIP, retirement, education, SWP, emergency fund and loan prepayment
     #[command(after_help = "Examples:\n  \
 stockwise goal sip --target 1cr --years 15 --step-up 10\n  \
+stockwise goal sip --target 10L --months 9 --json\n  \
+stockwise goal sip --target 50L --by 2031-06 --inflation 6 --from-portfolio\n  \
 stockwise goal retire --monthly-expense 80000 --years-to-retire 20 --years-in-retirement 30\n  \
-stockwise goal education --cost 25L --years 10 --json\n\n\
-Amounts take Indian units: 50k, 25L (lakh), 1cr (crore).")]
+stockwise goal education --cost 25L --years 10 --json\n  \
+stockwise goal add house --target 50L --by 2031-06 --holdings NIFTYBEES\n  \
+stockwise goal list\n  \
+stockwise goal swp --corpus 1cr --withdrawal 50000\n  \
+stockwise goal emergency --monthly-expense 60000\n  \
+stockwise goal prepay --principal 50L --loan-rate 9 --remaining-months 240 --extra 10000\n\n\
+Without --return the return follows the horizon: capital preservation up to\n\
+24 months, conservative hybrid to 60, long-term growth beyond. Taxes and exit\n\
+loads are estimates. Amounts take Indian units: 50k, 25L (lakh), 1cr (crore).")]
     Goal {
         #[command(subcommand)]
-        action: GoalCmd,
+        action: Option<GoalCmd>,
     },
 
     // ── Live trading ──
@@ -1190,19 +1199,31 @@ enum ExportCountry {
 
 #[derive(Subcommand)]
 enum GoalCmd {
-    /// Monthly SIP needed for a target corpus, with an optional yearly step-up
+    /// Monthly SIP for a target corpus: horizon-matched return, tax at redemption, outcome bands
     Sip {
         /// Target corpus: 1cr, 50L, 2500000, ...
         #[arg(long, value_parser = goal_amount)]
         target: f64,
-        /// Years to the goal (1-60)
-        #[arg(long, value_parser = goal_years)]
-        years: u32,
-        /// Expected annual return, in percent
-        #[arg(long = "return", value_name = "PCT", default_value_t = 12.0, value_parser = return_pct)]
-        return_pct: f64,
+        #[command(flatten)]
+        horizon: GoalHorizon,
+        /// Expected annual return, in percent (default: matched to the horizon)
+        #[arg(long = "return", value_name = "PCT", value_parser = return_pct)]
+        return_pct: Option<f64>,
+        /// The target is in today's money and grows by this yearly inflation, in percent
+        #[arg(long, value_name = "PCT", value_parser = inflation_pct)]
+        inflation: Option<f64>,
+        #[command(flatten)]
+        tax: GoalTaxFlags,
+        /// The target is what must be left after tax and exit load
+        #[arg(long)]
+        net: bool,
+        /// Move to the short-term rate over the last 24 months (goals over 60 months)
+        #[arg(long)]
+        glide_path: bool,
         #[command(flatten)]
         sip: GoalSipFlags,
+        #[command(flatten)]
+        link: GoalLink,
     },
     /// Retirement corpus for today's monthly expenses, and the SIP that builds it
     Retire {
@@ -1224,26 +1245,211 @@ enum GoalCmd {
         /// Annual return on the corpus during retirement, in percent
         #[arg(long, value_name = "PCT", default_value_t = 7.0, value_parser = return_pct)]
         return_post: f64,
+        /// Pension, rent or other income in today's money that offsets expenses
+        #[arg(long, value_parser = goal_amount)]
+        monthly_income: Option<f64>,
+        /// Extra years the corpus must last
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=40))]
+        buffer_years: u32,
+        /// Amount to leave at the end, in today's money
+        #[arg(long, value_parser = goal_amount)]
+        legacy: Option<f64>,
         #[command(flatten)]
         sip: GoalSipFlags,
+        #[command(flatten)]
+        link: GoalLink,
     },
     /// Education cost in N years, grown by education inflation, and the SIP that pays it
     Education {
         /// Cost in today's money: 25L, 40 lakh, 1.2cr, ...
         #[arg(long, value_parser = goal_amount)]
         cost: f64,
-        /// Years until it is needed (1-60)
-        #[arg(long, value_parser = goal_years)]
-        years: u32,
+        #[command(flatten)]
+        horizon: GoalHorizon,
         /// Yearly education inflation, in percent
         #[arg(long, value_name = "PCT", default_value_t = 8.0, value_parser = inflation_pct)]
         inflation: f64,
-        /// Expected annual return, in percent
-        #[arg(long = "return", value_name = "PCT", default_value_t = 12.0, value_parser = return_pct)]
-        return_pct: f64,
+        /// Expected annual return, in percent (default: matched to the horizon)
+        #[arg(long = "return", value_name = "PCT", value_parser = return_pct)]
+        return_pct: Option<f64>,
+        #[command(flatten)]
+        tax: GoalTaxFlags,
+        #[arg(long)]
+        net: bool,
+        #[arg(long)]
+        glide_path: bool,
         #[command(flatten)]
         sip: GoalSipFlags,
+        #[command(flatten)]
+        link: GoalLink,
     },
+    /// How long a corpus lasts under monthly withdrawals: equity SWP tax vs FD interest tax
+    Swp {
+        /// Corpus: 1cr, 80L, ... (or --from-portfolio / --holdings)
+        #[arg(long, value_parser = goal_amount, required_unless_present_any = ["from_portfolio", "holdings"])]
+        corpus: Option<f64>,
+        /// Monthly withdrawal in today's money
+        #[arg(long, value_parser = goal_amount)]
+        withdrawal: f64,
+        /// Yearly rise of the withdrawal, in percent
+        #[arg(long, value_name = "PCT", default_value_t = 6.0, value_parser = inflation_pct)]
+        inflation: f64,
+        /// Annual return of the corpus, in percent
+        #[arg(long = "return", value_name = "PCT", default_value_t = 10.0, value_parser = return_pct)]
+        return_pct: f64,
+        /// Years to look ahead (1-60)
+        #[arg(long, default_value_t = 30, value_parser = goal_years)]
+        years: u32,
+        /// FD interest rate for the comparison, in percent
+        #[arg(long, value_name = "PCT", default_value_t = 7.0, value_parser = return_pct)]
+        fd_return: f64,
+        /// Your income-tax slab rate, in percent
+        #[arg(long, value_name = "PCT", default_value_t = 30.0, value_parser = slab_pct)]
+        slab: f64,
+        /// What the corpus cost, when you know it (default: its value)
+        #[arg(long, value_parser = goal_amount)]
+        cost: Option<f64>,
+        #[command(flatten)]
+        link: GoalLink,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// Size an emergency reserve, compare it with liquid money and plan the build-up
+    Emergency {
+        /// Monthly expenses: 60000, 60k, ...
+        #[arg(long, value_parser = goal_amount)]
+        monthly_expense: f64,
+        /// Months of expenses to hold
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=36))]
+        months_cover: u32,
+        /// Time to build it: 12mo, 18mo, 2y
+        #[arg(long, default_value = "12mo", value_parser = goal_duration)]
+        horizon: u32,
+        /// Liquid money already set aside
+        #[arg(long, value_parser = goal_amount)]
+        savings: Option<f64>,
+        /// Annual return of the liquid money (default: the short-term baseline)
+        #[arg(long = "return", value_name = "PCT", value_parser = return_pct)]
+        return_pct: Option<f64>,
+        #[command(flatten)]
+        link: GoalLink,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// Prepay a loan or invest in a SIP: interest and tenure saved against after-tax SIP outcomes
+    Prepay {
+        /// Loan principal outstanding
+        #[arg(long, value_parser = goal_amount)]
+        principal: f64,
+        /// Loan interest rate, in percent a year
+        #[arg(long, value_name = "PCT", value_parser = percent_0_to_50)]
+        loan_rate: f64,
+        /// Months left on the loan
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=720))]
+        remaining_months: u32,
+        /// Extra amount to put in every month
+        #[arg(long, value_parser = goal_amount, required_unless_present = "lump_sum")]
+        extra: Option<f64>,
+        /// One-off amount to put in today
+        #[arg(long, value_parser = goal_amount)]
+        lump_sum: Option<f64>,
+        /// Annual return of the SIP (default: matched to the loan's remaining term)
+        #[arg(long = "return", value_name = "PCT", value_parser = return_pct)]
+        return_pct: Option<f64>,
+        #[command(flatten)]
+        tax: GoalTaxFlags,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// Save a goal in goals.json
+    Add {
+        name: String,
+        #[arg(long, value_parser = goal_amount)]
+        target: f64,
+        /// Due date: YYYY-MM or YYYY-MM-DD
+        #[arg(long, value_name = "YYYY-MM[-DD]")]
+        by: String,
+        /// Yearly inflation in percent; the target is then in today's money
+        #[arg(long, value_name = "PCT", value_parser = inflation_pct)]
+        inflation: Option<f64>,
+        /// Holdings that count towards it: MF:122639,NIFTYBEES
+        #[arg(long, value_delimiter = ',')]
+        holdings: Vec<String>,
+        /// Annual return to plan with (default: matched to the horizon)
+        #[arg(long = "return", value_name = "PCT", value_parser = return_pct)]
+        return_pct: Option<f64>,
+    },
+    /// Saved goals with live funded share and the SIP still needed
+    #[command(alias = "ls")]
+    List {
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// One saved goal in full
+    Show {
+        name: String,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// Remove a saved goal
+    #[command(alias = "rm")]
+    Remove { name: String },
+}
+
+/// The horizon of a goal: exactly one of these.
+#[derive(Args, Clone)]
+#[group(required = true, multiple = false)]
+struct GoalHorizon {
+    /// Years to the goal (1-60)
+    #[arg(long, value_parser = goal_years)]
+    years: Option<u32>,
+    /// Months to the goal (1-720)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=720))]
+    months: Option<u32>,
+    /// A horizon such as 6mo, 18mo or 2y
+    #[arg(long, value_parser = goal_duration)]
+    horizon: Option<u32>,
+    /// A target date: YYYY-MM or YYYY-MM-DD
+    #[arg(long, value_name = "YYYY-MM[-DD]")]
+    by: Option<String>,
+}
+
+impl GoalHorizon {
+    fn months(&self) -> anyhow::Result<u32> {
+        if let Some(y) = self.years {
+            return Ok(y * 12);
+        }
+        if let Some(m) = self.months.or(self.horizon) {
+            return Ok(m);
+        }
+        let by = self.by.as_deref().expect("clap requires a horizon");
+        goals::months_until(chrono::Local::now().date_naive(), by).map_err(anyhow::Error::msg)
+    }
+}
+
+/// How a redemption is taxed.
+#[derive(Args, Clone, Copy)]
+struct GoalTaxFlags {
+    /// Fund kind for tax: equity, arbitrage, debt or none (default: matched to the horizon)
+    #[arg(long, value_enum, ignore_case = true)]
+    tax: Option<goals::TaxKind>,
+    /// Your income-tax slab rate for debt funds and FDs, in percent (default 30; US 24)
+    #[arg(long, value_name = "PCT", value_parser = slab_pct)]
+    slab: Option<f64>,
+    /// Exit load on units held under 12 months, in percent (default: 1 for equity in India)
+    #[arg(long, value_name = "PCT", value_parser = percent_0_to_50)]
+    exit_load: Option<f64>,
+}
+
+/// Count holdings from the portfolio towards the goal.
+#[derive(Args, Clone, Default)]
+struct GoalLink {
+    /// Use the portfolio's value as existing savings
+    #[arg(long)]
+    from_portfolio: bool,
+    /// Use only these holdings: MF:122639,NIFTYBEES
+    #[arg(long, value_delimiter = ',')]
+    holdings: Vec<String>,
 }
 
 /// SIP options shared by every goal.
@@ -1270,6 +1476,18 @@ fn goal_years(s: &str) -> Result<u32, String> {
             "`{s}` must be a whole number of years from 1 to 60"
         )),
     }
+}
+
+fn goal_duration(s: &str) -> Result<u32, String> {
+    goals::parse_duration(s)
+}
+
+fn slab_pct(s: &str) -> Result<f64, String> {
+    percent_between(s, 0.0, 50.0)
+}
+
+fn percent_0_to_50(s: &str) -> Result<f64, String> {
+    percent_between(s, 0.0, 50.0)
 }
 
 fn percent_between(s: &str, lo: f64, hi: f64) -> Result<f64, String> {
@@ -3858,58 +4076,7 @@ async fn dispatch(
                 commands::cmd_tax(&value_name(country), m, out.into()).await
             }
         },
-        Commands::Goal { action } => match action {
-            GoalCmd::Sip {
-                target,
-                years,
-                return_pct,
-                sip,
-            } => commands::cmd_goal_sip(
-                target,
-                years,
-                return_pct,
-                sip.step_up,
-                sip.savings.unwrap_or(0.0),
-                m,
-                sip.out.json,
-            ),
-            GoalCmd::Retire {
-                monthly_expense,
-                years_to_retire,
-                years_in_retirement,
-                inflation,
-                return_pre,
-                return_post,
-                sip,
-            } => commands::cmd_goal_retire(
-                monthly_expense,
-                years_to_retire,
-                years_in_retirement,
-                inflation,
-                return_pre,
-                return_post,
-                sip.step_up,
-                sip.savings.unwrap_or(0.0),
-                m,
-                sip.out.json,
-            ),
-            GoalCmd::Education {
-                cost,
-                years,
-                inflation,
-                return_pct,
-                sip,
-            } => commands::cmd_goal_education(
-                cost,
-                years,
-                inflation,
-                return_pct,
-                sip.step_up,
-                sip.savings.unwrap_or(0.0),
-                m,
-                sip.out.json,
-            ),
-        },
+        Commands::Goal { action } => run_goal(action, m).await,
         Commands::Divcal => commands::cmd_divcal(m).await,
         Commands::Pcorr => commands::cmd_pcorr(m).await,
 
@@ -4065,6 +4232,242 @@ async fn dispatch(
             Ok(())
         }
         Commands::Man { dir } => cmd_man(dir.as_deref()),
+    }
+}
+
+/// Existing savings from `--savings`, or from the portfolio when linked.
+async fn goal_savings(
+    savings: Option<f64>,
+    link: &GoalLink,
+    m: Market,
+) -> anyhow::Result<(f64, Option<commands::Linked>)> {
+    if savings.is_some() && (link.from_portfolio || !link.holdings.is_empty()) {
+        anyhow::bail!("Use either --savings or --from-portfolio / --holdings, not both");
+    }
+    match commands::goal_linked(link.from_portfolio, &link.holdings, m).await? {
+        Some(l) => Ok((l.value, Some(l))),
+        None => Ok((savings.unwrap_or(0.0), None)),
+    }
+}
+
+fn sip_request(
+    target: f64,
+    months: u32,
+    return_pct: Option<f64>,
+    inflation: Option<f64>,
+    tax: GoalTaxFlags,
+    net: bool,
+    glide: bool,
+    step_up: f64,
+    savings: f64,
+) -> goals::SipRequest {
+    let mut req = goals::SipRequest::new(target, months, goals::Region::Other);
+    req.return_pct = return_pct;
+    req.inflation_pct = inflation;
+    req.tax_kind = tax.tax;
+    req.slab_pct = tax.slab;
+    req.exit_load_pct = tax.exit_load;
+    req.net = net;
+    req.glide = glide;
+    req.step_up_pct = step_up;
+    req.savings = savings;
+    req
+}
+
+async fn run_goal(action: Option<GoalCmd>, m: Market) -> anyhow::Result<()> {
+    let Some(action) = action else {
+        return commands::cmd_goal_list(m, false).await;
+    };
+    match action {
+        GoalCmd::Sip {
+            target,
+            horizon,
+            return_pct,
+            inflation,
+            tax,
+            net,
+            glide_path,
+            sip,
+            link,
+        } => {
+            commands::check_tax_region(tax.tax, m)?;
+            let months = horizon.months()?;
+            let (savings, _) = goal_savings(sip.savings, &link, m).await?;
+            let req = sip_request(
+                target,
+                months,
+                return_pct,
+                inflation,
+                tax,
+                net,
+                glide_path,
+                sip.step_up,
+                savings,
+            );
+            commands::cmd_goal_sip(req, m, sip.out.json)
+        }
+        GoalCmd::Retire {
+            monthly_expense,
+            years_to_retire,
+            years_in_retirement,
+            inflation,
+            return_pre,
+            return_post,
+            monthly_income,
+            buffer_years,
+            legacy,
+            sip,
+            link,
+        } => {
+            let (savings, _) = goal_savings(sip.savings, &link, m).await?;
+            commands::cmd_goal_retire(
+                commands::RetireArgs {
+                    monthly_expense,
+                    years_to_retire,
+                    years_in_retirement,
+                    inflation_pct: inflation,
+                    return_pre_pct: return_pre,
+                    return_post_pct: return_post,
+                    step_up_pct: sip.step_up,
+                    savings,
+                    monthly_income: monthly_income.unwrap_or(0.0),
+                    buffer_years,
+                    legacy: legacy.unwrap_or(0.0),
+                },
+                m,
+                sip.out.json,
+            )
+        }
+        GoalCmd::Education {
+            cost,
+            horizon,
+            inflation,
+            return_pct,
+            tax,
+            net,
+            glide_path,
+            sip,
+            link,
+        } => {
+            commands::check_tax_region(tax.tax, m)?;
+            let months = horizon.months()?;
+            let (savings, _) = goal_savings(sip.savings, &link, m).await?;
+            let req = sip_request(
+                cost,
+                months,
+                return_pct,
+                None,
+                tax,
+                net,
+                glide_path,
+                sip.step_up,
+                savings,
+            );
+            commands::cmd_goal_education(cost, inflation, req, m, sip.out.json)
+        }
+        GoalCmd::Swp {
+            corpus,
+            withdrawal,
+            inflation,
+            return_pct,
+            years,
+            fd_return,
+            slab,
+            cost,
+            link,
+            out,
+        } => {
+            let linked = commands::goal_linked(link.from_portfolio, &link.holdings, m).await?;
+            let (corpus, cost) = match (corpus, linked) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("Use either --corpus or --from-portfolio / --holdings, not both")
+                }
+                (Some(c), None) => (c, cost),
+                (None, Some(l)) => (l.value, cost.or(Some(l.cost))),
+                (None, None) => anyhow::bail!("Give --corpus, --from-portfolio or --holdings"),
+            };
+            commands::cmd_goal_swp(
+                commands::SwpArgs {
+                    corpus,
+                    cost,
+                    withdrawal,
+                    inflation_pct: inflation,
+                    return_pct,
+                    years,
+                    fd_return_pct: fd_return,
+                    slab_pct: slab,
+                },
+                m,
+                out.json,
+            )
+        }
+        GoalCmd::Emergency {
+            monthly_expense,
+            months_cover,
+            horizon,
+            savings,
+            return_pct,
+            link,
+            out,
+        } => {
+            let (liquid, _) = goal_savings(savings, &link, m).await?;
+            let plan = commands::emergency_plan(
+                monthly_expense,
+                months_cover,
+                liquid,
+                horizon,
+                return_pct,
+                m,
+            );
+            commands::cmd_goal_emergency(plan, m, out.json)
+        }
+        GoalCmd::Prepay {
+            principal,
+            loan_rate,
+            remaining_months,
+            extra,
+            lump_sum,
+            return_pct,
+            tax,
+            out,
+        } => {
+            commands::check_tax_region(tax.tax, m)?;
+            if extra.is_none() && lump_sum.is_none() {
+                anyhow::bail!("Give --extra (a monthly amount) and/or --lump-sum");
+            }
+            commands::cmd_goal_prepay(
+                commands::PrepayArgs {
+                    principal,
+                    loan_rate_pct: loan_rate,
+                    remaining_months,
+                    extra: extra.unwrap_or(0.0),
+                    lump_sum: lump_sum.unwrap_or(0.0),
+                    return_pct,
+                    tax: tax.tax,
+                    slab_pct: tax.slab,
+                },
+                m,
+                out.json,
+            )
+        }
+        GoalCmd::Add {
+            name,
+            target,
+            by,
+            inflation,
+            holdings,
+            return_pct,
+        } => commands::cmd_goal_add(commands::GoalAdd {
+            name,
+            target,
+            by,
+            inflation_pct: inflation,
+            holdings,
+            return_pct,
+        }),
+        GoalCmd::List { out } => commands::cmd_goal_list(m, out.json).await,
+        GoalCmd::Show { name, out } => commands::cmd_goal_show(&name, m, out.json).await,
+        GoalCmd::Remove { name } => commands::cmd_goal_remove(&name),
     }
 }
 
@@ -5000,6 +5403,118 @@ mod tests {
                 "8",
                 "--json",
             ],
+            vec!["stockwise", "goal"],
+            vec!["stockwise", "goal", "list", "--json"],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "10L",
+                "--months",
+                "9",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "10L",
+                "--horizon",
+                "18mo",
+                "--json",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "50L",
+                "--by",
+                "2031-06",
+                "--inflation",
+                "6",
+                "--net",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "50L",
+                "--years",
+                "10",
+                "--tax",
+                "equity",
+                "--slab",
+                "30",
+                "--exit-load",
+                "1",
+                "--glide-path",
+                "--from-portfolio",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "retire",
+                "--monthly-expense",
+                "80k",
+                "--years-to-retire",
+                "20",
+                "--years-in-retirement",
+                "30",
+                "--monthly-income",
+                "20k",
+                "--buffer-years",
+                "5",
+                "--legacy",
+                "50L",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "swp",
+                "--corpus",
+                "1cr",
+                "--withdrawal",
+                "50k",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "emergency",
+                "--monthly-expense",
+                "60k",
+                "--horizon",
+                "12mo",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "prepay",
+                "--principal",
+                "50L",
+                "--loan-rate",
+                "9",
+                "--remaining-months",
+                "240",
+                "--extra",
+                "10k",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "add",
+                "house",
+                "--target",
+                "50L",
+                "--by",
+                "2031-06",
+                "--holdings",
+                "MF:122639,NIFTYBEES",
+            ],
+            vec!["stockwise", "goal", "show", "house"],
+            vec!["stockwise", "goal", "remove", "house"],
         ] {
             assert!(parses(&args), "{args:?} should parse");
         }
@@ -5009,8 +5524,60 @@ mod tests {
             vec!["stockwise", "tax", "export", "in", "--csv"],
             vec!["stockwise", "portfolio", "benchmark", "-p", "5d"],
             vec!["stockwise", "portfolio", "--json", "benchmark"],
-            vec!["stockwise", "goal"],
             vec!["stockwise", "goal", "sip", "--target", "1cr"],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "1cr",
+                "--years",
+                "5",
+                "--months",
+                "6",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "1cr",
+                "--years",
+                "5",
+                "--by",
+                "2031-06",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "1cr",
+                "--months",
+                "0",
+            ],
+            vec![
+                "stockwise",
+                "goal",
+                "sip",
+                "--target",
+                "1cr",
+                "--horizon",
+                "5w",
+            ],
+            vec!["stockwise", "goal", "swp", "--withdrawal", "50k"],
+            vec![
+                "stockwise",
+                "goal",
+                "prepay",
+                "--principal",
+                "50L",
+                "--loan-rate",
+                "9",
+                "--remaining-months",
+                "240",
+            ],
+            vec!["stockwise", "goal", "add", "house", "--target", "50L"],
             vec![
                 "stockwise",
                 "goal",
@@ -5066,17 +5633,19 @@ mod tests {
         .unwrap();
         let Commands::Goal {
             action:
-                GoalCmd::Sip {
+                Some(GoalCmd::Sip {
                     target,
-                    years,
+                    horizon,
                     return_pct,
                     sip,
-                },
+                    ..
+                }),
         } = cli.command
         else {
             panic!("expected goal sip");
         };
-        assert_eq!((target, years, return_pct), (1e7, 15, 12.0));
+        assert_eq!((target, horizon.years, return_pct), (1e7, Some(15), None));
+        assert_eq!(horizon.months().unwrap(), 180);
         assert_eq!(sip.step_up, 0.0);
         assert!(sip.savings.is_none() && !sip.out.json);
 
