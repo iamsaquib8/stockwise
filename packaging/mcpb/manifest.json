@@ -63,6 +63,10 @@
       "description": "Corporate events & disclosures. Recent and upcoming corporate events for one ticker with 1-day and 5-day price reaction."
     },
     {
+      "name": "quarterly_results",
+      "description": "Quarterly and annual financial results. Last 8 or more quarters (or fiscal years) of results for one ticker with growth, margins, trailing twelve months and EPS against consensus."
+    },
+    {
       "name": "search",
       "description": "Find a ticker. Search tickers by company name (\"tata motors\", \"apple\")."
     },
@@ -137,6 +141,14 @@
     {
       "name": "portfolio_pme",
       "description": "Public Market Equivalent (Index Twin). Mirrors the user's exact cash flows into a passive benchmark (SPY, VOO, VWCE, NIFTY 50) to compute Kaplan-Schoar PME, Direct Alpha and benchmark twin value."
+    },
+    {
+      "name": "portfolio_sell_preview",
+      "description": "Preview a sale without recording it: departing FIFO lots, short- vs long-term tax with the Sec. 112A exemption and cess, a long-term countdown and a mutual-fund exit-load check."
+    },
+    {
+      "name": "mf_bleed",
+      "description": "Held Regular-plan funds vs their Direct twin: TER gap, yearly and 10-year cost, and units that can switch tax-free."
     },
     {
       "name": "calendar",

@@ -177,6 +177,12 @@ impl Valuation {
             .or_else(|| pf::symbol_currency(symbol).map(str::to_string))
     }
 
+    /// Market-cap tier of a priced stock; `Unknown` for funds and the rest.
+    pub fn cap_tier(&self, symbol: &str) -> market::CapTier {
+        self.quote(symbol)
+            .map_or(market::CapTier::Unknown, market::cap_tier_of)
+    }
+
     pub fn base(&self) -> &str {
         &self.fx.base
     }
@@ -562,6 +568,8 @@ pub(crate) struct HoldingRow {
     pub(crate) price_source: Option<PriceSource>,
     /// Date of the NAV a fund is valued at.
     pub(crate) nav_date: Option<chrono::NaiveDate>,
+    /// `mega|large|mid|small|micro`, `unknown` for funds and anything without a market cap.
+    pub(crate) cap_tier: &'static str,
 }
 
 impl CsvRow for HoldingRow {
@@ -580,6 +588,7 @@ impl CsvRow for HoldingRow {
         "name",
         "price_source",
         "nav_date",
+        "cap_tier",
     ];
 }
 
@@ -646,6 +655,7 @@ pub(crate) fn portfolio_report(
                 name: val.name(&h.symbol),
                 price_source: val.price_source(&h.symbol),
                 nav_date: val.nav_date(&h.symbol),
+                cap_tier: val.cap_tier(&h.symbol).as_str(),
             }
         })
         .collect();
@@ -841,10 +851,10 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .max()
         .unwrap_or(0)
         .max(12);
-    let rule = "─".repeat(74 + sw);
+    let rule = "─".repeat(81 + sw);
     // Width-aware padding: translated labels (e.g. Hindi) aren't one column per char.
     println!(
-        "  {} {} {} {} {} {} {} {}",
+        "  {} {} {} {} {} {} {} {} {}",
         pad_end(t(Msg::Symbol), sw).bold(),
         pad_start(t(Msg::Shares), 8).bold(),
         pad_start(t(Msg::AvgCost), 10).bold(),
@@ -853,6 +863,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         pad_start(t(Msg::PnL), 11).bold(),
         pad_start(t(Msg::PnLPct), 8).bold(),
         pad_start("XIRR", 8).bold(),
+        pad_start("Cap", 6).bold(),
     );
     println!("  {}", rule.dimmed());
 
@@ -869,7 +880,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         // leave it out of the totals rather than valuing it at 0.
         let Some(price) = val.price(&h.symbol) else {
             println!(
-                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
+                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
                 label.yellow(),
                 h.shares,
                 format_price(h.avg_cost, cur),
@@ -878,6 +889,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 "—",
                 "—",
                 "—",
+                "",
             );
             continue;
         };
@@ -887,7 +899,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let pnl_pct = if cost > 0.0 { pnl / cost * 100.0 } else { 0.0 };
         let xirr = pf::xirr(&portfolio.cash_flows(&h.symbol), value, today);
         println!(
-            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
+            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
             label.cyan(),
             h.shares,
             format_price(h.avg_cost, cur),
@@ -896,6 +908,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             signed_money(pnl, cur),
             signed_pct(pnl_pct),
             xirr_cell(xirr),
+            val.cap_tier(&h.symbol).badge().dimmed(),
         );
     }
 
@@ -923,7 +936,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     };
     println!("  {}", rule.dimmed());
     println!(
-        "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8}",
+        "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
         pad_end(t(Msg::Total), sw).bold(),
         "",
         format_price(totals.cost, base),
@@ -932,6 +945,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         signed_money(totals.value - totals.cost, base),
         signed_pct(totals.pnl_pct()),
         xirr_cell(portfolio_xirr),
+        "",
     );
     if let Some(note) = val.fx_note() {
         println!("  {}", note.dimmed());
@@ -980,6 +994,25 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     println!();
     totals.print_exclusions();
     val.print_price_notes();
+    let regular_funds = portfolio
+        .holdings
+        .iter()
+        .filter(|h| {
+            val.mark(&h.symbol)
+                .and_then(|m| m.name.as_deref())
+                .is_some_and(|n| {
+                    let n = n.to_lowercase();
+                    n.contains("regular plan") && !n.contains("direct")
+                })
+        })
+        .count();
+    if regular_funds > 0 {
+        println!(
+            "  {} {} Regular-plan fund(s) held: `stockwise mf bleed` shows the Direct-plan TER gap and the units that can switch.",
+            "·".dimmed(),
+            regular_funds
+        );
+    }
     if !unconverted.is_empty() {
         println!(
             "  {} No exchange rate for {} — left out of realized P&L and dividends.",

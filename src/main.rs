@@ -16,6 +16,7 @@ mod api;
 mod ask;
 mod backtest;
 mod benchmark;
+mod bleed;
 mod bonds;
 mod brokers;
 mod calendar;
@@ -53,7 +54,9 @@ mod practice;
 mod providers;
 mod rebalance;
 mod research;
+mod results;
 mod scorecard;
+mod sellpreview;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
@@ -450,6 +453,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Scan an NSE index's members instead of the built-in large caps
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -463,6 +469,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Scan an NSE index's members instead of the built-in large caps
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
     },
     /// Fear & Greed style sentiment gauge
     Sentiment,
@@ -508,6 +517,38 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Scan an NSE index's members instead of the built-in large caps
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Last 8-12 quarters (or fiscal years) of results with YoY, QoQ, TTM and beat/miss; --holdings or --universe for the season scoreboard
+    #[command(after_help = "Examples:\n  \
+stockwise results TCS                      Last 8 quarters with YoY, QoQ, OPM, TTM\n  \
+stockwise results AAPL -m us --quarters 12 12 quarters, EPS vs consensus\n  \
+stockwise results HDFCBANK --csv           Banks add NII and GNPA/NNPA when filed\n  \
+stockwise results TCS --annual             Fiscal years: CFO/PAT, FCF, ROE, ROCE, CAGR\n  \
+stockwise results --universe nifty50       Season scoreboard: aggregate YoY, beat/in-line/miss\n  \
+stockwise results --holdings --json        Same for your holdings and watchlist")]
+    Results {
+        /// Ticker, e.g. TCS (India) or AAPL with -m us
+        symbol: Option<String>,
+        /// Quarters (or with --annual, fiscal years) to show
+        #[arg(long, short = 'q', default_value_t = 8)]
+        quarters: usize,
+        /// Fiscal years instead of quarters
+        #[arg(long)]
+        annual: bool,
+        /// Scoreboard over holdings and watchlist (`--portfolio NAME` picks which portfolio)
+        #[arg(long, conflicts_with_all = ["symbol", "universe"])]
+        holdings: bool,
+        /// Scoreboard over an NSE index's members
+        #[arg(long, value_enum, ignore_case = true, conflicts_with = "symbol")]
+        universe: Option<market::Universe>,
+        /// Scoreboard order
+        #[arg(long, value_enum, ignore_case = true, default_value = "date")]
+        sort: results::Sort,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -715,6 +756,10 @@ stockwise options TCS                     expected moves (same as `options moves
         /// (default: the first whose header fits the importer)
         #[arg(long, value_name = "NAME")]
         sheet: Option<String>,
+        /// For `cas` with a .pdf: the statement password (else STOCKWISE_CAS_PASSWORD,
+        /// else a hidden prompt). Needs casparser on PATH. Use `-` as FILE to read casparser output from stdin
+        #[arg(long, value_name = "PASSWORD")]
+        password: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -1038,6 +1083,9 @@ enum PortfolioCmd {
         /// Sale date, YYYY-MM-DD (default: today)
         #[arg(long)]
         date: Option<String>,
+        /// Show the FIFO lots, tax and LTCG countdown without recording the sale
+        #[arg(long, alias = "dry-run")]
+        preview: bool,
     },
     /// A holding's lots, sales and dividends; --lot N --date fixes a purchase date
     Lots {
@@ -2098,6 +2146,15 @@ enum MfCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Held Regular-plan funds vs their Direct twin: TER gap, yearly and 10-year cost, tax-free switch units
+    Bleed {
+        /// Gross annual return (percent, before TER) for the compounded 10-year figure
+        #[arg(long = "return", value_name = "PERCENT", default_value_t = 10.0)]
+        assumed_return: f64,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Rank a category's growth funds by 1Y/3Y/5Y return or expense ratio (bare: list categories)
     Screen {
         /// Category words, e.g. `flexi cap`, `elss`, `liquid`, `equity etf`
@@ -2834,6 +2891,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "picks",
             "screen",
             "dividends",
+            "results",
         ],
     ),
     ("Funds & F&O", &["mf", "options"]),
@@ -3578,9 +3636,11 @@ async fn dispatch(
             period,
         } => commands::cmd_forecast(&symbol, days, &period, m).await,
 
-        Commands::Movers { universe, out } => commands::cmd_movers(m, universe, out.into()).await,
+        Commands::Movers { universe, cap, out } => {
+            commands::cmd_movers(m, universe, cap, out.into()).await
+        }
         Commands::Sectors { out } => commands::cmd_sectors(m, out.into()).await,
-        Commands::Heatmap { universe } => commands::cmd_heatmap(m, universe).await,
+        Commands::Heatmap { universe, cap } => commands::cmd_heatmap(m, universe, cap).await,
         Commands::Sentiment => commands::cmd_sentiment().await,
         Commands::News { symbol } => commands::cmd_news(&symbol, m).await,
         Commands::Rotation => commands::cmd_rotation(m).await,
@@ -3612,8 +3672,30 @@ async fn dispatch(
         Commands::Screen {
             category,
             universe,
+            cap,
             out,
-        } => commands::cmd_screen(&value_name(category), m, universe, out.into()).await,
+        } => commands::cmd_screen(&value_name(category), m, universe, cap, out.into()).await,
+        Commands::Results {
+            symbol,
+            quarters,
+            annual,
+            holdings,
+            universe,
+            sort,
+            out,
+        } => {
+            commands::cmd_results(
+                symbol.as_deref(),
+                quarters,
+                annual,
+                holdings,
+                universe,
+                sort,
+                m,
+                out.into(),
+            )
+            .await
+        }
         Commands::Dividends { symbol, out } => {
             commands::cmd_dividends(&symbol, m, out.into()).await
         }
@@ -3696,6 +3778,10 @@ async fn dispatch(
                 commands::cmd_mf_screen(&category.join(" "), plan, sort, max_ter, limit, max, json)
                     .await
             }
+            MfCmd::Bleed {
+                assumed_return,
+                json,
+            } => commands::cmd_mf_bleed(assumed_return, json, m).await,
             MfCmd::Overlap { a, b, json } => commands::cmd_mf_overlap(&a, &b, m, json).await,
         },
         Commands::Options {
@@ -3922,6 +4008,17 @@ async fn dispatch(
                 shares,
                 price,
                 date,
+                preview,
+            }) if preview => {
+                commands::cmd_portfolio_sell_preview(&symbol, shares, price, date.as_deref(), m)
+                    .await
+            }
+            Some(PortfolioCmd::Sell {
+                symbol,
+                shares,
+                price,
+                date,
+                ..
             }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
             Some(PortfolioCmd::Lots { symbol, lot, date }) => {
                 commands::cmd_portfolio_lots(&symbol, lot, date.as_deref(), m).await
@@ -4038,7 +4135,15 @@ async fn dispatch(
             file,
             replace,
             sheet,
-        } => commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await,
+            password,
+        } => {
+            if matches!(source, ImportSource::Cas) {
+                commands::cmd_import_cas(&file, password.as_deref(), replace, sheet.as_deref(), m)
+                    .await
+            } else {
+                commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await
+            }
+        }
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance {
             inflow,
@@ -5263,6 +5368,16 @@ mod tests {
                 "2023-04-12",
             ],
             vec!["stockwise", "portfolio", "sell", "TCS", "5"],
+            vec!["stockwise", "portfolio", "sell", "TCS", "5", "--preview"],
+            vec![
+                "stockwise",
+                "portfolio",
+                "sell",
+                "TCS",
+                "5",
+                "3900",
+                "--dry-run",
+            ],
             vec![
                 "stockwise",
                 "portfolio",
@@ -5806,6 +5921,17 @@ mod tests {
             vec!["stockwise", "events", "TCS", "--csv"],
             vec!["stockwise", "analyze", "TCS", "--json"],
             vec!["stockwise", "deep", "TCS", "--json"],
+            vec!["stockwise", "results", "TCS", "--quarters", "12", "--csv"],
+            vec!["stockwise", "results", "TCS", "--annual", "--json"],
+            vec![
+                "stockwise",
+                "results",
+                "--universe",
+                "nifty50",
+                "--sort",
+                "pat",
+            ],
+            vec!["stockwise", "results", "--holdings", "--json"],
             vec!["stockwise", "technical", "TCS", "--explain"],
             vec!["stockwise", "harvest", "--json"],
             vec!["stockwise", "harvest", "--csv"],

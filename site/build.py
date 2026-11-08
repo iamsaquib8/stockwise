@@ -206,7 +206,7 @@ def cheatsheet_rows() -> list[tuple[str, list[tuple[str, str]]]]:
 
 
 def mcp_tool_count() -> str:
-    """The number of MCP tools, as docs/ai.md states it ("There are 34 tools");
+    """The number of MCP tools, as docs/ai.md states it ("There are 35 tools");
     "the" (as in "the read-only tools") if that sentence is gone."""
     m = re.search(r"There are (\d+) tools", (ROOT / "docs" / "ai.md").read_text())
     return m.group(1) if m else "the"

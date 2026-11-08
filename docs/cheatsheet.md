@@ -20,6 +20,8 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Indian and US indices | `stockwise markets` |
 | One index per exchange worldwide | `stockwise markets --global` |
 | Gainers and losers | `stockwise movers` |
+| Scan all of NIFTY 500 in one NSE request, one cap tier | `stockwise -m in movers --universe nifty500 --cap mid` |
+| Large / mid / small / micro stocks of a screen or heatmap | `stockwise screen momentum --cap small`, `stockwise heatmap --cap large` |
 | Sector performance | `stockwise sectors` |
 | Find a ticker by name | `stockwise search "tata motors"` |
 | First-run setup: market, holdings import, MCP snippet | `stockwise init` (no prompts without a TTY: `init --market in --import groww:FILE --no-mcp`) |
@@ -36,6 +38,8 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 |---|---|
 | Fundamentals in plain English | `stockwise analyze INFY` |
 | Key events & filings timeline | `stockwise events LT` |
+| Last 8 quarters: YoY, QoQ, OPM, TTM, beat/miss | `stockwise results TCS` · `results AAPL -m us --quarters 12` · `results TCS --annual` |
+| Earnings-season scoreboard | `stockwise results --universe nifty50` · `results --holdings --csv` |
 | Positive and negative findings | `stockwise insights LT` |
 | 6-pillar score (not a recommendation) | `stockwise verdict LT` · `stockwise verdict LT --explain` |
 | Piotroski F-score & Altman Z-score | `stockwise score INFY --explain` · `stockwise scorecard TCS --json` |
@@ -57,6 +61,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Find a mutual fund | `stockwise mf search parag flexi direct` |
 | SIP returns (XIRR) for a fund | `stockwise mf sip 122639 5000 -p 5y` |
 | Rank a category by return | `stockwise mf screen flexi cap` |
+| Regular vs Direct plan cost of the funds you hold | `stockwise mf bleed --return 10` |
 | Option chain with greeks | `stockwise options chain NIFTY` |
 | Put/call ratio, max pain | `stockwise options pcr BANKNIFTY` · `stockwise options maxpain NIFTY` |
 | OI build-up & resistance/support walls | `stockwise fno oi NIFTY` · `stockwise options oi BANKNIFTY -n 5 --explain` |
@@ -71,10 +76,13 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 |---|---|
 | Add a purchase (a lot) | `stockwise portfolio add TCS 10 3500 --date 2023-04-12` |
 | Sell (oldest lots first) | `stockwise portfolio sell TCS 5 3900` |
+| Preview a sale: lots, STCG/LTCG tax, LTCG countdown (saves nothing) | `stockwise portfolio sell TCS 5 --preview` (alias `--dry-run`) |
+| Regular-plan funds vs Direct: TER gap, yearly and 10Y cost, switch units | `stockwise mf bleed` |
 | Holdings, P&L and XIRR | `stockwise portfolio` |
 | Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
 | Portfolio X-Ray (overlap, concentration, sectors) | `stockwise portfolio xray` · `stockwise portfolio xray --json` |
 | Import from your broker | `stockwise import kite holdings.xlsx` (CSV or `.xlsx`; also `groww`, `upstox`, `indmoney`, `cas`) |
+| Import a password-protected CAS PDF (needs `casparser`) | `stockwise import cas CAS.pdf` · `casparser ... \| stockwise import cas -` |
 | Rebuild a symbol's lots from a dated file | `stockwise import kite tradebook.csv --replace` |
 | One holding's lots, sales and XIRR | `stockwise portfolio lots TCS` |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |

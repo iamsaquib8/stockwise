@@ -45,7 +45,7 @@ src/
   server/            `stockwise serve`: axum routes, bearer auth, Prometheus metrics; web.rs serves
                      the dashboard (web/, embedded with include_str!) and sets CSP/security headers
   daemon_status.rs   Reads the intraday daemon's daemon_state.json for /metrics
-  tools/             The 34 read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
+  tools/             The 35 read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
                      definitions, JSON schemas from typed Param lists, the result envelope with
                      the "not financial advice" note and size limit), args.rs (argument checks),
                      handlers.rs (each tool calls the function behind the command's --json),

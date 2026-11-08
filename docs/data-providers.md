@@ -104,8 +104,9 @@ dividends and splits — comes from Yahoo, exactly as with the other providers.
 - Big scans stay on Yahoo: a quote request for more than 12 uncached NSE
   symbols (8 on BSE) goes to Yahoo in one request rather than waiting on the
   rate limit. Members of an index fetched with `--universe` are already priced
-  by that one NSE request, so `movers --universe nifty100` costs one NSE
-  request and one Yahoo request (for names and fundamentals).
+  by that one NSE request, so `movers --universe nifty500` costs one NSE
+  request and no Yahoo request, and still works when Yahoo is unreachable;
+  `screen --universe` also asks Yahoo for P/E and market cap.
 
 **Mixed mode** (`exchange`): `.NS` symbols and NSE indices go to NSE, `.BO`
 symbols to BSE, and US stocks, crypto, FX and SENSEX to Yahoo — so a

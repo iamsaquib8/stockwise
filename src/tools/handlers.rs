@@ -34,6 +34,7 @@ pub(super) async fn run<D: DataSource>(
         "scorecard" => scorecard(src, a, m).await,
         "insights" => insights(src, a, m).await,
         "events" => events(src, a, m).await,
+        "quarterly_results" => quarterly_results(src, a, m).await,
         "search" => search(src, a).await,
         "markets" => Ok(json!({
             "indices": views::markets(src, m, a.bool("crypto"), a.bool("fx"), a.bool("global")).await?
@@ -67,6 +68,8 @@ pub(super) async fn run<D: DataSource>(
         "harvest" => harvest(src, m).await,
         "rebalance" => rebalance(src, a, m).await,
         "portfolio_pme" => portfolio_pme(src, a, m).await,
+        "portfolio_sell_preview" => portfolio_sell_preview(src, a, m).await,
+        "mf_bleed" => mf_bleed(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
         "ipo_board" => ipo_board(src, a).await,
         "ipo_analyze" => ipo_analyze(src, a).await,
@@ -327,6 +330,26 @@ async fn events(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
         "upcoming": upcoming,
         "events": evts,
     }))
+}
+
+/// Quarterly or annual results of one ticker, as `results --json`.
+async fn quarterly_results(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let n = a.usize_or("quarters", 8);
+    let annual = a.bool("annual");
+    let c = crate::results::collect(
+        src.yahoo().await?,
+        a.need_str("symbol")?,
+        m,
+        crate::results::default_store(),
+        !annual,
+        true,
+    )
+    .await?;
+    Ok(if annual {
+        crate::results::annual_json(&c, n)
+    } else {
+        crate::results::quarterly_json(&c, n)
+    })
 }
 
 async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {
@@ -667,6 +690,38 @@ async fn portfolio_pme(src: &impl DataSource, a: &Args, m: Market) -> Result<Val
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let report =
         commands::portfolio_pme_report(src, &p, a.str("benchmark"), m, a.str("base")).await?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn portfolio_sell_preview(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let resolved = commands::held_symbol(&p, a.need_str("symbol")?, m);
+    if p.holding(&resolved).is_none() {
+        bail!("{resolved} is not in your portfolio");
+    }
+    let qty = a.need_f64("quantity")?;
+    let today = crate::portfolio::today();
+    let date = match a.str("date") {
+        Some(d) => crate::portfolio::parse_date(d)?,
+        None => crate::portfolio::parse_date(&today)?,
+    };
+    let (price, cur) = match a.f64("price") {
+        Some(price) => (
+            price,
+            crate::portfolio::symbol_currency(&resolved).map(str::to_string),
+        ),
+        None if date.to_string() != today => {
+            bail!("Give price when date is not today")
+        }
+        None => commands::live_sale_price(&resolved, m).await?,
+    };
+    let out = commands::build_sell_preview(&p, &resolved, qty, price, cur, date, m).await?;
+    Ok(commands::sell_preview_json(&out))
+}
+
+async fn mf_bleed(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let report = commands::build_bleed_report(&p, a.f64("return_pct").unwrap_or(10.0), m).await?;
     Ok(serde_json::to_value(report)?)
 }
 

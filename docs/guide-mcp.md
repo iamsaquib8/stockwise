@@ -13,7 +13,7 @@ Claude Code, Claude Desktop, Cursor or another.
 
 ## What the assistant can and cannot do
 
-- **It can read.** The 34 tools cover quotes, history, technicals, risk,
+- **It can read.** The 35 tools cover quotes, history, technicals, risk,
   scorecards, events, mutual funds, option chains, IPOs, screens, backtests,
   your portfolio and lots, tax estimate, advance tax, harvest and rebalance
   plans, calendar, watchlist and alerts.
@@ -90,6 +90,8 @@ Questions that work well, grouped by what they use:
 | "Which of my holdings are long-term and which are short-term?" | `holdings_lots` |
 | "What is my capital-gains tax so far this year?" | `tax_estimate` |
 | "Do I owe advance tax by the next due date?" | `tax_advance` |
+| "Which lots would 20 shares of TCS sell, and what is the tax?" | `portfolio_sell_preview` (never records the sale) |
+| "What do my Regular-plan funds cost me against Direct?" | `mf_bleed` |
 | "What could I book before 31 March, and what is my unused LTCG exemption?" | `harvest` |
 | "If I invest another ₹50,000, how should it be split to match my targets?" | `rebalance` |
 | "How risky has HDFCBANK been over the last year?" | `risk` |
