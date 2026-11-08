@@ -7,8 +7,9 @@
 //! - Factual Dividend Sustainability & Payout Safety check (FCF coverage & payout ratio).
 //! - Semi-annual coupons for Sovereign Gold Bonds (SGB 2.5% p.a.) and fixed-coupon bonds.
 
+use crate::api::Quote;
 use crate::output::CsvRow;
-use crate::portfolio::{Holding, Portfolio};
+use crate::portfolio::{Fx, Holding, Portfolio};
 use chrono::{Datelike, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +75,7 @@ pub struct IncomeHoldingSummary {
     pub annual_gross_income: f64,
     pub current_yield_pct: f64,
     pub yoc_pct: f64,
+    pub net_yield_pct: f64,
     pub wht_rate_pct: f64,
     pub annual_wht_amount: f64,
     pub annual_net_income: f64,
@@ -83,6 +85,7 @@ pub struct IncomeHoldingSummary {
     pub payout_safety: PayoutSafety,
     pub safety_reason: Option<String>,
     pub lots_yoc: Vec<LotYoC>,
+    pub currency: Option<String>,
 }
 
 /// An individual cashflow event (received or projected).
@@ -152,14 +155,75 @@ pub fn is_sgb(symbol: &str) -> bool {
 }
 
 /// Calculate standard withholding tax rate (percentage) based on currency / symbol.
+///
+/// Returns 10% flat TDS for Indian dividends (Section 194),
+/// 25% flat withholding tax for US foreign dividends, and 0% for other currencies.
 pub fn standard_wht_rate(symbol: &str, currency: Option<&str>) -> f64 {
-    let is_us = currency.is_some_and(|c| c.eq_ignore_ascii_case("USD"))
-        || (!symbol.ends_with(".NS") && !symbol.ends_with(".BO") && currency.is_none());
-    if is_us {
+    let cur = currency.unwrap_or("");
+    if cur.eq_ignore_ascii_case("INR") || symbol.ends_with(".NS") || symbol.ends_with(".BO") {
+        DEFAULT_INDIA_TDS_RATE * 100.0
+    } else if cur.eq_ignore_ascii_case("USD")
+        || (!symbol.contains('.') && (cur.is_empty() || cur.eq_ignore_ascii_case("USD")))
+    {
         DEFAULT_US_WHT_RATE * 100.0
     } else {
-        DEFAULT_INDIA_TDS_RATE * 100.0
+        0.0
     }
+}
+
+/// Assemble holding income input data from portfolio, quotes, and resolved symbols.
+pub fn assemble_holdings_data<'a>(
+    portfolio: &'a Portfolio,
+    quotes: &'a [Quote],
+    resolved_symbols: &[String],
+    base_currency: &'a str,
+) -> Vec<HoldingIncomeData<'a>> {
+    let mut holdings_data = Vec::with_capacity(portfolio.holdings.len());
+
+    for (idx, holding) in portfolio.holdings.iter().enumerate() {
+        let res_sym = resolved_symbols
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or(&holding.symbol);
+        let q_opt = quotes.iter().find(|q| {
+            q.symbol.as_deref().is_some_and(|s| {
+                s.eq_ignore_ascii_case(res_sym) || s.eq_ignore_ascii_case(&holding.symbol)
+            })
+        });
+
+        let current_price = q_opt
+            .and_then(|q| q.regular_market_price)
+            .filter(|p| *p > 0.0)
+            .unwrap_or(holding.avg_cost);
+
+        let div_yield_frac = q_opt
+            .and_then(|q| q.dividend_yield_fraction())
+            .unwrap_or(0.0);
+        let annual_div_rate = q_opt
+            .and_then(|q| q.trailing_annual_dividend_rate)
+            .filter(|r| *r > 0.0)
+            .unwrap_or(current_price * div_yield_frac);
+
+        let payout_ratio =
+            q_opt.and_then(|q| match (q.eps_trailing_twelve_months, annual_div_rate) {
+                (Some(eps), div) if eps > 0.0 && div > 0.0 => Some(div / eps),
+                (Some(eps), div) if eps <= 0.0 && div > 0.0 => Some(2.0), // Loss-making dividend payer
+                _ => None,
+            });
+
+        holdings_data.push(HoldingIncomeData {
+            holding,
+            current_price,
+            annual_dividend_per_share: annual_div_rate,
+            payout_ratio,
+            fcf: None,
+            currency: q_opt
+                .and_then(|q| q.currency.as_deref())
+                .or(Some(base_currency)),
+        });
+    }
+
+    holdings_data
 }
 
 /// Evaluate dividend sustainability and safety for a single holding.
@@ -173,8 +237,8 @@ pub fn evaluate_payout_safety(
     let mut is_caution = false;
 
     if let Some(ratio) = payout_ratio {
-        let pct = if ratio <= 1.5 { ratio * 100.0 } else { ratio };
-        if pct > 90.0 {
+        let pct = ratio * 100.0;
+        if pct < 0.0 || pct > 90.0 {
             is_warning = true;
             warnings.push(format!("Earnings payout ratio is {pct:.1}% (> 90%)"));
         } else if pct > 75.0 {
@@ -278,6 +342,12 @@ pub fn compute_holding_summary(data: &HoldingIncomeData<'_>) -> IncomeHoldingSum
         });
     }
 
+    let net_yield = if cost_basis > 0.0 {
+        (annual_net / cost_basis) * 100.0
+    } else {
+        0.0
+    };
+
     IncomeHoldingSummary {
         symbol: holding.symbol.clone(),
         shares,
@@ -289,17 +359,17 @@ pub fn compute_holding_summary(data: &HoldingIncomeData<'_>) -> IncomeHoldingSum
         annual_gross_income: annual_gross,
         current_yield_pct: current_yield,
         yoc_pct: yoc,
+        net_yield_pct: net_yield,
         wht_rate_pct: wht_rate,
         annual_wht_amount: annual_wht,
         annual_net_income: annual_net,
-        payout_ratio_pct: data
-            .payout_ratio
-            .map(|r| if r <= 1.5 { r * 100.0 } else { r }),
+        payout_ratio_pct: data.payout_ratio.map(|r| r * 100.0),
         fcf: data.fcf,
         fcf_coverage_ratio: fcf_coverage,
         payout_safety: safety,
         safety_reason: reason,
         lots_yoc,
+        currency: data.currency.map(str::to_string),
     }
 }
 
@@ -307,10 +377,18 @@ pub fn compute_holding_summary(data: &HoldingIncomeData<'_>) -> IncomeHoldingSum
 pub fn build_monthly_schedule(
     portfolio: &Portfolio,
     holdings_summary: &[IncomeHoldingSummary],
+    base_currency: &str,
+    fx: Option<&Fx>,
     today: NaiveDate,
     forecast_months: u32,
 ) -> (Vec<MonthlyCashflow>, f64, f64, f64, f64, f64, f64) {
     let mut schedule: Vec<MonthlyCashflow> = Vec::new();
+    let convert = |amt: f64, cur: Option<&str>| -> f64 {
+        match (fx, cur) {
+            (Some(fx_eng), Some(c)) => fx_eng.convert(amt, c).unwrap_or(amt),
+            _ => amt,
+        }
+    };
 
     // 1. Trailing 12 months (actual received dividends recorded in portfolio.dividends)
     let start_trailing = today.checked_sub_months(Months::new(12)).unwrap_or(today);
@@ -333,15 +411,17 @@ pub fn build_monthly_schedule(
 
         for d in &portfolio.dividends {
             if d.ex_date.starts_with(&ym) {
-                let wht_rate = standard_wht_rate(&d.symbol, d.currency.as_deref());
-                let wht = d.amount * (wht_rate / 100.0);
-                let net = d.amount - wht;
-                m_gross += d.amount;
+                let cur = d.currency.as_deref().or(Some(base_currency));
+                let gross = convert(d.amount, cur);
+                let wht_rate = standard_wht_rate(&d.symbol, cur);
+                let wht = gross * (wht_rate / 100.0);
+                let net = gross - wht;
+                m_gross += gross;
                 m_wht += wht;
                 items.push(CashflowItem {
                     symbol: d.symbol.clone(),
                     date: d.ex_date.clone(),
-                    amount_gross: d.amount,
+                    amount_gross: gross,
                     wht_amount: wht,
                     amount_net: net,
                     kind: "Dividend".to_string(),
@@ -386,7 +466,7 @@ pub fn build_monthly_schedule(
 
             // Distribute projected cashflows across months:
             // SGB pays half-yearly in May and Nov (or every 6 months);
-            // General equity stocks distributed evenly across quarters (1/4th) or monthly (1/12th)
+            // General equity stocks distributed monthly (1/12th)
             let (applies, portion, kind) = if is_sgb(&h.symbol) {
                 // SGB coupon frequency: twice a year
                 let is_coupon_month = fwd_date.month() == 5 || fwd_date.month() == 11;
@@ -397,7 +477,8 @@ pub fn build_monthly_schedule(
             };
 
             if applies {
-                let gross_item = h.annual_gross_income * portion;
+                let cur = h.currency.as_deref().or(Some(base_currency));
+                let gross_item = convert(h.annual_gross_income * portion, cur);
                 let wht_item = gross_item * (h.wht_rate_pct / 100.0);
                 let net_item = gross_item - wht_item;
                 m_gross += gross_item;
@@ -445,6 +526,7 @@ pub fn generate_income_report(
     portfolio: &Portfolio,
     holdings_data: &[HoldingIncomeData<'_>],
     currency: &str,
+    fx: Option<&Fx>,
     today: NaiveDate,
     forecast_months: u32,
 ) -> IncomeReport {
@@ -454,10 +536,18 @@ pub fn generate_income_report(
     let mut total_market_value = 0.0;
     let mut total_cost_basis = 0.0;
 
+    let convert = |amt: f64, cur: Option<&str>| -> f64 {
+        match (fx, cur) {
+            (Some(fx_eng), Some(c)) => fx_eng.convert(amt, c).unwrap_or(amt),
+            _ => amt,
+        }
+    };
+
     for data in holdings_data {
         let summary = compute_holding_summary(data);
-        total_market_value += summary.market_value;
-        total_cost_basis += summary.cost_basis;
+        let cur = summary.currency.as_deref().or(Some(currency));
+        total_market_value += convert(summary.market_value, cur);
+        total_cost_basis += convert(summary.cost_basis, cur);
 
         if let Some(ref reason) = summary.safety_reason {
             payout_warnings.push(format!("{}: {}", summary.symbol, reason));
@@ -477,10 +567,26 @@ pub fn generate_income_report(
         _proj_gross,
         _proj_wht,
         _proj_net,
-    ) = build_monthly_schedule(portfolio, &summaries, today, forecast_months);
+    ) = build_monthly_schedule(portfolio, &summaries, currency, fx, today, forecast_months);
 
-    let annual_proj_gross: f64 = summaries.iter().map(|s| s.annual_gross_income).sum();
-    let annual_proj_wht: f64 = summaries.iter().map(|s| s.annual_wht_amount).sum();
+    let annual_proj_gross: f64 = summaries
+        .iter()
+        .map(|s| {
+            convert(
+                s.annual_gross_income,
+                s.currency.as_deref().or(Some(currency)),
+            )
+        })
+        .sum();
+    let annual_proj_wht: f64 = summaries
+        .iter()
+        .map(|s| {
+            convert(
+                s.annual_wht_amount,
+                s.currency.as_deref().or(Some(currency)),
+            )
+        })
+        .sum();
     let annual_proj_net = annual_proj_gross - annual_proj_wht;
 
     let portfolio_current_yield = if total_market_value > 0.0 {
@@ -534,6 +640,7 @@ pub struct IncomeHoldingCsvRow {
     pub annual_gross_income: f64,
     pub current_yield_pct: f64,
     pub yoc_pct: f64,
+    pub net_yield_pct: f64,
     pub annual_wht: f64,
     pub annual_net_income: f64,
     pub payout_ratio_pct: String,
@@ -550,6 +657,7 @@ impl CsvRow for IncomeHoldingCsvRow {
         "annual_gross_income",
         "current_yield_pct",
         "yoc_pct",
+        "net_yield_pct",
         "annual_wht",
         "annual_net_income",
         "payout_ratio_pct",
@@ -680,6 +788,11 @@ mod tests {
         let (s4, r4) = evaluate_payout_safety(Some(0.50), 1000.0, Some(5000.0));
         assert_eq!(s4, PayoutSafety::Safe);
         assert!(r4.is_none());
+
+        // Loss-making dividend payer (sentinel ratio = 2.0 / 200%)
+        let (s5, r5) = evaluate_payout_safety(Some(2.0), 1000.0, None);
+        assert_eq!(s5, PayoutSafety::Warning);
+        assert!(r5.unwrap().contains("> 90%"));
     }
 
     #[test]
@@ -705,7 +818,7 @@ mod tests {
         };
 
         let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
-        let report = generate_income_report(&portfolio, &[data1], "INR", today, 12);
+        let report = generate_income_report(&portfolio, &[data1], "INR", None, today, 12);
 
         assert!((report.portfolio_cost_basis - 150_000.0).abs() < 1e-4);
         assert!((report.portfolio_market_value - 175_000.0).abs() < 1e-4);
@@ -713,10 +826,59 @@ mod tests {
         assert!((report.projected_annual_wht - 200.0).abs() < 1e-4); // 10%
         assert!((report.projected_annual_net - 1800.0).abs() < 1e-4);
         assert!((report.portfolio_yoc_pct - (2000.0 / 150_000.0 * 100.0)).abs() < 1e-4);
+        assert!((report.portfolio_net_yield_pct - (1800.0 / 150_000.0 * 100.0)).abs() < 1e-4);
+        assert!((report.holdings[0].net_yield_pct - (1800.0 / 150_000.0 * 100.0)).abs() < 1e-4);
 
         // Trailing 12M received should contain the May 2026 dividend
         assert!((report.trailing_12m_gross - 500.0).abs() < 1e-4);
         assert!((report.trailing_12m_wht - 50.0).abs() < 1e-4);
         assert!((report.trailing_12m_net - 450.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_multi_currency_income_report() {
+        let mut fx = Fx::new("INR");
+        fx.set_rate("USD", 85.0);
+
+        let h_in = make_test_holding("ITC.NS", vec![(100.0, 200.0, "2024-01-10")]);
+        let data_in = HoldingIncomeData {
+            holding: &h_in,
+            current_price: 400.0,
+            annual_dividend_per_share: 10.0,
+            payout_ratio: Some(0.60),
+            fcf: None,
+            currency: Some("INR"),
+        };
+
+        // 10 shares of AAPL @ $150, div = $2/sh -> annual gross = $20 -> in INR = 20 * 85 = 1700
+        let h_us = make_test_holding("AAPL", vec![(10.0, 150.0, "2024-01-10")]);
+        let data_us = HoldingIncomeData {
+            holding: &h_us,
+            current_price: 200.0,
+            annual_dividend_per_share: 2.0,
+            payout_ratio: Some(0.20),
+            fcf: None,
+            currency: Some("USD"),
+        };
+
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let report = generate_income_report(
+            &Portfolio::default(),
+            &[data_in, data_us],
+            "INR",
+            Some(&fx),
+            today,
+            12,
+        );
+
+        // ITC gross = 100 * 10 = 1000 INR
+        // AAPL gross = 10 * 2 = $20 * 85 = 1700 INR
+        // Total projected gross in INR = 2700 INR
+        assert!((report.projected_annual_gross - 2700.0).abs() < 1e-4);
+
+        // ITC cost = 100 * 200 = 20,000 INR
+        // AAPL cost = 10 * 150 = $1,500 * 85 = 127,500 INR
+        // Total cost in INR = 147,500 INR
+        assert!((report.portfolio_cost_basis - 147_500.0).abs() < 1e-4);
     }
 }

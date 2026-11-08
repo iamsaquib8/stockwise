@@ -46,76 +46,31 @@ pub async fn cmd_income(months: u32, by_holding: bool, market: Market, fmt: Form
         };
     }
 
-    let client = YahooClient::new().await?;
+    let client = YahooClient::new()
+        .await
+        .context("Could not connect to fetch market quotes")?;
     let raw_symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
     let resolved = resolve_symbols(&raw_symbols, market);
-    let sym_refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
 
-    let quotes = client.get_quote(&sym_refs).await.unwrap_or_default();
+    let val = crate::commands::value_holdings(&client, &resolved, market, None)
+        .await
+        .context("Could not fetch quotes needed for dividend rates")?;
     let today = Local::now().date_naive();
 
-    // Determine portfolio base currency (INR for .NS/.BO, USD default for US)
-    let base_currency = if resolved
-        .iter()
-        .any(|s| s.ends_with(".NS") || s.ends_with(".BO"))
-    {
-        "INR"
-    } else {
-        "USD"
-    };
-
-    // Prepare holding data
-    let mut holdings_data = Vec::with_capacity(portfolio.holdings.len());
-
-    for (idx, holding) in portfolio.holdings.iter().enumerate() {
-        let res_sym = resolved
-            .get(idx)
-            .map(String::as_str)
-            .unwrap_or(&holding.symbol);
-        let q_opt = quotes.iter().find(|q| {
-            q.symbol.as_deref().is_some_and(|s| {
-                s.eq_ignore_ascii_case(res_sym) || s.eq_ignore_ascii_case(&holding.symbol)
-            })
-        });
-
-        let current_price = q_opt
-            .and_then(|q| q.regular_market_price)
-            .filter(|p| *p > 0.0)
-            .unwrap_or(holding.avg_cost);
-
-        let div_yield_frac = q_opt
-            .and_then(|q| q.dividend_yield_fraction())
-            .unwrap_or(0.0);
-        let annual_div_rate = q_opt
-            .and_then(|q| q.trailing_annual_dividend_rate)
-            .filter(|r| *r > 0.0)
-            .unwrap_or(current_price * div_yield_frac);
-
-        // Compute payout ratio from dividend per share and trailing EPS
-        let payout_ratio =
-            q_opt.and_then(|q| match (q.eps_trailing_twelve_months, annual_div_rate) {
-                (Some(eps), div) if eps > 0.0 && div > 0.0 => Some(div / eps),
-                (Some(eps), div) if eps <= 0.0 && div > 0.0 => Some(2.0), // Loss-making with dividend
-                _ => None,
-            });
-
-        holdings_data.push(HoldingIncomeData {
-            holding,
-            current_price,
-            annual_dividend_per_share: annual_div_rate,
-            payout_ratio,
-            fcf: None,
-            currency: q_opt
-                .and_then(|q| q.currency.as_deref())
-                .or(Some(base_currency)),
-        });
-    }
-
-    let report = generate_income_report(&portfolio, &holdings_data, base_currency, today, months);
+    let holdings_data =
+        crate::income::assemble_holdings_data(&portfolio, &val.quotes, &resolved, val.base());
+    let report = generate_income_report(
+        &portfolio,
+        &holdings_data,
+        val.base(),
+        Some(&val.fx),
+        today,
+        months,
+    );
 
     match fmt {
         Format::Json => output::print_json(&report),
@@ -133,6 +88,7 @@ pub async fn cmd_income(months: u32, by_holding: bool, market: Market, fmt: Form
                         annual_gross_income: h.annual_gross_income,
                         current_yield_pct: h.current_yield_pct,
                         yoc_pct: h.yoc_pct,
+                        net_yield_pct: h.net_yield_pct,
                         annual_wht: h.annual_wht_amount,
                         annual_net_income: h.annual_net_income,
                         payout_ratio_pct: h

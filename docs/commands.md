@@ -424,7 +424,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `tax advance [--fy 2025-26] [--paid [DATE:]AMOUNT]... [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
 | `income [--months 12] [--by-holding] [--json\|--csv]` (or `portfolio income` / `portfolio dividends`) | 12-month trailing and projected dividend, coupon and passive-income calendar, Yield-on-Cost (YoC), and dividend payout safety checks (see [below](#passive-income-and-dividend-calendar)) |
-| `income upcoming [--days 60] [--json\|--csv]` | Radar of upcoming ex-dividend, record and payment dates with expected payout amounts on held shares |
+| `income upcoming [--days 60] [--json\|--csv]` | Radar of upcoming ex-dividend and payment dates for held and watchlisted shares (see [below](#passive-income-and-dividend-calendar)) |
 | `pcorr` | Correlation between holdings from the days both traded, diversification warnings (`N/A` when two holdings share too few days) |
 
 ### Lots, sales and tax
@@ -533,17 +533,17 @@ investors, retirees, and bond/SGB holders:
 - **Yield on Cost (YoC):** Calculates per-holding and per-lot Yield-on-Cost
   (`YoC = Annual Dividend / Original Lot Cost`), comparing it against current
   market yield to reveal dividend-growth compounding over time.
-- **TDS and Withholding Tax:** Automatically computes withholding tax (10% TDS
-  for Indian dividends under Section 194/194K; 25% WHT for US foreign dividends)
-  to report net spendable income.
+- **TDS and Withholding Tax:** Automatically computes withholding tax (flat 10% TDS
+  for Indian dividends and 25% WHT for US foreign dividends; 0% assumed for other
+  currencies) to report net spendable income.
 - **Sovereign Gold Bonds & Fixed Income:** Models half-yearly 2.5% p.a. SGB
   coupons on issue nominal values across maturity cycles.
-- **Payout Safety & Sustainability:** Evaluates company earnings payout ratios
-  and Free Cash Flow (FCF) coverage, diagnosing distributions as `SAFE`, `CAUTION`,
-  or `WARNING` if dividends exceed Free Cash Flow or earnings payout exceeds 90%.
-- **Upcoming Radar (`stockwise income upcoming`):** Checks upcoming ex-dividend,
-  record, and payment dates for holdings and watchlists, calculating expected
-  payouts on user's held shares.
+- **Payout Safety & Sustainability:** Evaluates earnings payout ratios,
+  diagnosing distributions as `SAFE` (< 60%), `CAUTION` (60–85%), or `WARNING`
+  (> 85% or negative earnings).
+- **Upcoming Radar (`stockwise income upcoming`):** Checks upcoming ex-dividend
+  and payment dates for holdings and watchlists, showing held share counts and
+  calendar details.
 
 ### Harvest
 

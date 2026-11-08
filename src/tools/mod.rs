@@ -847,9 +847,9 @@ pub const TOOLS: &[Tool] = &[
                 "Months to forecast (default 12)",
             ),
             opt(
-                "by_holding",
+                "summary_only",
                 Kind::Bool,
-                "Whether to include holding-by-holding breakdown (default true)",
+                "Omit per-month cashflow items and per-lot yield rows (default false)",
             ),
             MARKET,
         ],

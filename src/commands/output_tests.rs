@@ -1387,6 +1387,7 @@ fn income_holding_csv_row_columns_match_fields() {
         annual_gross_income: 1500.0,
         current_yield_pct: 3.33,
         yoc_pct: 7.5,
+        net_yield_pct: 6.75,
         annual_wht: 150.0,
         annual_net_income: 1350.0,
         payout_ratio_pct: "65.0%".into(),
