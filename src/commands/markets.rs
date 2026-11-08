@@ -451,15 +451,16 @@ async fn cmd_sector_members(
         );
     };
     let client = YahooClient::new().await?;
-    // NSE's snapshot quotes carry no market cap: tiers come from the saved
-    // index membership, so fetch it once (best effort) when it is missing.
-    if market::IndiaMembership::load().is_empty() {
-        let _ = scan_nse_index(&client, "NIFTY 500", None).await;
-    }
-    let fallback = fallback.or_else(|| SectorMembers::get(index));
+    // The last live listing beats the built-in list (an index rebalances).
+    let fallback = SectorMembers::get(index).or(fallback);
     let scan = scan_nse_index(&client, index, fallback).await?;
     if scan.live() {
         SectorMembers::save(index, &scan.symbols);
+        // NSE answered, so one more request is cheap: NSE's snapshot quotes
+        // carry no market cap, and tiers come from the saved membership.
+        if market::IndiaMembership::load().is_empty() {
+            let _ = scan_nse_index(&client, "NIFTY 500", None).await;
+        }
     }
     let mut quotes = match scan_quotes(&client, market, &scan, cap, true).await {
         Ok(q) => q,
