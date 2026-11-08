@@ -1097,6 +1097,15 @@ pub async fn cmd_portfolio_remove(symbol: &str, market: Market) -> Result<()> {
     Ok(())
 }
 
+/// The hint printed after a sale; names the symbol so the command can be
+/// copied and run as-is.
+fn sell_history_hint(symbol: &str) -> String {
+    format!(
+        "Kept for `stockwise tax`; `stockwise portfolio lots {}` shows the history.",
+        symbol
+    )
+}
+
 pub async fn cmd_portfolio_sell(
     symbol: &str,
     shares: f64,
@@ -1221,10 +1230,7 @@ pub async fn cmd_portfolio_sell(
     if sales.iter().any(|s| s.buy_date_estimated) {
         println!("  {}", ESTIMATED_DATE_HINT.dimmed());
     }
-    println!(
-        "  {}",
-        "Kept for `stockwise tax`; `stockwise portfolio lots` shows the history.".dimmed()
-    );
+    println!("  {}", sell_history_hint(&resolved).dimmed());
     Ok(())
 }
 
@@ -1972,7 +1978,7 @@ pub async fn cmd_rebalance(
             let plan = crate::rebalance::RebalancePlan::empty(market_currency(market));
             println!("{}", serde_json::to_string_pretty(&plan)?);
         } else {
-            println!("\n  {}", "Portfolio is empty.".dimmed());
+            println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
         }
         return Ok(());
     }
@@ -2547,6 +2553,12 @@ mod tests {
         let mut p = Portfolio::default();
         p.add_lot("TCS.NS", pf::Lot::new(10.0, 3500.0, "2024-01-02", "manual"));
         p
+    }
+
+    #[test]
+    fn sell_hint_names_the_symbol() {
+        let hint = sell_history_hint("TCS.NS");
+        assert!(hint.contains("`stockwise portfolio lots TCS.NS`"), "{hint}");
     }
 
     #[tokio::test]

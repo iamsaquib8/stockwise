@@ -1606,7 +1606,7 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             }
             Format::Csv => output::print_csv::<HarvestRow>(&[]),
             Format::Table => {
-                println!("\n  {}", "Portfolio is empty.".dimmed());
+                println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
                 Ok(())
             }
         };
@@ -2155,10 +2155,8 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
             .is_ok_and(|d| d >= year_start && d <= year_end)
     });
     if portfolio.holdings.is_empty() && !any_sale_this_year && fmt.is_table() {
-        println!(
-            "\n  {}",
-            "Portfolio is empty and no sales are recorded this tax year.".dimmed()
-        );
+        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
+        println!("  {}", "No sales are recorded this tax year.".dimmed());
         return Ok(());
     }
 
