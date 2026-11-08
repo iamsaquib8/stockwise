@@ -54,6 +54,7 @@ mod providers;
 mod rebalance;
 mod research;
 mod scorecard;
+mod sellpreview;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
@@ -1038,6 +1039,9 @@ enum PortfolioCmd {
         /// Sale date, YYYY-MM-DD (default: today)
         #[arg(long)]
         date: Option<String>,
+        /// Show the FIFO lots, tax and LTCG countdown without recording the sale
+        #[arg(long, alias = "dry-run")]
+        preview: bool,
     },
     /// A holding's lots, sales and dividends; --lot N --date fixes a purchase date
     Lots {
@@ -3922,6 +3926,17 @@ async fn dispatch(
                 shares,
                 price,
                 date,
+                preview,
+            }) if preview => {
+                commands::cmd_portfolio_sell_preview(&symbol, shares, price, date.as_deref(), m)
+                    .await
+            }
+            Some(PortfolioCmd::Sell {
+                symbol,
+                shares,
+                price,
+                date,
+                ..
             }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
             Some(PortfolioCmd::Lots { symbol, lot, date }) => {
                 commands::cmd_portfolio_lots(&symbol, lot, date.as_deref(), m).await
@@ -5263,6 +5278,16 @@ mod tests {
                 "2023-04-12",
             ],
             vec!["stockwise", "portfolio", "sell", "TCS", "5"],
+            vec!["stockwise", "portfolio", "sell", "TCS", "5", "--preview"],
+            vec![
+                "stockwise",
+                "portfolio",
+                "sell",
+                "TCS",
+                "5",
+                "3900",
+                "--dry-run",
+            ],
             vec![
                 "stockwise",
                 "portfolio",
