@@ -23,6 +23,7 @@ pub struct FetchStats {
     /// Fetches that failed after all retries.
     pub errors: AtomicU64,
     pub cache_hits_redis: AtomicU64,
+    pub cache_hits_sqlite: AtomicU64,
     pub cache_hits_memory: AtomicU64,
     pub cache_misses: AtomicU64,
 }
@@ -31,6 +32,7 @@ pub static STATS: FetchStats = FetchStats {
     requests: AtomicU64::new(0),
     errors: AtomicU64::new(0),
     cache_hits_redis: AtomicU64::new(0),
+    cache_hits_sqlite: AtomicU64::new(0),
     cache_hits_memory: AtomicU64::new(0),
     cache_misses: AtomicU64::new(0),
 };
@@ -177,6 +179,8 @@ struct CacheEntry {
 pub(crate) struct HybridCache {
     redis: Option<redis::aio::MultiplexedConnection>,
     memory: HashMap<String, CacheEntry>,
+    /// The SQLite `cache.db`, used as L2 when Redis is not connected.
+    l2: Option<crate::db::L2>,
 }
 
 /// The cache shared by Yahoo and an alternative data provider.
@@ -187,6 +191,7 @@ impl HybridCache {
         Self {
             redis: connect_redis().await,
             memory: HashMap::new(),
+            l2: crate::db::l2(),
         }
     }
 
@@ -195,6 +200,16 @@ impl HybridCache {
         Self {
             redis: None,
             memory: HashMap::new(),
+            l2: None,
+        }
+    }
+
+    /// In-memory L1 over a given `cache.db`, no Redis.
+    #[cfg(test)]
+    pub(crate) fn with_l2(l2: crate::db::L2) -> Self {
+        Self {
+            l2: Some(l2),
+            ..Self::in_memory()
         }
     }
 
@@ -230,12 +245,21 @@ impl HybridCache {
                 None
             }
         });
-        count(if hit.is_some() {
-            &STATS.cache_hits_memory
-        } else {
-            &STATS.cache_misses
-        });
-        hit
+        if hit.is_some() {
+            count(&STATS.cache_hits_memory);
+            return hit;
+        }
+
+        // Persistent L2: a response fetched by an earlier command.
+        if self.redis.is_none()
+            && let Some(l2) = self.l2
+            && let Some(v) = crate::db::CacheDb::l2_get(l2, key)
+        {
+            count(&STATS.cache_hits_sqlite);
+            return Some(v);
+        }
+        count(&STATS.cache_misses);
+        None
     }
 
     pub(crate) async fn set(&mut self, key: String, data: String, ttl: Duration) {
@@ -250,6 +274,13 @@ impl HybridCache {
                 .arg(&data)
                 .query_async(conn)
                 .await;
+        }
+
+        // Without Redis, keep the response on disk for the next command.
+        if self.redis.is_none()
+            && let Some(l2) = self.l2
+        {
+            crate::db::CacheDb::l2_set(l2, &key, &data, ttl.as_secs());
         }
 
         // Also write to memory (fast path for same-session reads). The
@@ -2006,6 +2037,43 @@ mod tests {
             homes.load(Ordering::SeqCst),
             2,
             "the first handshake and one renewal for four callers"
+        );
+    }
+
+    /// Two commands, no Redis: the second is served from `cache.db` and
+    /// sends no request.
+    #[tokio::test]
+    async fn second_command_is_served_from_cache_db_without_a_request() {
+        let body =
+            r#"{"quoteResponse":{"result":[{"symbol":"TCS.NS","regularMarketPrice":3500.0}]}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let db: crate::db::L2 = Box::leak(Box::new(Mutex::new(
+            crate::db::CacheDb::open_in_memory().unwrap(),
+        )));
+        // Each client is a fresh process as far as the in-memory cache goes.
+        let mut prices = Vec::new();
+        for _ in 0..2 {
+            let mut client = YahooClient::for_tests_with_rewrite(
+                reqwest::Client::new(),
+                "crumb",
+                to_server(&server.url),
+            );
+            client.cache = Arc::new(tokio::sync::Mutex::new(HybridCache::with_l2(db)));
+            let started = Instant::now();
+            let quotes = client.get_quote(&["TCS.NS"]).await.unwrap();
+            prices.push((quotes[0].regular_market_price, started.elapsed()));
+        }
+        assert_eq!(prices[0].0, Some(3500.0));
+        assert_eq!(prices[1].0, Some(3500.0));
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "one HTTP request across two calls"
+        );
+        assert!(
+            prices[1].1 < Duration::from_millis(100),
+            "{:?}",
+            prices[1].1
         );
     }
 

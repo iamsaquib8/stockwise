@@ -1357,6 +1357,14 @@ pub async fn load_history(client: &reqwest::Client, code: u32) -> Result<NavHist
     })
     .await?;
     let parsed = parse_mfapi(&text, code);
+    if let Ok(h) = &parsed {
+        let navs: Vec<(String, f64)> = h
+            .navs
+            .iter()
+            .map(|(d, n)| (d.format("%Y-%m-%d").to_string(), *n))
+            .collect();
+        crate::db::with_db(|db| db.put_navs(&code.to_string(), &navs));
+    }
     if parsed.is_err() {
         // Don't keep "unknown scheme" answers around for 12 hours.
         let _ = cache_path(&name).map(std::fs::remove_file);

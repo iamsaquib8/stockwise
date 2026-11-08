@@ -79,6 +79,7 @@ request.
 | `GET /api/portfolio?base=usd` | Holdings (lots, FIFO cost) valued at live prices, totals in one currency (below); `base` is `inr` or `usd` | `portfolio --json` |
 | `GET /api/watchlist` | Array of `{symbol, price, change, change_percent, volume, currency}` in watchlist order | `watch --json` |
 | `GET /api/alerts` | Array of `{index, symbol, condition, target, price, currency, status, period, description, value, reference}`; `status` is `triggered`, `waiting`, `no_price` or `no_data` (technical alert with too little history) | `alert check --json` |
+| `GET /api/events` | Server-sent events: `quotes` (`{type, quotes:[{symbol, price, change_percent}]}`) when held or watched prices move, `task` (`{type, task:{id, title, status, progress_pct}}`) when a background task changes. Keep-alive comments every 15 s | — |
 | `GET /healthz` | `{"status": "ok", "version": "..."}` — never needs a token | |
 | `GET /metrics` | Prometheus text format (below) | |
 

@@ -41,6 +41,8 @@ pub struct AppState<D> {
     /// Bearer token required on every route except `/healthz`.
     pub token: Option<String>,
     pub metrics: Metrics,
+    /// Live price and task events from the background ticker (`/api/events`).
+    pub bus: crate::worker::Bus,
 }
 
 type Shared<D> = State<Arc<AppState<D>>>;
@@ -408,6 +410,37 @@ async fn alerts<D: DataSource>(State(st): Shared<D>) -> ApiResult {
     )
 }
 
+/// Server-sent events: `quotes` when held or watched prices move, `task`
+/// when a background task changes. Read-only, like every route here.
+async fn events<D: DataSource + 'static>(
+    State(st): Shared<D>,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio::sync::broadcast::error::RecvError;
+    let rx = st.bus.subscribe();
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let name = match &ev {
+                        crate::worker::LiveEvent::Quotes { .. } => "quotes",
+                        crate::worker::LiveEvent::Task { .. } => "task",
+                    };
+                    if let Ok(e) = Event::default().event(name).json_data(&ev) {
+                        return Some((Ok(e), rx));
+                    }
+                }
+                // A slow client misses events, not the connection.
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 async fn healthz() -> Response {
     axum::Json(serde_json::json!({
         "status": "ok",
@@ -574,6 +607,7 @@ pub fn router<D: DataSource + 'static>(state: Arc<AppState<D>>) -> Router {
         .route("/api/portfolios", get(portfolios))
         .route("/api/watchlist", get(watchlist::<D>))
         .route("/api/alerts", get(alerts::<D>))
+        .route("/api/events", get(events::<D>))
         .route("/metrics", get(prometheus::<D>))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -738,7 +772,7 @@ pub async fn run(bind: &str, allow_remote: bool, market: Market, open: bool) -> 
     println!(
         "\n  {}\n  {}\n  {}\n",
         "/api/quote?symbols=  /api/history/{symbol}?period=  /api/research/{symbol}  /api/markets  /api/search?q=".dimmed(),
-        "/api/portfolio  /api/portfolios  /api/watchlist  /api/alerts  /healthz  /metrics".dimmed(),
+        "/api/portfolio  /api/portfolios  /api/watchlist  /api/alerts  /api/events (SSE)  /healthz  /metrics".dimmed(),
         "No trading endpoints. Press Ctrl+C to stop.".dimmed()
     );
     if open {
@@ -750,7 +784,10 @@ pub async fn run(bind: &str, allow_remote: bool, market: Market, open: bool) -> 
         market,
         token,
         metrics: Metrics::new(),
+        bus: crate::worker::bus(),
     });
+    let _ticker = crate::worker::spawn_ticker(market, state.bus.clone());
+    let _tasks = crate::worker::spawn_task_watcher(state.bus.clone());
     // Ctrl+C stops accepting connections and lets requests in flight finish,
     // for at most SHUTDOWN_GRACE (a request can be inside Yahoo retries).
     let (stopping_tx, stopping) = tokio::sync::oneshot::channel::<()>();
@@ -790,6 +827,7 @@ mod tests {
             market: Market::In,
             token: token.map(str::to_string),
             metrics: Metrics::new(),
+            bus: crate::worker::bus(),
         }))
     }
 
@@ -822,6 +860,49 @@ mod tests {
     async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let (status, resp) = get_with(app, uri, None).await;
         (status, serde_json::from_str(&body(resp).await).unwrap())
+    }
+
+    #[tokio::test]
+    async fn events_stream_pushes_bus_messages() {
+        use futures_util::StreamExt;
+        use tower::ServiceExt;
+        let state = Arc::new(AppState {
+            source: Fixture::default(),
+            market: Market::In,
+            token: None,
+            metrics: Metrics::new(),
+            bus: crate::worker::bus(),
+        });
+        let bus = state.bus.clone();
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::get("/api/events")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let _ = bus.send(crate::worker::LiveEvent::Quotes {
+            quotes: vec![crate::worker::LiveQuote {
+                symbol: "TCS.NS".into(),
+                price: 3500.0,
+                change_percent: Some(1.0),
+            }],
+        });
+        let mut body = resp.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+            .await
+            .expect("an event within 2s")
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(
+            text.contains("event: quotes") && text.contains("TCS.NS"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -1015,6 +1096,7 @@ mod tests {
             market: Market::In,
             token: None,
             metrics: Metrics::new(),
+            bus: crate::worker::bus(),
         }));
         let (status, v) = get_json(&app, "/api/alerts").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);

@@ -61,6 +61,13 @@ pub async fn run(market: Market, opts: Options) -> Result<()> {
         );
     }
 
+    // Live updates: the ticker keeps held and watched quotes warm and tells
+    // the loop when they move, without blocking rendering.
+    let bus = crate::worker::bus();
+    let _ticker = crate::worker::spawn_ticker(market, bus.clone());
+    let _tasks = crate::worker::spawn_task_watcher(bus.clone());
+    let mut live = bus.subscribe();
+
     let theme = ui::Theme::from_env();
     let mut app = App::new(market, opts.interval);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Msg>();
@@ -88,6 +95,7 @@ pub async fn run(market: Market, opts: Options) -> Result<()> {
             let msg = tokio::select! {
                 Some(msg) = rx.recv() => msg,
                 _ = refresh.tick() => Msg::RefreshDue,
+                Ok(event) = live.recv() => Msg::Live(event),
                 _ = clock.tick() => continue,
                 // Signals from outside (raw mode turns the keyboard's Ctrl+C into a key event).
                 _ = &mut terminate => break,

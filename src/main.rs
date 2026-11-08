@@ -26,6 +26,7 @@ mod commodity;
 mod config;
 mod daemon;
 mod daemon_status;
+mod db;
 mod derivatives;
 mod display;
 mod events;
@@ -69,6 +70,7 @@ mod verdict;
 mod views;
 mod watchlist;
 mod wealth;
+mod worker;
 mod xlsx;
 mod xray;
 
@@ -220,6 +222,24 @@ enum Commands {
 
     /// Check your setup: data directory, network, cache, AI, broker
     Doctor,
+
+    /// Background worker: live quotes, queued tasks, alerts, post-close sync
+    Worker {
+        #[command(subcommand)]
+        action: WorkerAction,
+    },
+
+    /// Queued background jobs (screens, backtests, syncs) and their progress
+    Tasks {
+        #[command(subcommand)]
+        action: Option<TasksAction>,
+    },
+
+    /// Inspect or clear the persistent response cache (`cache.db`)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
 
     /// First run: pick a market, import holdings, optionally connect an AI assistant
     Init {
@@ -877,6 +897,110 @@ stockwise man --dir ~/.local/share/man/man1    then: man stockwise-backtest")]
         #[arg(long, value_name = "DIR")]
         dir: Option<std::path::PathBuf>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CapArg {
+    Mega,
+    Large,
+    Mid,
+    Small,
+    Micro,
+}
+
+impl From<CapArg> for db::CapTier {
+    fn from(c: CapArg) -> Self {
+        match c {
+            CapArg::Mega => Self::Mega,
+            CapArg::Large => Self::Large,
+            CapArg::Mid => Self::Mid,
+            CapArg::Small => Self::Small,
+            CapArg::Micro => Self::Micro,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum WorkerAction {
+    /// Start the background worker (quotes while open, tasks, alerts, post-close sync)
+    Start,
+    /// Stop it
+    Stop,
+    /// Is it running, and what is queued
+    Status,
+    /// Run it in this terminal (what `start` launches)
+    Run,
+}
+
+#[derive(Subcommand)]
+enum TasksAction {
+    /// List recent tasks (the default)
+    List {
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one task with its result
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a queued or running task
+    Cancel { id: i64 },
+    /// Queue a task for the worker
+    Add {
+        #[arg(value_enum, ignore_case = true)]
+        kind: worker::TaskKind,
+        /// For `run`: the stockwise command, after `--`
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Show entries, size and location of `cache.db`
+    Status,
+    /// Fill `market_snapshots` with the market universe and your holdings
+    Warm {
+        /// Queue it as a task for the worker instead of running now
+        #[arg(long)]
+        background: bool,
+    },
+    /// Filter cached market snapshots with SQL, offline (cap, sector, P/E, ...)
+    Snapshots {
+        /// Market-cap bucket
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<CapArg>,
+        #[arg(long)]
+        sector: Option<String>,
+        #[arg(long)]
+        min_pe: Option<f64>,
+        #[arg(long)]
+        max_pe: Option<f64>,
+        #[arg(long)]
+        min_roe: Option<f64>,
+        /// Minimum dividend yield, percent
+        #[arg(long)]
+        min_div_yield: Option<f64>,
+        /// Minimum relative volume (today vs 3-month average)
+        #[arg(long)]
+        min_rvol: Option<f64>,
+        /// Sort by: symbol, mcap, price, change_1d, rvol, pe, roe, div_yield
+        #[arg(long, default_value = "mcap")]
+        sort: String,
+        /// Smallest first
+        #[arg(long)]
+        asc: bool,
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete every cached response (your portfolio and settings are untouched)
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -2442,6 +2566,9 @@ const GROUPS: &[(&str, &[&str])] = &[
             "dashboard",
             "search",
             "doctor",
+            "cache",
+            "worker",
+            "tasks",
             "init",
         ],
     ),
@@ -3099,6 +3226,57 @@ async fn dispatch(
         Commands::Dashboard => commands::cmd_dashboard(m).await,
         Commands::Search { query, out } => commands::cmd_search(&query, out.into()).await,
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
+        Commands::Cache { action } => match action {
+            CacheAction::Status => commands::cmd_cache(false),
+            CacheAction::Clear => commands::cmd_cache(true),
+            CacheAction::Warm { background } => commands::cmd_cache_warm(m, background).await,
+            CacheAction::Snapshots {
+                cap,
+                sector,
+                min_pe,
+                max_pe,
+                min_roe,
+                min_div_yield,
+                min_rvol,
+                sort,
+                asc,
+                limit,
+                json,
+            } => commands::cmd_cache_snapshots(
+                commands::SnapshotQuery {
+                    market: (sources.market == config::Source::Flag).then_some(m),
+                    cap: cap.map(Into::into),
+                    sector,
+                    min_pe,
+                    max_pe,
+                    min_roe,
+                    min_div_yield,
+                    min_rvol,
+                    sort: Some(sort),
+                    ascending: asc,
+                    limit,
+                },
+                json,
+            ),
+        },
+        Commands::Worker { action } => {
+            let name = match action {
+                WorkerAction::Start => "start",
+                WorkerAction::Stop => "stop",
+                WorkerAction::Status => "status",
+                WorkerAction::Run => "run",
+            };
+            commands::cmd_worker(name, m).await
+        }
+        Commands::Tasks { action } => match action.unwrap_or(TasksAction::List {
+            limit: 30,
+            json: false,
+        }) {
+            TasksAction::List { limit, json } => commands::cmd_tasks_list(limit, json),
+            TasksAction::Show { id, json } => commands::cmd_tasks_show(id, json),
+            TasksAction::Cancel { id } => commands::cmd_tasks_cancel(id),
+            TasksAction::Add { kind, args } => commands::cmd_tasks_add(kind, &args, m),
+        },
         Commands::Init { imports, no_mcp } => {
             commands::cmd_init(m, sources.market == config::Source::Flag, &imports, no_mcp).await
         }

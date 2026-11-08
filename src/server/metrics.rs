@@ -200,6 +200,11 @@ impl Metrics {
         );
         let _ = writeln!(
             out,
+            "stockwise_cache_hits_total{{layer=\"sqlite\"}} {}",
+            load(&stats.cache_hits_sqlite)
+        );
+        let _ = writeln!(
+            out,
             "stockwise_cache_hits_total{{layer=\"memory\"}} {}",
             load(&stats.cache_hits_memory)
         );
@@ -214,6 +219,22 @@ impl Metrics {
             "stockwise_cache_misses_total {}",
             load(&stats.cache_misses)
         );
+        if let Some(db) = crate::db::http_stats() {
+            header(
+                &mut out,
+                "stockwise_cache_db_entries",
+                "gauge",
+                "Responses stored in the persistent cache.db.",
+            );
+            let _ = writeln!(out, "stockwise_cache_db_entries {}", db.entries);
+            header(
+                &mut out,
+                "stockwise_cache_db_bytes",
+                "gauge",
+                "Size of cache.db on disk.",
+            );
+            let _ = writeln!(out, "stockwise_cache_db_bytes {}", db.file_bytes);
+        }
 
         header(
             &mut out,

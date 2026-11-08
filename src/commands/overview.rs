@@ -706,6 +706,35 @@ pub async fn cmd_search(query: &str, fmt: Format) -> Result<()> {
 }
 
 /// `stockwise doctor` — one screen that answers "is my setup working?".
+/// `stockwise cache status|clear`: the persistent response cache.
+pub fn cmd_cache(clear: bool) -> Result<()> {
+    print_header("Response Cache (cache.db)");
+    let location = crate::db::path()?;
+    print_kv("File", &location.display().to_string());
+    if clear {
+        match crate::db::http_clear() {
+            Some(n) => println!("\n  {} Removed {} cached responses.\n", "✓".green(), n),
+            None => bail!("Cache database is off or cannot be opened"),
+        }
+        return Ok(());
+    }
+    let Some(st) = crate::db::http_stats() else {
+        println!(
+            "\n  {}\n",
+            "Persistent cache is off or cannot be opened (STOCKWISE_CACHE_DB=off disables it)."
+                .dimmed()
+        );
+        return Ok(());
+    };
+    print_kv("Entries", &st.entries.to_string());
+    print_kv("Fresh", &st.fresh.to_string());
+    print_kv("Expired", &st.expired.to_string());
+    print_kv("Cached bytes", &st.body_bytes.to_string());
+    print_kv("File size", &format!("{} KiB", st.file_bytes / 1024));
+    println!();
+    Ok(())
+}
+
 pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> Result<()> {
     let ok = |s: &str| format!("{} {}", "✓".green(), s);
     let warn = |s: &str| format!("{} {}", "!".yellow(), s);
@@ -889,6 +918,23 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
             t(Msg::DoctorRedisNotUsed).dimmed().to_string()
         },
     );
+
+    match crate::db::http_stats() {
+        Some(st) => print_kv(
+            "Cache database",
+            &ok(&format!(
+                "cache.db ({} entries, {} KiB)",
+                st.entries,
+                st.file_bytes / 1024
+            )),
+        ),
+        None => print_kv(
+            "Cache database",
+            &"off or unavailable (in-memory cache only)"
+                .dimmed()
+                .to_string(),
+        ),
+    }
 
     // AI — provider and model, never the key itself.
     let ai = crate::ai::AiClient::connect().await;
