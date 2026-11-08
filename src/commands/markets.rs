@@ -86,6 +86,13 @@ pub(super) struct Scan {
     bulk: Vec<crate::api::Quote>,
 }
 
+impl Scan {
+    /// Whether NSE listed the members just now (not a built-in or saved list).
+    fn live(&self) -> bool {
+        !self.bulk.is_empty()
+    }
+}
+
 /// Longest age of a `market_snapshots` row a `--cap` scan will use.
 const SNAPSHOT_MAX_AGE_SECS: i64 = 30 * 60;
 
@@ -372,6 +379,30 @@ fn india_sector_index(name: &str) -> Option<(&'static str, &'static str, Option<
     Some((short, index, u.and_then(market::Universe::fallback)))
 }
 
+/// Sector index members saved by the last live listing: the offline
+/// fallback for sectors without a built-in list.
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct SectorMembers(std::collections::BTreeMap<String, Vec<String>>);
+
+impl SectorMembers {
+    const FILE: &'static str = "sector_members.json";
+
+    fn get(index: &str) -> Option<Vec<String>> {
+        let m: SectorMembers = crate::store::load(Self::FILE).ok()?;
+        m.0.get(index).filter(|l| !l.is_empty()).cloned()
+    }
+
+    fn save(index: &str, symbols: &[String]) {
+        if symbols.is_empty() {
+            return;
+        }
+        let _ = crate::store::update(Self::FILE, |m: &mut SectorMembers| {
+            m.0.insert(index.to_string(), symbols.to_vec());
+            Ok(())
+        });
+    }
+}
+
 /// `sectors <NAME>`: the sector index's members with their cap tier,
 /// biggest mover first, cut to `--cap`.
 async fn cmd_sector_members(
@@ -398,7 +429,16 @@ async fn cmd_sector_members(
         );
     };
     let client = YahooClient::new().await?;
+    // NSE's snapshot quotes carry no market cap: tiers come from the saved
+    // index membership, so fetch it once (best effort) when it is missing.
+    if market::IndiaMembership::load().is_empty() {
+        let _ = scan_nse_index(&client, "NIFTY 500", None).await;
+    }
+    let fallback = fallback.or_else(|| SectorMembers::get(index));
     let scan = scan_nse_index(&client, index, fallback).await?;
+    if scan.live() {
+        SectorMembers::save(index, &scan.symbols);
+    }
     let mut quotes = scan_quotes(&client, market, &scan, cap, true).await?;
     quotes.sort_by(|a, b| {
         let key = |q: &crate::api::Quote| q.regular_market_change_percent.unwrap_or(f64::MIN);

@@ -218,3 +218,34 @@ fn sector_cap_needs_a_sector_and_the_indian_market() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("Indian market only"));
 }
+
+#[test]
+fn sector_without_a_built_in_list_uses_the_saved_members_offline() {
+    let home = scratch("sector-saved");
+    seed(&home);
+    let args = ["-m", "in", "sectors", "pharma", "--cap", "mid", "--json"];
+    // Nothing saved yet and NSE unreachable: a clear error.
+    let out = stockwise(&home, &args);
+    assert!(!out.status.success());
+    // A live listing saves the members; here the file stands in for it.
+    std::fs::write(
+        home.join("sector_members.json"),
+        r#"{"NIFTY PHARMA":["SUNPHARMA.NS","DRREDDY.NS"]}"#,
+    )
+    .unwrap();
+    let out = stockwise(&home, &args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut syms: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["symbol"].as_str().unwrap())
+        .collect();
+    syms.sort();
+    assert_eq!(syms, ["DRREDDY.NS", "SUNPHARMA.NS"]);
+}
