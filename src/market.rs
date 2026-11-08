@@ -1553,10 +1553,11 @@ pub struct IndiaMembership {
     pub midcap150: Vec<String>,
     pub smallcap250: Vec<String>,
     pub nifty500: Vec<String>,
-    /// NIFTY 100 / MIDCAP 150 / SMALLCAP 250 were cut from the NIFTY 500
-    /// order (ranks 1-100, 101-250, 251-500), not scanned themselves.
+    /// Bands (`NIFTY 100`, `NIFTY MIDCAP 150`, `NIFTY SMALLCAP 250`) saved
+    /// from a scan of that index itself; the others are cut from the NIFTY
+    /// 500 order (ranks 1-100, 101-250, 251-500).
     #[serde(default)]
-    pub derived: bool,
+    pub scanned: Vec<String>,
 }
 
 impl IndiaMembership {
@@ -1639,22 +1640,27 @@ impl IndiaMembership {
             _ => return,
         };
         *list = symbols.iter().map(|s| s.to_ascii_uppercase()).collect();
-        match index {
-            "NIFTY 500" => {
-                // NSE lists NIFTY 500 by market cap, which is the SEBI rank
-                // order: cut it into the three bands until the real index
-                // lists have been scanned.
-                if self.derived || (self.nifty100.is_empty() && self.midcap150.is_empty()) {
-                    let all = self.nifty500.clone();
-                    let cut =
-                        |a: usize, b: usize| all.iter().skip(a).take(b - a).cloned().collect();
-                    self.nifty100 = cut(0, 100);
-                    self.midcap150 = cut(100, 250);
-                    self.smallcap250 = cut(250, 500);
-                    self.derived = true;
+        if index == "NIFTY 500" {
+            // NSE lists NIFTY 500 by market cap, which is the SEBI rank
+            // order: cut it into the bands no real index scan has filled.
+            let all = self.nifty500.clone();
+            let cut = |a: usize, b: usize| all.iter().skip(a).take(b - a).cloned().collect();
+            for (name, a, b) in [
+                ("NIFTY 100", 0, 100),
+                ("NIFTY MIDCAP 150", 100, 250),
+                ("NIFTY SMALLCAP 250", 250, 500),
+            ] {
+                if self.scanned.iter().any(|s| s == name) {
+                    continue;
+                }
+                match name {
+                    "NIFTY 100" => self.nifty100 = cut(a, b),
+                    "NIFTY MIDCAP 150" => self.midcap150 = cut(a, b),
+                    _ => self.smallcap250 = cut(a, b),
                 }
             }
-            _ => self.derived = false,
+        } else if !self.scanned.iter().any(|s| s == index) {
+            self.scanned.push(index.to_string());
         }
     }
 
@@ -1795,7 +1801,12 @@ mod tests {
         assert_eq!(c("BTC-INR"), CapTier::Unknown);
         // A real MIDCAP 150 scan replaces the derived band.
         m.set("NIFTY MIDCAP 150", &["R300.NS".to_string()]);
-        assert!(!m.derived);
+        assert_eq!(m.scanned, ["NIFTY MIDCAP 150"]);
+        // A later NIFTY 500 scan keeps that band and re-derives the rest.
+        m.set("NIFTY 500", &all);
+        assert_eq!(m.midcap150, ["R300.NS"]);
+        assert_eq!(m.nifty100.len(), 100);
+        assert_eq!(m.smallcap250.len(), 250);
         assert_eq!(
             CapTier::classify("R300.NS", None, Some("INR"), Some(&m)),
             CapTier::Mid
