@@ -69,7 +69,7 @@ pub(crate) async fn build_sell_preview(
         Ok(v) => v,
         Err(e) => {
             notes.push(format!(
-                "Could not load prices ({e}); tax already realized this year may be understated."
+                "Could not load prices ({e}); tax already realized this year may be understated, and 31 Jan 2018 grandfathering was not applied, so tax on old lots may be overstated."
             ));
             Valuation::new(Vec::new(), &[], market, None)
         }
@@ -138,7 +138,7 @@ pub async fn cmd_portfolio_sell_preview(
     let (price, cur) = match price {
         Some(p) => (p, pf::symbol_currency(&resolved).map(str::to_string)),
         None if date.to_string() != today => bail!(
-            "Give the sale price for a past sale: stockwise portfolio sell {symbol} {shares} <PRICE> --date {date} --preview"
+            "Give the sale price when --date is not today: stockwise portfolio sell {symbol} {shares} <PRICE> --date {date} --preview"
         ),
         None => live_sale_price(&resolved, market).await?,
     };
@@ -219,8 +219,10 @@ pub(crate) fn print_sell_preview(out: &PreviewOutcome) {
             print_section(&format!(
                 "Capital-gains tax added — {} ({})",
                 out.country.name(),
-                out.country
-                    .tax_year_label(chrono::Local::now().date_naive())
+                out.country.tax_year_label(
+                    chrono::NaiveDate::parse_from_str(&pv.date, "%Y-%m-%d")
+                        .unwrap_or_else(|_| chrono::Local::now().date_naive())
+                )
             ));
             if terms {
                 print_kv(
@@ -355,7 +357,12 @@ pub(crate) async fn build_bleed_report(
     let today = chrono::Local::now().date_naive();
     let realized = match tax_valuation(&views::LiveSource::new(), portfolio, market).await {
         Ok(val) => tax_report(Country::India, portfolio, &val, today).realized,
-        Err(_) => tax::Buckets::default(),
+        Err(e) => {
+            eprintln!(
+                "  Could not load prices ({e:#}); the unused Sec. 112A exemption shown may be overstated."
+            );
+            tax::Buckets::default()
+        }
     };
     Ok(crate::bleed::report(
         portfolio,
@@ -372,6 +379,9 @@ fn pct2(frac: f64) -> String {
 }
 
 pub async fn cmd_mf_bleed(assumed_return_pct: f64, json: bool, market: Market) -> Result<()> {
+    if !(0.0..=30.0).contains(&assumed_return_pct) {
+        bail!("--return must be between 0 and 30 (percent a year)");
+    }
     let portfolio = Portfolio::load()?;
     if !portfolio
         .holdings
@@ -379,7 +389,7 @@ pub async fn cmd_mf_bleed(assumed_return_pct: f64, json: bool, market: Market) -
         .any(|h| offmarket::is_fund(&h.symbol))
     {
         if json {
-            return output::print_json(&build_empty_bleed());
+            return output::print_json(&build_empty_bleed(assumed_return_pct / 100.0));
         }
         println!(
             "\n  {}",
@@ -396,8 +406,8 @@ pub async fn cmd_mf_bleed(assumed_return_pct: f64, json: bool, market: Market) -
     Ok(())
 }
 
-fn build_empty_bleed() -> serde_json::Value {
-    serde_json::json!({ "funds": [], "skipped": [], "annual_bleed": 0.0, "drag_10y": 0.0 })
+fn build_empty_bleed(assumed_return: f64) -> serde_json::Value {
+    serde_json::json!({ "funds": [], "skipped": [], "annual_bleed": 0.0, "drag_10y": 0.0, "assumed_return": assumed_return, "ter_month": null })
 }
 
 pub(crate) fn print_bleed_report(r: &crate::bleed::BleedReport) {

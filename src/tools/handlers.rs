@@ -675,6 +675,9 @@ async fn portfolio_pme(src: &impl DataSource, a: &Args, m: Market) -> Result<Val
 async fn portfolio_sell_preview(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let resolved = commands::held_symbol(&p, a.need_str("symbol")?, m);
+    if p.holding(&resolved).is_none() {
+        bail!("{resolved} is not in your portfolio");
+    }
     let qty = a.need_f64("quantity")?;
     let today = crate::portfolio::today();
     let date = match a.str("date") {
@@ -687,7 +690,7 @@ async fn portfolio_sell_preview(src: &impl DataSource, a: &Args, m: Market) -> R
             crate::portfolio::symbol_currency(&resolved).map(str::to_string),
         ),
         None if date.to_string() != today => {
-            bail!("Give price for a past sale date")
+            bail!("Give price when date is not today")
         }
         None => commands::live_sale_price(&resolved, m).await?,
     };

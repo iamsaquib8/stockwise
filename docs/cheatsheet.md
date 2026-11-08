@@ -78,7 +78,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
 | Portfolio X-Ray (overlap, concentration, sectors) | `stockwise portfolio xray` · `stockwise portfolio xray --json` |
 | Import from your broker | `stockwise import kite holdings.xlsx` (CSV or `.xlsx`; also `groww`, `upstox`, `indmoney`, `cas`) |
-| Import a password-protected CAS PDF (needs `casparser`) | `stockwise import cas CAS.pdf --password <PAN>` · `casparser ... \| stockwise import cas -` |
+| Import a password-protected CAS PDF (needs `casparser`) | `stockwise import cas CAS.pdf` · `casparser ... \| stockwise import cas -` |
 | Rebuild a symbol's lots from a dated file | `stockwise import kite tradebook.csv --replace` |
 | One holding's lots, sales and XIRR | `stockwise portfolio lots TCS` |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |

@@ -270,6 +270,9 @@ pub fn report(
         assumed_return,
         ter_month: ter.month.clone(),
     };
+    // The Sec. 112A exemption is one yearly amount for all funds: carry what
+    // each fund's tax-free units use into the next.
+    let mut realized = realized;
     for h in &portfolio.holdings {
         let Some(id) = fund_id(&h.symbol) else {
             continue;
@@ -319,6 +322,9 @@ pub fn report(
             exit_load: ExitLoadTerms::equity_default(),
         };
         let bleed = analyze(&input);
+        if bleed.switch.tax_modeled && bleed.switch.tax_free_gain > 0.0 {
+            realized.lt_gain += bleed.switch.tax_free_gain;
+        }
         r.annual_bleed += bleed.annual_bleed;
         r.drag_10y += bleed.drag_10y;
         r.funds.push(FundBleed {
@@ -519,5 +525,52 @@ mod tests {
         assert_eq!(r.skipped.len(), 1);
         assert_eq!(r.skipped[0].symbol, "MF:999999");
         assert!(f.bleed.switch.tax_modeled);
+    }
+
+    #[test]
+    fn exemption_is_shared_across_funds() {
+        use crate::funds::{TerCosts, TerRecord};
+        let costs = |t: f64| TerCosts {
+            total: t,
+            base: None,
+            brokerage: None,
+            transaction: None,
+            statutory_levies: None,
+        };
+        let mut schemes = Vec::new();
+        let mut records = Vec::new();
+        let mut p = Portfolio::default();
+        for (i, n) in ["Alpha", "Beta"].iter().enumerate() {
+            let code = 200_000 + i as u32 * 10;
+            schemes.push(scheme(
+                code,
+                &format!("{n} Fund - Regular Plan"),
+                "Regular Plan",
+            ));
+            records.push(TerRecord {
+                name: format!("{n} Fund"),
+                nsdl_code: None,
+                category: None,
+                date: d("2026-10-31"),
+                regular: Some(costs(0.02)),
+                direct: Some(costs(0.01)),
+            });
+            // gain ₹100,000 each (1,000 units × ₹100)
+            p.add_lot(
+                &format!("MF:{code}"),
+                Lot::new(1000.0, 100.0, "2024-01-01", "import:cas"),
+            );
+        }
+        let ter = TerTable::new("10-2026".into(), records);
+        let r = report(
+            &p,
+            &schemes,
+            &ter,
+            0.10,
+            d("2026-11-08"),
+            Buckets::default(),
+        );
+        let free: f64 = r.funds.iter().map(|f| f.bleed.switch.tax_free_gain).sum();
+        assert!((free - 125_000.0).abs() < 1e-6, "{free}");
     }
 }

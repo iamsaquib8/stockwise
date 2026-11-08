@@ -986,7 +986,10 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .filter(|h| {
             val.mark(&h.symbol)
                 .and_then(|m| m.name.as_deref())
-                .is_some_and(|n| n.to_lowercase().contains("regular"))
+                .is_some_and(|n| {
+                    let n = n.to_lowercase();
+                    n.contains("regular plan") && !n.contains("direct")
+                })
         })
         .count();
     if regular_funds > 0 {

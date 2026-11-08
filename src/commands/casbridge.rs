@@ -19,9 +19,30 @@ pub(crate) fn install_hint(file: &str) -> String {
 
 /// `name` on the `PATH` string `path_var`, if an executable file is there.
 pub(crate) fn find_on_path(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
+            .split(';')
+            .map(str::to_string)
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    let runnable = |p: &Path| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        }
+        #[cfg(not(unix))]
+        {
+            p.is_file()
+        }
+    };
     std::env::split_paths(path_var)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+        .flat_map(|dir| exts.iter().map(move |e| dir.join(format!("{name}{e}"))))
+        .find(|p| runnable(p))
 }
 
 /// Whether the file is a PDF, by extension or by its first bytes.
@@ -54,12 +75,14 @@ pub(crate) fn run_casparser(bin: &Path, pdf: &Path, password: &str) -> Result<St
         std::process::id(),
         chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
     ));
-    std::fs::create_dir_all(&dir)?;
+    // Create it exclusively, so a pre-made directory is refused.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     }
+    #[cfg(not(unix))]
+    std::fs::create_dir(&dir)?;
     let out = dir.join("cas.json");
     let result = Command::new(bin)
         .arg(pdf)
@@ -179,6 +202,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sw-path-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("casparser"), b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.join("casparser"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
         let path = std::env::join_paths([dir.clone()]).unwrap();
         assert!(find_on_path("casparser", &path).is_some());
         assert!(find_on_path("nothere", &path).is_none());

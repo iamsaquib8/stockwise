@@ -68,7 +68,9 @@ pip install casparser
 casparser CAS.pdf -p <password> -o cas.json
 stockwise import cas cas.json
 # or let StockWise run casparser for you (casparser must be on PATH):
-stockwise import cas CAS.pdf --password <password>   # or STOCKWISE_CAS_PASSWORD, or a hidden prompt
+stockwise import cas CAS.pdf   # hidden password prompt (or set STOCKWISE_CAS_PASSWORD)
+# Note: the bridge passes the password to casparser as a command-line argument,
+# so other local users can see it in the process list while it runs.
 ```
 
 Each fund with units left becomes `MF:<AMFI code>`. StockWise values it at
