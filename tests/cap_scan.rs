@@ -196,6 +196,11 @@ fn sector_members_filter_by_cap_from_snapshots() {
             .iter()
             .map(|r| {
                 assert_eq!(r["cap_tier"], cap, "{r}");
+                // Fresh snapshots are stored prices too: they carry their age.
+                assert!(
+                    r["price_age_secs"].as_i64().is_some_and(|a| a < 3600),
+                    "{r}"
+                );
                 r["symbol"].as_str().unwrap().to_string()
             })
             .collect();

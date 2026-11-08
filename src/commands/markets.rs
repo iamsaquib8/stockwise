@@ -241,6 +241,19 @@ async fn scan_quotes(
     cap: Option<market::CapFilter>,
     prefer_bulk: bool,
 ) -> Result<Vec<crate::api::Quote>> {
+    scan_quotes_src(client, market, scan, cap, prefer_bulk)
+        .await
+        .map(|(q, _)| q)
+}
+
+/// [`scan_quotes`], and whether the quotes came from `cache.db`.
+async fn scan_quotes_src(
+    client: &YahooClient,
+    market: Market,
+    scan: &Scan,
+    cap: Option<market::CapFilter>,
+    prefer_bulk: bool,
+) -> Result<(Vec<crate::api::Quote>, bool)> {
     if scan.bulk.is_empty()
         && let Some(c) = cap
         && let Some(cached) = cached_cap_quotes(market, c, &scan.symbols)
@@ -250,20 +263,20 @@ async fn scan_quotes(
             c.tier().map_or("all", market::CapTier::as_str),
             SNAPSHOT_MAX_AGE_SECS / 60
         );
-        return Ok(cached);
+        return Ok((cached, true));
     }
     if prefer_bulk && !scan.bulk.is_empty() {
-        return Ok(market::filter_by_cap(scan.bulk.clone(), cap));
+        return Ok((market::filter_by_cap(scan.bulk.clone(), cap), false));
     }
     let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
     match client.get_quote(&refs).await {
-        Ok(q) => Ok(market::filter_by_cap(q, cap)),
+        Ok(q) => Ok((market::filter_by_cap(q, cap), false)),
         Err(e) if !scan.bulk.is_empty() => {
             eprintln!(
                 "  \u{24d8} Yahoo Finance did not answer ({:#}); using NSE's index snapshot (no P/E or market cap).",
                 e
             );
-            Ok(market::filter_by_cap(scan.bulk.clone(), cap))
+            Ok((market::filter_by_cap(scan.bulk.clone(), cap), false))
         }
         Err(e) => Err(e),
     }
@@ -514,8 +527,13 @@ async fn cmd_sector_members(
         }
     }
     let mut ages = std::collections::HashMap::new();
-    let mut quotes = match scan_quotes(&client, market, &scan, cap, true).await {
-        Ok(q) => q,
+    let mut quotes = match scan_quotes_src(&client, market, &scan, cap, true).await {
+        Ok((q, from_cache)) => {
+            if from_cache && let Some(st) = stored_quotes(&scan.symbols, cap) {
+                ages = st.age_secs;
+            }
+            q
+        }
         Err(e) => match stored_quotes(&scan.symbols, cap) {
             Some(st) => {
                 let oldest = st.age_secs.values().max().copied().unwrap_or(0);
@@ -523,6 +541,11 @@ async fn cmd_sector_members(
                     "  \u{24d8} No live quotes ({:#}); using prices stored in cache.db (oldest {} min old).",
                     e,
                     oldest / 60
+                );
+                eprintln!(
+                    "  \u{24d8} Showing {} stored quotes after any cap filter; the sector list has {} members. Members without stored quotes may be missing.",
+                    st.quotes.len(),
+                    scan.symbols.len()
                 );
                 ages = st.age_secs;
                 st.quotes
