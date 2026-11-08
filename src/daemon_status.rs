@@ -27,6 +27,9 @@ pub struct DaemonStatus {
     /// ISO code of the currency of the money fields: `INR` for `IN`, `USD`
     /// for `US` (empty if the market is unknown).
     pub currency: String,
+    /// The daemon's session date (`YYYY-MM-DD`): the day the numbers belong
+    /// to, so yesterday's positions do not pose as today's.
+    pub date: String,
     /// Unix seconds of the last save.
     pub updated_at: i64,
     pub capital: f64,
@@ -62,6 +65,8 @@ struct RawState {
     updated_at: DateTime<Utc>,
     #[serde(default)]
     market: String,
+    #[serde(default)]
+    date: String,
     #[serde(default)]
     capital: f64,
     #[serde(default)]
@@ -107,6 +112,7 @@ impl DaemonStatus {
         Some(Self {
             currency: currency_code(&market).to_string(),
             market,
+            date: raw.date,
             updated_at: raw.updated_at.timestamp(),
             capital: raw.capital,
             open_positions: open.len(),
@@ -124,6 +130,21 @@ impl DaemonStatus {
 
     pub fn is_fresh(&self, now: i64) -> bool {
         self.age_secs(now) <= STALE_AFTER_SECS
+    }
+
+    /// Whether the saved numbers belong to the session in progress at `now`:
+    /// the same exchange-local calendar date. A crashed daemon keeps its last
+    /// numbers for the rest of the day, but not into the next one.
+    pub fn is_current_session(&self, now: i64) -> bool {
+        use crate::market::Market;
+        use clap::ValueEnum;
+        let Ok(market) = Market::from_str(&self.market, true) else {
+            return false;
+        };
+        let Some(now) = DateTime::from_timestamp(now, 0) else {
+            return false;
+        };
+        !self.date.is_empty() && self.date == crate::clock::session_date(market, now).to_string()
     }
 }
 
@@ -204,6 +225,19 @@ mod tests {
         assert!(DaemonStatus::from_state_json(r#"{"capital": 1.0}"#).is_none());
         let minimal = DaemonStatus::from_state_json(r#"{"updated_at": "2026-10-21T05:30:00Z"}"#);
         assert_eq!(minimal.unwrap().open_positions, 0);
+    }
+
+    #[test]
+    fn the_saved_date_says_which_session_the_numbers_belong_to() {
+        let s = DaemonStatus::from_state_json(STATE).unwrap();
+        assert_eq!(s.date, "2026-10-21");
+        assert!(s.is_current_session(1_792_560_660)); // 11:01 IST, same day
+        assert!(!s.is_current_session(1_792_560_660 + 24 * 3600));
+        // A state without a date cannot claim to be today's.
+        let undated =
+            DaemonStatus::from_state_json(r#"{"updated_at": "2026-10-21T05:30:00Z"}"#).unwrap();
+        assert!(undated.date.is_empty());
+        assert!(!undated.is_current_session(1_792_560_660));
     }
 
     #[test]

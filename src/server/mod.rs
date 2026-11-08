@@ -1118,6 +1118,8 @@ mod tests {
             daemon: vec![DaemonStatus {
                 market: "IN".into(),
                 currency: "INR".into(),
+                date: crate::clock::session_date(crate::market::Market::In, chrono::Utc::now())
+                    .to_string(),
                 updated_at: chrono::Utc::now().timestamp(),
                 open_positions: 3,
                 day_pnl: 420.5,

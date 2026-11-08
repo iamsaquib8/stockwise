@@ -239,10 +239,15 @@ impl Metrics {
                 u8::from(fresh)
             );
         }
-        let gauges: [(&str, &str, bool, fn(&DaemonStatus, i64) -> f64); 9] = [
+        // (name, help, money, session-scoped, value). Session-scoped gauges
+        // describe one day of paper trading and are omitted once the daemon's
+        // saved date is no longer the current session, so yesterday's open
+        // positions do not pose as today's.
+        let gauges: [(&str, &str, bool, bool, fn(&DaemonStatus, i64) -> f64); 9] = [
             (
                 "stockwise_daemon_status_age_seconds",
                 "Seconds since the daemon last saved its state.",
+                false,
                 false,
                 |d, now| d.age_secs(now) as f64,
             ),
@@ -250,29 +255,34 @@ impl Metrics {
                 "stockwise_daemon_last_update_timestamp_seconds",
                 "Unix time of the daemon's last state save; use time() - this for the age.",
                 false,
+                false,
                 |d, _| d.updated_at as f64,
             ),
             (
                 "stockwise_daemon_open_positions",
-                "Open paper positions.",
+                "Open paper positions in the current session.",
                 false,
+                true,
                 |d, _| d.open_positions as f64,
             ),
             (
                 "stockwise_daemon_day_pnl",
-                "Day P&L of the paper session (realized + unrealized).",
+                "Day P&L of the current paper session (realized + unrealized).",
+                true,
                 true,
                 |d, _| d.day_pnl,
             ),
             (
                 "stockwise_daemon_realized_pnl",
-                "Realized P&L of the paper session today.",
+                "Realized P&L of the current paper session.",
+                true,
                 true,
                 |d, _| d.realized_pnl,
             ),
             (
                 "stockwise_daemon_unrealized_pnl",
-                "Unrealized P&L of open paper positions.",
+                "Unrealized P&L of open paper positions in the current session.",
+                true,
                 true,
                 |d, _| d.unrealized_pnl,
             ),
@@ -280,25 +290,35 @@ impl Metrics {
                 "stockwise_daemon_capital",
                 "Paper capital the daemon trades with.",
                 true,
+                false,
                 |d, _| d.capital,
             ),
             (
                 "stockwise_daemon_kill_switch",
-                "1 once the daily loss limit tripped (no new entries today).",
+                "1 once the current session's daily loss limit tripped (no new entries today).",
                 false,
+                true,
                 |d, _| if d.kill_switch { 1.0 } else { 0.0 },
             ),
             (
                 "stockwise_daemon_settled",
-                "1 once the day is over and recorded in the simulator history.",
+                "1 once the current session is over and recorded in the simulator history.",
                 false,
+                true,
                 |d, _| if d.settled { 1.0 } else { 0.0 },
             ),
         ];
         if !daemons.is_empty() {
-            for (name, help, money, value) in gauges {
+            for (name, help, money, session, value) in gauges {
+                let shown: Vec<&DaemonStatus> = daemons
+                    .iter()
+                    .filter(|d| !session || d.is_current_session(now))
+                    .collect();
+                if shown.is_empty() {
+                    continue;
+                }
                 header(&mut out, name, "gauge", help);
-                for d in daemons {
+                for d in shown {
                     // Money is in the market's own currency: INR for IN, USD
                     // for US. The label keeps a sum() across markets honest.
                     if money {
@@ -365,6 +385,8 @@ mod tests {
     fn every_sample_has_help_and_type() {
         let d = DaemonStatus {
             market: "US".into(),
+            // `now` is 160, which is still 1969-12-31 in New York.
+            date: "1969-12-31".into(),
             updated_at: 100,
             open_positions: 2,
             currency: "USD".into(),
@@ -401,7 +423,7 @@ mod tests {
     fn settled_day_exports_no_open_positions() {
         // A daemon that missed the square-off saves a settled state whose
         // rows are still `Open`; the gauges must not call them open.
-        let json = r#"{"market": "IN", "capital": 25000.0, "settled": true,
+        let json = r#"{"date": "2026-10-21", "market": "IN", "capital": 25000.0, "settled": true,
             "positions": [{"status": "Open", "pnl": 30.0}, {"status": "T1Hit", "pnl": 20.0}],
             "risk": {"realized_pnl": 0.0, "killed": false},
             "updated_at": "2026-10-21T05:30:00Z"}"#;
@@ -415,6 +437,51 @@ mod tests {
                 "stockwise_daemon_last_update_timestamp_seconds{market=\"IN\"} 1792560600"
             )
         );
+    }
+
+    #[test]
+    fn yesterdays_session_gauges_do_not_outlive_the_date() {
+        let json = r#"{"date": "2026-10-21", "market": "IN", "capital": 25000.0,
+            "positions": [{"status": "Open", "pnl": 30.0}],
+            "risk": {"realized_pnl": 0.0, "killed": true},
+            "updated_at": "2026-10-21T05:30:00Z"}"#;
+        let d = DaemonStatus::from_state_json(json).unwrap();
+        let next_day = 1_792_560_600 + 24 * 3600;
+        let text = Metrics::new().render(std::slice::from_ref(&d), next_day);
+        for name in [
+            "stockwise_daemon_open_positions",
+            "stockwise_daemon_day_pnl",
+            "stockwise_daemon_realized_pnl",
+            "stockwise_daemon_unrealized_pnl",
+            "stockwise_daemon_kill_switch",
+            "stockwise_daemon_settled",
+        ] {
+            assert!(
+                !text.contains(name),
+                "{name} survived the session date:\n{text}"
+            );
+        }
+        // The health and age signals stay, so the crash is still visible.
+        assert!(text.contains("stockwise_daemon_up{market=\"IN\"} 0"));
+        assert!(text.contains("stockwise_daemon_status_age_seconds{market=\"IN\"} 86400"));
+        assert!(text.contains("stockwise_daemon_last_update_timestamp_seconds{market=\"IN\"} "));
+        assert!(text.contains("stockwise_daemon_capital{market=\"IN\",currency=\"INR\"} 25000"));
+    }
+
+    #[test]
+    fn a_stale_daemon_still_shows_the_current_sessions_last_numbers() {
+        // Same date but no save for hours: those are the crash's last numbers,
+        // not yesterday's, so they stay until the date turns over.
+        let d = DaemonStatus {
+            market: "IN".into(),
+            date: "2026-10-21".into(),
+            updated_at: 1_792_560_600,
+            open_positions: 2,
+            ..Default::default()
+        };
+        let text = Metrics::new().render(&[d], 1_792_560_600 + 5 * 3600);
+        assert!(text.contains("stockwise_daemon_up{market=\"IN\"} 0"));
+        assert!(text.contains("stockwise_daemon_open_positions{market=\"IN\"} 2"));
     }
 
     #[test]
