@@ -627,6 +627,7 @@ async fn tax_advance(src: &impl DataSource, a: &Args) -> Result<Value> {
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let symbols: Vec<String> = p.realized.iter().map(|s| s.symbol.clone()).collect();
     let marks = commands::sale_marks(src, &symbols).await;
+    let fmvs = commands::advance_fmvs(&p).await;
     let schedule = commands::advance_tax_schedule(
         &p,
         a.str("fy"),
@@ -634,6 +635,7 @@ async fn tax_advance(src: &impl DataSource, a: &Args) -> Result<Value> {
             .map(|amount| vec![crate::tax::AdvancePayment { date: None, amount }])
             .unwrap_or_default(),
         &marks,
+        &fmvs,
     )?;
     Ok(serde_json::to_value(schedule)?)
 }

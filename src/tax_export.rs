@@ -178,12 +178,20 @@ pub struct IndiaRow {
     pub sale_value: f64,
     pub purchase_date: String,
     pub purchase_price: f64,
-    /// Cost of acquisition (actual — no grandfathering applied).
+    /// Cost of acquisition for the schedule: the actual cost, or for a
+    /// grandfathered lot the higher of the actual cost and the lower of the
+    /// 31 Jan 2018 fair market value and the sale value (Section 112A).
     pub cost: f64,
+    /// What the shares actually cost.
+    pub actual_cost: f64,
+    /// Fair market value per share on 31 Jan 2018, for a grandfathered lot
+    /// whose price is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fmv_31_jan_2018: Option<f64>,
     pub holding_days: Option<i64>,
     pub gain: f64,
-    /// Bought on or before 31 Jan 2018: the cost may be raised to that day's
-    /// fair market value, which would lower the gain.
+    /// Long-term and bought on or before 31 Jan 2018: Section 112A lets the
+    /// cost rise to that day's fair market value (see `fmv_31_jan_2018`).
     pub grandfathered: bool,
     pub purchase_date_estimated: bool,
 }
@@ -244,13 +252,107 @@ pub struct IndiaSchedule {
     pub notes: Vec<String>,
 }
 
-/// The Indian schedule for the tax year starting `start`. `isin` looks up a
-/// symbol's ISIN (None leaves it blank).
+/// The fair market value of a listed share on 31 Jan 2018 from its daily
+/// bars: the highest price of that trading day (Section 112A(2)(b)). Bar times
+/// are read in India Standard Time. None when no bar falls on that day.
+pub fn fmv_from_bars(bars: &[crate::views::Bar]) -> Option<f64> {
+    let day = ymd(GRANDFATHER_DATE);
+    bars.iter()
+        .find(|b| {
+            chrono::DateTime::from_timestamp(b.ts + 19_800, 0)
+                .is_some_and(|t| t.date_naive() == day)
+        })
+        .and_then(|b| b.high.or(b.close))
+        .filter(|p| p.is_finite() && *p > 0.0)
+}
+
+/// The Unix-second window around 31 Jan 2018 to ask for daily bars.
+pub fn fmv_window() -> (i64, i64) {
+    let day = ymd(GRANDFATHER_DATE);
+    let at = |d: NaiveDate| {
+        d.and_hms_opt(0, 0, 0)
+            .expect("midnight")
+            .and_utc()
+            .timestamp()
+    };
+    (
+        at(day - chrono::Duration::days(2)),
+        at(day + chrono::Duration::days(3)),
+    )
+}
+
+/// Section 112A cost of acquisition per share for a lot bought on or before
+/// 31 Jan 2018: the higher of the actual cost and the lower of the fair market
+/// value on that day and the sale price. A loss is never created or enlarged
+/// by the FMV, because the FMV is capped at the sale price.
+pub fn grandfathered_unit_cost(buy_price: f64, fmv: f64, sell_price: f64) -> f64 {
+    buy_price.max(fmv.min(sell_price))
+}
+
+/// Cost per share of a lot for an Indian gain: the Section 112A grandfathered
+/// cost when the lot is long-term, was bought on or before 31 Jan 2018 and its
+/// 31 Jan 2018 price (`fmv`) is known; the actual cost otherwise. `ref_price`
+/// is the sale price, or today's price for an open lot.
+pub fn lot_unit_cost(
+    buy_date: &str,
+    long: bool,
+    buy_price: f64,
+    ref_price: f64,
+    fmv: Option<f64>,
+) -> f64 {
+    match fmv {
+        Some(f) if long && is_grandfathered_date(buy_date) => {
+            grandfathered_unit_cost(buy_price, f, ref_price)
+        }
+        _ => buy_price,
+    }
+}
+
+/// Bought on or before 31 Jan 2018.
+pub fn is_grandfathered_date(buy_date: &str) -> bool {
+    date(buy_date).is_some_and(|d| d <= ymd(GRANDFATHER_DATE))
+}
+
+/// The Indian schedule for the tax year starting `start`, with every cost at
+/// its actual value. `isin` looks up a symbol's ISIN (None leaves it blank).
 pub fn india_schedule(
     sales: &[Sale],
     start: NaiveDate,
     isin: impl Fn(&str) -> Option<String>,
     marks: &crate::offmarket::OffMarket,
+) -> IndiaSchedule {
+    india_schedule_with_fmv(sales, start, isin, marks, |_| None)
+}
+
+/// Symbols with a long-term sale in the tax year starting `start` of a lot
+/// bought on or before 31 Jan 2018: the ones whose 31 Jan 2018 price is
+/// needed for [`india_schedule_with_fmv`].
+pub fn grandfathered_symbols(sales: &[Sale], start: NaiveDate) -> Vec<String> {
+    let c = Country::India;
+    let gf = ymd(GRANDFATHER_DATE);
+    let mut out: Vec<String> = sales_in_year(c, sales, start)
+        .0
+        .into_iter()
+        .filter(|(s, _)| {
+            !s.is_intraday() && is_long_term(c, s) && date(&s.buy_date).is_some_and(|d| d <= gf)
+        })
+        .map(|(s, _)| s.symbol.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Like [`india_schedule`], but a long-term lot bought on or before 31 Jan
+/// 2018 uses the Section 112A grandfathered cost. `fmv` gives a symbol's price
+/// on 31 Jan 2018 (highest price for listed shares, NAV for funds); None
+/// keeps the actual cost and says so in the notes.
+pub fn india_schedule_with_fmv(
+    sales: &[Sale],
+    start: NaiveDate,
+    isin: impl Fn(&str) -> Option<String>,
+    marks: &crate::offmarket::OffMarket,
+    fmv: impl Fn(&str) -> Option<f64>,
 ) -> IndiaSchedule {
     use crate::offmarket::{IndiaClass, india_class};
     let c = Country::India;
@@ -292,7 +394,14 @@ pub fn india_schedule(
     for (s, scale) in kept {
         let long = is_long_term(c, s);
         let sale_value = s.qty * s.sell_price * scale;
-        let cost = s.qty * s.buy_price * scale;
+        let actual_cost = s.qty * s.buy_price * scale;
+        let grandfathered = long && date(&s.buy_date).is_some_and(|d| d <= gf);
+        let fmv_price = if grandfathered { fmv(&s.symbol) } else { None };
+        let unit_cost = match fmv_price {
+            Some(f) => grandfathered_unit_cost(s.buy_price, f, s.sell_price),
+            None => s.buy_price,
+        };
+        let cost = s.qty * unit_cost * scale;
         let gain = sale_value - cost;
         buckets.add(gain, long);
         if date(&s.sell_date).is_some_and(|d| d < rate_change) {
@@ -320,9 +429,11 @@ pub fn india_schedule(
             purchase_date: s.buy_date.clone(),
             purchase_price: round(s.buy_price * scale, 4),
             cost: round(cost, 2),
+            actual_cost: round(actual_cost, 2),
+            fmv_31_jan_2018: fmv_price.map(|f| round(f * scale, 4)),
             holding_days: holding_days(s),
             gain: round(gain, 2),
-            grandfathered: long && date(&s.buy_date).is_some_and(|d| d <= gf),
+            grandfathered,
             purchase_date_estimated: s.buy_date_estimated,
         });
     }
@@ -378,10 +489,22 @@ pub fn india_schedule(
             c.lt_rate()
         )
     }];
-    if rows.iter().any(|r| r.grandfathered) {
+    if rows.iter().any(|r| r.fmv_31_jan_2018.is_some()) {
         notes.push(
-            "Shares bought on or before 31 Jan 2018 use their actual cost; Schedule 112A lets you use \
-             the 31 Jan 2018 fair market value instead, which may lower the gain"
+            "Shares bought on or before 31 Jan 2018 use the grandfathered cost (Section 112A): the \
+             higher of the actual cost and the lower of the 31 Jan 2018 fair market value and the \
+             sale value"
+                .into(),
+        );
+    }
+    if rows
+        .iter()
+        .any(|r| r.grandfathered && r.fmv_31_jan_2018.is_none())
+    {
+        notes.push(
+            "Some shares bought on or before 31 Jan 2018 have no 31 Jan 2018 price here, so they use \
+             their actual cost; Schedule 112A lets you use the fair market value instead, which may \
+             lower the gain"
                 .into(),
         );
     }
@@ -516,7 +639,9 @@ pub fn india_csv(s: &IndiaSchedule) -> String {
         "Full value of consideration",
         "Purchase date",
         "Purchase price per share",
+        "Fair market value per share on 31-Jan-2018",
         "Cost of acquisition",
+        "Actual cost of acquisition",
         "Holding period (days)",
         "Gain / loss",
         "Acquired on or before 31-Jan-2018",
@@ -534,7 +659,11 @@ pub fn india_csv(s: &IndiaSchedule) -> String {
             &money(r.sale_value),
             &r.purchase_date,
             &format!("{:.4}", r.purchase_price),
+            &r.fmv_31_jan_2018
+                .map(|f| format!("{:.4}", f))
+                .unwrap_or_default(),
             &money(r.cost),
+            &money(r.actual_cost),
             &r.holding_days.map(|d| d.to_string()).unwrap_or_default(),
             &money(r.gain),
             yes_no(r.grandfathered),
@@ -957,6 +1086,119 @@ mod tests {
     }
 
     #[test]
+    fn fmv_is_the_high_of_31_jan_2018_in_ist() {
+        let bar = |date: &str, high: f64| {
+            // 09:15 IST is 03:45 UTC.
+            let ts = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(3, 45, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp();
+            crate::views::Bar {
+                time: None,
+                open: None,
+                high: Some(high),
+                low: None,
+                close: Some(high - 5.0),
+                volume: None,
+                ts,
+            }
+        };
+        let bars = [
+            bar("2018-01-30", 1010.0),
+            bar("2018-01-31", 1030.0),
+            bar("2018-02-01", 1100.0),
+        ];
+        assert_eq!(fmv_from_bars(&bars), Some(1030.0));
+        assert_eq!(fmv_from_bars(&bars[..1]), None);
+        let (from, to) = fmv_window();
+        assert!(bars.iter().all(|b| b.ts >= from && b.ts < to));
+    }
+
+    fn hdfc_fmv(fmv: f64) -> impl Fn(&str) -> Option<f64> {
+        move |s| (s == "HDFCBANK.NS").then_some(fmv)
+    }
+
+    fn hdfc_row(fmv: Option<f64>) -> IndiaRow {
+        let s = india_schedule_with_fmv(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+            move |s| fmv.filter(|_| s == "HDFCBANK.NS"),
+        );
+        s.sales
+            .into_iter()
+            .find(|r| r.symbol == "HDFCBANK.NS")
+            .unwrap()
+    }
+
+    #[test]
+    fn grandfathered_cost_is_higher_of_cost_and_lower_of_fmv_and_sale() {
+        assert_eq!(grandfathered_unit_cost(800.0, 1000.0, 2000.0), 1000.0);
+        assert_eq!(grandfathered_unit_cost(800.0, 3000.0, 2000.0), 2000.0);
+        assert_eq!(grandfathered_unit_cost(800.0, 500.0, 2000.0), 800.0);
+        // Sold below cost: the FMV never turns the loss into a bigger one.
+        assert_eq!(grandfathered_unit_cost(800.0, 1000.0, 700.0), 800.0);
+    }
+
+    #[test]
+    fn a_lot_bought_in_2017_uses_the_grandfathered_cost() {
+        let r = hdfc_row(Some(1000.0));
+        assert!(r.grandfathered);
+        assert_eq!(r.fmv_31_jan_2018, Some(1000.0));
+        assert_eq!(r.actual_cost, 80_000.0);
+        assert_eq!(r.cost, 100_000.0);
+        assert_eq!(r.gain, 100_000.0, "200,000 sold less 100,000, not 120,000");
+    }
+
+    #[test]
+    fn grandfathering_without_a_price_keeps_actual_cost_and_says_so() {
+        let r = hdfc_row(None);
+        assert!(r.grandfathered);
+        assert_eq!(
+            (r.fmv_31_jan_2018, r.cost, r.gain),
+            (None, 80_000.0, 120_000.0)
+        );
+        let s = india_schedule(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
+        assert!(s.notes.iter().any(|n| n.contains("no 31 Jan 2018 price")));
+    }
+
+    #[test]
+    fn grandfathering_lowers_the_tax_and_skips_later_lots() {
+        let plain = india_schedule(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
+        let gf = india_schedule_with_fmv(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+            hdfc_fmv(1000.0),
+        );
+        assert_eq!(
+            plain.summary.ltcg_112a_cost - gf.summary.ltcg_112a_cost,
+            -20_000.0
+        );
+        assert!(gf.summary.total_tax < plain.summary.total_tax);
+        let tcs = gf.sales.iter().find(|r| r.symbol == "TCS.NS").unwrap();
+        assert_eq!(tcs.fmv_31_jan_2018, None, "bought in 2024");
+        assert_eq!(
+            grandfathered_symbols(&fy26_sales(), d("2025-04-01")),
+            vec!["HDFCBANK.NS".to_string()]
+        );
+    }
+
+    #[test]
     fn india_schedule_worked_example() {
         let isin = |s: &str| (s == "TCS.NS").then(|| "INE467B01029".to_string());
         let s = india_schedule(&fy26_sales(), d("2025-04-01"), isin, &Default::default());
@@ -1081,7 +1323,7 @@ mod tests {
                 .iter()
                 .any(|l| l.starts_with("Section,Type,ISIN,Scrip,Quantity"))
         );
-        assert!(lines.contains(&"112A,LTCG,,TCS,10,2025-06-02,4100.0000,41000.00,2024-01-10,3500.0000,35000.00,509,6000.00,No,No"));
+        assert!(lines.contains(&"112A,LTCG,,TCS,10,2025-06-02,4100.0000,41000.00,2024-01-10,3500.0000,,35000.00,35000.00,509,6000.00,No,No"));
         assert!(lines.contains(&"Taxable LTCG (112A),1000.00"));
         assert!(lines.contains(&"LTCG exemption (up to ₹1.25 lakh),125000.00"));
         assert!(lines.contains(&"Health and education cess (4%),61.00"));
