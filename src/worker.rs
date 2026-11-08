@@ -638,7 +638,9 @@ pub async fn run_worker(market: Market) -> Result<()> {
             }
         }
         if let Some(date) = eod_due(market, now, &state) {
-            if let Ok(client) = YahooClient::new().await {
+            let has_work = Portfolio::load().is_ok_and(|p| !p.holdings.is_empty())
+                || !tracked_symbols().is_empty();
+            if has_work && let Ok(client) = YahooClient::new().await {
                 let _ = eod_sync(&client, market, |_| true).await;
             }
             state.last_eod = Some(date);

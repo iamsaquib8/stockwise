@@ -115,6 +115,8 @@ pub enum Msg {
     },
     /// A watchlist edit finished: the message to show, or an error.
     WatchlistSaved(Result<String, String>),
+    /// The background ticker saw prices move or a task change.
+    Live(crate::worker::LiveEvent),
 }
 
 /// Work for the runtime. Nothing here trades: the TUI is read-only apart
@@ -271,6 +273,18 @@ impl App {
         match msg {
             Msg::Key(key) => self.on_key(key),
             Msg::RefreshDue => self.request_refresh(),
+            // The ticker has just fetched these quotes, so the refresh is
+            // served from the cache: no extra network call.
+            Msg::Live(crate::worker::LiveEvent::Quotes { .. }) => self.request_refresh(),
+            Msg::Live(crate::worker::LiveEvent::Task { task }) => {
+                if matches!(task.status.as_str(), "running" | "done" | "failed") {
+                    self.info(format!(
+                        "Task #{} {}: {} ({:.0}%)",
+                        task.id, task.status, task.title, task.progress_pct
+                    ));
+                }
+                Vec::new()
+            }
             Msg::Redraw => Vec::new(),
             Msg::InputClosed => {
                 self.quit = true;

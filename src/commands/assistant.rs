@@ -122,6 +122,8 @@ async fn serve_mcp(
     allow_orders: bool,
     market: Market,
 ) -> Result<()> {
+    // Keeps held and watched quotes warm in cache.db while the server runs.
+    let _ticker = crate::worker::spawn_ticker(market, crate::worker::bus());
     crate::mcp::run(market, allow_orders, http, allow_remote).await
 }
 

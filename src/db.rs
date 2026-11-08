@@ -669,17 +669,25 @@ pub fn with_db<T>(f: impl FnOnce(&mut CacheDb) -> Result<T>) -> Option<T> {
     f(&mut db).ok()
 }
 
-/// Persistent-cache read used by the HTTP layer.
-pub fn http_get(key: &str) -> Option<String> {
-    shared()?.lock().ok()?.get(key).ok().flatten()
+/// A shared handle to a [`CacheDb`] for the HTTP cache layer.
+pub type L2 = &'static Mutex<CacheDb>;
+
+/// The process-wide persistent cache, `None` when it is off or unusable.
+pub fn l2() -> Option<L2> {
+    shared()
 }
 
-/// Persistent-cache write used by the HTTP layer.
-pub fn http_set(key: &str, body: &str, ttl_secs: u64, source: &str) {
-    if let Some(db) = shared()
-        && let Ok(db) = db.lock()
-    {
-        let _ = db.set(key, body, ttl_secs, source);
+impl CacheDb {
+    /// Cached body for `key` through a shared handle, ignoring errors.
+    pub fn l2_get(l2: L2, key: &str) -> Option<String> {
+        l2.lock().ok()?.get(key).ok().flatten()
+    }
+
+    /// Store a body through a shared handle, ignoring errors.
+    pub fn l2_set(l2: L2, key: &str, body: &str, ttl_secs: u64) {
+        if let Ok(db) = l2.lock() {
+            let _ = db.set(key, body, ttl_secs, "http");
+        }
     }
 }
 
