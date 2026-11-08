@@ -26,6 +26,7 @@ use tokio::sync::broadcast;
 
 const STATE_FILE: &str = "worker_state.json";
 const PID_FILE: &str = "worker.pid";
+const LOCK_FILE: &str = "worker.lock";
 const LOG_FILE: &str = "worker.log";
 /// Refresh period while the exchange is open, and when it is closed.
 const OPEN_TICK: Duration = Duration::from_secs(30);
@@ -64,6 +65,7 @@ pub enum LiveEvent {
 /// Fan-out channel for [`LiveEvent`]s. Sending with no subscriber is fine.
 pub type Bus = broadcast::Sender<LiveEvent>;
 
+/// A new live-event channel.
 pub fn bus() -> Bus {
     broadcast::channel(256).0
 }
@@ -125,6 +127,7 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
     })
 }
 
+/// Store usable quotes as `market_snapshots` rows; returns how many.
 fn store_snapshots(market: Market, quotes: &[Quote]) -> usize {
     let label = crate::value_name(market);
     let rows: Vec<Snapshot> = quotes
@@ -280,6 +283,7 @@ pub enum TaskKind {
 }
 
 impl TaskKind {
+    /// The name stored in the `tasks.kind` column.
     pub fn as_str(self) -> &'static str {
         match self {
             TaskKind::Warm => "warm",
@@ -489,12 +493,14 @@ fn eod_due(market: Market, now: chrono::DateTime<Utc>, state: &WorkerState) -> O
     (now >= close && state.last_eod.as_deref() != Some(&key)).then_some(key)
 }
 
-// ── Service: pid file, run loop, status ──
+// ── Service: ownership lock, pid file, run loop, status ──
 
+/// Path of the worker pid file.
 fn pid_path() -> Result<std::path::PathBuf> {
     crate::store::path(PID_FILE)
 }
 
+/// The pid the worker wrote, if the file is readable.
 fn read_pid() -> Option<u32> {
     std::fs::read_to_string(pid_path().ok()?)
         .ok()?
@@ -503,32 +509,44 @@ fn read_pid() -> Option<u32> {
         .ok()
 }
 
-/// Whether a process with this id is running (Unix: `kill -0`).
-fn alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
+/// Try to take the worker's ownership lock: an exclusive OS lock on
+/// `worker.lock` that lives as long as the returned file. `None` means a
+/// worker holds it. The OS drops the lock when the holder dies, so a crash
+/// never leaves a stale owner, and start, stop and the worker itself all
+/// coordinate on this one lock.
+fn try_own() -> Result<Option<std::fs::File>> {
+    let path = crate::store::path(LOCK_FILE)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("Cannot open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("Cannot lock {}", path.display()))
+        }
     }
 }
 
-/// The running worker's pid, if any.
+/// The running worker's pid, if one holds the lock and has written its pid.
 pub fn running_pid() -> Option<u32> {
-    read_pid().filter(|p| alive(*p))
+    match try_own() {
+        Ok(None) => read_pid(),
+        _ => None,
+    }
 }
 
-/// Start the worker detached; returns its pid.
+/// Start the worker detached and wait until it owns the lock and has
+/// written its pid. Returns that pid, or the reason it did not start.
 pub fn start(market: Market) -> Result<u32> {
-    if let Some(pid) = running_pid() {
-        bail!("The worker is already running (pid {pid})");
+    if try_own()?.is_none() {
+        match read_pid() {
+            Some(pid) => bail!("The worker is already running (pid {pid})"),
+            None => bail!("A worker is starting up; check `stockwise worker status`"),
+        }
     }
     #[cfg(unix)]
     {
@@ -540,7 +558,7 @@ pub fn start(market: Market) -> Result<u32> {
             .append(true)
             .open(&log_path)
             .with_context(|| format!("Cannot open {}", log_path.display()))?;
-        let child = std::process::Command::new(exe)
+        let mut child = std::process::Command::new(exe)
             .args(["-m", &crate::value_name(market), "worker", "run"])
             .stdin(std::process::Stdio::null())
             .stdout(log.try_clone()?)
@@ -548,7 +566,28 @@ pub fn start(market: Market) -> Result<u32> {
             .process_group(0)
             .spawn()
             .context("Cannot start the worker")?;
-        Ok(child.id())
+        // The child acknowledges by taking the lock and writing its pid. A
+        // child that exits first (lock lost to a concurrent start, unwritable
+        // data directory) is a failed start, not a success.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                bail!(
+                    "The worker exited while starting ({status}); see {}",
+                    log_path.display()
+                );
+            }
+            if running_pid() == Some(child.id()) {
+                return Ok(child.id());
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!(
+                    "The worker did not report ready within 10 s; see {}",
+                    log_path.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     #[cfg(not(unix))]
     {
@@ -557,29 +596,40 @@ pub fn start(market: Market) -> Result<u32> {
     }
 }
 
-/// Stop the worker; false when none was running.
+/// Stop the worker and wait until it has released the lock; false when none
+/// was running. The worker removes its own pid file while it still holds
+/// the lock, so `stop` never deletes a pid file a newer worker wrote.
 pub async fn stop() -> Result<bool> {
-    let Some(pid) = running_pid() else {
-        let _ = std::fs::remove_file(pid_path()?);
-        return Ok(false);
-    };
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .status();
-    }
-    for _ in 0..50 {
-        if !alive(pid) {
-            break;
+    let Some(guard) = try_own()? else {
+        // A worker holds the lock. It may not have written its pid yet.
+        let mut pid = None;
+        for _ in 0..40 {
+            pid = read_pid();
+            if pid.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    if alive(pid) {
+        let pid = pid.context("The worker has not reported its pid; try again")?;
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        for _ in 0..50 {
+            if let Some(_free) = try_own()? {
+                return Ok(true);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         bail!("The worker (pid {pid}) did not stop; stop it manually");
-    }
+    };
+    // Nobody owns it: a pid file left by a crash is removed under the lock,
+    // so a worker starting right now cannot have its file deleted.
     let _ = std::fs::remove_file(pid_path()?);
-    Ok(true)
+    drop(guard);
+    Ok(false)
 }
 
 /// What `worker status` prints.
@@ -590,6 +640,7 @@ pub struct Status {
     pub running: usize,
 }
 
+/// Worker state for `worker status`.
 pub fn status() -> Status {
     let state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
     let tasks = db::with_db(|d| d.list_tasks(500)).unwrap_or_default();
@@ -601,18 +652,38 @@ pub fn status() -> Status {
     }
 }
 
+/// Load the alert watcher; a read or parse error is reported once per
+/// distinct message and retried by the caller, never silently dropped.
+fn load_alerts(last_error: &mut Option<String>) -> Option<crate::commands::AlertWatcher> {
+    match crate::commands::AlertWatcher::load() {
+        Ok(w) => {
+            *last_error = None;
+            Some(w)
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if last_error.as_deref() != Some(&msg) {
+                eprintln!("alerts disabled until alert_watch.json loads: {msg}");
+                *last_error = Some(msg);
+            }
+            None
+        }
+    }
+}
+
 /// The foreground worker: ticker, task executor, alert checks, post-close
 /// sync. Runs until Ctrl+C or SIGTERM.
 pub async fn run_worker(market: Market) -> Result<()> {
-    if let Some(pid) = running_pid()
-        && pid != std::process::id()
-    {
-        bail!("Another worker is already running (pid {pid})");
-    }
-    std::fs::write(pid_path()?, std::process::id().to_string())?;
+    // Exclusive ownership first, held through shutdown and pid-file cleanup.
+    let Some(_owner) = try_own()? else {
+        bail!("Another worker is already running");
+    };
+    std::fs::write(pid_path()?, std::process::id().to_string())
+        .context("Cannot write the worker pid file")?;
     let mut shutdown = crate::daemon::Shutdown::install("State is saved after every step.");
-    // A task left running by a worker that died goes back in the queue.
-    db::with_db(|d| d.requeue_stale_tasks(300));
+    // We own the lock, so no executor can still own a `running` task: recover
+    // them all, whatever their age (warm/eod requeue, run fails).
+    db::with_db(|d| d.requeue_stale_tasks(0));
 
     let bus = bus();
     let ticker = spawn_ticker(market, bus.clone());
@@ -626,7 +697,9 @@ pub async fn run_worker(market: Market) -> Result<()> {
         }
     });
 
-    let mut alerts = crate::commands::AlertWatcher::load().ok();
+    let mut alerts: Option<crate::commands::AlertWatcher> = None;
+    let mut alerts_error: Option<String> = None;
+    let mut alert_pass_error: Option<String> = None;
     let mut state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
     println!(
         "worker started (pid {}), market {}",
@@ -641,8 +714,22 @@ pub async fn run_worker(market: Market) -> Result<()> {
         let due = state
             .last_alert_pass
             .is_none_or(|t| now.timestamp() - t >= OPEN_TICK.as_secs() as i64);
-        if due && let Some(w) = alerts.as_mut() {
-            let _ = w.pass(market).await;
+        if due {
+            if alerts.is_none() {
+                alerts = load_alerts(&mut alerts_error);
+            }
+            if let Some(w) = alerts.as_mut() {
+                match w.pass(market).await {
+                    Ok(_) => alert_pass_error = None,
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        if alert_pass_error.as_deref() != Some(&msg) {
+                            eprintln!("alert check failed: {msg}");
+                            alert_pass_error = Some(msg);
+                        }
+                    }
+                }
+            }
             state.last_alert_pass = Some(now.timestamp());
         }
         if let Some(date) = eod_due(market, now, &state) {
@@ -671,6 +758,7 @@ pub async fn run_worker(market: Market) -> Result<()> {
     if id > 0 {
         db::with_db(|d| d.release_task(id));
     }
+    // Still holding the lock: no newer worker can have written a pid file.
     let _ = std::fs::remove_file(pid_path()?);
     println!("worker stopped");
     Ok(())

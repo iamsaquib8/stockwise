@@ -31,6 +31,7 @@ pub struct CacheStats {
     pub file_bytes: u64,
 }
 
+/// Current Unix time in seconds.
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -55,6 +56,7 @@ pub enum CapTier {
 }
 
 impl CapTier {
+    /// Lower-case name stored in `market_snapshots.cap_tier`.
     pub fn as_str(self) -> &'static str {
         match self {
             CapTier::Mega => "mega",
@@ -65,6 +67,7 @@ impl CapTier {
         }
     }
 
+    /// Parse a tier name, case-insensitively.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "mega" => CapTier::Mega,
@@ -173,6 +176,7 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// Map a `tasks` row (in `TASK_COLS` order) to a [`Task`].
 fn task_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
@@ -196,17 +200,20 @@ pub struct CacheDb {
 }
 
 impl CacheDb {
+    /// Open (creating if needed) the database at `path` in WAL mode.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Cannot open cache database {}", path.display()))?;
         Self::init(conn)
     }
 
+    /// An in-memory database for tests.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// Set pragmas and create every table and index.
     fn init(conn: Connection) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         // `journal_mode` returns a row, so it cannot go through execute_batch
@@ -318,6 +325,7 @@ impl CacheDb {
 
     // ── market_snapshots ──
 
+    /// Insert or replace snapshots by `(symbol, market)` in one transaction.
     pub fn upsert_snapshots(&mut self, rows: &[Snapshot]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -355,6 +363,7 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Snapshots matching `f`, sorted by a whitelisted column.
     pub fn query_snapshots(&self, f: &SnapshotFilter) -> Result<Vec<Snapshot>> {
         let mut sql = String::from(
             "SELECT symbol, market, name, sector, industry, cap_tier, mcap, price, change_1d,
@@ -428,6 +437,7 @@ impl CacheDb {
 
     // ── ohlcv_bars ──
 
+    /// Insert or replace bars for `symbol` and `interval` in one transaction.
     pub fn put_bars(&mut self, symbol: &str, interval: &str, bars: &[Bar]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -479,6 +489,7 @@ impl CacheDb {
         Ok(())
     }
 
+    /// `(date, nav)` pairs for a fund, oldest first.
     pub fn get_navs(&self, code: &str) -> Result<Vec<(String, f64)>> {
         let mut st = self
             .conn
@@ -489,6 +500,7 @@ impl CacheDb {
 
     // ── financial_results ──
 
+    /// Insert or replace one period of financial results.
     pub fn put_result(
         &self,
         symbol: &str,
@@ -525,6 +537,7 @@ impl CacheDb {
 
     // ── tasks ──
 
+    /// Queue a task; returns its id.
     pub fn enqueue_task(&self, kind: &str, title: &str, payload_json: &str) -> Result<i64> {
         let now = now_secs();
         self.conn.execute(
@@ -535,6 +548,7 @@ impl CacheDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// One task by id.
     pub fn get_task(&self, id: i64) -> Result<Option<Task>> {
         Ok(self
             .conn
@@ -582,6 +596,7 @@ impl CacheDb {
         Ok(n > 0)
     }
 
+    /// Record a running task as `done` (with a result) or `failed` (with an error).
     pub fn finish_task(&self, id: i64, outcome: std::result::Result<&str, &str>) -> Result<()> {
         let (status, result, error) = match outcome {
             Ok(r) => ("done", Some(r), None),
@@ -616,12 +631,12 @@ impl CacheDb {
         self.conn.execute(
             "UPDATE tasks SET status='failed', error='worker stopped while this was running',
                  updated_at=?2
-             WHERE status='running' AND updated_at < ?1 AND kind NOT IN ('warm','eod')",
+             WHERE status='running' AND updated_at <= ?1 AND kind NOT IN ('warm','eod')",
             params![cutoff, now],
         )?;
         let n = self.conn.execute(
             "UPDATE tasks SET status='queued', updated_at=?2
-             WHERE status='running' AND updated_at < ?1 AND kind IN ('warm','eod')",
+             WHERE status='running' AND updated_at <= ?1 AND kind IN ('warm','eod')",
             params![cutoff, now],
         )?;
         Ok(n as u64)
@@ -643,6 +658,7 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Entry counts and sizes for `cache status`.
     pub fn stats(&self, file_bytes: u64) -> Result<CacheStats> {
         let (entries, fresh, bytes): (i64, i64, i64) = self.conn.query_row(
             "SELECT COUNT(*),

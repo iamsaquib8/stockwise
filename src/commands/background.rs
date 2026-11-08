@@ -5,10 +5,12 @@ use super::*;
 use crate::db::{CapTier, SnapshotFilter, Task};
 use crate::worker::{self, TaskKind};
 
+/// The store value, or an error saying `cache.db` is off.
 fn need_store<T>(v: Option<T>) -> Result<T> {
     v.context("The cache database (cache.db) is off or cannot be opened")
 }
 
+/// "5m ago" style age of a Unix timestamp.
 fn age(secs: i64) -> String {
     let secs = (chrono::Utc::now().timestamp() - secs).max(0);
     match secs {
@@ -19,6 +21,7 @@ fn age(secs: i64) -> String {
     }
 }
 
+/// A task as the JSON `tasks --json` prints.
 fn task_json(t: &Task) -> serde_json::Value {
     let parse = |s: &Option<String>| {
         s.as_deref()
@@ -153,6 +156,7 @@ pub fn cmd_cache_snapshots(q: SnapshotQuery, json: bool) -> Result<()> {
 
 // ── worker ──
 
+/// `worker start|stop|status|run`.
 pub async fn cmd_worker(action: &str, market: Market) -> Result<()> {
     match action {
         "start" => {
@@ -193,6 +197,7 @@ pub async fn cmd_worker(action: &str, market: Market) -> Result<()> {
 
 // ── tasks ──
 
+/// A coloured status (or progress) cell for the task table.
 fn status_cell(t: &Task) -> String {
     match t.status.as_str() {
         "done" => "done".green().to_string(),
@@ -202,6 +207,7 @@ fn status_cell(t: &Task) -> String {
     }
 }
 
+/// `tasks list`: recent tasks, newest first.
 pub fn cmd_tasks_list(limit: usize, json: bool) -> Result<()> {
     let tasks = need_store(crate::db::with_db(|d| d.list_tasks(limit)))?;
     if json {
@@ -229,6 +235,7 @@ pub fn cmd_tasks_list(limit: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `tasks show ID`: one task with its result.
 pub fn cmd_tasks_show(id: i64, json: bool) -> Result<()> {
     let task = need_store(crate::db::with_db(|d| d.get_task(id)))?
         .with_context(|| format!("No task #{id} (see `stockwise tasks`)"))?;
@@ -251,6 +258,7 @@ pub fn cmd_tasks_show(id: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `tasks cancel ID`.
 pub fn cmd_tasks_cancel(id: i64) -> Result<()> {
     let ok = need_store(crate::db::with_db(|d| d.cancel_task(id)))?;
     if ok {
@@ -261,6 +269,7 @@ pub fn cmd_tasks_cancel(id: i64) -> Result<()> {
     }
 }
 
+/// `tasks add KIND [-- ARGS]`: queue a task for the worker.
 pub fn cmd_tasks_add(kind: TaskKind, args: &[String], market: Market) -> Result<()> {
     let id = worker::enqueue(kind, market, args)?;
     println!(

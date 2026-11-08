@@ -111,3 +111,23 @@ fn run_task_without_a_command_is_refused() {
     assert!(!stockwise(&home, &["tasks", "add", "run"]).status.success());
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn only_one_worker_owns_the_data_directory() {
+    let home = scratch("owner");
+    let _worker = Worker(&home);
+    ok(&home, &["worker", "start"]);
+    // A second start, and a second foreground worker, are refused.
+    let again = stockwise(&home, &["worker", "start"]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already running"));
+    assert!(!stockwise(&home, &["worker", "run"]).status.success());
+    // The first one is untouched and still stoppable.
+    assert!(ok(&home, &["worker", "status"]).contains("(pid "));
+    assert!(ok(&home, &["worker", "stop"]).contains("stopped"));
+    // After a clean stop the pid file is gone and a new worker can start.
+    assert!(!home.join("worker.pid").exists());
+    ok(&home, &["worker", "start"]);
+    assert!(ok(&home, &["worker", "stop"]).contains("stopped"));
+    let _ = std::fs::remove_dir_all(&home);
+}
