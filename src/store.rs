@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where the data directory is, without creating it: `STOCKWISE_HOME`, then
 /// `home` in the config file, then `dirs::data_local_dir()/stockwise`.
@@ -135,6 +136,9 @@ pub fn load_from<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
 /// write a temp file next to the target, flush it to disk, then rename it over
 /// the target. With `private`, the file is readable by the owner only (0600 on
 /// Unix) — used for broker credentials.
+/// Distinguishes concurrent saves in one process (see [`save_to`]).
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 pub fn save_to<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()> {
     let data = serde_json::to_string_pretty(value)?;
     // Named portfolios live in a subdirectory (`portfolios/NAME.json`).
@@ -142,9 +146,14 @@ pub fn save_to<T: Serialize>(path: &Path, value: &T, private: bool) -> Result<()
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Cannot create directory {}", dir.display()))?;
     }
-    // Per-process temp name so a concurrent writer (e.g. the daemon) can't
-    // rename our half-written file or delete it from under us.
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    // A unique name per write, so two saves in one process (two threads, or a
+    // save racing a daemon) cannot rename or delete each other's half-written
+    // file. The pid keeps processes apart; the sequence keeps writes apart.
+    let tmp = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        SAVE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     // A leftover temp file would keep its old permissions on reopen.
     let _ = std::fs::remove_file(&tmp);
 
@@ -229,6 +238,34 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn concurrent_saves_to_one_path_leave_one_whole_document() {
+        let dir = temp_dir("save-race");
+        let path = dir.join("doc.json");
+        // A large value widens the window where two writes share the temp file.
+        let big = "x".repeat(1_000_000);
+        let threads: Vec<_> = (0..2)
+            .map(|t| {
+                let path = path.clone();
+                let big = big.clone();
+                std::thread::spawn(move || {
+                    for i in 0..5 {
+                        let doc = Doc {
+                            items: vec![format!("{t}-{i}"), big.clone()],
+                        };
+                        save_to(&path, &doc, false).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let doc: Doc = load_from(&path).unwrap();
+        assert_eq!(doc.items.len(), 2);
+        assert_eq!(doc.items[1].len(), big.len());
     }
 
     #[test]
