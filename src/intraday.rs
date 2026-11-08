@@ -142,6 +142,28 @@ impl std::fmt::Display for OBVTrend {
     }
 }
 
+/// OBV trend against its 10-period average. The ±5% band is relative to the
+/// average's magnitude: OBV is a signed running total, so `avg * 1.05` would
+/// invert the comparison when the average is negative (a stock with
+/// historical selling).
+fn obv_trend(obv_data: &[f64]) -> OBVTrend {
+    if obv_data.len() <= 10 {
+        return OBVTrend::Flat;
+    }
+    let Some(avg) = technical::sma(obv_data, 10) else {
+        return OBVTrend::Flat;
+    };
+    let last = *obv_data.last().unwrap();
+    let diff = (last - avg) / avg.abs().max(1.0);
+    if diff > 0.05 {
+        OBVTrend::Rising
+    } else if diff < -0.05 {
+        OBVTrend::Falling
+    } else {
+        OBVTrend::Flat
+    }
+}
+
 /// Trade plan with Kelly-criterion position sizing
 #[derive(Debug)]
 pub struct TradePlan {
@@ -421,29 +443,18 @@ fn compute_signal(
     };
 
     // ── Strategy 8: OBV Divergence ──
-    let obv_data = technical::obv(closes, volumes);
-    let obv_trend = if obv_data.len() > 10 {
-        let obv_sma = technical::sma(&obv_data, 10);
-        let last_obv = *obv_data.last().unwrap();
-        match obv_sma {
-            Some(avg) if last_obv > avg * 1.05 => {
-                // OBV rising while price might be flat = accumulation
-                if regime == MarketRegime::Ranging || regime == MarketRegime::Downtrend {
-                    strategies.push(StrategySignal {
-                        name: "OBV Divergence",
-                        direction: Direction::Long,
-                        strength: 68.0,
-                        reason: "OBV rising (accumulation) despite weak price".into(),
-                    });
-                }
-                OBVTrend::Rising
-            }
-            Some(avg) if last_obv < avg * 0.95 => OBVTrend::Falling,
-            _ => OBVTrend::Flat,
-        }
-    } else {
-        OBVTrend::Flat
-    };
+    let obv_trend = obv_trend(&technical::obv(closes, volumes));
+    if obv_trend == OBVTrend::Rising
+        && (regime == MarketRegime::Ranging || regime == MarketRegime::Downtrend)
+    {
+        // OBV rising while price might be flat = accumulation
+        strategies.push(StrategySignal {
+            name: "OBV Divergence",
+            direction: Direction::Long,
+            strength: 68.0,
+            reason: "OBV rising (accumulation) despite weak price".into(),
+        });
+    }
 
     // ── Strategy 9: Mean Reversion ──
     if let Some(sma20) = technical::sma(closes, 20) {
@@ -980,6 +991,27 @@ impl IntradaySignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obv_trend_reads_negative_series_correctly() {
+        // OBV is a signed running total, so a stock with historical selling
+        // sits at a negative level. The band must scale with |avg|: a 2%
+        // drift is noise, not accumulation or distribution.
+        let series = |last: f64| {
+            let mut v = vec![-1_000_000.0; 11];
+            v[10] = last;
+            v
+        };
+        assert_eq!(obv_trend(&series(-1_020_000.0)), OBVTrend::Flat);
+        assert_eq!(obv_trend(&series(-980_000.0)), OBVTrend::Flat);
+        assert_eq!(obv_trend(&series(-1_200_000.0)), OBVTrend::Falling);
+        assert_eq!(obv_trend(&series(-800_000.0)), OBVTrend::Rising);
+        // Positive series keep working, and a flat series stays neutral.
+        let positive: Vec<f64> = (0..12).map(|i| 50_000.0 + i as f64 * 2_000.0).collect();
+        assert_eq!(obv_trend(&positive), OBVTrend::Rising);
+        assert_eq!(obv_trend(&[-1_000_000.0; 12]), OBVTrend::Flat);
+        assert_eq!(obv_trend(&[-1.0; 5]), OBVTrend::Flat);
+    }
 
     fn make_signal(score: f64, confidence: Confidence, atr_pct: f64) -> IntradaySignal {
         IntradaySignal {
