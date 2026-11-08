@@ -2978,7 +2978,7 @@ mod tests {
         assert!(check_tax_region(Some(Equity), Market::In).is_ok());
         assert!(check_tax_region(Some(Arbitrage), Market::Us).is_ok());
         assert!(check_tax_region(Some(Debt), Market::Crypto).is_ok());
-        assert!(check_tax_region(None, Market::Crypto).is_ok());
+        assert!(check_tax_region(Option::None, Market::Crypto).is_ok());
         assert!(check_tax_region(Some(Equity), Market::Crypto).is_err());
     }
 
