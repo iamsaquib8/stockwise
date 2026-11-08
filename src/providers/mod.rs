@@ -32,6 +32,7 @@
 
 pub mod alphavantage;
 pub mod bse;
+pub mod edgar;
 pub mod finnhub;
 pub mod fmp;
 pub mod massive;
