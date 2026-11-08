@@ -67,6 +67,8 @@ import the result.
 pip install casparser
 casparser CAS.pdf -p <password> -o cas.json
 stockwise import cas cas.json
+# or let StockWise run casparser for you (casparser must be on PATH):
+stockwise import cas CAS.pdf --password <password>   # or STOCKWISE_CAS_PASSWORD, or a hidden prompt
 ```
 
 Each fund with units left becomes `MF:<AMFI code>`. StockWise values it at

@@ -57,6 +57,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Find a mutual fund | `stockwise mf search parag flexi direct` |
 | SIP returns (XIRR) for a fund | `stockwise mf sip 122639 5000 -p 5y` |
 | Rank a category by return | `stockwise mf screen flexi cap` |
+| Regular vs Direct plan cost of the funds you hold | `stockwise mf bleed --return 10` |
 | Option chain with greeks | `stockwise options chain NIFTY` |
 | Put/call ratio, max pain | `stockwise options pcr BANKNIFTY` · `stockwise options maxpain NIFTY` |
 | OI build-up & resistance/support walls | `stockwise fno oi NIFTY` · `stockwise options oi BANKNIFTY -n 5 --explain` |
@@ -71,10 +72,13 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 |---|---|
 | Add a purchase (a lot) | `stockwise portfolio add TCS 10 3500 --date 2023-04-12` |
 | Sell (oldest lots first) | `stockwise portfolio sell TCS 5 3900` |
+| Preview a sale: lots, STCG/LTCG tax, LTCG countdown (saves nothing) | `stockwise portfolio sell TCS 5 --preview` (alias `--dry-run`) |
+| Regular-plan funds vs Direct: TER gap, yearly and 10Y cost, switch units | `stockwise mf bleed` |
 | Holdings, P&L and XIRR | `stockwise portfolio` |
 | Track a mutual fund (AMFI code or ISIN, valued at its NAV) | `stockwise portfolio add MF:122639 100 80 --date 2024-01-10` |
 | Portfolio X-Ray (overlap, concentration, sectors) | `stockwise portfolio xray` · `stockwise portfolio xray --json` |
 | Import from your broker | `stockwise import kite holdings.xlsx` (CSV or `.xlsx`; also `groww`, `upstox`, `indmoney`, `cas`) |
+| Import a password-protected CAS PDF (needs `casparser`) | `stockwise import cas CAS.pdf --password <PAN>` · `casparser ... \| stockwise import cas -` |
 | Rebuild a symbol's lots from a dated file | `stockwise import kite tradebook.csv --replace` |
 | One holding's lots, sales and XIRR | `stockwise portfolio lots TCS` |
 | Compare with NIFTY | `stockwise portfolio benchmark NIFTY -p 1y` |

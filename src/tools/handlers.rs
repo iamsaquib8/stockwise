@@ -67,6 +67,8 @@ pub(super) async fn run<D: DataSource>(
         "harvest" => harvest(src, m).await,
         "rebalance" => rebalance(src, a, m).await,
         "portfolio_pme" => portfolio_pme(src, a, m).await,
+        "portfolio_sell_preview" => portfolio_sell_preview(src, a, m).await,
+        "mf_bleed" => mf_bleed(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
         "ipo_board" => ipo_board(src, a).await,
         "ipo_analyze" => ipo_analyze(src, a).await,
@@ -667,6 +669,35 @@ async fn portfolio_pme(src: &impl DataSource, a: &Args, m: Market) -> Result<Val
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let report =
         commands::portfolio_pme_report(src, &p, a.str("benchmark"), m, a.str("base")).await?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn portfolio_sell_preview(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let resolved = commands::held_symbol(&p, a.need_str("symbol")?, m);
+    let qty = a.need_f64("quantity")?;
+    let today = crate::portfolio::today();
+    let date = match a.str("date") {
+        Some(d) => crate::portfolio::parse_date(d)?,
+        None => crate::portfolio::parse_date(&today)?,
+    };
+    let (price, cur) = match a.f64("price") {
+        Some(price) => (
+            price,
+            crate::portfolio::symbol_currency(&resolved).map(str::to_string),
+        ),
+        None if date.to_string() != today => {
+            bail!("Give price for a past sale date")
+        }
+        None => commands::live_sale_price(&resolved, m).await?,
+    };
+    let out = commands::build_sell_preview(&p, &resolved, qty, price, cur, date, m).await?;
+    Ok(commands::sell_preview_json(&out))
+}
+
+async fn mf_bleed(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let report = commands::build_bleed_report(&p, a.f64("return_pct").unwrap_or(10.0), m).await?;
     Ok(serde_json::to_value(report)?)
 }
 

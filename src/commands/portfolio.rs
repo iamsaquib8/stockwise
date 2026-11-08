@@ -980,6 +980,22 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     println!();
     totals.print_exclusions();
     val.print_price_notes();
+    let regular_funds = portfolio
+        .holdings
+        .iter()
+        .filter(|h| {
+            val.mark(&h.symbol)
+                .and_then(|m| m.name.as_deref())
+                .is_some_and(|n| n.to_lowercase().contains("regular"))
+        })
+        .count();
+    if regular_funds > 0 {
+        println!(
+            "  {} {} Regular-plan fund(s) held: `stockwise mf bleed` shows the Direct-plan TER gap and the units that can switch.",
+            "·".dimmed(),
+            regular_funds
+        );
+    }
     if !unconverted.is_empty() {
         println!(
             "  {} No exchange rate for {} — left out of realized P&L and dividends.",

@@ -753,6 +753,63 @@ pub const TOOLS: &[Tool] = &[
         personal: true,
     },
     Tool {
+        name: "portfolio_sell_preview",
+        title: "Pre-sell lot and tax preview",
+        description: "Preview selling a held symbol without recording anything: the FIFO lots \
+                      that would depart (date, days held, quantity, cost, gain or loss), \
+                      short- vs long-term split, capital-gains tax with cess after the \
+                      remaining Sec. 112A exemption, lots within 45 days of turning long-term \
+                      with the tax difference of waiting, and a mutual-fund exit-load check. \
+                      Tax facts and arithmetic only. Never changes the portfolio.",
+        params: &[
+            req("symbol", Kind::Str, "Held ticker or MF:<AMFI code>"),
+            req(
+                "quantity",
+                Kind::Number {
+                    min: 0.000_001,
+                    max: 1e12,
+                },
+                "Shares or units to sell",
+            ),
+            opt(
+                "price",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e12,
+                },
+                "Sale price per share or unit (default: live price or latest AMFI NAV)",
+            ),
+            opt(
+                "date",
+                Kind::Str,
+                "Sale date YYYY-MM-DD (default today; a past date needs price)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "mf_bleed",
+        title: "Regular vs Direct fund cost",
+        description: "For held Regular-plan mutual funds: the Direct growth twin, the TER gap \
+                      from AMFI's disclosure, yearly rupee cost of the gap, its 10-year \
+                      compounded effect at a stated gross return, and the FIFO split of units \
+                      past 12 months (units that redeem inside the unused Sec. 112A exemption) \
+                      versus younger units with tax, exit load and breakeven months.",
+        params: &[
+            opt(
+                "return_pct",
+                Kind::Number {
+                    min: 0.0,
+                    max: 30.0,
+                },
+                "Assumed gross annual return in percent for the 10-year figure (default 10)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
         name: "calendar",
         title: "Results and dividends calendar",
         description: "Upcoming results dates, ex-dividend dates and splits for given tickers, or \

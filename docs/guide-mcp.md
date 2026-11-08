@@ -90,6 +90,8 @@ Questions that work well, grouped by what they use:
 | "Which of my holdings are long-term and which are short-term?" | `holdings_lots` |
 | "What is my capital-gains tax so far this year?" | `tax_estimate` |
 | "Do I owe advance tax by the next due date?" | `tax_advance` |
+| "Which lots would 20 shares of TCS sell, and what is the tax?" | `portfolio_sell_preview` (never records the sale) |
+| "What do my Regular-plan funds cost me against Direct?" | `mf_bleed` |
 | "What could I book before 31 March, and what is my unused LTCG exemption?" | `harvest` |
 | "If I invest another ₹50,000, how should it be split to match my targets?" | `rebalance` |
 | "How risky has HDFCBANK been over the last year?" | `risk` |
