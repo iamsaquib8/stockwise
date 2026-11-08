@@ -469,7 +469,7 @@ pub(super) fn portfolio_title(title: &str) -> String {
     }
 }
 
-fn signed_money(amount: f64, currency: Option<&str>) -> String {
+pub(crate) fn signed_money(amount: f64, currency: Option<&str>) -> String {
     let sym = market::currency_symbol(currency);
     let body = format!(
         "{sym}{}",
