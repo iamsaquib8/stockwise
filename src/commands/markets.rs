@@ -494,11 +494,23 @@ async fn cmd_sector_members(
         // NSE answered, so one more request is cheap: NSE's snapshot quotes
         // carry no market cap, and tiers come from the saved membership.
         if market::IndiaMembership::load().is_empty() {
-            let _ = tokio::time::timeout(
+            let seed = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 scan_nse_index(&client, "NIFTY 500", None),
             )
             .await;
+            let why = match seed {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(format!("{:#}", e)),
+                Err(_) => Some("timed out".to_string()),
+            };
+            if let Some(why) = why
+                && market::IndiaMembership::load().is_empty()
+            {
+                eprintln!(
+                    "  \u{24d8} Cap tiers unavailable (NIFTY 500 membership: {why}); members show as unknown and a specific --cap may list none. Retry later."
+                );
+            }
         }
     }
     let mut ages = std::collections::HashMap::new();
