@@ -211,11 +211,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                dir.join("casparser"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+            std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
         }
         let path = std::env::join_paths([dir.clone()]).unwrap();
         assert!(find_on_path("casparser", &path).is_some());

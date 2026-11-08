@@ -416,7 +416,8 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # model = "qwen3:14b"
 # ollama_host = "http://localhost:11434"
 
-# Redis cache server, or "off" for the in-memory cache only.
+# Optional Redis cache server. Off by default: StockWise keeps a SQLite
+# cache.db in the data directory instead (`stockwise cache status`).
 # Env: STOCKWISE_REDIS_URL.
 # redis_url = "redis://127.0.0.1:6379/"
 
