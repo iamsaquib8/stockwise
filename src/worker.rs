@@ -99,6 +99,9 @@ pub fn snapshot_from_quote(default_market: &str, q: &Quote) -> Option<Snapshot> 
     let currency = q.currency.as_deref().map(str::to_ascii_uppercase);
     let market = if symbol.ends_with(".NS") || symbol.ends_with(".BO") {
         "in".to_string()
+    } else if let Some(exchange) = crate::market::exchange_of(&symbol) {
+        // `SAP.DE` is a German row whichever market the worker was started in.
+        crate::value_name(Market::Global(exchange))
     } else {
         match currency.as_deref() {
             Some("INR") => "in".to_string(),
@@ -473,6 +476,12 @@ pub async fn eod_sync(
     if !codes.is_empty()
         && let Ok(schemes) = crate::funds::load_amfi().await
     {
+        // Cancellation can arrive while AMFI loads, after the last snapshot
+        // check and before any write; with only `MF:` holdings there was no
+        // snapshot chunk to notice it at all.
+        if !progress(55.0) {
+            bail!("cancelled");
+        }
         for s in schemes.iter().filter(|s| codes.contains(&s.code)) {
             if let (Some(nav), Some(date)) = (s.nav, s.date) {
                 let row = vec![(date.format("%Y-%m-%d").to_string(), nav)];
@@ -496,6 +505,10 @@ pub async fn eod_sync(
             .collect();
         let base = crate::commands::market_currency(market);
         if let Ok(val) = crate::commands::value_holdings(client, &all, market, Some(base)).await {
+            // Valuation takes a while: check again before the wealth write.
+            if !progress(95.0) {
+                bail!("cancelled");
+            }
             let totals = val.totals(&portfolio);
             if totals.unpriced.is_empty() && totals.unconverted.is_empty() {
                 crate::wealth::WealthHistory::update(|h| {
@@ -847,8 +860,11 @@ mod tests {
         let toyota = snapshot_from_quote("jp", &with("7203.T", "JPY")).unwrap();
         assert_eq!((toyota.market.as_str(), toyota.cap_tier), ("jp", None));
         // An unknown currency under the home market is not filed as `in`.
-        let sap = snapshot_from_quote("in", &with("SAP.DE", "EUR")).unwrap();
+        let sap = snapshot_from_quote("in", &with("SAP.F", "EUR")).unwrap();
         assert_eq!((sap.market.as_str(), sap.cap_tier), ("other", None));
+        // A German holding is a German row even under a Japanese worker.
+        let sap_jp = snapshot_from_quote("jp", &with("SAP.DE", "EUR")).unwrap();
+        assert_eq!((sap_jp.market.as_str(), sap_jp.cap_tier), ("de", None));
         // `.NS` with a mismatched currency still gets no tier.
         let odd = snapshot_from_quote("us", &with("X.NS", "USD")).unwrap();
         assert_eq!((odd.market.as_str(), odd.cap_tier), ("in", None));
