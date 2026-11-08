@@ -330,6 +330,7 @@ async fn events(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     }))
 }
 
+/// Quarterly or annual results of one ticker, as `results --json`.
 async fn quarterly_results(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let n = a.usize_or("quarters", 8);
     let annual = a.bool("annual");

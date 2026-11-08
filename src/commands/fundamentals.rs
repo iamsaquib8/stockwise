@@ -1290,10 +1290,12 @@ fn money(v: Option<f64>, currency: Option<&str>) -> String {
     }
 }
 
+/// A number with `places` decimals, or `-`.
 fn num(v: Option<f64>, places: usize) -> String {
     v.map_or("-".into(), |v| format!("{v:.places$}"))
 }
 
+/// A number with its sign and `suffix`, or `-`.
 fn signed(v: Option<f64>, places: usize, suffix: &str) -> String {
     v.map_or("-".into(), |v| format!("{v:+.places$}{suffix}"))
 }
@@ -1318,6 +1320,7 @@ fn print_grid(columns: &[String], rows: &[(String, Vec<String>)]) {
     }
 }
 
+/// The quarterly table with growth and consensus sections.
 fn print_quarterly(c: &results::Collected, n: usize) {
     let views = results::quarter_views(&c.quarterly, n, c.is_india);
     let ttm = results::ttm(&c.quarterly).map(results::ttm_rounded);
@@ -1458,6 +1461,7 @@ fn print_quarterly(c: &results::Collected, n: usize) {
     }
 }
 
+/// The fiscal-year table and the CAGR lines.
 fn print_annual(c: &results::Collected, n: usize) {
     let views = results::annual_views(&c.annual, n, c.is_india);
     let ccy = c.currency.as_deref();
@@ -1509,6 +1513,7 @@ fn print_annual(c: &results::Collected, n: usize) {
     }
 }
 
+/// Source and currency footer; source notes go to stderr.
 fn print_results_footer(c: &results::Collected) {
     println!();
     println!(
@@ -1525,6 +1530,7 @@ fn print_results_footer(c: &results::Collected) {
     }
 }
 
+/// The season scoreboard: totals, then one line per reporter.
 fn print_scoreboard(b: &results::Scoreboard) {
     print_header(&format!(
         "Results season: {} ({})",

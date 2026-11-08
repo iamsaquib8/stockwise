@@ -4,6 +4,7 @@
 
 use std::process::{Command, Stdio};
 
+/// Run `stockwise results ARGS` in a scratch home; (success, stderr).
 fn run(args: &[&str]) -> (bool, String) {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

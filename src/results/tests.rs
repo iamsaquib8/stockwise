@@ -3,10 +3,12 @@ use crate::output;
 use serde_json::json;
 use std::sync::Mutex;
 
+/// Parse a `YYYY-MM-DD` date.
 fn d(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
 }
 
+/// One Yahoo timeseries result for `kind`+`field`.
 fn series(kind: &str, field: &str, rows: &[(String, f64)], ccy: &str) -> Value {
     let t = format!("{kind}{field}");
     let items: Vec<Value> = rows
@@ -31,6 +33,7 @@ const QUARTER_ENDS: [&str; 10] = [
     "2026-09-30",
 ];
 
+/// Revenue of the i-th test quarter.
 fn rev(i: usize) -> f64 {
     1000.0 + 50.0 * i as f64
 }
@@ -72,6 +75,7 @@ fn nonbank_series() -> Vec<Value> {
     ]
 }
 
+/// Ten parsed quarters of a non-bank.
 fn nonbank() -> Vec<ResultPeriod> {
     parse_statements(&nonbank_series()).quarterly
 }
@@ -171,6 +175,7 @@ fn surprise_lands_on_the_quarter_with_a_nearby_end_date() {
     assert!(q[..9].iter().all(|p| p.surprise.is_none()));
 }
 
+/// Daily bars with the given closes from `start`.
 fn flat_series(closes: &[f64], start: &str) -> Series {
     let mut s = Series::default();
     let mut day = d(start);
@@ -228,6 +233,7 @@ fn five_day_reaction_is_absent_when_prices_stop_early() {
 
 // ── Annual ──
 
+/// Six fiscal years growing 10% a year.
 fn annual() -> Vec<ResultPeriod> {
     (0..6)
         .map(|i| {
@@ -316,6 +322,7 @@ fn nse_filings_keep_one_per_quarter_and_prefer_consolidated() {
     assert_eq!(f[1].to_date, d("2026-06-30"));
 }
 
+/// Eight quarters of bank statements.
 fn bank_series() -> Vec<Value> {
     let rows = |f: &dyn Fn(usize) -> f64| -> Vec<(String, f64)> {
         QUARTER_ENDS[2..]
@@ -358,6 +365,7 @@ fn bank_series() -> Vec<Value> {
     ]
 }
 
+/// A Yahoo quote response for HDFCBANK.NS.
 fn quote_body(sector: &str, industry: &str) -> String {
     json!({"quoteResponse": {"result": [{
         "symbol": "HDFCBANK.NS", "quoteType": "EQUITY", "longName": "HDFC Bank Limited",
@@ -367,6 +375,7 @@ fn quote_body(sector: &str, industry: &str) -> String {
     .to_string()
 }
 
+/// A client whose requests go to the mock server at `server`.
 fn client_for(server: &str) -> YahooClient {
     let base = server.to_string();
     YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", move |url: &str| {
@@ -375,6 +384,7 @@ fn client_for(server: &str) -> YahooClient {
     })
 }
 
+/// Routes for a bank: quote, summary, timeseries, NSE list and XBRL.
 fn bank_server() -> Vec<(&'static str, String)> {
     let summary = json!({"quoteSummary": {"result": [{"earningsHistory": {"history": [
         {"quarter": {"raw": 1767139200}, "epsActual": {"raw": 21.2}, "epsEstimate": {"raw": 20.0},
@@ -406,6 +416,7 @@ fn bank_server() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// An in-memory `cache.db` that lives for the test run.
 fn memory_db() -> L2 {
     Box::leak(Box::new(Mutex::new(CacheDb::open_in_memory().unwrap())))
 }
@@ -621,6 +632,7 @@ fn the_default_store_is_off_in_unit_tests() {
 
 // ── Scoreboard ──
 
+/// A `Collected` holding `quarters`.
 fn collected(symbol: &str, quarters: Vec<ResultPeriod>) -> Collected {
     Collected {
         symbol: symbol.into(),
@@ -636,6 +648,7 @@ fn collected(symbol: &str, quarters: Vec<ResultPeriod>) -> Collected {
     }
 }
 
+/// A quarter with revenue, PAT and an optional surprise outcome.
 fn q(end: &str, revenue: f64, pat: f64, outcome: Option<&str>) -> ResultPeriod {
     ResultPeriod {
         end: d(end),
