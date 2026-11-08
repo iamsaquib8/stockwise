@@ -20,6 +20,8 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Indian and US indices | `stockwise markets` |
 | One index per exchange worldwide | `stockwise markets --global` |
 | Gainers and losers | `stockwise movers` |
+| Scan all of NIFTY 500 in one NSE request, one cap tier | `stockwise -m in movers --universe nifty500 --cap mid` |
+| Large / mid / small / micro stocks of a screen or heatmap | `stockwise screen momentum --cap small`, `stockwise heatmap --cap large` |
 | Sector performance | `stockwise sectors` |
 | Find a ticker by name | `stockwise search "tata motors"` |
 | First-run setup: market, holdings import, MCP snippet | `stockwise init` (no prompts without a TTY: `init --market in --import groww:FILE --no-mcp`) |

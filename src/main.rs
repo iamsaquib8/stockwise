@@ -450,6 +450,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Scan an NSE index's members instead of the built-in large caps
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -463,6 +466,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Scan an NSE index's members instead of the built-in large caps
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
     },
     /// Fear & Greed style sentiment gauge
     Sentiment,
@@ -508,6 +514,9 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Scan an NSE index's members instead of the built-in large caps
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -3578,9 +3587,11 @@ async fn dispatch(
             period,
         } => commands::cmd_forecast(&symbol, days, &period, m).await,
 
-        Commands::Movers { universe, out } => commands::cmd_movers(m, universe, out.into()).await,
+        Commands::Movers { universe, cap, out } => {
+            commands::cmd_movers(m, universe, cap, out.into()).await
+        }
         Commands::Sectors { out } => commands::cmd_sectors(m, out.into()).await,
-        Commands::Heatmap { universe } => commands::cmd_heatmap(m, universe).await,
+        Commands::Heatmap { universe, cap } => commands::cmd_heatmap(m, universe, cap).await,
         Commands::Sentiment => commands::cmd_sentiment().await,
         Commands::News { symbol } => commands::cmd_news(&symbol, m).await,
         Commands::Rotation => commands::cmd_rotation(m).await,
@@ -3612,8 +3623,9 @@ async fn dispatch(
         Commands::Screen {
             category,
             universe,
+            cap,
             out,
-        } => commands::cmd_screen(&value_name(category), m, universe, out.into()).await,
+        } => commands::cmd_screen(&value_name(category), m, universe, cap, out.into()).await,
         Commands::Dividends { symbol, out } => {
             commands::cmd_dividends(&symbol, m, out.into()).await
         }

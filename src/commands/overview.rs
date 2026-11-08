@@ -51,6 +51,8 @@ pub(crate) struct QuoteRow {
     pub(crate) volume: Option<u64>,
     pub(crate) avg_volume_3m: Option<u64>,
     pub(crate) market_cap: Option<f64>,
+    /// `mega|large|mid|small|micro|unknown` (see `market::CapTier`).
+    pub(crate) cap_tier: &'static str,
     pub(crate) pe_ttm: Option<f64>,
     pub(crate) eps_ttm: Option<f64>,
     pub(crate) dividend_yield: Option<f64>,
@@ -76,6 +78,7 @@ impl CsvRow for QuoteRow {
         "volume",
         "avg_volume_3m",
         "market_cap",
+        "cap_tier",
         "pe_ttm",
         "eps_ttm",
         "dividend_yield",
@@ -102,6 +105,7 @@ impl From<&crate::api::Quote> for QuoteRow {
             volume: q.regular_market_volume,
             avg_volume_3m: q.average_daily_volume_3_month,
             market_cap: q.market_cap,
+            cap_tier: market::cap_tier_of(q).as_str(),
             pe_ttm: q.trailing_pe,
             eps_ttm: q.eps_trailing_twelve_months,
             dividend_yield: q.trailing_annual_dividend_yield,
@@ -243,7 +247,8 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
 
     if !fmt.is_table() {
         if fmt == Format::Json {
-            output::print_json(&quotes)?;
+            let items: Vec<_> = quotes.iter().map(market::quote_json).collect();
+            output::print_json(&items)?;
         } else {
             let rows: Vec<QuoteRow> = quotes.iter().map(QuoteRow::from).collect();
             output::print_csv(&rows)?;
@@ -320,8 +325,11 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
         }
         print_kv(
             t(Msg::MarketCap),
-            &q.market_cap
-                .map_or_else(na, |v| format_large_number(v, cur)),
+            &match (q.market_cap, market::cap_badge(q)) {
+                (Some(v), Some(b)) => format!("{}  {}", format_large_number(v, cur), b.dimmed()),
+                (Some(v), None) => format_large_number(v, cur),
+                (None, _) => na(),
+            },
         );
         print_kv(t(Msg::PeTtm), &format_optional_f64(q.trailing_pe, ""));
         print_kv(

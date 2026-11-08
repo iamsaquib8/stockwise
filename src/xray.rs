@@ -352,44 +352,19 @@ pub fn normalize_sector(raw: Option<&str>) -> String {
     }
 }
 
-/// India market-cap cut-offs in rupees, from AMFI's half-yearly list that
-/// SEBI's categories follow (top 100 companies are large cap, ranks 101-250
-/// mid cap, the rest small cap). Rounded from the list dated December 2024
-/// (in force January to June 2025): large cap from about ₹1,00,000 Cr, mid cap
-/// from about ₹33,200 Cr. AMFI publishes new cut-offs every January and July,
-/// so update these two values (and the date here) when they move.
-pub const INDIA_LARGE_CAP_MIN_INR: f64 = 1_000_000_000_000.0; // ₹1,00,000 Cr
-pub const INDIA_MID_CAP_MIN_INR: f64 = 330_000_000_000.0; // ₹33,000 Cr
-
 /// Classify market cap into Large, Mid, or Small Cap based on quote market cap and currency.
 ///
 /// Thresholds:
 /// - India (INR): Large Cap >= ₹1,00,000 Cr; Mid Cap ₹33,000 Cr to ₹1,00,000 Cr; Small Cap < ₹33,000 Cr
-///   (see [`INDIA_LARGE_CAP_MIN_INR`]).
-/// - US / Global (USD & others): Large Cap >= $10B; Mid Cap $2B to $10B; Small Cap < $2B.
+///   (see [`crate::market::INDIA_LARGE_MIN_INR`]).
+/// - every other currency is converted to USD first: Large Cap (mega included) >= $10B; Mid Cap $2B to $10B; Small Cap (micro included) < $2B.
 pub fn classify_market_cap(market_cap: Option<f64>, currency: Option<&str>) -> MarketCapCategory {
-    let Some(mc) = market_cap.filter(|v| *v > 0.0) else {
-        return MarketCapCategory::Unclassified;
-    };
-    let is_inr = currency.is_some_and(|c| c.eq_ignore_ascii_case("INR"));
-    if is_inr {
-        if mc >= INDIA_LARGE_CAP_MIN_INR {
-            MarketCapCategory::LargeCap
-        } else if mc >= INDIA_MID_CAP_MIN_INR {
-            MarketCapCategory::MidCap
-        } else {
-            MarketCapCategory::SmallCap
-        }
-    } else {
-        // $10 Billion = 10,000,000,000 USD
-        // $2 Billion = 2,000,000,000 USD
-        if mc >= 10_000_000_000.0 {
-            MarketCapCategory::LargeCap
-        } else if mc >= 2_000_000_000.0 {
-            MarketCapCategory::MidCap
-        } else {
-            MarketCapCategory::SmallCap
-        }
+    use crate::market::CapTier;
+    match CapTier::classify("", market_cap, currency, None) {
+        CapTier::Unknown => MarketCapCategory::Unclassified,
+        CapTier::Mega | CapTier::Large => MarketCapCategory::LargeCap,
+        CapTier::Mid => MarketCapCategory::MidCap,
+        CapTier::Small | CapTier::Micro => MarketCapCategory::SmallCap,
     }
 }
 

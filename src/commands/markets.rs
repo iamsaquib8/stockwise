@@ -13,6 +13,7 @@ pub(crate) struct MoverRow {
     pub(crate) change_percent: f64,
     pub(crate) volume: Option<u64>,
     pub(crate) currency: Option<String>,
+    pub(crate) cap_tier: &'static str,
 }
 
 impl CsvRow for MoverRow {
@@ -24,6 +25,7 @@ impl CsvRow for MoverRow {
         "change_percent",
         "volume",
         "currency",
+        "cap_tier",
     ];
 }
 
@@ -45,6 +47,7 @@ pub(crate) fn mover_rows(quotes: &[crate::api::Quote], n: usize) -> (Vec<MoverRo
         change_percent: *pct,
         volume: q.regular_market_volume,
         currency: q.currency.clone(),
+        cap_tier: market::cap_tier_of(q).as_str(),
     };
     let gainers = ranked
         .iter()
@@ -75,20 +78,55 @@ fn check_universe(market: Market, universe: Option<market::Universe>) -> Result<
     Ok(())
 }
 
+/// What a scan covers: the symbols, its title and, for an NSE index, the
+/// members' quotes that came with the one bulk request.
+struct Scan {
+    symbols: Vec<String>,
+    scope: String,
+    bulk: Vec<crate::api::Quote>,
+}
+
+/// Longest age of a `market_snapshots` row a `--cap` scan will use.
+const SNAPSHOT_MAX_AGE_SECS: i64 = 30 * 60;
+
 /// Symbols a scan covers and its title: the members of an NSE index with
-/// `--universe` (from NSE; the built-in list when NSE can't answer), else
-/// the market's built-in list.
+/// `--universe` (one bulk NSE request that also prices them; the built-in
+/// list when NSE can't answer), else the market's built-in list. Index
+/// members are saved for the India cap tiers and the prices feed
+/// `market_snapshots`.
 async fn scan_symbols(
     client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,
-) -> Result<(Vec<String>, String)> {
+) -> Result<Scan> {
     let Some(u) = universe else {
-        return Ok((market.universe(), market.label().to_string()));
+        return Ok(Scan {
+            symbols: market.universe(),
+            scope: market.label().to_string(),
+            bulk: Vec::new(),
+        });
     };
     let index = u.nse_index();
-    match client.index_constituents(index).await {
-        Ok(symbols) => Ok((symbols, index.to_string())),
+    let snap = match client.index_snapshot(index).await {
+        Ok(s) if s.members.iter().any(|q| q.symbol.is_some()) => Ok(s),
+        Ok(_) => Err(anyhow::anyhow!("NSE listed no members for {}", index)),
+        Err(e) => Err(e),
+    };
+    match snap {
+        Ok(snap) => {
+            let symbols: Vec<String> = snap
+                .members
+                .iter()
+                .filter_map(|q| q.symbol.clone())
+                .collect();
+            market::IndiaMembership::record(index, &symbols);
+            store_bulk_snapshots(&snap.members);
+            Ok(Scan {
+                symbols,
+                scope: index.to_string(),
+                bulk: snap.members,
+            })
+        }
         Err(e) => match u.fallback() {
             Some(list) => {
                 eprintln!(
@@ -98,7 +136,11 @@ async fn scan_symbols(
                         &[&index, &format!("{:#}", e), &list.len()]
                     )
                 );
-                Ok((list, index.to_string()))
+                Ok(Scan {
+                    symbols: list,
+                    scope: index.to_string(),
+                    bulk: Vec::new(),
+                })
             }
             None => Err(e.context(format!(
                 "NSE's {} member list is unavailable and StockWise has no built-in copy of it",
@@ -108,16 +150,119 @@ async fn scan_symbols(
     }
 }
 
+/// Save an NSE bulk snapshot's prices into `market_snapshots` (best effort;
+/// fundamentals already stored for a symbol are kept).
+fn store_bulk_snapshots(quotes: &[crate::api::Quote]) {
+    let members = market::IndiaMembership::load();
+    let rows: Vec<crate::db::Snapshot> = quotes
+        .iter()
+        .filter(|q| q.is_usable())
+        .filter_map(|q| crate::worker::snapshot_from_quote("in", q))
+        .map(|mut r| {
+            if r.cap_tier.is_none() {
+                let t = market::CapTier::classify(&r.symbol, r.mcap, Some("INR"), Some(&members));
+                r.cap_tier = (t != market::CapTier::Unknown).then(|| t.as_str().to_string());
+            }
+            r
+        })
+        .collect();
+    if !rows.is_empty() {
+        crate::db::with_db(|d| d.upsert_snapshots(&rows));
+    }
+}
+
+/// Quotes of a `--cap` scan from fresh `market_snapshots` rows, when the
+/// worker or an earlier scan stored enough of the market's built-in list:
+/// no request at all. `None` means "scan live".
+fn cached_cap_quotes(market: Market, cap: market::CapFilter) -> Option<Vec<crate::api::Quote>> {
+    let tier = cap.tier()?;
+    if !matches!(market, Market::In | Market::Us) {
+        return None;
+    }
+    let label = crate::value_name(market);
+    let since = chrono::Utc::now().timestamp() - SNAPSHOT_MAX_AGE_SECS;
+    let filter = crate::db::SnapshotFilter {
+        market: Some(label),
+        updated_since: Some(since),
+        ..Default::default()
+    };
+    let (all, rows) = crate::db::with_db(|d| {
+        let all = d.query_snapshots(&filter)?;
+        let rows = d.query_snapshots(&crate::db::SnapshotFilter {
+            cap_tier: Some(tier),
+            ..filter.clone()
+        })?;
+        Ok((all, rows))
+    })?;
+    // Part of the list only: a scan of it would miss most of the market.
+    if all.len() * 2 < market.universe().len() {
+        return None;
+    }
+    Some(
+        rows.iter()
+            .map(crate::worker::quote_from_snapshot)
+            .collect(),
+    )
+}
+
+/// Quotes a scan ranks. `--cap` uses fresh cached snapshots when it can; an
+/// NSE index scan uses the bulk snapshot (`prefer_bulk`, for scans that need
+/// only price and change) or falls back to it when Yahoo can't answer;
+/// everything else is a live Yahoo scan. The result is cut to `cap`.
+async fn scan_quotes(
+    client: &YahooClient,
+    market: Market,
+    scan: &Scan,
+    cap: Option<market::CapFilter>,
+    prefer_bulk: bool,
+) -> Result<Vec<crate::api::Quote>> {
+    if scan.bulk.is_empty()
+        && let Some(c) = cap
+        && let Some(cached) = cached_cap_quotes(market, c)
+    {
+        eprintln!(
+            "  \u{24d8} {} from cache.db (updated in the last {} min).",
+            c.tier().map_or("all", market::CapTier::as_str),
+            SNAPSHOT_MAX_AGE_SECS / 60
+        );
+        return Ok(cached);
+    }
+    if prefer_bulk && !scan.bulk.is_empty() {
+        return Ok(market::filter_by_cap(scan.bulk.clone(), cap));
+    }
+    let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
+    match client.get_quote(&refs).await {
+        Ok(q) => Ok(market::filter_by_cap(q, cap)),
+        Err(e) if !scan.bulk.is_empty() => {
+            eprintln!(
+                "  \u{24d8} Yahoo Finance did not answer ({:#}); using NSE's index snapshot (no P/E or market cap).",
+                e
+            );
+            Ok(market::filter_by_cap(scan.bulk.clone(), cap))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Scan title with the `--cap` tier appended: `NIFTY 500 (mid cap)`.
+fn cap_scope(scope: &str, cap: Option<market::CapFilter>) -> String {
+    match cap.and_then(market::CapFilter::tier) {
+        Some(t) => format!("{scope} ({} cap)", t.as_str()),
+        None => scope.to_string(),
+    }
+}
+
 pub async fn cmd_movers(
     market: Market,
     universe: Option<market::Universe>,
+    cap: Option<market::CapFilter>,
     fmt: Format,
 ) -> Result<()> {
     check_universe(market, universe)?;
     let client = YahooClient::new().await?;
-    let (symbols, scope) = scan_symbols(&client, market, universe).await?;
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let scan = scan_symbols(&client, market, universe).await?;
+    let quotes = scan_quotes(&client, market, &scan, cap, true).await?;
+    let scope = cap_scope(&scan.scope, cap);
     let (gainers, losers) = mover_rows(&quotes, 10);
     match fmt {
         Format::Json => {
@@ -143,17 +288,18 @@ pub async fn cmd_movers(
             continue;
         }
         println!(
-            "  {:<14} {:>10} {:>10} {:>14}",
+            "  {:<14} {:>10} {:>10} {:>14} {:>6}",
             "Symbol".bold(),
             "Price".bold(),
             "Change %".bold(),
-            "Volume".bold()
+            "Volume".bold(),
+            "Cap".bold()
         );
-        println!("  {}", "─".repeat(52).dimmed());
+        println!("  {}", "─".repeat(59).dimmed());
         for r in rows.iter() {
             let pct = format!("{:+.2}%", r.change_percent);
             println!(
-                "  {:<14} {:>10} {:>10} {:>14}",
+                "  {:<14} {:>10} {:>10} {:>14} {:>6}",
                 r.symbol.cyan(),
                 format_asset_price(r.price, r.currency.as_deref(), &r.symbol),
                 if r.side == "gainer" {
@@ -161,7 +307,10 @@ pub async fn cmd_movers(
                 } else {
                     pct.red()
                 },
-                r.volume.map_or("N/A".to_string(), format_volume)
+                r.volume.map_or("N/A".to_string(), format_volume),
+                market::CapTier::parse(r.cap_tier)
+                    .map_or("", market::CapTier::badge)
+                    .dimmed()
             );
         }
     }
@@ -699,6 +848,7 @@ pub(crate) struct ScreenRow {
     pub(crate) market_cap: Option<f64>,
     pub(crate) dividend_yield: Option<f64>,
     pub(crate) currency: Option<String>,
+    pub(crate) cap_tier: &'static str,
 }
 
 impl CsvRow for ScreenRow {
@@ -711,6 +861,7 @@ impl CsvRow for ScreenRow {
         "market_cap",
         "dividend_yield",
         "currency",
+        "cap_tier",
     ];
 }
 
@@ -725,6 +876,7 @@ impl From<&crate::api::Quote> for ScreenRow {
             market_cap: q.market_cap,
             dividend_yield: q.trailing_annual_dividend_yield,
             currency: q.currency.clone(),
+            cap_tier: market::cap_tier_of(q).as_str(),
         }
     }
 }
@@ -774,14 +926,15 @@ pub async fn cmd_screen(
     category: &str,
     market: Market,
     universe: Option<market::Universe>,
+    cap: Option<market::CapFilter>,
     fmt: Format,
 ) -> Result<()> {
     market.require_stocks("screen")?;
     check_universe(market, universe)?;
     let client = YahooClient::new().await?;
-    let (symbols, scope) = scan_symbols(&client, market, universe).await?;
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let scan = scan_symbols(&client, market, universe).await?;
+    let quotes = scan_quotes(&client, market, &scan, cap, false).await?;
+    let scope = cap_scope(&scan.scope, cap);
 
     let (title, filtered) = screen_matches(category, &quotes)?;
 
@@ -793,7 +946,7 @@ pub async fn cmd_screen(
         };
     }
 
-    let title = if universe.is_some() {
+    let title = if universe.is_some() || cap.is_some_and(|c| c.tier().is_some()) {
         format!("{} — {}", title, scope)
     } else {
         title
@@ -804,14 +957,15 @@ pub async fn cmd_screen(
         return Ok(());
     }
     println!(
-        "  {:<14} {:>10} {:>10} {:>10} {:>14}",
+        "  {:<14} {:>10} {:>10} {:>10} {:>14} {:>6}",
         "Symbol".bold(),
         "Price".bold(),
         "Change %".bold(),
         "P/E".bold(),
-        "Market Cap".bold()
+        "Market Cap".bold(),
+        "Cap".bold()
     );
-    println!("  {}", "─".repeat(62).dimmed());
+    println!("  {}", "─".repeat(69).dimmed());
 
     for q in &filtered {
         let sym = q.symbol.as_deref().unwrap_or("???");
@@ -823,14 +977,15 @@ pub async fn cmd_screen(
             format!("{:.2}%", pct).red().to_string()
         };
         println!(
-            "  {:<14} {:>10} {:>10} {:>10} {:>14}",
+            "  {:<14} {:>10} {:>10} {:>10} {:>14} {:>6}",
             sym.cyan(),
             format_price(q.regular_market_price.unwrap_or(0.0), cur),
             pct_str,
             q.trailing_pe
                 .map_or("N/A".to_string(), |v| format!("{:.1}", v)),
             q.market_cap
-                .map_or("N/A".to_string(), |v| format_large_number(v, cur))
+                .map_or("N/A".to_string(), |v| format_large_number(v, cur)),
+            market::cap_tier_of(q).badge().dimmed()
         );
     }
     println!("\n  {} {} stocks matched", "→".cyan(), filtered.len());
@@ -1313,12 +1468,16 @@ pub async fn cmd_surprise(market: Market) -> Result<()> {
 
 // ── Dividend Calendar ──
 
-pub async fn cmd_heatmap(market: Market, universe: Option<market::Universe>) -> Result<()> {
+pub async fn cmd_heatmap(
+    market: Market,
+    universe: Option<market::Universe>,
+    cap: Option<market::CapFilter>,
+) -> Result<()> {
     check_universe(market, universe)?;
     let client = YahooClient::new().await?;
-    let (symbols, scope) = scan_symbols(&client, market, universe).await?;
-    let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let mut quotes = client.get_quote(&refs).await?;
+    let scan = scan_symbols(&client, market, universe).await?;
+    let mut quotes = scan_quotes(&client, market, &scan, cap, true).await?;
+    let scope = cap_scope(&scan.scope, cap);
     quotes.sort_by(|a, b| {
         b.regular_market_change_percent
             .unwrap_or(0.0)

@@ -114,7 +114,8 @@ fn portfolio_totals_skip_holdings_without_a_price() {
             "currency",
             "name",
             "price_source",
-            "nav_date"
+            "nav_date",
+            "cap_tier"
         ]
     );
     assert_eq!(row["price_source"], "quote");
@@ -136,7 +137,7 @@ fn portfolio_csv_leaves_missing_prices_empty() {
     let report = portfolio_report(&p, &valued(&p, Vec::new()), day("2026-01-02"));
     assert_eq!(
         to_csv(&report.holdings).unwrap().lines().nth(1),
-        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,")
+        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown")
     );
 }
 
@@ -751,6 +752,7 @@ fn inline_rows_match_their_columns() {
         market_cap: None,
         dividend_yield: None,
         currency: None,
+        cap_tier: "unknown",
     });
     assert_columns(&super::holdings::AlertRow {
         index: 0,

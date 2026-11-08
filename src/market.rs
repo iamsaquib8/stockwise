@@ -1220,6 +1220,15 @@ pub enum Universe {
     /// NIFTY IT
     #[value(name = "niftyit")]
     NiftyIt,
+    /// NIFTY 500: one bulk NSE request prices every member
+    #[value(name = "nifty500")]
+    Nifty500,
+    /// NIFTY MIDCAP 150
+    #[value(name = "midcap150")]
+    Midcap150,
+    /// NIFTY SMALLCAP 250
+    #[value(name = "smallcap250")]
+    Smallcap250,
 }
 
 impl Universe {
@@ -1231,6 +1240,9 @@ impl Universe {
             Universe::Nifty100 => "NIFTY 100",
             Universe::BankNifty => "NIFTY BANK",
             Universe::NiftyIt => "NIFTY IT",
+            Universe::Nifty500 => "NIFTY 500",
+            Universe::Midcap150 => "NIFTY MIDCAP 150",
+            Universe::Smallcap250 => "NIFTY SMALLCAP 250",
         }
     }
 
@@ -1243,7 +1255,10 @@ impl Universe {
             Universe::Nifty50 | Universe::Nifty100 => INDIA_POPULAR,
             Universe::BankNifty => BANK_NIFTY,
             Universe::NiftyIt => NIFTY_IT,
-            Universe::NiftyNext50 => return None,
+            Universe::NiftyNext50
+            | Universe::Nifty500
+            | Universe::Midcap150
+            | Universe::Smallcap250 => return None,
         };
         Some(list.iter().map(|s| s.to_string()).collect())
     }
@@ -1317,8 +1332,420 @@ pub const COMMODITY_UNIVERSE: &[(&str, &str)] = &[
 pub const SCREENER_CATEGORIES: &[&str] =
     &["undervalued", "growth", "dividend", "momentum", "bluechip"];
 
+// ── Market-cap tiers ──
+
+/// Market-cap bucket shown as a badge and used by `--cap`. India follows the
+/// SEBI/AMFI rank convention when index membership is known (cached from
+/// NSE index scans) and falls back to rupee cut-offs offline; every other
+/// market uses USD-equivalent bands. A display and filtering aid, not a
+/// regulatory classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CapTier {
+    Mega,
+    Large,
+    Mid,
+    Small,
+    Micro,
+    /// No market cap, or a currency with no rate in the table.
+    Unknown,
+}
+
+/// India fallback cut-offs in rupees, from AMFI's half-yearly list that
+/// SEBI's categories follow (top 100 companies are large cap, ranks 101-250
+/// mid cap, the rest small cap). Rounded from the list dated December 2024:
+/// large cap from about ₹1,00,000 Cr, mid cap from about ₹33,200 Cr. AMFI
+/// publishes new cut-offs every January and July, so update these values
+/// (and the date here) when they move.
+pub const INDIA_MEGA_MIN_INR: f64 = 5.0e12; // ₹5,00,000 Cr
+pub const INDIA_LARGE_MIN_INR: f64 = 1.0e12; // ₹1,00,000 Cr
+pub const INDIA_MID_MIN_INR: f64 = 3.3e11; // ₹33,000 Cr
+pub const INDIA_SMALL_MIN_INR: f64 = 1.0e11; // ₹10,000 Cr
+
+/// USD-equivalent bands for every other market.
+pub const USD_MEGA_MIN: f64 = 200.0e9;
+pub const USD_LARGE_MIN: f64 = 10.0e9;
+pub const USD_MID_MIN: f64 = 2.0e9;
+pub const USD_SMALL_MIN: f64 = 300.0e6;
+
+impl CapTier {
+    /// Lower-case name stored in `market_snapshots.cap_tier` and `--json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapTier::Mega => "mega",
+            CapTier::Large => "large",
+            CapTier::Mid => "mid",
+            CapTier::Small => "small",
+            CapTier::Micro => "micro",
+            CapTier::Unknown => "unknown",
+        }
+    }
+
+    /// Badge text: `Large`, `Mid`, ... (empty for `Unknown`).
+    pub fn badge(self) -> &'static str {
+        match self {
+            CapTier::Mega => "Mega",
+            CapTier::Large => "Large",
+            CapTier::Mid => "Mid",
+            CapTier::Small => "Small",
+            CapTier::Micro => "Micro",
+            CapTier::Unknown => "",
+        }
+    }
+
+    /// Parse a tier name, case-insensitively.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "mega" => CapTier::Mega,
+            "large" => CapTier::Large,
+            "mid" => CapTier::Mid,
+            "small" => CapTier::Small,
+            "micro" => CapTier::Micro,
+            "unknown" => CapTier::Unknown,
+            _ => return None,
+        })
+    }
+
+    /// Tier of a market cap given in `currency` (`GBp` pence and `JPY` yen
+    /// included), by symbol for Indian stocks. `members` is the cached NSE
+    /// index membership, if any.
+    pub fn classify(
+        symbol: &str,
+        mcap: Option<f64>,
+        currency: Option<&str>,
+        members: Option<&IndiaMembership>,
+    ) -> Self {
+        let upper = symbol.to_ascii_uppercase();
+        let india = currency == Some("INR") || upper.ends_with(".NS") || upper.ends_with(".BO");
+        if india {
+            if let Some(t) = members.and_then(|m| m.tier(&upper, mcap)) {
+                return t;
+            }
+            return match mcap.filter(|v| *v > 0.0) {
+                Some(m) => Self::from_bands(
+                    m,
+                    [
+                        INDIA_MEGA_MIN_INR,
+                        INDIA_LARGE_MIN_INR,
+                        INDIA_MID_MIN_INR,
+                        INDIA_SMALL_MIN_INR,
+                    ],
+                ),
+                None => CapTier::Unknown,
+            };
+        }
+        let Some(usd) = mcap
+            .filter(|v| *v > 0.0)
+            .and_then(|m| approx_usd(m, currency))
+        else {
+            return CapTier::Unknown;
+        };
+        Self::from_bands(
+            usd,
+            [USD_MEGA_MIN, USD_LARGE_MIN, USD_MID_MIN, USD_SMALL_MIN],
+        )
+    }
+
+    fn from_bands(v: f64, [mega, large, mid, small]: [f64; 4]) -> Self {
+        if v >= mega {
+            CapTier::Mega
+        } else if v >= large {
+            CapTier::Large
+        } else if v >= mid {
+            CapTier::Mid
+        } else if v >= small {
+            CapTier::Small
+        } else {
+            CapTier::Micro
+        }
+    }
+}
+
+/// Tier of a quote, using the NSE membership cached by earlier index scans.
+pub fn cap_tier_of(q: &crate::api::Quote) -> CapTier {
+    CapTier::classify(
+        q.symbol.as_deref().unwrap_or(""),
+        q.market_cap,
+        q.currency.as_deref(),
+        IndiaMembership::shared(),
+    )
+}
+
+/// ` [Large]`-style badge for a quote's cap tier; `None` when unknown.
+pub fn cap_badge(q: &crate::api::Quote) -> Option<String> {
+    match cap_tier_of(q) {
+        CapTier::Unknown => None,
+        t => Some(format!("[{}]", t.badge())),
+    }
+}
+
+/// A quote as JSON with its `cap_tier` added (`--json` of `quote`, `deep`).
+pub fn quote_json(q: &crate::api::Quote) -> serde_json::Value {
+    let mut v = serde_json::to_value(q).unwrap_or(serde_json::Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("cap_tier".into(), cap_tier_of(q).as_str().into());
+    }
+    v
+}
+
+/// `--cap` value of the scans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CapFilter {
+    All,
+    Mega,
+    Large,
+    Mid,
+    Small,
+    Micro,
+}
+
+impl CapFilter {
+    pub fn tier(self) -> Option<CapTier> {
+        match self {
+            CapFilter::All => None,
+            CapFilter::Mega => Some(CapTier::Mega),
+            CapFilter::Large => Some(CapTier::Large),
+            CapFilter::Mid => Some(CapTier::Mid),
+            CapFilter::Small => Some(CapTier::Small),
+            CapFilter::Micro => Some(CapTier::Micro),
+        }
+    }
+
+    /// Does `tier` pass? `all` keeps everything, unknown tiers included.
+    pub fn matches(self, tier: CapTier) -> bool {
+        self.tier().is_none_or(|t| t == tier)
+    }
+}
+
+/// Keep the quotes whose tier passes `cap` (all of them without `--cap`).
+pub fn filter_by_cap(
+    quotes: Vec<crate::api::Quote>,
+    cap: Option<CapFilter>,
+) -> Vec<crate::api::Quote> {
+    match cap {
+        None => quotes,
+        Some(c) => quotes
+            .into_iter()
+            .filter(|q| c.matches(cap_tier_of(q)))
+            .collect(),
+    }
+}
+
+/// File in the data directory with the NSE index membership.
+const MEMBERSHIP_FILE: &str = "cap_membership.json";
+
+/// Index members saved by NSE index scans: lets the India cap tier follow
+/// the SEBI/AMFI ranks (NIFTY 100 = large, MIDCAP 150 = mid, SMALLCAP 250 =
+/// small, outside NIFTY 500 = micro) without a request.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct IndiaMembership {
+    /// NIFTY 100 in NSE's order (largest first): the first 10 are Mega.
+    pub nifty100: Vec<String>,
+    pub midcap150: Vec<String>,
+    pub smallcap250: Vec<String>,
+    pub nifty500: Vec<String>,
+}
+
+impl IndiaMembership {
+    /// Saved membership, loaded once per run; `None` when nothing is saved
+    /// or the data directory is unreadable.
+    pub fn shared() -> Option<&'static IndiaMembership> {
+        // Unit tests never read the real data directory.
+        if cfg!(test) {
+            return None;
+        }
+        static CELL: OnceLock<Option<IndiaMembership>> = OnceLock::new();
+        CELL.get_or_init(|| {
+            crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
+                .ok()
+                .filter(|m| !m.is_empty())
+        })
+        .as_ref()
+    }
+
+    /// Saved membership read now (not the once-per-run copy).
+    pub fn load() -> Self {
+        crate::store::load(MEMBERSHIP_FILE).unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nifty100.is_empty()
+            && self.midcap150.is_empty()
+            && self.smallcap250.is_empty()
+            && self.nifty500.is_empty()
+    }
+
+    /// Tier by membership, `None` when the saved lists can't tell. `upper`
+    /// is an upper-case Yahoo symbol (`RELIANCE.NS`).
+    pub fn tier(&self, upper: &str, mcap: Option<f64>) -> Option<CapTier> {
+        let has = |l: &[String]| l.iter().any(|s| s == upper);
+        if let Some(pos) = self.nifty100.iter().position(|s| s == upper) {
+            let huge = mcap.is_some_and(|m| m >= INDIA_MEGA_MIN_INR);
+            return Some(if pos < 10 || huge {
+                CapTier::Mega
+            } else {
+                CapTier::Large
+            });
+        }
+        if has(&self.midcap150) {
+            return Some(CapTier::Mid);
+        }
+        if has(&self.smallcap250) {
+            return Some(CapTier::Small);
+        }
+        // Outside NIFTY 500 is micro; inside it but in no saved list, the
+        // cut-offs decide.
+        if !self.nifty500.is_empty() && !has(&self.nifty500) {
+            return Some(CapTier::Micro);
+        }
+        None
+    }
+
+    /// Replace one index's members. Unknown index names are ignored.
+    pub fn set(&mut self, index: &str, symbols: &[String]) {
+        let list = match index {
+            "NIFTY 100" => &mut self.nifty100,
+            "NIFTY MIDCAP 150" => &mut self.midcap150,
+            "NIFTY SMALLCAP 250" => &mut self.smallcap250,
+            "NIFTY 500" => &mut self.nifty500,
+            _ => return,
+        };
+        *list = symbols.iter().map(|s| s.to_ascii_uppercase()).collect();
+    }
+
+    /// Save one index's members next to the others (best effort).
+    pub fn record(index: &str, symbols: &[String]) {
+        if !matches!(
+            index,
+            "NIFTY 100" | "NIFTY MIDCAP 150" | "NIFTY SMALLCAP 250" | "NIFTY 500"
+        ) || symbols.is_empty()
+        {
+            return;
+        }
+        let _ = crate::store::update(MEMBERSHIP_FILE, |m: &mut IndiaMembership| {
+            m.set(index, symbols);
+            Ok(())
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{CapFilter, CapTier, IndiaMembership};
+
+    fn tier(sym: &str, mcap: f64, cur: &str) -> CapTier {
+        CapTier::classify(sym, Some(mcap), Some(cur), None)
+    }
+
+    #[test]
+    fn us_bands_in_dollars() {
+        assert_eq!(tier("AAPL", 3.0e12, "USD"), CapTier::Mega);
+        assert_eq!(tier("X", 50.0e9, "USD"), CapTier::Large);
+        assert_eq!(tier("X", 5.0e9, "USD"), CapTier::Mid);
+        assert_eq!(tier("X", 1.0e9, "USD"), CapTier::Small);
+        assert_eq!(tier("X", 1.0e8, "USD"), CapTier::Micro);
+        assert_eq!(
+            CapTier::classify("X", None, Some("USD"), None),
+            CapTier::Unknown
+        );
+        assert_eq!(tier("X", 0.0, "USD"), CapTier::Unknown);
+    }
+
+    #[test]
+    fn pence_and_yen_are_converted() {
+        // 100 billion pence = £1B ≈ $1.27B → small, not mega.
+        assert_eq!(tier("VOD.L", 1.0e11, "GBp"), CapTier::Small);
+        // £100B ≈ $127B → large.
+        assert_eq!(tier("SHEL.L", 1.0e13, "GBp"), CapTier::Large);
+        assert_eq!(tier("SHEL.L", 100.0e9, "GBP"), CapTier::Large);
+        // ¥40 trillion ≈ $268B → mega; ¥1 trillion ≈ $6.7B → mid.
+        assert_eq!(tier("7203.T", 4.0e13, "JPY"), CapTier::Mega);
+        assert_eq!(tier("6758.T", 1.0e12, "JPY"), CapTier::Mid);
+        // ¥30 billion ≈ $200M → micro.
+        assert_eq!(tier("1234.T", 3.0e10, "JPY"), CapTier::Micro);
+        // No rate for the currency: unknown, never a guess.
+        assert_eq!(tier("X", 1.0e12, "XYZ"), CapTier::Unknown);
+    }
+
+    #[test]
+    fn india_falls_back_to_rupee_cutoffs() {
+        assert_eq!(tier("RELIANCE.NS", 1.9e13, "INR"), CapTier::Mega);
+        assert_eq!(tier("X.NS", 2.0e12, "INR"), CapTier::Large);
+        assert_eq!(tier("X.NS", 5.0e11, "INR"), CapTier::Mid);
+        assert_eq!(tier("X.NS", 2.0e11, "INR"), CapTier::Small);
+        assert_eq!(tier("X.BO", 2.0e10, "INR"), CapTier::Micro);
+    }
+
+    #[test]
+    fn india_uses_index_membership_when_known() {
+        let mut m = IndiaMembership::default();
+        let n100: Vec<String> = (0..100).map(|i| format!("L{i}.NS")).collect();
+        m.set("NIFTY 100", &n100);
+        m.set("NIFTY MIDCAP 150", &["MIDX.NS".to_string()]);
+        m.set("NIFTY SMALLCAP 250", &["SMLX.NS".to_string()]);
+        let all: Vec<String> = n100
+            .iter()
+            .cloned()
+            .chain(["MIDX.NS".into(), "SMLX.NS".into()])
+            .collect();
+        m.set("NIFTY 500", &all);
+        let c = |s: &str, mc| CapTier::classify(s, mc, Some("INR"), Some(&m));
+        assert_eq!(c("L0.NS", None), CapTier::Mega);
+        assert_eq!(c("l50.ns", None), CapTier::Large);
+        // A big cap outside the top 10 is Mega too.
+        assert_eq!(c("L50.NS", Some(6.0e12)), CapTier::Mega);
+        assert_eq!(c("MIDX.NS", None), CapTier::Mid);
+        assert_eq!(c("SMLX.NS", Some(1.0e13)), CapTier::Small);
+        // Outside NIFTY 500: micro whatever the cap says.
+        assert_eq!(c("TINY.NS", Some(1.0e13)), CapTier::Micro);
+        // Unknown list: cut-offs decide.
+        let mut part = IndiaMembership::default();
+        part.set("NIFTY 100", &n100);
+        assert_eq!(
+            CapTier::classify("ZZ.NS", Some(2.0e11), Some("INR"), Some(&part)),
+            CapTier::Small
+        );
+    }
+
+    #[test]
+    fn filter_by_cap_keeps_the_tier() {
+        let q = |sym: &str, mc: f64| crate::api::Quote {
+            symbol: Some(sym.into()),
+            market_cap: Some(mc),
+            currency: Some("USD".into()),
+            ..Default::default()
+        };
+        let quotes = vec![q("A", 3.0e11), q("B", 5.0e10), q("C", 5.0e9), q("D", 1.0e8)];
+        let syms = |v: Vec<crate::api::Quote>| -> Vec<String> {
+            v.into_iter().filter_map(|q| q.symbol).collect()
+        };
+        assert_eq!(syms(super::filter_by_cap(quotes.clone(), None)).len(), 4);
+        assert_eq!(
+            syms(super::filter_by_cap(quotes.clone(), Some(CapFilter::All))).len(),
+            4
+        );
+        assert_eq!(
+            syms(super::filter_by_cap(quotes.clone(), Some(CapFilter::Mid))),
+            ["C"]
+        );
+        assert_eq!(
+            syms(super::filter_by_cap(quotes, Some(CapFilter::Micro))),
+            ["D"]
+        );
+    }
+
+    #[test]
+    fn cap_names_and_filter() {
+        assert_eq!(CapTier::parse("Small"), Some(CapTier::Small));
+        assert_eq!(CapTier::parse("huge"), None);
+        assert_eq!(CapTier::Mid.badge(), "Mid");
+        assert_eq!(CapTier::Unknown.badge(), "");
+        assert!(CapFilter::All.matches(CapTier::Unknown));
+        assert!(CapFilter::Large.matches(CapTier::Large));
+        assert!(!CapFilter::Large.matches(CapTier::Mega));
+        assert!(!CapFilter::Mid.matches(CapTier::Unknown));
+    }
+
     #[test]
     fn symbols_pick_their_own_market() {
         use super::{Exchange, Market, market_of_symbol as m};
