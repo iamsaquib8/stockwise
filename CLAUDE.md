@@ -34,4 +34,4 @@ cargo build --release
 - **Financial Math**: Integer minor units (`i64` cents/pence/paise) or `rust_decimal::Decimal` for money. `f64` for analytical ratios (XIRR, Sharpe, beta).
 - **Compliance**: Never output financial advice, stock picks, or price targets (`DISCLAIMER.md`).
 - **Data Protection**: Zero raw market-data leakage; never commit raw OHLCV series.
-- **Offline First**: All core commands operate 100% offline from local files; Pro features verify offline Ed25519 signatures without runtime telemetry.
+- **Offline First**: All core commands operate 100% offline from local files; zero telemetry or external network calls needed during analysis.
