@@ -68,7 +68,9 @@ To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mc
 | Tax-loss & 112A LTCG harvest | `stockwise harvest --json` |
 | Results and dividend dates | `stockwise calendar --json` |
 | Watchlist, alerts | `stockwise watch --json` · `stockwise alert check --json` |
-| SIP for a goal | `stockwise goal sip --target 1cr --years 15 --json` |
+| SIP for a goal | `stockwise goal sip --target 1cr --years 15 --json` (also `--months`, `--by 2031-06`, `--inflation`, `--net`) |
+| Saved goals and funded share | `stockwise goal list --json` |
+| SWP runway · loan prepayment vs SIP | `stockwise goal swp --corpus 1cr --withdrawal 50k --json` · `stockwise goal prepay --principal 50L --loan-rate 9 --remaining-months 240 --extra 10k --json` |
 | Retirement corpus | `stockwise goal retire --monthly-expense 80k --years-to-retire 20 --years-in-retirement 30 --json` |
 | Setup problems | `stockwise doctor` |
 

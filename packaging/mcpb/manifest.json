@@ -152,7 +152,7 @@
     },
     {
       "name": "goal_sip",
-      "description": "SIP for a goal. Monthly SIP needed to reach a target amount in a number of years at an expected return, optionally stepped up every year, with a year-by-year schedule."
+      "description": "SIP for a goal. Monthly SIP needed to reach a target amount by a horizon (years, months or a date), with a horizon-matched return, tax and exit load at redemption, P10/P50/P90 outcome bands and a return sensitivity."
     },
     {
       "name": "goal_retire",
@@ -161,6 +161,18 @@
     {
       "name": "goal_education",
       "description": "Education goal. Future cost of an education from today's cost and education inflation, and the monthly SIP that pays for it."
+    },
+    {
+      "name": "goal_swp",
+      "description": "SWP runway. How long a corpus lasts under monthly withdrawals that rise with inflation: equity SWP (tax on the gain share) against an FD (interest at the slab rate)."
+    },
+    {
+      "name": "goal_prepay",
+      "description": "Loan prepayment vs SIP. Exact interest and tenure saved against P10/P50/P90 after-tax SIP outcomes and the before-tax return a SIP needs to break even."
+    },
+    {
+      "name": "goal_list",
+      "description": "Saved goals. The user's saved goals with months left, live value of linked holdings, funded share and the monthly SIP still needed."
     },
     {
       "name": "alerts_list",

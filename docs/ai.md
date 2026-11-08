@@ -235,7 +235,9 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `rebalance` | Trades to reach your saved target weights (or equal weight); buy-only when `inflow` is given | `rebalance --json` |
 | `calendar` | Results, ex-dividend and split dates for tickers, or for your holdings and watchlist | `calendar --json` |
 | `ipo_board` / `ipo_analyze` | Open, upcoming and recently listed IPOs from NSE; one issue's terms, subscription and allotment odds | `ipo --json` |
-| `goal_sip` / `goal_retire` / `goal_education` | Goal calculators | `goal ... --json` |
+| `goal_sip` / `goal_retire` / `goal_education` | Goal calculators: horizon-matched return, tax at redemption, outcome bands | `goal ... --json` |
+| `goal_swp` / `goal_prepay` | Withdrawal runway (SWP vs FD tax); loan prepayment against a SIP | `goal swp\|prepay --json` |
+| `goal_list` | Your saved goals with live funded share | `goal list --json` |
 | `alerts_list` | Your alerts checked against live data | `alert check --json` |
 | `watchlist` | Your watchlist with live prices | `watch --json` |
 

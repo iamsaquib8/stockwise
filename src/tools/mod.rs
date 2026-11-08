@@ -215,6 +215,50 @@ const SAVINGS: Param = opt(
     "Money already invested towards the goal (default 0)",
 );
 
+const HORIZON_MONTHS: Param = opt(
+    "months",
+    Kind::Integer { min: 1, max: 720 },
+    "Months to the goal, for horizons under or between whole years (give years, months or by)",
+);
+const HORIZON_BY: Param = opt(
+    "by",
+    Kind::Str,
+    "Target date, YYYY-MM or YYYY-MM-DD (give years, months or by)",
+);
+const TAX_PARAMS: [Param; 3] = [
+    opt(
+        "tax",
+        Kind::Enum(&["equity", "arbitrage", "debt", "none"]),
+        "How the redemption is taxed (default: matched to the horizon; none outside India and the US)",
+    ),
+    opt(
+        "slab_pct",
+        Kind::Number {
+            min: 0.0,
+            max: 50.0,
+        },
+        "Income-tax slab rate in percent for debt funds and FDs (default 30; US 24)",
+    ),
+    opt(
+        "exit_load_pct",
+        Kind::Number {
+            min: 0.0,
+            max: 50.0,
+        },
+        "Exit load in percent on units held under 12 months (default 1 for equity in India)",
+    ),
+];
+const NET: Param = opt(
+    "net",
+    Kind::Bool,
+    "Treat the target as what must be left after tax and exit load",
+);
+const GLIDE: Param = opt(
+    "glide_path",
+    Kind::Bool,
+    "Move to the short-term rate over the last 24 months (goals over 60 months)",
+);
+
 /// Every tool, in the order agents see them.
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -785,9 +829,13 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "goal_sip",
         title: "SIP for a goal",
-        description: "Monthly SIP needed to reach a target amount in a number of years at an \
-                      expected return, optionally stepped up every year, with a year-by-year \
-                      schedule. Amounts in the market's currency (₹ for India).",
+        description: "Monthly SIP needed to reach a target amount by a horizon (years, months or a \
+                      date). Without a return it uses a horizon-matched baseline (capital \
+                      preservation to 24 months, conservative hybrid to 60, long-term growth \
+                      beyond) and estimates tax and exit load at redemption, the SIP needed to \
+                      receive the target after tax, P10/P50/P90 outcome bands, the chance of \
+                      reaching the target and a return sensitivity. Amounts in the market's \
+                      currency (₹ for India).",
         params: &[
             req(
                 "target",
@@ -797,14 +845,30 @@ pub const TOOLS: &[Tool] = &[
                 },
                 "Target amount (1 crore = 10000000, 1 lakh = 100000)",
             ),
-            req("years", YEARS, "Years to the goal"),
+            opt(
+                "years",
+                YEARS,
+                "Years to the goal (give years, months or by)",
+            ),
+            HORIZON_MONTHS,
+            HORIZON_BY,
             opt(
                 "return_pct",
                 RETURN,
-                "Expected yearly return in percent (default 12)",
+                "Expected yearly return in percent (default: matched to the horizon)",
+            ),
+            opt(
+                "inflation_pct",
+                INFLATION,
+                "Yearly inflation in percent; the target is then in today's money (default 0)",
             ),
             STEP_UP,
             SAVINGS,
+            TAX_PARAMS[0],
+            TAX_PARAMS[1],
+            TAX_PARAMS[2],
+            NET,
+            GLIDE,
             MARKET,
         ],
         personal: false,
@@ -840,6 +904,27 @@ pub const TOOLS: &[Tool] = &[
                 RETURN,
                 "Yearly return during retirement in percent (default 7)",
             ),
+            opt(
+                "monthly_income",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e10,
+                },
+                "Pension, rent or other income in today's money that offsets expenses (default 0)",
+            ),
+            opt(
+                "buffer_years",
+                Kind::Integer { min: 0, max: 40 },
+                "Extra years the corpus must last (default 0)",
+            ),
+            opt(
+                "legacy",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e13,
+                },
+                "Amount to leave at the end, in today's money (default 0)",
+            ),
             STEP_UP,
             SAVINGS,
             MARKET,
@@ -850,7 +935,8 @@ pub const TOOLS: &[Tool] = &[
         name: "goal_education",
         title: "Education goal",
         description: "Future cost of an education from today's cost and education inflation, \
-                      and the monthly SIP that pays for it.",
+                      and the monthly SIP that pays for it, with the same horizon-matched return, \
+                      tax, outcome bands and sensitivity as goal_sip.",
         params: &[
             req(
                 "cost",
@@ -860,7 +946,13 @@ pub const TOOLS: &[Tool] = &[
                 },
                 "Cost in today's money",
             ),
-            req("years", YEARS, "Years until the money is needed"),
+            opt(
+                "years",
+                YEARS,
+                "Years until the money is needed (give years, months or by)",
+            ),
+            HORIZON_MONTHS,
+            HORIZON_BY,
             opt(
                 "inflation_pct",
                 INFLATION,
@@ -869,13 +961,142 @@ pub const TOOLS: &[Tool] = &[
             opt(
                 "return_pct",
                 RETURN,
-                "Expected yearly return in percent (default 12)",
+                "Expected yearly return in percent (default: matched to the horizon)",
             ),
             STEP_UP,
             SAVINGS,
+            TAX_PARAMS[0],
+            TAX_PARAMS[1],
+            TAX_PARAMS[2],
+            NET,
+            GLIDE,
             MARKET,
         ],
         personal: false,
+    },
+    Tool {
+        name: "goal_swp",
+        title: "SWP runway",
+        description: "How long a corpus lasts under monthly withdrawals that rise with inflation: \
+                      an equity SWP (tax on the gain share only) against an FD (interest at the \
+                      slab rate), with the initial withdrawal rate.",
+        params: &[
+            req(
+                "corpus",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1e13,
+                },
+                "Corpus to withdraw from",
+            ),
+            req(
+                "withdrawal",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1e10,
+                },
+                "Monthly withdrawal in today's money",
+            ),
+            opt("years", YEARS, "Years to look ahead (default 30)"),
+            opt(
+                "inflation_pct",
+                INFLATION,
+                "Yearly rise of the withdrawal in percent (default 6)",
+            ),
+            opt(
+                "return_pct",
+                RETURN,
+                "Yearly return of the corpus in percent (default 10)",
+            ),
+            opt(
+                "fd_return_pct",
+                RETURN,
+                "FD interest rate in percent for the comparison (default 7)",
+            ),
+            opt(
+                "slab_pct",
+                Kind::Number {
+                    min: 0.0,
+                    max: 50.0,
+                },
+                "Income-tax slab rate in percent (default 30)",
+            ),
+            opt(
+                "cost",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e13,
+                },
+                "What the corpus cost, when known (default: its value)",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "goal_prepay",
+        title: "Loan prepayment vs SIP",
+        description: "Compare prepaying a loan (extra monthly amount and/or a lump sum) with \
+                      investing the same money in a SIP: exact interest and tenure saved, \
+                      P10/P50/P90 after-tax SIP outcomes, the chance the SIP wins and the \
+                      before-tax return it needs to break even.",
+        params: &[
+            req(
+                "principal",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1e13,
+                },
+                "Loan principal outstanding",
+            ),
+            req(
+                "loan_rate_pct",
+                Kind::Number {
+                    min: 0.0,
+                    max: 50.0,
+                },
+                "Loan interest rate in percent a year",
+            ),
+            req(
+                "remaining_months",
+                Kind::Integer { min: 1, max: 720 },
+                "Months left on the loan",
+            ),
+            opt(
+                "extra",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e10,
+                },
+                "Extra amount every month (give extra and/or lump_sum)",
+            ),
+            opt(
+                "lump_sum",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e13,
+                },
+                "One-off amount today (give extra and/or lump_sum)",
+            ),
+            opt(
+                "return_pct",
+                RETURN,
+                "Yearly SIP return in percent (default: matched to the remaining term)",
+            ),
+            TAX_PARAMS[0],
+            TAX_PARAMS[1],
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "goal_list",
+        title: "Saved goals",
+        description: "The user's saved goals (goals.json) with months left, target after \
+                      inflation, live value of the linked holdings, funded share and the monthly \
+                      SIP still needed.",
+        params: &[MARKET],
+        personal: true,
     },
     Tool {
         name: "alerts_list",

@@ -250,6 +250,21 @@ pub fn ten_year(rows: &[YieldRow]) -> Option<&YieldRow> {
         .map(|(_, r)| r)
 }
 
+/// The 364-day T-bill yield from the cached CCIL page, in percent, with no
+/// request: `None` when the page was never fetched or has no such row.
+pub fn cached_tbill_364() -> Option<f64> {
+    let page = pagecache::read(
+        "ccil_tenorwise.html",
+        Duration::from_secs(14 * 86_400),
+        |t| !parse_ccil(t).is_empty(),
+    )?;
+    parse_ccil(&page.text)
+        .into_iter()
+        .find(|r| r.kind == Kind::Tbill && r.tenor.starts_with("364"))
+        .and_then(|r| r.ytm)
+        .filter(|y| (0.0..=50.0).contains(y))
+}
+
 /// Benchmark yields and where they came from.
 #[derive(Debug, Clone)]
 pub struct YieldSet {
