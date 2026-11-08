@@ -270,8 +270,19 @@ async fn scan_quotes_src(
     }
     let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
     let live = client.get_quote(&refs).await;
+    // Yahoo down: the keyed providers priced the built-in list (their quotes
+    // carry `meta.sources`). If the `--cap` filter leaves none of it, the
+    // screener lists companies in that tier instead.
+    let yahoo_down = match &live {
+        Err(_) => true,
+        Ok(q) => {
+            q.is_empty()
+                || (q.iter().any(|x| x.meta.is_some())
+                    && market::filter_by_cap(q.clone(), cap).is_empty())
+        }
+    };
     if scan.bulk.is_empty()
-        && live.as_ref().map_or(true, |q| q.is_empty())
+        && yahoo_down
         && let Some(q) = screener_quotes(client, market, cap).await
     {
         return Ok((q, false));
