@@ -717,6 +717,10 @@ stockwise options TCS                     expected moves (same as `options moves
         /// (default: the first whose header fits the importer)
         #[arg(long, value_name = "NAME")]
         sheet: Option<String>,
+        /// For `cas` with a .pdf: the statement password (else STOCKWISE_CAS_PASSWORD,
+        /// else a hidden prompt). Needs casparser on PATH. Use `-` as FILE to read casparser output from stdin
+        #[arg(long, value_name = "PASSWORD")]
+        password: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -4067,7 +4071,15 @@ async fn dispatch(
             file,
             replace,
             sheet,
-        } => commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await,
+            password,
+        } => {
+            if matches!(source, ImportSource::Cas) {
+                commands::cmd_import_cas(&file, password.as_deref(), replace, sheet.as_deref(), m)
+                    .await
+            } else {
+                commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await
+            }
+        }
         Commands::Wealth => commands::cmd_wealth(m).await,
         Commands::Rebalance {
             inflow,
