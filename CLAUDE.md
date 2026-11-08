@@ -1,14 +1,14 @@
 # CLAUDE.md — Context and Guidelines for Claude Code
 
 ## Project Overview
-StockWise is a local-first financial terminal, quantitative backtest engine, and MCP server ecosystem written in **100% Pure Rust 1.97**.
+StockWise is a local-first financial terminal, quantitative backtest engine, and MCP server written in **100% Pure Rust 1.97**.
 
-It spans 5 repositories:
-1. `iamsaquib8/stockwise`: Public core CLI (`src/main.rs`, `src/cli/`, `src/portfolio/`, `src/tax/`).
-2. `iamsaquib8/stockwise-pool`: Private point-in-time quant research lake, CPCV runner, and factor engine.
-3. `iamsaquib8/stockwise-slm`: Private in-house financial SLM fine-tuning and GGUF/ONNX packaging.
-4. `iamsaquib8/stockwise-pro`: Private statutory tax filing packs and CPA/CA audit workpapers.
-5. `iamsaquib8/stockwise-hub`: Private offline-first Ed25519 licensing and default AI gateway.
+It provides:
+- Core CLI & TUI (`src/main.rs`, `src/cli/`, `src/tui/`)
+- Multi-currency portfolio accounting & lots (`src/portfolio/`)
+- Statutory tax engines & audit workpapers (`src/tax/`)
+- Model Context Protocol server (`src/mcp/`)
+- Local SQLite database & background worker (`src/db/`, `src/worker/`)
 
 ## Build and Test Commands
 ```bash

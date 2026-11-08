@@ -1,12 +1,16 @@
 ---
-description: Multi-repository boundaries and privacy rules for the StockWise ecosystem
+description: Architecture boundaries and modular layout for StockWise
 globs: ["*"]
 ---
 
-# Multi-Repo Architecture Rules
+# Architecture Rules
 
-1. `iamsaquib8/stockwise`: Public MIT-licensed terminal, TUI, and MCP server. Contains zero raw exchange data, zero proprietary model weights, and zero hardcoded cloud keys.
-2. `iamsaquib8/stockwise-pool`: Private point-in-time quant research data lake. Only exports `<200 KB` statistical distributions (`strategy_benchmarks.json`) and quantized model weights (`model_card.json`). Never commit raw OHLCV bars.
-3. `iamsaquib8/stockwise-slm`: Private in-house SLM training and dataset curation. Emits GGUF and ONNX models.
-4. `iamsaquib8/stockwise-pro`: Private statutory tax form engines and CPA/CA audit workpapers.
-5. `iamsaquib8/stockwise-hub`: Private offline-first Ed25519 licensing and default AI gateway.
+1. `stockwise`: Public MIT-licensed terminal, TUI, and MCP server. Contains zero raw exchange data, zero proprietary model weights, and zero hardcoded cloud keys.
+2. Crate Layout & Modularisation:
+   - `cli/`: Command-line interface subcommands and argument parsing.
+   - `portfolio/`: Multi-currency portfolio accounting, XIRR, and lot management.
+   - `tax/`: Global statutory tax engines (US, UK, CA, IN, etc.) and audit workpapers.
+   - `importers/`: Broker CSV/JSON parsers with sanitization and validation.
+   - `mcp/`: Model Context Protocol server exposing financial analytics tools.
+   - `store/`: Local SQLite WAL database, disk caches, and encrypted backups.
+   - `server/`: Lightweight Web/REST/SSE server and Tailscale-ready dashboard.
