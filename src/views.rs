@@ -518,7 +518,21 @@ pub async fn history(
     market: Market,
 ) -> Result<History> {
     let (range, interval) = history_range(period);
-    let chart = src.chart(resolved, range, interval).await?;
+    let chart = match src.chart(resolved, range, interval).await {
+        Ok(chart) => chart,
+        // Yahoo's 404 for an unknown symbol is a missing resource, not an
+        // outage: report it as such so `/api/history` answers 404 and the CLI
+        // prints its symbol hint instead of a host and status.
+        Err(e) if crate::api::is_not_found(&e) => {
+            return Err(NotFound(format!(
+                "No price history for {}{}",
+                resolved,
+                market::not_found_hint(market)
+            ))
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
     let hist = history_from_chart(chart, resolved, period, interval);
     if hist.bars.is_empty() {
         return Err(NotFound(format!(
@@ -936,7 +950,7 @@ pub mod fixtures {
         async fn chart(&self, symbol: &str, _range: &str, interval: &str) -> Result<ChartData> {
             self.check()?;
             if find_quote(&self.quotes, symbol).is_none() {
-                bail!("Yahoo Finance returned HTTP 404 Not Found");
+                return Err(crate::api::no_history_error(symbol));
             }
             let step = if interval == "1d" { 86_400 } else { 300 };
             Ok(chart(
@@ -1243,13 +1257,41 @@ mod tests {
     #[test]
     fn history_of_unknown_symbol_fails() {
         let f = Fixture::default();
-        assert!(block(history(&f, "NOPE.NS", "1mo", Market::In)).is_err());
+        let err = block(history(&f, "NOPE.NS", "1mo", Market::In)).unwrap_err();
+        assert!(
+            err.downcast_ref::<NotFound>().is_some(),
+            "a 404 chart is a missing symbol, not an outage: {err:#}"
+        );
         let empty = ChartData {
             timestamp: None,
             ..chart(&[], 0, 1, "INR")
         };
         let h = history_from_chart(empty, "X", "1mo", "1d");
         assert!(h.bars.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_yahoo_404_chart_becomes_not_found() {
+        let server = crate::testutil::MockServer::start(vec![(
+            404,
+            r#"{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found, symbol may be delisted"}}}"#.into(),
+        )])
+        .await;
+        let base = server.url.clone();
+        let client = YahooClient::lazy_for_tests(None, move |url: &str| {
+            let path = url
+                .find("finance.yahoo.com")
+                .map_or("/", |i| &url[i + "finance.yahoo.com".len()..]);
+            format!("{base}{path}")
+        });
+        let err = history(&client, "NOTREAL.NS", "1mo", Market::In)
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<NotFound>().is_some(), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("No price history for NOTREAL.NS"),
+            "{err:#}"
+        );
     }
 
     #[test]
