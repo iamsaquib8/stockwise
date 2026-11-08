@@ -1,0 +1,16 @@
+---
+description: Architecture boundaries and modular layout for StockWise
+globs: ["*"]
+---
+
+# Architecture Rules
+
+1. `stockwise`: Public MIT-licensed terminal, TUI, and MCP server. Contains zero raw exchange data, zero proprietary model weights, and zero hardcoded cloud keys.
+2. Crate Layout & Modularisation:
+   - `cli/`: Command-line interface subcommands and argument parsing.
+   - `portfolio/`: Multi-currency portfolio accounting, XIRR, and lot management.
+   - `tax/`: Global statutory tax engines (US, UK, CA, IN, etc.) and audit workpapers.
+   - `importers/`: Broker CSV/JSON parsers with sanitization and validation.
+   - `mcp/`: Model Context Protocol server exposing financial analytics tools.
+   - `store/`: Local SQLite WAL database, disk caches, and encrypted backups.
+   - `server/`: Lightweight Web/REST/SSE server and Tailscale-ready dashboard.

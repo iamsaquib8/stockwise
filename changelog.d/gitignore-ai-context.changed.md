@@ -1,0 +1,1 @@
+- Harden repository `.gitignore` against local databases (`cache.db*`), user portfolios, model weights, and editor caches, and add universal AI developer context files (`CLAUDE.md`, `AGENTS.md`, `CODEX.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`, `.clinerules`).

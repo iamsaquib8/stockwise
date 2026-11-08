@@ -1,0 +1,16 @@
+---
+description: Financial arithmetic, penny precision, and tax rules
+globs: ["**/*.rs", "**/schema*/**"]
+---
+
+# Financial Math & Precision Standards
+
+- **Money Precision**: Currency amounts must use integer minor units (`i64` cents, pence, paise) or `rust_decimal::Decimal`. Never use floating-point types (`f32`/`f64`) for account balances or taxes.
+- **Ratios & Indicators**: Use `f64` for unitless quantities (XIRR, TTWROR, Sharpe, beta, RSI). Use `Option<f64>` when warmup periods are insufficient.
+- **Penny Conservation**: When splitting quantities or allocating cost bases across corporate actions (demergers, spin-offs), use integer remainder allocation so the sum of parts matches the initial basis down to the exact penny.
+- **Tax Rules**: Pluggable lot accounting must match statutory laws:
+  - US: FIFO, HIFO, MinTax SpecID; 30-day Wash Sales (IRC Sec. 1091).
+  - UK: Same-Day, 30-day Bed & Breakfast, Section 104 Pool (TCGA92/S106A).
+  - Canada: Adjusted Cost Base (`ACB`) pooling, 30-day Superficial Loss (ITA s. 54).
+  - Germany: *Abgeltungsteuer* (`26.375%`), *Teilfreistellung* (30% equity ETF tax exemption).
+  - India: Schedule 112A LTCG, Jan 2018 grandfathering, Section 288B rounding (nearest ₹10).

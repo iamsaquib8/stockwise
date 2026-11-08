@@ -1,0 +1,12 @@
+---
+description: Pure Rust standards, error handling, and performance rules
+globs: ["**/*.rs", "**/Cargo.toml"]
+---
+
+# Rust Engineering Standards
+
+- **Rust Version**: Rust 1.97+ (2024 edition).
+- **Error Handling**: Use `anyhow::Result` with `.with_context(|| ...)` in CLI entry points; use explicit `thiserror` enums for reusable libraries.
+- **Concurrency**: Use `tokio` for async networking and background daemons; use `rayon` for heavy mathematical CPU sweeps (backtesting, factor matrices).
+- **Serialization**: All user-facing data tables must support clean `--json` and `--csv` emission.
+- **No Python**: Do not introduce Python runtime scripts, conda environments, or C-FFI wrapper hacks.

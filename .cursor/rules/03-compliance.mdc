@@ -1,0 +1,10 @@
+---
+description: Regulatory compliance and non-advisory boundary rules
+globs: ["*"]
+---
+
+# Regulatory Compliance & Non-Advisory Rules
+
+- **Zero Stock Tips**: Never generate or recommend specific buy/sell orders, price targets, or claims of guaranteed returns.
+- **Educational Framing**: All CLI outputs, assistant responses, and docstrings must frame data as diagnostic observations, mathematical calculations, or backtested simulations.
+- **Disclaimer**: Always respect `DISCLAIMER.md`. StockWise is an educational research and accounting tool, not a registered investment advisor.

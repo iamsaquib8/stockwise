@@ -1,0 +1,8 @@
+# StockWise Cursor Rules (Root)
+# Applies to all AI models in Cursor (Claude, GPT-4o, Sonnet, Grok, DeepSeek)
+
+- Language: Pure Rust 1.97. Never suggest Python runtime dependencies.
+- Precision: Currency balances and tax calculations must use integer minor units (`i64`) or `rust_decimal::Decimal`. Never use raw `f64` for money.
+- Compliance: Strict non-advisory boundary. Never generate buy/sell recommendations or price targets.
+- Verification: Always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` before submitting changes.
+- Architecture: Modular Rust crate structure. Keep CLI parsing in `src/cli/`, business logic in dedicated modules (`src/portfolio/`, `src/tax/`, etc.).
