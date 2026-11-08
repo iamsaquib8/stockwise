@@ -673,6 +673,14 @@ fn resolve_symbol_in(symbol: &str, market: Market, crypto_quote: &str) -> String
         }
         Market::In => format!("{}.NS", normalize_india_ticker(&upper)),
         Market::Crypto if upper.contains('-') || explicit => upper,
+        Market::Crypto if upper.contains(['/', '_', ' ']) => {
+            // Exchange-style pairs: BTC/USD and eth_inr name BTC-USD / ETH-INR.
+            upper
+                .split(['/', '_', ' '])
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("-")
+        }
         Market::Crypto => format!("{}-{}", upper, crypto_quote),
         Market::Fx if upper.contains('=') || upper.starts_with('^') => upper,
         Market::Fx => {
@@ -1466,6 +1474,19 @@ mod tests {
             "ETH-EUR"
         );
         assert_eq!(resolve_symbol_in("^GSPC", Market::Crypto, "USD"), "^GSPC");
+        // Exchange-style separators name the same pair as BTC-USD.
+        assert_eq!(
+            resolve_symbol_in("BTC/USD", Market::Crypto, "USD"),
+            "BTC-USD"
+        );
+        assert_eq!(
+            resolve_symbol_in("eth_inr", Market::Crypto, "USD"),
+            "ETH-INR"
+        );
+        assert_eq!(
+            resolve_symbol_in("BTC USD", Market::Crypto, "USD"),
+            "BTC-USD"
+        );
     }
 
     #[test]
