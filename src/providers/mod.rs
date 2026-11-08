@@ -24,6 +24,7 @@
 
 pub mod alphavantage;
 pub mod bse;
+pub mod edgar;
 pub mod massive;
 pub mod nse;
 pub mod session;
