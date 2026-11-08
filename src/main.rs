@@ -26,6 +26,7 @@ mod commodity;
 mod config;
 mod daemon;
 mod daemon_status;
+mod db;
 mod derivatives;
 mod display;
 mod events;
@@ -219,6 +220,12 @@ enum Commands {
 
     /// Check your setup: data directory, network, cache, AI, broker
     Doctor,
+
+    /// Inspect or clear the persistent response cache (`cache.db`)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
 
     // ── Analysis ──
     /// Fundamental analysis with plain-English insights
@@ -865,6 +872,14 @@ stockwise man --dir ~/.local/share/man/man1    then: man stockwise-backtest")]
         #[arg(long, value_name = "DIR")]
         dir: Option<std::path::PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Show entries, size and location of `cache.db`
+    Status,
+    /// Delete every cached response (your portfolio and settings are untouched)
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -2416,7 +2431,15 @@ fn value_name<T: ValueEnum>(v: T) -> String {
 const GROUPS: &[(&str, &[&str])] = &[
     (
         "Start here",
-        &["quote", "deep", "markets", "dashboard", "search", "doctor"],
+        &[
+            "quote",
+            "deep",
+            "markets",
+            "dashboard",
+            "search",
+            "doctor",
+            "cache",
+        ],
     ),
     (
         "Analysis",
@@ -3059,6 +3082,7 @@ async fn dispatch(
         Commands::Dashboard => commands::cmd_dashboard(m).await,
         Commands::Search { query, out } => commands::cmd_search(&query, out.into()).await,
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
+        Commands::Cache { action } => commands::cmd_cache(matches!(action, CacheAction::Clear)),
 
         Commands::Analyze { symbol, out } => commands::cmd_analyze(&symbol, m, out.json).await,
         Commands::Events {

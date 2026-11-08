@@ -23,6 +23,7 @@ pub struct FetchStats {
     /// Fetches that failed after all retries.
     pub errors: AtomicU64,
     pub cache_hits_redis: AtomicU64,
+    pub cache_hits_sqlite: AtomicU64,
     pub cache_hits_memory: AtomicU64,
     pub cache_misses: AtomicU64,
 }
@@ -31,6 +32,7 @@ pub static STATS: FetchStats = FetchStats {
     requests: AtomicU64::new(0),
     errors: AtomicU64::new(0),
     cache_hits_redis: AtomicU64::new(0),
+    cache_hits_sqlite: AtomicU64::new(0),
     cache_hits_memory: AtomicU64::new(0),
     cache_misses: AtomicU64::new(0),
 };
@@ -177,6 +179,8 @@ struct CacheEntry {
 pub(crate) struct HybridCache {
     redis: Option<redis::aio::MultiplexedConnection>,
     memory: HashMap<String, CacheEntry>,
+    /// Use the SQLite `cache.db` as L2 when Redis is not connected.
+    persistent: bool,
 }
 
 /// The cache shared by Yahoo and an alternative data provider.
@@ -187,6 +191,7 @@ impl HybridCache {
         Self {
             redis: connect_redis().await,
             memory: HashMap::new(),
+            persistent: true,
         }
     }
 
@@ -195,6 +200,7 @@ impl HybridCache {
         Self {
             redis: None,
             memory: HashMap::new(),
+            persistent: false,
         }
     }
 
@@ -230,12 +236,21 @@ impl HybridCache {
                 None
             }
         });
-        count(if hit.is_some() {
-            &STATS.cache_hits_memory
-        } else {
-            &STATS.cache_misses
-        });
-        hit
+        if hit.is_some() {
+            count(&STATS.cache_hits_memory);
+            return hit;
+        }
+
+        // Persistent L2: a response fetched by an earlier command.
+        if self.persistent
+            && self.redis.is_none()
+            && let Some(v) = crate::db::http_get(key)
+        {
+            count(&STATS.cache_hits_sqlite);
+            return Some(v);
+        }
+        count(&STATS.cache_misses);
+        None
     }
 
     pub(crate) async fn set(&mut self, key: String, data: String, ttl: Duration) {
@@ -250,6 +265,11 @@ impl HybridCache {
                 .arg(&data)
                 .query_async(conn)
                 .await;
+        }
+
+        // Without Redis, keep the response on disk for the next command.
+        if self.persistent && self.redis.is_none() {
+            crate::db::http_set(&key, &data, ttl.as_secs(), "http");
         }
 
         // Also write to memory (fast path for same-session reads). The

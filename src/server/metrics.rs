@@ -200,6 +200,11 @@ impl Metrics {
         );
         let _ = writeln!(
             out,
+            "stockwise_cache_hits_total{{layer=\"sqlite\"}} {}",
+            load(&stats.cache_hits_sqlite)
+        );
+        let _ = writeln!(
+            out,
             "stockwise_cache_hits_total{{layer=\"memory\"}} {}",
             load(&stats.cache_hits_memory)
         );
