@@ -1447,7 +1447,7 @@ mod tests {
 
     #[test]
     fn signed_money() {
-        assert_eq!(money(-1234.5, Some("INR")), "-₹1234.50");
+        assert_eq!(money(-1234.5, Some("INR")), "-₹1,234.50");
         assert_eq!(money(12.0, Some("USD")), "$12.00");
     }
 

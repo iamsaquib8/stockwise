@@ -459,10 +459,14 @@ pub(super) fn portfolio_title(title: &str) -> String {
 
 fn signed_money(amount: f64, currency: Option<&str>) -> String {
     let sym = market::currency_symbol(currency);
+    let body = format!(
+        "{sym}{}",
+        crate::display::group_number(&format!("{:.2}", amount.abs()), market::is_inr(currency))
+    );
     if amount >= 0.0 {
-        format!("+{}{:.2}", sym, amount).green().to_string()
+        format!("+{body}").green().to_string()
     } else {
-        format!("-{}{:.2}", sym, amount.abs()).red().to_string()
+        format!("-{body}").red().to_string()
     }
 }
 
