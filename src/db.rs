@@ -43,6 +43,153 @@ pub fn path() -> Result<PathBuf> {
     store::path(FILE_NAME)
 }
 
+/// Market-cap bucket. Cut-offs are rough local-currency bands for filtering
+/// and display, not a regulatory classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapTier {
+    Mega,
+    Large,
+    Mid,
+    Small,
+    Micro,
+}
+
+impl CapTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapTier::Mega => "mega",
+            CapTier::Large => "large",
+            CapTier::Mid => "mid",
+            CapTier::Small => "small",
+            CapTier::Micro => "micro",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "mega" => CapTier::Mega,
+            "large" => CapTier::Large,
+            "mid" => CapTier::Mid,
+            "small" => CapTier::Small,
+            "micro" => CapTier::Micro,
+            _ => return None,
+        })
+    }
+
+    /// Bucket for a market cap in the market's own currency. `market` is
+    /// `in` (INR) or anything else (USD).
+    pub fn classify(market: &str, mcap: f64) -> Self {
+        let (mega, large, mid, small) = if market == "in" {
+            (1.0e13, 5.0e11, 1.5e11, 3.0e10)
+        } else {
+            (2.0e11, 1.0e10, 2.0e9, 3.0e8)
+        };
+        if mcap >= mega {
+            CapTier::Mega
+        } else if mcap >= large {
+            CapTier::Large
+        } else if mcap >= mid {
+            CapTier::Mid
+        } else if mcap >= small {
+            CapTier::Small
+        } else {
+            CapTier::Micro
+        }
+    }
+}
+
+/// One row of `market_snapshots`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Snapshot {
+    pub symbol: String,
+    pub market: String,
+    pub name: String,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub cap_tier: Option<String>,
+    pub mcap: Option<f64>,
+    pub price: Option<f64>,
+    pub change_1d: Option<f64>,
+    pub rvol: Option<f64>,
+    pub pe: Option<f64>,
+    pub roe: Option<f64>,
+    pub div_yield: Option<f64>,
+    pub updated_at: i64,
+}
+
+/// Columns a snapshot query may sort by (a whitelist: never user text in SQL).
+const SNAPSHOT_SORTS: &[&str] = &[
+    "symbol",
+    "mcap",
+    "price",
+    "change_1d",
+    "rvol",
+    "pe",
+    "roe",
+    "div_yield",
+];
+
+/// Filter for [`CacheDb::query_snapshots`].
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotFilter {
+    pub market: Option<String>,
+    pub cap_tier: Option<CapTier>,
+    pub sector: Option<String>,
+    pub min_pe: Option<f64>,
+    pub max_pe: Option<f64>,
+    pub min_roe: Option<f64>,
+    pub min_div_yield: Option<f64>,
+    pub min_rvol: Option<f64>,
+    /// Ignore rows not updated since this Unix time.
+    pub updated_since: Option<i64>,
+    pub sort_by: Option<String>,
+    pub descending: bool,
+    pub limit: Option<usize>,
+}
+
+/// One OHLCV bar; `ts` is Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bar {
+    pub ts: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
+
+/// A background task row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Task {
+    pub id: i64,
+    pub kind: String,
+    pub status: String,
+    pub progress_pct: f64,
+    pub title: String,
+    pub payload_json: String,
+    pub result_json: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn task_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        status: r.get(2)?,
+        progress_pct: r.get(3)?,
+        title: r.get(4)?,
+        payload_json: r.get(5)?,
+        result_json: r.get(6)?,
+        error: r.get(7)?,
+        created_at: r.get(8)?,
+        updated_at: r.get(9)?,
+    })
+}
+
+const TASK_COLS: &str = "id, kind, status, progress_pct, title, payload_json, result_json, error, created_at, updated_at";
+
 /// An open `cache.db`.
 pub struct CacheDb {
     conn: Connection,
@@ -74,7 +221,40 @@ impl CacheDb {
                  expires_at INTEGER NOT NULL,
                  source     TEXT NOT NULL DEFAULT ''
              );
-             CREATE INDEX IF NOT EXISTS http_cache_expires ON http_cache(expires_at);",
+             CREATE INDEX IF NOT EXISTS http_cache_expires ON http_cache(expires_at);
+             CREATE TABLE IF NOT EXISTS market_snapshots (
+                 symbol TEXT NOT NULL, market TEXT NOT NULL,
+                 name TEXT NOT NULL DEFAULT '', sector TEXT, industry TEXT,
+                 cap_tier TEXT, mcap REAL, price REAL, change_1d REAL,
+                 rvol REAL, pe REAL, roe REAL, div_yield REAL,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (symbol, market)
+             );
+             CREATE INDEX IF NOT EXISTS snap_market_cap ON market_snapshots(market, cap_tier);
+             CREATE INDEX IF NOT EXISTS snap_sector ON market_snapshots(market, sector);
+             CREATE TABLE IF NOT EXISTS ohlcv_bars (
+                 symbol TEXT NOT NULL, interval TEXT NOT NULL, ts INTEGER NOT NULL,
+                 open REAL, high REAL, low REAL, close REAL, volume REAL,
+                 PRIMARY KEY (symbol, interval, ts)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS nav_history (
+                 code TEXT NOT NULL, date TEXT NOT NULL, nav REAL NOT NULL,
+                 PRIMARY KEY (code, date)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS financial_results (
+                 symbol TEXT NOT NULL, period_end TEXT NOT NULL,
+                 is_annual INTEGER NOT NULL, source TEXT NOT NULL DEFAULT '',
+                 payload_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (symbol, period_end, is_annual)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS tasks (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
+                 progress_pct REAL NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '',
+                 payload_json TEXT NOT NULL DEFAULT '{}', result_json TEXT, error TEXT,
+                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, id);",
         )?;
         Ok(Self { conn })
     }
@@ -136,6 +316,307 @@ impl CacheDb {
         Ok(n as u64)
     }
 
+    // ── market_snapshots ──
+
+    pub fn upsert_snapshots(&mut self, rows: &[Snapshot]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT INTO market_snapshots (symbol, market, name, sector, industry, cap_tier,
+                     mcap, price, change_1d, rvol, pe, roe, div_yield, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                 ON CONFLICT(symbol, market) DO UPDATE SET name=excluded.name,
+                     sector=excluded.sector, industry=excluded.industry,
+                     cap_tier=excluded.cap_tier, mcap=excluded.mcap, price=excluded.price,
+                     change_1d=excluded.change_1d, rvol=excluded.rvol, pe=excluded.pe,
+                     roe=excluded.roe, div_yield=excluded.div_yield,
+                     updated_at=excluded.updated_at",
+            )?;
+            for r in rows {
+                st.execute(params![
+                    r.symbol,
+                    r.market,
+                    r.name,
+                    r.sector,
+                    r.industry,
+                    r.cap_tier,
+                    r.mcap,
+                    r.price,
+                    r.change_1d,
+                    r.rvol,
+                    r.pe,
+                    r.roe,
+                    r.div_yield,
+                    r.updated_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn query_snapshots(&self, f: &SnapshotFilter) -> Result<Vec<Snapshot>> {
+        let mut sql = String::from(
+            "SELECT symbol, market, name, sector, industry, cap_tier, mcap, price, change_1d,
+                    rvol, pe, roe, div_yield, updated_at FROM market_snapshots WHERE 1=1",
+        );
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        let mut cond = |clause: &str, v: rusqlite::types::Value| {
+            args.push(v);
+            sql.push_str(&format!(" AND {clause} ?{}", args.len()));
+        };
+        if let Some(v) = &f.market {
+            cond("market =", v.clone().into());
+        }
+        if let Some(v) = f.cap_tier {
+            cond("cap_tier =", v.as_str().to_string().into());
+        }
+        if let Some(v) = &f.sector {
+            cond("sector =", v.clone().into());
+        }
+        if let Some(v) = f.min_pe {
+            cond("pe >=", v.into());
+        }
+        if let Some(v) = f.max_pe {
+            cond("pe <=", v.into());
+        }
+        if let Some(v) = f.min_roe {
+            cond("roe >=", v.into());
+        }
+        if let Some(v) = f.min_div_yield {
+            cond("div_yield >=", v.into());
+        }
+        if let Some(v) = f.min_rvol {
+            cond("rvol >=", v.into());
+        }
+        if let Some(v) = f.updated_since {
+            cond("updated_at >=", v.into());
+        }
+        let sort = f
+            .sort_by
+            .as_deref()
+            .filter(|c| SNAPSHOT_SORTS.contains(c))
+            .unwrap_or("symbol");
+        sql.push_str(&format!(
+            " ORDER BY {sort} {}, symbol ASC",
+            if f.descending { "DESC" } else { "ASC" }
+        ));
+        if let Some(n) = f.limit {
+            sql.push_str(&format!(" LIMIT {n}"));
+        }
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok(Snapshot {
+                symbol: r.get(0)?,
+                market: r.get(1)?,
+                name: r.get(2)?,
+                sector: r.get(3)?,
+                industry: r.get(4)?,
+                cap_tier: r.get(5)?,
+                mcap: r.get(6)?,
+                price: r.get(7)?,
+                change_1d: r.get(8)?,
+                rvol: r.get(9)?,
+                pe: r.get(10)?,
+                roe: r.get(11)?,
+                div_yield: r.get(12)?,
+                updated_at: r.get(13)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ── ohlcv_bars ──
+
+    pub fn put_bars(&mut self, symbol: &str, interval: &str, bars: &[Bar]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO ohlcv_bars VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?;
+            for b in bars {
+                st.execute(params![
+                    symbol, interval, b.ts, b.open, b.high, b.low, b.close, b.volume
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Bars with `from <= ts <= to`, oldest first.
+    pub fn get_bars(&self, symbol: &str, interval: &str, from: i64, to: i64) -> Result<Vec<Bar>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT ts, open, high, low, close, volume FROM ohlcv_bars
+             WHERE symbol=?1 AND interval=?2 AND ts BETWEEN ?3 AND ?4 ORDER BY ts",
+        )?;
+        let rows = st.query_map(params![symbol, interval, from, to], |r| {
+            Ok(Bar {
+                ts: r.get(0)?,
+                open: r.get(1)?,
+                high: r.get(2)?,
+                low: r.get(3)?,
+                close: r.get(4)?,
+                volume: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ── nav_history ──
+
+    /// `navs` are `(YYYY-MM-DD, nav)` pairs.
+    pub fn put_navs(&mut self, code: &str, navs: &[(String, f64)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st =
+                tx.prepare_cached("INSERT OR REPLACE INTO nav_history VALUES (?1,?2,?3)")?;
+            for (d, n) in navs {
+                st.execute(params![code, d, n])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_navs(&self, code: &str) -> Result<Vec<(String, f64)>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT date, nav FROM nav_history WHERE code=?1 ORDER BY date")?;
+        let rows = st.query_map(params![code], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ── financial_results ──
+
+    pub fn put_result(
+        &self,
+        symbol: &str,
+        period_end: &str,
+        is_annual: bool,
+        source: &str,
+        payload_json: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO financial_results VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                symbol,
+                period_end,
+                is_annual,
+                source,
+                payload_json,
+                now_secs()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// `(period_end, is_annual, payload_json)`, newest period first.
+    pub fn get_results(&self, symbol: &str) -> Result<Vec<(String, bool, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT period_end, is_annual, payload_json FROM financial_results
+             WHERE symbol=?1 ORDER BY period_end DESC",
+        )?;
+        let rows = st.query_map(params![symbol], |r| {
+            Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ── tasks ──
+
+    pub fn enqueue_task(&self, kind: &str, title: &str, payload_json: &str) -> Result<i64> {
+        let now = now_secs();
+        self.conn.execute(
+            "INSERT INTO tasks (kind, title, payload_json, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?4)",
+            params![kind, title, payload_json, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_task(&self, id: i64) -> Result<Option<Task>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"),
+                params![id],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Newest first.
+    pub fn list_tasks(&self, limit: usize) -> Result<Vec<Task>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {TASK_COLS} FROM tasks ORDER BY id DESC LIMIT ?1"
+        ))?;
+        let rows = st.query_map(params![limit as i64], task_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Atomically move the oldest queued task to `running` and return it, so
+    /// two workers never take the same one.
+    pub fn claim_task(&self) -> Result<Option<Task>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "UPDATE tasks SET status='running', updated_at=?1
+                     WHERE id = (SELECT id FROM tasks WHERE status='queued' ORDER BY id LIMIT 1)
+                     RETURNING {TASK_COLS}"
+                ),
+                params![now_secs()],
+                task_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Record progress of a running task; returns false if it is no longer
+    /// running (cancelled), so the executor can stop.
+    pub fn set_task_progress(&self, id: i64, pct: f64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE tasks SET progress_pct=?2, updated_at=?3 WHERE id=?1 AND status='running'",
+            params![id, pct.clamp(0.0, 100.0), now_secs()],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn finish_task(&self, id: i64, outcome: std::result::Result<&str, &str>) -> Result<()> {
+        let (status, result, error) = match outcome {
+            Ok(r) => ("done", Some(r), None),
+            Err(e) => ("failed", None, Some(e)),
+        };
+        self.conn.execute(
+            "UPDATE tasks SET status=?2, result_json=?3, error=?4,
+                 progress_pct = CASE WHEN ?2='done' THEN 100 ELSE progress_pct END,
+                 updated_at=?5
+             WHERE id=?1 AND status='running'",
+            params![id, status, result, error, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Cancel a queued or running task; false when it already finished.
+    pub fn cancel_task(&self, id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE tasks SET status='cancelled', updated_at=?2
+             WHERE id=?1 AND status IN ('queued','running')",
+            params![id, now_secs()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Tasks left `running` by a worker that died: back to `queued`.
+    pub fn requeue_stale_tasks(&self, older_than_secs: i64) -> Result<u64> {
+        let n = self.conn.execute(
+            "UPDATE tasks SET status='queued', updated_at=?2
+             WHERE status='running' AND updated_at < ?1",
+            params![now_secs() - older_than_secs, now_secs()],
+        )?;
+        Ok(n as u64)
+    }
+
     pub fn stats(&self, file_bytes: u64) -> Result<CacheStats> {
         let (entries, fresh, bytes): (i64, i64, i64) = self.conn.query_row(
             "SELECT COUNT(*),
@@ -180,6 +661,12 @@ fn persistent_cache_disabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// Run `f` on the shared database; `None` when it is off or `f` fails.
+pub fn with_db<T>(f: impl FnOnce(&mut CacheDb) -> Result<T>) -> Option<T> {
+    let mut db = shared()?.lock().ok()?;
+    f(&mut db).ok()
 }
 
 /// Persistent-cache read used by the HTTP layer.
@@ -265,6 +752,173 @@ mod tests {
         assert_eq!(stats.entries, MAX_ROWS as u64);
         assert_eq!(db.get("k0").unwrap(), None);
         assert_eq!(db.get("new").unwrap().as_deref(), Some("v"));
+    }
+
+    fn snap(i: usize, market: &str, mcap: f64) -> Snapshot {
+        Snapshot {
+            symbol: format!("S{i}"),
+            market: market.into(),
+            name: format!("Stock {i}"),
+            sector: Some(if i % 2 == 0 { "Tech" } else { "Banks" }.into()),
+            cap_tier: Some(CapTier::classify(market, mcap).as_str().into()),
+            mcap: Some(mcap),
+            price: Some(100.0 + i as f64),
+            change_1d: Some((i % 7) as f64 - 3.0),
+            rvol: Some(0.5 + (i % 5) as f64),
+            pe: Some(10.0 + (i % 40) as f64),
+            updated_at: now_secs(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshots_filter_and_sort_by_cap_and_columns() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        // 600 stocks across all tiers; market caps spread from micro to mega.
+        let rows: Vec<Snapshot> = (0..600)
+            .map(|i| snap(i, "in", 1.0e9 * 1.03f64.powi(i as i32 * 2)))
+            .collect();
+        db.upsert_snapshots(&rows).unwrap();
+        let all = db
+            .query_snapshots(&SnapshotFilter {
+                market: Some("in".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 600);
+        let tiers: std::collections::HashSet<_> =
+            all.iter().filter_map(|r| r.cap_tier.clone()).collect();
+        assert!(tiers.len() >= 4, "{tiers:?}");
+        let large = db
+            .query_snapshots(&SnapshotFilter {
+                cap_tier: Some(CapTier::Large),
+                min_pe: Some(20.0),
+                sector: Some("Tech".into()),
+                sort_by: Some("pe".into()),
+                descending: true,
+                limit: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(large.len() <= 5);
+        assert!(large.iter().all(|r| r.cap_tier.as_deref() == Some("large")
+            && r.pe.unwrap() >= 20.0
+            && r.sector.as_deref() == Some("Tech")));
+        assert!(large.windows(2).all(|w| w[0].pe >= w[1].pe));
+        // A bogus sort column falls back to symbol instead of reaching SQL.
+        let rows = db
+            .query_snapshots(&SnapshotFilter {
+                sort_by: Some("symbol; DROP TABLE tasks".into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        // Upsert replaces by (symbol, market).
+        let mut again = snap(0, "in", 5.0e12);
+        again.price = Some(1.0);
+        db.upsert_snapshots(&[again]).unwrap();
+        let n = db
+            .query_snapshots(&SnapshotFilter::default())
+            .unwrap()
+            .len();
+        assert_eq!(n, 600);
+    }
+
+    #[test]
+    fn cap_tiers_classify_by_market() {
+        assert_eq!(CapTier::classify("in", 2.0e13), CapTier::Mega);
+        assert_eq!(CapTier::classify("in", 6.0e11), CapTier::Large);
+        assert_eq!(CapTier::classify("us", 5.0e9), CapTier::Mid);
+        assert_eq!(CapTier::classify("us", 1.0e6), CapTier::Micro);
+        assert_eq!(CapTier::parse("Small"), Some(CapTier::Small));
+        assert_eq!(CapTier::parse("huge"), None);
+    }
+
+    #[test]
+    fn bars_navs_and_results_round_trip() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        let bars: Vec<Bar> = (0..10)
+            .map(|i| Bar {
+                ts: 1000 + i,
+                open: 1.0,
+                high: 2.0,
+                low: 0.5,
+                close: 1.5,
+                volume: 10.0,
+            })
+            .collect();
+        db.put_bars("TCS.NS", "1d", &bars).unwrap();
+        db.put_bars("TCS.NS", "1d", &bars[..3]).unwrap();
+        assert_eq!(db.get_bars("TCS.NS", "1d", 1002, 1005).unwrap().len(), 4);
+        assert!(db.get_bars("TCS.NS", "1h", 0, i64::MAX).unwrap().is_empty());
+        db.put_navs(
+            "120503",
+            &[("2026-01-02".into(), 10.5), ("2026-01-01".into(), 10.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_navs("120503").unwrap()[0],
+            ("2026-01-01".to_string(), 10.0)
+        );
+        db.put_result("INFY.NS", "2026-03-31", false, "nse", "{\"revenue\":1}")
+            .unwrap();
+        db.put_result("INFY.NS", "2026-03-31", false, "nse", "{\"revenue\":2}")
+            .unwrap();
+        db.put_result("INFY.NS", "2025-03-31", true, "nse", "{}")
+            .unwrap();
+        let r = db.get_results("INFY.NS").unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            r[0],
+            (
+                "2026-03-31".to_string(),
+                false,
+                "{\"revenue\":2}".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn task_lifecycle_claim_progress_cancel_requeue() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let a = db.enqueue_task("warm", "Warm quotes", "{}").unwrap();
+        let b = db
+            .enqueue_task("backtest", "Backtest", "{\"s\":1}")
+            .unwrap();
+        let first = db.claim_task().unwrap().unwrap();
+        assert_eq!((first.id, first.status.as_str()), (a, "running"));
+        assert!(db.set_task_progress(a, 40.0).unwrap());
+        assert_eq!(db.get_task(a).unwrap().unwrap().progress_pct, 40.0);
+        // Cancelling a running task makes the executor see it.
+        assert!(db.cancel_task(a).unwrap());
+        assert!(!db.set_task_progress(a, 50.0).unwrap());
+        assert!(!db.cancel_task(a).unwrap());
+        let second = db.claim_task().unwrap().unwrap();
+        assert_eq!(second.id, b);
+        assert!(db.claim_task().unwrap().is_none());
+        db.finish_task(b, Ok("{\"ok\":true}")).unwrap();
+        let done = db.get_task(b).unwrap().unwrap();
+        assert_eq!((done.status.as_str(), done.progress_pct), ("done", 100.0));
+        let c = db.enqueue_task("x", "", "{}").unwrap();
+        db.claim_task().unwrap();
+        db.finish_task(c, Err("boom")).unwrap();
+        assert_eq!(
+            db.get_task(c).unwrap().unwrap().error.as_deref(),
+            Some("boom")
+        );
+        // A task stuck in `running` is requeued once it is old enough.
+        let d = db.enqueue_task("y", "", "{}").unwrap();
+        db.claim_task().unwrap();
+        db.conn
+            .execute(
+                "UPDATE tasks SET updated_at = updated_at - 1000 WHERE id=?1",
+                params![d],
+            )
+            .unwrap();
+        assert_eq!(db.requeue_stale_tasks(600).unwrap(), 1);
+        assert_eq!(db.get_task(d).unwrap().unwrap().status, "queued");
+        assert_eq!(db.list_tasks(2).unwrap().len(), 2);
     }
 
     #[test]

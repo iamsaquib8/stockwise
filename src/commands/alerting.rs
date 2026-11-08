@@ -326,6 +326,42 @@ async fn check_alerts(
 /// `alert watch`: check alerts every `interval` seconds while their market
 /// is open; notify each trigger once. `once` runs a single pass over every
 /// alert regardless of market hours (for cron).
+/// Alert checking for the background worker: the same pass `alert watch`
+/// runs, with the notified-state kept between passes.
+pub(crate) struct AlertWatcher {
+    feed: Feed,
+    state: WatchState,
+    notifier: Notifier,
+}
+
+impl AlertWatcher {
+    pub(crate) fn load() -> Result<Self> {
+        Ok(Self {
+            feed: Feed::default(),
+            state: crate::store::load(WATCH_STATE)?,
+            notifier: Notifier::from_env(),
+        })
+    }
+
+    /// One pass over alerts whose market is open; returns the number of new
+    /// triggers (each already notified).
+    pub(crate) async fn pass(&mut self, market: Market) -> Result<usize> {
+        let pass = check_alerts(
+            &mut self.feed,
+            &mut self.state,
+            market,
+            Utc::now(),
+            false,
+            false,
+        )
+        .await?;
+        self.feed.succeeded();
+        report_triggers(&pass.triggers, &mut self.state, market, &self.notifier).await;
+        crate::store::save(WATCH_STATE, &self.state, false)?;
+        Ok(pass.triggers.len())
+    }
+}
+
 pub async fn cmd_alert_watch(interval: u64, once: bool, market: Market) -> Result<()> {
     let interval = Duration::from_secs(interval);
     let notifier = Notifier::from_env();
