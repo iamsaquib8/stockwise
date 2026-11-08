@@ -86,6 +86,13 @@ pub(super) struct Scan {
     bulk: Vec<crate::api::Quote>,
 }
 
+impl Scan {
+    /// Whether NSE listed the members just now (not a built-in or saved list).
+    fn live(&self) -> bool {
+        !self.bulk.is_empty()
+    }
+}
+
 /// Longest age of a `market_snapshots` row a `--cap` scan will use.
 const SNAPSHOT_MAX_AGE_SECS: i64 = 30 * 60;
 
@@ -106,7 +113,16 @@ pub(super) async fn scan_symbols(
             bulk: Vec::new(),
         });
     };
-    let index = u.nse_index();
+    scan_nse_index(client, u.nse_index(), u.fallback()).await
+}
+
+/// One NSE index's members and their bulk quotes; `fallback` is the
+/// built-in member list used when NSE can't answer.
+async fn scan_nse_index(
+    client: &YahooClient,
+    index: &str,
+    fallback: Option<Vec<String>>,
+) -> Result<Scan> {
     let snap = match client.index_snapshot(index).await {
         Ok(s) if s.members.iter().any(|q| q.symbol.is_some()) => Ok(s),
         Ok(_) => Err(anyhow::anyhow!("NSE listed no members for {}", index)),
@@ -127,7 +143,7 @@ pub(super) async fn scan_symbols(
                 bulk: snap.members,
             })
         }
-        Err(e) => match u.fallback() {
+        Err(e) => match fallback {
             Some(list) => {
                 eprintln!(
                     "  \u{24d8} {}",
@@ -225,6 +241,19 @@ async fn scan_quotes(
     cap: Option<market::CapFilter>,
     prefer_bulk: bool,
 ) -> Result<Vec<crate::api::Quote>> {
+    scan_quotes_src(client, market, scan, cap, prefer_bulk)
+        .await
+        .map(|(q, _)| q)
+}
+
+/// [`scan_quotes`], and whether the quotes came from `cache.db`.
+async fn scan_quotes_src(
+    client: &YahooClient,
+    market: Market,
+    scan: &Scan,
+    cap: Option<market::CapFilter>,
+    prefer_bulk: bool,
+) -> Result<(Vec<crate::api::Quote>, bool)> {
     if scan.bulk.is_empty()
         && let Some(c) = cap
         && let Some(cached) = cached_cap_quotes(market, c, &scan.symbols)
@@ -234,20 +263,20 @@ async fn scan_quotes(
             c.tier().map_or("all", market::CapTier::as_str),
             SNAPSHOT_MAX_AGE_SECS / 60
         );
-        return Ok(cached);
+        return Ok((cached, true));
     }
     if prefer_bulk && !scan.bulk.is_empty() {
-        return Ok(market::filter_by_cap(scan.bulk.clone(), cap));
+        return Ok((market::filter_by_cap(scan.bulk.clone(), cap), false));
     }
     let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
     match client.get_quote(&refs).await {
-        Ok(q) => Ok(market::filter_by_cap(q, cap)),
+        Ok(q) => Ok((market::filter_by_cap(q, cap), false)),
         Err(e) if !scan.bulk.is_empty() => {
             eprintln!(
                 "  \u{24d8} Yahoo Finance did not answer ({:#}); using NSE's index snapshot (no P/E or market cap).",
                 e
             );
-            Ok(market::filter_by_cap(scan.bulk.clone(), cap))
+            Ok((market::filter_by_cap(scan.bulk.clone(), cap), false))
         }
         Err(e) => Err(e),
     }
@@ -344,8 +373,263 @@ impl CsvRow for SectorRow {
         &["sector", "symbol", "price", "change_percent", "currency"];
 }
 
-pub async fn cmd_sectors(market: Market, fmt: Format) -> Result<()> {
+/// The NSE index behind an Indian sector and its built-in member list.
+fn india_sector_index(name: &str) -> Option<(&'static str, &'static str, Option<Vec<String>>)> {
+    let (_, short) = market::INDIA_SECTOR_INDICES
+        .iter()
+        .find(|(sym, short)| short.eq_ignore_ascii_case(name) || sym.eq_ignore_ascii_case(name))?;
+    let (index, u) = match *short {
+        "IT" => ("NIFTY IT", Some(market::Universe::NiftyIt)),
+        "Bank" => ("NIFTY BANK", Some(market::Universe::BankNifty)),
+        "Pharma" => ("NIFTY PHARMA", None),
+        "Auto" => ("NIFTY AUTO", None),
+        "FMCG" => ("NIFTY FMCG", None),
+        "Metal" => ("NIFTY METAL", None),
+        "Realty" => ("NIFTY REALTY", None),
+        "Energy" => ("NIFTY ENERGY", None),
+        _ => return None,
+    };
+    Some((short, index, u.and_then(market::Universe::fallback)))
+}
+
+/// Sector index members saved by the last live listing: the offline
+/// fallback for sectors without a built-in list.
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct SectorMembers(std::collections::BTreeMap<String, Vec<String>>);
+
+impl SectorMembers {
+    const FILE: &'static str = "sector_members.json";
+
+    fn get(index: &str) -> Option<Vec<String>> {
+        let m: SectorMembers = crate::store::load(Self::FILE).ok()?;
+        m.0.get(index).filter(|l| !l.is_empty()).cloned()
+    }
+
+    fn save(index: &str, symbols: &[String]) {
+        if symbols.is_empty() {
+            return;
+        }
+        let _ = crate::store::update(Self::FILE, |m: &mut SectorMembers| {
+            m.0.insert(index.to_string(), symbols.to_vec());
+            Ok(())
+        });
+    }
+}
+
+/// Quotes served from `cache.db` with each one's age in seconds.
+struct StoredQuotes {
+    quotes: Vec<crate::api::Quote>,
+    age_secs: std::collections::HashMap<String, i64>,
+}
+
+/// The last stored `market_snapshots` rows of `symbols`, of any age: the
+/// offline answer when no live quote is available. `None` when none match.
+fn stored_quotes(symbols: &[String], cap: Option<market::CapFilter>) -> Option<StoredQuotes> {
+    let filter = crate::db::SnapshotFilter {
+        market: Some("in".to_string()),
+        cap_tier: cap.and_then(market::CapFilter::tier),
+        ..Default::default()
+    };
+    let rows = crate::db::with_db(|d| d.query_snapshots(&filter))?;
+    let wanted: std::collections::HashSet<String> =
+        symbols.iter().map(|s| s.to_ascii_uppercase()).collect();
+    let now = chrono::Utc::now().timestamp();
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|r| wanted.contains(&r.symbol.to_ascii_uppercase()))
+        .collect();
+    let age_secs = rows
+        .iter()
+        .map(|r| (r.symbol.to_ascii_uppercase(), (now - r.updated_at).max(0)))
+        .collect();
+    let quotes: Vec<crate::api::Quote> = rows
+        .into_iter()
+        .map(crate::worker::quote_from_snapshot)
+        .collect();
+    (!quotes.is_empty()).then_some(StoredQuotes { quotes, age_secs })
+}
+
+/// One member in `sectors <NAME> --json/--csv`: a `screen` row, plus the
+/// age of the price when it came from `cache.db` instead of a live quote.
+#[derive(Debug, Serialize)]
+pub(crate) struct SectorMemberRow {
+    #[serde(flatten)]
+    row: ScreenRow,
+    price_age_secs: Option<i64>,
+}
+
+impl CsvRow for SectorMemberRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "symbol",
+        "name",
+        "price",
+        "change_percent",
+        "pe",
+        "market_cap",
+        "dividend_yield",
+        "currency",
+        "cap_tier",
+        "price_age_secs",
+    ];
+}
+
+/// `sectors <NAME>`: the sector index's members with their cap tier,
+/// biggest mover first, cut to `--cap`.
+async fn cmd_sector_members(
+    market: Market,
+    name: &str,
+    cap: Option<market::CapFilter>,
+    fmt: Format,
+) -> Result<()> {
+    if market != Market::In {
+        bail!(
+            "sector members are listed for the Indian market only (-m in), not {}",
+            market.label()
+        );
+    }
+    let Some((short, index, fallback)) = india_sector_index(name) else {
+        let names: Vec<&str> = market::INDIA_SECTOR_INDICES
+            .iter()
+            .map(|(_, n)| *n)
+            .collect();
+        bail!(
+            "Sector '{}' not found; try one of: {}",
+            name,
+            names.join(", ")
+        );
+    };
+    let client = YahooClient::new().await?;
+    // The last live listing beats the built-in list (an index rebalances).
+    let fallback = SectorMembers::get(index).or(fallback);
+    let scan = scan_nse_index(&client, index, fallback).await?;
+    if scan.live() {
+        SectorMembers::save(index, &scan.symbols);
+        // NSE answered, so one more request is cheap: NSE's snapshot quotes
+        // carry no market cap, and tiers come from the saved membership.
+        if market::IndiaMembership::load().is_empty() {
+            let seed = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                scan_nse_index(&client, "NIFTY 500", None),
+            )
+            .await;
+            let why = match seed {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(format!("{:#}", e)),
+                Err(_) => Some("timed out".to_string()),
+            };
+            if let Some(why) = why
+                && market::IndiaMembership::load().is_empty()
+            {
+                eprintln!(
+                    "  \u{24d8} Cap tiers unavailable (NIFTY 500 membership: {why}); members show as unknown and a specific --cap may list none. Retry later."
+                );
+            }
+        }
+    }
+    let mut ages = std::collections::HashMap::new();
+    let mut quotes = match scan_quotes_src(&client, market, &scan, cap, true).await {
+        Ok((q, from_cache)) => {
+            if from_cache && let Some(st) = stored_quotes(&scan.symbols, cap) {
+                ages = st.age_secs;
+            }
+            q
+        }
+        Err(e) => match stored_quotes(&scan.symbols, cap) {
+            Some(st) => {
+                let oldest = st.age_secs.values().max().copied().unwrap_or(0);
+                eprintln!(
+                    "  \u{24d8} No live quotes ({:#}); using prices stored in cache.db (oldest {} min old).",
+                    e,
+                    oldest / 60
+                );
+                eprintln!(
+                    "  \u{24d8} Showing {} stored quotes after any cap filter; the sector list has {} members. Members without stored quotes may be missing.",
+                    st.quotes.len(),
+                    scan.symbols.len()
+                );
+                ages = st.age_secs;
+                st.quotes
+            }
+            None => return Err(e),
+        },
+    };
+    let member_rows = |quotes: &[crate::api::Quote]| -> Vec<SectorMemberRow> {
+        quotes
+            .iter()
+            .map(|q| SectorMemberRow {
+                row: ScreenRow::from(q),
+                price_age_secs: q
+                    .symbol
+                    .as_ref()
+                    .and_then(|s| ages.get(&s.to_ascii_uppercase()).copied()),
+            })
+            .collect()
+    };
+    quotes.sort_by(|a, b| {
+        let key = |q: &crate::api::Quote| q.regular_market_change_percent.unwrap_or(f64::MIN);
+        key(b).total_cmp(&key(a))
+    });
+    match fmt {
+        Format::Json => {
+            return output::print_json(&member_rows(&quotes));
+        }
+        Format::Csv => {
+            return output::print_csv(&member_rows(&quotes));
+        }
+        Format::Table => {}
+    }
+    print_header(&format!("{} — {}", short, cap_scope(index, cap)));
+    if quotes.is_empty() {
+        println!("  {}", "No members in this tier.".dimmed());
+        return Ok(());
+    }
+    println!(
+        "  {:<14} {:>10} {:>10} {:>14} {:>6}",
+        "Symbol".bold(),
+        "Price".bold(),
+        "Change %".bold(),
+        "Market Cap".bold(),
+        "Cap".bold()
+    );
+    println!("  {}", "─".repeat(59).dimmed());
+    for q in &quotes {
+        let sym = q.symbol.as_deref().unwrap_or("???");
+        let cur = q.currency.as_deref();
+        let pct = q.regular_market_change_percent.unwrap_or(0.0);
+        let pct_str = format!("{:+.2}%", pct);
+        println!(
+            "  {:<14} {:>10} {:>10} {:>14} {:>6}",
+            sym.cyan(),
+            format_price(q.regular_market_price.unwrap_or(0.0), cur),
+            if pct >= 0.0 {
+                pct_str.green()
+            } else {
+                pct_str.red()
+            },
+            q.market_cap
+                .map_or("N/A".to_string(), |v| format_large_number(v, cur)),
+            market::cap_tier_of(q).badge().dimmed()
+        );
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn cmd_sectors(
+    market: Market,
+    name: Option<String>,
+    cap: Option<market::CapFilter>,
+    fmt: Format,
+) -> Result<()> {
     market.require_sectors("sectors")?;
+    if let Some(n) = name {
+        return cmd_sector_members(market, &n, cap, fmt).await;
+    }
+    if cap.is_some() {
+        bail!(
+            "--cap filters a sector's members: name one, e.g. `stockwise sectors bank --cap mid`"
+        );
+    }
     let client = YahooClient::new().await?;
     let sectors = market.sectors();
     let title = format!("{} Sector Performance", market.label());

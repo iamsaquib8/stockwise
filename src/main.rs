@@ -459,8 +459,13 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[command(flatten)]
         out: TableOutput,
     },
-    /// Sector performance with bars
+    /// Sector performance with bars, or one sector's members (India)
     Sectors {
+        /// List this sector's member stocks (IT, Bank, Pharma, Auto, FMCG, Metal, Realty, Energy)
+        name: Option<String>,
+        /// Only members of this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -3639,7 +3644,9 @@ async fn dispatch(
         Commands::Movers { universe, cap, out } => {
             commands::cmd_movers(m, universe, cap, out.into()).await
         }
-        Commands::Sectors { out } => commands::cmd_sectors(m, out.into()).await,
+        Commands::Sectors { name, cap, out } => {
+            commands::cmd_sectors(m, name, cap, out.into()).await
+        }
         Commands::Heatmap { universe, cap } => commands::cmd_heatmap(m, universe, cap).await,
         Commands::Sentiment => commands::cmd_sentiment().await,
         Commands::News { symbol } => commands::cmd_news(&symbol, m).await,

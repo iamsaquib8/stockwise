@@ -201,7 +201,7 @@ mod tests {
     fn finds_binary_on_path_or_not() {
         let dir = std::env::temp_dir().join(format!("sw-path-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Windows only runs files with an executable extension (`PATHEXT`).
+        // Windows looks a command up with its PATHEXT extension.
         let file = if cfg!(windows) {
             "casparser.exe"
         } else {

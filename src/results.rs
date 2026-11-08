@@ -18,6 +18,7 @@ use crate::db::{CacheDb, L2};
 use crate::events::{self, Kind};
 use crate::market::{self, Market};
 use crate::output::{CsvRow, round_opt};
+use crate::providers::edgar;
 use crate::research::{self, Needs, Series};
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
@@ -99,6 +100,13 @@ pub struct ResultPeriod {
     /// The result-date and reaction lookup ran (found or not).
     #[serde(default)]
     pub reaction_checked: bool,
+    /// Filled from SEC EDGAR filings (the rest is Yahoo).
+    #[serde(default)]
+    pub edgar: bool,
+    /// EDGAR was asked for this symbol (found or not), so a cached copy
+    /// is complete for requests that use it.
+    #[serde(default)]
+    pub edgar_checked: bool,
     #[serde(skip)]
     ebitda: Option<f64>,
     #[serde(skip)]
@@ -371,12 +379,15 @@ pub fn attach_reactions(quarters: &mut [ResultPeriod], r: &research::Research) {
 // NSE filings (bank asset quality)
 // ───────────────────────────────────────────────────────────────
 
-/// One entry of NSE's `corporates-financial-results` list.
+/// One quarter of NSE's `corporates-financial-results` list: the
+/// consolidated filing, else the standalone one, and the standalone one
+/// as a second source when the consolidated filing leaves the ratios empty.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NseFiling {
     pub to_date: NaiveDate,
     pub xbrl: String,
     pub consolidated: bool,
+    pub standalone: Option<String>,
 }
 
 /// Parse NSE's `30-Sep-2026` dates, in any letter case.
@@ -393,14 +404,15 @@ fn nse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(&norm, "%d-%b-%Y").ok()
 }
 
-/// Quarterly filings with an XBRL link, newest first. One filing per
-/// quarter end: consolidated beats standalone, a later revision beats an
-/// earlier one.
+/// Quarterly filings with an XBRL file, newest first. NSE lists every
+/// filing newest first and gives rows without a file an `.../xbrl/-` link;
+/// of several revisions of one filing the first (latest) one is used.
 pub fn parse_nse_filings(v: &Value) -> Vec<NseFiling> {
     let rows = v
         .as_array()
         .or_else(|| v.get("data").and_then(|d| d.as_array()));
-    let mut by_date: BTreeMap<NaiveDate, NseFiling> = BTreeMap::new();
+    // (consolidated, standalone) per quarter end.
+    let mut by_date: BTreeMap<NaiveDate, (Option<String>, Option<String>)> = BTreeMap::new();
     for e in rows.into_iter().flatten() {
         let get = |keys: &[&str]| {
             keys.iter()
@@ -411,30 +423,45 @@ pub fn parse_nse_filings(v: &Value) -> Vec<NseFiling> {
         let Some(to_date) = get(&["toDate", "to_date", "qe_Date"]).and_then(nse_date) else {
             continue;
         };
-        let Some(xbrl) = get(&["xbrl", "xbrlLink"]) else {
+        let Some(xbrl) = get(&["xbrl", "xbrlLink"]).filter(|x| x.to_lowercase().ends_with(".xml"))
+        else {
             continue;
         };
         let consolidated = get(&["consolidated"])
             .map(|c| c.eq_ignore_ascii_case("consolidated"))
             .unwrap_or(false);
-        let f = NseFiling {
-            to_date,
-            xbrl: xbrl.to_string(),
-            consolidated,
+        let slot = by_date.entry(to_date).or_default();
+        let slot = if consolidated {
+            &mut slot.0
+        } else {
+            &mut slot.1
         };
-        match by_date.get(&to_date) {
-            Some(old) if old.consolidated && !f.consolidated => {}
-            _ => {
-                by_date.insert(to_date, f);
-            }
-        }
+        slot.get_or_insert_with(|| xbrl.to_string());
     }
-    by_date.into_values().rev().collect()
+    by_date
+        .into_iter()
+        .rev()
+        .filter_map(|(to_date, (cons, solo))| match (cons, solo) {
+            (Some(c), solo) => Some(NseFiling {
+                to_date,
+                xbrl: c,
+                consolidated: true,
+                standalone: solo,
+            }),
+            (None, Some(s)) => Some(NseFiling {
+                to_date,
+                xbrl: s,
+                consolidated: false,
+                standalone: None,
+            }),
+            (None, None) => None,
+        })
+        .collect()
 }
 
-/// First numeric value of an element whose name contains every needle
-/// (case-insensitive), in a filing's XBRL.
-fn xbrl_number(xml: &str, needles: &[&str]) -> Option<f64> {
+/// The first value of the XBRL fact `local_name` in the current-quarter
+/// context (`OneD`), whatever its namespace prefix.
+fn xbrl_fact(xml: &str, local_name: &str) -> Option<f64> {
     let mut rest = xml;
     while let Some(i) = rest.find('<') {
         rest = &rest[i + 1..];
@@ -444,11 +471,11 @@ fn xbrl_number(xml: &str, needles: &[&str]) -> Option<f64> {
             .split(|c: char| c.is_whitespace() || c == '/')
             .next()
             .unwrap_or("");
-        let local = name.rsplit(':').next().unwrap_or("").to_lowercase();
-        if !local.is_empty()
+        let local = name.rsplit(':').next().unwrap_or("");
+        if local.eq_ignore_ascii_case(local_name)
             && !name.starts_with('/')
             && !tag.ends_with('/')
-            && needles.iter().all(|n| local.contains(n))
+            && tag.contains("contextRef=\"OneD\"")
         {
             let body = &rest[gt + 1..];
             if let Some(lt) = body.find('<')
@@ -462,13 +489,18 @@ fn xbrl_number(xml: &str, needles: &[&str]) -> Option<f64> {
 }
 
 /// Gross and net NPA (percent) from a bank's result XBRL.
+///
+/// NSE's banking format (`in-bse-fin`) files them as fractions in
+/// `PercentageOfGrossNpa` and `PercentageOfNpa` (the net ratio): `0.0142`
+/// is 1.42%. A consolidated filing can carry `0.00` placeholders instead
+/// of the ratios; a bank never has none, so a zero reads as "not filed".
 pub fn parse_bank_xbrl(xml: &str) -> (Option<f64>, Option<f64>) {
-    // Filed as a percent (1.24 means 1.24%), as the filing's ratio rows are.
-    let get = |kind: &str| {
-        xbrl_number(xml, &[kind, "npa", "percent"])
-            .or_else(|| xbrl_number(xml, &[kind, "npa", "ratio"]))
+    let get = |tag: &str| {
+        xbrl_fact(xml, tag)
+            .filter(|v| *v > 0.0)
+            .map(|v| (v * 1e6).round() / 1e4)
     };
-    (get("gross"), get("net"))
+    (get("PercentageOfGrossNpa"), get("PercentageOfNpa"))
 }
 
 /// Fill GNPA/NNPA on `quarters` from the NSE filings; returns how many were filled.
@@ -492,23 +524,76 @@ async fn nse_asset_quality(
         let Some(p) = quarters.iter_mut().find(|p| near(p.end, f.to_date)) else {
             continue;
         };
-        let xml = match tokio::time::timeout(
-            Duration::from_secs(4),
-            client.nse_get_text(&f.xbrl, Duration::from_secs(7 * 86_400)),
-        )
-        .await
-        {
-            Ok(Ok(x)) => x,
-            _ => continue,
-        };
-        let (g, n) = parse_bank_xbrl(&xml);
-        if g.is_some() || n.is_some() {
-            p.gnpa_pct = g;
-            p.nnpa_pct = n;
-            filled += 1;
+        for url in std::iter::once(&f.xbrl).chain(f.standalone.as_ref()) {
+            let xml = match tokio::time::timeout(
+                Duration::from_secs(4),
+                client.nse_get_text(url, Duration::from_secs(7 * 86_400)),
+            )
+            .await
+            {
+                Ok(Ok(x)) => x,
+                _ => continue,
+            };
+            let (g, n) = parse_bank_xbrl(&xml);
+            if g.is_some() || n.is_some() {
+                p.gnpa_pct = g;
+                p.nnpa_pct = n;
+                filled += 1;
+                break;
+            }
         }
     }
     Ok(filled)
+}
+
+// ───────────────────────────────────────────────────────────────
+// SEC EDGAR merge
+// ───────────────────────────────────────────────────────────────
+
+/// Copy what EDGAR reports onto `p`; fields EDGAR lacks stay as they are.
+fn apply_edgar(p: &mut ResultPeriod, e: &edgar::Period) {
+    let set = |dst: &mut Option<f64>, v: Option<f64>| {
+        if v.is_some() {
+            *dst = v;
+        }
+    };
+    set(&mut p.revenue, e.revenue);
+    set(&mut p.operating_profit, e.operating_income);
+    set(&mut p.pat, e.net_income);
+    set(&mut p.eps, e.diluted_eps);
+    set(&mut p.ocf, e.operating_cash_flow);
+    set(&mut p.capex, e.capex);
+    // Yahoo's free cash flow belonged to its own cash-flow figures.
+    // (`finalize` is not rerun: it would replace the EDGAR operating profit.)
+    if let (Some(o), Some(c)) = (e.operating_cash_flow, e.capex) {
+        p.fcf = Some(o - c.abs());
+    }
+    p.edgar = true;
+    if p.currency.is_none() {
+        p.currency = Some("USD".into());
+    }
+}
+
+/// Merge EDGAR periods into `rows` (oldest first): EDGAR wins the fields it
+/// has, Yahoo keeps the rest, and quarters only EDGAR has are added.
+fn merge_edgar_rows(rows: &mut Vec<ResultPeriod>, edgar: &[edgar::Period]) {
+    for e in edgar {
+        match rows.iter_mut().find(|p| near(p.end, e.end)) {
+            Some(p) => apply_edgar(p, e),
+            None => {
+                let mut p = ResultPeriod::new(e.end);
+                apply_edgar(&mut p, e);
+                rows.push(p);
+            }
+        }
+    }
+    rows.sort_by_key(|p| p.end);
+}
+
+fn merge_edgar(st: &mut Statements, e: &edgar::Statements) {
+    merge_edgar_rows(&mut st.quarterly, &e.quarterly);
+    merge_edgar_rows(&mut st.annual, &e.annual);
+    st.currency.get_or_insert_with(|| "USD".into());
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -533,7 +618,8 @@ pub fn store_periods(db: L2, symbol: &str, quarterly: &[ResultPeriod], annual: &
     for (rows, is_annual) in [(quarterly, false), (annual, true)] {
         for p in rows {
             if let Ok(json) = serde_json::to_string(p) {
-                let _ = db.put_result(symbol, &p.end.to_string(), is_annual, "yahoo", &json);
+                let source = if p.edgar { "edgar" } else { "yahoo" };
+                let _ = db.put_result(symbol, &p.end.to_string(), is_annual, source, &json);
             }
         }
     }
@@ -597,6 +683,21 @@ pub async fn collect(
     reaction: bool,
     resolve: bool,
 ) -> Result<Collected> {
+    collect_with(client, symbol, market, store, reaction, resolve, true).await
+}
+
+/// [`collect`], with SEC EDGAR optional: the scoreboard reads only the
+/// latest quarter of many symbols, where a multi-megabyte filing history
+/// each would cost more than it adds.
+async fn collect_with(
+    client: &YahooClient,
+    symbol: &str,
+    market: Market,
+    store: Option<L2>,
+    reaction: bool,
+    resolve: bool,
+    use_edgar: bool,
+) -> Result<Collected> {
     // Saved holdings and index members are already full symbols (a US
     // holding `AAPL` must not become `AAPL.NS`): only typed ones resolve.
     let symbol = if resolve {
@@ -624,11 +725,18 @@ pub async fn collect(
     );
     let is_india = is_india || market::is_inr(quote.currency.as_deref());
 
+    let want_edgar = use_edgar && market == Market::Us && !is_india;
     if let Some(db) = store
         && let Ok(guard) = db.lock()
         && let Some((quarterly, annual)) = load_periods(&guard, &symbol, CACHE_TTL_SECS)
         && (!reaction || quarterly.iter().any(|p| p.reaction_checked))
+        && (!want_edgar || quarterly.iter().any(|p| p.edgar_checked))
     {
+        let source = if quarterly.iter().any(|p| p.edgar) {
+            "cache.db (Yahoo Finance, SEC EDGAR)"
+        } else {
+            "cache.db (Yahoo Finance)"
+        };
         return Ok(Collected {
             currency: quarterly
                 .iter()
@@ -641,7 +749,7 @@ pub async fn collect(
             is_financial,
             quarterly,
             annual,
-            sources: vec!["cache.db (Yahoo Finance)".into()],
+            sources: vec![source.into()],
             warnings: vec![],
             from_cache: true,
         });
@@ -653,15 +761,48 @@ pub async fn collect(
         .flat_map(|f| [format!("quarterly{f}"), format!("annual{f}")])
         .collect();
     let type_refs: Vec<&str> = types.iter().map(String::as_str).collect();
-    let (series, summary) = tokio::join!(
+    let (series, summary, filings) = tokio::join!(
         // Explicit period timestamps: eleven years back, not Yahoo's default
         // handful of quarters.
         client.fundamentals_timeseries(&symbol, &type_refs, 365 * 11),
         client.quote_summary(&symbol, &["earningsHistory"]),
+        async {
+            if want_edgar {
+                edgar::fetch(client, &symbol).await
+            } else {
+                Ok(None)
+            }
+        },
     );
-    let series = series.context("Yahoo financial statements unavailable")?;
-    let mut st = parse_statements(&series);
-    let mut sources = vec!["Yahoo Finance fundamentals-timeseries".to_string()];
+    // A source that failed leaves a partial result that is not cached,
+    // so a retry can fill it in.
+    let mut partial = false;
+    let filings = match filings {
+        Ok(f) => f,
+        Err(e) => {
+            warnings.push(format!("SEC EDGAR unavailable: {e:#}"));
+            partial = true;
+            None
+        }
+    };
+    let mut sources = Vec::new();
+    let mut st = match series {
+        Ok(series) => {
+            sources.push("Yahoo Finance fundamentals-timeseries".to_string());
+            parse_statements(&series)
+        }
+        // EDGAR alone still gives a full history.
+        Err(e) if filings.is_some() => {
+            warnings.push(format!("Yahoo financial statements unavailable: {e:#}"));
+            partial = true;
+            Statements::default()
+        }
+        Err(e) => return Err(e.context("Yahoo financial statements unavailable")),
+    };
+    if let Some(f) = &filings {
+        merge_edgar(&mut st, f);
+        sources.push("SEC EDGAR companyfacts (XBRL, 10-K/10-Q)".into());
+    }
     match summary {
         Ok(s) => {
             let surprises = research::parse_surprises(&s);
@@ -706,7 +847,15 @@ pub async fn collect(
     if st.quarterly.is_empty() {
         anyhow::bail!("No quarterly results found for {symbol}");
     }
-    if let Some(db) = store {
+    if want_edgar && !partial {
+        st.quarterly
+            .iter_mut()
+            .chain(st.annual.iter_mut())
+            .for_each(|p| p.edgar_checked = true);
+    }
+    if let Some(db) = store
+        && !partial
+    {
         store_periods(db, &symbol, &st.quarterly, &st.annual);
     }
     Ok(Collected {
@@ -741,7 +890,7 @@ pub async fn season(
         futures_util::stream::iter(symbols.iter().map(|s| async move {
             (
                 s.clone(),
-                collect(client, s, market, store, false, false).await,
+                collect_with(client, s, market, store, false, false, false).await,
             )
         }))
         .buffered(PARALLEL)
