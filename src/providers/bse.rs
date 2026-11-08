@@ -283,7 +283,7 @@ pub fn parse_announcements(json: &Value) -> Result<Vec<Announcement>, &'static s
     let rows = json["Table"]
         .as_array()
         .ok_or("announcements: no Table list")?;
-    Ok(rows
+    let parsed: Vec<Announcement> = rows
         .iter()
         .filter_map(|r| {
             let code = match &r["SCRIP_CD"] {
@@ -306,7 +306,12 @@ pub fn parse_announcements(json: &Value) -> Result<Vec<Announcement>, &'static s
                 attachment: text("ATTACHMENTNAME").map(|a| format!("{ATTACHMENTS}/{a}")),
             })
         })
-        .collect())
+        .collect();
+    // Rows but none readable: the format changed, not "no filings".
+    if parsed.is_empty() && !rows.is_empty() {
+        return Err("announcements: no row has a readable date and scrip");
+    }
+    Ok(parsed)
 }
 
 // ── Client ──
@@ -813,6 +818,13 @@ mod filings_tests {
         assert_eq!(rows[1].headline, "Board Meeting Intimation");
         assert_eq!(rows[1].attachment, None);
         assert!(parse_announcements(&serde_json::json!({"rows": []})).is_err());
+        assert!(
+            parse_announcements(&serde_json::json!({"Table": []}))
+                .unwrap()
+                .is_empty()
+        );
+        let moved = serde_json::json!({"Table": [{"SCRIP_CD": 1, "NEWS_DT": "17 Oct 2025"}]});
+        assert!(parse_announcements(&moved).is_err());
     }
 
     #[tokio::test]

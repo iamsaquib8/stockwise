@@ -308,7 +308,7 @@ async fn screener_quotes(
         .and_then(market::CapFilter::tier)
         .map_or((None, None), market::CapTier::usd_range);
     let query = crate::providers::router::ScreenQuery {
-        market_cap_min: min.or(Some(market::USD_LARGE_MIN)),
+        market_cap_min: min.or(max.is_none().then_some(market::USD_LARGE_MIN)),
         market_cap_max: max,
         country: Some("US".into()),
         limit: SCREENER_LIMIT,

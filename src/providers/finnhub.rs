@@ -178,8 +178,9 @@ pub fn parse_recommendation(json: &Value) -> Option<Recommendation> {
 }
 
 /// `/stock/earnings`: `period` is the quarter end, `actual` and `estimate`
-/// EPS, `surprisePercent` percent of the estimate. Rows without both EPS
-/// figures are skipped.
+/// EPS, `surprisePercent` percent of the estimate (converted here to the
+/// fraction `research::Surprise` carries, as Yahoo's is). Rows without both
+/// EPS figures are skipped.
 pub fn parse_surprises(json: &Value) -> Vec<Surprise> {
     json.as_array()
         .into_iter()
@@ -191,13 +192,15 @@ pub fn parse_surprises(json: &Value) -> Vec<Surprise> {
                 quarter: NaiveDate::parse_from_str(r["period"].as_str()?, "%Y-%m-%d").ok()?,
                 actual,
                 estimate,
-                surprise_pct: num(&r["surprisePercent"]).unwrap_or_else(|| {
-                    if estimate != 0.0 {
-                        (actual - estimate) / estimate.abs() * 100.0
-                    } else {
-                        0.0
-                    }
-                }),
+                surprise_pct: num(&r["surprisePercent"])
+                    .map(|p| p / 100.0)
+                    .unwrap_or_else(|| {
+                        if estimate != 0.0 {
+                            (actual - estimate) / estimate.abs()
+                        } else {
+                            0.0
+                        }
+                    }),
             })
         })
         .collect()
@@ -259,7 +262,10 @@ mod tests {
         let s = parse_surprises(&serde_json::from_str(EARNINGS).unwrap());
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].quarter.to_string(), "2026-09-30");
-        assert_eq!(s[0].surprise_pct, 2.5);
+        assert!(
+            (s[0].surprise_pct - 0.025).abs() < 1e-12,
+            "a fraction, like Yahoo's"
+        );
     }
 
     #[test]
