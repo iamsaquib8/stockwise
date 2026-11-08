@@ -431,6 +431,23 @@ async fn lots_are_long_term_after_twelve_months() {
 }
 
 #[tokio::test]
+async fn goal_horizons_are_exclusive() {
+    let e = call("goal_sip", json!({"target": 1e6, "years": 2, "months": 18}))
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("only one"), "{e}");
+    let e = call(
+        "goal_sip",
+        json!({"target": 1e6, "months": 18, "by": "2030-01"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("only one"), "{e}");
+    let ok = data("goal_sip", json!({"target": 1e6, "months": 18})).await;
+    assert_eq!(ok["months"], 18);
+}
+
+#[tokio::test]
 async fn goals_are_pure_and_rounded() {
     let sip = data("goal_sip", json!({"target": 10_000_000, "years": 15})).await;
     assert_eq!(sip["goal"], "sip");

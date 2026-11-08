@@ -708,6 +708,13 @@ fn pct(a: &Args, name: &str, default: f64) -> f64 {
 
 /// Months to the goal from `years`, `months` or `by`.
 fn goal_months(a: &Args) -> Result<u32> {
+    let given = ["years", "months", "by"]
+        .iter()
+        .filter(|k| a.str(k).is_some() || a.f64(k).is_some())
+        .count();
+    if given > 1 {
+        bail!("Give only one of 'years', 'months' or 'by'");
+    }
     if let Some(y) = a.i64("years") {
         return Ok(y as u32 * 12);
     }
