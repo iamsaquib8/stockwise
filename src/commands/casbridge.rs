@@ -201,7 +201,13 @@ mod tests {
     fn finds_binary_on_path_or_not() {
         let dir = std::env::temp_dir().join(format!("sw-path-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("casparser"), b"").unwrap();
+        // Windows looks a command up with its PATHEXT extension.
+        let file = if cfg!(windows) {
+            "casparser.exe"
+        } else {
+            "casparser"
+        };
+        std::fs::write(dir.join(file), b"").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
