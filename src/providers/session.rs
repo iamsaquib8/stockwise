@@ -548,14 +548,21 @@ impl Session {
                 }
                 Ok(text)
             }
-            Ok(_) => Err(self.format_error(file)),
-            Err(e) => match disk.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
-                Some(text) if valid(&text) => {
-                    self.notice(&e, &format!("using the saved copy of {}", file));
-                    Ok(text)
+            other => {
+                // Unreachable and unparseable both fall back to the saved copy:
+                // a 200 with a maintenance page is no more useful than a 503.
+                let error = match other {
+                    Ok(_) => self.format_error(file),
+                    Err(e) => e,
+                };
+                match disk.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
+                    Some(text) if valid(&text) => {
+                        self.notice(&error, &format!("using the saved copy of {}", file));
+                        Ok(text)
+                    }
+                    _ => Err(error),
                 }
-                _ => Err(e),
-            },
+            }
         }
     }
 }
@@ -830,5 +837,42 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(server.requests().len(), 1, "second read comes from disk");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_200_uses_the_saved_reference_file() {
+        let dir = std::env::temp_dir().join(format!("sw-session-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MockServer::start(vec![
+            (200, "SYMBOL,NAME\nTCS,Tata".into()),
+            (200, "<html>maintenance</html>".into()),
+        ])
+        .await;
+        let s = Session::for_tests(site(&server.url, false), DiskCache::Dir(dir.clone()));
+        let valid = |t: &str| t.starts_with("SYMBOL");
+        let day = Duration::from_secs(86_400);
+        let saved = s
+            .get_text_on_disk("list.csv", "/list.csv", &[], day, valid)
+            .await
+            .unwrap();
+        // Zero max age forces the refetch that returns the invalid page.
+        let served = s
+            .get_text_on_disk("list.csv", "/list.csv", &[], Duration::ZERO, valid)
+            .await
+            .unwrap();
+        assert_eq!(served, saved, "the saved copy stands in for a bad answer");
+        assert_eq!(server.requests().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_200_without_a_saved_copy_is_a_format_error() {
+        let server = MockServer::start(vec![(200, "<html>maintenance</html>".into())]).await;
+        let s = Session::for_tests(site(&server.url, false), DiskCache::Off);
+        let err = s
+            .get_text_on_disk("list.csv", "/list.csv", &[], Duration::ZERO, |_| false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Format(_)), "{err:?}");
     }
 }
