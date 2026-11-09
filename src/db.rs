@@ -87,6 +87,8 @@ pub enum CacheTarget {
     Results,
     /// Saved NSE index members (NIFTY 500 and the cap bands)
     Members,
+    /// BSE end-of-day prices (the last bhavcopy)
+    Bhavcopy,
     /// Everything above
     All,
 }
@@ -277,6 +279,13 @@ impl CacheDb {
                  symbol TEXT PRIMARY KEY, quote_json TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS bse_eod (
+                 ticker TEXT PRIMARY KEY, quote_json TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS eod_state (
+                 source TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
+                 checked_at INTEGER NOT NULL
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS index_lists (
                  index_name TEXT PRIMARY KEY, scanned INTEGER NOT NULL DEFAULT 0,
                  updated_at INTEGER NOT NULL
@@ -382,6 +391,69 @@ impl CacheDb {
         Ok(out)
     }
 
+    // ── bse_eod ──
+
+    /// Replace the stored end-of-day day with `rows` (ticker, quote JSON)
+    /// of `trade_date` (`YYYY-MM-DD`).
+    pub fn put_eod(&mut self, trade_date: &str, rows: &[(String, String)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM bse_eod", [])?;
+        {
+            let mut st =
+                tx.prepare_cached("INSERT INTO bse_eod (ticker, quote_json) VALUES (?1, ?2)")?;
+            for (ticker, json) in rows {
+                st.execute(params![ticker, json])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO eod_state (source, trade_date, checked_at)
+             VALUES ('bse', ?1, ?2)",
+            params![trade_date, now_secs()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Note that the stored day was checked just now (no newer file yet).
+    pub fn touch_eod(&mut self) -> Result<()> {
+        // No day stored yet: an empty date still throttles the next look.
+        self.conn.execute(
+            "INSERT INTO eod_state (source, trade_date, checked_at) VALUES ('bse', '', ?1)
+             ON CONFLICT(source) DO UPDATE SET checked_at = excluded.checked_at",
+            params![now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// The stored day (`YYYY-MM-DD`) and when it was last checked.
+    pub fn eod_state(&self) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT trade_date, checked_at FROM eod_state WHERE source = 'bse'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Stored quotes (ticker, JSON) for `tickers`.
+    pub fn eod_quotes(&self, tickers: &[String]) -> Result<Vec<(String, String)>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT ticker, quote_json FROM bse_eod WHERE ticker = ?1")?;
+        let mut out = Vec::new();
+        for t in tickers {
+            if let Some(row) = st
+                .query_row(params![t], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+            {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
     // ── index_members ──
 
     /// Replace the saved lists: (index name, scanned, members in order).
@@ -430,6 +502,7 @@ impl CacheDb {
             CacheTarget::Bars => &["ohlcv_bars"],
             CacheTarget::Results => &["financial_results"],
             CacheTarget::Members => &["index_members", "index_lists"],
+            CacheTarget::Bhavcopy => &["bse_eod", "eod_state"],
             CacheTarget::All => &[
                 "http_cache",
                 "quote_cache",
@@ -438,6 +511,8 @@ impl CacheDb {
                 "financial_results",
                 "index_members",
                 "index_lists",
+                "bse_eod",
+                "eod_state",
             ],
         };
         let tx = self.conn.transaction()?;

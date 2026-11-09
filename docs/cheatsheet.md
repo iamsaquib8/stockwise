@@ -26,7 +26,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Find a ticker by name | `stockwise search "tata motors"` |
 | First-run setup: market, holdings import, MCP snippet | `stockwise init` (no prompts without a TTY: `init --market in --import groww:FILE --no-mcp`) |
 | Check your setup | `stockwise doctor` |
-| Persistent response cache: size, clear | `stockwise cache status` / `stockwise cache clear` |
+| Persistent response cache: size, clear | `stockwise cache status` / `stockwise cache clear [http\|quotes\|snapshots\|bars\|results\|members\|bhavcopy\|all]` |
 | Pre-load the market universe into `cache.db` | `stockwise cache warm` (or `--background`) |
 | Filter cached stocks offline by cap, sector, P/E, RVOL | `stockwise cache snapshots --cap large --min-pe 10 --sort roe` |
 | Run the background worker (live quotes, tasks, alerts, post-close sync) | `stockwise worker start` / `status` / `stop` |

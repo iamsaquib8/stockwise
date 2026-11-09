@@ -1719,6 +1719,96 @@ impl YahooClient {
         self.nse_client().constituents(index).await
     }
 
+    /// End-of-day quotes from BSE's latest bhavcopy for NSE-style symbols
+    /// (`ABB.NS`), and the day they are from. The file is downloaded at
+    /// most once per trading day (and looked for again at most every 30
+    /// minutes when a newer one is due), stored in `cache.db`. `None` with
+    /// `cache.db` off, in unit tests, or when no day is available.
+    pub async fn bse_eod_quotes(
+        &self,
+        symbols: &[String],
+    ) -> Option<(chrono::NaiveDate, Vec<Quote>)> {
+        if cfg!(test) || crate::db::l2().is_none() {
+            return None;
+        }
+        self.refresh_bse_eod().await;
+        let (date, _) = crate::db::with_db(|d| d.eod_state()).flatten()?;
+        let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+        let tickers: Vec<String> = symbols
+            .iter()
+            .filter_map(|s| s.strip_suffix(".NS"))
+            .map(str::to_ascii_uppercase)
+            .collect();
+        let quotes: Vec<Quote> = crate::db::with_db(|d| d.eod_quotes(&tickers))?
+            .into_iter()
+            .filter_map(|(_, json)| serde_json::from_str(&json).ok())
+            .collect();
+        (!quotes.is_empty()).then_some((date, quotes))
+    }
+
+    /// Download the newest bhavcopy when the stored one is older than the
+    /// last trading day whose file should be out (BSE posts it in the
+    /// evening, IST).
+    async fn refresh_bse_eod(&self) {
+        use crate::market::Market;
+        use chrono::{Datelike, Timelike};
+        let now = chrono::Utc::now();
+        let ist = crate::clock::local(Market::In, now);
+        let mut day = ist.date_naive();
+        if ist.hour() < 19 || !crate::clock::is_trading_day(Market::In, day) {
+            day = day.pred_opt().unwrap_or(day);
+        }
+        while !crate::clock::is_trading_day(Market::In, day) && day.year() > 2000 {
+            day = day.pred_opt().unwrap_or(day);
+        }
+        let state = crate::db::with_db(|d| d.eod_state()).flatten();
+        let stored = state
+            .as_ref()
+            .and_then(|(d, _)| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+        if stored.is_some_and(|s| s >= day) {
+            return;
+        }
+        if state
+            .as_ref()
+            .is_some_and(|(_, checked)| now.timestamp() - checked < 30 * 60)
+        {
+            return;
+        }
+        // The expected day first, then a few trading days back (a late or
+        // missing file).
+        let mut tries = 0;
+        while tries < 5 {
+            if stored.is_some_and(|s| s >= day) {
+                break;
+            }
+            if crate::clock::is_trading_day(Market::In, day) {
+                tries += 1;
+                let url = providers::bse_bhav::url(day);
+                if let Ok(body) = self.fetch_with(&url, Duration::ZERO, &[]).await
+                    && let Some((date, rows)) = providers::bse_bhav::parse(&body)
+                {
+                    let json: Vec<(String, String)> = rows
+                        .iter()
+                        .filter_map(|r| {
+                            Some((
+                                r.ticker.clone(),
+                                serde_json::to_string(&r.to_quote(date)).ok()?,
+                            ))
+                        })
+                        .collect();
+                    let d = date.format("%Y-%m-%d").to_string();
+                    crate::db::with_db(|db| db.put_eod(&d, &json));
+                    return;
+                }
+            }
+            day = match day.pred_opt() {
+                Some(d) => d,
+                None => break,
+            };
+        }
+        crate::db::with_db(|d| d.touch_eod());
+    }
+
     /// An NSE index's members from niftyindices.com's CSV (members only,
     /// alphabetical). Never cached (zero TTL: no cache read or write): the
     /// site answers some requests with an HTML page and HTTP 200, which

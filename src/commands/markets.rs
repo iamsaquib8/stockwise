@@ -387,6 +387,18 @@ async fn scan_quotes_src(
     if prefer_bulk && !scan.bulk.is_empty() {
         return Ok((market::filter_by_cap(scan.bulk.clone(), cap), false));
     }
+    // Price-only scans (movers, heatmap) outside Indian market hours: the
+    // last close of every stock comes from one BSE file, no Yahoo calls.
+    // A `--cap` tier needs market caps, which the file lacks.
+    let no_tier = cap.is_none_or(|c| c.tier().is_none());
+    if prefer_bulk
+        && no_tier
+        && market == Market::In
+        && !crate::clock::is_open(Market::In, chrono::Utc::now())
+        && let Some(q) = bse_eod(client, &scan.symbols, "the market is closed").await
+    {
+        return Ok((q, false));
+    }
     let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
     let live = client.get_quote(&refs).await;
     // Yahoo down: the keyed providers priced the built-in list (their quotes
@@ -415,8 +427,34 @@ async fn scan_quotes_src(
             );
             Ok((market::filter_by_cap(scan.bulk.clone(), cap), false))
         }
+        Err(e) if market == Market::In && no_tier => {
+            match bse_eod(client, &scan.symbols, "Yahoo Finance did not answer").await {
+                Some(q) => Ok((q, false)),
+                None => Err(e),
+            }
+        }
         Err(e) => Err(e),
     }
+}
+
+/// The scan's symbols at BSE's last close (bhavcopy), when the file covers
+/// at least half of them; says so on stderr. `why` names the reason.
+async fn bse_eod(
+    client: &YahooClient,
+    symbols: &[String],
+    why: &str,
+) -> Option<Vec<crate::api::Quote>> {
+    let (date, quotes) = client.bse_eod_quotes(symbols).await?;
+    if quotes.len() * 2 < symbols.len() {
+        return None;
+    }
+    eprintln!(
+        "  \u{24d8} {}: {} closing prices of {} from BSE's bhavcopy (no P/E or market cap).",
+        why,
+        quotes.len(),
+        date.format("%d %b %Y")
+    );
+    Some(quotes)
 }
 
 /// Most companies a screener fallback asks for.

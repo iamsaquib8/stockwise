@@ -171,6 +171,15 @@ caps for `nifty50` / `nifty100`, a built-in member list for `banknifty` and
 `niftyit`); `niftynext50`, `midcap150` and `smallcap250` have no built-in list
 and fail with the reason.
 
+**End-of-day prices (India):** outside Indian market hours, `movers` and
+`heatmap` (without a `--cap` tier) take every stock's last close from BSE's
+daily bhavcopy, a public CSV of the whole exchange's day, instead of asking
+Yahoo Finance for each stock. Any India scan that has no P/E or cap filter
+also falls back to it when Yahoo does not answer. The file is downloaded once
+per trading day (BSE posts it in the evening, IST) and kept in `cache.db`;
+`stockwise cache clear bhavcopy` drops it. It has prices and volume only: no
+P/E, market cap or intraday prices.
+
 **Cap tiers** (`mega`, `large`, `mid`, `small`, `micro`): a badge such as
 `[Large]` next to the market cap in `quote`, `deep`, `analyze` and `compare`
 (and a `Cap` column in `movers`, `screen` and `portfolio`), and a `cap_tier`
