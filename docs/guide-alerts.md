@@ -142,7 +142,7 @@ an end-of-day summary to the same notification channels.
 There is also a once-a-day research pass:
 
 ```bash
-stockwise daemon longterm   # scores 30 stocks, snapshots wealth, checks alerts, lists holdings below cost
+stockwise daemon longterm   # scores NIFTY 500 / S&P 500, snapshots wealth, checks alerts, lists holdings below cost
 ```
 
 For how the bots decide and the risk limits, see [Bots and alerts](bots.md) and

@@ -133,9 +133,9 @@ always works. Common names resolve to NSE symbols
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers among 30 large caps, or an NSE index's members (see below), with a cap-tier column |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across NIFTY 500 (India) or the S&P 500 (US), or an NSE index's members (see below), with a cap-tier column |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the 30-stock universe, or an NSE index's members |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of NIFTY 500 (India) or the S&P 500 (US), or an NSE index's members |
 | `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
 | `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
 | `rotation` | Sector rotation vs 50-day average |
@@ -144,14 +144,15 @@ always works. Common names resolve to NSE symbols
 | `insider <SYMBOL>` | Analyst consensus + insider-related news |
 | `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a demand label such as "STRONG DEMAND" or "BOOK BUILDING") and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (with `--capital`, the odds at that amount, including for several separate applications), unofficial GMP and broker calls from press headlines, and a 6-pillar score with a **listing demand** label and a **long-term profile** label. In `--json`: `listing_demand`, `long_term_profile` and `timeline` replace `listing_verdict`, `long_term_verdict` and `timing_guidance`; `capital_odds` and `allotment_rules` replace `capital_plan` and `golden_rules`. Not a recommendation |
 | `earnings` | Earnings growth for portfolio and watchlist |
-| `surprise` | Earnings momentum — accelerating vs decelerating |
-| `matrix` | Quality vs growth quadrants |
-| `picks` | The highest-scoring large caps on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
+| `surprise [--universe INDEX]` | Earnings momentum — accelerating vs decelerating |
+| `matrix [--universe INDEX]` | Quality vs growth quadrants |
+| `picks [--universe INDEX]` | The highest-scoring stocks of NIFTY 500 (India) or the S&P 500 (US) on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
 | `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
-**`--universe`** (Indian market): scan the current members of an NSE index
-instead of the built-in 30 large caps — `nifty50`, `niftynext50` (`next50`),
+**`--universe`** (Indian market; `movers`, `heatmap`, `screen`, `picks`,
+`matrix`, `surprise`, `longterm`): scan the current members of a
+narrower NSE index instead of NIFTY 500, the default — `nifty50`, `niftynext50` (`next50`),
 `nifty100`, `banknifty` (`niftybank`), `niftyit`, `nifty500`, `midcap150` or
 `smallcap250`. NSE's website lists the members and prices them in one bulk
 request (all 500 of `nifty500`), whichever data provider you use. `movers` and

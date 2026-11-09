@@ -1563,7 +1563,7 @@ fn saved_nifty500() -> Option<Vec<String>> {
 }
 
 /// File where versions before `cache.db` kept the NSE index membership;
-/// read once and moved into `cache.db`.
+/// read once and moved into `cache.db`, and still used when it is off.
 const MEMBERSHIP_FILE: &str = "cap_membership.json";
 
 /// Index members saved by NSE index scans: lets the India cap tier follow
@@ -1611,15 +1611,19 @@ impl IndiaMembership {
 
     /// Saved membership read now from `cache.db` (not the once-per-run
     /// copy). A `cap_membership.json` from an older version is moved in
-    /// the first time.
+    /// the first time; with `cache.db` off, that file stays the store.
     pub fn load() -> Self {
-        let lists = crate::db::with_db(|d| d.index_lists()).unwrap_or_default();
+        let Some(lists) = crate::db::with_db(|d| d.index_lists()) else {
+            return crate::store::load(MEMBERSHIP_FILE).unwrap_or_default();
+        };
         if lists.is_empty() {
             if let Ok(old) = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
                 && !old.is_empty()
             {
-                old.save();
-                if let Ok(p) = crate::store::path(MEMBERSHIP_FILE) {
+                // Delete the old file only once its lists are in cache.db.
+                if old.save()
+                    && let Ok(p) = crate::store::path(MEMBERSHIP_FILE)
+                {
                     let _ = std::fs::remove_file(p);
                 }
                 return old;
@@ -1642,8 +1646,8 @@ impl IndiaMembership {
         m
     }
 
-    /// Write every list to `cache.db` (best effort).
-    fn save(&self) {
+    /// Write every list to `cache.db` (best effort); whether it worked.
+    fn save(&self) -> bool {
         let flag = |n: &str| self.scanned.iter().any(|s| s == n);
         let lists: [(&str, bool, &[String]); 4] = [
             ("NIFTY 100", flag("NIFTY 100"), &self.nifty100),
@@ -1659,7 +1663,7 @@ impl IndiaMembership {
             ),
             ("NIFTY 500", false, &self.nifty500),
         ];
-        crate::db::with_db(|d| d.put_index_lists(&lists));
+        crate::db::with_db(|d| d.put_index_lists(&lists)).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1740,7 +1744,10 @@ impl IndiaMembership {
         }
         let mut m = Self::load();
         m.set(index, symbols);
-        m.save();
+        // With cache.db off or unusable, keep the lists in the JSON file.
+        if !m.save() {
+            let _ = crate::store::save(MEMBERSHIP_FILE, &m, false);
+        }
     }
 }
 

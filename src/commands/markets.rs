@@ -177,9 +177,11 @@ pub(super) async fn universe_quotes(
         if !rows.is_empty() {
             crate::db::with_db(|d| d.put_quotes(&rows));
         }
+        // A Yahoo failure returns NSE's whole snapshot: never let its
+        // fundamentals-free rows replace fresh cached quotes.
         for q in fetched {
             if let Some(sym) = q.symbol.clone() {
-                cached.insert(sym, q);
+                cached.entry(sym).or_insert(q);
             }
         }
     }

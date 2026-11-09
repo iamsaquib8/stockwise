@@ -580,10 +580,15 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                 "⟳".yellow()
             );
             market.require_bot_support("report longterm")?;
-            // Only the first 15 (NIFTY 500 lists the largest first) go in.
-            let symbols = market.universe();
-            let sym_refs: Vec<&str> = symbols.iter().take(15).map(String::as_str).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            // Only the 15 largest by market cap go in (the S&P 500 and
+            // built-in NIFTY 500 lists are alphabetical).
+            let mut quotes = super::markets::universe_quotes(&client, market, None).await?;
+            quotes.sort_by(|a, b| {
+                b.market_cap
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.market_cap.unwrap_or(0.0))
+            });
+            quotes.truncate(15);
             let mut data = String::new();
             for q in quotes.iter().take(15) {
                 let sym = q.symbol.as_deref().unwrap_or("?");

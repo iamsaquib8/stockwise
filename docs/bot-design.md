@@ -60,7 +60,7 @@ Two persistent background workers that run throughout the day:
 ```
 PRE-MARKET (9:00 – 9:14)
 ├── Fetch sector heat (NIFTY IT, Bank, Pharma, etc.)
-├── Scan for overnight gaps in all 30 stocks
+├── Scan for overnight gaps across the market's universe
 ├── Check global cues (US futures, SGX NIFTY)
 ├── Identify watchlist candidates (top 10 by score)
 └── Print morning brief

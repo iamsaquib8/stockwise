@@ -1,6 +1,6 @@
 //! S&P 500 members, the default US universe. A snapshot of the index (as
-//! of `SP500_AS_OF`), refreshed by hand each release; with `FMP_API_KEY`
-//! set, scans use FMP's current list instead and save it in `cache.db`.
+//! of `SP500_AS_OF`), refreshed by hand each release. It is not updated
+//! at run time.
 //! Yahoo symbols: share classes use `-` (`BRK-B`), not `.`.
 
 /// When this list was taken.
