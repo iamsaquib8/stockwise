@@ -30,6 +30,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Pre-load the market universe into `cache.db` | `stockwise cache warm` (or `--background`) |
 | Filter cached stocks offline by cap, sector, P/E, RVOL | `stockwise cache snapshots --cap large --min-pe 10 --sort roe` |
 | Run the background worker (live quotes, tasks, alerts, post-close sync) | `stockwise worker start` / `status` / `stop` |
+| Post-close notices: LTCG turns, new quarters, new non-routine NSE filings of held `.NS` stocks (each sent once) | `stockwise tasks add eod` queues it for a running worker (`worker start`) |
 | Queue a long job and follow it | `stockwise tasks add run -- backtest TCS` then `stockwise tasks` / `tasks show 1` |
 
 ## Analysis

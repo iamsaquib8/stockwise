@@ -131,3 +131,28 @@ fn only_one_worker_owns_the_data_directory() {
     assert!(ok(&home, &["worker", "stop"]).contains("stopped"));
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The stop file is how `worker stop` reaches a Windows worker; the worker
+/// honours it on every platform, so it is testable here.
+#[test]
+fn a_stop_file_shuts_the_worker_down_cleanly() {
+    let home = scratch("stopfile");
+    let _worker = Worker(&home);
+    ok(&home, &["worker", "start"]);
+    std::fs::write(home.join("worker.stop"), b"stop").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // "Not running" can show a moment before the worker has removed its
+    // files, so wait for the cleanup too: no pid file, no stop request left.
+    loop {
+        let stopped = ok(&home, &["worker", "status"]).contains("not running");
+        if stopped && !home.join("worker.pid").exists() && !home.join("worker.stop").exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker ignored the stop file or did not clean up"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}

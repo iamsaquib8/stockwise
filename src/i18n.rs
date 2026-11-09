@@ -312,11 +312,11 @@ messages! {
     DoctorProviderAnswered => "{0} answered for {1} ({2} ms); Yahoo fills missing fields", "{1} के लिए {0} ने जवाब दिया ({2} ms); बाकी फ़ील्ड Yahoo से";
     DoctorProviderFellBack => "{0} did not answer ({1}); using Yahoo instead", "{0} से जवाब नहीं मिला ({1}); Yahoo का उपयोग हो रहा है";
     DoctorProviderNoKey => "{0} selected but {1} is not set; using Yahoo", "{0} चुना गया पर {1} सेट नहीं है; Yahoo का उपयोग हो रहा है";
-    DoctorProviderUnknown => "unknown provider '{0}' — use yahoo, alphavantage, massive (polygon), twelvedata, nse, bse or exchange", "अज्ञात प्रदाता '{0}' — yahoo, alphavantage, massive (polygon), twelvedata, nse, bse या exchange चुनें";
+    DoctorProviderUnknown => "unknown provider '{0}' — use yahoo, alphavantage, massive (polygon), twelvedata, finnhub, fmp, nse, bse or exchange", "अज्ञात प्रदाता '{0}' — yahoo, alphavantage, massive (polygon), twelvedata, finnhub, fmp, nse, bse या exchange चुनें";
     DoctorExchangeNote => "NSE/BSE website data is unofficial; when they refuse automated requests, Yahoo answers", "NSE/BSE वेबसाइट का डेटा अनौपचारिक है; जब वे स्वचालित अनुरोध रोकते हैं, तब Yahoo जवाब देता है";
     DoctorRedis => "Redis cache", "Redis कैश";
     DoctorConnected => "connected", "जुड़ा हुआ";
-    DoctorRedisNotUsed => "not used (optional; in-memory cache instead)", "उपयोग में नहीं (वैकल्पिक; मेमोरी कैश चल रहा है)";
+    DoctorRedisNotUsed => "not used (optional; set STOCKWISE_REDIS_URL to enable — cache.db is used instead)", "उपयोग में नहीं (वैकल्पिक; चालू करने के लिए STOCKWISE_REDIS_URL सेट करें — अभी cache.db इस्तेमाल हो रहा है)";
     DoctorAi => "AI", "AI";
     DoctorOllamaReady => "Ollama model {0} ready — use `report` or add --ai", "Ollama मॉडल {0} तैयार — `report` चलाएँ या --ai जोड़ें";
     DoctorOllamaNoModel => "Ollama is running, but model {0} is not pulled — run `ollama pull {0}`", "Ollama चल रहा है, पर मॉडल {0} डाउनलोड नहीं है — `ollama pull {0}` चलाएँ";

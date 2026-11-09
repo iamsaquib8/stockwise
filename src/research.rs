@@ -1630,7 +1630,11 @@ async fn fetch_yahoo_rss(client: &YahooClient, symbol: &str) -> Result<Vec<Headl
     Ok(parse_rss(&xml, "Yahoo Finance"))
 }
 
-async fn fetch_nse_filings(client: &YahooClient, sym: &str, days: i64) -> Result<Vec<Headline>> {
+pub(crate) async fn fetch_nse_filings(
+    client: &YahooClient,
+    sym: &str,
+    days: i64,
+) -> Result<Vec<Headline>> {
     let to = Utc::now().date_naive();
     let from = to - chrono::Duration::days(days);
     let url = format!(

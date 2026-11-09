@@ -37,6 +37,11 @@ rustPlatform.buildRustPackage (finalAttrs: {
   nativeInstallCheckInputs = [ versionCheckHook ];
   doInstallCheck = true;
 
+  checkFlags = [
+    # Static test fixture in v0.8.1 tag drifts relative to runtime date
+    "--skip=providers::alphavantage::tests::short_history_is_refused_so_yahoo_serves_it"
+  ];
+
   passthru.updateScript = nix-update-script { };
 
   meta = {

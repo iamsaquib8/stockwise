@@ -12,7 +12,6 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 const MAX_RETRIES: u32 = 3;
 const MIN_REQUEST_INTERVAL_MS: u64 = 200;
 const REDIS_KEY_PREFIX: &str = "stockwise:";
-const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379/";
 /// Never sleep longer than this for a single retry, whatever Retry-After says.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
 
@@ -53,13 +52,19 @@ fn fetch_failure_message(url: &str, error: reqwest::Error) -> String {
 }
 
 /// Redis URL: `STOCKWISE_REDIS_URL`, then `redis_url` in the config file,
-/// then local Redis. An empty env var has always meant "off", so it counts
+/// else `off`: Redis is opt-in, and without it the SQLite `cache.db` is the
+/// persistent cache. An empty env var has always meant "off", so it counts
 /// as set.
 pub fn redis_url() -> String {
-    std::env::var("STOCKWISE_REDIS_URL")
-        .ok()
-        .or_else(|| crate::config::get().redis_url.clone())
-        .unwrap_or_else(|| DEFAULT_REDIS_URL.into())
+    redis_url_from(
+        std::env::var("STOCKWISE_REDIS_URL").ok(),
+        crate::config::get().redis_url.clone(),
+    )
+}
+
+/// The precedence behind [`redis_url`]: env, then config file, else `off`.
+fn redis_url_from(env: Option<String>, file: Option<String>) -> String {
+    env.or(file).unwrap_or_else(|| "off".into())
 }
 
 /// Connect to the optional Redis cache.
@@ -80,6 +85,35 @@ pub async fn connect_redis() -> Option<redis::aio::MultiplexedConnection> {
         .get_multiplexed_async_connection_with_config(&config)
         .await
         .ok()
+}
+
+/// The complete OHLCV bars of a chart (a bar missing any field is dropped).
+fn bars_of(chart: &ChartData) -> Vec<crate::db::Bar> {
+    let (Some(ts), Some(q)) = (chart.timestamp.as_ref(), chart.indicators.quote.first()) else {
+        return Vec::new();
+    };
+    let (Some(o), Some(h), Some(l), Some(c), Some(v)) = (
+        q.open.as_ref(),
+        q.high.as_ref(),
+        q.low.as_ref(),
+        q.close.as_ref(),
+        q.volume.as_ref(),
+    ) else {
+        return Vec::new();
+    };
+    ts.iter()
+        .enumerate()
+        .filter_map(|(i, &ts)| {
+            Some(crate::db::Bar {
+                ts,
+                open: (*o.get(i)?)?,
+                high: (*h.get(i)?)?,
+                low: (*l.get(i)?)?,
+                close: (*c.get(i)?)?,
+                volume: (*v.get(i)?)? as f64,
+            })
+        })
+        .collect()
 }
 
 /// Cache key for a request URL: the per-session `crumb` parameter is dropped
@@ -211,6 +245,11 @@ impl HybridCache {
             l2: Some(l2),
             ..Self::in_memory()
         }
+    }
+
+    /// The `cache.db` handle, for storing bars next to cached responses.
+    pub(crate) fn l2(&self) -> Option<crate::db::L2> {
+        self.l2
     }
 
     fn has_redis(&self) -> bool {
@@ -497,6 +536,18 @@ pub struct Quote {
     /// Lower circuit limit; NSE provider only.
     #[serde(rename = "lowerCircuit", skip_serializing_if = "Option::is_none")]
     pub lower_circuit: Option<f64>,
+    /// Where the fields came from when the provider router filled them in
+    /// (`FINNHUB_API_KEY`, `FMP_API_KEY`); omitted from JSON otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<QuoteMeta>,
+}
+
+/// Provenance of a merged quote: every source that supplied a field, in the
+/// order they answered (`["Yahoo Finance", "Finnhub"]`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct QuoteMeta {
+    pub sources: Vec<String>,
 }
 
 /// Unix seconds as a number or Yahoo's `{raw, fmt}`; anything else is None
@@ -849,6 +900,9 @@ pub struct YahooClient {
     provider: Option<providers::Provider>,
     /// NSE, for index members when the provider isn't NSE-backed.
     nse: std::sync::OnceLock<providers::nse::Nse>,
+    /// Keyed providers (Finnhub, FMP) that answer when Yahoo fails or leaves
+    /// holes, one per capability (`providers::router`).
+    router: providers::router::Router,
     #[cfg(test)]
     pub(crate) url_rewrite: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>,
 }
@@ -878,13 +932,15 @@ impl YahooClient {
             }
             providers::Selection::Unknown(name) => {
                 eprintln!(
-                    "  \u{24d8} Unknown STOCKWISE_DATA_PROVIDER '{}' (alphavantage, massive, twelvedata, nse, bse, exchange); using Yahoo Finance",
+                    "  \u{24d8} Unknown STOCKWISE_DATA_PROVIDER '{}' (alphavantage, massive, twelvedata, finnhub, fmp, nse, bse, exchange); using Yahoo Finance",
                     name
                 );
                 None
             }
         };
 
+        let router =
+            providers::router::Router::from_env(provider.as_ref().map(|p| p.kind()), Some(&cache));
         Ok(Self {
             client,
             session: tokio::sync::Mutex::new(None),
@@ -894,6 +950,7 @@ impl YahooClient {
             cache,
             provider,
             nse: std::sync::OnceLock::new(),
+            router,
             #[cfg(test)]
             url_rewrite: None,
         })
@@ -997,6 +1054,7 @@ impl YahooClient {
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
+            router: providers::router::Router::default(),
             url_rewrite: None,
         }
     }
@@ -1020,8 +1078,17 @@ impl YahooClient {
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider,
             nse: std::sync::OnceLock::new(),
+            router: providers::router::Router::default(),
             url_rewrite: Some(std::sync::Arc::new(rewrite)),
         }
+    }
+
+    /// Back the client with keyed providers, as `FINNHUB_API_KEY` /
+    /// `FMP_API_KEY` would.
+    #[cfg(test)]
+    pub(crate) fn with_router(mut self, router: providers::router::Router) -> Self {
+        self.router = router;
+        self
     }
 
     #[cfg(test)]
@@ -1042,6 +1109,7 @@ impl YahooClient {
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
+            router: providers::router::Router::default(),
             url_rewrite: Some(std::sync::Arc::new(rewrite)),
         }
     }
@@ -1212,7 +1280,29 @@ impl YahooClient {
     /// Quotes for `symbols`. With a data provider configured, it prices the
     /// symbols it covers and Yahoo fills every other field and symbol; a
     /// provider error or exhausted free tier falls back to Yahoo alone.
+    ///
+    /// Keyed providers (`FINNHUB_API_KEY`, `FMP_API_KEY`) back both up: when
+    /// Yahoo fails or lacks a symbol they price it, and for a short list they
+    /// fill a missing market cap, merging field by field with the sources
+    /// named in `meta.sources`.
     pub async fn get_quote(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
+        if self.router.is_empty() {
+            return self.primary_quote(symbols).await;
+        }
+        let (have, error) = match self.primary_quote(symbols).await {
+            Ok(q) => (q, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
+        let out = self.router.complete(symbols, have, "Yahoo Finance").await;
+        match error {
+            Some(e) if out.is_empty() => Err(e),
+            _ => Ok(out),
+        }
+    }
+
+    /// Quotes from the configured primary provider merged into Yahoo's, or
+    /// Yahoo's alone.
+    async fn primary_quote(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
         let Some(provider) = &self.provider else {
             return self.yahoo_quote(symbols).await;
         };
@@ -1233,6 +1323,38 @@ impl YahooClient {
             Err(_) => Vec::new(),
         };
         Ok(combine_quotes(symbols, from_provider, yahoo))
+    }
+
+    /// Quarterly and annual statements from the keyed providers (FMP), for
+    /// when Yahoo's are unavailable. Returns the source's name.
+    pub async fn provider_statements(
+        &self,
+        symbol: &str,
+    ) -> Result<(crate::results::Statements, &'static str)> {
+        self.router.statements(symbol).await
+    }
+
+    /// Company profile, analyst trend and earnings surprises from the keyed
+    /// providers, merged; the second value names the sources.
+    pub async fn provider_fundamentals(
+        &self,
+        symbol: &str,
+    ) -> Result<(providers::router::Fundamentals, Vec<&'static str>)> {
+        self.router.fundamentals(symbol).await
+    }
+
+    /// Companies matching a screen from the keyed providers (FMP).
+    pub async fn provider_screener(
+        &self,
+        query: &providers::router::ScreenQuery,
+    ) -> Result<(Vec<Quote>, &'static str)> {
+        self.router.screener(query).await
+    }
+
+    /// Whether any keyed provider (`FINNHUB_API_KEY`, `FMP_API_KEY`) backs
+    /// Yahoo up.
+    pub fn has_router(&self) -> bool {
+        !self.router.is_empty()
     }
 
     /// Quotes straight from Yahoo Finance, ignoring any configured provider.
@@ -1307,7 +1429,8 @@ impl YahooClient {
         let resp: ChartResponse =
             serde_json::from_str(&body).context("Failed to parse chart response")?;
 
-        resp.chart
+        let chart = resp
+            .chart
             .result
             .and_then(|mut r| {
                 if r.is_empty() {
@@ -1316,7 +1439,24 @@ impl YahooClient {
                     Some(r.remove(0))
                 }
             })
-            .context("No chart data returned")
+            .context("No chart data returned")?;
+        self.store_bars(symbol, interval, &chart).await;
+        Ok(chart)
+    }
+
+    /// Keep a chart's complete bars in `cache.db` (`ohlcv_bars`) for offline
+    /// charts and backtests. Best-effort; bars with a missing field are skipped.
+    async fn store_bars(&self, symbol: &str, interval: &str, chart: &ChartData) {
+        let Some(l2) = self.cache.lock().await.l2() else {
+            return;
+        };
+        let bars = bars_of(chart);
+        if bars.is_empty() {
+            return;
+        }
+        if let Ok(mut db) = l2.lock() {
+            let _ = db.put_bars(symbol, interval, &bars);
+        }
     }
 
     /// Bars between two instants (Unix seconds), e.g. one past session's
@@ -1342,10 +1482,13 @@ impl YahooClient {
         let body = self.fetch(&url, Duration::from_secs(600)).await?;
         let resp: ChartResponse =
             serde_json::from_str(&body).context("Failed to parse chart response")?;
-        resp.chart
+        let chart = resp
+            .chart
             .result
             .and_then(|r| r.into_iter().next())
-            .context("No chart data returned")
+            .context("No chart data returned")?;
+        self.store_bars(symbol, interval, &chart).await;
+        Ok(chart)
     }
 
     /// Dividends and splits for `symbol` from `since` (Unix seconds) to today.
@@ -2089,6 +2232,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chart_bars_are_stored_in_cache_db() {
+        let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100,200,300],
+            "indicators":{"quote":[{"open":[1.0,2.0,null],"high":[2.0,3.0,4.0],
+            "low":[0.5,1.5,2.5],"close":[1.5,2.5,3.5],"volume":[10,20,30]}]}}],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let db: crate::db::L2 = Box::leak(Box::new(Mutex::new(
+            crate::db::CacheDb::open_in_memory().unwrap(),
+        )));
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.cache = Arc::new(tokio::sync::Mutex::new(HybridCache::with_l2(db)));
+        client.get_chart("TCS.NS", "1mo", "1d").await.unwrap();
+        let bars = db
+            .lock()
+            .unwrap()
+            .get_bars("TCS.NS", "1d", 0, 1000)
+            .unwrap();
+        // The third bar has a null open and is skipped.
+        assert_eq!(bars.len(), 2);
+        assert_eq!(
+            (bars[1].ts, bars[1].close, bars[1].volume),
+            (200, 2.5, 20.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn range_chart_bars_are_stored_too() {
+        let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100],
+            "indicators":{"quote":[{"open":[1.0],"high":[2.0],"low":[0.5],
+            "close":[1.5],"volume":[10]}]}}],"error":null}}"#;
+        let server = crate::testutil::MockServer::start(vec![(200, body.into())]).await;
+        let db: crate::db::L2 = Box::leak(Box::new(Mutex::new(
+            crate::db::CacheDb::open_in_memory().unwrap(),
+        )));
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.cache = Arc::new(tokio::sync::Mutex::new(HybridCache::with_l2(db)));
+        client
+            .get_chart_between("TCS.NS", 0, 1000, "5m")
+            .await
+            .unwrap();
+        let bars = db
+            .lock()
+            .unwrap()
+            .get_bars("TCS.NS", "5m", 0, 1000)
+            .unwrap();
+        assert_eq!(bars.len(), 1);
+    }
+
+    #[test]
+    fn redis_is_off_unless_configured() {
+        // No env, no config: off. The old default was a local Redis.
+        assert_eq!(redis_url_from(None, None), "off");
+        // The environment wins over the file; an empty value still counts
+        // as set (it has always meant "off").
+        assert_eq!(
+            redis_url_from(Some("redis://h:1/".into()), Some("redis://f:2/".into())),
+            "redis://h:1/"
+        );
+        assert_eq!(
+            redis_url_from(None, Some("redis://f:2/".into())),
+            "redis://f:2/"
+        );
+        assert_eq!(
+            redis_url_from(Some(String::new()), Some("redis://f:2/".into())),
+            ""
+        );
+    }
+
+    #[tokio::test]
     async fn new_sends_no_request_and_opens_no_session() {
         let client = YahooClient::new().await.unwrap();
         assert!(client.session.lock().await.is_none());
@@ -2118,6 +2337,43 @@ mod tests {
         assert_eq!(quotes.len(), 1);
         assert_eq!(quotes[0].symbol.as_deref(), Some("RELIANCE.NS"));
         assert_eq!(quotes[0].data_source.as_deref(), Some("NSE"));
+    }
+
+    #[tokio::test]
+    async fn keyed_providers_price_a_list_when_yahoo_is_down_and_name_their_source() {
+        let yahoo = crate::testutil::MockServer::start(vec![(429, "no".into())]).await;
+        let fmp = crate::testutil::MockServer::start(vec![(
+            200,
+            r#"[{"symbol":"AAPL","name":"Apple Inc.","price":261.74,"change":-1.26,"changePercentage":-0.48,"marketCap":3.9e12},
+                {"symbol":"MSFT","name":"Microsoft","price":470.1,"change":2.0,"changePercentage":0.43,"marketCap":3.5e12}]"#
+                .into(),
+        )])
+        .await;
+        let router = providers::router::Router::new(vec![providers::Provider::new(
+            providers::ProviderKind::Fmp,
+            "test-key".into(),
+            Some(fmp.url.clone()),
+        )]);
+        let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url)).with_router(router);
+        let quotes = client.get_quote(&["AAPL", "MSFT"]).await.unwrap();
+        assert_eq!(quotes.len(), 2);
+        assert_eq!(quotes[0].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(quotes[1].market_cap, Some(3.5e12));
+        assert_eq!(
+            quotes[0].meta.as_ref().map(|m| m.sources.clone()),
+            Some(vec!["Financial Modeling Prep".to_string()])
+        );
+        let json = serde_json::to_value(&quotes[0]).unwrap();
+        assert_eq!(json["meta"]["sources"][0], "Financial Modeling Prep");
+        assert!(json.to_string().find("test-key").is_none());
+    }
+
+    #[tokio::test]
+    async fn without_keyed_providers_a_yahoo_failure_is_still_the_error() {
+        let yahoo = crate::testutil::MockServer::start(vec![(429, "no".into())]).await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url));
+        assert!(!client.has_router());
+        assert!(client.get_quote(&["AAPL"]).await.is_err());
     }
 
     #[tokio::test]

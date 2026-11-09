@@ -408,6 +408,7 @@ fn print_income_table(report: &IncomeReport, by_holding: bool) {
     println!("  {}", "─".repeat(95));
 
     for h in &report.holdings {
+        let holding_cur = h.currency.as_deref().or(cur);
         let badge_colored = match h.payout_safety {
             PayoutSafety::Safe => "SAFE".green().bold(),
             PayoutSafety::Caution => "CAUTION".yellow().bold(),
@@ -419,12 +420,12 @@ fn print_income_table(report: &IncomeReport, by_holding: bool) {
             "  {:<12}  {:>8.2}  {:>10}  {:>10}  {:>7.2}%  {:>7.2}%  {:>12}  {:>12}  {:<8}",
             h.symbol.cyan(),
             h.shares,
-            format_price(h.current_price, cur),
-            format_price(h.avg_cost, cur),
+            format_price(h.current_price, holding_cur),
+            format_price(h.avg_cost, holding_cur),
             h.current_yield_pct,
             h.yoc_pct,
-            format_price(h.annual_gross_income, cur).green(),
-            format_price(h.annual_net_income, cur),
+            format_price(h.annual_gross_income, holding_cur).green(),
+            format_price(h.annual_net_income, holding_cur),
             badge_colored
         );
 
@@ -435,7 +436,7 @@ fn print_income_table(report: &IncomeReport, by_holding: bool) {
                     lot.lot_no,
                     lot.purchase_date.dimmed(),
                     lot.qty,
-                    format_price(lot.cost_per_share, cur),
+                    format_price(lot.cost_per_share, holding_cur),
                     format!("{:.2}%", lot.yoc_pct).cyan()
                 );
             }

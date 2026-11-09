@@ -1,0 +1,1 @@
+- `results` bank asset quality now reads NSE's real banking XBRL (`PercentageOfGrossNpa` and `PercentageOfNpa`, filed as fractions), falls back to the standalone filing when the consolidated one has 0.00 placeholders, and skips list rows without an XBRL file.

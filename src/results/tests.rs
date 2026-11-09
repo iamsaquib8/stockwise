@@ -290,15 +290,31 @@ fn fiscal_year_labels() {
 
 // ── Banks ──
 
-const BANK_XBRL: &str = r#"<xbrli:xbrl xmlns:xbrli="x">
-<in-capmkt:PercentageOfGrossNpa contextRef="OneD">1.24</in-capmkt:PercentageOfGrossNpa>
-<in-capmkt:PercentageOfNetNpa contextRef="OneD">0.33</in-capmkt:PercentageOfNetNpa>
-<in-capmkt:ProfitLossForThePeriod contextRef="OneD">17616</in-capmkt:ProfitLossForThePeriod>
-</xbrli:xbrl>"#;
+// Trimmed real NSE files for HDFC Bank, Q3 FY25 (31-Dec-2024): the filing
+// list, and the consolidated and standalone banking-format XBRL. The
+// consolidated file carries 0.00 placeholders for the NPA ratios.
+const NSE_LIST: &str = include_str!("../fixtures/nse_results_hdfcbank.json");
+const XBRL_CONSOLIDATED: &str = include_str!("../fixtures/nse_bank_xbrl_hdfcbank_consolidated.xml");
+const BANK_XBRL: &str = include_str!("../fixtures/nse_bank_xbrl_hdfcbank_standalone.xml");
 
 #[test]
-fn bank_xbrl_gives_gross_and_net_npa() {
-    assert_eq!(parse_bank_xbrl(BANK_XBRL), (Some(1.24), Some(0.33)));
+fn bank_xbrl_gives_gross_and_net_npa_as_percent() {
+    // Filed as fractions: 0.0142 and 0.0046.
+    assert_eq!(parse_bank_xbrl(BANK_XBRL), (Some(1.42), Some(0.46)));
+}
+
+#[test]
+fn consolidated_placeholder_zeros_are_not_ratios() {
+    assert_eq!(parse_bank_xbrl(XBRL_CONSOLIDATED), (None, None));
+}
+
+#[test]
+fn only_the_current_quarter_context_counts() {
+    let xml = r#"<x:a xmlns:x="u">
+<x:PercentageOfGrossNpa contextRef="FourD">0.0900</x:PercentageOfGrossNpa>
+<x:PercentageOfGrossNpa contextRef="OneD" unitRef="pure">0.0207</x:PercentageOfGrossNpa>
+<x:PercentageOfNpa contextRef="OneD">0.0053</x:PercentageOfNpa></x:a>"#;
+    assert_eq!(parse_bank_xbrl(xml), (Some(2.07), Some(0.53)));
 }
 
 #[test]
@@ -307,19 +323,44 @@ fn xbrl_without_npa_gives_nothing() {
 }
 
 #[test]
+fn the_real_nse_list_gives_the_filing_with_a_standalone_fallback() {
+    let v: Value = serde_json::from_str(NSE_LIST).unwrap();
+    let f = parse_nse_filings(&v);
+    // The row without a file (`.../xbrl/-`) is skipped.
+    assert!(f.iter().all(|x| x.xbrl.ends_with(".xml")));
+    assert_eq!(f[0].to_date, d("2024-12-31"));
+    assert!(f[0].consolidated);
+    assert!(
+        f[0].xbrl
+            .ends_with("BANKING_117525_1359016_23012025122721.xml")
+    );
+    assert!(
+        f[0].standalone
+            .as_deref()
+            .unwrap()
+            .ends_with("BANKING_117524_1359008_23012025122553.xml")
+    );
+}
+
+#[test]
 fn nse_filings_keep_one_per_quarter_and_prefer_consolidated() {
     let v = json!([
         {"toDate": "30-Sep-2026", "xbrl": "https://x/solo.xml", "consolidated": "Non-Consolidated"},
         {"toDate": "30-Sep-2026", "xbrl": "https://x/cons.xml", "consolidated": "Consolidated"},
-        {"toDate": "30-Jun-2026", "xbrl": "https://x/jun.xml", "consolidated": "Consolidated"},
+        {"toDate": "30-Sep-2026", "xbrl": "https://x/cons-old.xml", "consolidated": "Consolidated"},
+        {"toDate": "30-Jun-2026", "xbrl": "https://x/jun.xml", "consolidated": "Non-Consolidated"},
         {"toDate": "31-Mar-2026", "xbrl": "-"},
+        {"toDate": "31-Dec-2025", "xbrl": "https://nsearchives.nseindia.com/corporate/xbrl/-", "consolidated": "Consolidated"},
         {"toDate": "garbage", "xbrl": "https://x/bad.xml"}
     ]);
     let f = parse_nse_filings(&v);
     assert_eq!(f.len(), 2);
     assert_eq!(f[0].to_date, d("2026-09-30"));
+    // The list is newest first: the first revision wins.
     assert_eq!(f[0].xbrl, "https://x/cons.xml");
+    assert_eq!(f[0].standalone.as_deref(), Some("https://x/solo.xml"));
     assert_eq!(f[1].to_date, d("2026-06-30"));
+    assert!(!f[1].consolidated);
 }
 
 /// Eight quarters of bank statements.
@@ -416,6 +457,45 @@ fn bank_server() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Consolidated placeholders (0.00) make a quarter fall back to the
+/// standalone filing.
+#[tokio::test]
+async fn a_zero_consolidated_filing_falls_back_to_standalone() {
+    let mut routes = bank_server();
+    let filings: Vec<Value> = vec![
+        json!({"toDate": "31-Dec-2025", "consolidated": "Consolidated",
+            "xbrl": "https://nsearchives.nseindia.com/x/cons.xml"}),
+        json!({"toDate": "31-Dec-2025", "consolidated": "Non-Consolidated",
+            "xbrl": "https://nsearchives.nseindia.com/x/solo.xml"}),
+    ];
+    routes.retain(|(n, _)| *n != "corporates-financial-results");
+    routes.insert(
+        0,
+        (
+            "corporates-financial-results",
+            Value::Array(filings).to_string(),
+        ),
+    );
+    routes.insert(0, ("cons.xml", XBRL_CONSOLIDATED.to_string()));
+    let server = crate::testutil::MockServer::start_routed(routes).await;
+    let c = collect(
+        &client_for(&server.url),
+        "HDFCBANK",
+        Market::In,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let q = c
+        .quarterly
+        .iter()
+        .find(|p| p.end == d("2025-12-31"))
+        .unwrap();
+    assert_eq!((q.gnpa_pct, q.nnpa_pct), (Some(1.42), Some(0.46)));
+}
+
 /// An in-memory `cache.db` that lives for the test run.
 fn memory_db() -> L2 {
     Box::leak(Box::new(Mutex::new(CacheDb::open_in_memory().unwrap())))
@@ -432,7 +512,7 @@ async fn a_bank_shows_nii_asset_quality_and_the_surprise() {
     assert_eq!(c.quarterly.len(), 8);
     let last = c.quarterly.last().unwrap();
     assert_eq!(last.nii, Some(3000.0 + 50.0 * 7.0));
-    assert_eq!((last.gnpa_pct, last.nnpa_pct), (Some(1.24), Some(0.33)));
+    assert_eq!((last.gnpa_pct, last.nnpa_pct), (Some(1.42), Some(0.46)));
     // Banks have no operating profit: no OPM either.
     assert_eq!(last.opm(), None);
     // 1767139200 = 2025-12-31.
@@ -446,7 +526,7 @@ async fn a_bank_shows_nii_asset_quality_and_the_surprise() {
     assert!(c.sources.iter().any(|s| s.contains("NSE")));
     // JSON and CSV carry the bank rows.
     let j = quarterly_json(&c, 8);
-    assert_eq!(j["quarters"][7]["gnpa_pct"], 1.24);
+    assert_eq!(j["quarters"][7]["gnpa_pct"], 1.42);
     assert_eq!(j["currency"], "INR");
     let csv = output::to_csv(&quarterly_csv(&c, 8)).unwrap();
     assert!(csv.lines().next().unwrap().contains("gnpa_pct"));
@@ -835,4 +915,315 @@ async fn saved_symbols_are_not_resolved_again() {
     .await
     .unwrap();
     assert_eq!(c.symbol, "AAPL");
+}
+
+#[tokio::test]
+async fn results_fall_back_to_keyed_providers_when_yahoo_has_no_statements() {
+    use crate::providers::{Provider, ProviderKind, router::Router};
+    // Yahoo answers the quote only: statements and earnings 404.
+    let yahoo = crate::testutil::MockServer::start_routed(vec![(
+        "/v7/finance/quote",
+        json!({"quoteResponse": {"result": [{
+            "symbol": "AAPL", "quoteType": "EQUITY", "longName": "Apple Inc.",
+            "currency": "USD", "regularMarketPrice": 260.0, "marketCap": 3.9e12
+        }]}})
+        .to_string(),
+    )])
+    .await;
+    let income = json!([
+        {"date": "2025-06-28", "period": "Q3", "reportedCurrency": "USD", "revenue": 94036.0, "netIncome": 23434.0, "epsDiluted": 1.57},
+        {"date": "2025-09-27", "period": "Q4", "reportedCurrency": "USD", "revenue": 102466.0, "netIncome": 27466.0, "epsDiluted": 1.85},
+        {"date": "2025-09-27", "period": "FY", "reportedCurrency": "USD", "revenue": 416161.0, "netIncome": 112010.0}
+    ]);
+    let fmp = crate::testutil::MockServer::start_routed(vec![
+        ("/income-statement", income.to_string()),
+        ("/balance-sheet-statement", "[]".into()),
+        ("/cash-flow-statement", "[]".into()),
+    ])
+    .await;
+    let finnhub = crate::testutil::MockServer::start_routed(vec![
+        ("/stock/profile2", r#"{"name":"Apple Inc"}"#.into()),
+        ("/stock/recommendation", "[]".into()),
+        (
+            "/stock/earnings",
+            r#"[{"actual":1.85,"estimate":1.7,"period":"2025-09-30","surprisePercent":8.8}]"#
+                .into(),
+        ),
+    ])
+    .await;
+    let router = Router::new(vec![
+        Provider::new(ProviderKind::Fmp, "k".into(), Some(fmp.url.clone())),
+        Provider::new(ProviderKind::Finnhub, "k".into(), Some(finnhub.url.clone())),
+    ]);
+    let client = client_for(&yahoo.url).with_router(router);
+    let c = collect(&client, "AAPL", Market::Us, None, false, true)
+        .await
+        .unwrap();
+    assert_eq!(c.quarterly.len(), 2);
+    assert_eq!(c.annual.len(), 1);
+    assert_eq!(c.currency.as_deref(), Some("USD"));
+    assert!(
+        c.sources
+            .iter()
+            .any(|s| s.contains("Financial Modeling Prep"))
+    );
+    assert!(
+        c.sources
+            .iter()
+            .any(|s| s.contains("Finnhub earnings surprises"))
+    );
+    let s = c.quarterly[1].surprise.as_ref().expect("surprise attached");
+    assert_eq!(s.outcome, "beat");
+}
+
+#[tokio::test]
+async fn results_error_stays_the_yahoo_one_without_keyed_providers() {
+    let yahoo = crate::testutil::MockServer::start_routed(vec![(
+        "/v7/finance/quote",
+        quote_body("Technology", "Software"),
+    )])
+    .await;
+    let client = client_for(&yahoo.url);
+    let err = collect(&client, "HDFCBANK", Market::In, None, false, true)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("Yahoo financial statements unavailable"));
+}
+
+// ── SEC EDGAR ──
+
+/// A US quote (the symbol is fixed by the test client's routes).
+fn us_quote_body() -> String {
+    json!({"quoteResponse": {"result": [{
+        "symbol": "ACME", "quoteType": "EQUITY", "longName": "Calendar Corp",
+        "currency": "USD", "regularMarketPrice": 50.0,
+        "sector": "Technology", "industry": "Software"
+    }]}})
+    .to_string()
+}
+
+/// Yahoo's last four US quarters: revenue 999 (EDGAR says otherwise), with
+/// a pre-tax figure only Yahoo has, and a 2025-12-31 quarter EDGAR has not
+/// filed yet.
+fn us_yahoo_series() -> Vec<Value> {
+    let ends = ["2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"];
+    let rows = |v: f64| -> Vec<(String, f64)> { ends.iter().map(|e| (e.to_string(), v)).collect() };
+    vec![
+        series("quarterly", "TotalRevenue", &rows(999.0), "USD"),
+        series("quarterly", "PretaxIncome", &rows(7.0), "USD"),
+        series("quarterly", "FreeCashFlow", &rows(1.0), "USD"),
+    ]
+}
+
+fn us_routes(edgar: bool) -> Vec<(&'static str, String)> {
+    let mut routes = vec![
+        (
+            "fundamentals-timeseries",
+            json!({"timeseries": {"result": us_yahoo_series()}}).to_string(),
+        ),
+        (
+            "quoteSummary",
+            json!({"quoteSummary": {"result": [{}]}}).to_string(),
+        ),
+        ("/v7/finance/quote", us_quote_body()),
+    ];
+    if edgar {
+        routes.push((
+            "company_tickers.json",
+            json!({"0": {"cik_str": 1234, "ticker": "ACME", "title": "Calendar Corp"}}).to_string(),
+        ));
+        routes.push((
+            "companyfacts/CIK0000001234.json",
+            crate::providers::edgar::tests::calendar_filer(),
+        ));
+    }
+    routes
+}
+
+#[tokio::test]
+async fn us_results_use_edgar_for_the_long_history_and_yahoo_for_the_rest() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let db = memory_db();
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    // 15 EDGAR quarters plus the one only Yahoo has.
+    assert_eq!(c.quarterly.len(), 16);
+    assert_eq!(c.annual.len(), 3);
+    assert!(c.sources.iter().any(|s| s.contains("SEC EDGAR")));
+    assert!(c.sources.iter().any(|s| s.contains("Yahoo")));
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    let q = |end: &str| c.quarterly.iter().find(|p| p.end == d(end)).unwrap();
+    // EDGAR wins what it has, Yahoo keeps what EDGAR lacks.
+    assert_eq!(q("2025-03-31").revenue, Some(220.0));
+    assert_eq!(q("2025-03-31").pbt, Some(7.0));
+    assert_eq!(q("2022-12-31").revenue, Some(130.0));
+    assert_eq!(q("2025-12-31").revenue, Some(999.0));
+    assert!(!q("2025-12-31").edgar && q("2025-09-30").edgar);
+    // Free cash flow follows the EDGAR cash flow and capex.
+    let p = q("2025-09-30");
+    assert_eq!(p.fcf, Some(p.ocf.unwrap() - p.capex.unwrap().abs()));
+    // Every period lands in cache.db, tagged with the source.
+    let stored = db.lock().unwrap().get_results("ACME").unwrap();
+    assert_eq!(stored.len(), 16 + 3);
+    let tags = stored
+        .iter()
+        .filter(|(e, _, j)| j.contains("\"edgar\":true") && !e.is_empty());
+    assert_eq!(tags.count(), 15 + 3);
+    // EDGAR was asked politely and with a client name.
+    let sec: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.target.contains("company"))
+        .collect();
+    assert_eq!(sec.len(), 2);
+    for r in &sec {
+        let ua = r.header("user-agent").unwrap();
+        assert!(ua.starts_with("stockwise/") && !ua.contains('@'), "{ua}");
+    }
+    // The second call is served from cache.db, naming both sources.
+    let again = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(again.from_cache);
+    assert_eq!(again.quarterly.len(), 16);
+    assert!(again.sources[0].contains("SEC EDGAR"));
+}
+
+#[tokio::test]
+async fn a_failing_edgar_leaves_yahoo_results_with_a_note() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(false)).await;
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.quarterly.len(), 4);
+    assert!(c.warnings.iter().any(|w| w.contains("SEC EDGAR")));
+    assert!(!c.sources.iter().any(|s| s.contains("EDGAR")));
+}
+
+#[tokio::test]
+async fn edgar_alone_carries_the_results_when_yahoo_statements_fail() {
+    let mut routes = us_routes(true);
+    routes.retain(|(n, _)| *n != "fundamentals-timeseries");
+    let server = crate::testutil::MockServer::start_routed(routes).await;
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.quarterly.len(), 15);
+    assert_eq!(c.currency.as_deref(), Some("USD"));
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("Yahoo financial statements"))
+    );
+}
+
+#[tokio::test]
+async fn other_markets_and_the_scoreboard_never_ask_edgar() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let client = client_for(&server.url);
+    collect(&client, "ACME", Market::In, None, false, true)
+        .await
+        .unwrap();
+    season(
+        &client,
+        &["ACME".to_string()],
+        "Test",
+        Market::Us,
+        None,
+        Sort::Date,
+    )
+    .await;
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| !r.target.contains("company_tickers") && !r.target.contains("companyfacts"))
+    );
+}
+
+#[tokio::test]
+async fn edgar_operating_profit_survives_the_merge() {
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let c = collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let p = c
+        .quarterly
+        .iter()
+        .find(|p| p.end == d("2022-12-31"))
+        .unwrap();
+    assert_eq!(p.operating_profit, Some(13.0));
+    assert!(p.fcf.is_some());
+}
+
+#[tokio::test]
+async fn partial_results_and_scoreboard_entries_are_not_served_to_edgar_requests() {
+    // EDGAR down: nothing is cached.
+    let server = crate::testutil::MockServer::start_routed(us_routes(false)).await;
+    let db = memory_db();
+    collect(
+        &client_for(&server.url),
+        "ACME",
+        Market::Us,
+        Some(db),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(db.lock().unwrap().get_results("ACME").unwrap().is_empty());
+    // A scoreboard run caches Yahoo only; a results request still asks EDGAR.
+    let server = crate::testutil::MockServer::start_routed(us_routes(true)).await;
+    let db = memory_db();
+    let client = client_for(&server.url);
+    season(
+        &client,
+        &["ACME".to_string()],
+        "T",
+        Market::Us,
+        Some(db),
+        Sort::Date,
+    )
+    .await;
+    let c = collect(&client, "ACME", Market::Us, Some(db), false, true)
+        .await
+        .unwrap();
+    assert!(!c.from_cache);
+    assert_eq!(c.quarterly.len(), 16);
 }

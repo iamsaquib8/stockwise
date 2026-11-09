@@ -917,6 +917,56 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
         );
     }
 
+    // Keyed providers that back Yahoo up (Finnhub, FMP): one probe each,
+    // the key never shown.
+    {
+        use crate::providers::router::Router;
+        let primary = match Selection::from_env() {
+            Selection::Ready(p) => Some(p.kind()),
+            _ => None,
+        };
+        let router = Router::from_env(primary, None);
+        let mut first = true;
+        for kind in [
+            crate::providers::ProviderKind::Finnhub,
+            crate::providers::ProviderKind::Fmp,
+        ] {
+            if Some(kind) == primary {
+                continue;
+            }
+            let line = match router.members().iter().find(|p| p.kind() == kind) {
+                None => format!(
+                    "{} {}",
+                    kind.name(),
+                    format!(
+                        "not configured (set {} to use it as a backup)",
+                        kind.key_env()
+                    )
+                    .dimmed()
+                ),
+                Some(provider) => {
+                    let started = std::time::Instant::now();
+                    match provider.quotes(&["AAPL"]).await {
+                        Ok(q) if q.iter().any(|q| q.regular_market_price.is_some()) => ok(&tf(
+                            Msg::DoctorProviderAnswered,
+                            &[&kind.name(), &"AAPL", &started.elapsed().as_millis()],
+                        )),
+                        Ok(_) => warn(&tf(
+                            Msg::DoctorProviderFellBack,
+                            &[&kind.name(), &"no price returned"],
+                        )),
+                        Err(e) => warn(&tf(
+                            Msg::DoctorProviderFellBack,
+                            &[&kind.name(), &format!("{:#}", e)],
+                        )),
+                    }
+                }
+            };
+            print_kv(if first { "Backup providers" } else { "" }, &line);
+            first = false;
+        }
+    }
+
     // Cache
     let redis = crate::api::connect_redis().await.is_some();
     print_kv(
