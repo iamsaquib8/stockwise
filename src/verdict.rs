@@ -1133,7 +1133,8 @@ mod tests {
 
     #[test]
     fn explain_weights_match_the_composite() {
-        let v = generate_verdict(&full_stock(), &[]);
+        let profile = crate::config::EffectiveProfile::default();
+        let v = generate_verdict_with_profile(&full_stock(), &[], &profile);
         let total: f64 = v.pillars.iter().map(|p| p.weight).sum();
         assert!((total - 1.0).abs() < 1e-9);
         let text = explain_lines(&v).join("\n");

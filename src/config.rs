@@ -341,6 +341,12 @@ pub struct EffectiveProfile {
     pub screen_presets: &'static [&'static str],
 }
 
+impl Default for EffectiveProfile {
+    fn default() -> Self {
+        Self::from_parts(None, None, &ProfileConfig::default())
+    }
+}
+
 impl EffectiveProfile {
     /// Resolve effective profile settings from explicit inputs.
     pub fn from_parts(
