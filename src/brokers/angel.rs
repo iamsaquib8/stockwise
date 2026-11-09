@@ -28,12 +28,16 @@ pub fn status(migrate: bool) -> Result<super::ConfigStatus> {
     let mut status = super::status_of(
         BrokerKind::Angel,
         config.is_configured(),
-        format!("client {}", config.client_id),
+        client_summary(&config.client_id),
         storage,
         None,
     )?;
     status.identifiers = vec![config.client_id.clone()];
     Ok(status)
+}
+
+fn client_summary(id: &str) -> String {
+    format!("client {}", super::redact_id(id))
 }
 
 // ── Config persistence ──
@@ -811,6 +815,13 @@ mod tests {
     use super::*;
     use crate::brokers::Side;
     use crate::brokers::mock::{MockServer, Route};
+
+    #[test]
+    fn status_summary_masks_client_id() {
+        let summary = client_summary("A1234567");
+        assert_eq!(summary, "client ••67");
+        assert!(!summary.contains("A1234567"));
+    }
 
     fn scrip(sym: &str, token: &str) -> SearchScrip {
         SearchScrip {

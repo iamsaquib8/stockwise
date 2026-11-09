@@ -10,7 +10,7 @@
 use super::trade::{Intent, check_cap, prepare_order};
 use super::*;
 use crate::brokers::readonly::ReadOnly;
-use crate::brokers::{self, Broker, BrokerKind, Endpoint, OrderKind, Side};
+use crate::brokers::{self, Broker, BrokerKind, Endpoint, OrderKind, Side, redact_id};
 
 /// Liquid NSE symbols every broker should resolve exactly. NIFTYBEES is
 /// the Nifty 50 ETF.
@@ -93,17 +93,6 @@ pub(super) struct Redactor {
     /// Account and app ids to cut down wherever they appear.
     ids: Vec<String>,
     amounts: bool,
-}
-
-/// `XX0042` → `••42`.
-pub(super) fn redact_id(id: &str) -> String {
-    let chars: Vec<char> = id.trim().chars().collect();
-    let tail: String = chars[chars.len().saturating_sub(2)..].iter().collect();
-    if chars.len() <= 2 {
-        "••".into()
-    } else {
-        format!("••{tail}")
-    }
 }
 
 impl Redactor {
