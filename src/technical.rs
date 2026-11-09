@@ -660,6 +660,34 @@ pub fn chandelier_exit(highs: &[f64], atr: f64, multiplier: f64) -> Option<f64> 
     Some(max_high - multiplier * atr)
 }
 
+/// Position size (whole shares) for a given capital, risk percentage, entry price, and stop price.
+///
+/// Uses integer minor units dynamically scaled to preserve sub-cent/crypto price precision
+/// and avoid IEEE 754 binary floating-point subtraction drift at exact share boundaries.
+///
+/// Formula: `floor((capital * (risk_pct / 100.0)) / (entry - stop))`.
+/// Returns `0` when `capital <= 0.0`, `risk_pct <= 0.0`, `entry <= 0.0`, or `stop >= entry`.
+pub fn shares_for_risk(capital: f64, risk_pct: f64, entry: f64, stop: f64) -> u64 {
+    let diff = entry - stop;
+    if !(capital > 0.0 && risk_pct > 0.0 && entry > 0.0 && diff > 0.0 && diff.is_finite()) {
+        return 0;
+    }
+    // Select a power-of-10 integer minor-unit scale giving at least 4 digits of resolution
+    // beyond the stop distance, preserving precision for penny stocks and crypto.
+    let exp = ((-diff.log10()).ceil() as i32 + 4).clamp(4, 12);
+    let scale = 10.0f64.powi(exp);
+    let entry_units = (entry * scale).round() as i128;
+    let stop_units = (stop * scale).round() as i128;
+    let risk_per_share_units = entry_units - stop_units;
+    if risk_per_share_units <= 0 {
+        return 0;
+    }
+    let capital_units = (capital * scale).round() as i128;
+    let risk_budget_units = (capital_units as f64 * (risk_pct / 100.0)).round() as i128;
+    let shares = risk_budget_units / risk_per_share_units;
+    if shares > 0 { shares as u64 } else { 0 }
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -672,6 +700,25 @@ mod tests {
         assert_eq!(sma(&[1.0, 2.0], 3), None);
         assert_eq!(sma(&[10.0, 10.0, 10.0], 3), Some(10.0));
         assert_eq!(sma(&[], 3), None);
+    }
+
+    #[test]
+    fn test_shares_for_risk() {
+        // Exact share boundary (floating point binary subtraction drift check)
+        assert_eq!(shares_for_risk(100.0, 1.0, 1.1, 1.0), 10);
+        assert_eq!(shares_for_risk(100.0, 1.0, 1.05, 1.0), 20);
+        // Small stop distance (sub-cent penny stock / crypto)
+        assert_eq!(shares_for_risk(1000.0, 1.0, 0.001, 0.00098), 500_000);
+        // Capital = 500,000, risk = 1%, entry = 1,280, stop = 1,231 (risk/share = 49)
+        // Risk amount = 5,000 -> 5000 / 49 = 102.04 -> 102 shares
+        assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1231.0), 102);
+        // Stop >= entry -> 0 shares
+        assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1280.0), 0);
+        assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1300.0), 0);
+        // Zero/negative capital or risk -> 0 shares
+        assert_eq!(shares_for_risk(0.0, 1.0, 1280.0, 1231.0), 0);
+        assert_eq!(shares_for_risk(-100.0, 1.0, 1280.0, 1231.0), 0);
+        assert_eq!(shares_for_risk(500_000.0, 0.0, 1280.0, 1231.0), 0);
     }
 
     #[test]

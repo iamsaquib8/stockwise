@@ -669,6 +669,15 @@ pub const TOOLS: &[Tool] = &[
         personal: true,
     },
     Tool {
+        name: "profile",
+        title: "Investor profile & personal guardrails",
+        description: "The user's active investor profile mode (passive, active, ultra), risk level, \
+                      tax parameters (regime, slab rate), horizon, and portfolio guardrails (max \
+                      stock weight, max small-cap weight, risk per trade).",
+        params: &[],
+        personal: true,
+    },
+    Tool {
         name: "holdings_lots",
         title: "Holding lots",
         description: "The user's purchase lots (quantity, price, date, days held, short or long \

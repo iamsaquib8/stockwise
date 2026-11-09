@@ -167,6 +167,16 @@ struct Cli {
     )]
     portfolio: Option<String>,
 
+    /// Investor profile mode (`passive`, `active`, `active:low`, `active:med`, `active:high`, `ultra`)
+    #[arg(
+        long,
+        global = true,
+        env = "STOCKWISE_PROFILE",
+        value_name = "MODE[:RISK]",
+        value_parser = config::parse_profile_spec
+    )]
+    profile: Option<config::ProfileSpec>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -428,12 +438,18 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         period: String,
     },
 
-    /// Stop-loss levels (ATR, percentage, Chandelier exit)
+    /// Stop-loss levels (ATR, percentage, Chandelier exit) and position sizing
     Stoploss {
         symbol: String,
         /// Your entry price (default: last price)
         #[arg(short, long)]
         entry: Option<f64>,
+        /// Capital available for position sizing (in the stock's currency)
+        #[arg(long, value_parser = capital)]
+        capital: Option<f64>,
+        /// Risk per trade as a percentage of capital (default: profile risk_per_trade, 1.0%)
+        #[arg(long = "risk-pct", value_name = "PCT", value_parser = risk_pct_arg)]
+        risk_pct: Option<f64>,
         #[arg(short, long, default_value = "1mo", value_parser = PERIODS)]
         period: String,
     },
@@ -965,6 +981,9 @@ that returns the `stockwise trade` command for you to run yourself.")]
     },
 
     // ── Setup ──
+    /// Investor profile mode (passive, active, ultra) and personal guardrails
+    Profile(Box<ProfileArgs>),
+
     /// Your defaults: config file path, effective settings, template (default: show)
     Config {
         #[command(subcommand)]
@@ -1604,6 +1623,23 @@ fn percent_0_to_50(s: &str) -> Result<f64, String> {
     percent_between(s, 0.0, 50.0)
 }
 
+fn percent_0_to_100(s: &str) -> Result<f64, String> {
+    percent_between(s, 0.0, 100.0)
+}
+
+fn max_stock_weight_arg(s: &str) -> Result<f64, String> {
+    percent_between(s, 1.0, 100.0)
+}
+
+fn risk_pct_arg(s: &str) -> Result<f64, String> {
+    match s.trim().trim_end_matches('%').parse::<f64>() {
+        Ok(v) if v > 0.0 && v <= 100.0 => Ok(v),
+        _ => Err(format!(
+            "`{s}` must be a percentage above 0 and at most 100"
+        )),
+    }
+}
+
 fn percent_between(s: &str, lo: f64, hi: f64) -> Result<f64, String> {
     match s.trim().trim_end_matches('%').parse::<f64>() {
         Ok(v) if (lo..=hi).contains(&v) => Ok(v),
@@ -1983,6 +2019,55 @@ fn level(s: &str) -> Result<f64, String> {
         Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
         _ => Err(format!("`{s}` must be a price above 0")),
     }
+}
+
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct ProfileArgs {
+    #[command(subcommand)]
+    action: Option<ProfileCmd>,
+    #[command(flatten)]
+    out: JsonOutput,
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// Show current effective investor profile and personal guardrails
+    #[command(alias = "status")]
+    Show {
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// Set investor profile mode and personal guardrails in config.toml
+    Set {
+        /// Mode archetype (passive, active, ultra, or mode:risk like active:high)
+        mode: Option<config::ProfileSpec>,
+        /// Risk level for active mode (low, med, high)
+        #[arg(long, value_enum, ignore_case = true)]
+        risk: Option<config::RiskLevel>,
+        /// Income tax slab rate in percent (0 to 50)
+        #[arg(long = "tax-slab", value_name = "PCT", value_parser = slab_pct)]
+        tax_slab: Option<f64>,
+        /// Income tax regime: new or old
+        #[arg(long = "tax-regime", value_enum, ignore_case = true)]
+        tax_regime: Option<config::TaxRegime>,
+        /// Default goal horizon in years (1 to 60)
+        #[arg(long = "horizon-years", value_parser = goal_years)]
+        horizon_years: Option<u32>,
+        /// Maximum single-stock allocation guardrail percentage (1.0 to 100.0)
+        #[arg(long = "max-stock-weight", value_name = "PCT", value_parser = max_stock_weight_arg)]
+        max_stock_weight: Option<f64>,
+        /// Maximum total small-cap allocation guardrail percentage (0.0 to 100.0)
+        #[arg(long = "max-smallcap-weight", value_name = "PCT", value_parser = percent_0_to_100)]
+        max_smallcap_weight: Option<f64>,
+        /// Maximum risk per trade as a percentage of capital (0.0 < risk <= 100.0)
+        #[arg(long = "risk-per-trade", value_name = "PCT", value_parser = risk_pct_arg)]
+        risk_per_trade: Option<f64>,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// Reset [profile] in config.toml to commented defaults
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -3002,7 +3087,10 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("AI assistants", &["ask", "mcp"]),
     ("Interfaces", &["tui", "serve"]),
     ("Live trading", &["trade"]),
-    ("Setup", &["notify", "config", "completions", "man", "help"]),
+    (
+        "Setup",
+        &["profile", "notify", "config", "completions", "man", "help"],
+    ),
 ];
 
 /// The catalog entry for a help group title. Titles without one (e.g. a
@@ -3120,7 +3208,7 @@ fn curated_quickstart_help(new_user: bool) -> String {
         "stockwise <SYMBOL>  (e.g. `stockwise RELIANCE` or `stockwise AAPL -m us`)"
     ));
 
-    let sections: &[(&str, &[(&str, &str)])] = &[
+    let default_sections: &[(&str, &[(&str, &str)])] = &[
         (
             "Stock Research & Scores",
             &[
@@ -3219,6 +3307,111 @@ fn curated_quickstart_help(new_user: bool) -> String {
         ),
     ];
 
+    let passive_sections: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Portfolio, SIP Goals & Direct Mutual Funds",
+            &[
+                (
+                    "portfolio",
+                    "Live holdings, FIFO lots, XIRR & multi-currency valuation",
+                ),
+                (
+                    "goal sip --target <AMT>",
+                    "Goal-matched SIP planning with inflation & outcome bands",
+                ),
+                (
+                    "mf search <QUERY>",
+                    "AMFI NAVs, Direct vs Regular expense bleed & category screens",
+                ),
+                (
+                    "rebalance",
+                    "Target allocation drift & inflow-only (--inflow) rebalance",
+                ),
+                (
+                    "tax [in|us|uk]",
+                    "Capital gains estimate, `tax export` & `tax advance` (234C)",
+                ),
+                (
+                    "harvest",
+                    "Lot-level tax-loss & ₹1.25L LTCG exemption harvesting",
+                ),
+            ],
+        ),
+        (
+            "Stock Research & Scores",
+            &[
+                (
+                    "quote <SYM>",
+                    "Live price, 52W range, valuation & circuit limits",
+                ),
+                (
+                    "verdict <SYM>",
+                    "6-pillar score (0–100) with data coverage; not a recommendation",
+                ),
+                (
+                    "insights <SYM>",
+                    "9-dimension fundamental cards & shareholding split",
+                ),
+                (
+                    "score <SYM>",
+                    "Piotroski 9-Point F-Score & Altman Z-Score breakdown",
+                ),
+                (
+                    "events <SYM>",
+                    "Corporate filings, dividends, splits & price reaction",
+                ),
+                (
+                    "deep <SYM>",
+                    "All-in-one deep dive (fundamentals + technicals + verdict)",
+                ),
+            ],
+        ),
+        (
+            "Markets & Screening",
+            &[
+                (
+                    "markets",
+                    "Global, US & Indian indices (--global, --crypto, --fx)",
+                ),
+                (
+                    "screen <TYPE>",
+                    "Screen by undervalued, growth, dividend, bluechip",
+                ),
+                (
+                    "ipo",
+                    "Indian Mainboard & SME IPO board, subscription, GMP & demand scores",
+                ),
+            ],
+        ),
+        (
+            "Interactive & AI Surfaces",
+            &[
+                (
+                    "tui",
+                    "Full-screen terminal workstation (Watchlist, Portfolio, Charts)",
+                ),
+                (
+                    "serve --open",
+                    "Local Web UI research & portfolio workbench",
+                ),
+                (
+                    "ask \"<QUERY>\"",
+                    "Ask an AI agent grounded in live StockWise tools",
+                ),
+                (
+                    "mcp",
+                    "Model Context Protocol server for Claude / Cursor / IDEs",
+                ),
+            ],
+        ),
+    ];
+
+    let sections = if config::effective_profile().mode == config::ProfileMode::Passive {
+        passive_sections
+    } else {
+        default_sections
+    };
+
     for (title, rows) in sections {
         out.push_str(&format!("\n  {}\n", title.bold().underline()));
         for (cmd, desc) in *rows {
@@ -3260,6 +3453,15 @@ fn parse_bare_symbol_invocation(
         } else if let Some(val) = a.strip_prefix("--market=") {
             market = Market::from_str(val, true).ok()?;
             market_flag = true;
+            i += 1;
+        } else if a == "--profile" {
+            let val = args.get(i + 1)?;
+            let spec = config::parse_profile_spec(val).ok()?;
+            config::set_cli_profile(Some(spec), config::Source::Flag);
+            i += 2;
+        } else if let Some(val) = a.strip_prefix("--profile=") {
+            let spec = config::parse_profile_spec(val).ok()?;
+            config::set_cli_profile(Some(spec), config::Source::Flag);
             i += 1;
         } else if a == "--json" {
             if fmt == Format::Csv {
@@ -3518,7 +3720,8 @@ async fn async_main() {
     if let config::Status::Invalid(msg) = &cfg_state.status
         && !matches!(
             cli.command,
-            Commands::Config { .. }
+            Commands::Profile { .. }
+                | Commands::Config { .. }
                 | Commands::Init { .. }
                 | Commands::Doctor
                 | Commands::Completions { .. }
@@ -3529,6 +3732,8 @@ async fn async_main() {
     }
 
     let cfg = config::get();
+    let profile_source = arg_source(&matches, "profile", cfg.profile.mode.is_some());
+    config::set_cli_profile(cli.profile, profile_source);
     let sources = config::CliSources {
         market: arg_source(&matches, "market", cfg.market.is_some()),
         ai: if matches.value_source("no_ai") == Some(ValueSource::CommandLine) {
@@ -3547,7 +3752,16 @@ async fn async_main() {
         std::process::exit(2);
     }
 
-    let result = Box::pin(dispatch(cli.command, m, sources, periods)).await;
+    let cli_profile = cli.profile;
+    let result = Box::pin(dispatch(
+        cli.command,
+        m,
+        sources,
+        periods,
+        profile_source,
+        cli_profile,
+    ))
+    .await;
 
     if let Err(e) = result {
         eprintln!(
@@ -3564,6 +3778,8 @@ async fn dispatch(
     m: Market,
     sources: config::CliSources,
     periods: Vec<(String, String)>,
+    profile_source: config::Source,
+    cli_profile: Option<config::ProfileSpec>,
 ) -> anyhow::Result<()> {
     match command {
         Commands::Quote { symbols, out } => commands::cmd_quote(&symbols, m, out.into()).await,
@@ -3633,7 +3849,16 @@ async fn dispatch(
             TasksAction::Add { kind, args } => commands::cmd_tasks_add(kind, &args, m),
         },
         Commands::Init { imports, no_mcp } => {
-            commands::cmd_init(m, sources.market == config::Source::Flag, &imports, no_mcp).await
+            commands::cmd_init(
+                m,
+                sources.market == config::Source::Flag,
+                (profile_source == config::Source::Flag)
+                    .then_some(cli_profile)
+                    .flatten(),
+                &imports,
+                no_mcp,
+            )
+            .await
         }
 
         Commands::Analyze { symbol, out } => commands::cmd_analyze(&symbol, m, out.json).await,
@@ -3707,8 +3932,10 @@ async fn dispatch(
         Commands::Stoploss {
             symbol,
             entry,
+            capital,
+            risk_pct,
             period,
-        } => commands::cmd_stoploss(&symbol, entry, &period, m).await,
+        } => commands::cmd_stoploss(&symbol, entry, &period, capital, risk_pct, m).await,
         Commands::Forecast {
             symbol,
             days,
@@ -4422,6 +4649,39 @@ async fn dispatch(
             allow_orders,
             list_tools,
         } => commands::cmd_mcp(http.as_deref(), allow_remote, allow_orders, list_tools, m).await,
+        Commands::Profile(args) => match args.action {
+            Some(ProfileCmd::Show { out: sub_out }) => {
+                let fmt = Format::from_flags(args.out.json || sub_out.json, false);
+                commands::cmd_profile_show(fmt)
+            }
+            Some(ProfileCmd::Set {
+                mode,
+                risk,
+                tax_slab,
+                tax_regime,
+                horizon_years,
+                max_stock_weight,
+                max_smallcap_weight,
+                risk_per_trade,
+                out: set_out,
+            }) => {
+                let fmt = Format::from_flags(args.out.json || set_out.json, false);
+                let spec_str = mode.map(|s| s.canonical());
+                let update = config::ProfileUpdate {
+                    mode: mode.map(|s| s.mode),
+                    risk: risk.or_else(|| mode.and_then(|s| s.risk)),
+                    tax_slab,
+                    tax_regime,
+                    horizon_years,
+                    max_stock_weight,
+                    max_smallcap_weight,
+                    risk_per_trade,
+                };
+                commands::cmd_profile_set(spec_str.as_deref(), update, fmt)
+            }
+            Some(ProfileCmd::Reset) => commands::cmd_profile_reset(),
+            None => commands::cmd_profile_show(args.out.into()),
+        },
         Commands::Config { action } => match action {
             Some(ConfigCmd::Path) => commands::cmd_config_path(),
             Some(ConfigCmd::Init { force }) => commands::cmd_config_init(force),
@@ -5766,16 +6026,31 @@ mod tests {
             ],
             vec!["stockwise", "goal", "show", "house"],
             vec!["stockwise", "goal", "remove", "house"],
+            vec!["stockwise", "profile"],
+            vec!["stockwise", "profile", "show", "--json"],
+            vec!["stockwise", "profile", "set", "passive"],
+            vec!["stockwise", "profile", "set", "active", "--risk", "high"],
+            vec!["stockwise", "profile", "set", "ultra", "--tax-slab", "30"],
+            vec!["stockwise", "profile", "reset"],
+            vec![
+                "stockwise",
+                "stoploss",
+                "TCS",
+                "--capital",
+                "50000",
+                "--risk-pct",
+                "1.5",
+            ],
         ] {
             assert!(parses(&args), "{args:?} should parse");
         }
         for args in [
+            vec!["stockwise", "goal", "sip", "--target", "1cr"],
             vec!["stockwise", "tax"],
             vec!["stockwise", "tax", "export", "uk"],
             vec!["stockwise", "tax", "export", "in", "--csv"],
             vec!["stockwise", "portfolio", "benchmark", "-p", "5d"],
             vec!["stockwise", "portfolio", "--json", "benchmark"],
-            vec!["stockwise", "goal", "sip", "--target", "1cr"],
             vec![
                 "stockwise",
                 "goal",

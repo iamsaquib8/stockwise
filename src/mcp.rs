@@ -59,6 +59,11 @@ const RESOURCES: &[(&str, &str, &str)] = &[
         "Alerts",
         "Price and technical alerts with their live status",
     ),
+    (
+        "stockwise://profile",
+        "Investor Profile",
+        "Active investor profile mode, risk level, horizon and guardrails",
+    ),
 ];
 
 /// The MCP server: tools, resources and prompts over one [`ToolContext`].
@@ -120,6 +125,7 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
             }
             "stockwise://watchlist" => serde_json::to_value(views::watchlist(src).await?)?,
             "stockwise://alerts" => serde_json::to_value(views::alerts(src).await?)?,
+            "stockwise://profile" => serde_json::to_value(crate::config::effective_profile())?,
             other => anyhow::bail!("Unknown resource {}", other),
         })
     }

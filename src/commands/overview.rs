@@ -368,11 +368,15 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
 }
 
 /// Smart stock snapshot invoked when a user passes a bare symbol (`stockwise RELIANCE`).
-/// Displays the live quote followed by a compact 6-pillar Verdict & Technicals snapshot.
+/// Adapts output depth and guardrails to the active investor profile (`passive`, `active`, `ultra`).
 pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     if !fmt.is_table() || market::AssetClass::of(&resolved) != market::AssetClass::Stock {
         return cmd_quote(&[symbol.to_string()], market, fmt).await;
+    }
+    let prof = crate::config::effective_profile();
+    if prof.mode == crate::config::ProfileMode::Ultra {
+        return cmd_ultra_overview(symbol, &resolved, market).await;
     }
     cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
     if let Ok(client) = YahooClient::new().await
@@ -386,11 +390,344 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
         .await
     {
         let cards = crate::insights::generate_rich_insights(&bundle);
-        let v = crate::verdict::generate_verdict(&bundle, &cards);
-        print_section("Quick Research Snapshot (6-Pillar Score)");
+        let v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+        print_section(&format!(
+            "Quick Research Snapshot (6-Pillar Score · Profile: {})",
+            prof.spec
+        ));
         crate::verdict::print_snapshot(&v, &resolved);
+        if prof.mode == crate::config::ProfileMode::Passive {
+            println!();
+            println!(
+                "  {}",
+                "HOW TO READ THIS SCORE (Passive Profile Guide)"
+                    .bold()
+                    .cyan()
+            );
+            for line in crate::verdict::explain_lines(&v) {
+                println!("  {}", line.dimmed());
+            }
+            println!();
+            print_hint(
+                "Passive toolkit: stockwise portfolio xray · stockwise goal sip · stockwise mf search",
+            );
+        }
         println!();
     }
+    Ok(())
+}
+
+/// High-density single-screen Pro Terminal View for `--profile ultra`.
+async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) -> Result<()> {
+    let client = YahooClient::new().await?;
+    let r = crate::research::fetch(
+        &client,
+        resolved,
+        market,
+        60,
+        crate::research::Needs::VERDICT | crate::research::Needs::STATEMENTS,
+    )
+    .await;
+    let bundle = match r {
+        Ok(b) => b,
+        Err(_) => {
+            return cmd_quote(&[raw_symbol.to_string()], market, Format::Table).await;
+        }
+    };
+    let q = &bundle.quote;
+    let cur = bundle.currency.as_deref().or(q.currency.as_deref());
+    let csym = market::currency_symbol(cur);
+    let px = |v: Option<f64>| price_or_na(v, cur, resolved);
+    let prof = crate::config::effective_profile();
+
+    // 1. Header: Price, Change%, CapTier, 52W Distance, Circuits
+    print_header(&format!(
+        "{} — {}  [PRO TERMINAL · {}]",
+        bundle.symbol, bundle.name, prof.spec
+    ));
+    let badge = market::cap_badge(q).unwrap_or_default();
+    let dist_52h = match (bundle.price(), q.fifty_two_week_high) {
+        (Some(p), Some(h)) if h > 0.0 => format!("{:+.1}% vs 52W High", (p - h) / h * 100.0),
+        _ => "52W High N/A".to_string(),
+    };
+    let dist_52l = match (bundle.price(), q.fifty_two_week_low) {
+        (Some(p), Some(l)) if l > 0.0 => format!("{:+.1}% vs 52W Low", (p - l) / l * 100.0),
+        _ => "52W Low N/A".to_string(),
+    };
+    println!(
+        "  {}  {}   {}   ({} · {})",
+        px(q.regular_market_price).bold(),
+        change_for(q, resolved),
+        badge.cyan(),
+        dist_52h,
+        dist_52l
+    );
+    let mcap_str = q
+        .market_cap
+        .map_or_else(|| "N/A".into(), |v| format_large_number(v, cur));
+    let rvol_str = match (q.regular_market_volume, q.average_daily_volume_3_month) {
+        (Some(v), Some(avg)) if avg > 0 => format!("{:.2}x", v as f64 / avg as f64),
+        _ => "N/A".into(),
+    };
+    let circuit_str = if q.lower_circuit.is_some() || q.upper_circuit.is_some() {
+        format!(
+            "  |  Circuits: {} – {}",
+            px(q.lower_circuit),
+            px(q.upper_circuit)
+        )
+    } else {
+        String::new()
+    };
+    println!(
+        "  MCap: {}  |  P/E: {}  |  P/B: {}  |  Vol: {} (RVOL {}){}",
+        mcap_str.bold(),
+        format_optional_f64(bundle.fin.trailing_pe.or(q.trailing_pe), "x"),
+        format_optional_f64(bundle.fin.pb, "x"),
+        q.regular_market_volume
+            .map_or_else(|| "N/A".into(), format_volume),
+        rvol_str,
+        circuit_str
+    );
+
+    // 2. 6-Pillar Verdict + Piotroski F-Score + Altman Z + CFO/PAT
+    let cards = crate::insights::generate_rich_insights(&bundle);
+    let v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+    let sc = scorecard::generate_scorecard_report(&bundle);
+    let cfo_pat = bundle
+        .annual
+        .last()
+        .or_else(|| bundle.quarters.last())
+        .and_then(|p| match (p.ocf, p.net_income) {
+            (Some(ocf), Some(pat)) if pat > 0.0 => Some(format!("{:.2}x", ocf / pat)),
+            _ => None,
+        })
+        .unwrap_or_else(|| "N/A".to_string());
+    let altman_str = if sc.altman.is_financial {
+        "N/A (Fin)".to_string()
+    } else if let Some(z) = sc.altman.z_score {
+        format!(
+            "{:.2} ({})",
+            z,
+            sc.altman.zone_label.as_deref().unwrap_or("—")
+        )
+    } else {
+        "N/A".to_string()
+    };
+    print_section("1. Verdict & Accounting Forensics");
+    crate::verdict::print_snapshot(&v, resolved);
+    println!(
+        "  Piotroski F-Score: {}/{} ({})  |  Altman Z: {}  |  CFO/PAT: {}",
+        sc.piotroski.score,
+        sc.piotroski.evaluated,
+        sc.piotroski.rating_label,
+        altman_str,
+        cfo_pat.bold()
+    );
+
+    // 3. Quarterly Delta (Last 4–8 Quarters)
+    if let Ok(res_bundle) = crate::results::collect(
+        &client,
+        resolved,
+        market,
+        crate::results::default_store(),
+        true,
+        false,
+    )
+    .await
+        && !res_bundle.quarterly.is_empty()
+    {
+        print_section("2. Quarterly Earnings Delta (Last 8Q)");
+        println!(
+            "  {:<10} {:>12} {:>9} {:>9} {:>8} {:>12} {:>9} {:>8}",
+            "Quarter".bold(),
+            "Sales".bold(),
+            "YoY%".bold(),
+            "QoQ%".bold(),
+            "OPM%".bold(),
+            "PAT".bold(),
+            "PAT YoY%".bold(),
+            "EPS".bold()
+        );
+        println!("  {}", "─".repeat(84).dimmed());
+        let qs = &res_bundle.quarterly;
+        let start_idx = qs.len().saturating_sub(8);
+        for i in start_idx..qs.len() {
+            let p = &qs[i];
+            let qoq_prev = i.checked_sub(1).and_then(|idx| qs.get(idx));
+            let yoy_prev = qs.iter().take(i).rev().find(|prev| {
+                let days = (p.end - prev.end).num_days();
+                (345..=385).contains(&days)
+            });
+            let fmt_pct = |g: Option<f64>| match g {
+                Some(x) => format!("{:+.1}%", x * 100.0),
+                None => "—".to_string(),
+            };
+            let sales_yoy = yoy_prev.and_then(|pr| crate::results::growth(p.revenue, pr.revenue));
+            let sales_qoq = qoq_prev.and_then(|pr| crate::results::growth(p.revenue, pr.revenue));
+            let pat_yoy = yoy_prev.and_then(|pr| crate::results::growth(p.pat, pr.pat));
+            let opm_str = p
+                .opm()
+                .map_or_else(|| "—".to_string(), |m| format!("{:.1}%", m * 100.0));
+            let sales_str = p
+                .revenue
+                .map_or_else(|| "—".to_string(), |v| format_large_number(v, cur));
+            let pat_str = p
+                .pat
+                .map_or_else(|| "—".to_string(), |v| format_large_number(v, cur));
+            let eps_str = p
+                .eps
+                .map_or_else(|| "—".to_string(), |e| format!("{:.2}", e));
+            println!(
+                "  {:<10} {:>12} {:>9} {:>9} {:>8} {:>12} {:>9} {:>8}",
+                p.end.format("%b %Y").to_string().cyan(),
+                sales_str,
+                fmt_pct(sales_yoy),
+                fmt_pct(sales_qoq),
+                opm_str,
+                pat_str,
+                fmt_pct(pat_yoy),
+                eps_str
+            );
+        }
+    }
+
+    // 4. Technicals & Levels: RSI, ADX, ATR, 20/50/200 SMA, Classic Pivots
+    print_section("3. Technicals & Key Levels");
+    let closes = &bundle.prices.close;
+    let highs = &bundle.prices.high;
+    let lows = &bundle.prices.low;
+    let price_now = bundle.price().unwrap_or(0.0);
+    let rsi_str =
+        technical::rsi(closes, 14).map_or_else(|| "N/A".to_string(), |v| format!("{:.1}", v));
+    let macd_str = technical::macd(closes).map_or_else(
+        || "N/A".to_string(),
+        |(_l, _s, h)| format!("{:+.2} ({})", h, technical::macd_signal(h)),
+    );
+    let atr_val = technical::atr(highs, lows, closes, 14);
+    let atr_str = match atr_val {
+        Some(a) if price_now > 0.0 => format!("{}{:.2} ({:.2}%)", csym, a, a / price_now * 100.0),
+        Some(a) => format!("{}{:.2}", csym, a),
+        None => "N/A".to_string(),
+    };
+    let sma_fmt = |val: Option<f64>| match val {
+        Some(m) if price_now > 0.0 => {
+            format!("{}{:.2} ({:+.1}%)", csym, m, (price_now - m) / m * 100.0)
+        }
+        Some(m) => format!("{}{:.2}", csym, m),
+        None => "N/A".to_string(),
+    };
+    let sma20 = technical::sma(closes, 20);
+    let sma50 = q.fifty_day_average.or_else(|| technical::sma(closes, 50));
+    let sma200 = q
+        .two_hundred_day_average
+        .or_else(|| technical::sma(closes, 200));
+    println!(
+        "  RSI(14): {}  |  MACD Hist: {}  |  ATR(14): {}",
+        rsi_str.bold(),
+        macd_str.bold(),
+        atr_str.bold()
+    );
+    println!(
+        "  SMA 20: {}  |  SMA 50: {}  |  SMA 200: {}",
+        sma_fmt(sma20),
+        sma_fmt(sma50),
+        sma_fmt(sma200)
+    );
+    if let (Some(&h), Some(&l), Some(&c)) = (highs.last(), lows.last(), closes.last()) {
+        let (p, r1, r2, _r3, s1, s2, _s3) = technical::pivot_points(h, l, c);
+        println!(
+            "  Classic Pivots:  S2 {}{:.2}  ·  S1 {}{:.2}  ·  P {}{:.2}  ·  R1 {}{:.2}  ·  R2 {}{:.2}",
+            csym, s2, csym, s1, csym, p, csym, r1, csym, r2
+        );
+    }
+
+    // 5. F&O Snapshot (when optionable)
+    if let Ok(chain) = crate::derivatives::fetch_chain(resolved, market, None).await {
+        print_section(&format!(
+            "4. F&O Snapshot (Expiry: {})",
+            chain.expiry.format("%d %b %Y")
+        ));
+        let pcr = crate::derivatives::pcr(&chain.rows);
+        let mp = crate::derivatives::max_pain(&chain.rows);
+        let buildup = crate::derivatives::buildup_breakdown(&chain.rows);
+        let atm_iv = chain
+            .underlying
+            .and_then(|spot| {
+                let idx = crate::derivatives::atm_index(&chain.rows, spot)?;
+                let row = chain.rows.get(idx)?;
+                row.call
+                    .as_ref()
+                    .and_then(|c| c.source_iv)
+                    .or_else(|| row.put.as_ref().and_then(|p| p.source_iv))
+            })
+            .map_or_else(|| "N/A".to_string(), |iv| format!("{:.1}%", iv * 100.0));
+        let pcr_str = pcr
+            .oi_ratio
+            .map_or_else(|| "N/A".to_string(), |r| format!("{:.2}", r));
+        let mp_str = mp.map_or_else(|| "N/A".to_string(), |m| format!("{}{:.2}", csym, m.strike));
+        println!(
+            "  PCR (OI): {}  |  Max Pain: {}  |  ATM IV: {}  |  Calls: {} · Puts: {}",
+            pcr_str.bold(),
+            mp_str.bold(),
+            atm_iv.bold(),
+            buildup
+                .calls
+                .dominant_sentiment(crate::greeks::OptionKind::Call),
+            buildup
+                .puts
+                .dominant_sentiment(crate::greeks::OptionKind::Put),
+        );
+    }
+
+    // 6. Ownership & Institutional Flow
+    print_section("5. Ownership & Institutional Flow");
+    let deliv_str = q
+        .delivery_percent
+        .map_or_else(|| "N/A".to_string(), |d| format!("{:.1}%", d));
+    let holding_str = if let Some(h) = bundle.holdings.last() {
+        let fmt_opt = |v: Option<f64>| v.map_or_else(|| "—".to_string(), |x| format!("{:.1}%", x));
+        let pledge_tag = match h.pledged {
+            Some(true) => " (PLEDGED!)".red().bold().to_string(),
+            Some(false) => " (0% pledged)".green().to_string(),
+            None => String::new(),
+        };
+        format!(
+            "Promoter: {}{}  |  FII: {}  |  DII: {}  |  MF: {}",
+            fmt_opt(h.promoter),
+            pledge_tag,
+            fmt_opt(h.fii),
+            fmt_opt(h.dii),
+            fmt_opt(h.mf)
+        )
+    } else {
+        format!(
+            "Institutional Ownership: {}",
+            bundle
+                .fin
+                .inst_pct
+                .map_or_else(|| "N/A".to_string(), |p| format!("{:.1}%", p * 100.0))
+        )
+    };
+    let (buy_val, sell_val) = bundle.insiders.iter().fold((0.0, 0.0), |(b, s), tx| {
+        if tx.is_buy {
+            (b + tx.value, s)
+        } else {
+            (b, s + tx.value)
+        }
+    });
+    let insider_str = if bundle.insiders.is_empty() {
+        "No recent open-market filings".to_string()
+    } else {
+        format!(
+            "{} txns (Bought {}, Sold {})",
+            bundle.insiders.len(),
+            format_large_number(buy_val, cur),
+            format_large_number(sell_val, cur)
+        )
+    };
+    println!("  Delivery %: {}  |  {}", deliv_str.bold(), holding_str);
+    println!("  Insider Flow: {}", insider_str);
+    println!();
     Ok(())
 }
 

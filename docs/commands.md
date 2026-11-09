@@ -16,6 +16,7 @@ task-based guides, and each section below links to its guide.
 | `--ai` | `STOCKWISE_AI` | Add an AI section to `analyze`, `technical`, `compare`, `screen`, `backtest`, `deep` (slow with a local model; see [ai.md](ai.md)) |
 | `--no-ai` | | Turn the AI section off for one run, even if `STOCKWISE_AI` or the config file turn it on |
 | `--portfolio <NAME>` | `STOCKWISE_PORTFOLIO` | Use a named portfolio (`portfolios/NAME.json`) instead of the default `portfolio.json`. Applies to `portfolio`, `import`, `tax`, `wealth`, `dashboard`, `trade holdings` and every other command that reads holdings |
+| `--profile <MODE[:RISK]>` | `STOCKWISE_PROFILE` | Investor profile mode (`passive`, `active`, `active:low`, `active:med`, `active:high`, `ultra`) and personal guardrails |
 
 Other environment variables: `STOCKWISE_HOME` (data directory),
 `STOCKWISE_REDIS_URL` (cache server, or `off`), `STOCKWISE_DATA_PROVIDER`
@@ -122,7 +123,7 @@ always works. Common names resolve to NSE symbols
 | `fibs <SYMBOL>` | Fibonacci retracement with a "you are here" marker, for the last 21, 63 and 126 trading days (1, 3 and 6 months of daily bars). Always reads a year of daily bars; `-p` is accepted but ignored |
 | `volume <SYMBOL> [-p]` (`vol`) | OBV, A/D line, volume ratio, volume bars |
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
-| `stoploss <SYMBOL> [-e PRICE] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, R:R targets |
+| `stoploss <SYMBOL> [-e PRICE] [--capital AMT] [--risk-pct PCT] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, position sizing (shares and position value for risk budget) and R:R targets |
 | `forecast <SYMBOL> [-d DAYS] [-p]` | Linear trend projection with 95% bands — a projection, not a prediction |
 
 `--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners.
@@ -863,6 +864,9 @@ untested against a live account.
 
 | Command | Description |
 |---------|-------------|
+| `profile [show] [--json]` | Show active investor profile mode (`passive`, `active:low\|med\|high`, `ultra`), effective tax parameters and personal guardrails |
+| `profile set [MODE[:RISK]] [--risk low\|med\|high] [--tax-slab PCT] [--tax-regime new\|old] [--horizon-years N] [--max-stock-weight PCT] [--max-smallcap-weight PCT] [--risk-per-trade PCT] [--json]` | Save investor profile mode and personal guardrails to `config.toml` |
+| `profile reset` | Reset profile mode and guardrails in `config.toml` to defaults (`active:med`) |
 | `config [show] [--json]` | Effective settings and where each comes from (flag, env, config file, default), plus the config file's status |
 | `config path` | Print the config file path (it may not exist yet) |
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |

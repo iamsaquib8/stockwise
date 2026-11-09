@@ -991,6 +991,21 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     if !portfolio.dividends.is_empty() {
         print_kv("Dividends received", &format_price(dividends, base));
     }
+    let prof = crate::config::effective_profile();
+    if prof.mode == crate::config::ProfileMode::Ultra && totals.value > 0.0 {
+        let heat_per_pos = prof.risk_per_trade;
+        let total_heat = (portfolio.holdings.len() as f64) * heat_per_pos;
+        print_kv(
+            "Portfolio Heat (1R/holding)",
+            &format!(
+                "{:.1}% ({} holdings × {:.2}% risk_per_trade = {})",
+                total_heat,
+                portfolio.holdings.len(),
+                heat_per_pos,
+                format_price(totals.value * total_heat / 100.0, base)
+            ),
+        );
+    }
     println!();
     totals.print_exclusions();
     val.print_price_notes();
@@ -1996,14 +2011,32 @@ pub(crate) async fn rebalance_plan(
         configured_targets = portfolio.targets.clone();
     }
 
-    let drift_tolerance = drift.or(portfolio.drift_tolerance).unwrap_or(0.0);
-    let plan = crate::rebalance::compute_rebalance_plan(
+    let prof = crate::config::effective_profile();
+    let drift_tolerance = drift
+        .or(portfolio.drift_tolerance)
+        .unwrap_or(prof.default_drift_pct);
+    let mut plan = crate::rebalance::compute_rebalance_plan(
         &holding_inputs,
         &configured_targets,
         inflow,
         drift_tolerance,
         val.base(),
     )?;
+    for it in &plan.items {
+        let is_fund = holding_inputs
+            .iter()
+            .find(|h| h.symbol == it.symbol)
+            .is_some_and(|h| h.is_fund);
+        if !is_fund
+            && (it.target_pct > prof.max_stock_weight + 1e-6
+                || it.projected_pct > prof.max_stock_weight + 1e-6)
+        {
+            plan.warnings.push(format!(
+                "Profile guardrail ({}): {} target/projected weight ({:.1}% / {:.1}%) exceeds configured max_stock_weight ({:.1}%).",
+                prof.spec, it.symbol, it.target_pct, it.projected_pct, prof.max_stock_weight
+            ));
+        }
+    }
     Ok((plan, val))
 }
 
@@ -2322,7 +2355,14 @@ pub async fn cmd_portfolio_xray(
     }
 
     let p_name = active_name.unwrap_or("default");
-    let report = xray::compute_xray(p_name, val.base(), &input_holdings, &fund_profiles);
+    let prof = crate::config::effective_profile();
+    let report = xray::compute_xray_with_threshold(
+        p_name,
+        val.base(),
+        &input_holdings,
+        &fund_profiles,
+        prof.max_stock_weight,
+    );
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2331,11 +2371,13 @@ pub async fn cmd_portfolio_xray(
 
     print_header(&portfolio_title("Portfolio X-Ray"));
     println!(
-        "  {} {}   {} {}",
+        "  {} {}   {} {}   {} {}",
         "Total Portfolio Value:".dimmed(),
         format_price(report.total_value, Some(val.base())).bold(),
         "Base Currency:".dimmed(),
-        val.base().cyan()
+        val.base().cyan(),
+        "Profile:".dimmed(),
+        prof.spec.cyan()
     );
     println!();
 
@@ -2345,8 +2387,9 @@ pub async fn cmd_portfolio_xray(
             "  {} {}",
             "!".red().bold(),
             format!(
-                "High Concentration Risk: {} holding(s) exceed the 10.0% portfolio risk threshold!",
-                report.concentrations_above_10pct.len()
+                "High Concentration Risk: {} holding(s) exceed your {:.1}% single-stock guardrail (max_stock_weight)!",
+                report.concentrations_above_10pct.len(),
+                prof.max_stock_weight
             )
             .red()
             .bold()
@@ -2376,10 +2419,53 @@ pub async fn cmd_portfolio_xray(
         println!(
             "  {} {}",
             "✓".green().bold(),
-            "No individual company exceeds the 10.0% concentration threshold (well-diversified)."
-                .green()
+            format!(
+                "No individual company exceeds your {:.1}% concentration threshold (max_stock_weight).",
+                prof.max_stock_weight
+            )
+            .green()
         );
         println!();
+    }
+
+    if report.market_cap_breakdown.small_cap_pct > prof.max_smallcap_weight + 1e-6 {
+        println!(
+            "  {} {}",
+            "!".yellow().bold(),
+            format!(
+                "Profile guardrail ({}): Small-cap equity exposure ({:.2}%) exceeds your configured max_smallcap_weight ({:.1}%).",
+                prof.spec,
+                report.market_cap_breakdown.small_cap_pct,
+                prof.max_smallcap_weight
+            )
+            .yellow()
+        );
+        println!();
+    }
+
+    if prof.mode == crate::config::ProfileMode::Passive {
+        let regular_count = input_holdings
+            .iter()
+            .filter(|h| {
+                h.is_fund
+                    && h.name.as_deref().is_some_and(|n| {
+                        let lower = n.to_ascii_lowercase();
+                        lower.contains("regular") && !lower.contains("direct")
+                    })
+            })
+            .count();
+        if regular_count > 0 {
+            println!(
+                "  {} {}",
+                "ℹ".cyan().bold(),
+                format!(
+                    "Passive guardrail: {} Regular-plan mutual fund(s) detected. Run `stockwise mf bleed` to inspect the Direct-plan TER difference.",
+                    regular_count
+                )
+                .cyan()
+            );
+            println!();
+        }
     }
 
     // Top Effective Exposures
@@ -2434,7 +2520,12 @@ pub async fn cmd_portfolio_xray(
     if report.effective_holdings.iter().any(|h| h.is_concentrated) {
         println!(
             "  {}",
-            "* Exceeds 10.0% concentration limit".yellow().dimmed()
+            format!(
+                "* Exceeds {:.1}% concentration limit (max_stock_weight)",
+                prof.max_stock_weight
+            )
+            .yellow()
+            .dimmed()
         );
     }
     println!();

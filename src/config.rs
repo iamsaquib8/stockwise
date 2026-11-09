@@ -12,10 +12,496 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// Env var that points at another config file.
 pub const ENV_VAR: &str = "STOCKWISE_CONFIG";
+
+/// Env var that selects an investor profile (`passive`, `active:low`, `active:med`, `active:high`, `ultra`).
+pub const PROFILE_ENV_VAR: &str = "STOCKWISE_PROFILE";
+
+/// Investor profile mode (`passive`, `active`, or `ultra`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileMode {
+    /// Index, SIP, ETF & mutual fund savers (auto `--explain`, conservative glide paths).
+    Passive,
+    /// Core-and-satellite / fundamental / GARP or compounder stock & fund pickers.
+    #[default]
+    Active,
+    /// Pro / quant / trader full-telemetry mode.
+    Ultra,
+}
+
+impl ProfileMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passive => "passive",
+            Self::Active => "active",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "passive" => Ok(Self::Passive),
+            "active" => Ok(Self::Active),
+            "ultra" => Ok(Self::Ultra),
+            other => Err(format!(
+                "`{other}` is not a profile mode; use passive, active or ultra"
+            )),
+        }
+    }
+
+    pub const fn default_risk(self) -> RiskLevel {
+        match self {
+            Self::Passive => RiskLevel::Low,
+            Self::Active => RiskLevel::Med,
+            Self::Ultra => RiskLevel::High,
+        }
+    }
+}
+
+/// Risk tolerance tier (`low`, `med`, or `high`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum RiskLevel {
+    Low,
+    #[default]
+    #[value(alias = "medium")]
+    Med,
+    High,
+}
+
+impl RiskLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Med => "med",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "med" | "medium" => Ok(Self::Med),
+            "high" => Ok(Self::High),
+            other => Err(format!(
+                "`{other}` is not a risk level; use low, med or high"
+            )),
+        }
+    }
+}
+
+/// Indian income-tax regime (`new` or `old`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum TaxRegime {
+    #[default]
+    New,
+    Old,
+}
+
+impl TaxRegime {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Old => "old",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "new" => Ok(Self::New),
+            "old" => Ok(Self::Old),
+            other => Err(format!("`{other}` is not a tax regime; use new or old")),
+        }
+    }
+}
+
+/// Parsed `<MODE[:RISK]>` profile specification (e.g. `passive`, `active:low`, `ultra`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileSpec {
+    pub mode: ProfileMode,
+    pub risk: Option<RiskLevel>,
+}
+
+impl ProfileSpec {
+    pub const fn effective_risk(self) -> RiskLevel {
+        match self.risk {
+            Some(r) => r,
+            None => self.mode.default_risk(),
+        }
+    }
+
+    pub fn canonical(self) -> String {
+        let risk = self.effective_risk();
+        match self.mode {
+            ProfileMode::Ultra if self.risk.is_none() || risk == RiskLevel::High => {
+                "ultra".to_string()
+            }
+            _ => format!("{}:{}", self.mode.as_str(), risk.as_str()),
+        }
+    }
+}
+
+impl std::str::FromStr for ProfileSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_profile_spec(s)
+    }
+}
+
+/// Parse a `<MODE[:RISK]>` string such as `passive`, `active:low`, `active:med`, `active:high`, or `ultra`.
+pub fn parse_profile_spec(s: &str) -> Result<ProfileSpec, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "profile cannot be empty; use passive, active:low, active:med, active:high or ultra"
+                .into(),
+        );
+    }
+    if let Some((m, r)) = trimmed.split_once(':') {
+        let mode = ProfileMode::parse(m)?;
+        let risk = RiskLevel::parse(r)?;
+        Ok(ProfileSpec {
+            mode,
+            risk: Some(risk),
+        })
+    } else {
+        let mode = ProfileMode::parse(trimmed)?;
+        Ok(ProfileSpec { mode, risk: None })
+    }
+}
+
+/// Optional `[profile]` section in `config.toml`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    /// `"passive"`, `"active"` or `"ultra"` (or `"active:low"`, etc.).
+    pub mode: Option<String>,
+    /// `"low"`, `"med"` or `"high"`.
+    pub risk: Option<String>,
+    /// Marginal income-tax slab in percent (`0..=50`, e.g. `30`).
+    pub tax_slab: Option<f64>,
+    /// `"new"` or `"old"` (India).
+    pub tax_regime: Option<String>,
+    /// Default investment horizon in years (`1..=60`, default `10`).
+    pub horizon_years: Option<u32>,
+    /// Single-stock look-through weight cap in percent (`1..=100`).
+    pub max_stock_weight: Option<f64>,
+    /// Combined Small + Micro cap weight guardrail in percent (`0..=100`).
+    pub max_smallcap_weight: Option<f64>,
+    /// Portfolio capital risked per trade in `stoploss`, in percent (`0.05..=20`).
+    pub risk_per_trade: Option<f64>,
+}
+
+impl ProfileConfig {
+    pub const fn is_empty(&self) -> bool {
+        self.mode.is_none()
+            && self.risk.is_none()
+            && self.tax_slab.is_none()
+            && self.tax_regime.is_none()
+            && self.horizon_years.is_none()
+            && self.max_stock_weight.is_none()
+            && self.max_smallcap_weight.is_none()
+            && self.risk_per_trade.is_none()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(m) = &self.mode {
+            parse_profile_spec(m).map_err(|e| anyhow::anyhow!("`profile.mode`: {e}"))?;
+        }
+        if let Some(r) = &self.risk {
+            RiskLevel::parse(r).map_err(|e| anyhow::anyhow!("`profile.risk`: {e}"))?;
+        }
+        if let Some(s) = self.tax_slab
+            && (!s.is_finite() || !(0.0..=50.0).contains(&s))
+        {
+            bail!("`profile.tax_slab` = {s} must be between 0 and 50");
+        }
+        if let Some(tr) = &self.tax_regime {
+            TaxRegime::parse(tr).map_err(|e| anyhow::anyhow!("`profile.tax_regime`: {e}"))?;
+        }
+        if let Some(y) = self.horizon_years
+            && !(1..=60).contains(&y)
+        {
+            bail!("`profile.horizon_years` = {y} must be between 1 and 60");
+        }
+        if let Some(w) = self.max_stock_weight
+            && (!w.is_finite() || !(1.0..=100.0).contains(&w))
+        {
+            bail!("`profile.max_stock_weight` = {w} must be between 1 and 100");
+        }
+        if let Some(w) = self.max_smallcap_weight
+            && (!w.is_finite() || !(0.0..=100.0).contains(&w))
+        {
+            bail!("`profile.max_smallcap_weight` = {w} must be between 0 and 100");
+        }
+        if let Some(r) = self.risk_per_trade
+            && (!r.is_finite() || !(0.05..=20.0).contains(&r))
+        {
+            bail!("`profile.risk_per_trade` = {r} must be between 0.05 and 20");
+        }
+        Ok(())
+    }
+}
+
+/// Archetype defaults for `(mode, risk)`:
+/// `(label, max_stock_weight, max_smallcap_weight, risk_per_trade, default_drift_pct, screen_presets)`.
+pub fn archetype_defaults(
+    mode: ProfileMode,
+    risk: RiskLevel,
+) -> (&'static str, f64, f64, f64, f64, &'static [&'static str]) {
+    match (mode, risk) {
+        (ProfileMode::Passive, RiskLevel::Low) => (
+            "Index, SIP, ETF & Mutual Fund Saver",
+            10.0,
+            10.0,
+            0.5,
+            5.0,
+            &["bluechip", "dividend", "undervalued"],
+        ),
+        (ProfileMode::Passive, RiskLevel::Med | RiskLevel::High) => (
+            "Index, SIP, ETF & Mutual Fund Saver",
+            10.0,
+            15.0,
+            0.5,
+            5.0,
+            &["bluechip", "dividend", "undervalued"],
+        ),
+        (ProfileMode::Active, RiskLevel::Low) => (
+            "Conservative Stock & Fund Picker",
+            8.0,
+            10.0,
+            0.5,
+            0.0,
+            &[
+                "quality-moat",
+                "dividend-leaders",
+                "bluechip",
+                "piotroski-strong",
+            ],
+        ),
+        (ProfileMode::Active, RiskLevel::Med) => (
+            "Balanced Core-and-Satellite / GARP Investor",
+            12.0,
+            25.0,
+            1.0,
+            0.0,
+            &["garp", "coffee-can", "undervalued", "momentum"],
+        ),
+        (ProfileMode::Active, RiskLevel::High) => (
+            "Aggressive Growth / Small-Mid Compounder & Swing Trader",
+            20.0,
+            50.0,
+            2.0,
+            0.0,
+            &["compounders", "stage2-uptrend", "canslim", "52w-breakout"],
+        ),
+        (ProfileMode::Ultra, _) => (
+            "Pro / Quant / Trader Full-Telemetry Mode",
+            20.0,
+            50.0,
+            2.0,
+            0.0,
+            &["momentum", "stage2-uptrend", "canslim", "52w-breakout"],
+        ),
+    }
+}
+
+/// Effective investor profile and personal guardrails after applying
+/// `--profile` flag > `STOCKWISE_PROFILE` env > `[profile]` in `config.toml` > archetype defaults.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EffectiveProfile {
+    pub mode: ProfileMode,
+    pub risk: RiskLevel,
+    pub spec: String,
+    pub label: &'static str,
+    pub mode_source: Source,
+    pub risk_source: Source,
+    pub tax_slab: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tax_slab_configured: Option<f64>,
+    pub tax_slab_source: Source,
+    pub tax_regime: TaxRegime,
+    pub tax_regime_source: Source,
+    pub horizon_years: u32,
+    pub horizon_years_source: Source,
+    pub max_stock_weight: f64,
+    pub max_stock_weight_source: Source,
+    pub max_smallcap_weight: f64,
+    pub max_smallcap_weight_source: Source,
+    pub risk_per_trade: f64,
+    pub risk_per_trade_source: Source,
+    pub default_drift_pct: f64,
+    pub auto_explain: bool,
+    pub screen_presets: &'static [&'static str],
+}
+
+impl Default for EffectiveProfile {
+    fn default() -> Self {
+        Self::from_parts(None, None, &ProfileConfig::default())
+    }
+}
+
+impl EffectiveProfile {
+    /// Resolve effective profile settings from explicit inputs.
+    pub fn from_parts(
+        cli_spec: Option<(ProfileSpec, Source)>,
+        env_val: Option<&str>,
+        file_cfg: &ProfileConfig,
+    ) -> Self {
+        let file_spec = file_cfg
+            .mode
+            .as_deref()
+            .and_then(|m| parse_profile_spec(m).ok());
+        let file_risk = file_cfg
+            .risk
+            .as_deref()
+            .and_then(|r| RiskLevel::parse(r).ok())
+            .or_else(|| file_spec.and_then(|s| s.risk));
+
+        let env_spec = env_val
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| parse_profile_spec(s).ok());
+
+        let (mode, mode_source, risk, risk_source) =
+            if let Some((spec, _)) = cli_spec.filter(|(_, s)| *s == Source::Flag) {
+                let r = spec.effective_risk();
+                (spec.mode, Source::Flag, r, Source::Flag)
+            } else if let Some(spec) = env_spec {
+                let r = spec.effective_risk();
+                (spec.mode, Source::Env, r, Source::Env)
+            } else if let Some(spec) = file_spec {
+                let (r, r_src) = match file_risk {
+                    Some(r) => (r, Source::File),
+                    None => (spec.mode.default_risk(), Source::File),
+                };
+                (spec.mode, Source::File, r, r_src)
+            } else if let Some(r) = file_risk {
+                (ProfileMode::Active, Source::Default, r, Source::File)
+            } else {
+                (
+                    ProfileMode::Active,
+                    Source::Default,
+                    RiskLevel::Med,
+                    Source::Default,
+                )
+            };
+
+        let (
+            label,
+            def_stock_wt,
+            def_smallcap_wt,
+            def_risk_trade,
+            default_drift_pct,
+            screen_presets,
+        ) = archetype_defaults(mode, risk);
+
+        // When `--profile` or `STOCKWISE_PROFILE` overrides the archetype on the
+        // command line / env, use that archetype's guardrails unless the file's
+        // mode/risk matches the override.
+        let file_matches_archetype = match (mode_source, file_spec) {
+            (Source::Flag | Source::Env, Some(fs)) => {
+                fs.mode == mode && file_risk.unwrap_or_else(|| fs.mode.default_risk()) == risk
+            }
+            (Source::Flag | Source::Env, None) => false,
+            _ => true,
+        };
+        let fallback_src = match mode_source {
+            Source::Flag => Source::Flag,
+            Source::Env => Source::Env,
+            Source::File => Source::Default,
+            Source::Default => Source::Default,
+        };
+
+        let (max_stock_weight, max_stock_weight_source) = match file_cfg.max_stock_weight {
+            Some(w) if file_matches_archetype => (w, Source::File),
+            _ => (def_stock_wt, fallback_src),
+        };
+        let (max_smallcap_weight, max_smallcap_weight_source) = match file_cfg.max_smallcap_weight {
+            Some(w) if file_matches_archetype => (w, Source::File),
+            _ => (def_smallcap_wt, fallback_src),
+        };
+        let (risk_per_trade, risk_per_trade_source) = match file_cfg.risk_per_trade {
+            Some(r) if file_matches_archetype => (r, Source::File),
+            _ => (def_risk_trade, fallback_src),
+        };
+
+        let (tax_slab, tax_slab_configured, tax_slab_source) = match file_cfg.tax_slab {
+            Some(s) => (s, Some(s), Source::File),
+            None => (30.0, None, Source::Default),
+        };
+        let (tax_regime, tax_regime_source) = match file_cfg
+            .tax_regime
+            .as_deref()
+            .and_then(|t| TaxRegime::parse(t).ok())
+        {
+            Some(tr) => (tr, Source::File),
+            None => (TaxRegime::New, Source::Default),
+        };
+        let (horizon_years, horizon_years_source) = match file_cfg.horizon_years {
+            Some(y) => (y, Source::File),
+            None => (10, Source::Default),
+        };
+
+        let spec = ProfileSpec {
+            mode,
+            risk: Some(risk),
+        }
+        .canonical();
+
+        Self {
+            mode,
+            risk,
+            spec,
+            label,
+            mode_source,
+            risk_source,
+            tax_slab,
+            tax_slab_configured,
+            tax_slab_source,
+            tax_regime,
+            tax_regime_source,
+            horizon_years,
+            horizon_years_source,
+            max_stock_weight,
+            max_stock_weight_source,
+            max_smallcap_weight,
+            max_smallcap_weight_source,
+            risk_per_trade,
+            risk_per_trade_source,
+            default_drift_pct,
+            auto_explain: mode == ProfileMode::Passive,
+            screen_presets,
+        }
+    }
+}
+
+static CLI_PROFILE: RwLock<Option<(ProfileSpec, Source)>> = RwLock::new(None);
+
+/// Set or clear the process-wide CLI `--profile` override.
+pub fn set_cli_profile(spec: Option<ProfileSpec>, source: Source) {
+    if let Ok(mut guard) = CLI_PROFILE.write() {
+        *guard = spec.map(|s| (s, source));
+    }
+}
+
+/// Read the current process-wide CLI `--profile` override.
+pub fn cli_profile() -> Option<(ProfileSpec, Source)> {
+    CLI_PROFILE.read().ok().and_then(|g| *g)
+}
+
+/// Resolve the active [`EffectiveProfile`] for this process.
+pub fn effective_profile() -> EffectiveProfile {
+    let cli = cli_profile();
+    let env_val = std::env::var(PROFILE_ENV_VAR).ok();
+    EffectiveProfile::from_parts(cli, env_val.as_deref(), &get().profile)
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +530,9 @@ pub struct Config {
     /// Market-data provider: `yahoo` (default), `alphavantage`, `massive`
     /// or `twelvedata`. API keys stay in environment variables.
     pub data_provider: Option<String>,
+    /// Investor profile and personal guardrails (`[profile]`).
+    #[serde(default)]
+    pub profile: ProfileConfig,
     /// Default `--period` per command, e.g. `technical = "6mo"`.
     #[serde(default)]
     pub periods: BTreeMap<String, String>,
@@ -65,6 +554,16 @@ static EMPTY: Config = Config {
     portfolio: None,
     ai_provider: None,
     data_provider: None,
+    profile: ProfileConfig {
+        mode: None,
+        risk: None,
+        tax_slab: None,
+        tax_regime: None,
+        horizon_years: None,
+        max_stock_weight: None,
+        max_smallcap_weight: None,
+        risk_per_trade: None,
+    },
     periods: BTreeMap::new(),
     notify: BTreeMap::new(),
 };
@@ -311,6 +810,7 @@ impl Config {
             }
             period_value(period).with_context(|| format!("`periods.{}`", command))?;
         }
+        self.profile.validate()?;
         Ok(())
     }
 }
@@ -481,7 +981,161 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # email_from = ""
 # email_to = ""
 # desktop_notify = "1"
+
+# Investor profile and personal guardrails (`stockwise profile`).
+# Env: STOCKWISE_PROFILE (e.g. "passive", "active:low", "active:med", "active:high", "ultra").
+# Flag: --profile <MODE[:RISK]>.
+[profile]
+# mode = "active"
+# risk = "med"
+# tax_slab = 30
+# tax_regime = "new"
+# horizon_years = 10
+# max_stock_weight = 12.0
+# max_smallcap_weight = 25.0
+# risk_per_trade = 1.0
 "#;
+
+/// Updates to apply to the `[profile]` section of `config.toml`.
+#[derive(Debug, Default, Clone)]
+pub struct ProfileUpdate {
+    pub mode: Option<ProfileMode>,
+    pub risk: Option<RiskLevel>,
+    pub tax_slab: Option<f64>,
+    pub tax_regime: Option<TaxRegime>,
+    pub horizon_years: Option<u32>,
+    pub max_stock_weight: Option<f64>,
+    pub max_smallcap_weight: Option<f64>,
+    pub risk_per_trade: Option<f64>,
+}
+
+/// Update `[profile]` settings in the config file at `path`, creating it from
+/// [`TEMPLATE`] when missing. Preserves comments and other sections.
+pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
+    let probe = ProfileConfig {
+        mode: update.mode.map(|m| m.as_str().to_string()),
+        risk: update.risk.map(|r| r.as_str().to_string()),
+        tax_slab: update.tax_slab,
+        tax_regime: update.tax_regime.map(|t| t.as_str().to_string()),
+        horizon_years: update.horizon_years,
+        max_stock_weight: update.max_stock_weight,
+        max_smallcap_weight: update.max_smallcap_weight,
+        risk_per_trade: update.risk_per_trade,
+    };
+    probe.validate()?;
+
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
+    };
+
+    let mut pairs: Vec<(&str, String)> = Vec::new();
+    if let Some(m) = update.mode {
+        pairs.push(("mode", format!("\"{}\"", m.as_str())));
+    }
+    if let Some(r) = update.risk {
+        pairs.push(("risk", format!("\"{}\"", r.as_str())));
+    }
+    if let Some(s) = update.tax_slab {
+        let formatted = if (s.fract()).abs() < 1e-9 {
+            format!("{}", s as i64)
+        } else {
+            format!("{s}")
+        };
+        pairs.push(("tax_slab", formatted));
+    }
+    if let Some(tr) = update.tax_regime {
+        pairs.push(("tax_regime", format!("\"{}\"", tr.as_str())));
+    }
+    if let Some(y) = update.horizon_years {
+        pairs.push(("horizon_years", y.to_string()));
+    }
+    if let Some(w) = update.max_stock_weight {
+        pairs.push(("max_stock_weight", format!("{w:.1}")));
+    }
+    if let Some(w) = update.max_smallcap_weight {
+        pairs.push(("max_smallcap_weight", format!("{w:.1}")));
+    }
+    if let Some(r) = update.risk_per_trade {
+        pairs.push(("risk_per_trade", format!("{r}")));
+    }
+
+    let is_key = |l: &str, prefix: &str| {
+        l.strip_prefix(prefix)
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    };
+
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let header_idx = match lines.iter().position(|l| l.trim() == "[profile]") {
+        Some(idx) => idx,
+        None => {
+            if !lines.last().is_some_and(|l| l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[profile]".to_string());
+            lines.len() - 1
+        }
+    };
+
+    for (key, val_str) in pairs {
+        let new_line = format!("{key} = {val_str}");
+        let end_idx = lines[header_idx + 1..]
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .map(|rel| header_idx + 1 + rel)
+            .unwrap_or(lines.len());
+        let commented = format!("# {key}");
+        let found = lines[header_idx + 1..end_idx]
+            .iter()
+            .position(|l| is_key(l.trim_start(), key))
+            .or_else(|| {
+                lines[header_idx + 1..end_idx]
+                    .iter()
+                    .position(|l| is_key(l.trim_start(), &commented))
+            })
+            .map(|rel| header_idx + 1 + rel);
+        match found {
+            Some(i) => lines[i] = new_line,
+            None => lines.insert(end_idx, new_line),
+        }
+    }
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Cannot create directory {}", dir.display()))?;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))
+}
+
+/// Comment out all active keys inside `[profile]` at `path`, restoring built-in defaults.
+pub fn reset_profile(path: &Path) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if let Some(header_idx) = lines.iter().position(|l| l.trim() == "[profile]") {
+        let end_idx = lines[header_idx + 1..]
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .map(|rel| header_idx + 1 + rel)
+            .unwrap_or(lines.len());
+        for line in &mut lines[header_idx + 1..end_idx] {
+            let trimmed = line.trim_start();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                *line = format!("# {trimmed}");
+            }
+        }
+        let mut out = lines.join("\n");
+        out.push('\n');
+        std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))?;
+    }
+    Ok(())
+}
 
 /// Write [`TEMPLATE`] to `path`, refusing to replace an existing file
 /// unless `force`.
@@ -772,5 +1426,103 @@ mod tests {
         }
         assert_eq!(expand_home("/data/sw"), PathBuf::from("/data/sw"));
         assert_eq!(expand_home("~bob/sw"), PathBuf::from("~bob/sw"));
+    }
+
+    #[test]
+    fn profile_spec_and_archetype_precedence_resolve_correctly() {
+        let passive = parse_profile_spec("passive").unwrap();
+        assert_eq!(passive.mode, ProfileMode::Passive);
+        assert_eq!(passive.effective_risk(), RiskLevel::Low);
+        assert_eq!(passive.canonical(), "passive:low");
+
+        let active_low = parse_profile_spec("active:low").unwrap();
+        assert_eq!(active_low.mode, ProfileMode::Active);
+        assert_eq!(active_low.effective_risk(), RiskLevel::Low);
+
+        let ultra = parse_profile_spec("ultra").unwrap();
+        assert_eq!(ultra.mode, ProfileMode::Ultra);
+        assert_eq!(ultra.effective_risk(), RiskLevel::High);
+        assert_eq!(ultra.canonical(), "ultra");
+
+        assert!(parse_profile_spec("yolo").is_err());
+
+        // Built-in default is active:med.
+        let def = EffectiveProfile::from_parts(None, None, &ProfileConfig::default());
+        assert_eq!(def.mode, ProfileMode::Active);
+        assert_eq!(def.risk, RiskLevel::Med);
+        assert_eq!(def.max_stock_weight, 12.0);
+        assert_eq!(def.max_smallcap_weight, 25.0);
+        assert_eq!(def.risk_per_trade, 1.0);
+        assert!(!def.auto_explain);
+
+        // File config sets active:low with custom tax_slab.
+        let file_cfg = ProfileConfig {
+            mode: Some("active".into()),
+            risk: Some("low".into()),
+            tax_slab: Some(20.0),
+            tax_regime: Some("old".into()),
+            horizon_years: Some(15),
+            max_stock_weight: None,
+            max_smallcap_weight: None,
+            risk_per_trade: None,
+        };
+        let eff_file = EffectiveProfile::from_parts(None, None, &file_cfg);
+        assert_eq!(eff_file.mode, ProfileMode::Active);
+        assert_eq!(eff_file.risk, RiskLevel::Low);
+        assert_eq!(eff_file.max_stock_weight, 8.0);
+        assert_eq!(eff_file.max_smallcap_weight, 10.0);
+        assert_eq!(eff_file.risk_per_trade, 0.5);
+        assert_eq!(eff_file.tax_slab, 20.0);
+        assert_eq!(eff_file.tax_regime, TaxRegime::Old);
+        assert_eq!(eff_file.horizon_years, 15);
+
+        // Env beats file.
+        let eff_env = EffectiveProfile::from_parts(None, Some("passive"), &file_cfg);
+        assert_eq!(eff_env.mode, ProfileMode::Passive);
+        assert_eq!(eff_env.mode_source, Source::Env);
+        assert_eq!(eff_env.max_stock_weight, 10.0);
+        assert!(eff_env.auto_explain);
+
+        // CLI flag beats env and file.
+        let eff_flag =
+            EffectiveProfile::from_parts(Some((ultra, Source::Flag)), Some("passive"), &file_cfg);
+        assert_eq!(eff_flag.mode, ProfileMode::Ultra);
+        assert_eq!(eff_flag.mode_source, Source::Flag);
+        assert_eq!(eff_flag.max_stock_weight, 20.0);
+        assert_eq!(eff_flag.max_smallcap_weight, 50.0);
+        assert_eq!(eff_flag.risk_per_trade, 2.0);
+    }
+
+    #[test]
+    fn set_profile_and_reset_profile_preserve_comments_and_validate() {
+        let dir = std::env::temp_dir().join(format!("sw-setprofile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+
+        set_profile(
+            &file,
+            &ProfileUpdate {
+                mode: Some(ProfileMode::Active),
+                risk: Some(RiskLevel::Low),
+                tax_slab: Some(30.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        let cfg = parse(&text, CMDS).unwrap();
+        assert_eq!(cfg.profile.mode.as_deref(), Some("active"));
+        assert_eq!(cfg.profile.risk.as_deref(), Some("low"));
+        assert_eq!(cfg.profile.tax_slab, Some(30.0));
+
+        reset_profile(&file).unwrap();
+        let reset_text = std::fs::read_to_string(&file).unwrap();
+        let reset_cfg = parse(&reset_text, CMDS).unwrap();
+        assert!(reset_cfg.profile.is_empty());
+
+        assert!(err("[profile]\nmode = \" invalid \"\n").contains("profile.mode"));
+        assert!(err("[profile]\ntax_slab = 90\n").contains("profile.tax_slab"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

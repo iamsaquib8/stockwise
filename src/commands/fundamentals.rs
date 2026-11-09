@@ -1260,6 +1260,7 @@ pub async fn cmd_fundamental_score(
     json: bool,
     explain: bool,
 ) -> Result<()> {
+    let explain = explain || crate::config::effective_profile().auto_explain;
     let client = YahooClient::new().await?;
     let r = crate::research::fetch(
         &client,
