@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct TestHome(PathBuf);
@@ -13,8 +14,12 @@ impl TestHome {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        // Tests run in parallel and macOS clocks tick in microseconds: a
+        // counter keeps two homes from sharing a name.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "stockwise-broker-status-{}-{nonce}",
+            "stockwise-broker-status-{}-{nonce}-{seq}",
             std::process::id()
         ));
         fs::create_dir(&path).unwrap();
@@ -23,10 +28,14 @@ impl TestHome {
 
     fn trade_config(&self, broker: &str, filename: &str, config: &str) -> String {
         fs::write(self.0.join(filename), config).unwrap();
+        // An empty config file: a STOCKWISE_CONFIG that names a missing
+        // file is an error, and the user's own config must not leak in.
+        let empty_config = self.0.join("empty-config.toml");
+        fs::write(&empty_config, "").unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_stockwise"))
             .args(["trade", "--broker", broker, "config"])
             .env("STOCKWISE_HOME", &self.0)
-            .env("STOCKWISE_CONFIG", self.0.join("no-config.toml"))
+            .env("STOCKWISE_CONFIG", &empty_config)
             .env("STOCKWISE_KEYRING", "off")
             .output()
             .unwrap();
