@@ -283,7 +283,7 @@ impl Config {
             && crate::providers::ProviderKind::parse(p).is_none()
         {
             bail!(
-                "`data_provider` = \"{}\" is not a provider; use yahoo, alphavantage, massive, twelvedata, nse, bse or exchange",
+                "`data_provider` = \"{}\" is not a provider; use yahoo, alphavantage, massive, twelvedata, finnhub, fmp, nse, bse or exchange",
                 p
             );
         }
@@ -442,9 +442,10 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # ai_provider = "ollama"
 
 # Market-data provider: "yahoo" (default), "alphavantage", "massive",
-# "twelvedata", or the exchanges' own websites: "nse", "bse" or "exchange"
-# (NSE for .NS, BSE for .BO; no key). API keys stay in environment variables.
-# Env: STOCKWISE_DATA_PROVIDER.
+# "twelvedata", "finnhub", "fmp", or the exchanges' own websites: "nse",
+# "bse" or "exchange" (NSE for .NS, BSE for .BO; no key). API keys stay in
+# environment variables. Env: STOCKWISE_DATA_PROVIDER. FINNHUB_API_KEY and
+# FMP_API_KEY also back Yahoo up without naming a provider here.
 # data_provider = "yahoo"
 
 # Default --period per command. Periods: 1d 5d 1w 1mo 3mo 6mo ytd 1y 2y 5y 10y max.

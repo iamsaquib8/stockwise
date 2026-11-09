@@ -115,7 +115,7 @@ pub struct ResultPeriod {
 
 impl ResultPeriod {
     /// An empty period ending on `end`.
-    fn new(end: NaiveDate) -> Self {
+    pub(crate) fn new(end: NaiveDate) -> Self {
         Self {
             end,
             ..Default::default()
@@ -797,21 +797,70 @@ async fn collect_with(
             partial = true;
             Statements::default()
         }
-        Err(e) => return Err(e.context("Yahoo financial statements unavailable")),
+        Err(e) if !client.has_router() => {
+            return Err(e.context("Yahoo financial statements unavailable"));
+        }
+        Err(e) => {
+            warnings.push(format!("Yahoo financial statements unavailable: {e:#}"));
+            partial = true;
+            Statements::default()
+        }
     };
     if let Some(f) = &filings {
         merge_edgar(&mut st, f);
         sources.push("SEC EDGAR companyfacts (XBRL, 10-K/10-Q)".into());
     }
+    // Neither Yahoo nor EDGAR had quarters: the keyed providers' statements.
+    if st.quarterly.is_empty() && client.has_router() {
+        match client.provider_statements(&symbol).await {
+            Ok((fallback, name)) => {
+                // Keep annual rows Yahoo or EDGAR already gave.
+                let annual = std::mem::take(&mut st.annual);
+                st = fallback;
+                // Only when they report in the same currency: the sheet shows
+                // one currency for all amounts.
+                let same_currency = |a: &[ResultPeriod], q: &[ResultPeriod]| {
+                    let ccy = |v: &[ResultPeriod]| v.iter().find_map(|p| p.currency.clone());
+                    match (ccy(a), ccy(q)) {
+                        (Some(x), Some(y)) => x.eq_ignore_ascii_case(&y),
+                        _ => true,
+                    }
+                };
+                if st.annual.is_empty() && same_currency(&annual, &st.quarterly) {
+                    st.annual = annual;
+                }
+                sources.push(format!(
+                    "{name} income, balance-sheet and cash-flow statements"
+                ));
+            }
+            Err(e) => {
+                return Err(e.context(format!(
+                    "Yahoo financial statements unavailable and no keyed provider had {symbol}"
+                )));
+            }
+        }
+    }
+    let mut surprises = Vec::new();
     match summary {
         Ok(s) => {
-            let surprises = research::parse_surprises(&s);
+            surprises = research::parse_surprises(&s);
             if !surprises.is_empty() {
-                attach_surprises(&mut st.quarterly, &surprises);
                 sources.push("Yahoo Finance earningsHistory".into());
             }
         }
         Err(e) => warnings.push(format!("Consensus estimates unavailable: {e:#}")),
+    }
+    // No surprises from Yahoo: a keyed provider's earnings history.
+    if surprises.is_empty()
+        && client.has_router()
+        && let Ok((f, names)) = client.provider_fundamentals(&symbol).await
+        && !f.surprises.is_empty()
+    {
+        surprises = f.surprises;
+        sources.push(format!("{} earnings surprises", names.join(" + ")));
+    }
+    if !surprises.is_empty() {
+        attach_surprises(&mut st.quarterly, &surprises);
     }
 
     if reaction {

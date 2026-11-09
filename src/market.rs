@@ -1369,6 +1369,19 @@ pub const USD_MID_MIN: f64 = 2.0e9;
 pub const USD_SMALL_MIN: f64 = 300.0e6;
 
 impl CapTier {
+    /// The USD market-cap range of this tier as `(at least, below)`; `None`
+    /// bounds are open. For screeners that filter by market cap.
+    pub fn usd_range(self) -> (Option<f64>, Option<f64>) {
+        match self {
+            CapTier::Mega => (Some(USD_MEGA_MIN), None),
+            CapTier::Large => (Some(USD_LARGE_MIN), Some(USD_MEGA_MIN)),
+            CapTier::Mid => (Some(USD_MID_MIN), Some(USD_LARGE_MIN)),
+            CapTier::Small => (Some(USD_SMALL_MIN), Some(USD_MID_MIN)),
+            CapTier::Micro => (None, Some(USD_SMALL_MIN)),
+            CapTier::Unknown => (None, None),
+        }
+    }
+
     /// Lower-case name stored in `market_snapshots.cap_tier` and `--json`.
     pub fn as_str(self) -> &'static str {
         match self {

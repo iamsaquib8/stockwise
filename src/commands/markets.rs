@@ -269,7 +269,25 @@ async fn scan_quotes_src(
         return Ok((market::filter_by_cap(scan.bulk.clone(), cap), false));
     }
     let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
-    match client.get_quote(&refs).await {
+    let live = client.get_quote(&refs).await;
+    // Yahoo down: the keyed providers priced the built-in list (their quotes
+    // carry `meta.sources`). If the `--cap` filter leaves none of it, the
+    // screener lists companies in that tier instead.
+    let yahoo_down = match &live {
+        Err(_) => true,
+        Ok(q) => {
+            q.is_empty()
+                || (q.iter().any(|x| x.meta.is_some())
+                    && market::filter_by_cap(q.clone(), cap).is_empty())
+        }
+    };
+    if scan.bulk.is_empty()
+        && yahoo_down
+        && let Some(q) = screener_quotes(client, market, cap).await
+    {
+        return Ok((q, false));
+    }
+    match live {
         Ok(q) => Ok((market::filter_by_cap(q, cap), false)),
         Err(e) if !scan.bulk.is_empty() => {
             eprintln!(
@@ -280,6 +298,48 @@ async fn scan_quotes_src(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Most companies a screener fallback asks for.
+const SCREENER_LIMIT: usize = 200;
+
+/// A US scan Yahoo could not answer: FMP's screener lists companies in the
+/// `--cap` tier, and the keyed providers price them (one FMP batch request),
+/// the screener's market cap, sector and industry filling what a quote
+/// lacks. `None` without a keyed provider or when they have nothing.
+async fn screener_quotes(
+    client: &YahooClient,
+    market: Market,
+    cap: Option<market::CapFilter>,
+) -> Option<Vec<crate::api::Quote>> {
+    if market != Market::Us || !client.has_router() {
+        return None;
+    }
+    let (min, max) = cap
+        .and_then(market::CapFilter::tier)
+        .map_or((None, None), market::CapTier::usd_range);
+    let query = crate::providers::router::ScreenQuery {
+        market_cap_min: min.or(max.is_none().then_some(market::USD_LARGE_MIN)),
+        market_cap_max: max,
+        country: Some("US".into()),
+        limit: SCREENER_LIMIT,
+        ..Default::default()
+    };
+    let (rows, source) = client.provider_screener(&query).await.ok()?;
+    let symbols: Vec<String> = rows.iter().filter_map(|r| r.symbol.clone()).collect();
+    let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+    let mut quotes = client.get_quote(&refs).await.ok()?;
+    for q in &mut quotes {
+        if let Some(row) = rows.iter().find(|r| r.symbol == q.symbol) {
+            crate::providers::router::fill_quote(q, row);
+        }
+    }
+    eprintln!(
+        "  \u{24d8} Yahoo Finance did not answer; {} companies listed by {}'s screener and priced by the keyed providers.",
+        quotes.len(),
+        source
+    );
+    Some(market::filter_by_cap(quotes, cap))
 }
 
 /// Scan title with the `--cap` tier appended: `NIFTY 500 (mid cap)`.
