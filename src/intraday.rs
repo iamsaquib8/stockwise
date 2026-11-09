@@ -892,7 +892,20 @@ pub async fn scan_intraday_with(
     let quotes = client.get_quote(&sym_refs).await?;
     let mut signals = Vec::new();
 
-    for quote in &quotes {
+    // Daily bars a few symbols at a time (NIFTY 500 is 500 charts), in the
+    // quotes' order; priceless quotes skip the request.
+    use futures_util::StreamExt;
+    let charts: Vec<Option<crate::api::ChartData>> =
+        futures_util::stream::iter(quotes.iter().map(|q| async move {
+            let sym = q.symbol.as_deref()?;
+            q.regular_market_price.filter(|p| *p > 0.0)?;
+            client.get_chart(sym, "1mo", "1d").await.ok()
+        }))
+        .buffered(8)
+        .collect()
+        .await;
+
+    for (quote, chart) in quotes.iter().zip(charts) {
         let symbol = match &quote.symbol {
             Some(s) => s.clone(),
             None => continue,
@@ -902,9 +915,8 @@ pub async fn scan_intraday_with(
             _ => continue,
         };
 
-        let chart = match client.get_chart(&symbol, "1mo", "1d").await {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Some(chart) = chart else {
+            continue;
         };
 
         let extract =

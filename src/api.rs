@@ -880,6 +880,9 @@ fn no_history_message(symbol: &str) -> String {
     msg
 }
 
+/// Most symbols in one Yahoo quote request.
+const QUOTE_CHUNK: usize = 100;
+
 pub struct YahooClient {
     client: reqwest::Client,
     /// Opened on the first request that needs it (quotes, quoteSummary,
@@ -1359,7 +1362,36 @@ impl YahooClient {
 
     /// Quotes straight from Yahoo Finance, ignoring any configured provider.
     pub async fn yahoo_quote(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
-        let joined = symbols.join(",");
+        if symbols.len() <= QUOTE_CHUNK {
+            return self.yahoo_quote_chunk(symbols.join(",")).await;
+        }
+        // An index scan (NIFTY 500) is too long for one URL: ask in chunks,
+        // a few at a time, keeping the order. A chunk that fails is skipped
+        // unless every chunk fails.
+        use futures_util::StreamExt;
+        let joined: Vec<String> = symbols.chunks(QUOTE_CHUNK).map(|c| c.join(",")).collect();
+        let parts: Vec<Result<Vec<Quote>>> = futures_util::stream::iter(joined)
+            .map(|j| self.yahoo_quote_chunk(j))
+            .buffered(4)
+            .collect()
+            .await;
+        let mut out = Vec::new();
+        let mut last_err = None;
+        for part in parts {
+            match part {
+                Ok(q) => out.extend(q),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        match last_err {
+            Some(e) if out.is_empty() => Err(e),
+            _ => Ok(out),
+        }
+    }
+
+    /// One Yahoo quote request for at most [`QUOTE_CHUNK`] comma-joined
+    /// symbols.
+    async fn yahoo_quote_chunk(&self, joined: String) -> Result<Vec<Quote>> {
         let url = build_url(
             "https://query2.finance.yahoo.com/v7/finance/quote",
             None,

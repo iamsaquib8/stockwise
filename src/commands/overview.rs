@@ -716,6 +716,19 @@ pub async fn cmd_search(query: &str, fmt: Format) -> Result<()> {
 
 /// `stockwise doctor` — one screen that answers "is my setup working?".
 /// `stockwise cache status|clear`: the persistent response cache.
+pub fn cmd_cache_clear(what: crate::db::CacheTarget) -> Result<()> {
+    if what == crate::db::CacheTarget::Http {
+        return cmd_cache(true);
+    }
+    print_header("Response Cache (cache.db)");
+    print_kv("File", &crate::db::path()?.display().to_string());
+    match crate::db::clear(what) {
+        Some(n) => println!("\n  {} Removed {} cached rows.\n", "✓".green(), n),
+        None => bail!("Cache database is off or cannot be opened"),
+    }
+    Ok(())
+}
+
 pub fn cmd_cache(clear: bool) -> Result<()> {
     print_header("Response Cache (cache.db)");
     let location = crate::db::path()?;

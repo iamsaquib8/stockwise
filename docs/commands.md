@@ -172,8 +172,9 @@ no exchange rate for the currency). Indian stocks follow the SEBI/AMFI ranks
 when the index members are known: NIFTY 100 is large (the top 10, or above
 ₹5,00,000 Cr, is mega), NIFTY MIDCAP 150 is mid, NIFTY SMALLCAP 250 is small
 and anything outside NIFTY 500 is micro. Scanning those indexes with
-`--universe` saves their members (`cap_membership.json` in the data
-directory); until then, and offline, rupee cut-offs decide (large from
+`--universe` (or any India scan, which covers NIFTY 500 by default) saves
+their members in `cache.db` (`stockwise cache clear members` forgets them);
+until then, and offline, rupee cut-offs decide (large from
 ₹1,00,000 Cr, mid from ₹33,000 Cr, small from ₹10,000 Cr). Every other market
 converts the market cap to dollars at the built-in approximate rates (London
 pence `GBp` and Japanese yen `JPY` included): mega from $200B, large from
