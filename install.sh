@@ -6,8 +6,10 @@
 # Environment overrides:
 #   STOCKWISE_VERSION   release tag to install (default: latest), e.g. v0.8.1
 #   STOCKWISE_INSTALL   install directory (default: $HOME/.local/bin; $PREFIX/bin on Termux)
+#   STOCKWISE_SKIP_CHECKSUM=1  explicitly permit an unverified download (unsafe)
 set -eu
 
+main() {
 REPO="iamsaquib8/stockwise"
 BIN="stockwise"
 VERSION="${STOCKWISE_VERSION:-latest}"
@@ -65,7 +67,11 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 say "Downloading $asset ($VERSION)..."
 fetch "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset"
 
-if fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 2>/dev/null; then
+if [ "${STOCKWISE_SKIP_CHECKSUM:-0}" = 1 ]; then
+  say "WARNING: checksum verification explicitly disabled."
+else
+  fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 2>/dev/null || \
+    die "checksum file not found for $asset (set STOCKWISE_SKIP_CHECKSUM=1 only if you accept the risk)"
   expected=$(cut -d ' ' -f 1 < "$tmp/$asset.sha256")
   if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$tmp/$asset" | cut -d ' ' -f 1)
@@ -87,3 +93,8 @@ case ":$PATH:" in
   *) say "Add $INSTALL_DIR to your PATH, e.g.:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 say "Get started:  $BIN quote RELIANCE TCS   |   $BIN quote AAPL -m us"
+}
+
+# Delay all installer side effects until the complete script has been received.
+# A truncated `curl | sh` stream cannot call main before this final line.
+main "$@"

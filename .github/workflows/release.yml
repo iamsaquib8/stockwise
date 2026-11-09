@@ -50,6 +50,10 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     needs: [check-version, manpages]
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     # Run on manual dispatch too (check-version is skipped there).
     if: ${{ !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
@@ -168,6 +172,15 @@ jobs:
           # fragments and [Unreleased] entries.
           [ -s release-notes.md ] || python3 scripts/changelog.py preview --notes > release-notes.md
           [ -s release-notes.md ] || echo "See CHANGELOG.md." > release-notes.md
+
+      # Authenticate the release archive independently of its adjacent .sha256.
+      - name: Attest release archive provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')

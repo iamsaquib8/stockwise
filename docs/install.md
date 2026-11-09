@@ -15,6 +15,21 @@ The installer picks the right build for your system, checks its SHA-256
 against the release, and installs to `~/.local/bin` (`$PREFIX/bin` on
 Termux). `STOCKWISE_INSTALL=/usr/local/bin` changes the directory and
 `STOCKWISE_VERSION=v0.8.1` pins a version.
+The checksum download must succeed; otherwise installation stops before
+extracting or replacing the binary. `STOCKWISE_SKIP_CHECKSUM=1` is an explicit,
+unsafe override for recovery only. The script defers side effects until it has
+been fully received, reducing the risk of partially downloaded `curl | sh`
+input executing.
+
+To independently check an official release archive after downloading it,
+install the [GitHub CLI](https://cli.github.com/) and run:
+
+```bash
+gh attestation verify stockwise-x86_64-unknown-linux-gnu.tar.gz --repo iamsaquib8/stockwise
+```
+
+Build-provenance attestations will be available for archives published by the
+release workflow after this change is merged. Older releases are not attested.
 
 ## Every option
 
