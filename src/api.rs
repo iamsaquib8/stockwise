@@ -220,6 +220,12 @@ pub(crate) struct HybridCache {
 /// The cache shared by Yahoo and an alternative data provider.
 pub(crate) type SharedCache = Arc<tokio::sync::Mutex<HybridCache>>;
 
+/// Clear StockWise's Redis entries when `STOCKWISE_REDIS_URL` is set;
+/// `None` without Redis.
+pub async fn clear_redis_cache() -> Option<u64> {
+    HybridCache::new().await.clear_redis().await
+}
+
 impl HybridCache {
     async fn new() -> Self {
         Self {
@@ -250,6 +256,38 @@ impl HybridCache {
     /// The `cache.db` handle, for storing bars next to cached responses.
     pub(crate) fn l2(&self) -> Option<crate::db::L2> {
         self.l2
+    }
+
+    /// Delete StockWise's own Redis entries (keys under `stockwise:`),
+    /// leaving other data in the same Redis untouched; how many went.
+    /// `None` without Redis.
+    pub(crate) async fn clear_redis(&mut self) -> Option<u64> {
+        let conn = self.redis.as_mut()?;
+        let pattern = format!("{}*", REDIS_KEY_PREFIX);
+        let mut cursor: u64 = 0;
+        let mut removed = 0u64;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query_async(conn)
+                .await
+                .ok()?;
+            if !keys.is_empty() {
+                removed += redis::cmd("DEL")
+                    .arg(&keys)
+                    .query_async::<u64>(conn)
+                    .await
+                    .ok()?;
+            }
+            if next == 0 {
+                return Some(removed);
+            }
+            cursor = next;
+        }
     }
 
     fn has_redis(&self) -> bool {
@@ -1144,8 +1182,9 @@ impl YahooClient {
         cache_ttl: Duration,
         extra_headers: &[(&str, &str)],
     ) -> Result<String> {
-        // Check cache first (Redis → memory)
-        {
+        // Check cache first (Redis → memory). A zero TTL means "never
+        // cached": no read and, below, no write.
+        if !cache_ttl.is_zero() {
             let mut cache = self.cache.lock().await;
             if let Some(cached) = cache.get(&cache_key(url)).await {
                 return Ok(cached);
@@ -1210,8 +1249,10 @@ impl YahooClient {
                     if status.is_success() {
                         let body = resp.text().await.context("Failed to read response body")?;
                         // Cache to Redis + memory
-                        let mut cache = self.cache.lock().await;
-                        cache.set(cache_key(url), body.clone(), cache_ttl).await;
+                        if !cache_ttl.is_zero() {
+                            let mut cache = self.cache.lock().await;
+                            cache.set(cache_key(url), body.clone(), cache_ttl).await;
+                        }
                         return Ok(body);
                     }
                     last_status = Some(status);
@@ -1369,20 +1410,24 @@ impl YahooClient {
         // a few at a time, keeping the order. A chunk that fails is skipped
         // unless every chunk fails.
         use futures_util::StreamExt;
-        let joined: Vec<String> = symbols.chunks(QUOTE_CHUNK).map(|c| c.join(",")).collect();
-        let parts: Vec<Result<Vec<Quote>>> = futures_util::stream::iter(joined)
-            .map(|j| self.yahoo_quote_chunk(j))
+        let joined: Vec<(usize, String)> = symbols
+            .chunks(QUOTE_CHUNK)
+            .map(|c| (c.len(), c.join(",")))
+            .collect();
+        let parts: Vec<(usize, Result<Vec<Quote>>)> = futures_util::stream::iter(joined)
+            .map(|(n, j)| async move { (n, self.yahoo_quote_chunk(j).await) })
             .buffered(4)
             .collect()
             .await;
         let mut out = Vec::new();
         let mut last_err = None;
-        let mut failed = 0;
-        for part in parts {
+        let (mut failed, mut missing) = (0, 0);
+        for (n, part) in parts {
             match part {
                 Ok(q) => out.extend(q),
                 Err(e) => {
                     failed += 1;
+                    missing += n;
                     last_err = Some(e);
                 }
             }
@@ -1392,11 +1437,11 @@ impl YahooClient {
             Some(e) => {
                 // A partial scan must say so: the ranking misses symbols.
                 eprintln!(
-                    "  \u{24d8} Yahoo Finance did not answer {} of {} quote requests ({:#}); about {} symbols are missing.",
+                    "  \u{24d8} Yahoo Finance did not answer {} of {} quote requests ({:#}); {} symbols are missing.",
                     failed,
                     symbols.len().div_ceil(QUOTE_CHUNK),
                     e,
-                    failed * QUOTE_CHUNK
+                    missing
                 );
                 Ok(out)
             }
@@ -1675,8 +1720,9 @@ impl YahooClient {
     }
 
     /// An NSE index's members from niftyindices.com's CSV (members only,
-    /// alphabetical). Not cached as a response: the site answers some
-    /// requests with an HTML page and HTTP 200, which must not be kept.
+    /// alphabetical). Never cached (zero TTL: no cache read or write): the
+    /// site answers some requests with an HTML page and HTTP 200, which
+    /// must not be served again.
     pub async fn index_members_csv(&self, index: &str) -> Result<Vec<String>> {
         let url = providers::niftyindices::csv_url(index)
             .ok_or_else(|| anyhow::anyhow!("niftyindices.com has no member list for {}", index))?;

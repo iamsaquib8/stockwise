@@ -3583,7 +3583,7 @@ async fn dispatch(
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
         Commands::Cache { action } => match action {
             CacheAction::Status => commands::cmd_cache(false),
-            CacheAction::Clear { what } => commands::cmd_cache_clear(what),
+            CacheAction::Clear { what } => commands::cmd_cache_clear(what).await,
             CacheAction::Warm { background } => commands::cmd_cache_warm(m, background).await,
             CacheAction::Snapshots {
                 cap,
