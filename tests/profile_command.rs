@@ -176,3 +176,68 @@ fn profile_set_and_reset_flow() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn profile_archetype_defaults_and_overrides() {
+    let dir =
+        std::env::temp_dir().join(format!("sw-test-profile-archetypes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.toml");
+    std::fs::write(&cfg, "").unwrap();
+
+    for (
+        profile_arg,
+        expected_mode,
+        expected_risk,
+        expected_risk_trade,
+        expected_drift,
+        expected_explain,
+    ) in [
+        ("passive", "passive", "low", 0.5, 5.0, true),
+        ("active:low", "active", "low", 0.5, 0.0, false),
+        ("active:med", "active", "med", 1.0, 0.0, false),
+        ("active:high", "active", "high", 2.0, 0.0, false),
+        ("ultra", "ultra", "high", 2.0, 0.0, false),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_stockwise"))
+            .args(["--profile", profile_arg, "profile", "--json"])
+            .env("STOCKWISE_HOME", &dir)
+            .env("STOCKWISE_CONFIG", &cfg)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|_| panic!("run profile with {profile_arg}"));
+        assert!(out.status.success());
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert_eq!(v["mode"], expected_mode, "{profile_arg}");
+        assert_eq!(v["risk"], expected_risk, "{profile_arg}");
+        assert_eq!(v["risk_per_trade"], expected_risk_trade, "{profile_arg}");
+        assert_eq!(v["default_drift_pct"], expected_drift, "{profile_arg}");
+        assert_eq!(v["auto_explain"], expected_explain, "{profile_arg}");
+    }
+
+    // Also test setting only flags without explicit mode spec: `profile set --risk high --tax-slab 25 --json`
+    let set_out = Command::new(env!("CARGO_BIN_EXE_stockwise"))
+        .args([
+            "profile",
+            "set",
+            "--risk",
+            "high",
+            "--tax-slab",
+            "25",
+            "--json",
+        ])
+        .env("STOCKWISE_HOME", &dir)
+        .env("STOCKWISE_CONFIG", &cfg)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run profile set --risk high");
+    assert!(set_out.status.success());
+    let v_set: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&set_out.stdout)).unwrap();
+    assert_eq!(v_set["risk"], "high");
+    assert_eq!(v_set["tax_slab"], 25.0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

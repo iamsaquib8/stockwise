@@ -662,23 +662,26 @@ pub fn chandelier_exit(highs: &[f64], atr: f64, multiplier: f64) -> Option<f64> 
 
 /// Position size (whole shares) for a given capital, risk percentage, entry price, and stop price.
 ///
+/// Uses integer minor units (scaled by 10,000) for monetary calculations to avoid
+/// binary floating-point subtraction drift at exact share boundaries.
+///
 /// Formula: `floor((capital * (risk_pct / 100.0)) / (entry - stop))`.
 /// Returns `0` when `capital <= 0.0`, `risk_pct <= 0.0`, `entry <= 0.0`, or `stop >= entry`.
 pub fn shares_for_risk(capital: f64, risk_pct: f64, entry: f64, stop: f64) -> u64 {
     if !(capital > 0.0 && risk_pct > 0.0 && entry > 0.0 && stop < entry) {
         return 0;
     }
-    let risk_amount = capital * (risk_pct / 100.0);
-    let risk_per_share = entry - stop;
-    if risk_per_share <= 0.0 || !risk_per_share.is_finite() {
+    const SCALE: f64 = 10_000.0;
+    let entry_units = (entry * SCALE).round() as i128;
+    let stop_units = (stop * SCALE).round() as i128;
+    let risk_per_share_units = entry_units - stop_units;
+    if risk_per_share_units <= 0 {
         return 0;
     }
-    let raw = (risk_amount / risk_per_share).floor();
-    if raw.is_finite() && raw >= 0.0 {
-        raw as u64
-    } else {
-        0
-    }
+    let capital_units = (capital * SCALE).round() as i128;
+    let risk_budget_units = (capital_units as f64 * (risk_pct / 100.0)).round() as i128;
+    let shares = risk_budget_units / risk_per_share_units;
+    if shares > 0 { shares as u64 } else { 0 }
 }
 
 // ── Tests ──
@@ -697,6 +700,8 @@ mod tests {
 
     #[test]
     fn test_shares_for_risk() {
+        // Exact share boundary (floating point binary subtraction drift check)
+        assert_eq!(shares_for_risk(100.0, 1.0, 1.1, 1.0), 10);
         // Capital = 500,000, risk = 1%, entry = 1,280, stop = 1,231 (risk/share = 49)
         // Risk amount = 5,000 -> 5000 / 49 = 102.04 -> 102 shares
         assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1231.0), 102);
