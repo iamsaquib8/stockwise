@@ -1375,3 +1375,49 @@ async fn pme_empty_portfolio_returns_zero_report() {
     assert_eq!(report.summary.twin_value, 0.0);
     assert!(report.holdings.is_empty());
 }
+
+#[test]
+fn income_holding_csv_row_columns_match_fields() {
+    let row = crate::income::IncomeHoldingCsvRow {
+        symbol: "ITC.NS".into(),
+        shares: 100.0,
+        current_price: 450.0,
+        avg_cost: 200.0,
+        annual_dividend_per_share: 15.0,
+        annual_gross_income: 1500.0,
+        current_yield_pct: 3.33,
+        yoc_pct: 7.5,
+        net_yield_pct: 6.75,
+        annual_wht: 150.0,
+        annual_net_income: 1350.0,
+        payout_ratio_pct: "65.0%".into(),
+        safety_badge: "SAFE".into(),
+    };
+    assert_columns(&row);
+}
+
+#[test]
+fn monthly_income_csv_row_columns_match_fields() {
+    let row = crate::income::MonthlyIncomeCsvRow {
+        month: "2026-11".into(),
+        label: "Nov 2026".into(),
+        is_projected: true,
+        gross_amount: 1500.0,
+        wht_amount: 150.0,
+        net_amount: 1350.0,
+    };
+    assert_columns(&row);
+}
+
+#[test]
+fn upcoming_income_csv_row_columns_match_fields() {
+    let row = crate::commands::UpcomingIncomeCsvRow {
+        date: "2026-11-20".into(),
+        symbol: "TCS.NS".into(),
+        when: "in 12 days".into(),
+        event: "Ex-Dividend Date".into(),
+        held_shares: 50.0,
+        detail: "Interim Dividend Rs 10".into(),
+    };
+    assert_columns(&row);
+}

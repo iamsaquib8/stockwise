@@ -474,6 +474,8 @@ pub struct Quote {
     pub trailing_pe: Option<f64>,
     #[serde(rename = "forwardPE")]
     pub forward_pe: Option<f64>,
+    #[serde(rename = "trailingAnnualDividendRate")]
+    pub trailing_annual_dividend_rate: Option<f64>,
     #[serde(rename = "trailingAnnualDividendYield")]
     pub trailing_annual_dividend_yield: Option<f64>,
     #[serde(rename = "epsTrailingTwelveMonths")]

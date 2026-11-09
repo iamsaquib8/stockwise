@@ -70,6 +70,7 @@ pub(super) async fn run<D: DataSource>(
         "portfolio_pme" => portfolio_pme(src, a, m).await,
         "portfolio_sell_preview" => portfolio_sell_preview(src, a, m).await,
         "mf_bleed" => mf_bleed(src, a, m).await,
+        "income_calendar" => income_calendar(src, a, m).await,
         "calendar" => calendar(src, a, m).await,
         "ipo_board" => ipo_board(src, a).await,
         "ipo_analyze" => ipo_analyze(src, a).await,
@@ -722,6 +723,47 @@ async fn portfolio_sell_preview(src: &impl DataSource, a: &Args, m: Market) -> R
 async fn mf_bleed(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let report = commands::build_bleed_report(&p, a.f64("return_pct").unwrap_or(10.0), m).await?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn income_calendar(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
+    let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let months = a.i64("months").unwrap_or(12).clamp(1, 60) as u32;
+    let summary_only = a.bool("summary_only");
+    if p.holdings.is_empty() {
+        let base_cur = crate::commands::market_currency(m);
+        let today = chrono::Local::now().date_naive();
+        let report = crate::income::generate_income_report(&p, &[], base_cur, None, today, months);
+        return Ok(serde_json::to_value(report)?);
+    }
+    let raw_symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let resolved: Vec<String> = raw_symbols
+        .iter()
+        .map(|s| market::resolve_symbol(s, m))
+        .collect();
+    let val = commands::value_holdings(src, &resolved, m, None).await?;
+    let today = chrono::Local::now().date_naive();
+
+    let holdings_data =
+        crate::income::assemble_holdings_data(&p, &val.quotes, &resolved, val.base());
+    let mut report = crate::income::generate_income_report(
+        &p,
+        &holdings_data,
+        val.base(),
+        Some(&val.fx),
+        today,
+        months,
+    );
+
+    if summary_only {
+        for m in &mut report.monthly_schedule {
+            m.items.clear();
+        }
+        for h in &mut report.holdings {
+            h.lots_yoc.clear();
+        }
+    }
+
     Ok(serde_json::to_value(report)?)
 }
 

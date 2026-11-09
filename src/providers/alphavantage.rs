@@ -466,7 +466,12 @@ mod tests {
 
     #[tokio::test]
     async fn short_history_is_refused_so_yahoo_serves_it() {
-        let server = MockServer::start(vec![(200, DAILY.into())]).await;
+        let today = chrono::Utc::now().date_naive();
+        let body = DAILY.replace("2026-10-19", &today.to_string()).replace(
+            "2026-10-16",
+            &(today - chrono::Duration::days(3)).to_string(),
+        );
+        let server = MockServer::start(vec![(200, body)]).await;
         let p = Provider::new(
             ProviderKind::AlphaVantage,
             "k-1234".into(),

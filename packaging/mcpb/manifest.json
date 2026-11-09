@@ -151,6 +151,10 @@
       "description": "Held Regular-plan funds vs their Direct twin: TER gap, yearly and 10-year cost, and units that can switch tax-free."
     },
     {
+      "name": "income_calendar",
+      "description": "Dividend, coupon and passive-income calendar. 12-month trailing and projected dividend, coupon and passive-income calendar, Yield-on-Cost (YoC), and dividend payout safety checks."
+    },
+    {
       "name": "calendar",
       "description": "Results and dividends calendar. Upcoming results dates, ex-dividend dates and splits for given tickers, or for the user's holdings and watchlist when none are given."
     },
