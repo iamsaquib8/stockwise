@@ -75,9 +75,25 @@ fn print_holdings() -> Result<()> {
     Ok(())
 }
 
+/// Parse an `init` profile response: either a 1-keystroke number (`1`..`5`)
+/// or a `<MODE[:RISK]>` string (`passive`, `active:low`, `active:med`, `active:high`, `ultra`).
+pub fn parse_init_profile(input: &str) -> Result<crate::config::ProfileSpec> {
+    let trimmed = input.trim();
+    let spec_str = match trimmed {
+        "1" => "passive",
+        "2" => "active:low",
+        "3" => "active:med",
+        "4" => "active:high",
+        "5" => "ultra",
+        other => other,
+    };
+    crate::config::parse_profile_spec(spec_str).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub async fn cmd_init(
     market: Market,
     market_given: bool,
+    profile_given: Option<crate::config::ProfileSpec>,
     imports: &[String],
     no_mcp: bool,
 ) -> Result<()> {
@@ -104,6 +120,35 @@ pub async fn cmd_init(
             "  {} Default market set to {} in {}",
             "✓".green(),
             value.cyan(),
+            path.display()
+        );
+    }
+
+    // 2. Investor profile (1-keystroke or --profile flag).
+    let mut chosen_profile = profile_given;
+    if chosen_profile.is_none() && interactive {
+        let answer = ask(
+            "Investor profile — 1:passive  2:active:low  3:active:med  4:active:high  5:ultra?",
+            "3",
+        )?;
+        chosen_profile = Some(parse_init_profile(&answer)?);
+    }
+    if let Some(spec) = chosen_profile {
+        let path = crate::config::path().context(
+            "Cannot determine the config directory — set STOCKWISE_CONFIG to a file path",
+        )?;
+        crate::config::set_profile(
+            &path,
+            &crate::config::ProfileUpdate {
+                mode: Some(spec.mode),
+                risk: Some(spec.effective_risk()),
+                ..Default::default()
+            },
+        )?;
+        println!(
+            "  {} Investor profile set to {} in {}",
+            "✓".green(),
+            spec.canonical().cyan(),
             path.display()
         );
     }
@@ -173,5 +218,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("Unknown import source"), "{e}");
+    }
+
+    #[test]
+    fn parse_init_profile_accepts_keystrokes_and_names() {
+        assert_eq!(parse_init_profile("1").unwrap().canonical(), "passive:low");
+        assert_eq!(parse_init_profile("2").unwrap().canonical(), "active:low");
+        assert_eq!(parse_init_profile("3").unwrap().canonical(), "active:med");
+        assert_eq!(parse_init_profile("4").unwrap().canonical(), "active:high");
+        assert_eq!(parse_init_profile("5").unwrap().canonical(), "ultra");
+        assert_eq!(
+            parse_init_profile("passive").unwrap().canonical(),
+            "passive:low"
+        );
+        assert!(parse_init_profile("9").is_err());
     }
 }

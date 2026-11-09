@@ -143,6 +143,7 @@ pub async fn cmd_insights(symbol: &str, market: Market, json: bool) -> Result<()
 }
 
 pub async fn cmd_verdict(symbol: &str, market: Market, json: bool, explain: bool) -> Result<()> {
+    let explain = explain || crate::config::effective_profile().auto_explain;
     let client = YahooClient::new().await?;
     let r = research::fetch(&client, symbol, market, 60, research::Needs::VERDICT).await?;
     let cards = insights::generate_rich_insights(&r);

@@ -117,6 +117,9 @@ pub struct DecisionVerdict {
     pub next_catalyst: Option<String>,
     /// Data sources that failed while fetching, from the research bundle.
     pub warnings: Vec<String>,
+    /// Profile-specific guardrail observations (neutral, non-advisory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_notes: Vec<String>,
     pub disclaimer: &'static str,
 }
 
@@ -443,13 +446,154 @@ fn technical(r: &Research) -> PillarScore {
 
 const NOT_EQUITY: &str = "Not applicable to this asset type";
 
-/// Compute the 6-pillar score for one symbol.
+fn pillar_weights(profile: &crate::config::EffectiveProfile) -> [f64; 6] {
+    use crate::config::{ProfileMode, RiskLevel};
+    match (profile.mode, profile.risk) {
+        (ProfileMode::Passive, _) | (ProfileMode::Active, RiskLevel::Low) => {
+            [0.25, 0.20, 0.25, 0.15, 0.05, 0.10]
+        }
+        (ProfileMode::Active, RiskLevel::High) => [0.15, 0.30, 0.15, 0.10, 0.10, 0.20],
+        (ProfileMode::Ultra, _) => [0.15, 0.25, 0.10, 0.15, 0.10, 0.25],
+        (ProfileMode::Active, _) => [
+            W_VALUATION,
+            W_GROWTH,
+            W_BALANCE,
+            W_OWNERSHIP,
+            W_ANALYST,
+            W_TECHNICAL,
+        ],
+    }
+}
+
+fn build_profile_notes(r: &Research, profile: &crate::config::EffectiveProfile) -> Vec<String> {
+    use crate::config::{ProfileMode, RiskLevel};
+    let mut notes = Vec::new();
+    let sc = crate::scorecard::generate_scorecard_report(r);
+
+    match (profile.mode, profile.risk) {
+        (ProfileMode::Passive, _) | (ProfileMode::Active, RiskLevel::Low) => {
+            if let Some(beta) = r.fin.beta
+                && beta > 1.2
+            {
+                notes.push(format!(
+                    "Profile guardrail ({}): Beta {:.2} exceeds conservative threshold (1.20)",
+                    profile.spec, beta
+                ));
+            }
+            let tier = crate::market::CapTier::classify(
+                &r.symbol,
+                r.quote.market_cap,
+                r.currency.as_deref(),
+                None,
+            );
+            if matches!(
+                tier,
+                crate::market::CapTier::Small | crate::market::CapTier::Micro
+            ) {
+                notes.push(format!(
+                    "Profile guardrail ({}): {} stock (configured max_smallcap_weight = {:.1}%)",
+                    profile.spec,
+                    tier.badge(),
+                    profile.max_smallcap_weight
+                ));
+            }
+            if !sc.altman.is_financial
+                && let Some(de) = r.fin.de
+                && de > 50.0
+            {
+                notes.push(format!(
+                    "Profile guardrail ({}): Debt/Equity {:.0}% exceeds conservative 0.5x (50%) threshold",
+                    profile.spec, de
+                ));
+            }
+            if sc.piotroski.evaluated >= 6 && sc.piotroski.score < 7 {
+                notes.push(format!(
+                    "Profile guardrail ({}): Piotroski F-Score {}/{} is below conservative quality floor (7/9)",
+                    profile.spec, sc.piotroski.score, sc.piotroski.evaluated
+                ));
+            }
+            if sc.altman.zone == Some(crate::scorecard::AltmanZone::Distress)
+                || sc.altman.z_double_prime_zone == Some(crate::scorecard::AltmanZone::Distress)
+            {
+                notes.push(format!(
+                    "Profile guardrail ({}): Altman Z-Score is in the Distress Zone",
+                    profile.spec
+                ));
+            }
+            if !sc.altman.is_financial
+                && r.fin.de.is_some_and(|de| de <= 50.0)
+                && sc.piotroski.evaluated >= 6
+                && sc.piotroski.score >= 7
+            {
+                notes.push(format!(
+                    "Profile fit ({}): Low leverage (D/E {:.0}%) and Piotroski {}/{} meet conservative quality criteria",
+                    profile.spec,
+                    r.fin.de.unwrap_or(0.0),
+                    sc.piotroski.score,
+                    sc.piotroski.evaluated
+                ));
+            }
+        }
+        (ProfileMode::Active, RiskLevel::High) | (ProfileMode::Ultra, _) => {
+            if sc.altman.zone == Some(crate::scorecard::AltmanZone::Distress)
+                || sc.altman.z_double_prime_zone == Some(crate::scorecard::AltmanZone::Distress)
+            {
+                notes.push(format!(
+                    "Forensic flag ({}): Altman Z-Score is in the Distress Zone",
+                    profile.spec
+                ));
+            }
+            if r.holdings.last().and_then(|h| h.pledged) == Some(true) {
+                notes.push(format!(
+                    "Forensic flag ({}): Promoter shareholding includes pledged shares",
+                    profile.spec
+                ));
+            }
+            if let Some(rg) = r.fin.revenue_growth
+                && rg < -0.05
+            {
+                notes.push(format!(
+                    "Forensic flag ({}): Revenue contracted {:.1}% YoY",
+                    profile.spec,
+                    rg * 100.0
+                ));
+            }
+            if let (Some(p), Some(hi)) = (r.price(), r.quote.fifty_two_week_high)
+                && hi > 0.0
+            {
+                let dist_pct = (p - hi) / hi * 100.0;
+                if dist_pct >= -5.0 {
+                    notes.push(format!(
+                        "Momentum note ({}): Price is {:.1}% from 52-week high ({:.2})",
+                        profile.spec,
+                        dist_pct.abs(),
+                        hi
+                    ));
+                }
+            }
+        }
+        (ProfileMode::Active, _) => {}
+    }
+
+    notes
+}
+
+/// Compute the 6-pillar score for one symbol using the active investor profile.
 pub fn generate_verdict(r: &Research, cards: &[InsightCard]) -> DecisionVerdict {
+    generate_verdict_with_profile(r, cards, &crate::config::effective_profile())
+}
+
+/// Compute the 6-pillar score for one symbol under a specific investor profile.
+pub fn generate_verdict_with_profile(
+    r: &Research,
+    cards: &[InsightCard],
+    profile: &crate::config::EffectiveProfile,
+) -> DecisionVerdict {
     let price = r.price().unwrap_or(0.0);
     let class = AssetClass::of(&r.symbol);
     let equity = class == AssetClass::Stock;
 
-    let pillars = if equity {
+    let mut pillars = if equity {
         vec![
             valuation(r),
             growth(r),
@@ -470,6 +614,11 @@ pub fn generate_verdict(r: &Research, cards: &[InsightCard]) -> DecisionVerdict 
             technical(r),
         ]
     };
+
+    let weights = pillar_weights(profile);
+    for (p, &w) in pillars.iter_mut().zip(weights.iter()) {
+        p.weight = w;
+    }
 
     let (overall_score, note) = composite(&pillars, r, class);
     let data_coverage = coverage(&pillars);
@@ -507,6 +656,12 @@ pub fn generate_verdict(r: &Research, cards: &[InsightCard]) -> DecisionVerdict 
         None
     };
 
+    let profile_notes = if equity {
+        build_profile_notes(r, profile)
+    } else {
+        Vec::new()
+    };
+
     DecisionVerdict {
         symbol: r.symbol.clone(),
         name: r.name.clone(),
@@ -521,6 +676,7 @@ pub fn generate_verdict(r: &Research, cards: &[InsightCard]) -> DecisionVerdict 
         bear_points: drivers(Impact::Negative),
         next_catalyst,
         warnings: r.warnings.clone(),
+        profile_notes,
         disclaimer: DISCLAIMER,
     }
 }
@@ -638,6 +794,9 @@ pub fn render_snapshot(v: &DecisionVerdict, symbol_hint: &str) -> String {
     if let Some(n) = &v.note {
         outln!(o, "  {}", n.dimmed());
     }
+    for pn in &v.profile_notes {
+        outln!(o, "  {} {}", "•".cyan(), pn);
+    }
     outln!(
         o,
         "  {}",
@@ -723,6 +882,14 @@ pub fn render_verdict(v: &DecisionVerdict, explain: bool) -> String {
         outln!(o, "  {}", subline.dimmed());
         for b in &v.bear_points {
             outln!(o, "  {} {}", "✖".red(), b);
+        }
+    }
+
+    if !v.profile_notes.is_empty() {
+        outln!(o, "\n  {}", "PROFILE GUARDRAILS & NOTES".bold().cyan());
+        outln!(o, "  {}", subline.dimmed());
+        for pn in &v.profile_notes {
+            outln!(o, "  {} {}", "•".cyan(), pn);
         }
     }
 
@@ -1124,5 +1291,67 @@ mod tests {
         assert_eq!(cash(1.0e12, "INR"), cash(1.14e10, "USD"));
         // A currency with no rate gets no points either way.
         assert_eq!(cash(1.0e15, "XXX"), cash(1.0, "XXX"));
+    }
+
+    #[test]
+    fn profile_modes_adjust_weights_and_emit_neutral_guardrail_notes() {
+        let mut r = full_stock();
+        r.fin.beta = Some(1.45);
+        r.fin.de = Some(85.0);
+        r.quote.market_cap = Some(500_000_000.0); // Small cap in USD (< $2B)
+        r.quote.fifty_two_week_high = Some(205.0);
+        if let Some(last) = r.holdings.last_mut() {
+            last.pledged = Some(true);
+        }
+
+        let cfg = crate::config::ProfileConfig::default();
+        for spec_str in [
+            "passive",
+            "active:low",
+            "active:med",
+            "active:high",
+            "ultra",
+        ] {
+            let spec = crate::config::parse_profile_spec(spec_str).unwrap();
+            let prof = crate::config::EffectiveProfile::from_parts(
+                Some((spec, crate::config::Source::Flag)),
+                None,
+                &cfg,
+            );
+            let v = generate_verdict_with_profile(&r, &[], &prof);
+            let total_w: f64 = v.pillars.iter().map(|p| p.weight).sum();
+            assert!((total_w - 1.0).abs() < 1e-9, "{spec_str}: {total_w}");
+            assert_neutral(&render_verdict(&v, true));
+            assert_neutral(&render_snapshot(&v, &r.symbol));
+            for note in &v.profile_notes {
+                assert_neutral(note);
+            }
+            if matches!(spec_str, "passive" | "active:low") {
+                assert!(
+                    v.profile_notes.iter().any(|n| n.contains("Beta 1.45")),
+                    "{:?}",
+                    v.profile_notes
+                );
+                assert!(
+                    v.profile_notes
+                        .iter()
+                        .any(|n| n.contains("max_smallcap_weight")),
+                    "{:?}",
+                    v.profile_notes
+                );
+            }
+            if matches!(spec_str, "active:high" | "ultra") {
+                assert!(
+                    v.profile_notes.iter().any(|n| n.contains("pledged shares")),
+                    "{:?}",
+                    v.profile_notes
+                );
+                assert!(
+                    v.profile_notes.iter().any(|n| n.contains("52-week high")),
+                    "{:?}",
+                    v.profile_notes
+                );
+            }
+        }
     }
 }

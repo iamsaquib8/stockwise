@@ -2446,6 +2446,21 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     if estimated {
         println!("  {}", ESTIMATED_DATE_HINT.dimmed());
     }
+    if crate::config::effective_profile().auto_explain {
+        print_section("How to Read This Estimate (Passive Profile Guide)");
+        println!(
+            "  {}",
+            "• FIFO (First-In, First-Out): When you sell shares or units, the oldest lot in that account is matched first."
+                .dimmed()
+        );
+        if country == Country::India {
+            println!(
+                "  {}",
+                "• Holding period: Listed shares & equity mutual funds held > 12 months are Long-Term (LTCG at 12.5% above ₹1.25L/FY); ≤ 12 months are Short-Term (STCG at 20%)."
+                    .dimmed()
+            );
+        }
+    }
     let caveat = match country {
         Country::India => {
             "ESTIMATE for listed shares with STT paid (Sec. 111A/112A rates from 23 Jul 2024), FIFO lots. \

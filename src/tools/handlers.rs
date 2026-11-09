@@ -82,6 +82,7 @@ pub(super) async fn run<D: DataSource>(
         "goal_list" => goal_list(src, m).await,
         "alerts_list" => Ok(json!({ "alerts": views::alerts(src).await? })),
         "watchlist" => Ok(json!({ "watchlist": views::watchlist(src).await? })),
+        "profile" => Ok(serde_json::to_value(crate::config::effective_profile())?),
         "order_preview" => order_preview(src, a).await,
         other => bail!("Tool '{}' has no handler", other),
     }
