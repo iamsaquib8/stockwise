@@ -982,12 +982,12 @@ impl Market {
 
     /// Symbols scanned by movers, screeners and the bots. For India this is
     /// the NIFTY 500 list saved by the last NSE scan (no request), or the
-    /// built-in large caps until one has run; for the US the built-in
+    /// built-in NIFTY 500 until one has run; for the US the built-in
     /// S&P 500.
     pub fn universe(self) -> Vec<String> {
         let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect();
         match self {
-            Market::In => saved_nifty500().unwrap_or_else(|| owned(INDIA_POPULAR)),
+            Market::In => saved_nifty500().unwrap_or_else(|| owned(crate::nifty500::NIFTY500)),
             Market::Us => owned(crate::sp500::SP500),
             Market::Crypto => crypto_majors().into_iter().map(|(s, _)| s).collect(),
             Market::Fx => FX_MAJORS.iter().map(|(s, _)| s.to_string()).collect(),
@@ -1252,13 +1252,14 @@ impl Universe {
     /// What to scan when NSE can't list the members: the built-in large
     /// caps (all NIFTY 50 members, so also inside NIFTY 100), a built-in
     /// list of the sector's members, or for NIFTY 500 the members saved by
-    /// an earlier scan. `None` for indices with no saved or built-in list.
+    /// an earlier scan, else the built-in list. `None` for indices with no
+    /// built-in list.
     pub fn fallback(self) -> Option<Vec<String>> {
         let list: &[&str] = match self {
             Universe::Nifty50 | Universe::Nifty100 => INDIA_POPULAR,
             Universe::BankNifty => BANK_NIFTY,
             Universe::NiftyIt => NIFTY_IT,
-            Universe::Nifty500 => return saved_nifty500(),
+            Universe::Nifty500 => return Some(Market::In.universe()),
             Universe::NiftyNext50 | Universe::Midcap150 | Universe::Smallcap250 => return None,
         };
         Some(list.iter().map(|s| s.to_string()).collect())

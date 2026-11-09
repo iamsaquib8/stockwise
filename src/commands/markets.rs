@@ -149,13 +149,19 @@ pub(super) async fn universe_quotes(
         .filter(|s| !cached.contains_key(*s))
         .cloned()
         .collect();
-    if missing.is_empty() {
+    if !cached.is_empty() {
         eprintln!(
-            "  \u{24d8} {} quotes from cache.db (updated in the last {} min).",
+            "  \u{24d8} {} quotes from cache.db (updated in the last {} min){}.",
             cached.len(),
-            QUOTE_CACHE_MAX_AGE_SECS / 60
+            QUOTE_CACHE_MAX_AGE_SECS / 60,
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!("; fetching {} more", missing.len())
+            }
         );
-    } else {
+    }
+    if !missing.is_empty() {
         let part = Scan {
             symbols: missing,
             scope: scan.scope.clone(),
@@ -1520,10 +1526,7 @@ pub async fn cmd_picks(market: Market, universe: Option<market::Universe>) -> Re
     let client = YahooClient::new().await?;
     let quotes = universe_quotes(&client, market, universe).await?;
 
-    print_header(&format!(
-        "Highest Scores in the Large-Cap Universe — {} Market",
-        market.label()
-    ));
+    print_header(&format!("Highest Scores — {} Market", market.label()));
     println!(
         "  {} Scoring {} stocks across 8 factors...\n",
         "⟳".yellow(),

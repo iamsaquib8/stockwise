@@ -44,6 +44,7 @@ mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod nifty500;
 mod notify;
 mod offmarket;
 mod output;
