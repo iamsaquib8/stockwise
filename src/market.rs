@@ -1558,8 +1558,8 @@ pub fn filter_by_cap(
 /// When the saved membership last changed (Unix milliseconds): the
 /// `cache.db` lists, or with `cache.db` off the JSON file's mtime.
 fn membership_version() -> Option<i64> {
-    match crate::db::with_db(|d| d.index_lists_version()) {
-        Some(v) => v,
+    match crate::db::l2() {
+        Some(_) => crate::db::with_db(|d| d.index_lists_version()).flatten(),
         None => crate::store::path(MEMBERSHIP_FILE)
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -1615,10 +1615,11 @@ impl IndiaMembership {
         {
             return value.clone();
         }
+        // Keyed by the version read before loading: a save in between
+        // only makes the next call load again.
         let value = Some(Self::load())
             .filter(|m| !m.is_empty())
             .map(std::sync::Arc::new);
-        let version = membership_version();
         *cell = Some((version, value.clone()));
         value
     }
@@ -1627,9 +1628,10 @@ impl IndiaMembership {
     /// copy). A `cap_membership.json` from an older version is moved in
     /// the first time; with `cache.db` off, that file stays the store.
     pub fn load() -> Self {
-        let Some(lists) = crate::db::with_db(|d| d.index_lists()) else {
+        if crate::db::l2().is_none() {
             return crate::store::load(MEMBERSHIP_FILE).unwrap_or_default();
-        };
+        }
+        let lists = crate::db::with_db(|d| d.index_lists()).unwrap_or_default();
         if lists.is_empty() {
             if let Ok(old) = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
                 && !old.is_empty()
@@ -1644,6 +1646,11 @@ impl IndiaMembership {
             }
             return Self::default();
         }
+        Self::from_lists(lists)
+    }
+
+    /// Membership from saved lists (unknown index names are skipped).
+    fn from_lists(lists: Vec<crate::db::IndexList>) -> Self {
         let mut m = Self::default();
         for (name, scanned, members) in lists {
             match name.as_str() {
@@ -1660,23 +1667,23 @@ impl IndiaMembership {
         m
     }
 
+    /// Every list as saved rows.
+    fn to_lists(&self) -> Vec<crate::db::IndexList> {
+        let flag = |n: &str| n != "NIFTY 500" && self.scanned.iter().any(|s| s == n);
+        [
+            ("NIFTY 100", &self.nifty100),
+            ("NIFTY MIDCAP 150", &self.midcap150),
+            ("NIFTY SMALLCAP 250", &self.smallcap250),
+            ("NIFTY 500", &self.nifty500),
+        ]
+        .into_iter()
+        .map(|(n, l)| (n.to_string(), flag(n), l.clone()))
+        .collect()
+    }
+
     /// Write every list to `cache.db` (best effort); whether it worked.
     fn save(&self) -> bool {
-        let flag = |n: &str| self.scanned.iter().any(|s| s == n);
-        let lists: [(&str, bool, &[String]); 4] = [
-            ("NIFTY 100", flag("NIFTY 100"), &self.nifty100),
-            (
-                "NIFTY MIDCAP 150",
-                flag("NIFTY MIDCAP 150"),
-                &self.midcap150,
-            ),
-            (
-                "NIFTY SMALLCAP 250",
-                flag("NIFTY SMALLCAP 250"),
-                &self.smallcap250,
-            ),
-            ("NIFTY 500", false, &self.nifty500),
-        ];
+        let lists = self.to_lists();
         crate::db::with_db(|d| d.put_index_lists(&lists)).is_some()
     }
 
@@ -1756,12 +1763,24 @@ impl IndiaMembership {
         {
             return;
         }
-        let mut m = Self::load();
-        m.set(index, symbols);
-        // With cache.db off or unusable, keep the lists in the JSON file.
-        if !m.save() {
-            let _ = crate::store::save(MEMBERSHIP_FILE, &m, false);
+        // With cache.db off or unusable, the JSON file is the store.
+        if crate::db::l2().is_none() {
+            let _ = crate::store::update(MEMBERSHIP_FILE, |m: &mut IndiaMembership| {
+                m.set(index, symbols);
+                Ok(())
+            });
+            return;
         }
+        // Move an old JSON file in first, then read, change and write in one
+        // transaction. A busy cache.db skips this save; the next scan saves.
+        Self::load();
+        crate::db::with_db(|d| {
+            d.update_index_lists(|lists| {
+                let mut m = Self::from_lists(lists);
+                m.set(index, symbols);
+                m.to_lists()
+            })
+        });
     }
 }
 

@@ -32,6 +32,46 @@ pub struct CacheStats {
 }
 
 /// Current Unix time in seconds.
+/// One saved index list: (index name, scanned, members in order).
+pub type IndexList = (String, bool, Vec<String>);
+
+fn write_index_lists(conn: &Connection, lists: &[IndexList]) -> Result<()> {
+    let now = now_millis();
+    let mut del = conn.prepare_cached("DELETE FROM index_members WHERE index_name = ?1")?;
+    let mut put = conn.prepare_cached(
+        "INSERT INTO index_members (index_name, rank, symbol) VALUES (?1, ?2, ?3)",
+    )?;
+    let mut list = conn.prepare_cached(
+        "INSERT OR REPLACE INTO index_lists (index_name, scanned, updated_at) VALUES (?1, ?2, ?3)",
+    )?;
+    for (name, scanned, members) in lists {
+        del.execute(params![name])?;
+        for (rank, sym) in members.iter().enumerate() {
+            put.execute(params![name, rank as i64, sym])?;
+        }
+        list.execute(params![name, *scanned as i64, now])?;
+    }
+    Ok(())
+}
+
+fn read_index_lists(conn: &Connection) -> Result<Vec<IndexList>> {
+    let mut st =
+        conn.prepare_cached("SELECT index_name, scanned FROM index_lists ORDER BY index_name")?;
+    let names: Vec<(String, bool)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut members = conn
+        .prepare_cached("SELECT symbol FROM index_members WHERE index_name = ?1 ORDER BY rank")?;
+    let mut out = Vec::new();
+    for (name, scanned) in names {
+        let list: Vec<String> = members
+            .query_map(params![name], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        out.push((name, scanned, list));
+    }
+    Ok(out)
+}
+
 /// What `cache clear` removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum CacheTarget {
@@ -345,49 +385,33 @@ impl CacheDb {
     // ── index_members ──
 
     /// Replace the saved lists: (index name, scanned, members in order).
-    pub fn put_index_lists(&mut self, lists: &[(&str, bool, &[String])]) -> Result<()> {
-        let now = now_millis();
+    pub fn put_index_lists(&mut self, lists: &[IndexList]) -> Result<()> {
         let tx = self.conn.transaction()?;
-        {
-            let mut del = tx.prepare_cached("DELETE FROM index_members WHERE index_name = ?1")?;
-            let mut put = tx.prepare_cached(
-                "INSERT INTO index_members (index_name, rank, symbol) VALUES (?1, ?2, ?3)",
-            )?;
-            let mut list = tx.prepare_cached(
-                "INSERT OR REPLACE INTO index_lists (index_name, scanned, updated_at)
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for (name, scanned, members) in lists {
-                del.execute(params![name])?;
-                for (rank, sym) in members.iter().enumerate() {
-                    put.execute(params![name, rank as i64, sym])?;
-                }
-                list.execute(params![name, *scanned as i64, now])?;
-            }
-        }
+        write_index_lists(&tx, lists)?;
         tx.commit()?;
         Ok(())
     }
 
     /// Every saved list: (index name, scanned, members in order).
-    pub fn index_lists(&self) -> Result<Vec<(String, bool, Vec<String>)>> {
-        let mut st = self
+    pub fn index_lists(&self) -> Result<Vec<IndexList>> {
+        read_index_lists(&self.conn)
+    }
+
+    /// Read, change and write the saved lists in one write transaction, so
+    /// two scans saving at once (in this or another process) never lose
+    /// each other's lists. `change` gets the stored lists and returns the
+    /// ones to write.
+    pub fn update_index_lists(
+        &mut self,
+        change: impl FnOnce(Vec<IndexList>) -> Vec<IndexList>,
+    ) -> Result<()> {
+        let tx = self
             .conn
-            .prepare_cached("SELECT index_name, scanned FROM index_lists ORDER BY index_name")?;
-        let names: Vec<(String, bool)> = st
-            .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut members = self.conn.prepare_cached(
-            "SELECT symbol FROM index_members WHERE index_name = ?1 ORDER BY rank",
-        )?;
-        let mut out = Vec::new();
-        for (name, scanned) in names {
-            let list: Vec<String> = members
-                .query_map(params![name], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            out.push((name, scanned, list));
-        }
-        Ok(out)
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let lists = change(read_index_lists(&tx)?);
+        write_index_lists(&tx, &lists)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// When any saved list last changed (Unix milliseconds), `None` if none.
