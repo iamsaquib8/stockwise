@@ -728,15 +728,14 @@ async fn mf_bleed(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
 
 async fn income_calendar(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     let p = src.portfolio().map_err(|e| e.context(views::LocalData))?;
-    if p.holdings.is_empty() {
-        return Ok(json!({
-            "message": "No holdings found in portfolio",
-            "holdings": [],
-            "monthly_schedule": []
-        }));
-    }
     let months = a.i64("months").unwrap_or(12).clamp(1, 60) as u32;
     let summary_only = a.bool("summary_only");
+    if p.holdings.is_empty() {
+        let base_cur = crate::commands::market_currency(m);
+        let today = chrono::Local::now().date_naive();
+        let report = crate::income::generate_income_report(&p, &[], base_cur, None, today, months);
+        return Ok(serde_json::to_value(report)?);
+    }
     let raw_symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
     let resolved: Vec<String> = raw_symbols
         .iter()

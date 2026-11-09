@@ -752,6 +752,9 @@ stockwise options TCS                     expected moves (same as `options moves
         /// Break down projected income by individual holding
         #[arg(long)]
         by_holding: bool,
+        /// Base currency to report income in (default: INR for Indian markets, USD for US)
+        #[arg(long)]
+        base: Option<String>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -4144,12 +4147,16 @@ async fn dispatch(
                 months,
                 by_holding,
                 out: inc_out,
-            }) => commands::cmd_income(months, by_holding, m, out.or(inc_out)).await,
+            }) => {
+                commands::cmd_income(months, by_holding, m, base.as_deref(), out.or(inc_out)).await
+            }
             Some(PortfolioCmd::Dividends {
                 months,
                 by_holding,
                 out: inc_out,
-            }) => commands::cmd_income(months, by_holding, m, out.or(inc_out)).await,
+            }) => {
+                commands::cmd_income(months, by_holding, m, base.as_deref(), out.or(inc_out)).await
+            }
             None => commands::cmd_portfolio_show(m, base.as_deref(), out.into()).await,
         },
         Commands::Watch { action, out } => match action {
@@ -4200,12 +4207,13 @@ async fn dispatch(
             action,
             months,
             by_holding,
+            base,
             out,
         } => match action {
             Some(IncomeAction::Upcoming { days, out: up_out }) => {
                 commands::cmd_income_upcoming(days, m, out.or(up_out)).await
             }
-            None => commands::cmd_income(months, by_holding, m, out.into()).await,
+            None => commands::cmd_income(months, by_holding, m, base.as_deref(), out.into()).await,
         },
         Commands::Export { what } => commands::cmd_export(&value_name(what), m).await,
         Commands::Import {

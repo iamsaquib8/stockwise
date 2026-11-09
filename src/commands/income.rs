@@ -23,16 +23,25 @@ impl CsvRow for UpcomingIncomeCsvRow {
 }
 
 /// Monthly dividend, coupon and passive-income calendar.
-pub async fn cmd_income(months: u32, by_holding: bool, market: Market, fmt: Format) -> Result<()> {
+pub async fn cmd_income(
+    months: u32,
+    by_holding: bool,
+    market: Market,
+    base: Option<&str>,
+    fmt: Format,
+) -> Result<()> {
     let portfolio = Portfolio::load()?;
+    let base_currency = base.unwrap_or_else(|| crate::commands::market_currency(market));
     if portfolio.holdings.is_empty() {
         return match fmt {
-            Format::Json => output::print_json(&serde_json::json!({
-                "message": "No holdings found in portfolio",
-                "holdings": [],
-                "monthly_schedule": []
-            })),
-            Format::Csv => output::print_csv(&Vec::<IncomeHoldingCsvRow>::new()),
+            Format::Json => {
+                let today = Local::now().date_naive();
+                let report =
+                    generate_income_report(&portfolio, &[], base_currency, None, today, months);
+                output::print_json(&report)
+            }
+            Format::Csv if by_holding => output::print_csv(&Vec::<IncomeHoldingCsvRow>::new()),
+            Format::Csv => output::print_csv(&Vec::<MonthlyIncomeCsvRow>::new()),
             Format::Table => {
                 println!();
                 println!("  {} No holdings found in your portfolio.", "i".cyan());
@@ -56,7 +65,7 @@ pub async fn cmd_income(months: u32, by_holding: bool, market: Market, fmt: Form
         .collect();
     let resolved = resolve_symbols(&raw_symbols, market);
 
-    let val = crate::commands::value_holdings(&client, &resolved, market, None)
+    let val = crate::commands::value_holdings(&client, &resolved, market, base)
         .await
         .context("Could not fetch quotes needed for dividend rates")?;
     let today = Local::now().date_naive();
