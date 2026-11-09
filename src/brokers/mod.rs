@@ -556,6 +556,18 @@ pub async fn login(kind: BrokerKind) -> Result<()> {
     }
 }
 
+/// Redact a broker/account identifier in any output that might be pasted publicly.
+/// Keep just the last two characters, matching `trade selftest` reports.
+pub(crate) fn redact_id(id: &str) -> String {
+    let chars: Vec<char> = id.trim().chars().collect();
+    let tail: String = chars[chars.len().saturating_sub(2)..].iter().collect();
+    if chars.len() <= 2 {
+        "••".into()
+    } else {
+        format!("••{tail}")
+    }
+}
+
 /// What `trade config` and `doctor` show about a broker's credentials.
 #[derive(Debug, Clone)]
 pub struct ConfigStatus {
@@ -563,7 +575,7 @@ pub struct ConfigStatus {
     pub exists: bool,
     /// All required credentials are filled in.
     pub configured: bool,
-    /// Non-secret identity, e.g. "client A123" or "api key kitefront".
+    /// Redacted identity for display; the full values are kept in `identifiers`.
     pub summary: String,
     pub storage: secrets::Storage,
     /// For brokers with daily sessions: when `trade login` last succeeded.

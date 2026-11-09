@@ -98,14 +98,14 @@ pub fn status(kind: BrokerKind, needs: Needs, migrate: bool) -> Result<ConfigSta
             .map(|t| t.format("%Y-%m-%d %H:%M IST").to_string())
             .unwrap_or_else(|| "unknown time".into());
         match &config.user_id {
-            Some(u) => format!("logged in as {u} ({when})"),
+            Some(u) => login_summary(u, &when),
             None => format!("token saved {when}"),
         }
     });
     let mut status = super::status_of(
         kind,
         is_configured(&config, needs),
-        format!("app {}", config.api_key),
+        app_summary(&config.api_key),
         storage,
         session,
     )?;
@@ -121,6 +121,14 @@ pub fn status(kind: BrokerKind, needs: Needs, migrate: bool) -> Result<ConfigSta
         .filter(|s| secrets::is_real(s))
         .collect();
     Ok(status)
+}
+
+fn login_summary(user_id: &str, when: &str) -> String {
+    format!("logged in as {} ({when})", super::redact_id(user_id))
+}
+
+fn app_summary(id: &str) -> String {
+    format!("app {}", super::redact_id(id))
 }
 
 /// Load the config for an API call: credentials and a saved session.
@@ -231,6 +239,20 @@ mod tests {
         let failed = "http://127.0.0.1/?status=error&request_token=x";
         assert!(redirect_value(failed, "request_token", None).is_err());
         assert!(redirect_value("http://127.0.0.1/?foo=1", "code", None).is_err());
+    }
+
+    #[test]
+    fn status_session_masks_logged_in_user_id() {
+        let session = login_summary("AB1234", "2026-11-08 12:00 IST");
+        assert_eq!(session, "logged in as ••34 (2026-11-08 12:00 IST)");
+        assert!(!session.contains("AB1234"));
+    }
+
+    #[test]
+    fn status_summary_masks_app_id() {
+        let summary = app_summary("kite-secret-app-1234");
+        assert_eq!(summary, "app ••34");
+        assert!(!summary.contains("kite-secret-app-1234"));
     }
 
     #[test]
