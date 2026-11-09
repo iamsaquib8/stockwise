@@ -117,6 +117,9 @@ wasm-plugins = ["dep:wasmi"]
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 
+[profile.test]
+opt-level = 1
+
 [profile.release]
 opt-level = 3
 lto = true

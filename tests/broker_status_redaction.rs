@@ -23,10 +23,12 @@ impl TestHome {
 
     fn trade_config(&self, broker: &str, filename: &str, config: &str) -> String {
         fs::write(self.0.join(filename), config).unwrap();
+        let empty_config = self.0.join("no-config.toml");
+        fs::write(&empty_config, "").unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_stockwise"))
             .args(["trade", "--broker", broker, "config"])
             .env("STOCKWISE_HOME", &self.0)
-            .env("STOCKWISE_CONFIG", self.0.join("no-config.toml"))
+            .env("STOCKWISE_CONFIG", &empty_config)
             .env("STOCKWISE_KEYRING", "off")
             .output()
             .unwrap();

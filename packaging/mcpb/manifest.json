@@ -119,6 +119,10 @@
       "description": "Portfolio summary. The user's StockWise portfolio valued at current prices: each holding's quantity, average cost, price, value, P&L and weight, totals and XIRR."
     },
     {
+      "name": "profile",
+      "description": "Investor profile & personal guardrails. The user's active investor profile mode (passive, active, ultra), risk level, tax parameters (regime, slab rate), horizon, and portfolio guardrails (max stock weight, max small-cap weight, risk per trade)."
+    },
+    {
       "name": "holdings_lots",
       "description": "Holding lots. The user's purchase lots (quantity, price, date, days held, short or long term) for one holding or all, oldest first — what FIFO sales and tax use — and their most recent sales."
     },

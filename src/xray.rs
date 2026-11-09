@@ -486,12 +486,29 @@ struct CompanyAccumulator {
     via_funds: Vec<FundContribution>,
 }
 
-/// Compute portfolio X-Ray look-through exposures and macro allocations.
+/// Compute portfolio X-Ray look-through exposures and macro allocations using the default 10% threshold.
 pub fn compute_xray(
     portfolio_name: &str,
     base_currency: &str,
     holdings: &[XrayInputHolding],
     fund_profiles: &HashMap<String, FundProfile>,
+) -> PortfolioXrayReport {
+    compute_xray_with_threshold(
+        portfolio_name,
+        base_currency,
+        holdings,
+        fund_profiles,
+        CONCENTRATION_ALERT_THRESHOLD,
+    )
+}
+
+/// Compute portfolio X-Ray look-through exposures with a configurable single-stock concentration threshold.
+pub fn compute_xray_with_threshold(
+    portfolio_name: &str,
+    base_currency: &str,
+    holdings: &[XrayInputHolding],
+    fund_profiles: &HashMap<String, FundProfile>,
+    concentration_threshold_pct: f64,
 ) -> PortfolioXrayReport {
     let total_value: f64 = holdings.iter().map(|h| h.value).sum();
 
@@ -740,7 +757,7 @@ pub fn compute_xray(
     for (_key, acc) in companies {
         let tot = acc.direct_value + acc.fund_value;
         let eff_pct = pct(tot, total_value);
-        let is_concentrated = eff_pct >= CONCENTRATION_ALERT_THRESHOLD;
+        let is_concentrated = eff_pct >= concentration_threshold_pct;
 
         let mut via_funds = acc.via_funds;
         via_funds.sort_by(|a, b| b.value.total_cmp(&a.value));

@@ -1885,7 +1885,14 @@ fn print_goal_json(kind: &str, currency: &str, plan: &impl Serialize) -> Result<
 /// The report for a SIP request: region and the cached T-bill yield filled
 /// in, and the English warnings `--json` carries.
 pub(crate) fn goal_sip_report(mut req: goals::SipRequest, market: Market) -> goals::SipReport {
+    let prof = crate::config::effective_profile();
     req.region = goal_region(market);
+    if req.slab_pct.is_none() {
+        req.slab_pct = prof.tax_slab_configured;
+    }
+    if prof.mode == crate::config::ProfileMode::Passive && req.months >= 60 {
+        req.glide = true;
+    }
     if req.region == goals::Region::India && req.tbill_pct.is_none() {
         req.tbill_pct = crate::gsec::cached_tbill_364();
     }
@@ -2091,6 +2098,15 @@ fn print_sip_report(r: &goals::SipReport, currency: &str) {
         t(Msg::GoalSuccess),
         &format!("{:.0}%", bands.success_prob_pct),
     );
+    if crate::config::effective_profile().mode == crate::config::ProfileMode::Passive {
+        print_kv(
+            "High-confidence band (P10–P50)",
+            &format!("{} to {}", m(bands.gross.p10), m(bands.gross.p50))
+                .bold()
+                .cyan()
+                .to_string(),
+        );
+    }
     let s = &r.sensitivity;
     if s.len() == 3 {
         print_kv(
@@ -2154,6 +2170,8 @@ pub struct RetireArgs {
 }
 
 pub(crate) fn retire_plan(a: &RetireArgs, market: Market) -> goals::RetirePlan {
+    let prof = crate::config::effective_profile();
+    let region = goal_region(market);
     goals::plan_retirement_with(
         a.monthly_expense,
         a.years_to_retire,
@@ -2167,8 +2185,10 @@ pub(crate) fn retire_plan(a: &RetireArgs, market: Market) -> goals::RetirePlan {
             monthly_income: a.monthly_income,
             buffer_years: a.buffer_years,
             legacy: a.legacy,
-            region: goal_region(market),
-            slab_pct: goal_region(market).default_slab_pct(),
+            region,
+            slab_pct: prof
+                .tax_slab_configured
+                .unwrap_or_else(|| region.default_slab_pct()),
         },
     )
 }
@@ -2281,7 +2301,14 @@ pub(crate) fn education_plan(
     mut req: goals::SipRequest,
     market: Market,
 ) -> goals::EducationPlan {
+    let prof = crate::config::effective_profile();
     req.region = goal_region(market);
+    if req.slab_pct.is_none() {
+        req.slab_pct = prof.tax_slab_configured;
+    }
+    if prof.mode == crate::config::ProfileMode::Passive && req.months >= 60 {
+        req.glide = true;
+    }
     if req.region == goals::Region::India && req.tbill_pct.is_none() {
         req.tbill_pct = crate::gsec::cached_tbill_364();
     }
@@ -2779,12 +2806,16 @@ pub struct PrepayArgs {
 }
 
 pub(crate) fn prepay_plan(a: &PrepayArgs, market: Market) -> goals::PrepayPlan {
+    let prof = crate::config::effective_profile();
     let region = goal_region(market);
     let regime = goals::regime_for(a.remaining_months, region, None, a.return_pct);
     let kind = a
         .tax
         .unwrap_or_else(|| goals::default_tax_kind(regime.kind, region));
-    let slab = a.slab_pct.unwrap_or_else(|| region.default_slab_pct());
+    let slab = a
+        .slab_pct
+        .or(prof.tax_slab_configured)
+        .unwrap_or_else(|| region.default_slab_pct());
     let rules = goals::TaxRules::new(
         region,
         kind,

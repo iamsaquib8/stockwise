@@ -165,7 +165,8 @@ async fn resources_are_the_portfolio_watchlist_and_alerts() {
         [
             "stockwise://portfolio",
             "stockwise://watchlist",
-            "stockwise://alerts"
+            "stockwise://alerts",
+            "stockwise://profile"
         ]
     );
     let r = c
@@ -175,6 +176,13 @@ async fn resources_are_the_portfolio_watchlist_and_alerts() {
     assert_eq!(content["mimeType"], "application/json");
     let p: Value = serde_json::from_str(content["text"].as_str().unwrap()).unwrap();
     assert_eq!(p["unpriced"], json!(["DELISTED.NS"]));
+    let r = c
+        .request("resources/read", json!({"uri": "stockwise://profile"}))
+        .await;
+    let content = &r["result"]["contents"][0];
+    assert_eq!(content["mimeType"], "application/json");
+    let prof: Value = serde_json::from_str(content["text"].as_str().unwrap()).unwrap();
+    assert!(prof["mode"].is_string());
     let r = c
         .request("resources/read", json!({"uri": "stockwise://secrets"}))
         .await;

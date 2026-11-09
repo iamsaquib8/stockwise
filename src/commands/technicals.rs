@@ -120,6 +120,7 @@ pub async fn cmd_technical(
     fmt: Format,
     explain: bool,
 ) -> Result<()> {
+    let explain = explain || crate::config::effective_profile().auto_explain;
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
 
@@ -1295,8 +1296,27 @@ pub async fn cmd_stoploss(
     symbol: &str,
     entry: Option<f64>,
     period: &str,
+    capital: Option<f64>,
+    risk_pct: Option<f64>,
     market: Market,
 ) -> Result<()> {
+    if let Some(cap) = capital
+        && (!cap.is_finite() || cap <= 0.0)
+    {
+        bail!("--capital must be a positive number");
+    }
+    if let Some(rp) = risk_pct
+        && (!rp.is_finite() || rp <= 0.0 || rp > 100.0)
+    {
+        bail!("--risk-pct must be between 0 (exclusive) and 100");
+    }
+    let prof = crate::config::effective_profile();
+    let effective_risk_pct = risk_pct.unwrap_or(prof.risk_per_trade);
+    let risk_source = if risk_pct.is_some() {
+        "--risk-pct".to_string()
+    } else {
+        format!("profile {}", prof.spec)
+    };
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     let chart = client
@@ -1344,48 +1364,90 @@ pub async fn cmd_stoploss(
         "ATR (14)",
         &format!("{}{:.2} ({:.2}%)", csym, atr, (atr / current) * 100.0),
     );
+    print_kv(
+        "Risk per Trade",
+        &format!("{:.2}% ({})", effective_risk_pct, risk_source),
+    );
+    if let Some(cap) = capital {
+        let risk_budget = cap * (effective_risk_pct / 100.0);
+        print_kv(
+            "Capital",
+            &format!(
+                "{}{:.2}  (1R risk budget: {}{:.2})",
+                csym, cap, csym, risk_budget
+            ),
+        );
+    }
 
     let (cons, moderate, aggressive) = technical::atr_stop_loss(entry_price, atr);
+    let mut exceeds_capital = false;
+    let fmt_stop = |stop: f64, exceeds: &mut bool| -> String {
+        let dist_pct = ((entry_price - stop) / entry_price) * 100.0;
+        if let Some(cap) = capital {
+            let sh = technical::shares_for_risk(cap, effective_risk_pct, entry_price, stop);
+            let pos_val = sh as f64 * entry_price;
+            if pos_val > cap + 1e-6 {
+                *exceeds = true;
+            }
+            format!(
+                "{}{:.2} ({:.2}% stop)  →  {} shares ({}{:.2})",
+                csym, stop, dist_pct, sh, csym, pos_val
+            )
+        } else {
+            format!("{}{:.2} ({:.2}% risk)", csym, stop, dist_pct)
+        }
+    };
+
     print_section("ATR-Based Stop Loss");
     print_kv(
         "Conservative (3x ATR)",
-        &format!(
-            "{}{:.2} ({:.2}% risk)",
-            csym,
-            cons,
-            ((entry_price - cons) / entry_price) * 100.0
-        )
-        .green()
-        .to_string(),
+        &fmt_stop(cons, &mut exceeds_capital).green().to_string(),
     );
     print_kv(
         "Moderate (2x ATR)",
-        &format!(
-            "{}{:.2} ({:.2}% risk)",
-            csym,
-            moderate,
-            ((entry_price - moderate) / entry_price) * 100.0
-        )
-        .yellow()
-        .to_string(),
+        &fmt_stop(moderate, &mut exceeds_capital)
+            .yellow()
+            .to_string(),
     );
     print_kv(
         "Aggressive (1.5x ATR)",
-        &format!(
-            "{}{:.2} ({:.2}% risk)",
-            csym,
-            aggressive,
-            ((entry_price - aggressive) / entry_price) * 100.0
-        )
-        .red()
-        .to_string(),
+        &fmt_stop(aggressive, &mut exceeds_capital).red().to_string(),
     );
 
     // Percentage-based
     print_section("Percentage-Based");
     for pct in [2.0, 3.0, 5.0, 8.0] {
         let stop = entry_price * (1.0 - pct / 100.0);
-        print_kv(&format!("{}% Stop", pct), &format!("{}{:.2}", csym, stop));
+        if let Some(cap) = capital {
+            let sh = technical::shares_for_risk(cap, effective_risk_pct, entry_price, stop);
+            let pos_val = sh as f64 * entry_price;
+            if pos_val > cap + 1e-6 {
+                exceeds_capital = true;
+            }
+            print_kv(
+                &format!("{}% Stop", pct),
+                &format!(
+                    "{}{:.2}  →  {} shares ({}{:.2})",
+                    csym, stop, sh, csym, pos_val
+                ),
+            );
+        } else {
+            print_kv(&format!("{}% Stop", pct), &format!("{}{:.2}", csym, stop));
+        }
+    }
+
+    if let Some(cap) = capital
+        && exceeds_capital
+    {
+        println!(
+            "\n  {} {}",
+            "!".yellow().bold(),
+            format!(
+                "Note: One or more tight stop levels yield a position value exceeding your total capital ({}{:.2}) without leverage.",
+                csym, cap
+            )
+            .yellow()
+        );
     }
 
     // Chandelier exit

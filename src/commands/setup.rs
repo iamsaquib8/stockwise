@@ -119,6 +119,42 @@ pub(crate) fn setting_rows(
             config::setting_source("STOCKWISE_DATA_PROVIDER", |c| c.data_provider.as_ref()),
         ),
     ];
+    let eff_profile = config::effective_profile();
+    rows.push(row(
+        "profile",
+        eff_profile.spec.clone(),
+        eff_profile.mode_source,
+    ));
+    rows.push(row(
+        "profile.tax_slab",
+        format!("{:.0}%", eff_profile.tax_slab),
+        eff_profile.tax_slab_source,
+    ));
+    rows.push(row(
+        "profile.tax_regime",
+        eff_profile.tax_regime.as_str(),
+        eff_profile.tax_regime_source,
+    ));
+    rows.push(row(
+        "profile.horizon_years",
+        eff_profile.horizon_years.to_string(),
+        eff_profile.horizon_years_source,
+    ));
+    rows.push(row(
+        "profile.max_stock_weight",
+        format!("{:.1}%", eff_profile.max_stock_weight),
+        eff_profile.max_stock_weight_source,
+    ));
+    rows.push(row(
+        "profile.max_smallcap_weight",
+        format!("{:.1}%", eff_profile.max_smallcap_weight),
+        eff_profile.max_smallcap_weight_source,
+    ));
+    rows.push(row(
+        "profile.risk_per_trade",
+        format!("{:.2}%", eff_profile.risk_per_trade),
+        eff_profile.risk_per_trade_source,
+    ));
     for (env, _) in crate::notify::ENV_VARS {
         let Some(key) = config::notify_key(env) else {
             continue;
@@ -187,6 +223,7 @@ pub fn cmd_config_show(
             "path": path.map(|p| p.display().to_string()),
             "status": status,
             "error": error,
+            "profile": config::effective_profile(),
             "settings": rows,
         }));
     }
@@ -239,5 +276,127 @@ pub fn cmd_config_show(
         "Precedence: flag > environment variable > config file > default.".dimmed()
     );
     println!();
+    Ok(())
+}
+
+/// Format an [`EffectiveProfile`] table on stdout.
+pub fn print_effective_profile(p: &config::EffectiveProfile) {
+    print_header(&format!("Investor Profile: {} ({})", p.spec, p.label));
+    let fmt_src = |s: Source| match s {
+        Source::Default => s.to_string().dimmed().to_string(),
+        _ => s.to_string().cyan().to_string(),
+    };
+    println!(
+        "  {:<28} {:<32} {}",
+        "Guardrail / Setting".bold(),
+        "Effective Value".bold(),
+        "Source".bold()
+    );
+    println!("  {}", "─".repeat(74).dimmed());
+    let rows = [
+        ("mode", p.mode.as_str().to_string(), p.mode_source),
+        ("risk", p.risk.as_str().to_string(), p.risk_source),
+        ("tax_slab", format!("{:.0}%", p.tax_slab), p.tax_slab_source),
+        (
+            "tax_regime",
+            p.tax_regime.as_str().to_string(),
+            p.tax_regime_source,
+        ),
+        (
+            "horizon_years",
+            format!("{}y", p.horizon_years),
+            p.horizon_years_source,
+        ),
+        (
+            "max_stock_weight",
+            format!("{:.1}%", p.max_stock_weight),
+            p.max_stock_weight_source,
+        ),
+        (
+            "max_smallcap_weight",
+            format!("{:.1}%", p.max_smallcap_weight),
+            p.max_smallcap_weight_source,
+        ),
+        (
+            "risk_per_trade",
+            format!("{:.2}%", p.risk_per_trade),
+            p.risk_per_trade_source,
+        ),
+        (
+            "default_drift_pct",
+            format!("±{:.1}%", p.default_drift_pct),
+            p.mode_source,
+        ),
+        ("auto_explain", p.auto_explain.to_string(), p.mode_source),
+        ("screen_presets", p.screen_presets.join(", "), p.mode_source),
+    ];
+    for (k, v, s) in rows {
+        println!("  {:<28} {:<32} {}", k, v, fmt_src(s));
+    }
+    println!(
+        "\n  {}",
+        "Guardrails evaluate holdings and stocks against your configured thresholds (never financial advice)."
+            .dimmed()
+    );
+    println!();
+}
+
+/// `stockwise profile [show]`: print the active investor profile and guardrails.
+pub fn cmd_profile_show(fmt: Format) -> Result<()> {
+    let p = config::effective_profile();
+    if fmt == Format::Json {
+        return output::print_json(&p);
+    }
+    print_effective_profile(&p);
+    Ok(())
+}
+
+/// `stockwise profile set [MODE[:RISK]] [...]`: write `[profile]` to `config.toml`.
+pub fn cmd_profile_set(
+    mode_spec: Option<&str>,
+    mut update: config::ProfileUpdate,
+    fmt: Format,
+) -> Result<()> {
+    if let Some(spec_str) = mode_spec {
+        let spec = config::parse_profile_spec(spec_str).map_err(|e| anyhow::anyhow!("{e}"))?;
+        update.mode = Some(spec.mode);
+        if update.risk.is_none() {
+            update.risk = Some(spec.effective_risk());
+        }
+    }
+    let path = config::path()
+        .context("Cannot determine the config directory — set STOCKWISE_CONFIG to a file path")?;
+    config::set_profile(&path, &update)?;
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("Cannot read {}", path.display()))?;
+    let parsed: config::Config =
+        toml::from_str(&text).with_context(|| format!("Invalid config file {}", path.display()))?;
+    parsed.profile.validate()?;
+    let eff = config::EffectiveProfile::from_parts(None, None, &parsed.profile);
+
+    if fmt == Format::Json {
+        return output::print_json(&eff);
+    }
+    println!(
+        "  {} Saved profile {} to {}",
+        "✓".green(),
+        eff.spec.cyan().bold(),
+        path.display()
+    );
+    print_effective_profile(&eff);
+    Ok(())
+}
+
+/// `stockwise profile reset`: comment out `[profile]` overrides in `config.toml`.
+pub fn cmd_profile_reset() -> Result<()> {
+    let path = config::path()
+        .context("Cannot determine the config directory — set STOCKWISE_CONFIG to a file path")?;
+    config::reset_profile(&path)?;
+    println!(
+        "  {} Reset `[profile]` in {} to defaults (active:med)",
+        "✓".green(),
+        path.display()
+    );
     Ok(())
 }

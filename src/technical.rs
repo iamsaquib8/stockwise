@@ -660,6 +660,27 @@ pub fn chandelier_exit(highs: &[f64], atr: f64, multiplier: f64) -> Option<f64> 
     Some(max_high - multiplier * atr)
 }
 
+/// Position size (whole shares) for a given capital, risk percentage, entry price, and stop price.
+///
+/// Formula: `floor((capital * (risk_pct / 100.0)) / (entry - stop))`.
+/// Returns `0` when `capital <= 0.0`, `risk_pct <= 0.0`, `entry <= 0.0`, or `stop >= entry`.
+pub fn shares_for_risk(capital: f64, risk_pct: f64, entry: f64, stop: f64) -> u64 {
+    if !(capital > 0.0 && risk_pct > 0.0 && entry > 0.0 && stop < entry) {
+        return 0;
+    }
+    let risk_amount = capital * (risk_pct / 100.0);
+    let risk_per_share = entry - stop;
+    if risk_per_share <= 0.0 || !risk_per_share.is_finite() {
+        return 0;
+    }
+    let raw = (risk_amount / risk_per_share).floor();
+    if raw.is_finite() && raw >= 0.0 {
+        raw as u64
+    } else {
+        0
+    }
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -672,6 +693,20 @@ mod tests {
         assert_eq!(sma(&[1.0, 2.0], 3), None);
         assert_eq!(sma(&[10.0, 10.0, 10.0], 3), Some(10.0));
         assert_eq!(sma(&[], 3), None);
+    }
+
+    #[test]
+    fn test_shares_for_risk() {
+        // Capital = 500,000, risk = 1%, entry = 1,280, stop = 1,231 (risk/share = 49)
+        // Risk amount = 5,000 -> 5000 / 49 = 102.04 -> 102 shares
+        assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1231.0), 102);
+        // Stop >= entry -> 0 shares
+        assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1280.0), 0);
+        assert_eq!(shares_for_risk(500_000.0, 1.0, 1280.0, 1300.0), 0);
+        // Zero/negative capital or risk -> 0 shares
+        assert_eq!(shares_for_risk(0.0, 1.0, 1280.0, 1231.0), 0);
+        assert_eq!(shares_for_risk(-100.0, 1.0, 1280.0, 1231.0), 0);
+        assert_eq!(shares_for_risk(500_000.0, 0.0, 1280.0, 1231.0), 0);
     }
 
     #[test]
