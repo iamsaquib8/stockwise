@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-09",
+  "github": {
+    "assets": {
+      "stockwise-aarch64-apple-darwin.tar.gz": 9,
+      "stockwise-aarch64-linux-android.tar.gz": 6,
+      "stockwise-aarch64-unknown-linux-gnu.tar.gz": 10,
+      "stockwise-aarch64.rpm": 4,
+      "stockwise-x86_64-apple-darwin.tar.gz": 8,
+      "stockwise-x86_64-pc-windows-msvc.zip": 13,
+      "stockwise-x86_64-unknown-linux-gnu.tar.gz": 14,
+      "stockwise-x86_64.rpm": 4,
+      "stockwise.json": 6,
+      "stockwise_amd64.deb": 6,
+      "stockwise_arm64.deb": 4
+    },
+    "releases": {
+      "v0.3.0": 11,
+      "v0.5.0": 24,
+      "v0.7.0": 13,
+      "v0.8.0": 27,
+      "v0.8.1": 9
+    }
+  },
+  "homebrew": {},
+  "repository": "iamsaquib8/stockwise",
+  "sources": {
+    "aur": "not found",
+    "crates.io": "ok",
+    "dockerhub": "not found",
+    "ghcr": "ok",
+    "github": "ok",
+    "homebrew": "ok",
+    "pypi": "not found",
+    "traffic": "skipped: no STATS_TOKEN"
+  },
+  "totals": {
+    "crates.downloads": 67,
+    "crates.recent_downloads_90d": 44,
+    "ghcr.pulls": 59,
+    "github.asset.stockwise-aarch64-apple-darwin.tar.gz": 9,
+    "github.asset.stockwise-aarch64-linux-android.tar.gz": 6,
+    "github.asset.stockwise-aarch64-unknown-linux-gnu.tar.gz": 10,
+    "github.asset.stockwise-aarch64.rpm": 4,
+    "github.asset.stockwise-x86_64-apple-darwin.tar.gz": 8,
+    "github.asset.stockwise-x86_64-pc-windows-msvc.zip": 13,
+    "github.asset.stockwise-x86_64-unknown-linux-gnu.tar.gz": 14,
+    "github.asset.stockwise-x86_64.rpm": 4,
+    "github.asset.stockwise.json": 6,
+    "github.asset.stockwise_amd64.deb": 6,
+    "github.asset.stockwise_arm64.deb": 4,
+    "github.checksum_downloads": 69,
+    "github.forks": 6,
+    "github.release_downloads": 84,
+    "github.stars": 4,
+    "github.watchers": 0
+  }
+}
