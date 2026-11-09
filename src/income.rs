@@ -373,6 +373,19 @@ pub fn compute_holding_summary(data: &HoldingIncomeData<'_>) -> IncomeHoldingSum
     }
 }
 
+/// Convert `amt` in `cur` to the portfolio's `base` currency.
+///
+/// Returns `Some(amt)` if `cur` matches `base` (or is omitted),
+/// converts via `fx` when a rate is known, or returns `None` if `cur` differs
+/// from `base` and no conversion rate is available.
+pub fn to_base(fx: Option<&Fx>, amt: f64, cur: Option<&str>, base: &str) -> Option<f64> {
+    match cur {
+        None => Some(amt),
+        Some(c) if c.eq_ignore_ascii_case(base) => Some(amt),
+        Some(c) => fx.and_then(|f| f.convert(amt, c)),
+    }
+}
+
 /// Generate month-by-month cashflow calendar (12M trailing received + N-month projected).
 pub fn build_monthly_schedule(
     portfolio: &Portfolio,
@@ -383,12 +396,6 @@ pub fn build_monthly_schedule(
     forecast_months: u32,
 ) -> (Vec<MonthlyCashflow>, f64, f64, f64, f64, f64, f64) {
     let mut schedule: Vec<MonthlyCashflow> = Vec::new();
-    let convert = |amt: f64, cur: Option<&str>| -> f64 {
-        match (fx, cur) {
-            (Some(fx_eng), Some(c)) => fx_eng.convert(amt, c).unwrap_or(amt),
-            _ => amt,
-        }
-    };
 
     // 1. Trailing 12 months (actual received dividends recorded in portfolio.dividends)
     let start_trailing = today.checked_sub_months(Months::new(12)).unwrap_or(today);
@@ -412,20 +419,21 @@ pub fn build_monthly_schedule(
         for d in &portfolio.dividends {
             if d.ex_date.starts_with(&ym) {
                 let cur = d.currency.as_deref().or(Some(base_currency));
-                let gross = convert(d.amount, cur);
-                let wht_rate = standard_wht_rate(&d.symbol, cur);
-                let wht = gross * (wht_rate / 100.0);
-                let net = gross - wht;
-                m_gross += gross;
-                m_wht += wht;
-                items.push(CashflowItem {
-                    symbol: d.symbol.clone(),
-                    date: d.ex_date.clone(),
-                    amount_gross: gross,
-                    wht_amount: wht,
-                    amount_net: net,
-                    kind: "Dividend".to_string(),
-                });
+                if let Some(gross) = to_base(fx, d.amount, cur, base_currency) {
+                    let wht_rate = standard_wht_rate(&d.symbol, cur);
+                    let wht = gross * (wht_rate / 100.0);
+                    let net = gross - wht;
+                    m_gross += gross;
+                    m_wht += wht;
+                    items.push(CashflowItem {
+                        symbol: d.symbol.clone(),
+                        date: d.ex_date.clone(),
+                        amount_gross: gross,
+                        wht_amount: wht,
+                        amount_net: net,
+                        kind: "Dividend".to_string(),
+                    });
+                }
             }
         }
 
@@ -468,29 +476,30 @@ pub fn build_monthly_schedule(
             // SGB pays half-yearly in May and Nov (or every 6 months);
             // General equity stocks distributed monthly (1/12th)
             let (applies, portion, kind) = if is_sgb(&h.symbol) {
-                // SGB coupon frequency: twice a year
                 let is_coupon_month = fwd_date.month() == 5 || fwd_date.month() == 11;
                 (is_coupon_month, 0.5, "Coupon (SGB 2.5%)")
             } else {
-                // Standard dividend distribution across months: annualized / 12
                 (true, 1.0 / 12.0, "Dividend (Projected)")
             };
 
             if applies {
                 let cur = h.currency.as_deref().or(Some(base_currency));
-                let gross_item = convert(h.annual_gross_income * portion, cur);
-                let wht_item = gross_item * (h.wht_rate_pct / 100.0);
-                let net_item = gross_item - wht_item;
-                m_gross += gross_item;
-                m_wht += wht_item;
-                items.push(CashflowItem {
-                    symbol: h.symbol.clone(),
-                    date: format!("{}-15", ym),
-                    amount_gross: gross_item,
-                    wht_amount: wht_item,
-                    amount_net: net_item,
-                    kind: kind.to_string(),
-                });
+                if let Some(gross_item) =
+                    to_base(fx, h.annual_gross_income * portion, cur, base_currency)
+                {
+                    let wht_item = gross_item * (h.wht_rate_pct / 100.0);
+                    let net_item = gross_item - wht_item;
+                    m_gross += gross_item;
+                    m_wht += wht_item;
+                    items.push(CashflowItem {
+                        symbol: h.symbol.clone(),
+                        date: format!("{}-15", ym),
+                        amount_gross: gross_item,
+                        wht_amount: wht_item,
+                        amount_net: net_item,
+                        kind: kind.to_string(),
+                    });
+                }
             }
         }
 
@@ -536,18 +545,26 @@ pub fn generate_income_report(
     let mut total_market_value = 0.0;
     let mut total_cost_basis = 0.0;
 
-    let convert = |amt: f64, cur: Option<&str>| -> f64 {
-        match (fx, cur) {
-            (Some(fx_eng), Some(c)) => fx_eng.convert(amt, c).unwrap_or(amt),
-            _ => amt,
-        }
-    };
-
     for data in holdings_data {
         let summary = compute_holding_summary(data);
         let cur = summary.currency.as_deref().or(Some(currency));
-        total_market_value += convert(summary.market_value, cur);
-        total_cost_basis += convert(summary.cost_basis, cur);
+        match (
+            to_base(fx, summary.market_value, cur, currency),
+            to_base(fx, summary.cost_basis, cur, currency),
+        ) {
+            (Some(mv), Some(cb)) => {
+                total_market_value += mv;
+                total_cost_basis += cb;
+            }
+            _ => {
+                payout_warnings.push(format!(
+                    "{}: No FX conversion rate for {} to {}; omitted from totals",
+                    summary.symbol,
+                    cur.unwrap_or("unknown"),
+                    currency
+                ));
+            }
+        }
 
         if let Some(ref reason) = summary.safety_reason {
             payout_warnings.push(format!("{}: {}", summary.symbol, reason));
@@ -569,24 +586,18 @@ pub fn generate_income_report(
         _proj_net,
     ) = build_monthly_schedule(portfolio, &summaries, currency, fx, today, forecast_months);
 
-    let annual_proj_gross: f64 = summaries
-        .iter()
-        .map(|s| {
-            convert(
-                s.annual_gross_income,
-                s.currency.as_deref().or(Some(currency)),
-            )
-        })
-        .sum();
-    let annual_proj_wht: f64 = summaries
-        .iter()
-        .map(|s| {
-            convert(
-                s.annual_wht_amount,
-                s.currency.as_deref().or(Some(currency)),
-            )
-        })
-        .sum();
+    let mut annual_proj_gross = 0.0;
+    let mut annual_proj_wht = 0.0;
+    for s in &summaries {
+        let cur = s.currency.as_deref().or(Some(currency));
+        if let (Some(g), Some(w)) = (
+            to_base(fx, s.annual_gross_income, cur, currency),
+            to_base(fx, s.annual_wht_amount, cur, currency),
+        ) {
+            annual_proj_gross += g;
+            annual_proj_wht += w;
+        }
+    }
     let annual_proj_net = annual_proj_gross - annual_proj_wht;
 
     let portfolio_current_yield = if total_market_value > 0.0 {
@@ -880,5 +891,54 @@ mod tests {
         // AAPL cost = 10 * 150 = $1,500 * 85 = 127,500 INR
         // Total cost in INR = 147,500 INR
         assert!((report.portfolio_cost_basis - 147_500.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_unconverted_currency_omitted_with_warning() {
+        // When no FX rate is available for a foreign currency, it must be omitted from totals
+        // and reported in payout_warnings rather than corrupting the totals with mixed currencies.
+        let fx = Fx::new("INR"); // No USD rate configured
+
+        let h_in = make_test_holding("ITC.NS", vec![(100.0, 200.0, "2024-01-10")]);
+        let data_in = HoldingIncomeData {
+            holding: &h_in,
+            current_price: 400.0,
+            annual_dividend_per_share: 10.0,
+            payout_ratio: Some(0.60),
+            fcf: None,
+            currency: Some("INR"),
+        };
+
+        let h_us = make_test_holding("AAPL", vec![(10.0, 150.0, "2024-01-10")]);
+        let data_us = HoldingIncomeData {
+            holding: &h_us,
+            current_price: 200.0,
+            annual_dividend_per_share: 2.0,
+            payout_ratio: Some(0.20),
+            fcf: None,
+            currency: Some("USD"),
+        };
+
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let report = generate_income_report(
+            &Portfolio::default(),
+            &[data_in, data_us],
+            "INR",
+            Some(&fx),
+            today,
+            12,
+        );
+
+        // Only ITC is included in the totals (100 * 10 = 1000 INR)
+        assert!((report.projected_annual_gross - 1000.0).abs() < 1e-4);
+        assert!((report.portfolio_cost_basis - 20_000.0).abs() < 1e-4);
+
+        // A warning is raised for the unconvertible holding
+        assert!(
+            report
+                .payout_warnings
+                .iter()
+                .any(|w| w.contains("No FX conversion rate for USD to INR; omitted from totals"))
+        );
     }
 }
