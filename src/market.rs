@@ -1555,6 +1555,20 @@ pub fn filter_by_cap(
     }
 }
 
+/// When the saved membership last changed (Unix milliseconds): the
+/// `cache.db` lists, or with `cache.db` off the JSON file's mtime.
+fn membership_version() -> Option<i64> {
+    match crate::db::with_db(|d| d.index_lists_version()) {
+        Some(v) => v,
+        None => crate::store::path(MEMBERSHIP_FILE)
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64),
+    }
+}
+
 /// NIFTY 500 members saved by an NSE scan, `None` when none is saved.
 fn saved_nifty500() -> Option<Vec<String>> {
     IndiaMembership::shared()
@@ -1594,7 +1608,7 @@ impl IndiaMembership {
         }
         type Cached = Option<(Option<i64>, Option<std::sync::Arc<IndiaMembership>>)>;
         static CELL: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
-        let version = crate::db::with_db(|d| d.index_lists_version()).flatten();
+        let version = membership_version();
         let mut cell = CELL.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((seen, value)) = cell.as_ref()
             && *seen == version
@@ -1604,7 +1618,7 @@ impl IndiaMembership {
         let value = Some(Self::load())
             .filter(|m| !m.is_empty())
             .map(std::sync::Arc::new);
-        let version = crate::db::with_db(|d| d.index_lists_version()).flatten();
+        let version = membership_version();
         *cell = Some((version, value.clone()));
         value
     }

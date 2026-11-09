@@ -167,7 +167,20 @@ pub(super) async fn universe_quotes(
             scope: scan.scope.clone(),
             bulk: scan.bulk.clone(),
         };
-        let fetched = scan_quotes(client, market, &part, None, false).await?;
+        let fetched = match scan_quotes(client, market, &part, None, false).await {
+            Ok(q) => q,
+            // Score what cache.db has rather than fail the whole scan.
+            Err(e) if !cached.is_empty() => {
+                eprintln!(
+                    "  \u{24d8} Could not fetch {} quotes ({:#}); scoring the {} from cache.db.",
+                    part.symbols.len(),
+                    e,
+                    cached.len()
+                );
+                Vec::new()
+            }
+            Err(e) => return Err(e),
+        };
         // NSE's snapshot rows lack fundamentals: keep only Yahoo's.
         let rows: Vec<(String, String)> = fetched
             .iter()
