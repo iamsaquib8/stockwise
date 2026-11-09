@@ -1377,15 +1377,30 @@ impl YahooClient {
             .await;
         let mut out = Vec::new();
         let mut last_err = None;
+        let mut failed = 0;
         for part in parts {
             match part {
                 Ok(q) => out.extend(q),
-                Err(e) => last_err = Some(e),
+                Err(e) => {
+                    failed += 1;
+                    last_err = Some(e);
+                }
             }
         }
         match last_err {
             Some(e) if out.is_empty() => Err(e),
-            _ => Ok(out),
+            Some(e) => {
+                // A partial scan must say so: the ranking misses symbols.
+                eprintln!(
+                    "  \u{24d8} Yahoo Finance did not answer {} of {} quote requests ({:#}); about {} symbols are missing.",
+                    failed,
+                    symbols.len().div_ceil(QUOTE_CHUNK),
+                    e,
+                    failed * QUOTE_CHUNK
+                );
+                Ok(out)
+            }
+            None => Ok(out),
         }
     }
 
