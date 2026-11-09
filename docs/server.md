@@ -205,6 +205,13 @@ refuses any other address. Without a token it also only answers requests
 whose `Host` is `localhost`, `*.localhost` or a loopback IP, so a web page
 can't reach it through DNS rebinding.
 
+**Shared-machine security:** Loopback prevents remote network access, not
+access by other operating-system users. On a machine with multiple user
+accounts, another local user can connect to the unauthenticated loopback API
+and read portfolio holdings and other private data. Set `STOCKWISE_API_TOKEN`
+even when binding only to `127.0.0.1` on a shared machine. The bearer token
+is required on loopback too; keep it private to your user account.
+
 ```text
 $ stockwise serve --bind 0.0.0.0:8787
 Error: Refusing to listen on 0.0.0.0:8787: other machines could read your portfolio.
