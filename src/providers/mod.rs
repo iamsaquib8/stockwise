@@ -36,6 +36,7 @@ pub mod edgar;
 pub mod finnhub;
 pub mod fmp;
 pub mod massive;
+pub mod niftyindices;
 pub mod nse;
 pub mod router;
 pub mod session;

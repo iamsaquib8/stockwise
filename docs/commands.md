@@ -161,9 +161,14 @@ unreachable; `screen` needs P/E and market cap too, so it asks Yahoo for them
 and falls back to the snapshot (no P/E or market cap) when Yahoo fails. Every
 scan also saves the prices into `cache.db` (`market_snapshots`) and the index
 members for the cap tiers below. When NSE can't be reached or
-refuses, StockWise says so on stderr and scans a built-in list instead (the 30
-large caps for `nifty50` / `nifty100`, a built-in member list for `banknifty`
-and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
+refuses, StockWise says so on stderr and reads the members from the CSV that
+niftyindices.com (NSE Indices Ltd.) publishes for each index, then prices them
+on Yahoo Finance; that list is alphabetical, so only the MIDCAP 150 and
+SMALLCAP 250 bands are saved from it. When niftyindices.com fails too, it scans
+a built-in list (the saved or built-in NIFTY 500 for `nifty500`, the 30 large
+caps for `nifty50` / `nifty100`, a built-in member list for `banknifty` and
+`niftyit`); `niftynext50`, `midcap150` and `smallcap250` have no built-in list
+and fail with the reason.
 
 **Cap tiers** (`mega`, `large`, `mid`, `small`, `micro`): a badge such as
 `[Large]` next to the market cap in `quote`, `deep`, `analyze` and `compare`

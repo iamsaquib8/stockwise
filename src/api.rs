@@ -1659,6 +1659,17 @@ impl YahooClient {
         self.nse_client().constituents(index).await
     }
 
+    /// An NSE index's members from niftyindices.com's CSV (members only,
+    /// alphabetical). Not cached as a response: the site answers some
+    /// requests with an HTML page and HTTP 200, which must not be kept.
+    pub async fn index_members_csv(&self, index: &str) -> Result<Vec<String>> {
+        let url = providers::niftyindices::csv_url(index)
+            .ok_or_else(|| anyhow::anyhow!("niftyindices.com has no member list for {}", index))?;
+        let body = self.fetch_with(&url, Duration::ZERO, &[]).await?;
+        providers::niftyindices::parse_members(&body)
+            .ok_or_else(|| anyhow::anyhow!("niftyindices.com's {} list is not a member CSV", index))
+    }
+
     /// An NSE index with its members' quotes from one bulk request (NIFTY 500
     /// prices 500 stocks at once). No Yahoo call; errors are not announced.
     pub async fn index_snapshot(&self, index: &str) -> Result<providers::nse::IndexSnapshot> {
@@ -2406,6 +2417,36 @@ mod tests {
         let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url));
         assert!(!client.has_router());
         assert!(client.get_quote(&["AAPL"]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn index_members_come_from_the_niftyindices_csv_and_html_is_refused() {
+        let csv = "Company Name,Industry,Symbol,Series,ISIN Code\n\
+                   HDFC Bank Ltd.,Financial Services,HDFCBANK,EQ,INE040A01034\n\
+                   ICICI Bank Ltd.,Financial Services,ICICIBANK,EQ,INE090A01021\n";
+        let html = "<!DOCTYPE html><html><body>Error 404</body></html>";
+        let server = crate::testutil::MockServer::start(vec![
+            (200, csv.into()),
+            (200, html.into()),
+            (200, csv.into()),
+        ])
+        .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        assert_eq!(
+            client.index_members_csv("NIFTY BANK").await.unwrap(),
+            ["HDFCBANK.NS", "ICICIBANK.NS"]
+        );
+        // A 200 with an HTML page is an error, and is not served again.
+        assert!(client.index_members_csv("NIFTY BANK").await.is_err());
+        assert_eq!(
+            client.index_members_csv("NIFTY BANK").await.unwrap().len(),
+            2
+        );
+        assert!(client.index_members_csv("SENSEX").await.is_err());
     }
 
     #[tokio::test]

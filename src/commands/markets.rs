@@ -232,26 +232,56 @@ async fn scan_nse_index(
                 bulk: snap.members,
             })
         }
-        Err(e) => match fallback {
-            Some(list) => {
+        Err(e) => match client.index_members_csv(index).await {
+            Ok(symbols) => {
                 eprintln!(
-                    "  \u{24d8} {}",
-                    tf(
-                        Msg::UniverseFallback,
-                        &[&index, &format!("{:#}", e), &list.len()]
-                    )
+                    "  \u{24d8} NSE did not answer ({:#}); using niftyindices.com's list of {} {} members.",
+                    e,
+                    symbols.len(),
+                    index
                 );
+                // The CSV is alphabetical: only the bands whose order
+                // does not matter are saved as cap-tier membership.
+                if matches!(index, "NIFTY MIDCAP 150" | "NIFTY SMALLCAP 250") {
+                    market::IndiaMembership::record(index, &symbols);
+                }
                 Ok(Scan {
-                    symbols: list,
+                    symbols,
                     scope: index.to_string(),
                     bulk: Vec::new(),
                 })
             }
-            None => Err(e.context(format!(
-                "NSE's {} member list is unavailable and StockWise has no built-in copy of it",
-                index
-            ))),
+            Err(csv_err) => scan_fallback(
+                index,
+                fallback,
+                anyhow::anyhow!("{:#}; niftyindices.com: {:#}", e, csv_err),
+            ),
         },
+    }
+}
+
+/// The saved or built-in list when neither NSE nor niftyindices.com can
+/// list an index's members.
+fn scan_fallback(index: &str, fallback: Option<Vec<String>>, e: anyhow::Error) -> Result<Scan> {
+    match fallback {
+        Some(list) => {
+            eprintln!(
+                "  \u{24d8} {}",
+                tf(
+                    Msg::UniverseFallback,
+                    &[&index, &format!("{:#}", e), &list.len()]
+                )
+            );
+            Ok(Scan {
+                symbols: list,
+                scope: index.to_string(),
+                bulk: Vec::new(),
+            })
+        }
+        None => Err(e.context(format!(
+            "NSE's {} member list is unavailable and StockWise has no built-in copy of it",
+            index
+        ))),
     }
 }
 
