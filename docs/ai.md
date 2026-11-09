@@ -289,6 +289,12 @@ rules as `stockwise serve`:
   come from no browser origin or a `localhost` one, so a web page you visit
   can't reach it through DNS rebinding.
 
+- Loopback alone does **not** authenticate operating-system users. On a
+  shared machine, another local user can call the unauthenticated MCP HTTP
+  endpoint and read available portfolio data. Set `STOCKWISE_API_TOKEN` even
+  when listening only on `127.0.0.1`, and configure your HTTP MCP client to
+  send `Authorization: Bearer <token>`.
+
 Put a TLS proxy in front of it before exposing it beyond your network.
 
 ### Registry and Claude Desktop extension
