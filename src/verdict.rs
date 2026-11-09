@@ -1080,7 +1080,8 @@ mod tests {
 
     #[test]
     fn coverage_follows_the_data_that_is_present() {
-        let full = generate_verdict(&full_stock(), &[]).data_coverage;
+        let profile = crate::config::EffectiveProfile::default();
+        let full = generate_verdict_with_profile(&full_stock(), &[], &profile).data_coverage;
         let mut r = full_stock();
         r.fin.peg = None;
         r.fin.trailing_pe = None;
@@ -1088,7 +1089,7 @@ mod tests {
         r.fin.pb = None;
         r.fin.rec_mean = None;
         r.fin.target_mean = None;
-        let less = generate_verdict(&r, &[]).data_coverage;
+        let less = generate_verdict_with_profile(&r, &[], &profile).data_coverage;
         assert!(less < full, "{less} should be below {full}");
         // Valuation (20%) and analyst (10%) lost all inputs.
         assert!((full - less - 30.0).abs() < 1.0, "{full} vs {less}");
@@ -1118,10 +1119,11 @@ mod tests {
 
     #[test]
     fn crypto_and_fx_get_only_the_technical_pillar() {
+        let profile = crate::config::EffectiveProfile::default();
         for sym in ["BTC-USD", "EURUSD=X", "^NSEI"] {
             let mut r = full_stock();
             r.symbol = sym.into();
-            let v = generate_verdict(&r, &generate_rich_insights(&r));
+            let v = generate_verdict_with_profile(&r, &generate_rich_insights(&r), &profile);
             assert_eq!(v.overall_score, None, "{sym}");
             let scored: Vec<_> = v.pillars.iter().filter(|p| p.score.is_some()).collect();
             assert_eq!(scored.len(), 1, "{sym}");
