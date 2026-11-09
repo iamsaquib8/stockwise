@@ -491,12 +491,14 @@ pub async fn cmd_intraday(
 
 // ── AI-Powered Reports ──
 
-pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
+pub async fn cmd_longterm(
+    amount: Option<f64>,
+    market: Market,
+    universe: Option<market::Universe>,
+) -> Result<()> {
     market.require_bot_support("longterm")?;
     let client = YahooClient::new().await?;
-    let symbols = market.universe();
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let quotes = super::markets::universe_quotes(&client, market, universe).await?;
     let csym = market.currency_symbol();
     let monthly = amount.unwrap_or(10000.0);
 
@@ -507,19 +509,29 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         quotes.len()
     );
 
-    // Fetch 1Y chart data for volatility analysis
-    let mut scores: Vec<longterm::LongTermScore> = Vec::new();
-    for q in &quotes {
-        let sym = q.symbol.as_deref().unwrap_or("");
-        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-            c.indicators
-                .quote
-                .first()
-                .and_then(|qi| qi.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-        });
-        scores.push(longterm::score_for_longterm(q, hist.as_deref()));
-    }
+    // Fetch 1Y chart data for volatility analysis, a few symbols at a
+    // time (NIFTY 500 is 500 charts), keeping the quotes' order.
+    use futures_util::StreamExt;
+    let client_ref = &client;
+    let mut scores: Vec<longterm::LongTermScore> =
+        futures_util::stream::iter(quotes.iter().map(|q| async move {
+            let sym = q.symbol.as_deref().unwrap_or("");
+            let hist = client_ref
+                .get_chart(sym, "1y", "1d")
+                .await
+                .ok()
+                .and_then(|c| {
+                    c.indicators
+                        .quote
+                        .first()
+                        .and_then(|qi| qi.close.as_ref())
+                        .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
+                });
+            longterm::score_for_longterm(q, hist.as_deref())
+        }))
+        .buffered(8)
+        .collect()
+        .await;
     longterm::rank(&mut scores);
 
     print!("{}", longterm::render_report(&scores, monthly, csym));
@@ -568,9 +580,15 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                 "⟳".yellow()
             );
             market.require_bot_support("report longterm")?;
-            let symbols = market.universe();
-            let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            // Only the 15 largest by market cap go in (the S&P 500 and
+            // built-in NIFTY 500 lists are alphabetical).
+            let mut quotes = super::markets::universe_quotes(&client, market, None).await?;
+            quotes.sort_by(|a, b| {
+                b.market_cap
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.market_cap.unwrap_or(0.0))
+            });
+            quotes.truncate(15);
             let mut data = String::new();
             for q in quotes.iter().take(15) {
                 let sym = q.symbol.as_deref().unwrap_or("?");

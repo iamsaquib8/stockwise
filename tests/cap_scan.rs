@@ -50,7 +50,7 @@ fn stockwise(home: &Path, args: &[&str]) -> Output {
         .expect("run stockwise")
 }
 
-/// The market's built-in list (the symbols a plain scan covers).
+/// Rows the assertions are about: ten large, then twenty mid.
 const NSE_LIST: [&str; 30] = [
     "RELIANCE",
     "TCS",
@@ -118,10 +118,40 @@ fn seed(home: &Path) {
     }
 }
 
+/// The rest of the default India universe (the built-in NIFTY 500), as
+/// small caps: a plain `--cap` scan reads cache.db only when most of the
+/// scanned list is stored.
+fn seed_universe(home: &Path) {
+    seed(home);
+    let conn = rusqlite::Connection::open(home.join("cache.db")).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for sym in builtin_nifty500() {
+        conn.execute(
+            "INSERT OR IGNORE INTO market_snapshots (symbol, market, name, cap_tier, mcap, price, change_1d, updated_at)
+             VALUES (?1, 'in', ?1, 'small', 1.0e11, 100.0, 0.5, ?2)",
+            rusqlite::params![sym, now],
+        )
+        .unwrap();
+    }
+}
+
+/// Symbols of `src/nifty500.rs`, the list a plain India scan covers when
+/// NSE is unreachable.
+fn builtin_nifty500() -> Vec<String> {
+    include_str!("../src/nifty500.rs")
+        .split('"')
+        .filter(|t| t.ends_with(".NS"))
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn movers_cap_reads_fresh_snapshots_without_network() {
     let home = scratch("movers");
-    seed(&home);
+    seed_universe(&home);
     let out = stockwise(&home, &["-m", "in", "movers", "--cap", "mid", "--json"]);
     assert!(
         out.status.success(),
@@ -149,7 +179,7 @@ fn movers_cap_reads_fresh_snapshots_without_network() {
 #[test]
 fn screen_cap_filters_and_tags_rows() {
     let home = scratch("screen");
-    seed(&home);
+    seed_universe(&home);
     let out = stockwise(
         &home,
         &["-m", "in", "screen", "momentum", "--cap", "large", "--json"],

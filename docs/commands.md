@@ -134,9 +134,9 @@ always works. Common names resolve to NSE symbols
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers among 30 large caps, or an NSE index's members (see below), with a cap-tier column |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across NIFTY 500 (India) or the S&P 500 (US), or an NSE index's members (see below), with a cap-tier column |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the 30-stock universe, or an NSE index's members |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of NIFTY 500 (India) or the S&P 500 (US), or an NSE index's members |
 | `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
 | `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
 | `rotation` | Sector rotation vs 50-day average |
@@ -145,14 +145,15 @@ always works. Common names resolve to NSE symbols
 | `insider <SYMBOL>` | Analyst consensus + insider-related news |
 | `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a demand label such as "STRONG DEMAND" or "BOOK BUILDING") and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (with `--capital`, the odds at that amount, including for several separate applications), unofficial GMP and broker calls from press headlines, and a 6-pillar score with a **listing demand** label and a **long-term profile** label. In `--json`: `listing_demand`, `long_term_profile` and `timeline` replace `listing_verdict`, `long_term_verdict` and `timing_guidance`; `capital_odds` and `allotment_rules` replace `capital_plan` and `golden_rules`. Not a recommendation |
 | `earnings` | Earnings growth for portfolio and watchlist |
-| `surprise` | Earnings momentum — accelerating vs decelerating |
-| `matrix` | Quality vs growth quadrants |
-| `picks` | The highest-scoring large caps on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
+| `surprise [--universe INDEX]` | Earnings momentum — accelerating vs decelerating |
+| `matrix [--universe INDEX]` | Quality vs growth quadrants |
+| `picks [--universe INDEX]` | The highest-scoring stocks of NIFTY 500 (India) or the S&P 500 (US) on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
 | `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
-**`--universe`** (Indian market): scan the current members of an NSE index
-instead of the built-in 30 large caps — `nifty50`, `niftynext50` (`next50`),
+**`--universe`** (Indian market; `movers`, `heatmap`, `screen`, `picks`,
+`matrix`, `surprise`, `longterm`): scan the current members of a
+narrower NSE index instead of NIFTY 500, the default — `nifty50`, `niftynext50` (`next50`),
 `nifty100`, `banknifty` (`niftybank`), `niftyit`, `nifty500`, `midcap150` or
 `smallcap250`. NSE's website lists the members and prices them in one bulk
 request (all 500 of `nifty500`), whichever data provider you use. `movers` and
@@ -161,9 +162,23 @@ unreachable; `screen` needs P/E and market cap too, so it asks Yahoo for them
 and falls back to the snapshot (no P/E or market cap) when Yahoo fails. Every
 scan also saves the prices into `cache.db` (`market_snapshots`) and the index
 members for the cap tiers below. When NSE can't be reached or
-refuses, StockWise says so on stderr and scans a built-in list instead (the 30
-large caps for `nifty50` / `nifty100`, a built-in member list for `banknifty`
-and `niftyit`); `niftynext50` has no built-in list and fails with the reason.
+refuses, StockWise says so on stderr and reads the members from the CSV that
+niftyindices.com (NSE Indices Ltd.) publishes for each index, then prices them
+on Yahoo Finance; that list is alphabetical, so only the MIDCAP 150 and
+SMALLCAP 250 bands are saved from it. When niftyindices.com fails too, it scans
+a built-in list (the saved or built-in NIFTY 500 for `nifty500`, the 30 large
+caps for `nifty50` / `nifty100`, a built-in member list for `banknifty` and
+`niftyit`); `niftynext50`, `midcap150` and `smallcap250` have no built-in list
+and fail with the reason.
+
+**End-of-day prices (India):** outside Indian market hours, `movers` and
+`heatmap` (without a `--cap` tier) take every stock's last close from BSE's
+daily bhavcopy, a public CSV of the whole exchange's day, instead of asking
+Yahoo Finance for each stock. Any India scan that has no P/E or cap filter
+also falls back to it when Yahoo does not answer. The file is downloaded once
+per trading day (BSE posts it in the evening, IST) and kept in `cache.db`;
+`stockwise cache clear bhavcopy` drops it. It has prices and volume only: no
+P/E, market cap or intraday prices.
 
 **Cap tiers** (`mega`, `large`, `mid`, `small`, `micro`): a badge such as
 `[Large]` next to the market cap in `quote`, `deep`, `analyze` and `compare`
@@ -173,8 +188,9 @@ no exchange rate for the currency). Indian stocks follow the SEBI/AMFI ranks
 when the index members are known: NIFTY 100 is large (the top 10, or above
 ₹5,00,000 Cr, is mega), NIFTY MIDCAP 150 is mid, NIFTY SMALLCAP 250 is small
 and anything outside NIFTY 500 is micro. Scanning those indexes with
-`--universe` saves their members (`cap_membership.json` in the data
-directory); until then, and offline, rupee cut-offs decide (large from
+`--universe` (or any India scan, which covers NIFTY 500 by default) saves
+their members in `cache.db` (`stockwise cache clear members` forgets them);
+until then, and offline, rupee cut-offs decide (large from
 ₹1,00,000 Cr, mid from ₹33,000 Cr, small from ₹10,000 Cr). Every other market
 converts the market cap to dollars at the built-in approximate rates (London
 pence `GBp` and Japanese yen `JPY` included): mega from $200B, large from

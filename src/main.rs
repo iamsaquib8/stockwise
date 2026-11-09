@@ -44,6 +44,7 @@ mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod nifty500;
 mod notify;
 mod offmarket;
 mod output;
@@ -61,6 +62,7 @@ mod sellpreview;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
+mod sp500;
 mod store;
 mod tax;
 mod tax_export;
@@ -467,7 +469,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     // ── Market ──
     /// Top gainers and losers today
     Movers {
-        /// Scan an NSE index's members instead of the built-in large caps
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -488,7 +490,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     },
     /// Market heatmap
     Heatmap {
-        /// Scan an NSE index's members instead of the built-in large caps
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -527,16 +529,28 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     /// Earnings overview for your portfolio and watchlist
     Earnings,
     /// Earnings momentum — accelerating vs decelerating
-    Surprise,
+    Surprise {
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+    },
     /// Quality vs growth quadrants
-    Matrix,
-    /// Highest-scoring large caps on eight factors (a score, not a recommendation)
-    Picks,
+    Matrix {
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+    },
+    /// Highest-scoring stocks on eight factors (a score, not a recommendation)
+    Picks {
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+    },
     /// Screen large caps by a preset
     Screen {
         #[arg(value_enum, ignore_case = true)]
         category: ScreenCategory,
-        /// Scan an NSE index's members instead of the built-in large caps
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -684,6 +698,9 @@ stockwise options TCS                     expected moves (same as `options moves
     Longterm {
         /// Monthly SIP budget (default 10000)
         amount: Option<f64>,
+        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
     },
 
     /// Background worker: intraday paper-trading loop or daily long-term scan
@@ -1095,8 +1112,12 @@ enum CacheAction {
         #[arg(long)]
         json: bool,
     },
-    /// Delete every cached response (your portfolio and settings are untouched)
-    Clear,
+    /// Delete cached data: http (default), quotes, snapshots, bars, results,
+    /// members or all (your portfolio and settings are untouched)
+    Clear {
+        #[arg(value_enum, ignore_case = true, default_value = "http")]
+        what: db::CacheTarget,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3778,7 +3799,7 @@ async fn dispatch(
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
         Commands::Cache { action } => match action {
             CacheAction::Status => commands::cmd_cache(false),
-            CacheAction::Clear => commands::cmd_cache(true),
+            CacheAction::Clear { what } => commands::cmd_cache_clear(what).await,
             CacheAction::Warm { background } => commands::cmd_cache_warm(m, background).await,
             CacheAction::Snapshots {
                 cap,
@@ -3953,9 +3974,9 @@ async fn dispatch(
             .await
         }
         Commands::Earnings => commands::cmd_earnings(m).await,
-        Commands::Surprise => commands::cmd_surprise(m).await,
-        Commands::Matrix => commands::cmd_matrix(m).await,
-        Commands::Picks => commands::cmd_picks(m).await,
+        Commands::Surprise { universe } => commands::cmd_surprise(m, universe).await,
+        Commands::Matrix { universe } => commands::cmd_matrix(m, universe).await,
+        Commands::Picks { universe } => commands::cmd_picks(m, universe).await,
         Commands::Screen {
             category,
             universe,
@@ -4197,7 +4218,9 @@ async fn dispatch(
             target,
             strategy,
         } => commands::cmd_intraday(amount, target, strategy.as_deref(), m).await,
-        Commands::Longterm { amount } => commands::cmd_longterm(amount, m).await,
+        Commands::Longterm { amount, universe } => {
+            commands::cmd_longterm(amount, m, universe).await
+        }
         Commands::Daemon { mode, amount, once } => {
             commands::cmd_daemon(&value_name(mode), amount, m, once).await
         }

@@ -97,23 +97,112 @@ impl Scan {
 const SNAPSHOT_MAX_AGE_SECS: i64 = 30 * 60;
 
 /// Symbols a scan covers and its title: the members of an NSE index with
-/// `--universe` (one bulk NSE request that also prices them; the built-in
-/// list when NSE can't answer), else the market's built-in list. Index
-/// members are saved for the India cap tiers and the prices feed
-/// `market_snapshots`.
+/// `--universe`, or NIFTY 500 for India without it (one bulk NSE request
+/// that also prices them; the saved or built-in list when NSE can't
+/// answer), else the market's built-in list. Index members are saved for
+/// the India cap tiers and the prices feed `market_snapshots`.
 pub(super) async fn scan_symbols(
     client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,
 ) -> Result<Scan> {
-    let Some(u) = universe else {
-        return Ok(Scan {
+    match universe {
+        Some(u) => scan_nse_index(client, u.nse_index(), u.fallback()).await,
+        None if market == Market::In => {
+            let u = market::Universe::Nifty500;
+            let mut scan = scan_nse_index(client, u.nse_index(), Some(market.universe())).await?;
+            scan.scope = market.label().to_string();
+            Ok(scan)
+        }
+        None => Ok(Scan {
             symbols: market.universe(),
             scope: market.label().to_string(),
             bulk: Vec::new(),
-        });
-    };
-    scan_nse_index(client, u.nse_index(), u.fallback()).await
+        }),
+    }
+}
+
+/// Longest age of a `quote_cache` row an index scan will use.
+const QUOTE_CACHE_MAX_AGE_SECS: i64 = 15 * 60;
+
+/// Symbols and quotes of a scan (see [`scan_symbols`]): Yahoo's quotes,
+/// which carry the fundamentals scoring needs, or NSE's snapshot when
+/// Yahoo can't answer. Quotes stored in `quote_cache` in the last 15
+/// minutes are reused; only the rest are fetched, then stored.
+pub(super) async fn universe_quotes(
+    client: &YahooClient,
+    market: Market,
+    universe: Option<market::Universe>,
+) -> Result<Vec<crate::api::Quote>> {
+    check_universe(market, universe)?;
+    let scan = scan_symbols(client, market, universe).await?;
+    let since = chrono::Utc::now().timestamp() - QUOTE_CACHE_MAX_AGE_SECS;
+    let mut cached: std::collections::HashMap<String, crate::api::Quote> =
+        crate::db::with_db(|d| d.quotes_since(&scan.symbols, since))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(sym, json)| Some((sym, serde_json::from_str(&json).ok()?)))
+            .collect();
+    let missing: Vec<String> = scan
+        .symbols
+        .iter()
+        .filter(|s| !cached.contains_key(*s))
+        .cloned()
+        .collect();
+    if !cached.is_empty() {
+        eprintln!(
+            "  \u{24d8} {} quotes from cache.db (updated in the last {} min){}.",
+            cached.len(),
+            QUOTE_CACHE_MAX_AGE_SECS / 60,
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!("; fetching {} more", missing.len())
+            }
+        );
+    }
+    if !missing.is_empty() {
+        let part = Scan {
+            symbols: missing,
+            scope: scan.scope.clone(),
+            bulk: scan.bulk.clone(),
+        };
+        let fetched = match scan_quotes(client, market, &part, None, false).await {
+            Ok(q) => q,
+            // Score what cache.db has rather than fail the whole scan.
+            Err(e) if !cached.is_empty() => {
+                eprintln!(
+                    "  \u{24d8} Could not fetch {} quotes ({:#}); scoring the {} from cache.db.",
+                    part.symbols.len(),
+                    e,
+                    cached.len()
+                );
+                Vec::new()
+            }
+            Err(e) => return Err(e),
+        };
+        // NSE's snapshot rows lack fundamentals: keep only Yahoo's.
+        let rows: Vec<(String, String)> = fetched
+            .iter()
+            .filter(|q| q.forward_pe.is_some() || q.fifty_day_average.is_some())
+            .filter_map(|q| Some((q.symbol.clone()?, serde_json::to_string(q).ok()?)))
+            .collect();
+        if !rows.is_empty() {
+            crate::db::with_db(|d| d.put_quotes(&rows));
+        }
+        // A Yahoo failure returns NSE's whole snapshot: never let its
+        // fundamentals-free rows replace fresh cached quotes.
+        for q in fetched {
+            if let Some(sym) = q.symbol.clone() {
+                cached.entry(sym).or_insert(q);
+            }
+        }
+    }
+    Ok(scan
+        .symbols
+        .iter()
+        .filter_map(|s| cached.remove(s))
+        .collect())
 }
 
 /// One NSE index's members and their bulk quotes; `fallback` is the
@@ -143,26 +232,56 @@ async fn scan_nse_index(
                 bulk: snap.members,
             })
         }
-        Err(e) => match fallback {
-            Some(list) => {
+        Err(e) => match client.index_members_csv(index).await {
+            Ok(symbols) => {
                 eprintln!(
-                    "  \u{24d8} {}",
-                    tf(
-                        Msg::UniverseFallback,
-                        &[&index, &format!("{:#}", e), &list.len()]
-                    )
+                    "  \u{24d8} NSE did not answer ({:#}); using niftyindices.com's list of {} {} members.",
+                    e,
+                    symbols.len(),
+                    index
                 );
+                // The CSV is alphabetical: only the bands whose order
+                // does not matter are saved as cap-tier membership.
+                if matches!(index, "NIFTY MIDCAP 150" | "NIFTY SMALLCAP 250") {
+                    market::IndiaMembership::record(index, &symbols);
+                }
                 Ok(Scan {
-                    symbols: list,
+                    symbols,
                     scope: index.to_string(),
                     bulk: Vec::new(),
                 })
             }
-            None => Err(e.context(format!(
-                "NSE's {} member list is unavailable and StockWise has no built-in copy of it",
-                index
-            ))),
+            Err(csv_err) => scan_fallback(
+                index,
+                fallback,
+                anyhow::anyhow!("{:#}; niftyindices.com: {:#}", e, csv_err),
+            ),
         },
+    }
+}
+
+/// The saved or built-in list when neither NSE nor niftyindices.com can
+/// list an index's members.
+fn scan_fallback(index: &str, fallback: Option<Vec<String>>, e: anyhow::Error) -> Result<Scan> {
+    match fallback {
+        Some(list) => {
+            eprintln!(
+                "  \u{24d8} {}",
+                tf(
+                    Msg::UniverseFallback,
+                    &[&index, &format!("{:#}", e), &list.len()]
+                )
+            );
+            Ok(Scan {
+                symbols: list,
+                scope: index.to_string(),
+                bulk: Vec::new(),
+            })
+        }
+        None => Err(e.context(format!(
+            "NSE's {} member list is unavailable and StockWise has no built-in copy of it",
+            index
+        ))),
     }
 }
 
@@ -268,6 +387,18 @@ async fn scan_quotes_src(
     if prefer_bulk && !scan.bulk.is_empty() {
         return Ok((market::filter_by_cap(scan.bulk.clone(), cap), false));
     }
+    // Price-only scans (movers, heatmap) outside Indian market hours: the
+    // last close of every stock comes from one BSE file, no Yahoo calls.
+    // A `--cap` tier needs market caps, which the file lacks.
+    let no_tier = cap.is_none_or(|c| c.tier().is_none());
+    if prefer_bulk
+        && no_tier
+        && market == Market::In
+        && !crate::clock::is_open(Market::In, chrono::Utc::now())
+        && let Some(q) = bse_eod(client, &scan.symbols, "the market is closed").await
+    {
+        return Ok((q, false));
+    }
     let refs: Vec<&str> = scan.symbols.iter().map(String::as_str).collect();
     let live = client.get_quote(&refs).await;
     // Yahoo down: the keyed providers priced the built-in list (their quotes
@@ -296,8 +427,34 @@ async fn scan_quotes_src(
             );
             Ok((market::filter_by_cap(scan.bulk.clone(), cap), false))
         }
+        Err(e) if market == Market::In && no_tier => {
+            match bse_eod(client, &scan.symbols, "Yahoo Finance did not answer").await {
+                Some(q) => Ok((q, false)),
+                None => Err(e),
+            }
+        }
         Err(e) => Err(e),
     }
+}
+
+/// The scan's symbols at BSE's last close (bhavcopy), when the file covers
+/// at least half of them; says so on stderr. `why` names the reason.
+async fn bse_eod(
+    client: &YahooClient,
+    symbols: &[String],
+    why: &str,
+) -> Option<Vec<crate::api::Quote>> {
+    let (date, quotes) = client.bse_eod_quotes(symbols).await?;
+    if quotes.len() * 2 < symbols.len() {
+        return None;
+    }
+    eprintln!(
+        "  \u{24d8} {}: {} closing prices of {} from BSE's bhavcopy (no P/E or market cap).",
+        why,
+        quotes.len(),
+        date.format("%d %b %Y")
+    );
+    Some(quotes)
 }
 
 /// Most companies a screener fallback asks for.
@@ -1447,17 +1604,12 @@ fn score_quote(q: &crate::api::Quote) -> (f64, Vec<&'static str>) {
     (score.clamp(0.0, 100.0), reasons)
 }
 
-pub async fn cmd_picks(market: Market) -> Result<()> {
+pub async fn cmd_picks(market: Market, universe: Option<market::Universe>) -> Result<()> {
     market.require_stocks("picks")?;
     let client = YahooClient::new().await?;
-    let symbols = market.universe();
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let quotes = universe_quotes(&client, market, universe).await?;
 
-    print_header(&format!(
-        "Highest Scores in the Large-Cap Universe — {} Market",
-        market.label()
-    ));
+    print_header(&format!("Highest Scores — {} Market", market.label()));
     println!(
         "  {} Scoring {} stocks across 8 factors...\n",
         "⟳".yellow(),
@@ -1673,12 +1825,10 @@ pub async fn cmd_rotation(market: Market) -> Result<()> {
 
 // ── Quality-Growth Matrix ──
 
-pub async fn cmd_matrix(market: Market) -> Result<()> {
+pub async fn cmd_matrix(market: Market, universe: Option<market::Universe>) -> Result<()> {
     market.require_stocks("matrix")?;
     let client = YahooClient::new().await?;
-    let symbols = market.universe();
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let quotes = universe_quotes(&client, market, universe).await?;
 
     print_header("Quality vs Growth Matrix");
 
@@ -1746,12 +1896,10 @@ pub async fn cmd_matrix(market: Market) -> Result<()> {
 
 // ── Earnings Surprise ──
 
-pub async fn cmd_surprise(market: Market) -> Result<()> {
+pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) -> Result<()> {
     market.require_stocks("surprise")?;
     let client = YahooClient::new().await?;
-    let symbols = market.universe();
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let quotes = universe_quotes(&client, market, universe).await?;
 
     print_header("Earnings Momentum");
     println!(

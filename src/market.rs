@@ -980,12 +980,15 @@ impl Market {
         }
     }
 
-    /// Symbols scanned by movers, screeners and the bots.
+    /// Symbols scanned by movers, screeners and the bots. For India this is
+    /// the NIFTY 500 list saved by the last NSE scan (no request), or the
+    /// built-in NIFTY 500 until one has run; for the US the built-in
+    /// S&P 500.
     pub fn universe(self) -> Vec<String> {
         let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect();
         match self {
-            Market::In => owned(INDIA_POPULAR),
-            Market::Us => owned(US_POPULAR),
+            Market::In => saved_nifty500().unwrap_or_else(|| owned(crate::nifty500::NIFTY500)),
+            Market::Us => owned(crate::sp500::SP500),
             Market::Crypto => crypto_majors().into_iter().map(|(s, _)| s).collect(),
             Market::Fx => FX_MAJORS.iter().map(|(s, _)| s.to_string()).collect(),
             Market::Commodity => COMMODITY_UNIVERSE
@@ -1247,18 +1250,17 @@ impl Universe {
     }
 
     /// What to scan when NSE can't list the members: the built-in large
-    /// caps (all NIFTY 50 members, so also inside NIFTY 100), or a built-in
-    /// list of the sector's members. `None` for NIFTY NEXT 50, which has no
+    /// caps (all NIFTY 50 members, so also inside NIFTY 100), a built-in
+    /// list of the sector's members, or for NIFTY 500 the members saved by
+    /// an earlier scan, else the built-in list. `None` for indices with no
     /// built-in list.
     pub fn fallback(self) -> Option<Vec<String>> {
         let list: &[&str] = match self {
             Universe::Nifty50 | Universe::Nifty100 => INDIA_POPULAR,
             Universe::BankNifty => BANK_NIFTY,
             Universe::NiftyIt => NIFTY_IT,
-            Universe::NiftyNext50
-            | Universe::Nifty500
-            | Universe::Midcap150
-            | Universe::Smallcap250 => return None,
+            Universe::Nifty500 => return Some(Market::In.universe()),
+            Universe::NiftyNext50 | Universe::Midcap150 | Universe::Smallcap250 => return None,
         };
         Some(list.iter().map(|s| s.to_string()).collect())
     }
@@ -1553,7 +1555,29 @@ pub fn filter_by_cap(
     }
 }
 
-/// File in the data directory with the NSE index membership.
+/// When the saved membership last changed (Unix milliseconds): the
+/// `cache.db` lists, or with `cache.db` off the JSON file's mtime.
+fn membership_version() -> Option<i64> {
+    match crate::db::l2() {
+        Some(_) => crate::db::with_db(|d| d.index_lists_version()).flatten(),
+        None => crate::store::path(MEMBERSHIP_FILE)
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64),
+    }
+}
+
+/// NIFTY 500 members saved by an NSE scan, `None` when none is saved.
+fn saved_nifty500() -> Option<Vec<String>> {
+    IndiaMembership::shared()
+        .map(|m| m.nifty500.clone())
+        .filter(|l| !l.is_empty())
+}
+
+/// File where versions before `cache.db` kept the NSE index membership;
+/// read once and moved into `cache.db`, and still used when it is off.
 const MEMBERSHIP_FILE: &str = "cap_membership.json";
 
 /// Index members saved by NSE index scans: lets the India cap tier follow
@@ -1574,40 +1598,93 @@ pub struct IndiaMembership {
 }
 
 impl IndiaMembership {
-    /// Saved membership, reloaded when another process rewrites the file
-    /// (a long-running worker sees a later index scan); `None` when nothing
-    /// is saved or the data directory is unreadable.
+    /// Saved membership, reloaded when another process saves a list (a
+    /// long-running worker sees a later index scan); `None` when nothing is
+    /// saved or `cache.db` is unusable.
     pub fn shared() -> Option<std::sync::Arc<IndiaMembership>> {
         // Unit tests never read the real data directory.
         if cfg!(test) {
             return None;
         }
-        type Cached = Option<(
-            Option<std::time::SystemTime>,
-            Option<std::sync::Arc<IndiaMembership>>,
-        )>;
+        type Cached = Option<(Option<i64>, Option<std::sync::Arc<IndiaMembership>>)>;
         static CELL: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
-        let mtime = crate::store::path(MEMBERSHIP_FILE)
-            .ok()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        let version = membership_version();
         let mut cell = CELL.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((seen, value)) = cell.as_ref()
-            && *seen == mtime
+            && *seen == version
         {
             return value.clone();
         }
-        let value = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
-            .ok()
+        // Keyed by the version read before loading: a save in between
+        // only makes the next call load again.
+        let value = Some(Self::load())
             .filter(|m| !m.is_empty())
             .map(std::sync::Arc::new);
-        *cell = Some((mtime, value.clone()));
+        *cell = Some((version, value.clone()));
         value
     }
 
-    /// Saved membership read now (not the once-per-run copy).
+    /// Saved membership read now from `cache.db` (not the once-per-run
+    /// copy). A `cap_membership.json` from an older version is moved in
+    /// the first time; with `cache.db` off, that file stays the store.
     pub fn load() -> Self {
-        crate::store::load(MEMBERSHIP_FILE).unwrap_or_default()
+        if crate::db::l2().is_none() {
+            return crate::store::load(MEMBERSHIP_FILE).unwrap_or_default();
+        }
+        let lists = crate::db::with_db(|d| d.index_lists()).unwrap_or_default();
+        if lists.is_empty() {
+            if let Ok(old) = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
+                && !old.is_empty()
+            {
+                // Delete the old file only once its lists are in cache.db.
+                if old.save()
+                    && let Ok(p) = crate::store::path(MEMBERSHIP_FILE)
+                {
+                    let _ = std::fs::remove_file(p);
+                }
+                return old;
+            }
+            return Self::default();
+        }
+        Self::from_lists(lists)
+    }
+
+    /// Membership from saved lists (unknown index names are skipped).
+    fn from_lists(lists: Vec<crate::db::IndexList>) -> Self {
+        let mut m = Self::default();
+        for (name, scanned, members) in lists {
+            match name.as_str() {
+                "NIFTY 100" => m.nifty100 = members,
+                "NIFTY MIDCAP 150" => m.midcap150 = members,
+                "NIFTY SMALLCAP 250" => m.smallcap250 = members,
+                "NIFTY 500" => m.nifty500 = members,
+                _ => continue,
+            }
+            if scanned {
+                m.scanned.push(name);
+            }
+        }
+        m
+    }
+
+    /// Every list as saved rows.
+    fn to_lists(&self) -> Vec<crate::db::IndexList> {
+        let flag = |n: &str| n != "NIFTY 500" && self.scanned.iter().any(|s| s == n);
+        [
+            ("NIFTY 100", &self.nifty100),
+            ("NIFTY MIDCAP 150", &self.midcap150),
+            ("NIFTY SMALLCAP 250", &self.smallcap250),
+            ("NIFTY 500", &self.nifty500),
+        ]
+        .into_iter()
+        .map(|(n, l)| (n.to_string(), flag(n), l.clone()))
+        .collect()
+    }
+
+    /// Write every list to `cache.db` (best effort); whether it worked.
+    fn save(&self) -> bool {
+        let lists = self.to_lists();
+        crate::db::with_db(|d| d.put_index_lists(&lists)).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1686,9 +1763,23 @@ impl IndiaMembership {
         {
             return;
         }
-        let _ = crate::store::update(MEMBERSHIP_FILE, |m: &mut IndiaMembership| {
-            m.set(index, symbols);
-            Ok(())
+        // With cache.db off or unusable, the JSON file is the store.
+        if crate::db::l2().is_none() {
+            let _ = crate::store::update(MEMBERSHIP_FILE, |m: &mut IndiaMembership| {
+                m.set(index, symbols);
+                Ok(())
+            });
+            return;
+        }
+        // Move an old JSON file in first, then read, change and write in one
+        // transaction. A busy cache.db skips this save; the next scan saves.
+        Self::load();
+        crate::db::with_db(|d| {
+            d.update_index_lists(|lists| {
+                let mut m = Self::from_lists(lists);
+                m.set(index, symbols);
+                m.to_lists()
+            })
         });
     }
 }
