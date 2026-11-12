@@ -53,11 +53,25 @@ pub trait CsvRow: Serialize {
     const COLUMNS: &'static [&'static str];
 }
 
-/// Quote a CSV field per RFC 4180: fields containing a comma, double quote,
-/// CR or LF are wrapped in double quotes, with inner quotes doubled.
+/// Neutralize spreadsheet formulas before RFC 4180 quoting. Leading formula
+/// characters are escaped unless the entire field is a numeric value.
 pub fn csv_escape(field: &str) -> Cow<'_, str> {
-    if field.contains([',', '"', '\n', '\r']) {
-        Cow::Owned(format!("\"{}\"", field.replace('"', "\"\"")))
+    let starts_formula = field
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    let neutralize = starts_formula && field.parse::<f64>().is_err();
+    if neutralize || field.contains([',', '"', '\n', '\r']) {
+        let safe = if neutralize {
+            format!("'{field}")
+        } else {
+            field.to_string()
+        };
+        if safe.contains([',', '"', '\n', '\r']) {
+            Cow::Owned(format!("\"{}\"", safe.replace('"', "\"\"")))
+        } else {
+            Cow::Owned(safe)
+        }
     } else {
         Cow::Borrowed(field)
     }
@@ -162,6 +176,21 @@ mod tests {
         assert_eq!(csv_escape("two\nlines"), "\"two\nlines\"");
         assert_eq!(csv_escape("cr\rhere"), "\"cr\rhere\"");
         assert_eq!(csv_escape("\""), "\"\"\"\"");
+    }
+
+    #[test]
+    fn spreadsheet_formulas_are_neutralized_without_changing_numeric_cells() {
+        assert_eq!(csv_escape("=1+1"), "'=1+1");
+        assert_eq!(csv_escape("+SUM(A1:A2)"), "'+SUM(A1:A2)");
+        assert_eq!(csv_escape("-HYPERLINK(A1)"), "'-HYPERLINK(A1)");
+        assert_eq!(csv_escape("@SUM(A1:A2)"), "'@SUM(A1:A2)");
+        assert_eq!(csv_escape("\t=1+1"), "'\t=1+1");
+        assert_eq!(csv_escape("\r=1+1"), "\"'\r=1+1\"");
+        assert_eq!(csv_escape("=HYPERLINK(\"https://example.test\",\"go\")"),
+                   "\"'=HYPERLINK(\"\"https://example.test\"\",\"\"go\"\")\"");
+        assert_eq!(csv_escape("-200.00"), "-200.00");
+        assert_eq!(csv_escape("+200.00"), "+200.00");
+        assert_eq!(csv_escape("RELIANCE.NS"), "RELIANCE.NS");
     }
 
     #[test]
