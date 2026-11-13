@@ -193,8 +193,10 @@ mod tests {
         assert_eq!(csv_escape("@SUM(A1:A2)"), "'@SUM(A1:A2)");
         assert_eq!(csv_escape("\t=1+1"), "'\t=1+1");
         assert_eq!(csv_escape("\r=1+1"), "\"'\r=1+1\"");
-        assert_eq!(csv_escape("=HYPERLINK(\"https://example.test\",\"go\")"),
-                   "\"'=HYPERLINK(\"\"https://example.test\"\",\"\"go\"\")\"");
+        assert_eq!(
+            csv_escape("=HYPERLINK(\"https://example.test\",\"go\")"),
+            "\"'=HYPERLINK(\"\"https://example.test\"\",\"\"go\"\")\""
+        );
         assert_eq!(csv_escape("-5.00%"), "-5.00%");
         assert_eq!(csv_escape("+5.00%"), "+5.00%");
         assert_eq!(csv_escape("-5.00%+SUM(A1:A2)"), "'-5.00%+SUM(A1:A2)");

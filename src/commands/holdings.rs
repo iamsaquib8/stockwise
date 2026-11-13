@@ -512,7 +512,7 @@ pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
                         .map_or(String::new(), |p| format!("{p:.2}%")),
                     q.regular_market_volume
                         .map_or(String::new(), |v| v.to_string()),
-                    num(q.market_cap, 0)
+                    num(q.market_cap, 0),
                 ]));
             }
             std::fs::write(path, &csv)?;

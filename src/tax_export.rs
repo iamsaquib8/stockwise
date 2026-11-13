@@ -1349,7 +1349,12 @@ mod tests {
         assert!(csv.contains("\"'=HYPERLINK(\"\"https://example.test\"\",\"\"click\"\")\""));
 
         let mut us = us_schedule(
-            &[sale("MSFT", 1.0, ("2024-02-01", 100.0), ("2025-03-01", 120.0))],
+            &[sale(
+                "MSFT",
+                1.0,
+                ("2024-02-01", 100.0),
+                ("2025-03-01", 120.0),
+            )],
             d("2025-01-01"),
         );
         us.sales[0].description = "@SUM(A1:A2)".into();
