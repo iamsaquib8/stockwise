@@ -3,7 +3,10 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static NEXT_TEST_HOME_ID: AtomicU64 = AtomicU64::new(0);
 
 struct TestHome(PathBuf);
 
@@ -13,8 +16,9 @@ impl TestHome {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let id = NEXT_TEST_HOME_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "stockwise-broker-status-{}-{nonce}",
+            "stockwise-broker-status-{}-{nonce}-{id}",
             std::process::id()
         ));
         fs::create_dir(&path).unwrap();
