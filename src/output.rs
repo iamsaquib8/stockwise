@@ -60,7 +60,14 @@ pub fn csv_escape(field: &str) -> Cow<'_, str> {
         .chars()
         .next()
         .is_some_and(|ch| matches!(ch, '=' | '+' | '-' | '@' | '\t' | '\r'));
-    let neutralize = starts_formula && field.parse::<f64>().is_err();
+    // Portfolio and watchlist exporters emit percentages as fixed-point text.
+    // A number with one trailing '%' remains a spreadsheet numeric cell; any
+    // remaining formula-like text must still be escaped.
+    let numeric = field.parse::<f64>().is_ok()
+        || field
+            .strip_suffix('%')
+            .is_some_and(|percent| percent.parse::<f64>().is_ok());
+    let neutralize = starts_formula && !numeric;
     if neutralize || field.contains([',', '"', '\n', '\r']) {
         let safe = if neutralize {
             format!("'{field}")
@@ -188,6 +195,9 @@ mod tests {
         assert_eq!(csv_escape("\r=1+1"), "\"'\r=1+1\"");
         assert_eq!(csv_escape("=HYPERLINK(\"https://example.test\",\"go\")"),
                    "\"'=HYPERLINK(\"\"https://example.test\"\",\"\"go\"\")\"");
+        assert_eq!(csv_escape("-5.00%"), "-5.00%");
+        assert_eq!(csv_escape("+5.00%"), "+5.00%");
+        assert_eq!(csv_escape("-5.00%+SUM(A1:A2)"), "'-5.00%+SUM(A1:A2)");
         assert_eq!(csv_escape("-200.00"), "-200.00");
         assert_eq!(csv_escape("+200.00"), "+200.00");
         assert_eq!(csv_escape("RELIANCE.NS"), "RELIANCE.NS");
