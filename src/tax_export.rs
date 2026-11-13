@@ -1337,6 +1337,31 @@ mod tests {
     }
 
     #[test]
+    fn tax_csv_neutralizes_imported_spreadsheet_formulas() {
+        let mut india = india_schedule(
+            &fy26_sales(),
+            d("2025-04-01"),
+            |_| None,
+            &Default::default(),
+        );
+        india.sales[0].scrip = "=HYPERLINK(\"https://example.test\",\"click\")".into();
+        let csv = india_csv(&india);
+        assert!(csv.contains("\"'=HYPERLINK(\"\"https://example.test\"\",\"\"click\"\")\""));
+
+        let mut us = us_schedule(
+            &[sale(
+                "MSFT",
+                1.0,
+                ("2024-02-01", 100.0),
+                ("2025-03-01", 120.0),
+            )],
+            d("2025-01-01"),
+        );
+        us.sales[0].description = "@SUM(A1:A2)".into();
+        assert!(us_csv(&us).contains("'@SUM(A1:A2)"));
+    }
+
+    #[test]
     fn export_uses_the_rates_in_force_on_the_sale_date() {
         // The issue's repro: STCG ₹1,00,000 sold 2024-06-10 (FY 2024-25): 15%, not 20%.
         let sales = vec![sale(

@@ -2,6 +2,7 @@
 
 use super::portfolio::{ESTIMATED_DATE_HINT, Valuation, portfolio_title, value_holdings};
 use super::*;
+use crate::output::csv_line;
 use crate::portfolio::{self as pf, ImportOptions, ImportOutcome, ImportRow, SyncChange};
 use crate::tax::{self, Country};
 use crate::tax_export;
@@ -465,14 +466,24 @@ pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
                         } else {
                             String::new()
                         };
-                        format!("{price:.2},{value:.2},{pnl:.2},{pnl_pct}")
+                        [
+                            format!("{price:.2}"),
+                            format!("{value:.2}"),
+                            format!("{pnl:.2}"),
+                            pnl_pct,
+                        ]
                     }
-                    None => ",,,".to_string(),
+                    None => Default::default(),
                 };
-                csv.push_str(&format!(
-                    "{},{:.2},{:.2},{}\n",
-                    h.symbol, h.shares, h.avg_cost, cells
-                ));
+                csv.push_str(&csv_line(&[
+                    h.symbol.clone(),
+                    format!("{:.2}", h.shares),
+                    format!("{:.2}", h.avg_cost),
+                    cells[0].clone(),
+                    cells[1].clone(),
+                    cells[2].clone(),
+                    cells[3].clone(),
+                ]));
             }
             std::fs::write(path, &csv)?;
             println!("  {} Exported portfolio to {}", "✓".green(), path.cyan());
@@ -493,17 +504,16 @@ pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
                 v.map_or(String::new(), |v| format!("{v:.places$}"))
             };
             for q in &quotes {
-                csv.push_str(&format!(
-                    "{},{},{},{},{},{}\n",
-                    q.symbol.as_deref().unwrap_or(""),
+                csv.push_str(&csv_line(&[
+                    q.symbol.clone().unwrap_or_default(),
                     num(q.regular_market_price, 2),
                     num(q.regular_market_change, 2),
                     q.regular_market_change_percent
                         .map_or(String::new(), |p| format!("{p:.2}%")),
                     q.regular_market_volume
                         .map_or(String::new(), |v| v.to_string()),
-                    num(q.market_cap, 0)
-                ));
+                    num(q.market_cap, 0),
+                ]));
             }
             std::fs::write(path, &csv)?;
             println!("  {} Exported watchlist to {}", "✓".green(), path.cyan());
