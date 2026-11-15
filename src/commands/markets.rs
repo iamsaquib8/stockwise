@@ -2163,8 +2163,16 @@ pub async fn cmd_conditions(
                 .iter()
                 .filter_map(|json| serde_json::from_str(json).ok())
                 .collect();
-        if let Ok(json) = serde_json::to_string(&today) {
-            crate::db::with_db(|d| d.put_conditions(&key, scope, date, &json));
+        // The read above worked, so cache.db is on: a failed save is a
+        // fault worth saying, or the record silently stops growing.
+        let saved = serde_json::to_string(&today)
+            .ok()
+            .and_then(|json| crate::db::with_db(|d| d.put_conditions(&key, scope, date, &json)))
+            .is_some();
+        if !saved {
+            eprintln!(
+                "  \u{24d8} Could not save this session's breadth and valuation to cache.db; it will be missing from later comparisons."
+            );
         }
         Some(crate::conditions::history(&past, &today))
     });
@@ -2273,16 +2281,31 @@ pub async fn cmd_conditions(
             ),
             Some(since) => {
                 print_kv("Sessions on record", &format!("{} since {}", h.sessions, since));
-                let rank = |p: Option<f64>| match p {
-                    Some(p) => format!("lower on {:.0}% of them", p),
-                    None => format!(
-                        "after {} sessions",
+                // No figure today (no bond yield for this market, say) is
+                // "n/a"; a figure without enough sessions behind it waits.
+                let rank = |today: Option<f64>, p: Option<f64>| match (today, p) {
+                    (None, _) => "n/a".to_string(),
+                    (Some(_), Some(p)) => format!("lower on {:.0}% of them", p),
+                    (Some(_), None) => format!(
+                        "after {} sessions with this figure",
                         crate::conditions::MIN_HISTORY
                     ),
                 };
-                print_kv("Above 200-day average", &rank(h.above_200_day_percentile));
-                print_kv("Aggregate P/E", &rank(h.aggregate_pe_percentile));
-                print_kv("Earnings minus bond yield", &rank(h.earnings_minus_bond_percentile));
+                print_kv(
+                    "Above 200-day average",
+                    &rank(report.breadth.above_200_day_pct, h.above_200_day_percentile),
+                );
+                print_kv(
+                    "Aggregate P/E",
+                    &rank(report.valuation.aggregate_pe, h.aggregate_pe_percentile),
+                );
+                print_kv(
+                    "Earnings minus bond yield",
+                    &rank(
+                        report.valuation.earnings_minus_bond_pct,
+                        h.earnings_minus_bond_percentile,
+                    ),
+                );
                 if let Some(prev) = &h.previous {
                     let change = |now: Option<f64>, then: Option<f64>, unit: &str| {
                         match now.zip(then) {
