@@ -434,7 +434,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | Command | Description |
 |---------|-------------|
 | `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
-| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--force]` | Add a purchase as a new lot (default date: today). A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
+| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date); the rate used is printed. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N --date YYYY-MM-DD]` | Lots, sales, dividends and XIRR of one holding; `--lot N --date` corrects a purchase date |
 | `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo). Shows them; `--apply` adjusts lots and records dividends, and is safe to repeat |
@@ -443,6 +443,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio pme [NIFTY\|SPY\|VOO\|VWCE\|NIFTYBEES\|...] [--base inr\|usd] [--json\|--csv]` | Public Market Equivalent (Index Twin): mirror exact tradebook cash flows into a passive benchmark; computes Kaplan-Schoar PME, Direct Alpha, twin value, and net currency value added vs the index (see [below](#public-market-equivalent-index-twin)) |
 | `portfolio remove <SYMBOL>` | Remove a holding and its lots without recording a sale |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
+| `portfolio analyze [--quick] [--json]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
 | `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
@@ -673,6 +674,41 @@ stockwise tax advance --json                      # programmatic JSON output
 - **Section 234C Deferment Interest**: Section 234C looks at what was paid by each due date, so pass each payment with its date (`--paid 2025-06-14:3000`, repeated). It then charges 1% a month (3% for Q1–Q3, 1% for Q4) on each shortfall, rounded down to ₹100, when the payments by that date are below the safe-harbour level (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4). For Q4 the requirement on 15 March is the tax on gains up to 15 March; tax on gains after it carries no interest when paid by 31 March (the proviso). A payment dated before the financial year began is ignored (it was made for an earlier year) and the output says so. A payment without a date is assumed to have been made before every due date, which can understate the interest.
 - **Cess**: The tax and the instalments include the 4% health and education cess; surcharge is left out.
 - **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
+
+
+### Portfolio analysis
+
+`stockwise portfolio analyze` prints a dashboard of every holding:
+
+- **Summary:** value, P&L, today's move, cost and the *effective number of
+  holdings* (1 / the sum of squared weights: 10 equal holdings give 10).
+- **Holdings:** weight, value in the base currency, P&L %, today's move, the
+  tax term (`LT`; `ST 17d` until the lot turns long-term; `mix` for both),
+  distance from the 200-day average, a 52-week range strip (`●` marks the
+  price), yearly volatility, the long-term score and how many observations
+  name it (`●` when one is a notice).
+- **By market, currency, cap tier and sector:** value, weight and P&L in the
+  base currency; a market or currency group also shows its total in its own
+  currency (pence shown as pounds).
+- **Short-term and long-term:** unrealised gains by tax term (12 months for
+  Indian and US equity), lots on each side, the next lots to turn long-term,
+  and the estimated tax if everything were sold today at the standard rates
+  of your market (before this year's other gains and losses).
+- **Risk and concentration:** the yearly volatility and largest fall of the
+  portfolio as it is weighted today (from a year of daily closes), its beta
+  against the main index, the share of the value with price history behind
+  it, the value-weighted long-term score, the largest holding and the top five.
+- **Observations:** readings worth a look, each with its figures: a stock or
+  small caps above your investor profile's limits, a sector above 30%, a
+  holding more than 10% below cost (with the loss), a lot turning long-term
+  within 45 days (with the tax difference at the standard rates), a price
+  25% below its year high, 5% below its 200-day average or at a 52-week high
+  or low, a weak long-term score, an estimated purchase date, money in other
+  currencies, and holdings left out of the totals.
+
+These are readings of the data, not recommendations: nothing says to buy,
+sell or keep a holding. `--json` prints every figure. The TUI shows the same
+analysis on its own screen (key `p`).
 
 ### Benchmark and attribution
 

@@ -1054,6 +1054,9 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         }
     }
     println!();
+    print_hint(
+        "By market, sector and tax term, with risk and observations: stockwise portfolio analyze",
+    );
     Ok(())
 }
 

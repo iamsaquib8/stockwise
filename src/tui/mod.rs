@@ -5,6 +5,7 @@
 //! messages, and the effects `App::update` asks for become fetches on the
 //! shared [`LiveSource`] (one Yahoo client, so one rate limiter and cache).
 
+mod analysis;
 mod app;
 mod ui;
 
@@ -240,6 +241,16 @@ fn spawn_effect(
                     .await
                     .map_err(|e| format!("{:#}", e));
                 let _ = tx.send(Msg::Snapshot(result));
+            });
+        }
+        Effect::LoadAnalysis => {
+            tokio::spawn(async move {
+                let client = src.client().await.ok();
+                let result = crate::commands::load_analysis(&*src, client, market, None, false)
+                    .await
+                    .map(Box::new)
+                    .map_err(|e| format!("{:#}", e));
+                let _ = tx.send(Msg::Analysis(result));
             });
         }
         Effect::LoadChart { symbol, period } => {

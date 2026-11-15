@@ -1478,9 +1478,10 @@ mod tests {
         // A German holding is a German row even under a Japanese worker.
         let sap_jp = snapshot_from_quote("jp", &with("SAP.DE", "EUR")).unwrap();
         assert_eq!(sap_jp.market, "de");
-        // London pence convert as pence: 600 billion pence is £6B, a mid cap.
+        // A London cap is in pounds although the price is in pence (as
+        // Yahoo gives them): 600 billion is £600B, a mega cap.
         let lse = snapshot_from_quote("in", &with("VOD.L", "GBp")).unwrap();
-        assert_eq!(lse.cap_tier.as_deref(), Some("mid"));
+        assert_eq!(lse.cap_tier.as_deref(), Some("mega"));
         // A `.NS` symbol is an Indian stock whatever the currency says.
         let odd = snapshot_from_quote("us", &with("X.NS", "USD")).unwrap();
         assert_eq!(

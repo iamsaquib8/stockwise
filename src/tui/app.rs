@@ -13,6 +13,13 @@ pub const CHART_PERIODS: [&str; 6] = ["1d", "5d", "1mo", "6mo", "1y", "5y"];
 const DEFAULT_PERIOD: usize = 2;
 const MAX_QUERY: usize = 40;
 
+/// The whole-screen view: the market overview, or the portfolio analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Overview,
+    Analysis,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Watchlist,
@@ -117,6 +124,8 @@ pub enum Msg {
     WatchlistSaved(Result<String, String>),
     /// The background ticker saw prices move or a task change.
     Live(crate::worker::LiveEvent),
+    /// The portfolio analysis finished.
+    Analysis(Result<Box<crate::commands::AnalyzeReport>, String>),
 }
 
 /// Work for the runtime. Nothing here trades: the TUI is read-only apart
@@ -131,6 +140,8 @@ pub enum Effect {
     Search(String),
     AddToWatchlist(String),
     RemoveFromWatchlist(String),
+    /// Analyse the portfolio (prices, a year of closes, sectors).
+    LoadAnalysis,
 }
 
 /// Listed on the selected market's exchanges: NSE/BSE for India, a bare
@@ -165,6 +176,12 @@ pub struct App {
     pub sort: SortBy,
     pub status: Option<Status>,
     pub quit: bool,
+    pub screen: Screen,
+    /// The last portfolio analysis, holdings largest first.
+    pub analysis: Option<Box<crate::commands::AnalyzeReport>>,
+    pub analysis_loading: bool,
+    pub analysis_error: Option<String>,
+    pub analysis_sel: usize,
 }
 
 impl App {
@@ -187,7 +204,28 @@ impl App {
             sort: SortBy::Default,
             status: None,
             quit: false,
+            screen: Screen::Overview,
+            analysis: None,
+            analysis_loading: false,
+            analysis_error: None,
+            analysis_sel: 0,
         }
+    }
+
+    /// Ask for a portfolio analysis unless one is already running.
+    fn request_analysis(&mut self) -> Vec<Effect> {
+        if self.analysis_loading {
+            return Vec::new();
+        }
+        self.analysis_loading = true;
+        vec![Effect::LoadAnalysis]
+    }
+
+    /// The holding selected on the analysis screen.
+    pub fn selected_position(&self) -> Option<&crate::portfolio_analysis::Position> {
+        self.analysis
+            .as_ref()
+            .and_then(|a| a.analysis.positions.get(self.analysis_sel))
     }
 
     /// The first refresh, issued by the runtime at start-up.
@@ -371,6 +409,25 @@ impl App {
                 }
                 Vec::new()
             }
+            Msg::Analysis(result) => {
+                self.analysis_loading = false;
+                match result {
+                    Ok(mut report) => {
+                        // Largest first, as the screen lists them.
+                        report.analysis.positions.sort_by(|a, b| {
+                            b.value_base
+                                .unwrap_or(-1.0)
+                                .total_cmp(&a.value_base.unwrap_or(-1.0))
+                        });
+                        let n = report.analysis.positions.len();
+                        self.analysis_sel = self.analysis_sel.min(n.saturating_sub(1));
+                        self.analysis = Some(report);
+                        self.analysis_error = None;
+                    }
+                    Err(e) => self.analysis_error = Some(e),
+                }
+                Vec::new()
+            }
             Msg::WatchlistSaved(result) => match result {
                 Ok(text) => {
                     self.info(text);
@@ -422,12 +479,71 @@ impl App {
         }
     }
 
+    /// Keys on the analysis screen; `None` hands the key to the overview's
+    /// handler (quit, help, search).
+    fn on_analysis_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
+        let n = self
+            .analysis
+            .as_ref()
+            .map_or(0, |a| a.analysis.positions.len());
+        let last = n.saturating_sub(1);
+        Some(match key.code {
+            KeyCode::Char('p') | KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                self.screen = Screen::Overview;
+                Vec::new()
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.analysis_sel = self.analysis_sel.saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.analysis_sel = (self.analysis_sel + 1).min(last);
+                Vec::new()
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.analysis_sel = 0;
+                Vec::new()
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.analysis_sel = last;
+                Vec::new()
+            }
+            KeyCode::Char('d') | KeyCode::Enter => {
+                if self.selected_position().is_some() {
+                    self.mode = Mode::Detail;
+                }
+                Vec::new()
+            }
+            KeyCode::Char('r') => {
+                self.info("Analysing the portfolio…");
+                let mut effects = self.request_refresh();
+                effects.extend(self.request_analysis());
+                effects
+            }
+            KeyCode::Char('s' | 'x' | '[' | ']' | '1'..='6') | KeyCode::Delete => Vec::new(),
+            _ => return None,
+        })
+    }
+
     fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         if !matches!(key.code, KeyCode::Char('r')) && self.status.as_ref().is_some_and(|s| !s.error)
         {
             self.status = None;
         }
+        if self.screen == Screen::Analysis
+            && let Some(effects) = self.on_analysis_key(key)
+        {
+            return effects;
+        }
         match key.code {
+            KeyCode::Char('p') => {
+                self.screen = Screen::Analysis;
+                if self.analysis.is_none() {
+                    self.request_analysis()
+                } else {
+                    Vec::new()
+                }
+            }
             KeyCode::Char('q') => {
                 self.quit = true;
                 Vec::new()
