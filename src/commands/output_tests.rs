@@ -1421,3 +1421,48 @@ fn upcoming_income_csv_row_columns_match_fields() {
     };
     assert_columns(&row);
 }
+
+#[test]
+fn portfolio_analyze_csv_has_one_flat_row_per_holding() {
+    use crate::portfolio_analysis::{self as pa, LotInput, PositionInput};
+    let day = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+    let holding = |sym: &str, price: f64| PositionInput {
+        symbol: sym.into(),
+        market: "India".into(),
+        currency: Some("INR".into()),
+        shares: 10.0,
+        cost: 1000.0,
+        value: Some(10.0 * price),
+        fx_to_base: Some(1.0),
+        price: Some(price),
+        lots: vec![LotInput {
+            qty: 10.0,
+            price: 100.0,
+            date: Some(day("2025-12-01")),
+            estimated: false,
+        }],
+        tax_country: Some(crate::tax::Country::India),
+        ..Default::default()
+    };
+    let ctx = pa::Context {
+        today: day("2026-11-15"),
+        base_currency: "INR".into(),
+        ..Default::default()
+    };
+    let a = pa::analyze(&[holding("A.NS", 80.0), holding("B.NS", 150.0)], &ctx);
+    let rows = super::portfolio_analyze::csv_rows(&a);
+    assert_eq!(rows.len(), 2);
+    assert_columns(&rows[0]);
+    let csv = crate::output::to_csv(&rows).unwrap();
+    let mut lines = csv.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .starts_with("symbol,name,market,currency,cap_tier")
+    );
+    // Largest first; the next lot turns long-term on 2 Dec 2026.
+    let first = lines.next().unwrap();
+    assert!(first.starts_with("B.NS,,India,INR,unknown"), "{first}");
+    assert!(first.contains(",2026-12-02,17,"), "{first}");
+}

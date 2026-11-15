@@ -182,6 +182,8 @@ pub struct App {
     pub analysis_loading: bool,
     pub analysis_error: Option<String>,
     pub analysis_sel: usize,
+    /// Lines scrolled in the analysis detail popup.
+    pub detail_scroll: u16,
 }
 
 impl App {
@@ -209,6 +211,7 @@ impl App {
             analysis_loading: false,
             analysis_error: None,
             analysis_sel: 0,
+            detail_scroll: 0,
         }
     }
 
@@ -424,7 +427,13 @@ impl App {
                         self.analysis = Some(report);
                         self.analysis_error = None;
                     }
-                    Err(e) => self.analysis_error = Some(e),
+                    Err(e) => {
+                        // A failed re-run keeps the last result; say it is stale.
+                        if self.analysis.is_some() {
+                            self.error(format!("Analysis failed ({}); showing the last one", e));
+                        }
+                        self.analysis_error = Some(e);
+                    }
                 }
                 Vec::new()
             }
@@ -458,6 +467,15 @@ impl App {
             Mode::Detail => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('d') | KeyCode::Char('q') => {
                     self.mode = Mode::Normal;
+                    Vec::new()
+                }
+                // The analysis detail scrolls on small terminals.
+                KeyCode::Up | KeyCode::Char('k') if self.screen == Screen::Analysis => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                    Vec::new()
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.screen == Screen::Analysis => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(1).min(40);
                     Vec::new()
                 }
                 KeyCode::Char(c @ '1'..='6') => {
@@ -510,6 +528,7 @@ impl App {
             }
             KeyCode::Char('d') | KeyCode::Enter => {
                 if self.selected_position().is_some() {
+                    self.detail_scroll = 0;
                     self.mode = Mode::Detail;
                 }
                 Vec::new()
