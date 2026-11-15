@@ -2142,14 +2142,42 @@ pub async fn cmd_conditions(
         _ => None,
     };
     let quotes = universe_quotes(&client, market, universe).await?;
+    let breadth = crate::conditions::breadth(&quotes);
+    let valuation = crate::conditions::valuation(&quotes, bond_yield);
+    // The session the quotes are from: the latest trade time, as a date
+    // on the market's own calendar (a weekend run records Friday).
+    let as_of = quotes
+        .iter()
+        .filter_map(|q| q.regular_market_time)
+        .max()
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|t| crate::clock::local(market, t).date_naive().to_string());
+    // Breadth and valuation have no past to look up: save this session's
+    // and rank it against the ones saved before (per market and scan).
+    let history = as_of.as_ref().and_then(|date| {
+        let scope = universe.map_or("default", |u| u.nse_index());
+        let key = crate::value_name(market);
+        let today = crate::conditions::Reading::of(date, &breadth, &valuation);
+        let past: Vec<crate::conditions::Reading> =
+            crate::db::with_db(|d| d.conditions_history(&key, scope))?
+                .iter()
+                .filter_map(|json| serde_json::from_str(json).ok())
+                .collect();
+        if let Ok(json) = serde_json::to_string(&today) {
+            crate::db::with_db(|d| d.put_conditions(&key, scope, date, &json));
+        }
+        Some(crate::conditions::history(&past, &today))
+    });
     let report = crate::conditions::Report {
         market: market.label().to_string(),
         index: index_name.to_string(),
         trend,
         volatility,
-        breadth: crate::conditions::breadth(&quotes),
-        valuation: crate::conditions::valuation(&quotes, bond_yield),
+        breadth,
+        valuation,
         scanned: quotes.len(),
+        as_of,
+        history,
     };
     if json {
         return output::print_json(&report);
@@ -2227,6 +2255,46 @@ pub async fn cmd_conditions(
         &v.median_dividend_yield_pct
             .map_or("n/a".to_string(), |e| format!("{:.2}%", e)),
     );
+
+    if let Some(h) = &report.history {
+        print_section("Breadth and valuation against saved sessions");
+        match &h.since {
+            None => println!(
+                "  {}",
+                "First session on record. Each run of `conditions` saves one; ranks appear after 20."
+                    .dimmed()
+            ),
+            Some(since) => {
+                print_kv("Sessions on record", &format!("{} since {}", h.sessions, since));
+                let rank = |p: Option<f64>| match p {
+                    Some(p) => format!("lower on {:.0}% of them", p),
+                    None => format!(
+                        "after {} sessions",
+                        crate::conditions::MIN_HISTORY
+                    ),
+                };
+                print_kv("Above 200-day average", &rank(h.above_200_day_percentile));
+                print_kv("Aggregate P/E", &rank(h.aggregate_pe_percentile));
+                print_kv("Earnings minus bond yield", &rank(h.earnings_minus_bond_percentile));
+                if let Some(prev) = &h.previous {
+                    let change = |now: Option<f64>, then: Option<f64>, unit: &str| {
+                        match now.zip(then) {
+                            Some((n, t)) => format!("{:+.1}{}", n - t, unit),
+                            None => "n/a".to_string(),
+                        }
+                    };
+                    print_kv(
+                        &format!("Change since {}", prev.date),
+                        &format!(
+                            "above 200-day {}, aggregate P/E {}",
+                            change(report.breadth.above_200_day_pct, prev.above_200_day_pct, " points"),
+                            change(report.valuation.aggregate_pe, prev.aggregate_pe, "")
+                        ),
+                    );
+                }
+            }
+        }
+    }
 
     print_section("In words");
     for line in crate::conditions::describe(&report) {

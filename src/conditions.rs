@@ -7,7 +7,7 @@
 //! to wait, and nothing here forecasts returns.
 
 use crate::api::Quote;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Sessions in a year, for the one-year return and 52-week high.
 const YEAR: usize = 252;
@@ -76,6 +76,72 @@ pub struct Valuation {
     pub median_dividend_yield_pct: Option<f64>,
 }
 
+/// Saved readings needed before a percentile is shown.
+pub const MIN_HISTORY: usize = 20;
+
+/// One session's breadth and valuation, as saved in `cache.db`. Unlike
+/// the index, these have no price history to look back over: the record
+/// builds up one session at a time, each time `conditions` runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reading {
+    /// The session, `YYYY-MM-DD`.
+    pub date: String,
+    pub above_200_day_pct: Option<f64>,
+    pub above_50_day_pct: Option<f64>,
+    pub aggregate_pe: Option<f64>,
+    pub median_pe: Option<f64>,
+    pub earnings_minus_bond_pct: Option<f64>,
+}
+
+impl Reading {
+    pub fn of(date: &str, b: &Breadth, v: &Valuation) -> Self {
+        Reading {
+            date: date.to_string(),
+            above_200_day_pct: b.above_200_day_pct,
+            above_50_day_pct: b.above_50_day_pct,
+            aggregate_pe: v.aggregate_pe,
+            median_pe: v.median_pe,
+            earnings_minus_bond_pct: v.earnings_minus_bond_pct,
+        }
+    }
+}
+
+/// Today's breadth and valuation against the saved sessions before it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct History {
+    /// Earlier sessions on record.
+    pub sessions: usize,
+    /// The first of them.
+    pub since: Option<String>,
+    /// The session before this one, for the change.
+    pub previous: Option<Reading>,
+    /// Share of earlier sessions with a lower figure, 0-100; `None` until
+    /// [`MIN_HISTORY`] sessions have it.
+    pub above_200_day_percentile: Option<f64>,
+    pub aggregate_pe_percentile: Option<f64>,
+    pub earnings_minus_bond_percentile: Option<f64>,
+}
+
+/// `today` against `past` (any order; today's own date is left out).
+pub fn history(past: &[Reading], today: &Reading) -> History {
+    let mut past: Vec<&Reading> = past.iter().filter(|r| r.date < today.date).collect();
+    past.sort_by(|a, b| a.date.cmp(&b.date));
+    let pct = |f: fn(&Reading) -> Option<f64>| {
+        let series: Vec<f64> = past.iter().filter_map(|r| f(r)).collect();
+        f(today)
+            .filter(|_| series.len() >= MIN_HISTORY)
+            .map(|v| share_below(&series, v))
+    };
+    History {
+        sessions: past.len(),
+        since: past.first().map(|r| r.date.clone()),
+        previous: past.last().map(|r| (*r).clone()),
+        above_200_day_percentile: pct(|r| r.above_200_day_pct),
+        aggregate_pe_percentile: pct(|r| r.aggregate_pe),
+        earnings_minus_bond_percentile: pct(|r| r.earnings_minus_bond_pct),
+    }
+}
+
 /// Everything `conditions` reports.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
@@ -87,6 +153,11 @@ pub struct Report {
     pub valuation: Valuation,
     /// Stocks the breadth and valuation figures cover.
     pub scanned: usize,
+    /// The session the breadth and valuation are from, `YYYY-MM-DD`.
+    pub as_of: Option<String>,
+    /// Breadth and valuation against earlier saved sessions; `None` when
+    /// nothing can be saved (`cache.db` off).
+    pub history: Option<History>,
 }
 
 fn mean(xs: &[f64]) -> Option<f64> {
@@ -380,6 +451,41 @@ mod tests {
     }
 
     #[test]
+    fn history_ranks_today_against_earlier_sessions_only() {
+        let reading = |day: u32, above: f64, pe: Option<f64>| Reading {
+            date: format!("2026-10-{day:02}"),
+            above_200_day_pct: Some(above),
+            above_50_day_pct: None,
+            aggregate_pe: pe,
+            median_pe: None,
+            earnings_minus_bond_pct: None,
+        };
+        // 24 earlier sessions with breadth 30..53, plus today's own date
+        // and a later one, which do not count.
+        let mut past: Vec<Reading> = (1..=24)
+            .map(|d| reading(d, 29.0 + d as f64, None))
+            .collect();
+        past.reverse();
+        past.push(reading(25, 99.0, Some(20.0)));
+        past.push(reading(26, 99.0, Some(20.0)));
+        let today = reading(25, 47.5, Some(21.0));
+        let h = history(&past, &today);
+        assert_eq!(h.sessions, 24);
+        assert_eq!(h.since.as_deref(), Some("2026-10-01"));
+        assert_eq!(h.previous.as_ref().unwrap().date, "2026-10-24");
+        // 30..=47 are lower: 18 of 24.
+        assert_eq!(h.above_200_day_percentile, Some(75.0));
+        // No earlier session has a P/E: no percentile.
+        assert_eq!(h.aggregate_pe_percentile, None);
+
+        // Too few sessions: counted, but no percentile yet.
+        let few = history(&past[20..24], &today);
+        assert_eq!(few.sessions, 4);
+        assert_eq!(few.above_200_day_percentile, None);
+        assert_eq!(history(&[], &today).previous, None);
+    }
+
+    #[test]
     fn descriptions_state_readings_in_neutral_words() {
         let closes: Vec<f64> = (0..800).map(|i| 100.0 + (i % 50) as f64).collect();
         let quotes = [stock(118.0, 100.0, Some(10.0), 1000.0, 1.0)];
@@ -391,6 +497,8 @@ mod tests {
             breadth: breadth(&quotes),
             valuation: valuation(&quotes, Some(7.0)),
             scanned: 1,
+            as_of: None,
+            history: None,
         };
         let lines = describe(&report);
         assert_eq!(lines.len(), 5, "{lines:?}");

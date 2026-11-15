@@ -292,6 +292,11 @@ impl CacheDb {
                  source TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
                  checked_at INTEGER NOT NULL
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS conditions_history (
+                 market TEXT NOT NULL, scope TEXT NOT NULL, date TEXT NOT NULL,
+                 reading_json TEXT NOT NULL,
+                 PRIMARY KEY (market, scope, date)
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS index_lists (
                  index_name TEXT PRIMARY KEY, scanned INTEGER NOT NULL DEFAULT 0,
                  updated_at INTEGER NOT NULL
@@ -476,6 +481,38 @@ impl CacheDb {
             .filter(|(_, g)| groups.contains(&g.as_str()))
             .map(|(t, _)| t)
             .collect())
+    }
+
+    // ── conditions_history ──
+
+    /// Save one session's market reading (JSON), replacing that day's.
+    /// This is a record that builds up over time, not a cache: no
+    /// `cache clear` target removes it.
+    pub fn put_conditions(
+        &mut self,
+        market: &str,
+        scope: &str,
+        date: &str,
+        json: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO conditions_history (market, scope, date, reading_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![market, scope, date, json],
+        )?;
+        Ok(())
+    }
+
+    /// Every saved reading (JSON) of a market and scan scope, oldest first.
+    pub fn conditions_history(&self, market: &str, scope: &str) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT reading_json FROM conditions_history
+             WHERE market = ?1 AND scope = ?2 ORDER BY date",
+        )?;
+        let rows = st
+            .query_map(params![market, scope], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     // ── index_members ──
@@ -1129,6 +1166,29 @@ mod tests {
         assert_eq!(db.eod_state().unwrap(), None);
         assert_eq!(db.quotes_since(&["A.NS".to_string()], 0).unwrap().len(), 1);
         assert_eq!(db.clear_table(CacheTarget::All).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditions_history_keeps_one_reading_a_day_per_scope_and_survives_clear_all() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        db.put_conditions("in", "default", "2026-11-13", "{\"d\":13}")
+            .unwrap();
+        db.put_conditions("in", "default", "2026-11-12", "{\"d\":12}")
+            .unwrap();
+        db.put_conditions("in", "default", "2026-11-13", "{\"d\":130}")
+            .unwrap();
+        db.put_conditions("in", "NIFTY 50", "2026-11-13", "{}")
+            .unwrap();
+        db.put_conditions("us", "default", "2026-11-13", "{}")
+            .unwrap();
+        assert_eq!(
+            db.conditions_history("in", "default").unwrap(),
+            ["{\"d\":12}", "{\"d\":130}"]
+        );
+        assert_eq!(db.conditions_history("in", "NIFTY 50").unwrap().len(), 1);
+        // A record, not a cache.
+        db.clear_table(CacheTarget::All).unwrap();
+        assert_eq!(db.conditions_history("in", "default").unwrap().len(), 2);
     }
 
     #[test]
