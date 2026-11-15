@@ -32,6 +32,7 @@ mod derivatives;
 mod display;
 mod events;
 mod funds;
+mod global_lists;
 mod goals;
 mod greeks;
 mod gsec;
@@ -44,11 +45,13 @@ mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod nifty500;
 mod notify;
 mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;
+mod picks;
 mod pme;
 mod portfolio;
 mod practice;
@@ -61,6 +64,7 @@ mod sellpreview;
 #[cfg(feature = "server")]
 mod server;
 mod simulator;
+mod sp500;
 mod store;
 mod tax;
 mod tax_export;
@@ -467,7 +471,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     // ── Market ──
     /// Top gainers and losers today
     Movers {
-        /// Scan an NSE index's members instead of the built-in large caps
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -488,7 +493,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     },
     /// Market heatmap
     Heatmap {
-        /// Scan an NSE index's members instead of the built-in large caps
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -527,16 +533,41 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     /// Earnings overview for your portfolio and watchlist
     Earnings,
     /// Earnings momentum — accelerating vs decelerating
-    Surprise,
+    Surprise {
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+    },
     /// Quality vs growth quadrants
-    Matrix,
-    /// Highest-scoring large caps on eight factors (a score, not a recommendation)
-    Picks,
-    /// Screen large caps by a preset
+    Matrix {
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+    },
+    /// Stocks ranked against each other on value, quality, growth and trend (a score, not a
+    /// recommendation)
+    Picks {
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+        /// Only this market-cap tier, ranked within itself: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
+        /// How many of the highest scores to show (0 for all)
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Screen the market's stocks by a preset
     Screen {
         #[arg(value_enum, ignore_case = true)]
         category: ScreenCategory,
-        /// Scan an NSE index's members instead of the built-in large caps
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -684,6 +715,10 @@ stockwise options TCS                     expected moves (same as `options moves
     Longterm {
         /// Monthly SIP budget (default 10000)
         amount: Option<f64>,
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
     },
 
     /// Background worker: intraday paper-trading loop or daily long-term scan
@@ -1095,8 +1130,12 @@ enum CacheAction {
         #[arg(long)]
         json: bool,
     },
-    /// Delete every cached response (your portfolio and settings are untouched)
-    Clear,
+    /// Delete cached data: http (default), quotes, snapshots, bars, results,
+    /// members or all (your portfolio and settings are untouched)
+    Clear {
+        #[arg(value_enum, ignore_case = true, default_value = "http")]
+        what: db::CacheTarget,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3778,7 +3817,7 @@ async fn dispatch(
         Commands::Doctor => commands::cmd_doctor(m, sources).await,
         Commands::Cache { action } => match action {
             CacheAction::Status => commands::cmd_cache(false),
-            CacheAction::Clear => commands::cmd_cache(true),
+            CacheAction::Clear { what } => commands::cmd_cache_clear(what).await,
             CacheAction::Warm { background } => commands::cmd_cache_warm(m, background).await,
             CacheAction::Snapshots {
                 cap,
@@ -3953,9 +3992,14 @@ async fn dispatch(
             .await
         }
         Commands::Earnings => commands::cmd_earnings(m).await,
-        Commands::Surprise => commands::cmd_surprise(m).await,
-        Commands::Matrix => commands::cmd_matrix(m).await,
-        Commands::Picks => commands::cmd_picks(m).await,
+        Commands::Surprise { universe } => commands::cmd_surprise(m, universe).await,
+        Commands::Matrix { universe } => commands::cmd_matrix(m, universe).await,
+        Commands::Picks {
+            universe,
+            cap,
+            top,
+            out,
+        } => commands::cmd_picks(m, universe, cap, top, out.into()).await,
         Commands::Screen {
             category,
             universe,
@@ -4197,7 +4241,9 @@ async fn dispatch(
             target,
             strategy,
         } => commands::cmd_intraday(amount, target, strategy.as_deref(), m).await,
-        Commands::Longterm { amount } => commands::cmd_longterm(amount, m).await,
+        Commands::Longterm { amount, universe } => {
+            commands::cmd_longterm(amount, m, universe).await
+        }
         Commands::Daemon { mode, amount, once } => {
             commands::cmd_daemon(&value_name(mode), amount, m, once).await
         }
@@ -6253,6 +6299,21 @@ mod tests {
             assert!(parses(&args), "{:?}", args);
         }
         assert!(!parses(&["stockwise", "movers", "--universe", "sensex"]));
+        assert!(parses(&[
+            "stockwise",
+            "picks",
+            "--cap",
+            "large",
+            "--top",
+            "30",
+            "--json"
+        ]));
+        for whole in ["bse", "all", "BSEALL"] {
+            assert!(
+                parses(&["stockwise", "picks", "--universe", whole]),
+                "{whole}"
+            );
+        }
         match Cli::try_parse_from(["stockwise", "movers", "--universe", "banknifty"])
             .unwrap()
             .command

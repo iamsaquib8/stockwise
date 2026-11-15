@@ -32,6 +32,78 @@ pub struct CacheStats {
 }
 
 /// Current Unix time in seconds.
+/// One stock of the stored bhavcopy: (ticker, listing group, value traded
+/// in rupees, quote JSON).
+pub type EodRecord = (String, String, f64, String);
+
+/// One saved index list: (index name, scanned, members in order).
+pub type IndexList = (String, bool, Vec<String>);
+
+fn write_index_lists(conn: &Connection, lists: &[IndexList]) -> Result<()> {
+    let now = now_millis();
+    let mut del = conn.prepare_cached("DELETE FROM index_members WHERE index_name = ?1")?;
+    let mut put = conn.prepare_cached(
+        "INSERT INTO index_members (index_name, rank, symbol) VALUES (?1, ?2, ?3)",
+    )?;
+    let mut list = conn.prepare_cached(
+        "INSERT OR REPLACE INTO index_lists (index_name, scanned, updated_at) VALUES (?1, ?2, ?3)",
+    )?;
+    for (name, scanned, members) in lists {
+        del.execute(params![name])?;
+        for (rank, sym) in members.iter().enumerate() {
+            put.execute(params![name, rank as i64, sym])?;
+        }
+        list.execute(params![name, *scanned as i64, now])?;
+    }
+    Ok(())
+}
+
+fn read_index_lists(conn: &Connection) -> Result<Vec<IndexList>> {
+    let mut st =
+        conn.prepare_cached("SELECT index_name, scanned FROM index_lists ORDER BY index_name")?;
+    let names: Vec<(String, bool)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut members = conn
+        .prepare_cached("SELECT symbol FROM index_members WHERE index_name = ?1 ORDER BY rank")?;
+    let mut out = Vec::new();
+    for (name, scanned) in names {
+        let list: Vec<String> = members
+            .query_map(params![name], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        out.push((name, scanned, list));
+    }
+    Ok(out)
+}
+
+/// What `cache clear` removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CacheTarget {
+    /// Cached HTTP responses (the default)
+    Http,
+    /// Full quotes kept for index scans (picks, matrix, surprise, longterm)
+    Quotes,
+    /// Market snapshots (`cache snapshots`, cap tiers)
+    Snapshots,
+    /// Price bars
+    Bars,
+    /// Quarterly and annual results
+    Results,
+    /// Saved NSE index members (NIFTY 500 and the cap bands)
+    Members,
+    /// BSE end-of-day prices (the last bhavcopy)
+    Bhavcopy,
+    /// Everything above
+    All,
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -206,7 +278,28 @@ impl CacheDb {
                  payload_json TEXT NOT NULL DEFAULT '{}', result_json TEXT, error TEXT,
                  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, id);",
+             CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, id);
+             CREATE TABLE IF NOT EXISTS quote_cache (
+                 symbol TEXT PRIMARY KEY, quote_json TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             DROP TABLE IF EXISTS bse_eod;
+             CREATE TABLE IF NOT EXISTS bse_bhav (
+                 ticker TEXT PRIMARY KEY, grp TEXT NOT NULL, traded REAL NOT NULL,
+                 quote_json TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS eod_state (
+                 source TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
+                 checked_at INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS index_lists (
+                 index_name TEXT PRIMARY KEY, scanned INTEGER NOT NULL DEFAULT 0,
+                 updated_at INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS index_members (
+                 index_name TEXT NOT NULL, rank INTEGER NOT NULL, symbol TEXT NOT NULL,
+                 PRIMARY KEY (index_name, rank)
+             ) WITHOUT ROWID;",
         )?;
         Ok(Self { conn })
     }
@@ -266,6 +359,216 @@ impl CacheDb {
     pub fn clear(&self) -> Result<u64> {
         let n = self.conn.execute("DELETE FROM http_cache", [])?;
         Ok(n as u64)
+    }
+
+    // ── quote_cache ──
+
+    /// Store full quotes (JSON) by symbol, replacing older ones.
+    pub fn put_quotes(&mut self, rows: &[(String, String)]) -> Result<()> {
+        let now = now_secs();
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO quote_cache (symbol, quote_json, updated_at)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (symbol, json) in rows {
+                st.execute(params![symbol, json, now])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Quotes (symbol, JSON) stored at or after `since` for `symbols`.
+    pub fn quotes_since(&self, symbols: &[String], since: i64) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT symbol, quote_json FROM quote_cache WHERE symbol = ?1 AND updated_at >= ?2",
+        )?;
+        let mut out = Vec::new();
+        for sym in symbols {
+            if let Some(row) = st
+                .query_row(params![sym, since], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+            {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    // ── bse_eod ──
+
+    /// Replace the stored end-of-day day with `rows` (ticker, listing
+    /// group, value traded, quote JSON) of `trade_date` (`YYYY-MM-DD`).
+    pub fn put_eod(&mut self, trade_date: &str, rows: &[EodRecord]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM bse_bhav", [])?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO bse_bhav (ticker, grp, traded, quote_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (ticker, group, traded, json) in rows {
+                st.execute(params![ticker, group, traded, json])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO eod_state (source, trade_date, checked_at)
+             VALUES ('bse', ?1, ?2)",
+            params![trade_date, now_secs()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Note that the stored day was checked just now (no newer file yet).
+    pub fn touch_eod(&mut self) -> Result<()> {
+        // No day stored yet: an empty date still throttles the next look.
+        self.conn.execute(
+            "INSERT INTO eod_state (source, trade_date, checked_at) VALUES ('bse', '', ?1)
+             ON CONFLICT(source) DO UPDATE SET checked_at = excluded.checked_at",
+            params![now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// The stored day (`YYYY-MM-DD`) and when it was last checked.
+    pub fn eod_state(&self) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT trade_date, checked_at FROM eod_state WHERE source = 'bse'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Stored quotes (ticker, JSON) for `tickers`.
+    pub fn eod_quotes(&self, tickers: &[String]) -> Result<Vec<(String, String)>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT ticker, quote_json FROM bse_bhav WHERE ticker = ?1")?;
+        let mut out = Vec::new();
+        for t in tickers {
+            if let Some(row) = st
+                .query_row(params![t], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+            {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stored tickers of the given listing groups that traded at least
+    /// `min_traded` rupees on the day, by ticker.
+    pub fn eod_tickers(&self, groups: &[&str], min_traded: f64) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT ticker, grp FROM bse_bhav WHERE traded >= ?1 ORDER BY ticker",
+        )?;
+        let rows: Vec<(String, String)> = st
+            .query_map(params![min_traded], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, g)| groups.contains(&g.as_str()))
+            .map(|(t, _)| t)
+            .collect())
+    }
+
+    // ── index_members ──
+
+    /// Replace the saved lists: (index name, scanned, members in order).
+    pub fn put_index_lists(&mut self, lists: &[IndexList]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        write_index_lists(&tx, lists)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every saved list: (index name, scanned, members in order).
+    pub fn index_lists(&self) -> Result<Vec<IndexList>> {
+        read_index_lists(&self.conn)
+    }
+
+    /// One saved list's members and when it was saved (Unix milliseconds).
+    pub fn index_list(&self, name: &str) -> Result<Option<(Vec<String>, i64)>> {
+        let Some(at) = self
+            .conn
+            .query_row(
+                "SELECT updated_at FROM index_lists WHERE index_name = ?1",
+                params![name],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut st = self.conn.prepare_cached(
+            "SELECT symbol FROM index_members WHERE index_name = ?1 ORDER BY rank",
+        )?;
+        let members: Vec<String> = st
+            .query_map(params![name], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some((members, at)))
+    }
+
+    /// Read, change and write the saved lists in one write transaction, so
+    /// two scans saving at once (in this or another process) never lose
+    /// each other's lists. `change` gets the stored lists and returns the
+    /// ones to write.
+    pub fn update_index_lists(
+        &mut self,
+        change: impl FnOnce(Vec<IndexList>) -> Vec<IndexList>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let lists = change(read_index_lists(&tx)?);
+        write_index_lists(&tx, &lists)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// When any saved list last changed (Unix milliseconds), `None` if none.
+    pub fn index_lists_version(&self) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row("SELECT MAX(updated_at) FROM index_lists", [], |r| r.get(0))?)
+    }
+
+    /// Delete every row of one cache table; returns how many went.
+    pub fn clear_table(&mut self, target: CacheTarget) -> Result<u64> {
+        let tables: &[&str] = match target {
+            CacheTarget::Http => &["http_cache"],
+            CacheTarget::Quotes => &["quote_cache"],
+            CacheTarget::Snapshots => &["market_snapshots"],
+            CacheTarget::Bars => &["ohlcv_bars"],
+            CacheTarget::Results => &["financial_results"],
+            CacheTarget::Members => &["index_members", "index_lists"],
+            CacheTarget::Bhavcopy => &["bse_bhav", "eod_state"],
+            CacheTarget::All => &[
+                "http_cache",
+                "quote_cache",
+                "market_snapshots",
+                "ohlcv_bars",
+                "financial_results",
+                "index_members",
+                "index_lists",
+                "bse_bhav",
+                "eod_state",
+            ],
+        };
+        let tx = self.conn.transaction()?;
+        let mut n = 0u64;
+        for t in tables {
+            // Table names come from the fixed list above, never user text.
+            n += tx.execute(&format!("DELETE FROM {}", t), [])? as u64;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     // ── market_snapshots ──
@@ -716,9 +1019,117 @@ pub fn http_clear() -> Option<u64> {
     shared()?.lock().ok()?.clear().ok()
 }
 
+/// Clear one cache table group; `None` when `cache.db` is off.
+pub fn clear(target: CacheTarget) -> Option<u64> {
+    shared()?.lock().ok()?.clear_table(target).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_cache_returns_only_fresh_rows_of_the_asked_symbols() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        db.put_quotes(&[
+            ("A.NS".into(), "{\"a\":1}".into()),
+            ("B.NS".into(), "{}".into()),
+        ])
+        .unwrap();
+        let asked = ["A.NS".to_string(), "C.NS".to_string()];
+        let now = now_secs();
+        assert_eq!(
+            db.quotes_since(&asked, now - 60).unwrap(),
+            [("A.NS".to_string(), "{\"a\":1}".to_string())]
+        );
+        // Older than the cut-off: not served.
+        assert!(db.quotes_since(&asked, now + 60).unwrap().is_empty());
+        // A later put replaces the row.
+        db.put_quotes(&[("A.NS".into(), "{\"a\":2}".into())])
+            .unwrap();
+        assert_eq!(db.quotes_since(&asked, now - 60).unwrap()[0].1, "{\"a\":2}");
+    }
+
+    #[test]
+    fn index_lists_keep_order_and_update_in_one_transaction() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        assert_eq!(db.index_lists_version().unwrap(), None);
+        let list = |name: &str, scanned, syms: &[&str]| -> IndexList {
+            (
+                name.to_string(),
+                scanned,
+                syms.iter().map(|s| s.to_string()).collect(),
+            )
+        };
+        db.put_index_lists(&[list("NIFTY 500", false, &["Z.NS", "A.NS", "M.NS"])])
+            .unwrap();
+        assert_eq!(
+            db.index_lists().unwrap(),
+            [list("NIFTY 500", false, &["Z.NS", "A.NS", "M.NS"])]
+        );
+        assert!(db.index_lists_version().unwrap().is_some());
+        let (members, saved_at) = db.index_list("NIFTY 500").unwrap().unwrap();
+        assert_eq!(members, ["Z.NS", "A.NS", "M.NS"]);
+        assert!(saved_at > 0);
+        assert_eq!(db.index_list("NIFTY IT").unwrap(), None);
+        // The change sees the stored lists and its result replaces them;
+        // a shorter list leaves no old members behind.
+        db.update_index_lists(|mut lists| {
+            assert_eq!(lists.len(), 1);
+            lists[0].2.truncate(1);
+            lists.push(list("NIFTY 100", true, &["A.NS"]));
+            lists
+        })
+        .unwrap();
+        assert_eq!(
+            db.index_lists().unwrap(),
+            [
+                list("NIFTY 100", true, &["A.NS"]),
+                list("NIFTY 500", false, &["Z.NS"])
+            ]
+        );
+    }
+
+    #[test]
+    fn eod_day_is_replaced_whole_and_cleared_by_its_target() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        assert_eq!(db.eod_state().unwrap(), None);
+        // A look that found no file still records when it looked.
+        db.touch_eod().unwrap();
+        assert_eq!(db.eod_state().unwrap().unwrap().0, "");
+        let rec = |t: &str, g: &str, traded: f64, j: &str| -> EodRecord {
+            (t.into(), g.into(), traded, j.into())
+        };
+        db.put_eod(
+            "2026-11-05",
+            &[rec("ABB", "A", 5e6, "{}"), rec("OLD", "B", 5e6, "{}")],
+        )
+        .unwrap();
+        db.put_eod(
+            "2026-11-06",
+            &[
+                rec("ABB", "A", 5e6, "{\"d\":6}"),
+                rec("SMECO", "M", 2e4, "{}"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(db.eod_tickers(&["A", "B"], 0.0).unwrap(), ["ABB"]);
+        assert_eq!(db.eod_tickers(&["A", "M"], 0.0).unwrap(), ["ABB", "SMECO"]);
+        // The liquidity floor drops the thinly traded one.
+        assert_eq!(db.eod_tickers(&["A", "M"], 1e6).unwrap(), ["ABB"]);
+        assert_eq!(db.eod_state().unwrap().unwrap().0, "2026-11-06");
+        let asked = ["ABB".to_string(), "OLD".to_string()];
+        assert_eq!(
+            db.eod_quotes(&asked).unwrap(),
+            [("ABB".to_string(), "{\"d\":6}".to_string())]
+        );
+        db.put_quotes(&[("A.NS".into(), "{}".into())]).unwrap();
+        // Two stocks and the eod_state row; the quote cache stays.
+        assert_eq!(db.clear_table(CacheTarget::Bhavcopy).unwrap(), 3);
+        assert_eq!(db.eod_state().unwrap(), None);
+        assert_eq!(db.quotes_since(&["A.NS".to_string()], 0).unwrap().len(), 1);
+        assert_eq!(db.clear_table(CacheTarget::All).unwrap(), 1);
+    }
 
     #[test]
     fn set_then_get_round_trips() {

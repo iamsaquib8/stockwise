@@ -161,8 +161,9 @@ impl MarketInfo {
     }
 }
 
-/// The global market table, in [`Exchange`] order. Symbols were checked
-/// against Yahoo Finance; holiday tables live in `clock.rs`.
+/// The global market table, in [`Exchange`] order. Each universe is the
+/// exchange's main index (`global_lists.rs`); holiday tables live in
+/// `clock.rs`.
 pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
     MarketInfo {
         code: "uk",
@@ -182,10 +183,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^FTAS", "FTSE All-Share"),
         ],
         sectors: &[],
-        universe: &[
-            "SHEL.L", "AZN.L", "HSBA.L", "ULVR.L", "BP.L", "RIO.L", "GSK.L", "REL.L", "DGE.L",
-            "BATS.L", "LSEG.L", "VOD.L", "BARC.L", "LLOY.L", "NG.L",
-        ],
+        universe: crate::global_lists::FTSE350,
         session: Session {
             tz: TzRule::Eu(0),
             tz_label: "London",
@@ -216,10 +214,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^TECDAX", "TecDAX"),
         ],
         sectors: &[],
-        universe: &[
-            "SAP.DE", "SIE.DE", "ALV.DE", "DTE.DE", "MBG.DE", "BMW.DE", "BAS.DE", "MUV2.DE",
-            "IFX.DE", "ADS.DE", "DBK.DE", "VOW3.DE", "AIR.DE", "RHM.DE", "DHL.DE",
-        ],
+        universe: crate::global_lists::DAX_MDAX,
         session: Session {
             tz: TzRule::Eu(1),
             tz_label: "Frankfurt",
@@ -264,10 +259,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("1632.T", "Financials"),
             ("1633.T", "Real Estate"),
         ],
-        universe: &[
-            "7203.T", "6758.T", "8306.T", "9984.T", "6861.T", "9432.T", "8035.T", "6501.T",
-            "7974.T", "9983.T", "4063.T", "8316.T", "6098.T", "7267.T",
-        ],
+        universe: crate::global_lists::NIKKEI225,
         session: Session {
             tz: TzRule::Fixed(9 * 60),
             tz_label: "JST",
@@ -302,10 +294,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^HSNP", "Properties"),
             ("^HSNC", "Commerce & Industry"),
         ],
-        universe: &[
-            "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK", "3690.HK", "0388.HK", "1810.HK",
-            "0939.HK", "1398.HK", "2318.HK", "0883.HK", "0001.HK", "0016.HK",
-        ],
+        universe: crate::global_lists::HANG_SENG,
         session: Session {
             tz: TzRule::Fixed(8 * 60),
             tz_label: "HKT",
@@ -331,10 +320,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
         quote_unit: None,
         indices: &[("^STI", "Straits Times")],
         sectors: &[],
-        universe: &[
-            "D05.SI", "O39.SI", "U11.SI", "Z74.SI", "C6L.SI", "S68.SI", "C38U.SI", "A17U.SI",
-            "BN4.SI", "F34.SI", "Y92.SI", "G13.SI", "S63.SI", "9CI.SI",
-        ],
+        universe: crate::global_lists::STI,
         session: Session {
             tz: TzRule::Fixed(8 * 60),
             tz_label: "SGT",
@@ -370,10 +356,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("XRE.TO", "Real Estate"),
             ("XGD.TO", "Gold Miners"),
         ],
-        universe: &[
-            "RY.TO", "TD.TO", "SHOP.TO", "ENB.TO", "CNR.TO", "CP.TO", "BN.TO", "BMO.TO", "BNS.TO",
-            "CNQ.TO", "SU.TO", "TRI.TO", "ATD.TO", "CSU.TO", "MFC.TO",
-        ],
+        universe: crate::global_lists::TSX_COMPOSITE,
         session: Session {
             tz: TzRule::UsEastern,
             tz_label: "ET",
@@ -416,10 +399,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^AXPJ", "A-REIT"),
             ("^AXTJ", "Communication"),
         ],
-        universe: &[
-            "BHP.AX", "CBA.AX", "CSL.AX", "NAB.AX", "WBC.AX", "ANZ.AX", "MQG.AX", "WES.AX",
-            "WDS.AX", "FMG.AX", "RIO.AX", "TLS.AX", "WOW.AX", "GMG.AX", "TCL.AX",
-        ],
+        universe: crate::global_lists::ASX200,
         session: Session {
             tz: TzRule::AuEastern,
             tz_label: "Sydney",
@@ -980,12 +960,24 @@ impl Market {
         }
     }
 
-    /// Symbols scanned by movers, screeners and the bots.
+    /// Symbols scanned by movers, screeners and the bots. For India this is
+    /// the NIFTY 500 list saved by the last NSE scan (no request), or the
+    /// built-in NIFTY 500 until one has run; for the US the built-in
+    /// S&P 1500, and for the other exchanges their main index's members.
     pub fn universe(self) -> Vec<String> {
         let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect();
         match self {
-            Market::In => owned(INDIA_POPULAR),
-            Market::Us => owned(US_POPULAR),
+            Market::In => saved_nifty500().unwrap_or_else(|| owned(crate::nifty500::NIFTY500)),
+            // The S&P Composite 1500: large, mid and small caps.
+            Market::Us => [
+                crate::sp500::SP500,
+                crate::global_lists::SP400,
+                crate::global_lists::SP600,
+            ]
+            .concat()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             Market::Crypto => crypto_majors().into_iter().map(|(s, _)| s).collect(),
             Market::Fx => FX_MAJORS.iter().map(|(s, _)| s.to_string()).collect(),
             Market::Commodity => COMMODITY_UNIVERSE
@@ -1229,10 +1221,18 @@ pub enum Universe {
     /// NIFTY SMALLCAP 250
     #[value(name = "smallcap250")]
     Smallcap250,
+    /// BSE groups A and B (the main board, about 2,500 stocks), from BSE's
+    /// end-of-day file
+    #[value(name = "bse")]
+    Bse,
+    /// Every stock listed on BSE (about 4,500, SME and illiquid ones
+    /// included), from BSE's end-of-day file
+    #[value(name = "all", alias = "bseall")]
+    BseAll,
 }
 
 impl Universe {
-    /// NSE's name for the index.
+    /// NSE's name for the index (a label for the BSE universes).
     pub fn nse_index(self) -> &'static str {
         match self {
             Universe::Nifty50 => "NIFTY 50",
@@ -1243,22 +1243,37 @@ impl Universe {
             Universe::Nifty500 => "NIFTY 500",
             Universe::Midcap150 => "NIFTY MIDCAP 150",
             Universe::Smallcap250 => "NIFTY SMALLCAP 250",
+            Universe::Bse => "BSE A+B",
+            Universe::BseAll => "BSE (all)",
+        }
+    }
+
+    /// BSE listing groups of a whole-exchange universe (`None` for an NSE
+    /// index): its stocks come from BSE's end-of-day file, not from NSE.
+    pub fn bse_groups(self) -> Option<&'static [&'static str]> {
+        match self {
+            Universe::Bse => Some(&["A", "B"]),
+            Universe::BseAll => Some(crate::providers::bse_bhav::EQUITY_GROUPS),
+            _ => None,
         }
     }
 
     /// What to scan when NSE can't list the members: the built-in large
-    /// caps (all NIFTY 50 members, so also inside NIFTY 100), or a built-in
-    /// list of the sector's members. `None` for NIFTY NEXT 50, which has no
+    /// caps (all NIFTY 50 members, so also inside NIFTY 100), a built-in
+    /// list of the sector's members, or for NIFTY 500 the members saved by
+    /// an earlier scan, else the built-in list. `None` for indices with no
     /// built-in list.
     pub fn fallback(self) -> Option<Vec<String>> {
         let list: &[&str] = match self {
             Universe::Nifty50 | Universe::Nifty100 => INDIA_POPULAR,
             Universe::BankNifty => BANK_NIFTY,
             Universe::NiftyIt => NIFTY_IT,
+            Universe::Nifty500 => return Some(Market::In.universe()),
             Universe::NiftyNext50
-            | Universe::Nifty500
             | Universe::Midcap150
-            | Universe::Smallcap250 => return None,
+            | Universe::Smallcap250
+            | Universe::Bse
+            | Universe::BseAll => return None,
         };
         Some(list.iter().map(|s| s.to_string()).collect())
     }
@@ -1553,7 +1568,29 @@ pub fn filter_by_cap(
     }
 }
 
-/// File in the data directory with the NSE index membership.
+/// When the saved membership last changed (Unix milliseconds): the
+/// `cache.db` lists, or with `cache.db` off the JSON file's mtime.
+fn membership_version() -> Option<i64> {
+    match crate::db::l2() {
+        Some(_) => crate::db::with_db(|d| d.index_lists_version()).flatten(),
+        None => crate::store::path(MEMBERSHIP_FILE)
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64),
+    }
+}
+
+/// NIFTY 500 members saved by an NSE scan, `None` when none is saved.
+fn saved_nifty500() -> Option<Vec<String>> {
+    IndiaMembership::shared()
+        .map(|m| m.nifty500.clone())
+        .filter(|l| !l.is_empty())
+}
+
+/// File where versions before `cache.db` kept the NSE index membership;
+/// read once and moved into `cache.db`, and still used when it is off.
 const MEMBERSHIP_FILE: &str = "cap_membership.json";
 
 /// Index members saved by NSE index scans: lets the India cap tier follow
@@ -1574,40 +1611,95 @@ pub struct IndiaMembership {
 }
 
 impl IndiaMembership {
-    /// Saved membership, reloaded when another process rewrites the file
-    /// (a long-running worker sees a later index scan); `None` when nothing
-    /// is saved or the data directory is unreadable.
+    /// Saved membership, reloaded when another process saves a list (a
+    /// long-running worker sees a later index scan); `None` when nothing is
+    /// saved or `cache.db` is unusable.
     pub fn shared() -> Option<std::sync::Arc<IndiaMembership>> {
         // Unit tests never read the real data directory.
         if cfg!(test) {
             return None;
         }
-        type Cached = Option<(
-            Option<std::time::SystemTime>,
-            Option<std::sync::Arc<IndiaMembership>>,
-        )>;
+        type Cached = Option<(Option<i64>, Option<std::sync::Arc<IndiaMembership>>)>;
         static CELL: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
-        let mtime = crate::store::path(MEMBERSHIP_FILE)
-            .ok()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        let version = membership_version();
         let mut cell = CELL.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((seen, value)) = cell.as_ref()
-            && *seen == mtime
+            && *seen == version
         {
             return value.clone();
         }
-        let value = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
-            .ok()
+        // Keyed by the version read before loading: a save in between
+        // only makes the next call load again.
+        let value = Some(Self::load())
             .filter(|m| !m.is_empty())
             .map(std::sync::Arc::new);
-        *cell = Some((mtime, value.clone()));
+        *cell = Some((version, value.clone()));
         value
     }
 
-    /// Saved membership read now (not the once-per-run copy).
+    /// Saved membership read now from `cache.db` (not the once-per-run
+    /// copy). A `cap_membership.json` from an older version is moved in
+    /// the first time; with `cache.db` off, that file stays the store.
     pub fn load() -> Self {
-        crate::store::load(MEMBERSHIP_FILE).unwrap_or_default()
+        if crate::db::l2().is_none() {
+            return crate::store::load(MEMBERSHIP_FILE).unwrap_or_default();
+        }
+        let lists = crate::db::with_db(|d| d.index_lists()).unwrap_or_default();
+        // "Nothing saved" looks at the cap-tier lists only: a `csv:` member
+        // list saved first must not hide an old JSON file from the import.
+        if Self::from_lists(lists.clone()).is_empty() {
+            if let Ok(old) = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
+                && !old.is_empty()
+            {
+                // Delete the old file only once its lists are in cache.db.
+                if old.save()
+                    && let Ok(p) = crate::store::path(MEMBERSHIP_FILE)
+                {
+                    let _ = std::fs::remove_file(p);
+                }
+                return old;
+            }
+            return Self::default();
+        }
+        Self::from_lists(lists)
+    }
+
+    /// Membership from saved lists (unknown index names are skipped).
+    fn from_lists(lists: Vec<crate::db::IndexList>) -> Self {
+        let mut m = Self::default();
+        for (name, scanned, members) in lists {
+            match name.as_str() {
+                "NIFTY 100" => m.nifty100 = members,
+                "NIFTY MIDCAP 150" => m.midcap150 = members,
+                "NIFTY SMALLCAP 250" => m.smallcap250 = members,
+                "NIFTY 500" => m.nifty500 = members,
+                _ => continue,
+            }
+            if scanned {
+                m.scanned.push(name);
+            }
+        }
+        m
+    }
+
+    /// Every list as saved rows.
+    fn to_lists(&self) -> Vec<crate::db::IndexList> {
+        let flag = |n: &str| n != "NIFTY 500" && self.scanned.iter().any(|s| s == n);
+        [
+            ("NIFTY 100", &self.nifty100),
+            ("NIFTY MIDCAP 150", &self.midcap150),
+            ("NIFTY SMALLCAP 250", &self.smallcap250),
+            ("NIFTY 500", &self.nifty500),
+        ]
+        .into_iter()
+        .map(|(n, l)| (n.to_string(), flag(n), l.clone()))
+        .collect()
+    }
+
+    /// Write every list to `cache.db` (best effort); whether it worked.
+    fn save(&self) -> bool {
+        let lists = self.to_lists();
+        crate::db::with_db(|d| d.put_index_lists(&lists)).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1686,9 +1778,23 @@ impl IndiaMembership {
         {
             return;
         }
-        let _ = crate::store::update(MEMBERSHIP_FILE, |m: &mut IndiaMembership| {
-            m.set(index, symbols);
-            Ok(())
+        // With cache.db off or unusable, the JSON file is the store.
+        if crate::db::l2().is_none() {
+            let _ = crate::store::update(MEMBERSHIP_FILE, |m: &mut IndiaMembership| {
+                m.set(index, symbols);
+                Ok(())
+            });
+            return;
+        }
+        // Move an old JSON file in first, then read, change and write in one
+        // transaction. A busy cache.db skips this save; the next scan saves.
+        Self::load();
+        crate::db::with_db(|d| {
+            d.update_index_lists(|lists| {
+                let mut m = Self::from_lists(lists);
+                m.set(index, symbols);
+                m.to_lists()
+            })
         });
     }
 }
@@ -1696,6 +1802,27 @@ impl IndiaMembership {
 #[cfg(test)]
 mod tests {
     use super::{CapFilter, CapTier, IndiaMembership};
+
+    #[test]
+    fn membership_round_trips_through_saved_lists() {
+        let v = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let m = IndiaMembership {
+            nifty100: v(&["A.NS", "B.NS"]),
+            midcap150: v(&["C.NS"]),
+            smallcap250: Vec::new(),
+            nifty500: v(&["A.NS", "B.NS", "C.NS"]),
+            scanned: v(&["NIFTY MIDCAP 150"]),
+        };
+        let mut lists = m.to_lists();
+        // A list this version does not know is skipped, not an error.
+        lists.push(("csv:NIFTY IT".to_string(), false, v(&["X.NS"])));
+        let back = IndiaMembership::from_lists(lists);
+        assert_eq!(back.nifty100, m.nifty100);
+        assert_eq!(back.midcap150, m.midcap150);
+        assert_eq!(back.nifty500, m.nifty500);
+        assert_eq!(back.scanned, m.scanned);
+        assert!(back.smallcap250.is_empty());
+    }
 
     fn tier(sym: &str, mcap: f64, cur: &str) -> CapTier {
         CapTier::classify(sym, Some(mcap), Some(cur), None)

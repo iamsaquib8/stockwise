@@ -491,12 +491,56 @@ pub async fn cmd_intraday(
 
 // ── AI-Powered Reports ──
 
-pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
+/// Most stocks a long-term scan fetches a year of prices for. Requests are
+/// spaced 200 ms apart, so an index of 500 would take minutes.
+const LONGTERM_CHART_LIMIT: usize = 60;
+
+/// Long-term scores of `quotes`. Every quote is scored on its fundamentals
+/// first; the [`LONGTERM_CHART_LIMIT`] highest then get a year of prices
+/// (volatility, Monte Carlo) and their final score. Only those are
+/// returned, with a note on stderr when the rest were left out.
+pub(super) async fn longterm_scores(
+    client: &YahooClient,
+    quotes: &[crate::api::Quote],
+) -> Vec<longterm::LongTermScore> {
+    use futures_util::StreamExt;
+    let mut first: Vec<(&crate::api::Quote, Option<f64>)> = quotes
+        .iter()
+        .map(|q| (q, longterm::score_for_longterm(q, None).total()))
+        .collect();
+    if first.len() > LONGTERM_CHART_LIMIT {
+        first.sort_by(|a, b| b.1.unwrap_or(f64::MIN).total_cmp(&a.1.unwrap_or(f64::MIN)));
+        eprintln!(
+            "  \u{24d8} {} stocks scored on fundamentals; the {} highest get a year of prices for the final score.",
+            first.len(),
+            LONGTERM_CHART_LIMIT
+        );
+        first.truncate(LONGTERM_CHART_LIMIT);
+    }
+    futures_util::stream::iter(first.into_iter().map(|(q, _)| async move {
+        let sym = q.symbol.as_deref().unwrap_or("");
+        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
+            c.indicators
+                .quote
+                .first()
+                .and_then(|qi| qi.close.as_ref())
+                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
+        });
+        longterm::score_for_longterm(q, hist.as_deref())
+    }))
+    .buffered(8)
+    .collect()
+    .await
+}
+
+pub async fn cmd_longterm(
+    amount: Option<f64>,
+    market: Market,
+    universe: Option<market::Universe>,
+) -> Result<()> {
     market.require_bot_support("longterm")?;
     let client = YahooClient::new().await?;
-    let symbols = market.universe();
-    let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let quotes = super::markets::universe_quotes(&client, market, universe).await?;
     let csym = market.currency_symbol();
     let monthly = amount.unwrap_or(10000.0);
 
@@ -507,19 +551,7 @@ pub async fn cmd_longterm(amount: Option<f64>, market: Market) -> Result<()> {
         quotes.len()
     );
 
-    // Fetch 1Y chart data for volatility analysis
-    let mut scores: Vec<longterm::LongTermScore> = Vec::new();
-    for q in &quotes {
-        let sym = q.symbol.as_deref().unwrap_or("");
-        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-            c.indicators
-                .quote
-                .first()
-                .and_then(|qi| qi.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-        });
-        scores.push(longterm::score_for_longterm(q, hist.as_deref()));
-    }
+    let mut scores = longterm_scores(&client, &quotes).await;
     longterm::rank(&mut scores);
 
     print!("{}", longterm::render_report(&scores, monthly, csym));
@@ -568,9 +600,15 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                 "⟳".yellow()
             );
             market.require_bot_support("report longterm")?;
-            let symbols = market.universe();
-            let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-            let quotes = client.get_quote(&sym_refs).await?;
+            // Only the 15 largest by market cap go in (the S&P 500 and
+            // built-in NIFTY 500 lists are alphabetical).
+            let mut quotes = super::markets::universe_quotes(&client, market, None).await?;
+            quotes.sort_by(|a, b| {
+                b.market_cap
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.market_cap.unwrap_or(0.0))
+            });
+            quotes.truncate(15);
             let mut data = String::new();
             for q in quotes.iter().take(15) {
                 let sym = q.symbol.as_deref().unwrap_or("?");

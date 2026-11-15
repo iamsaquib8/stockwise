@@ -220,6 +220,12 @@ pub(crate) struct HybridCache {
 /// The cache shared by Yahoo and an alternative data provider.
 pub(crate) type SharedCache = Arc<tokio::sync::Mutex<HybridCache>>;
 
+/// Clear StockWise's Redis entries when `STOCKWISE_REDIS_URL` is set;
+/// `None` without Redis.
+pub async fn clear_redis_cache() -> Option<u64> {
+    HybridCache::new().await.clear_redis().await
+}
+
 impl HybridCache {
     async fn new() -> Self {
         Self {
@@ -250,6 +256,38 @@ impl HybridCache {
     /// The `cache.db` handle, for storing bars next to cached responses.
     pub(crate) fn l2(&self) -> Option<crate::db::L2> {
         self.l2
+    }
+
+    /// Delete StockWise's own Redis entries (keys under `stockwise:`),
+    /// leaving other data in the same Redis untouched; how many went.
+    /// `None` without Redis.
+    pub(crate) async fn clear_redis(&mut self) -> Option<u64> {
+        let conn = self.redis.as_mut()?;
+        let pattern = format!("{}*", REDIS_KEY_PREFIX);
+        let mut cursor: u64 = 0;
+        let mut removed = 0u64;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query_async(conn)
+                .await
+                .ok()?;
+            if !keys.is_empty() {
+                removed += redis::cmd("DEL")
+                    .arg(&keys)
+                    .query_async::<u64>(conn)
+                    .await
+                    .ok()?;
+            }
+            if next == 0 {
+                return Some(removed);
+            }
+            cursor = next;
+        }
     }
 
     fn has_redis(&self) -> bool {
@@ -880,6 +918,29 @@ fn no_history_message(symbol: &str) -> String {
     msg
 }
 
+/// The last Indian session that has closed: today once the close has
+/// passed on a trading day, else the trading day before.
+fn last_completed_session(now: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
+    use crate::market::Market;
+    let today = crate::clock::local(Market::In, now).date_naive();
+    if crate::clock::close_at(Market::In, today).is_some_and(|close| now >= close) {
+        return today;
+    }
+    let mut day = today;
+    // Exchanges never close for 30 days running.
+    for _ in 0..30 {
+        let Some(prev) = day.pred_opt() else { break };
+        day = prev;
+        if crate::clock::is_trading_day(Market::In, day) {
+            break;
+        }
+    }
+    day
+}
+
+/// Most symbols in one Yahoo quote request.
+const QUOTE_CHUNK: usize = 100;
+
 pub struct YahooClient {
     client: reqwest::Client,
     /// Opened on the first request that needs it (quotes, quoteSummary,
@@ -1141,8 +1202,9 @@ impl YahooClient {
         cache_ttl: Duration,
         extra_headers: &[(&str, &str)],
     ) -> Result<String> {
-        // Check cache first (Redis → memory)
-        {
+        // Check cache first (Redis → memory). A zero TTL means "never
+        // cached": no read and, below, no write.
+        if !cache_ttl.is_zero() {
             let mut cache = self.cache.lock().await;
             if let Some(cached) = cache.get(&cache_key(url)).await {
                 return Ok(cached);
@@ -1207,8 +1269,10 @@ impl YahooClient {
                     if status.is_success() {
                         let body = resp.text().await.context("Failed to read response body")?;
                         // Cache to Redis + memory
-                        let mut cache = self.cache.lock().await;
-                        cache.set(cache_key(url), body.clone(), cache_ttl).await;
+                        if !cache_ttl.is_zero() {
+                            let mut cache = self.cache.lock().await;
+                            cache.set(cache_key(url), body.clone(), cache_ttl).await;
+                        }
                         return Ok(body);
                     }
                     last_status = Some(status);
@@ -1359,7 +1423,55 @@ impl YahooClient {
 
     /// Quotes straight from Yahoo Finance, ignoring any configured provider.
     pub async fn yahoo_quote(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
-        let joined = symbols.join(",");
+        if symbols.len() <= QUOTE_CHUNK {
+            return self.yahoo_quote_chunk(symbols.join(",")).await;
+        }
+        // An index scan (NIFTY 500) is too long for one URL: ask in chunks,
+        // a few at a time, keeping the order. A chunk that fails is skipped
+        // unless every chunk fails.
+        use futures_util::StreamExt;
+        let joined: Vec<(usize, String)> = symbols
+            .chunks(QUOTE_CHUNK)
+            .map(|c| (c.len(), c.join(",")))
+            .collect();
+        let parts: Vec<(usize, Result<Vec<Quote>>)> = futures_util::stream::iter(joined)
+            .map(|(n, j)| async move { (n, self.yahoo_quote_chunk(j).await) })
+            .buffered(4)
+            .collect()
+            .await;
+        let mut out = Vec::new();
+        let mut last_err = None;
+        let (mut failed, mut missing) = (0, 0);
+        for (n, part) in parts {
+            match part {
+                Ok(q) => out.extend(q),
+                Err(e) => {
+                    failed += 1;
+                    missing += n;
+                    last_err = Some(e);
+                }
+            }
+        }
+        match last_err {
+            Some(e) if out.is_empty() => Err(e),
+            Some(e) => {
+                // A partial scan must say so: the ranking misses symbols.
+                eprintln!(
+                    "  \u{24d8} Yahoo Finance did not answer {} of {} quote requests ({:#}); {} symbols are missing.",
+                    failed,
+                    symbols.len().div_ceil(QUOTE_CHUNK),
+                    e,
+                    missing
+                );
+                Ok(out)
+            }
+            None => Ok(out),
+        }
+    }
+
+    /// One Yahoo quote request for at most [`QUOTE_CHUNK`] comma-joined
+    /// symbols.
+    async fn yahoo_quote_chunk(&self, joined: String) -> Result<Vec<Quote>> {
         let url = build_url(
             "https://query2.finance.yahoo.com/v7/finance/quote",
             None,
@@ -1625,6 +1737,132 @@ impl YahooClient {
     /// announced: the caller decides what to fall back to.
     pub async fn index_constituents(&self, index: &str) -> Result<Vec<String>> {
         self.nse_client().constituents(index).await
+    }
+
+    /// End-of-day quotes from BSE's latest bhavcopy for NSE-style symbols
+    /// (`ABB.NS`), the day they are from, and whether that is the last
+    /// completed session (false between the close and BSE posting the
+    /// day's file, when the stored file is a session behind). The file is
+    /// downloaded at most once per trading day (and looked for again at
+    /// most every 30 minutes while a newer one is due), stored in
+    /// `cache.db`. `None` with `cache.db` off, in unit tests, or when no
+    /// day is available.
+    pub async fn bse_eod_quotes(
+        &self,
+        symbols: &[String],
+    ) -> Option<(chrono::NaiveDate, Vec<Quote>, bool)> {
+        if cfg!(test) || crate::db::l2().is_none() {
+            return None;
+        }
+        let due = last_completed_session(chrono::Utc::now());
+        self.refresh_bse_eod(due).await;
+        let (date, _) = crate::db::with_db(|d| d.eod_state()).flatten()?;
+        let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+        // Ticker → the symbol asked for (`ABB.NS` or `ABB.BO`).
+        let asked: HashMap<String, &String> = symbols
+            .iter()
+            .filter_map(|s| {
+                let t = s.strip_suffix(".NS").or_else(|| s.strip_suffix(".BO"))?;
+                Some((t.to_ascii_uppercase(), s))
+            })
+            .collect();
+        let tickers: Vec<String> = asked.keys().cloned().collect();
+        let mut quotes: Vec<Quote> = crate::db::with_db(|d| d.eod_quotes(&tickers))?
+            .into_iter()
+            .filter_map(|(ticker, json)| {
+                let mut q: Quote = serde_json::from_str(&json).ok()?;
+                q.symbol = Some((*asked.get(&ticker)?).clone());
+                Some(q)
+            })
+            .collect();
+        quotes.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        (!quotes.is_empty()).then_some((date, quotes, date >= due))
+    }
+
+    /// Tickers of the stocks in the given BSE listing groups that traded
+    /// at least `min_traded` rupees, from the latest bhavcopy (downloaded
+    /// when due), and its day. `None` as for [`Self::bse_eod_quotes`].
+    pub async fn bse_listed(
+        &self,
+        groups: &[&str],
+        min_traded: f64,
+    ) -> Option<(chrono::NaiveDate, Vec<String>)> {
+        if cfg!(test) || crate::db::l2().is_none() {
+            return None;
+        }
+        self.refresh_bse_eod(last_completed_session(chrono::Utc::now()))
+            .await;
+        let (date, _) = crate::db::with_db(|d| d.eod_state()).flatten()?;
+        let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+        let tickers = crate::db::with_db(|d| d.eod_tickers(groups, min_traded))?;
+        (!tickers.is_empty()).then_some((date, tickers))
+    }
+
+    /// Download the bhavcopy of `due` (the last completed session) when
+    /// the stored one is older; an earlier day when that file is not out.
+    async fn refresh_bse_eod(&self, due: chrono::NaiveDate) {
+        use crate::market::Market;
+        let state = crate::db::with_db(|d| d.eod_state()).flatten();
+        let stored = state
+            .as_ref()
+            .and_then(|(d, _)| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+        if stored.is_some_and(|s| s >= due) {
+            return;
+        }
+        if state
+            .as_ref()
+            .is_some_and(|(_, checked)| chrono::Utc::now().timestamp() - checked < 30 * 60)
+        {
+            return;
+        }
+        // The due day first, then a few trading days back (a file that is
+        // late or missing), never past the stored day.
+        let mut day = due;
+        let mut tries = 0;
+        while tries < 5 && stored.is_none_or(|s| s < day) {
+            if crate::clock::is_trading_day(Market::In, day) {
+                tries += 1;
+                let url = providers::bse_bhav::url(day);
+                if let Ok(body) = self.fetch_with(&url, Duration::ZERO, &[]).await
+                    && let Some((date, rows)) = providers::bse_bhav::parse(&body)
+                    && stored.is_none_or(|s| s < date)
+                {
+                    let json: Vec<crate::db::EodRecord> = rows
+                        .iter()
+                        .filter_map(|r| {
+                            Some((
+                                r.ticker.clone(),
+                                r.group.clone(),
+                                r.traded,
+                                serde_json::to_string(&r.to_quote(date)).ok()?,
+                            ))
+                        })
+                        .collect();
+                    let d = date.format("%Y-%m-%d").to_string();
+                    // A failed store falls through to the 30-minute throttle.
+                    if crate::db::with_db(|db| db.put_eod(&d, &json)).is_some() && date >= due {
+                        return;
+                    }
+                    break;
+                }
+            }
+            let Some(prev) = day.pred_opt() else { break };
+            day = prev;
+        }
+        // The due file is not out yet: look again in 30 minutes.
+        crate::db::with_db(|d| d.touch_eod());
+    }
+
+    /// An NSE index's members from niftyindices.com's CSV (members only,
+    /// alphabetical). Never cached (zero TTL: no cache read or write): the
+    /// site answers some requests with an HTML page and HTTP 200, which
+    /// must not be served again.
+    pub async fn index_members_csv(&self, index: &str) -> Result<Vec<String>> {
+        let url = providers::niftyindices::csv_url(index)
+            .ok_or_else(|| anyhow::anyhow!("niftyindices.com has no member list for {}", index))?;
+        let body = self.fetch_with(&url, Duration::ZERO, &[]).await?;
+        providers::niftyindices::parse_members(&body)
+            .ok_or_else(|| anyhow::anyhow!("niftyindices.com's {} list is not a member CSV", index))
     }
 
     /// An NSE index with its members' quotes from one bulk request (NIFTY 500
@@ -2374,6 +2612,106 @@ mod tests {
         let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url));
         assert!(!client.has_router());
         assert!(client.get_quote(&["AAPL"]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn yahoo_quote_asks_in_chunks_and_keeps_what_answered() {
+        let body = |sym: &str| {
+            format!(
+                r#"{{"quoteResponse":{{"result":[{{"symbol":"{sym}","quoteType":"EQUITY","regularMarketPrice":10.0}}],"error":null}}}}"#
+            )
+        };
+        let symbols: Vec<String> = (0..150).map(|i| format!("S{i}.NS")).collect();
+        let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+
+        // 150 symbols: two requests, both answers kept.
+        let server =
+            crate::testutil::MockServer::start(vec![(200, body("A.NS")), (200, body("B.NS"))])
+                .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        let mut got: Vec<String> = client
+            .yahoo_quote(&refs)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|q| q.symbol)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["A.NS", "B.NS"]);
+
+        // One request refused: the other's quotes still come back.
+        let server =
+            crate::testutil::MockServer::start(vec![(200, body("A.NS")), (404, String::new())])
+                .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        assert_eq!(client.yahoo_quote(&refs).await.unwrap().len(), 1);
+
+        // Every request refused: an error, not an empty scan.
+        let server =
+            crate::testutil::MockServer::start(vec![(404, String::new()), (404, String::new())])
+                .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        assert!(client.yahoo_quote(&refs).await.is_err());
+    }
+
+    #[test]
+    fn last_completed_session_follows_the_indian_close() {
+        use chrono::TimeZone;
+        let ist = chrono::FixedOffset::east_opt(19_800).unwrap();
+        let at = |d: u32, h: u32, m: u32| {
+            ist.with_ymd_and_hms(2026, 11, d, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let day = |d: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        // Thursday 12 Nov 2026: before the close the last session is
+        // Wednesday's, after it Thursday's.
+        assert_eq!(last_completed_session(at(12, 11, 0)), day(11));
+        assert_eq!(last_completed_session(at(12, 15, 45)), day(12));
+        // Sunday: Friday's.
+        assert_eq!(last_completed_session(at(15, 12, 0)), day(13));
+    }
+
+    #[tokio::test]
+    async fn index_members_come_from_the_niftyindices_csv_and_html_is_refused() {
+        let csv = "Company Name,Industry,Symbol,Series,ISIN Code\n\
+                   HDFC Bank Ltd.,Financial Services,HDFCBANK,EQ,INE040A01034\n\
+                   ICICI Bank Ltd.,Financial Services,ICICIBANK,EQ,INE090A01021\n";
+        let html = "<!DOCTYPE html><html><body>Error 404</body></html>";
+        let server = crate::testutil::MockServer::start(vec![
+            (200, csv.into()),
+            (200, html.into()),
+            (200, csv.into()),
+        ])
+        .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        assert_eq!(
+            client.index_members_csv("NIFTY BANK").await.unwrap(),
+            ["HDFCBANK.NS", "ICICIBANK.NS"]
+        );
+        // A 200 with an HTML page is an error, and is not served again.
+        assert!(client.index_members_csv("NIFTY BANK").await.is_err());
+        assert_eq!(
+            client.index_members_csv("NIFTY BANK").await.unwrap().len(),
+            2
+        );
+        assert!(client.index_members_csv("SENSEX").await.is_err());
     }
 
     #[tokio::test]

@@ -1642,6 +1642,13 @@ pub async fn cmd_results(
             }
             (s, "portfolio and watchlist".to_string())
         } else {
+            // One statements request per company: an NSE index, not the
+            // thousands of stocks of a whole exchange.
+            if universe.is_some_and(|u| u.bse_groups().is_some()) {
+                bail!(
+                    "results --universe takes an NSE index (nifty50 ... smallcap250), not bse or all"
+                );
+            }
             let scan = super::markets::scan_symbols(&client, market, universe).await?;
             (scan.symbols, scan.scope)
         };
