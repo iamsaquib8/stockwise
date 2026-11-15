@@ -135,7 +135,7 @@ Add `--explain` to `options oi` for plain-English notes.
 - Want to test a rule on past prices? See
   [Backtest and practise on past markets](guide-practice.md).
 - Want an assistant to run these lookups for you? See
-  [Use StockWise from Claude or Cursor](guide-mcp.md).
+  [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md).
 - Every option for these commands is in the commands reference:
   [Analysis](commands.md#analysis), [Market](commands.md#market) and
   [Funds and F&O](commands.md#funds--fo).

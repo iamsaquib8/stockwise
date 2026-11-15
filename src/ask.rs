@@ -8,13 +8,17 @@
 //! what it has. Each provider speaks its own tool-calling dialect:
 //! Ollama `/api/chat`, the OpenAI Responses API, Anthropic Messages and
 //! Gemini `generateContent`.
+//!
+//! A [`Chat`] can carry on over several questions (`ask -i`) and be saved
+//! and resumed (`ask -c`, `--resume`): before each new question, older tool
+//! results are trimmed so the history stays small.
 
 use crate::ai::{AiClient, AiProvider, CLOUD_MAX_TOKENS};
 use crate::tools::{NOTE, Tool, ToolContext};
 use crate::views::DataSource;
 use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Context window asked of Ollama: tool definitions alone take a few
@@ -54,6 +58,45 @@ impl Default for AskOptions {
     }
 }
 
+/// A prepared task for `ask --playbook`: a fixed request that names the
+/// tools to use, so the same checkup runs the same way each time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Playbook {
+    /// Portfolio checkup: value, concentration against the profile, risk, dates ahead
+    Checkup,
+    /// Capital gains so far this year, loss harvesting, advance tax
+    TaxSeason,
+    /// Results and dividend dates ahead for holdings and the watchlist, and recent results
+    Earnings,
+}
+
+impl Playbook {
+    /// The request sent as the first question.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Self::Checkup => {
+                "Give me a checkup of my portfolio. Use portfolio_analyze first, then calendar \
+for my holdings and alerts_list. Report: total value, profit or loss and XIRR; the split by \
+market, currency, cap tier and sector; any holding or the small-cap share above my profile's \
+limits; holdings with missing prices; results or dividend dates in the next 30 days; and alerts \
+close to triggering. End with up to three questions I could look into next. Facts only."
+            }
+            Self::TaxSeason => {
+                "Prepare my capital-gains picture for the current financial year. Use \
+tax_estimate, harvest and tax_advance. Report realised gains and losses by short and long term, \
+the section 112A exemption used and still left, unrealised losses that could offset gains (as \
+facts), and the advance-tax dates and amounts due. Remind me these are estimates from the lots \
+StockWise has recorded, to check against my broker's tax P&L."
+            }
+            Self::Earnings => {
+                "Look at results season for my holdings and watchlist. Use calendar for dates in \
+the next 30 days, and quarterly_results for those that reported in the last 30 days: revenue, \
+profit and margin against the same quarter a year ago. Facts only, one line a stock."
+            }
+        }
+    }
+}
+
 /// What `ask --json` prints.
 #[derive(Debug, Serialize)]
 pub struct Transcript {
@@ -65,6 +108,9 @@ pub struct Transcript {
     pub usage: Usage,
     /// Why the model had to answer before it was done, if it did.
     pub stopped_early: Option<String>,
+    /// The saved conversation this turn belongs to (`ask -c`, `--resume`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<i64>,
     pub note: &'static str,
 }
 
@@ -97,11 +143,40 @@ impl Usage {
 
 /// The system prompt: the shared educational rules, then what the
 /// assistant may do and how to answer.
-pub fn system_prompt(market: crate::market::Market) -> String {
+pub fn system_prompt(market: crate::market::Market, can_change: bool) -> String {
     let today = chrono::Local::now().format("%A %d %B %Y").to_string();
-    crate::ai::prompts::ask(&market_code(market), &today)
+    crate::ai::prompts::ask(
+        &market_code(market),
+        &today,
+        &profile_line(&crate::config::effective_profile()),
+        can_change,
+    )
 }
 
+/// One paragraph on the user's investor profile for the system prompt.
+pub fn profile_line(p: &crate::config::EffectiveProfile) -> String {
+    use crate::config::Source;
+    let mut line = format!(
+        "The user's investor profile: {} (mode {}, risk {}), horizon {} years, largest weight of \
+one stock {:.0}%, small and micro caps together {:.0}%, tax slab {:.0}% ({} regime). Use it to \
+pick what matters to them, and measure concentration against these limits.",
+        p.label,
+        p.mode.as_str(),
+        p.risk.as_str(),
+        p.horizon_years,
+        p.max_stock_weight,
+        p.max_smallcap_weight,
+        p.tax_slab,
+        p.tax_regime.as_str(),
+    );
+    if p.mode_source == Source::Default && p.risk_source == Source::Default {
+        line.push_str(
+            " These are defaults: the user has not set up a profile. When it matters, mention \
+that profile_questions (or `stockwise profile set`) sets it up.",
+        );
+    }
+    line
+}
 fn market_code(market: crate::market::Market) -> String {
     use clap::ValueEnum;
     market
@@ -134,7 +209,7 @@ struct Reply {
 }
 
 /// A conversation in one provider's format.
-struct Chat {
+pub struct Chat {
     provider: AiProvider,
     model: String,
     system: String,
@@ -143,27 +218,119 @@ struct Chat {
     fallbacks: bool,
 }
 
+/// A chat as it is saved between runs: the provider and model it belongs
+/// to, and its history in that provider's format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedChat {
+    pub provider: String,
+    pub model: String,
+    pub history: Vec<Value>,
+}
+
+/// Tool results longer than this are trimmed once a new question starts.
+const KEEP_RESULT_BYTES: usize = 1_500;
+
 impl Chat {
-    fn new(ai: &AiClient, system: String, question: &str) -> Self {
+    /// A new chat with no messages yet.
+    pub fn new(ai: &AiClient, system: String) -> Self {
         let provider = ai.provider();
-        let first = match provider {
-            AiProvider::Ollama | AiProvider::Anthropic => {
-                json!({"role": "user", "content": question})
-            }
-            AiProvider::OpenAi => json!({"role": "user", "content": question}),
-            AiProvider::Gemini => json!({"role": "user", "parts": [{"text": question}]}),
-        };
         let mut history = Vec::new();
         if provider == AiProvider::Ollama {
             history.push(json!({"role": "system", "content": system}));
         }
-        history.push(first);
         Self {
             provider,
             model: ai.model().to_string(),
             system,
             history,
             fallbacks: ai.anthropic_fallbacks(),
+        }
+    }
+
+    /// A saved chat, carried on with `ai` (which must be the same provider
+    /// and model) and a fresh system prompt.
+    pub fn resume(ai: &AiClient, system: String, saved: SavedChat) -> Result<Self> {
+        let provider = ai.provider();
+        if saved.provider != provider.name() || saved.model != ai.model() {
+            bail!(
+                "That conversation was with {} ({}); this run uses {} ({}). Set \
+STOCKWISE_AI_PROVIDER and STOCKWISE_MODEL to match, or start a new one.",
+                saved.provider,
+                saved.model,
+                provider.name(),
+                ai.model()
+            );
+        }
+        let mut chat = Self::new(ai, system);
+        let rest = saved
+            .history
+            .into_iter()
+            .filter(|m| !(provider == AiProvider::Ollama && m["role"] == "system"));
+        chat.history.extend(rest);
+        Ok(chat)
+    }
+
+    /// The chat to save.
+    pub fn saved(&self) -> SavedChat {
+        SavedChat {
+            provider: self.provider.name().to_string(),
+            model: self.model.clone(),
+            history: self.history.clone(),
+        }
+    }
+
+    /// Whether any question has been asked yet.
+    pub fn is_empty(&self) -> bool {
+        !self.history.iter().any(|m| m["role"] == "user")
+    }
+
+    /// Add the user's next question.
+    fn push_user(&mut self, question: &str) {
+        self.trim_old_results();
+        let msg = match self.provider {
+            AiProvider::Gemini => json!({"role": "user", "parts": [{"text": question}]}),
+            _ => json!({"role": "user", "content": question}),
+        };
+        self.history.push(msg);
+    }
+
+    /// Replace long tool results already in the history by a short note:
+    /// the answers that used them stay, and the model can call again.
+    fn trim_old_results(&mut self) {
+        let note = "earlier tool result, trimmed; call the tool again if you need it";
+        let long = |v: &Value| match v {
+            Value::String(s) => s.len() > KEEP_RESULT_BYTES,
+            other => other.to_string().len() > KEEP_RESULT_BYTES,
+        };
+        for m in &mut self.history {
+            match self.provider {
+                AiProvider::Ollama if m["role"] == "tool" && long(&m["content"]) => {
+                    m["content"] = json!(note);
+                }
+                AiProvider::OpenAi if m["type"] == "function_call_output" && long(&m["output"]) => {
+                    m["output"] = json!(note);
+                }
+                AiProvider::Anthropic => {
+                    if let Some(blocks) = m["content"].as_array_mut() {
+                        for b in blocks {
+                            if b["type"] == "tool_result" && long(&b["content"]) {
+                                b["content"] = json!(note);
+                            }
+                        }
+                    }
+                }
+                AiProvider::Gemini => {
+                    if let Some(parts) = m["parts"].as_array_mut() {
+                        for p in parts {
+                            let r = &mut p["functionResponse"]["response"];
+                            if !r.is_null() && long(r) {
+                                *r = json!({ "note": note });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -541,10 +708,23 @@ fn explain(e: anyhow::Error, ai: &AiClient) -> anyhow::Error {
 /// clients space their requests themselves, so this only overlaps the waiting.
 const MAX_PARALLEL_TOOLS: usize = 4;
 
-/// Answer `question` with the tools in `ctx`.
+/// Answer `question` with the tools in `ctx`, in a new chat.
 pub async fn ask<D: DataSource>(
     ai: &AiClient,
     ctx: &ToolContext<D>,
+    question: &str,
+    opts: &AskOptions,
+) -> Result<Transcript> {
+    let mut chat = Chat::new(ai, system_prompt(ctx.market, ctx.workspace.is_some()));
+    ask_in(ai, ctx, &mut chat, question, opts).await
+}
+
+/// Answer `question` as the next turn of `chat`. On an error the chat is
+/// left as it was before the question.
+pub async fn ask_in<D: DataSource>(
+    ai: &AiClient,
+    ctx: &ToolContext<D>,
+    chat: &mut Chat,
     question: &str,
     opts: &AskOptions,
 ) -> Result<Transcript> {
@@ -552,8 +732,23 @@ pub async fn ask<D: DataSource>(
     if question.is_empty() {
         bail!("Ask a question, e.g. stockwise ask \"how did my portfolio do this month?\"");
     }
+    let before = chat.history.clone();
+    chat.push_user(question);
+    let out = turn(ai, ctx, chat, question, opts).await;
+    if out.is_err() {
+        chat.history = before;
+    }
+    out
+}
+
+async fn turn<D: DataSource>(
+    ai: &AiClient,
+    ctx: &ToolContext<D>,
+    chat: &mut Chat,
+    question: &str,
+    opts: &AskOptions,
+) -> Result<Transcript> {
     let tools = ctx.tools();
-    let mut chat = Chat::new(ai, system_prompt(ctx.market), question);
     let mut t = Transcript {
         question: question.to_string(),
         provider: ai.provider().name(),
@@ -562,6 +757,7 @@ pub async fn ask<D: DataSource>(
         steps: Vec::new(),
         usage: Usage::default(),
         stopped_early: None,
+        session: None,
         note: NOTE,
     };
     // Estimated length of the next prompt, in tokens (for a model whose

@@ -48,7 +48,7 @@ try it safely.
 | Estimate my capital-gains tax and fill my ITR | [File your Indian capital-gains tax](guide-tax.md) |
 | Check a stock or fund quickly | [Check a stock or fund fast](guide-research.md) |
 | Put new money where I am underweight | [Rebalance to target weights](guide-rebalance.md) |
-| Ask Claude or Cursor about my portfolio | [Use StockWise from Claude or Cursor](guide-mcp.md) |
+| Ask Claude or Cursor about my portfolio | [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md) |
 | Get a message when a price or RSI level is reached | [Set up alerts and the daemon](guide-alerts.md) |
 | Test an idea on past data, or practise with paper money | [Backtest and practise on past markets](guide-practice.md) |
 | Use the numbers in a script or spreadsheet | [Script it with JSON, CSV and jq](guide-scripting.md) |

@@ -73,7 +73,7 @@ claude mcp add stockwise -- stockwise mcp
 ```
 
 This adds StockWise to Claude Code. Claude Desktop and Cursor need a small JSON
-entry instead; see [Use StockWise from Claude or Cursor](guide-mcp.md). The
+entry instead; see [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md). The
 server only reads. It cannot place orders.
 
 ## Next steps

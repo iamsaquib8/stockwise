@@ -22,14 +22,103 @@ fn ask_unavailable(ai: &AiClient) -> String {
     )
 }
 
+/// Which conversation `ask` carries on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskSession {
+    New,
+    Latest,
+    Id(i64),
+}
+
+/// What the user asked `ask` to do.
+#[derive(Debug, Clone)]
+pub struct AskRequest {
+    pub question: String,
+    pub interactive: bool,
+    pub session: AskSession,
+    pub playbook: Option<ask::Playbook>,
+    pub auto: bool,
+}
+
+/// `text` cut to `max` characters, with an ellipsis when cut.
+fn short(text: &str, max: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max {
+        return one_line;
+    }
+    let mut s: String = one_line.chars().take(max.saturating_sub(1)).collect();
+    s.push('…');
+    s
+}
+
+/// `stockwise ask --sessions`.
+pub fn cmd_ask_sessions(json: bool) -> Result<()> {
+    let sessions = crate::db::with_db(|db| db.sessions(30))
+        .context("Saved conversations need the cache database (cache.db), which is off")?;
+    if json {
+        return output::print_json(&sessions);
+    }
+    print_header("Saved conversations");
+    if sessions.is_empty() {
+        println!(
+            "  {}",
+            "None yet. Ask something: stockwise ask \"...\"".dimmed()
+        );
+    }
+    for s in &sessions {
+        let when = chrono::DateTime::from_timestamp(s.updated_at, 0)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        println!(
+            "  #{:<4} {}  {:<3} {}  {}",
+            s.id,
+            when,
+            s.turns,
+            short(&s.title, 48),
+            format!("{} {}", s.provider, s.model).dimmed()
+        );
+    }
+    println!();
+    println!(
+        "  {}",
+        "Carry one on: stockwise ask --resume ID \"...\" (or -c for the newest)".dimmed()
+    );
+    println!();
+    Ok(())
+}
+
 /// `stockwise ask`.
-pub async fn cmd_ask(question: &str, opts: AskOptions, market: Market, json: bool) -> Result<()> {
+pub async fn cmd_ask(req: AskRequest, opts: AskOptions, market: Market, json: bool) -> Result<()> {
+    let mut first = req.question.trim().to_string();
+    if let Some(p) = req.playbook {
+        first = if first.is_empty() {
+            p.prompt().to_string()
+        } else {
+            format!("{} Also: {}", p.prompt(), first)
+        };
+    }
+    if first.is_empty() && !req.interactive {
+        bail!(
+            "Ask a question, e.g. stockwise ask \"how did my portfolio do this month?\" \
+             (or -i for a conversation, --playbook checkup for a portfolio checkup)"
+        );
+    }
+    if req.interactive && json {
+        bail!("--json answers one question; leave it off with -i");
+    }
     // Running `ask` is the opt-in, as for `report`.
     let ai = AiClient::connect_explicit().await;
     if !ai.is_available().await {
         bail!("{}", ask_unavailable(&ai));
     }
     let mut ctx = ToolContext::new(views::LiveSource::new(), market);
+    if req.auto {
+        ctx.workspace = Some(crate::tools::Workspace::for_user("ask", false)?);
+    }
     if ai.provider().is_cloud() {
         eprintln!(
             "  \u{24d8} {} also receives what the tools return — including your holdings, lots \
@@ -46,21 +135,112 @@ pub async fn cmd_ask(question: &str, opts: AskOptions, market: Market, json: boo
             );
         }
     }
-    {
-        use std::io::IsTerminal;
-        if !json && std::io::stderr().is_terminal() {
-            eprintln!(
-                "  {} Asking {} ({}); it can call StockWise's read-only tools…",
-                "⟳".dimmed(),
-                ai.model(),
-                ai.provider().name()
-            );
+    let system = ask::system_prompt(market, req.auto);
+    let (mut chat, mut session) = match req.session {
+        AskSession::New => (ask::Chat::new(&ai, system), None),
+        wanted => {
+            let id = match wanted {
+                AskSession::Id(id) => Some(id),
+                _ => None,
+            };
+            let row = crate::db::with_db(|db| db.session(id))
+                .context("Saved conversations need the cache database (cache.db), which is off")?
+                .with_context(|| match id {
+                    Some(id) => {
+                        format!("No saved conversation #{id} (see stockwise ask --sessions)")
+                    }
+                    None => "No saved conversation yet; ask without -c to start one".to_string(),
+                })?;
+            let saved: ask::SavedChat = serde_json::from_str(&row.chat_json)
+                .context("That saved conversation cannot be read")?;
+            (ask::Chat::resume(&ai, system, saved)?, Some(row.id))
         }
+    };
+    let can_change = if req.auto {
+        "read and change your workspace (undo: stockwise undo)"
+    } else {
+        "only read"
+    };
+    let interactive_terminal = {
+        use std::io::IsTerminal;
+        !json && std::io::stderr().is_terminal()
+    };
+    if interactive_terminal {
+        eprintln!(
+            "  {} {} ({}); its StockWise tools {}{}",
+            "⟳".dimmed(),
+            ai.model(),
+            ai.provider().name(),
+            can_change,
+            match session {
+                Some(id) => format!("; conversation #{id}"),
+                None => String::new(),
+            }
+        );
     }
-    let t = ask::ask(&ai, &ctx, question, &opts).await?;
-    if json {
-        return output::print_json(&t);
+    let title = if first.is_empty() {
+        "conversation".to_string()
+    } else if let Some(p) = req.playbook {
+        format!("playbook {:?}", p).to_lowercase()
+    } else {
+        first.clone()
+    };
+    let mut next = (!first.is_empty()).then_some(first);
+    loop {
+        let question = match next.take() {
+            Some(q) => q,
+            None => {
+                if !req.interactive {
+                    return Ok(());
+                }
+                eprint!("{} ", "you ›".cyan().bold());
+                use std::io::Write;
+                std::io::stderr().flush().ok();
+                let mut line = String::new();
+                if std::io::stdin().read_line(&mut line)? == 0 {
+                    eprintln!();
+                    return Ok(());
+                }
+                let line = line.trim();
+                if matches!(line, "exit" | "quit" | "/exit" | "/quit") {
+                    return Ok(());
+                }
+                if line.is_empty() {
+                    continue;
+                }
+                line.to_string()
+            }
+        };
+        let mut t = match ask::ask_in(&ai, &ctx, &mut chat, &question, &opts).await {
+            Ok(t) => t,
+            Err(e) if req.interactive => {
+                eprintln!("  {} {:#}", "✗".red(), e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        // Save after each answer; a missing cache.db only loses the history.
+        if let Ok(saved) = serde_json::to_string(&chat.saved()) {
+            session = crate::db::with_db(|db| {
+                db.save_session(
+                    session,
+                    &short(&title, 80),
+                    ai.provider().name(),
+                    ai.model(),
+                    &saved,
+                )
+            })
+            .or(session);
+        }
+        t.session = session;
+        if json {
+            return output::print_json(&t);
+        }
+        print_answer(&t);
     }
+}
+
+fn print_answer(t: &ask::Transcript) {
     println!("\n{}\n", t.answer);
     let mut used: Vec<String> = Vec::new();
     for s in &t.steps {
@@ -76,15 +256,30 @@ pub async fn cmd_ask(question: &str, opts: AskOptions, market: Market, json: boo
     if let Some(why) = &t.stopped_early {
         println!("  {}", format!("Stopped early: {why}.").yellow());
     }
+    let changed = t
+        .steps
+        .iter()
+        .filter(|s| s.ok && crate::tools::access(&s.tool) != crate::tools::Access::Read)
+        .count();
+    if changed > 0 {
+        println!(
+            "  {}",
+            format!("{changed} change(s) made; stockwise undo --list shows them.").yellow()
+        );
+    }
     println!(
         "  {}\n",
         format!(
-            "{} · {} ({}) · educational, not financial advice",
-            tools, t.model, t.provider
+            "{} · {} ({}){} · educational, not financial advice",
+            tools,
+            t.model,
+            t.provider,
+            t.session
+                .map(|id| format!(" · conversation #{id}, carry on with -c"))
+                .unwrap_or_default()
         )
         .dimmed()
     );
-    Ok(())
 }
 
 /// `stockwise mcp`.

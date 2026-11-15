@@ -1,4 +1,4 @@
-# Use StockWise from Claude or Cursor
+# Use StockWise from Claude, Gemini, Codex or Cursor
 
 This guide connects an AI assistant to StockWise so you can ask questions about
 quotes, your portfolio and your tax estimate in plain English. It takes about
@@ -9,19 +9,30 @@ server. Your assistant starts it on your machine. The server reads your local
 StockWise data and answers with JSON. It needs no account and no API key.
 
 You need: StockWise installed (see [Install](install.md)) and an MCP client:
-Claude Code, Claude Desktop, Cursor or another.
+Claude Desktop or Claude Code, OpenAI Codex, Gemini CLI, Google Antigravity,
+Cursor, Windsurf, VS Code, Cline, Zed, LM Studio, opencode, Goose, Continue
+or another.
 
 ## What the assistant can and cannot do
 
-- **It can read.** The 35 tools cover quotes, history, technicals, risk,
-  scorecards, events, mutual funds, option chains, IPOs, screens, backtests,
-  your portfolio and lots, tax estimate, advance tax, harvest and rebalance
-  plans, calendar, watchlist and alerts.
+- **It can read.** The 52 read tools cover quotes, history, technicals, risk,
+  scorecards, events, mutual funds, option chains, IPOs, screens, picks,
+  market conditions, backtests, your portfolio dashboard and lots, tax
+  estimate, advance tax, harvest and rebalance plans, calendar, goals,
+  watchlist and alerts.
+- **It can check a stock against your own rules.** Ask "does TCS fit my
+  rules?" and `fit_check` answers yes, no or unclear from your profile's
+  limits and your notes, rule by rule. It is not a recommendation: it never
+  says buy or sell.
 - **It cannot place orders.** The server never places, changes or cancels an
   order and never reads broker credentials. The optional `--allow-orders` flag
   adds one tool that only checks an order and returns a command such as
   `stockwise trade buy TCS 2 --limit 4000` for you to review and run yourself.
-- **It cannot change your data.** Every tool only reads.
+- **It changes your data only if you allow it.** By default every tool only
+  reads. With `--allow-writes` it can also set up your profile and change your
+  watchlist, alerts, goals, targets and notes; with `--allow-portfolio` it can
+  record purchase lots and sales. Each change is journalled, and
+  `stockwise undo` reverses it.
 
 One point on privacy. The server runs on your machine, but a hosted assistant
 sends what its tools return to its own model provider. If you ask about your
@@ -29,6 +40,29 @@ portfolio, the holdings go with the question. If that is a problem, use
 `stockwise ask "question"`, which can run a local model through Ollama. See [AI](ai.md).
 
 ## 1. Connect your client
+
+The quickest way is one command. It finds the AI apps on your computer and
+adds StockWise to each:
+
+```bash
+stockwise connect --list          # the apps it knows, and which it found
+stockwise connect                 # connect every app it found
+stockwise connect antigravity     # or name the apps
+```
+
+It edits only the `stockwise` entry of each app's config, keeps a backup next
+to it (`<file>.stockwise.bak`), and installs the StockWise skill for Claude
+Code and Antigravity. Add `--allow-writes` to let the assistant change your
+watchlist, alerts, goals and profile. Restart each app afterwards.
+`stockwise connect cursor --remove` takes it out again.
+
+Google Antigravity keeps its servers in `~/.gemini/antigravity/mcp_config.json`
+(on some installs a link to `~/.gemini/config/mcp_config.json`; `connect`
+writes through the link). Each user account has its own, so for a second
+profile on the same computer, run `stockwise connect antigravity` signed in
+as that user.
+
+To edit the configs by hand instead:
 
 Claude Code:
 
@@ -51,8 +85,20 @@ restart the app.
 }
 ```
 
-Cursor: put the same JSON in `~/.cursor/mcp.json`, or in `.cursor/mcp.json`
-inside a project.
+Cursor, Windsurf, Gemini CLI, Antigravity, LM Studio and Cline use the same
+`mcpServers` JSON, in `~/.cursor/mcp.json`, `~/.codeium/windsurf/mcp_config.json`,
+`~/.gemini/settings.json`, `~/.gemini/antigravity/mcp_config.json`,
+`~/.lmstudio/mcp.json` and Cline's MCP settings. VS Code uses `"servers"`
+with `"type": "stdio"`; Zed `"context_servers"`; opencode `"mcp"` with
+`"type": "local"` and the command as a list.
+
+OpenAI Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.stockwise]
+command = "stockwise"
+args = ["mcp"]
+```
 
 If the client cannot find the command, use the full path from `which
 stockwise` (`where stockwise` on Windows) as `command`.
@@ -96,6 +142,20 @@ Questions that work well, grouped by what they use:
 | "If I invest another ₹50,000, how should it be split to match my targets?" | `rebalance` |
 | "How risky has HDFCBANK been over the last year?" | `risk` |
 | "Explain the NIFTY option chain for this expiry in plain English." | `options_chain`, `options_oi` |
+| "Show my portfolio by market, sector and cap tier, and what stands out." | `portfolio_analyze` |
+| "Is the market expensive or stretched right now?" | `market_conditions` (readings, not a timing call) |
+| "Does INFY fit my rules if I put ₹50,000 in?" | `fit_check` |
+| "Which NIFTY 50 stocks score best on value and quality?" | `picks` |
+
+With `--allow-writes`:
+
+| Ask | Tools used |
+|---|---|
+| "Set up my investor profile." | `profile_questions`, then `profile_onboard` |
+| "Add TCS and INFY to my watchlist and alert me if TCS falls below 3,800." | `watchlist_add`, `alert_add` |
+| "Save a goal: 25 lakh for a house by June 2030." | `goal_save` |
+| "Note my thesis on HDFCBANK, with a P/E limit of 22." | `note_set` |
+| "What did you change today?" | `changes_list` |
 
 Ready-made prompts are built in. In clients that support MCP prompts, pick one
 from the prompt menu:
@@ -104,6 +164,8 @@ from the prompt menu:
   sell calls.
 - `tax_harvest_check` for unrealised gains and losses by lot before 31 March.
 - `explain_option_chain` for an option chain in plain words.
+- `onboard_profile` asks a few plain questions and saves your profile (needs
+  `--allow-writes`).
 
 The server also offers three resources: `stockwise://portfolio`,
 `stockwise://watchlist` and `stockwise://alerts`.

@@ -146,6 +146,13 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | See which tools it ran | `stockwise ask "compare TCS and INFY on RSI and risk" --verbose` |
 | MCP server for Claude, Cursor and other assistants | `stockwise mcp` |
 | Add it to Claude Code | `claude mcp add stockwise -- stockwise mcp` |
+| Add it to every AI app on this computer (Claude, Codex, Gemini, Antigravity, Cursor, VS Code, ...) | `stockwise connect` |
+| Just some apps, and let them change the watchlist, alerts, goals and profile | `stockwise connect antigravity cursor --allow-writes` |
+| Which apps it knows and where their configs are | `stockwise connect --list` |
+| Carry on the last question, or a conversation | `stockwise ask -c "and INFY?"` / `stockwise ask -i` |
+| A prepared portfolio checkup | `stockwise ask --playbook checkup` |
+| Let `ask` change your watchlist, alerts and goals | `stockwise ask --auto "add TCS to my watchlist"` |
+| Undo an assistant's change | `stockwise undo` / `stockwise undo --list` |
 | The MCP tools and their schemas | `stockwise mcp --list-tools` |
 | MCP over HTTP | `stockwise mcp --http 127.0.0.1:8788` |
 

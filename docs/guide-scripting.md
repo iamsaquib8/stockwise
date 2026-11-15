@@ -127,7 +127,7 @@ stockwise completions zsh > ~/.zfunc/_stockwise
 
 ## Next steps
 
-- [Use StockWise from Claude or Cursor](guide-mcp.md) for the same data through
+- [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md) for the same data through
   an assistant.
 - [Rebalance to target weights](guide-rebalance.md) and
   [File your Indian capital-gains tax](guide-tax.md) both print JSON you can

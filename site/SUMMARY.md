@@ -14,7 +14,7 @@
   - [File your Indian capital-gains tax](guide-tax.md)
   - [Check a stock or fund fast](guide-research.md)
   - [Rebalance to target weights](guide-rebalance.md)
-  - [Use StockWise from Claude or Cursor](guide-mcp.md)
+  - [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md)
   - [Set up alerts and the daemon](guide-alerts.md)
   - [Backtest and practise on past markets](guide-practice.md)
   - [Script it with JSON, CSV and jq](guide-scripting.md)

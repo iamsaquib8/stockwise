@@ -3,7 +3,7 @@
   "name": "stockwise",
   "display_name": "StockWise",
   "version": "0.0.0",
-  "description": "Indian (NSE/BSE) and US stock data, mutual funds, F&O, your portfolio and tax as read-only tools.",
+  "description": "Indian and US stocks, funds, F&O, your portfolio, tax, goals and watchlist for AI assistants.",
   "long_description": "StockWise is a stock market toolkit for the terminal. This extension runs its MCP server locally: quotes, price history, technical indicators, risk, Indian mutual funds (AMFI NAVs, SIP returns), F&O option chains and strategy payoffs, screens, backtests, and your own StockWise portfolio, lots, capital-gains estimate, calendar, watchlist and alerts. Every tool only reads data; nothing places orders. Market data comes from Yahoo Finance, NSE/BSE and AMFI; your portfolio stays in local files. Educational information, not financial advice.",
   "author": {
     "name": "iamsaquib8",

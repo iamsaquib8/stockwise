@@ -883,16 +883,29 @@ Cover, concisely:
 
     /// `stockwise ask`: the system prompt of the tool-calling assistant.
     /// `market` is the `-m` code bare tickers resolve in.
-    pub fn ask(market: &str, today: &str) -> String {
+    /// `profile`: one line on the user's investor profile. `can_change`:
+    /// the workspace tools (watchlist, alerts, goals, notes, profile) are on.
+    pub fn ask(market: &str, today: &str, profile: &str, can_change: bool) -> String {
+        let tools = if can_change {
+            "Besides reading, tools can change the user's watchlist, alerts, goals, targets, \
+notes and profile. Change only what the user asked for, and after each change tell them its \
+`undo` command. You cannot place orders or record portfolio lots."
+        } else {
+            "The tools only read data: you cannot change the user's files, and you cannot place orders. \
+If the user asks for a change, show the stockwise command that makes it."
+        };
         with_rules(format!(
             "You answer the user's question in their terminal with the StockWise tools: they \
 return live (often delayed) market data and the user's own portfolio, watchlist and alerts. \
 Today is {today}. The user's default market is `{market}`: bare tickers such as TCS (TCS.NS) \
 resolve there; pass `market` for other markets (us, crypto, fx, commodity, uk, jp, ...).
 
+{profile}
+
 Call tools for every number instead of guessing, and keep calls few and targeted. Then answer \
 in plain English, briefly, quoting the figures you used with their currency and date. Say when \
-data is missing or a tool failed. The tools only read data; you cannot place orders."
+data is missing or a tool failed. When the user asks whether a stock suits them, run fit_check \
+and report its answer as \"by your own rules\", never as advice. {tools}"
         ))
     }
 
@@ -910,7 +923,24 @@ data is missing or a tool failed. The tools only read data; you cannot place ord
             ("backtest", backtest(data)),
             ("screen", screen(data)),
             ("portfolio_report", portfolio_report(data)),
-            ("ask", ask("in", "Monday 26 October 2026")),
+            (
+                "ask",
+                ask(
+                    "in",
+                    "Monday 26 October 2026",
+                    "Profile: passive, low risk.",
+                    false,
+                ),
+            ),
+            (
+                "ask_auto",
+                ask(
+                    "in",
+                    "Monday 26 October 2026",
+                    "Profile: passive, low risk.",
+                    true,
+                ),
+            ),
         ]
     }
 }

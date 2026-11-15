@@ -15,7 +15,7 @@ minutes.
 | Estimate my capital-gains tax and fill my ITR | [File your Indian capital-gains tax](guide-tax.md) | `tax in`, `harvest`, `tax advance`, `tax export in` |
 | Check a stock or fund quickly | [Check a stock or fund fast](guide-research.md) | `quote`, `deep`, `score`, `events`, `mf` |
 | Put new money where I am underweight | [Rebalance to target weights](guide-rebalance.md) | `portfolio target`, `rebalance --inflow` |
-| Ask Claude or Cursor about my portfolio | [Use StockWise from Claude or Cursor](guide-mcp.md) | `mcp` |
+| Ask Claude or Cursor about my portfolio | [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md) | `mcp` |
 | Get a message when a price or RSI level is reached | [Set up alerts and the daemon](guide-alerts.md) | `alert`, `notify`, `daemon` |
 | Test an idea on past data, or practise with paper money | [Backtest and practise on past markets](guide-practice.md) | `backtest`, `sim replay` |
 | Use the numbers in a script or spreadsheet | [Script it with JSON, CSV and jq](guide-scripting.md) | `--json`, `--csv` |

@@ -100,15 +100,21 @@ shows which), so they fit in scripts:
 
 ### Ask an AI about your money
 
-`stockwise mcp` is an [MCP](https://modelcontextprotocol.io) server: Claude
-Desktop, Claude Code, Cursor and other assistants can look up quotes,
-technicals, risk, scorecards, events, mutual funds, option chains, IPOs, screens
-and backtests, and read your portfolio, lots, tax estimate, advance tax,
-harvest and rebalance plans, calendar, watchlist and alerts — 35 read-only
-tools, three resources and three ready-made prompts ("review my portfolio",
-"tax-harvest check before 31 March", "explain this option chain"). It never
-places orders. `stockwise ask "question"` lets a local or cloud model call the
-same tools from your terminal.
+`stockwise mcp` is an [MCP](https://modelcontextprotocol.io) server: Claude,
+ChatGPT Codex, Gemini CLI, Google Antigravity, Cursor, VS Code and other
+assistants can look up quotes, technicals, risk, scorecards, events, mutual
+funds, option chains, IPOs, screens, picks, market conditions and backtests,
+and read your portfolio dashboard, lots, tax estimate, advance tax, harvest and
+rebalance plans, calendar, goals, watchlist and alerts — 52 tools that read,
+three resources and four ready-made prompts. `fit_check` answers "does this
+stock fit my own rules?" with yes, no or unclear. With `--allow-writes` the
+assistant can also set up your profile and change your watchlist, alerts,
+goals and notes; `stockwise undo` reverses any change. It never places orders.
+
+`stockwise connect` adds it to every AI app on your computer in one step.
+`stockwise ask "question"` lets a local or cloud model call the same tools
+from your terminal, with your profile, saved conversations (`-c`, `-i`) and
+playbooks (`--playbook checkup`).
 
 ```bash
 claude mcp add stockwise -- stockwise mcp        # Claude Code
@@ -169,7 +175,7 @@ New here? [What do you want to do?](docs/guides.md) lists the guides:
 - [File your Indian capital-gains tax](docs/guide-tax.md)
 - [Check a stock or fund fast](docs/guide-research.md)
 - [Rebalance to target weights](docs/guide-rebalance.md)
-- [Use StockWise from Claude or Cursor](docs/guide-mcp.md)
+- [Use StockWise from Claude, Gemini, Codex or Cursor](docs/guide-mcp.md)
 - [Set up alerts and the daemon](docs/guide-alerts.md)
 - [Backtest and practise on past markets](docs/guide-practice.md)
 - [Script it with JSON, CSV and jq](docs/guide-scripting.md)
