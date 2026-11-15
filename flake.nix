@@ -35,6 +35,8 @@
               ./examples/strategies
               # The `serve` web dashboard, embedded with include_str!.
               ./web
+              # The agent skill `stockwise connect` installs, embedded with include_str!.
+              ./skills/stockwise/SKILL.md
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
