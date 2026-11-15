@@ -1166,10 +1166,12 @@ pub async fn cmd_portfolio_add(
             .ok()
             .and_then(|q| q.into_iter().next())
             .and_then(|q| q.currency);
-        let Some(quote) = quoted.or_else(|| pf::symbol_currency(&resolved).map(str::to_string))
-        else {
+        // No guessing from the suffix: a USD-quoted London listing would be
+        // stored in pence. Without the quote's currency, refuse.
+        let Some(quote) = quoted else {
             bail!(
-                "Can't tell which currency {} trades in; enter the price in that currency instead of using --currency",
+                "Can't tell which currency {} is quoted in (no quote from Yahoo Finance); \
+                 enter the price in that currency instead of using --currency",
                 resolved
             );
         };
