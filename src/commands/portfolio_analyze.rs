@@ -38,6 +38,115 @@ pub struct TaxIfSold {
     pub exemption_used: f64,
 }
 
+/// One holding in `portfolio analyze --csv`, flat; amounts in the holding's
+/// own currency unless named `_base`.
+#[derive(Debug, Serialize)]
+pub(crate) struct PositionCsv {
+    symbol: String,
+    name: Option<String>,
+    market: String,
+    currency: Option<String>,
+    cap_tier: &'static str,
+    sector: Option<String>,
+    shares: f64,
+    cost: f64,
+    value: Option<f64>,
+    value_base: Option<f64>,
+    weight_percent: Option<f64>,
+    pnl: Option<f64>,
+    pnl_percent: Option<f64>,
+    day_change_percent: Option<f64>,
+    xirr_percent: Option<f64>,
+    short_term_gain: Option<f64>,
+    long_term_gain: Option<f64>,
+    next_long_term_date: Option<chrono::NaiveDate>,
+    next_long_term_days: Option<i64>,
+    vs_200_day_percent: Option<f64>,
+    range_position_percent: Option<f64>,
+    volatility_percent: Option<f64>,
+    max_drawdown_percent: Option<f64>,
+    beta: Option<f64>,
+    score: Option<f64>,
+    observations: usize,
+}
+
+impl CsvRow for PositionCsv {
+    const COLUMNS: &'static [&'static str] = &[
+        "symbol",
+        "name",
+        "market",
+        "currency",
+        "cap_tier",
+        "sector",
+        "shares",
+        "cost",
+        "value",
+        "value_base",
+        "weight_percent",
+        "pnl",
+        "pnl_percent",
+        "day_change_percent",
+        "xirr_percent",
+        "short_term_gain",
+        "long_term_gain",
+        "next_long_term_date",
+        "next_long_term_days",
+        "vs_200_day_percent",
+        "range_position_percent",
+        "volatility_percent",
+        "max_drawdown_percent",
+        "beta",
+        "score",
+        "observations",
+    ];
+}
+
+/// The holdings of an analysis as CSV rows, largest first.
+pub(crate) fn csv_rows(a: &Analysis) -> Vec<PositionCsv> {
+    let mut rows: Vec<PositionCsv> = a
+        .positions
+        .iter()
+        .map(|p| PositionCsv {
+            symbol: p.symbol.clone(),
+            name: p.name.clone(),
+            market: p.market.clone(),
+            currency: p.currency.clone(),
+            cap_tier: p.cap_tier,
+            sector: p.sector.clone(),
+            shares: p.shares,
+            cost: p.cost,
+            value: p.value,
+            value_base: p.value_base,
+            weight_percent: p.weight_pct,
+            pnl: p.pnl,
+            pnl_percent: p.pnl_pct,
+            day_change_percent: p.day_change_pct,
+            xirr_percent: p.xirr_pct,
+            short_term_gain: p.short_term_gain,
+            long_term_gain: p.long_term_gain,
+            next_long_term_date: p.next_long_term.as_ref().map(|n| n.date),
+            next_long_term_days: p.next_long_term.as_ref().map(|n| n.days),
+            vs_200_day_percent: p.vs_200_day_pct,
+            range_position_percent: p.range_position_pct,
+            volatility_percent: p.volatility_pct,
+            max_drawdown_percent: p.max_drawdown_pct,
+            beta: p.beta,
+            score: p.score,
+            observations: a
+                .observations
+                .iter()
+                .filter(|o| o.symbol.as_deref() == Some(p.symbol.as_str()))
+                .count(),
+        })
+        .collect();
+    rows.sort_by(|x, y| {
+        y.value_base
+            .unwrap_or(-1.0)
+            .total_cmp(&x.value_base.unwrap_or(-1.0))
+    });
+    rows
+}
+
 /// Whose holding-period rules apply to a symbol, from its currency.
 fn tax_country(currency: Option<&str>) -> Option<Country> {
     match currency? {
@@ -58,14 +167,25 @@ fn home_country(market: Market) -> Option<Country> {
     }
 }
 
-fn closes_of(chart: &crate::api::ChartData) -> Vec<f64> {
-    chart
+/// Daily closes with their session date (in the market's own time zone,
+/// from the chart's UTC offset), gaps dropped.
+fn closes_of(chart: &crate::api::ChartData) -> Vec<(chrono::NaiveDate, f64)> {
+    let offset = chart.meta.as_ref().and_then(|m| m.gmtoffset).unwrap_or(0);
+    let stamps = chart.timestamp.as_deref().unwrap_or_default();
+    let closes = chart
         .indicators
         .quote
         .first()
-        .and_then(|q| q.close.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default()
+        .and_then(|q| q.close.as_deref())
+        .unwrap_or_default();
+    stamps
+        .iter()
+        .zip(closes)
+        .filter_map(|(t, c)| {
+            let day = chrono::DateTime::from_timestamp(t + offset, 0)?.date_naive();
+            Some((day, (*c)?))
+        })
+        .collect()
 }
 
 /// Sectors of `symbols`: stored snapshots first, then (with `client`) one
@@ -132,7 +252,7 @@ pub(crate) async fn load_analysis(
         .take(if quick { 0 } else { CHART_LIMIT })
         .cloned()
         .collect();
-    let closes: std::collections::HashMap<String, Vec<f64>> =
+    let closes: std::collections::HashMap<String, Vec<(chrono::NaiveDate, f64)>> =
         futures_util::stream::iter(charted.into_iter().map(|sym| async move {
             let c = src
                 .chart(&sym, "1y", "1d")
@@ -179,10 +299,11 @@ pub(crate) async fn load_analysis(
             let value = price.map(|p| h.shares * p);
             let currency = val.currency(sym);
             let hist = closes.get(sym).cloned().unwrap_or_default();
+            let plain: Vec<f64> = hist.iter().map(|(_, c)| *c).collect();
             let score = q.map(|q| {
                 crate::longterm::score_for_longterm(
                     q,
-                    (!hist.is_empty()).then_some(hist.as_slice()),
+                    (!plain.is_empty()).then_some(plain.as_slice()),
                 )
             });
             let market_label = if offmarket::is_fund(sym) || offmarket::is_sgb(sym) {
@@ -251,7 +372,9 @@ pub(crate) async fn load_analysis(
                 Country::Us => "United States",
                 Country::Uk => "United Kingdom",
             },
-            currency: val.base().to_string(),
+            // `tax_report` works in the country's own currency, whatever
+            // `--base` says.
+            currency: country.tax_currency().to_string(),
             short_term_tax: e.st_tax,
             long_term_tax: e.lt_tax,
             cess: e.cess,
@@ -312,14 +435,14 @@ fn opt_signed_pct(v: Option<f64>) -> String {
     }
 }
 
-/// The tax term of a holding in a few characters: `LT`, `ST 17d`, `ST+LT`.
-fn term_cell(p: &pa::Position) -> String {
-    match (p.short_term_gain, p.long_term_gain, &p.next_long_term) {
-        (Some(_), Some(_), Some(n)) if p.long_term_gain != Some(0.0) || n.qty < p.shares => {
-            format!("mix {}d", n.days)
-        }
-        (Some(_), _, Some(n)) => format!("ST {}d", n.days),
-        (Some(_), Some(_), None) => "LT".to_string(),
+/// The tax term of a holding in a few characters: `LT`, `ST 17d`,
+/// `mix 52d` (lots on both sides; days until the next turns long-term).
+pub(crate) fn term_cell(p: &pa::Position) -> String {
+    let days = p.next_long_term.as_ref().map(|n| n.days);
+    match (p.short_term_lots > 0, p.long_term_lots > 0, days) {
+        (true, true, Some(d)) => format!("mix {}d", d),
+        (true, false, Some(d)) => format!("ST {}d", d),
+        (false, true, _) => "LT".to_string(),
         _ => "–".to_string(),
     }
 }
@@ -605,8 +728,9 @@ pub async fn cmd_portfolio_analyze(
     market: Market,
     base: Option<&str>,
     quick: bool,
-    json: bool,
+    fmt: Format,
 ) -> Result<()> {
+    let json = !fmt.is_table();
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
@@ -626,8 +750,10 @@ pub async fn cmd_portfolio_analyze(
         );
     }
     let report = load_analysis(&src, Some(&client), market, base, quick).await?;
-    if json {
-        return output::print_json(&report);
+    match fmt {
+        Format::Json => return output::print_json(&report),
+        Format::Csv => return output::print_csv(&csv_rows(&report.analysis)),
+        Format::Table => {}
     }
     print_analysis(&report);
     Ok(())

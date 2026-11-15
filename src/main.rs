@@ -1255,8 +1255,9 @@ enum PortfolioCmd {
         /// Skip the year of prices and sector lookups (no risk figures; faster)
         #[arg(long)]
         quick: bool,
+        /// `--csv` prints the holdings table; `--json` everything
         #[command(flatten)]
-        out: JsonOutput,
+        out: TableOutput,
     },
     /// Portfolio X-Ray: look-through overlap, market-cap and sector concentration
     #[command(alias = "x-ray")]
@@ -4453,7 +4454,7 @@ async fn dispatch(
                 commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
             }
             Some(PortfolioCmd::Analyze { quick, out }) => {
-                commands::cmd_portfolio_analyze(m, base.as_deref(), quick, out.json).await
+                commands::cmd_portfolio_analyze(m, base.as_deref(), quick, out.into()).await
             }
             Some(PortfolioCmd::Xray { json }) => {
                 commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await

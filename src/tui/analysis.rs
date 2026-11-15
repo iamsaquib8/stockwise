@@ -40,14 +40,9 @@ fn bar(pct: f64, width: usize) -> String {
     )
 }
 
-/// The tax term in a few characters: `LT`, `ST 17d`, `mix 52d`.
+/// The tax term in a few characters, as the terminal dashboard writes it.
 pub fn term(p: &Position) -> String {
-    match (p.short_term_gain, p.long_term_gain, &p.next_long_term) {
-        (Some(_), Some(lt), Some(n)) if lt != 0.0 || n.qty < p.shares => format!("mix {}d", n.days),
-        (Some(_), _, Some(n)) => format!("ST {}d", n.days),
-        (Some(_), Some(_), None) => "LT".to_string(),
-        _ => "–".to_string(),
-    }
+    crate::commands::term_cell(p)
 }
 
 /// `●2` when a holding has a notice among its observations, `○1` for
@@ -105,9 +100,10 @@ pub fn render_body(f: &mut Frame, area: Rect, app: &App, theme: &Theme, full: bo
         let [left, right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(side_w)]).areas(area);
         render_holdings(f, left, app, a, theme, true);
+        // Allocation: two headings and three rows each, plus the border.
         let [summary, alloc, risk, obs] = Layout::vertical([
             Constraint::Length(6),
-            Constraint::Length(9),
+            Constraint::Length(10),
             Constraint::Length(7),
             Constraint::Min(3),
         ])
@@ -142,14 +138,18 @@ pub fn render_body(f: &mut Frame, area: Rect, app: &App, theme: &Theme, full: bo
 }
 
 fn render_holdings(f: &mut Frame, area: Rect, app: &App, a: &Analysis, theme: &Theme, wide: bool) {
-    let block = pane(
-        Line::from(vec![
-            Span::raw(" Holdings "),
-            Span::styled(format!("· {} ", a.positions.len()), theme.dim),
-        ]),
-        true,
-        theme,
-    );
+    let mut title = vec![
+        Span::raw(" Holdings "),
+        Span::styled(format!("· {} ", a.positions.len()), theme.dim),
+    ];
+    // The last re-run failed: what is shown is the run before it.
+    if app.analysis_error.is_some() {
+        title.push(Span::styled(
+            "· last run failed, figures are older ",
+            theme.warn,
+        ));
+    }
+    let block = pane(Line::from(title), true, theme);
     let wide = wide && area.width >= 70;
     let rows: Vec<Row> = a
         .positions
@@ -387,7 +387,7 @@ pub fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     };
     let a = &report.analysis;
-    let title = format!(" {} ", short(&p.symbol));
+    let title = format!(" {} · ↑↓ scroll ", short(&p.symbol));
     let inner = popup(f, area, 72, 22, &title, theme);
     let cur = p.currency.as_deref();
     let base = Some(a.base_currency.as_str());
@@ -529,7 +529,16 @@ pub fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         " Readings of the data, not a recommendation · Esc closes",
         theme.dim,
     ));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    // Rows the wrapped text takes, so scrolling stops at its last line.
+    let width = inner.width.max(1) as usize;
+    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+    let max_scroll = rows.saturating_sub(inner.height as usize) as u16;
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((app.detail_scroll.min(max_scroll), 0)),
+        inner,
+    );
 }
 
 #[cfg(test)]
@@ -647,6 +656,9 @@ mod tests {
             app.analysis.is_some(),
             "a failed re-run keeps the last analysis"
         );
+        let stale = draw(&app, 120, 40);
+        assert!(stale.contains("last run failed"), "{stale}");
+        assert!(stale.contains("Analysis failed (offline)"), "{stale}");
         // Esc returns to the overview.
         app.update(key(KeyCode::Esc));
         assert_eq!(app.screen, Screen::Overview);
@@ -713,5 +725,53 @@ mod tests {
         app.update(key(KeyCode::Esc));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.screen, Screen::Analysis);
+    }
+
+    #[test]
+    fn detail_scrolls_at_the_smallest_size() {
+        let mut app = loaded();
+        app.update(key(KeyCode::Char('p')));
+        app.update(Msg::Analysis(Ok(report())));
+        app.update(key(KeyCode::Enter));
+        let first = draw(&app, 40, 12);
+        assert!(!first.contains("Readings of the data"), "{first}");
+        for _ in 0..40 {
+            app.update(key(KeyCode::Down));
+        }
+        let later = draw(&app, 40, 12);
+        assert!(later.contains("Esc closes"), "{later}");
+        // Reopening starts from the top again.
+        app.update(key(KeyCode::Esc));
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[test]
+    fn allocation_lists_three_markets_and_three_sectors() {
+        let mut r = report();
+        let groups = |names: [&str; 3]| -> Vec<crate::portfolio_analysis::Group> {
+            names
+                .iter()
+                .map(|n| crate::portfolio_analysis::Group {
+                    name: n.to_string(),
+                    holdings: 1,
+                    value_base: 1.0,
+                    weight_pct: 33.3,
+                    pnl_base: 0.0,
+                    local_value: None,
+                    local_currency: None,
+                })
+                .collect()
+        };
+        r.analysis.by_market = groups(["India", "US", "United Kingdom"]);
+        r.analysis.by_sector = groups(["Energy", "Technology", "Utilities"]);
+        let mut app = loaded();
+        app.update(key(KeyCode::Char('p')));
+        app.update(Msg::Analysis(Ok(r)));
+        let screen = draw(&app, 120, 40);
+        assert!(
+            screen.contains("United Kingdom") && screen.contains("Utilities"),
+            "{screen}"
+        );
     }
 }

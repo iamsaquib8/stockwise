@@ -1154,12 +1154,23 @@ pub async fn cmd_portfolio_add(
     // A price paid in another currency (a US share bought with rupees):
     // convert it at that day's rate, so the cost is in the holding's own.
     if let Some(paid) = paid_in {
-        let Some(quote) = pf::symbol_currency(&resolved) else {
+        // The currency the instrument is quoted in, from its quote (a few
+        // London listings trade in USD), else from its suffix.
+        let client = YahooClient::new().await?;
+        let quoted = client
+            .get_quote(&[resolved.as_str()])
+            .await
+            .ok()
+            .and_then(|q| q.into_iter().next())
+            .and_then(|q| q.currency);
+        let Some(quote) = quoted.or_else(|| pf::symbol_currency(&resolved).map(str::to_string))
+        else {
             bail!(
                 "Can't tell which currency {} trades in; enter the price in that currency instead of using --currency",
                 resolved
             );
         };
+        let quote = quote.as_str();
         let (_, major) = market::to_major(1.0, quote);
         let paid_cost = cost;
         if paid.eq_ignore_ascii_case(&major) {
@@ -1167,7 +1178,6 @@ pub async fn cmd_portfolio_add(
         } else {
             let (pair, inverted) = fx_pair(paid, &major);
             let day = pf::parse_date(&date)?;
-            let client = YahooClient::new().await?;
             let (rate, on) = rate_on(&client, &pair, day).await?;
             cost = convert_paid(cost, rate, inverted, quote);
             let per = if inverted { rate } else { 1.0 / rate };
