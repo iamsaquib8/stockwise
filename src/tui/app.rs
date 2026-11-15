@@ -501,7 +501,12 @@ impl App {
                 }
                 // The analysis detail scrolls on small terminals.
                 KeyCode::Up | KeyCode::Char('k') if self.screen == Screen::Analysis => {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                    // The limit may have shrunk (a larger terminal): start
+                    // from what is on screen, not from the stored offset.
+                    self.detail_scroll = self
+                        .detail_scroll
+                        .min(self.detail_max.get())
+                        .saturating_sub(1);
                     Vec::new()
                 }
                 KeyCode::Down | KeyCode::Char('j') if self.screen == Screen::Analysis => {
