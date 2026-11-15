@@ -32,6 +32,7 @@ mod derivatives;
 mod display;
 mod events;
 mod funds;
+mod global_lists;
 mod goals;
 mod greeks;
 mod gsec;
@@ -555,13 +556,13 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// Only this market-cap tier, ranked within itself: all, mega, large, mid, small or micro
         #[arg(long, value_enum, ignore_case = true)]
         cap: Option<market::CapFilter>,
-        /// How many of the highest scores to show
+        /// How many of the highest scores to show (0 for all)
         #[arg(long, default_value_t = 15)]
         top: usize,
         #[command(flatten)]
         out: TableOutput,
     },
-    /// Screen large caps by a preset
+    /// Screen the market's stocks by a preset
     Screen {
         #[arg(value_enum, ignore_case = true)]
         category: ScreenCategory,

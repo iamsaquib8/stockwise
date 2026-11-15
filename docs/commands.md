@@ -134,9 +134,9 @@ always works. Common names resolve to NSE symbols
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 500 (US), or another universe (see below), with a cap-tier column |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe (see below), with a cap-tier column |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls |
 | `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
 | `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
 | `rotation` | Sector rotation vs 50-day average |
@@ -145,17 +145,24 @@ always works. Common names resolve to NSE symbols
 | `insider <SYMBOL>` | Analyst consensus + insider-related news |
 | `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a demand label such as "STRONG DEMAND" or "BOOK BUILDING") and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (with `--capital`, the odds at that amount, including for several separate applications), unofficial GMP and broker calls from press headlines, and a 6-pillar score with a **listing demand** label and a **long-term profile** label. In `--json`: `listing_demand`, `long_term_profile` and `timeline` replace `listing_verdict`, `long_term_verdict` and `timing_guidance`; `capital_odds` and `allotment_rules` replace `capital_plan` and `golden_rules`. Not a recommendation |
 | `earnings` | Earnings growth for portfolio and watchlist |
-| `surprise [--universe INDEX]` | Earnings momentum — accelerating vs decelerating |
+| `surprise [--universe INDEX]` | Forward EPS against trailing EPS, by expected growth; stocks without a forward EPS are left out, and a large scan shows the 25 fastest and the 25 steepest falls |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
-| `picks [--universe INDEX] [--cap TIER] [--top N] [--json\|--csv]` | Scores every stock of the scan (the liquid stocks of BSE for India, the S&P 500 for the US) from 0 to 100 and lists the highest. Four pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity), **growth** (forward against trailing EPS) and **trend** (price and 50-day average against the 200-day, place in the 52-week range). Weights 30/25/20/25; a pillar without data pulls the score toward 50, and the `Data` column shows how much of the score had data. `--cap` ranks one market-cap tier within itself. A score, not a recommendation |
-| `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
+| `picks [--universe INDEX] [--cap TIER] [--top N] [--json\|--csv]` | Scores every stock of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) from 0 to 100 and lists the highest. Four pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity), **growth** (forward against trailing EPS) and **trend** (price and 50-day average against the 200-day, place in the 52-week range). Weights 30/25/20/25; a pillar without data pulls the score toward 50, and the `Data` column shows how much of the score had data. `--cap` ranks one market-cap tier within itself. A score, not a recommendation |
+| `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr). The table shows the first 50 matches; `--json` and `--csv` carry them all |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
 **Default India universe:** without `--universe`, an India scan covers every
 stock listed on BSE that traded ₹10 lakh or more on the last session (about
-1,900 stocks), read from BSE's end-of-day file (see below). NIFTY 500 members
-keep their NSE symbol (`RELIANCE.NS`); the rest are BSE symbols (`XYZ.BO`).
+1,900 stocks), read from BSE's end-of-day file (see below), plus every NIFTY
+500 member. NIFTY 500 members keep their NSE symbol (`RELIANCE.NS`); the rest
+are BSE symbols (`XYZ.BO`).
 When that file is unavailable the scan covers NIFTY 500.
+
+**Other markets** scan built-in index lists (snapshots, refreshed each
+release): the S&P 1500 for the US (S&P 500, MidCap 400 and SmallCap 600), FTSE
+350 for London, DAX and MDAX for Germany, Nikkei 225 for Japan, the Hang Seng
+Index for Hong Kong, the Straits Times Index for Singapore, the S&P/TSX
+Composite for Canada and the S&P/ASX 200 for Australia.
 
 **`--universe`** (Indian market; `movers`, `heatmap`, `screen`, `picks`,
 `matrix`, `surprise`, `longterm`): `all` is every stock listed on BSE (about
@@ -196,7 +203,7 @@ field in their `--json` / `--csv` (`unknown` when there is no market cap, or
 no exchange rate for the currency). Indian stocks follow the SEBI/AMFI ranks
 when the index members are known: NIFTY 100 is large (the top 10, or above
 ₹5,00,000 Cr, is mega), NIFTY MIDCAP 150 is mid, NIFTY SMALLCAP 250 is small
-and anything outside NIFTY 500 is micro. Scanning those indexes with
+and any other NSE stock outside NIFTY 500 is micro (BSE symbols, `XYZ.BO`, are always tiered by the rupee cut-offs below). Scanning those indexes with
 `--universe` saves
 their members in `cache.db` (`stockwise cache clear members` forgets them);
 until then, and offline, rupee cut-offs decide (large from

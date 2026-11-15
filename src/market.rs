@@ -161,8 +161,9 @@ impl MarketInfo {
     }
 }
 
-/// The global market table, in [`Exchange`] order. Symbols were checked
-/// against Yahoo Finance; holiday tables live in `clock.rs`.
+/// The global market table, in [`Exchange`] order. Each universe is the
+/// exchange's main index (`global_lists.rs`); holiday tables live in
+/// `clock.rs`.
 pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
     MarketInfo {
         code: "uk",
@@ -182,10 +183,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^FTAS", "FTSE All-Share"),
         ],
         sectors: &[],
-        universe: &[
-            "SHEL.L", "AZN.L", "HSBA.L", "ULVR.L", "BP.L", "RIO.L", "GSK.L", "REL.L", "DGE.L",
-            "BATS.L", "LSEG.L", "VOD.L", "BARC.L", "LLOY.L", "NG.L",
-        ],
+        universe: crate::global_lists::FTSE350,
         session: Session {
             tz: TzRule::Eu(0),
             tz_label: "London",
@@ -216,10 +214,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^TECDAX", "TecDAX"),
         ],
         sectors: &[],
-        universe: &[
-            "SAP.DE", "SIE.DE", "ALV.DE", "DTE.DE", "MBG.DE", "BMW.DE", "BAS.DE", "MUV2.DE",
-            "IFX.DE", "ADS.DE", "DBK.DE", "VOW3.DE", "AIR.DE", "RHM.DE", "DHL.DE",
-        ],
+        universe: crate::global_lists::DAX_MDAX,
         session: Session {
             tz: TzRule::Eu(1),
             tz_label: "Frankfurt",
@@ -264,10 +259,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("1632.T", "Financials"),
             ("1633.T", "Real Estate"),
         ],
-        universe: &[
-            "7203.T", "6758.T", "8306.T", "9984.T", "6861.T", "9432.T", "8035.T", "6501.T",
-            "7974.T", "9983.T", "4063.T", "8316.T", "6098.T", "7267.T",
-        ],
+        universe: crate::global_lists::NIKKEI225,
         session: Session {
             tz: TzRule::Fixed(9 * 60),
             tz_label: "JST",
@@ -302,10 +294,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^HSNP", "Properties"),
             ("^HSNC", "Commerce & Industry"),
         ],
-        universe: &[
-            "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK", "3690.HK", "0388.HK", "1810.HK",
-            "0939.HK", "1398.HK", "2318.HK", "0883.HK", "0001.HK", "0016.HK",
-        ],
+        universe: crate::global_lists::HANG_SENG,
         session: Session {
             tz: TzRule::Fixed(8 * 60),
             tz_label: "HKT",
@@ -331,10 +320,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
         quote_unit: None,
         indices: &[("^STI", "Straits Times")],
         sectors: &[],
-        universe: &[
-            "D05.SI", "O39.SI", "U11.SI", "Z74.SI", "C6L.SI", "S68.SI", "C38U.SI", "A17U.SI",
-            "BN4.SI", "F34.SI", "Y92.SI", "G13.SI", "S63.SI", "9CI.SI",
-        ],
+        universe: crate::global_lists::STI,
         session: Session {
             tz: TzRule::Fixed(8 * 60),
             tz_label: "SGT",
@@ -370,10 +356,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("XRE.TO", "Real Estate"),
             ("XGD.TO", "Gold Miners"),
         ],
-        universe: &[
-            "RY.TO", "TD.TO", "SHOP.TO", "ENB.TO", "CNR.TO", "CP.TO", "BN.TO", "BMO.TO", "BNS.TO",
-            "CNQ.TO", "SU.TO", "TRI.TO", "ATD.TO", "CSU.TO", "MFC.TO",
-        ],
+        universe: crate::global_lists::TSX_COMPOSITE,
         session: Session {
             tz: TzRule::UsEastern,
             tz_label: "ET",
@@ -416,10 +399,7 @@ pub static GLOBAL_MARKETS: [MarketInfo; 7] = [
             ("^AXPJ", "A-REIT"),
             ("^AXTJ", "Communication"),
         ],
-        universe: &[
-            "BHP.AX", "CBA.AX", "CSL.AX", "NAB.AX", "WBC.AX", "ANZ.AX", "MQG.AX", "WES.AX",
-            "WDS.AX", "FMG.AX", "RIO.AX", "TLS.AX", "WOW.AX", "GMG.AX", "TCL.AX",
-        ],
+        universe: crate::global_lists::ASX200,
         session: Session {
             tz: TzRule::AuEastern,
             tz_label: "Sydney",
@@ -983,12 +963,21 @@ impl Market {
     /// Symbols scanned by movers, screeners and the bots. For India this is
     /// the NIFTY 500 list saved by the last NSE scan (no request), or the
     /// built-in NIFTY 500 until one has run; for the US the built-in
-    /// S&P 500.
+    /// S&P 1500, and for the other exchanges their main index's members.
     pub fn universe(self) -> Vec<String> {
         let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect();
         match self {
             Market::In => saved_nifty500().unwrap_or_else(|| owned(crate::nifty500::NIFTY500)),
-            Market::Us => owned(crate::sp500::SP500),
+            // The S&P Composite 1500: large, mid and small caps.
+            Market::Us => [
+                crate::sp500::SP500,
+                crate::global_lists::SP400,
+                crate::global_lists::SP600,
+            ]
+            .concat()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             Market::Crypto => crypto_majors().into_iter().map(|(s, _)| s).collect(),
             Market::Fx => FX_MAJORS.iter().map(|(s, _)| s.to_string()).collect(),
             Market::Commodity => COMMODITY_UNIVERSE
@@ -1656,7 +1645,9 @@ impl IndiaMembership {
             return crate::store::load(MEMBERSHIP_FILE).unwrap_or_default();
         }
         let lists = crate::db::with_db(|d| d.index_lists()).unwrap_or_default();
-        if lists.is_empty() {
+        // "Nothing saved" looks at the cap-tier lists only: a `csv:` member
+        // list saved first must not hide an old JSON file from the import.
+        if Self::from_lists(lists.clone()).is_empty() {
             if let Ok(old) = crate::store::load::<IndiaMembership>(MEMBERSHIP_FILE)
                 && !old.is_empty()
             {

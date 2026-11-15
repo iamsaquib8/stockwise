@@ -1,4 +1,5 @@
-//! S&P 500 members, the default US universe. A snapshot of the index (as
+//! S&P 500 members, part of the default US universe (the S&P 1500, with
+//! `global_lists::SP400` and `SP600`). A snapshot of the index (as
 //! of `SP500_AS_OF`), refreshed by hand each release. It is not updated
 //! at run time.
 //! Yahoo symbols: share classes use `-` (`BRK-B`), not `.`.

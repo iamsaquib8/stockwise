@@ -246,7 +246,7 @@ stockwise daemon longterm
 ```
 
 Runs 5 steps:
-1. Score the market's universe (the liquid stocks of BSE, or the S&P 500) on fundamentals, then the 60 highest on 6 pillars + Monte Carlo and print the three highest scores
+1. Score the market's universe (NIFTY 500, or the S&P 1500) on fundamentals, then the 60 highest on 6 pillars + Monte Carlo and print the three highest scores
 2. Check portfolio value, snapshot wealth tracker
 3. Check all price alerts
 4. List holdings priced below their average cost

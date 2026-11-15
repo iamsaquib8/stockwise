@@ -165,13 +165,22 @@ async fn scan_bse(
         .iter()
         .filter_map(|s| s.strip_suffix(".NS").map(str::to_ascii_uppercase))
         .collect();
-    let symbols: Vec<String> = tickers
+    let mut symbols: Vec<String> = tickers
         .into_iter()
         .map(|t| {
             let suffix = if nifty500.contains(&t) { "NS" } else { "BO" };
             format!("{}.{}", t, suffix)
         })
         .collect();
+    // NIFTY 500 members are always in: one may trade thinly on BSE on a
+    // day (or be listed on NSE alone) and still be liquid on NSE.
+    let have: std::collections::HashSet<&String> = symbols.iter().collect();
+    let extra: Vec<String> = Market::In
+        .universe()
+        .into_iter()
+        .filter(|s| !have.contains(s))
+        .collect();
+    symbols.extend(extra);
     let floor = if min_traded > 0.0 {
         format!(
             " that traded \u{20B9}{:.0} lakh or more",
@@ -181,7 +190,7 @@ async fn scan_bse(
         String::new()
     };
     eprintln!(
-        "  \u{24d8} {} stocks listed on BSE{} on {} (--universe narrows or widens this).",
+        "  \u{24d8} {} stocks: those listed on BSE{} on {}, and NIFTY 500 (--universe narrows or widens this).",
         symbols.len(),
         floor,
         date.format("%d %b %Y")
@@ -511,7 +520,14 @@ async fn scan_quotes_src(
         return Ok((q, false));
     }
     match live {
-        Ok(q) => Ok((market::filter_by_cap(q, cap), false)),
+        Ok(q) => {
+            // Keep the scan's quotes as snapshots: the next `--cap` scan in
+            // the half hour reads them instead of asking again.
+            if market == Market::In {
+                store_bulk_snapshots(&q);
+            }
+            Ok((market::filter_by_cap(q, cap), false))
+        }
         Err(e) if !scan.bulk.is_empty() => {
             eprintln!(
                 "  \u{24d8} Yahoo Finance did not answer ({:#}); using NSE's index snapshot (no P/E or market cap).",
@@ -1530,6 +1546,9 @@ pub(crate) fn screen_matches<'a>(
     Ok((title, filtered))
 }
 
+/// Most rows a `screen` table prints; `--json` and `--csv` carry them all.
+const SCREEN_ROWS: usize = 50;
+
 pub async fn cmd_screen(
     category: &str,
     market: Market,
@@ -1575,7 +1594,7 @@ pub async fn cmd_screen(
     );
     println!("  {}", "─".repeat(69).dimmed());
 
-    for q in &filtered {
+    for q in filtered.iter().take(SCREEN_ROWS) {
         let sym = q.symbol.as_deref().unwrap_or("???");
         let cur = q.currency.as_deref();
         let pct = q.regular_market_change_percent.unwrap_or(0.0);
@@ -1594,6 +1613,16 @@ pub async fn cmd_screen(
             q.market_cap
                 .map_or("N/A".to_string(), |v| format_large_number(v, cur)),
             market::cap_tier_of(q).badge().dimmed()
+        );
+    }
+    if filtered.len() > SCREEN_ROWS {
+        println!(
+            "  {}",
+            format!(
+                "... {} more (--json or --csv lists them all) ...",
+                filtered.len() - SCREEN_ROWS
+            )
+            .dimmed()
         );
     }
     println!("\n  {} {} stocks matched", "→".cyan(), filtered.len());
@@ -1640,7 +1669,9 @@ pub async fn cmd_picks(
     }
     let mut picks = crate::picks::score(&quotes);
     let scanned = picks.len();
-    picks.truncate(top.max(1));
+    if top > 0 {
+        picks.truncate(top);
+    }
 
     if !fmt.is_table() {
         return match fmt {
@@ -1960,6 +1991,10 @@ pub async fn cmd_matrix(market: Market, universe: Option<market::Universe>) -> R
 
 // ── Earnings Surprise ──
 
+/// Rows `surprise` shows from each end (fastest growth, steepest fall)
+/// when more stocks than both together have the figures.
+const SURPRISE_EDGE: usize = 25;
+
 pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) -> Result<()> {
     market.require_stocks("surprise")?;
     let client = YahooClient::new().await?;
@@ -1980,15 +2015,30 @@ pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) ->
     let mut accelerating = Vec::new();
     let mut decelerating = Vec::new();
 
-    for q in &quotes {
+    // Stocks with both figures (a missing forward EPS is not a fall to
+    // zero), by expected growth. A whole-market scan shows both ends.
+    let mut rows: Vec<(&crate::api::Quote, f64, f64, f64)> = quotes
+        .iter()
+        .filter_map(|q| {
+            let ttm = q.eps_trailing_twelve_months.filter(|e| *e > 0.0)?;
+            let fwd = q.eps_forward?;
+            Some((q, ttm, fwd, (fwd / ttm - 1.0) * 100.0))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.3.total_cmp(&a.3));
+    let total = rows.len();
+    let cut = total > 2 * SURPRISE_EDGE;
+    for (i, (q, eps_ttm, eps_fwd, growth)) in rows.into_iter().enumerate() {
+        let (eps_ttm, eps_fwd, growth) = (eps_ttm, eps_fwd, growth);
         let sym = q.symbol.as_deref().unwrap_or("???");
-        let eps_ttm = q.eps_trailing_twelve_months.unwrap_or(0.0);
-        let eps_fwd = q.eps_forward.unwrap_or(0.0);
-        if eps_ttm <= 0.0 {
-            continue;
-        }
-        let growth = ((eps_fwd / eps_ttm) - 1.0) * 100.0;
         let pe = q.trailing_pe.unwrap_or(0.0);
+        let shown = !cut || i < SURPRISE_EDGE || i >= total - SURPRISE_EDGE;
+        if cut && i == SURPRISE_EDGE {
+            println!(
+                "  {}",
+                format!("... {} more in between ...", total - 2 * SURPRISE_EDGE).dimmed()
+            );
+        }
         let signal = if growth > 15.0 {
             accelerating.push(sym.to_string());
             "ACCELERATING".green().bold().to_string()
@@ -2005,6 +2055,9 @@ pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) ->
         } else {
             format!("{:.1}%", growth).red().to_string()
         };
+        if !shown {
+            continue;
+        }
         println!(
             "  {:<14} {:>10.2} {:>10.2} {:>10} {:>8.1} {:>10}",
             sym.cyan(),
