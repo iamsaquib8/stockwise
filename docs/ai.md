@@ -350,7 +350,7 @@ stockwise connect --allow-writes   # write the flag into every app's config
 | Tier | Tools |
 |------|-------|
 | Workspace (`--allow-writes`) | `watchlist_add`, `watchlist_remove`, `alert_add`, `alert_remove`, `goal_save`, `goal_remove`, `target_set`, `target_remove`, `profile_set`, `profile_onboard`, `note_set` |
-| Portfolio (`--allow-portfolio`) | `portfolio_add`, `portfolio_sell` (record a purchase lot or a FIFO sale; never an order) |
+| Portfolio (`--allow-portfolio`) | `portfolio_add`, `portfolio_sell` (record a purchase lot or a FIFO sale; never an order). Two steps: without `confirm: true` they only return a preview (the lot, the holding after it, the realised gain), which the assistant shows you before recording |
 
 - **Every change can be undone.** Before a change, the files it touches are
   copied to `undo/` in the data directory and the change is listed in

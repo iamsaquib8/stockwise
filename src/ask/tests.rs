@@ -847,3 +847,64 @@ async fn a_change_made_before_a_failure_is_reported_and_carried_to_the_retry() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Every string value in `v` (not the keys), for the wording check.
+fn strings(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+        Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn playbooks_run_end_to_end_on_fixtures_without_advice() {
+    use clap::ValueEnum;
+    for pb in Playbook::value_variants() {
+        // The model calls every tool the playbook names, then answers.
+        let named: Vec<&str> = crate::tools::TOOLS
+            .iter()
+            .map(|t| t.name)
+            .filter(|n| pb.prompt().contains(n))
+            .collect();
+        assert!(!named.is_empty(), "{pb:?}");
+        let calls: Vec<Value> = named
+            .iter()
+            .map(|n| json!({"function": {"name": n, "arguments": {}}}))
+            .collect();
+        let server = MockServer::start(
+            vec![
+                json!({"message": {"role": "assistant", "content": "", "tool_calls": calls}, "done_reason": "stop"}),
+                json!({"message": {"role": "assistant", "content": "Summary of the figures."}, "done_reason": "stop"}),
+            ]
+            .into_iter()
+            .map(|r| (200, r.to_string()))
+            .collect(),
+        )
+        .await;
+        let ai = client(AiProvider::Ollama, &server.url);
+        let mut chat = Chat::new(&ai, system_prompt(Market::In, false));
+        let t = ask_in(&ai, &ctx(), &mut chat, pb.prompt(), &AskOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(t.steps.len(), named.len(), "{pb:?}");
+        assert!(
+            t.steps.iter().any(|s| s.ok),
+            "{pb:?}: no tool ran on the fixtures"
+        );
+        let reqs = server.requests();
+        let first = reqs[0].json();
+        assert_eq!(first["messages"][1]["content"], pb.prompt());
+        // What went back to the model: the tool results carry no advice.
+        for m in reqs[1].json()["messages"].as_array().unwrap() {
+            if m["role"] != "tool" {
+                continue;
+            }
+            let v: Value = serde_json::from_str(m["content"].as_str().unwrap()).unwrap();
+            let mut texts = Vec::new();
+            strings(&v, &mut texts);
+            crate::verdict::testing::assert_neutral(&texts.join("\n"));
+        }
+    }
+}

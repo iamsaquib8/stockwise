@@ -40,8 +40,9 @@ There are three tiers. The server's mode decides which tools you have.
 - Each change is recorded. The result holds `change_id` and an `undo`
   command; tell the user both. `changes_list` and `stockwise undo --list`
   show the journal; `stockwise undo` reverses the newest change.
-- Change only what the user asked for. Confirm a portfolio lot or sale
-  (symbol, quantity, price, date) before you record it.
+- Change only what the user asked for. `portfolio_add` and `portfolio_sell`
+  first return a preview; show it (symbol, quantity, price, date, gain) and
+  call again with `confirm: true` only after the user agrees.
 - Orders: `order_preview` only shows an order. Never place one. With the CLI,
   `trade` commands send real orders through the user's broker: show the
   command with `--dry-run` and let the user run the real one; never add `--yes`.
