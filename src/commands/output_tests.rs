@@ -1465,4 +1465,14 @@ fn portfolio_analyze_csv_has_one_flat_row_per_holding() {
     let first = lines.next().unwrap();
     assert!(first.starts_with("B.NS,,India,INR,unknown"), "{first}");
     assert!(first.contains(",2026-12-02,17,"), "{first}");
+    // The breakdowns, one table: a row per group in each grouping.
+    let groups = super::portfolio_analyze::group_csv_rows(&a);
+    assert_columns(&groups[0]);
+    let kinds: Vec<&str> = groups.iter().map(|g| g.grouping_name()).collect();
+    assert_eq!(kinds, ["market", "currency", "cap_tier", "sector"]);
+    let csv = crate::output::to_csv(&groups).unwrap();
+    assert!(
+        csv.lines().nth(1).unwrap().starts_with("market,India,2,"),
+        "{csv}"
+    );
 }

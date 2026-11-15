@@ -357,6 +357,14 @@ impl App {
                         if self.status.as_ref().is_some_and(|s| s.error) {
                             self.status = None;
                         }
+                        // A failed analysis re-run is not fixed by a good
+                        // snapshot: keep saying the figures are older.
+                        if self.screen == Screen::Analysis
+                            && self.analysis.is_some()
+                            && let Some(e) = self.analysis_error.clone()
+                        {
+                            self.error(format!("Analysis failed ({}); showing the last one", e));
+                        }
                         effects.extend(self.chart_effect(true));
                     }
                     Err(e) => self.error(format!("Refresh failed: {}", e)),

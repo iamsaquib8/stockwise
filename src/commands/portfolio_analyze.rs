@@ -101,6 +101,67 @@ impl CsvRow for PositionCsv {
     ];
 }
 
+/// One slice of `portfolio analyze --csv --groups`: the market, currency,
+/// cap-tier and sector breakdowns in one table.
+#[derive(Debug, Serialize)]
+pub(crate) struct GroupCsv {
+    grouping: &'static str,
+    name: String,
+    holdings: usize,
+    value_base: f64,
+    weight_percent: f64,
+    pnl_base: f64,
+    local_value: Option<f64>,
+    local_currency: Option<String>,
+    base_currency: String,
+}
+
+impl CsvRow for GroupCsv {
+    const COLUMNS: &'static [&'static str] = &[
+        "grouping",
+        "name",
+        "holdings",
+        "value_base",
+        "weight_percent",
+        "pnl_base",
+        "local_value",
+        "local_currency",
+        "base_currency",
+    ];
+}
+
+impl GroupCsv {
+    #[cfg(test)]
+    pub(crate) fn grouping_name(&self) -> &'static str {
+        self.grouping
+    }
+}
+
+/// Every breakdown of an analysis as CSV rows, by grouping then largest first.
+pub(crate) fn group_csv_rows(a: &Analysis) -> Vec<GroupCsv> {
+    [
+        ("market", &a.by_market),
+        ("currency", &a.by_currency),
+        ("cap_tier", &a.by_cap_tier),
+        ("sector", &a.by_sector),
+    ]
+    .into_iter()
+    .flat_map(|(grouping, groups)| {
+        groups.iter().map(move |g| GroupCsv {
+            grouping,
+            name: g.name.clone(),
+            holdings: g.holdings,
+            value_base: g.value_base,
+            weight_percent: g.weight_pct,
+            pnl_base: g.pnl_base,
+            local_value: g.local_value,
+            local_currency: g.local_currency.clone(),
+            base_currency: a.base_currency.clone(),
+        })
+    })
+    .collect()
+}
+
 /// The holdings of an analysis as CSV rows, largest first.
 pub(crate) fn csv_rows(a: &Analysis) -> Vec<PositionCsv> {
     let mut rows: Vec<PositionCsv> = a
@@ -728,6 +789,7 @@ pub async fn cmd_portfolio_analyze(
     market: Market,
     base: Option<&str>,
     quick: bool,
+    groups: bool,
     fmt: Format,
 ) -> Result<()> {
     let json = !fmt.is_table();
@@ -752,6 +814,7 @@ pub async fn cmd_portfolio_analyze(
     let report = load_analysis(&src, Some(&client), market, base, quick).await?;
     match fmt {
         Format::Json => return output::print_json(&report),
+        Format::Csv if groups => return output::print_csv(&group_csv_rows(&report.analysis)),
         Format::Csv => return output::print_csv(&csv_rows(&report.analysis)),
         Format::Table => {}
     }

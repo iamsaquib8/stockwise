@@ -1255,7 +1255,10 @@ enum PortfolioCmd {
         /// Skip the year of prices and sector lookups (no risk figures; faster)
         #[arg(long)]
         quick: bool,
-        /// `--csv` prints the holdings table; `--json` everything
+        /// With --csv: the market, currency, cap-tier and sector tables instead of the holdings
+        #[arg(long, requires = "csv")]
+        groups: bool,
+        /// `--csv` prints the holdings table (or, with --groups, the breakdowns); `--json` everything
         #[command(flatten)]
         out: TableOutput,
     },
@@ -4453,8 +4456,8 @@ async fn dispatch(
                 let parsed = crate::rebalance::parse_targets(&targets)?;
                 commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
             }
-            Some(PortfolioCmd::Analyze { quick, out }) => {
-                commands::cmd_portfolio_analyze(m, base.as_deref(), quick, out.into()).await
+            Some(PortfolioCmd::Analyze { quick, groups, out }) => {
+                commands::cmd_portfolio_analyze(m, base.as_deref(), quick, groups, out.into()).await
             }
             Some(PortfolioCmd::Xray { json }) => {
                 commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await
@@ -6349,6 +6352,21 @@ mod tests {
             "large",
             "--top",
             "30",
+            "--json"
+        ]));
+        assert!(parses(&[
+            "stockwise",
+            "portfolio",
+            "analyze",
+            "--csv",
+            "--groups"
+        ]));
+        assert!(!parses(&["stockwise", "portfolio", "analyze", "--groups"]));
+        assert!(parses(&[
+            "stockwise",
+            "portfolio",
+            "dash",
+            "--quick",
             "--json"
         ]));
         for whole in ["bse", "all", "BSEALL"] {

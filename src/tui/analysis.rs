@@ -706,6 +706,11 @@ mod tests {
         let stale = draw(&app, 120, 40);
         assert!(stale.contains("last run failed"), "{stale}");
         assert!(stale.contains("Analysis failed (offline)"), "{stale}");
+        // The overview refresh started by the same `r` lands afterwards:
+        // the failure is still shown.
+        app.update(Msg::Snapshot(Ok(super::super::app::tests::snapshot())));
+        let after = draw(&app, 120, 40);
+        assert!(after.contains("Analysis failed (offline)"), "{after}");
         // Esc returns to the overview.
         app.update(key(KeyCode::Esc));
         assert_eq!(app.screen, Screen::Overview);
