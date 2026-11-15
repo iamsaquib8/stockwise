@@ -209,7 +209,7 @@ const QUOTE_CACHE_MAX_AGE_SECS: i64 = 15 * 60;
 /// which carry the fundamentals scoring needs, or NSE's snapshot when
 /// Yahoo can't answer. Quotes stored in `quote_cache` in the last 15
 /// minutes are reused; only the rest are fetched, then stored.
-pub(super) async fn universe_quotes(
+pub(crate) async fn universe_quotes(
     client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,
@@ -2176,15 +2176,14 @@ pub(super) async fn record_conditions(
     Ok(as_of.zip(history).map(|(date, h)| (date, h.sessions)))
 }
 
-/// `conditions`: trend, volatility, breadth and valuation of a market.
-/// Readings only: no call on whether to invest.
-pub async fn cmd_conditions(
+/// The `conditions` report of a market (and, for India, a `--universe`),
+/// saving the session's breadth and valuation.
+pub(crate) async fn conditions_report(
+    client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,
-    json: bool,
-) -> Result<()> {
+) -> Result<crate::conditions::Report> {
     market.require_stocks("conditions")?;
-    let client = YahooClient::new().await?;
     let (index_symbol, index_name, vol): (&str, &str, Option<(&str, &str)>) = match market {
         Market::In => ("^NSEI", "NIFTY 50", Some(("^INDIAVIX", "India VIX"))),
         Market::Us => ("^GSPC", "S&P 500", Some(("^VIX", "VIX"))),
@@ -2207,12 +2206,12 @@ pub async fn cmd_conditions(
             .and_then(|c| crate::conditions::volatility(name, &chart_closes(&c))),
         None => None,
     };
-    let bond_yield = ten_year_yield(&client, market).await;
-    let quotes = universe_quotes(&client, market, universe).await?;
+    let bond_yield = ten_year_yield(client, market).await;
+    let quotes = universe_quotes(client, market, universe).await?;
     let breadth = crate::conditions::breadth(&quotes);
     let valuation = crate::conditions::valuation(&quotes, bond_yield);
     let (as_of, history) = record_reading(market, universe, &quotes, &breadth, &valuation);
-    let report = crate::conditions::Report {
+    Ok(crate::conditions::Report {
         market: market.label().to_string(),
         index: index_name.to_string(),
         trend,
@@ -2222,7 +2221,18 @@ pub async fn cmd_conditions(
         scanned: quotes.len(),
         as_of,
         history,
-    };
+    })
+}
+
+/// `conditions`: trend, volatility, breadth and valuation of a market.
+/// Readings only: no call on whether to invest.
+pub async fn cmd_conditions(
+    market: Market,
+    universe: Option<market::Universe>,
+    json: bool,
+) -> Result<()> {
+    let client = YahooClient::new().await?;
+    let report = conditions_report(&client, market, universe).await?;
     if json {
         return output::print_json(&report);
     }

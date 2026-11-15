@@ -14,6 +14,7 @@ mod ai;
 mod alerts;
 mod api;
 mod ask;
+mod audit;
 mod backtest;
 mod benchmark;
 mod bleed;
@@ -47,8 +48,10 @@ mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod nifty500;
+mod notes;
 mod notify;
 mod offmarket;
+mod onboarding;
 mod output;
 mod pagecache;
 mod payoff;
@@ -933,6 +936,20 @@ loads are estimates. Amounts take Indian units: 50k, 25L (lakh), 1cr (crore).")]
     },
 
     // ── AI assistants ──
+    /// Undo a change an assistant made to the watchlist, alerts, goals, targets, profile,
+    /// notes or portfolio (`stockwise mcp --allow-writes`, `ask --auto`)
+    Undo {
+        /// The change to undo (default: the newest one not yet undone)
+        id: Option<u64>,
+        /// List the recorded changes instead
+        #[arg(long)]
+        list: bool,
+        /// Undo even if a file was edited after the change (that edit is lost)
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
     /// Ask in plain English; the AI model answers with StockWise's read-only tools
     #[command(after_help = "Examples:\n  \
 stockwise ask \"how is my portfolio doing?\"\n  \
@@ -975,6 +992,14 @@ that returns the `stockwise trade` command for you to run yourself.")]
         /// Add an order_preview tool (dry-run previews only; it never places an order)
         #[arg(long)]
         allow_orders: bool,
+        /// Add tools that change the workspace: watchlist, alerts, goals, target weights,
+        /// the investor profile and notes. Every change can be undone with `stockwise undo`
+        #[arg(long)]
+        allow_writes: bool,
+        /// Also add tools that record purchases and sales in the portfolio (implies
+        /// --allow-writes; undoable; they never place orders)
+        #[arg(long)]
+        allow_portfolio: bool,
         /// Print the tools and their input schemas as JSON and exit
         #[arg(long)]
         list_tools: bool,
@@ -3132,7 +3157,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Planning", &["goal"]),
-    ("AI assistants", &["ask", "mcp"]),
+    ("AI assistants", &["ask", "mcp", "undo"]),
     ("Interfaces", &["tui", "serve"]),
     ("Live trading", &["trade"]),
     (
@@ -4712,12 +4737,27 @@ async fn dispatch(
             };
             commands::cmd_ask(&question.join(" "), opts, m, out.json).await
         }
+        Commands::Undo {
+            id,
+            list,
+            force,
+            out,
+        } => commands::cmd_undo(id, list, force, out.json),
         Commands::Mcp {
             http,
             allow_remote,
             allow_orders,
+            allow_writes,
+            allow_portfolio,
             list_tools,
-        } => commands::cmd_mcp(http.as_deref(), allow_remote, allow_orders, list_tools, m).await,
+        } => {
+            let access = commands::McpAccess {
+                orders: allow_orders,
+                writes: allow_writes || allow_portfolio,
+                portfolio: allow_portfolio,
+            };
+            commands::cmd_mcp(http.as_deref(), allow_remote, access, list_tools, m).await
+        }
         Commands::Profile(args) => match args.action {
             Some(ProfileCmd::Show { out: sub_out }) => {
                 let fmt = Format::from_flags(args.out.json || sub_out.json, false);

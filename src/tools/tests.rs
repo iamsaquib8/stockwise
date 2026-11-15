@@ -818,3 +818,295 @@ fn ipo_tools_are_described_without_a_call() {
         assert!(!t.description.to_lowercase().contains("verdict"), "{name}");
     }
 }
+
+// ── workspace changes ──
+
+/// A scratch data directory with a config file and an empty portfolio.
+fn workspace(name: &str, allow_portfolio: bool) -> Workspace {
+    let dir = std::env::temp_dir().join(format!(
+        "stockwise-ws-{}-{}-{}",
+        name,
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    Workspace {
+        config: dir.join("config.toml"),
+        portfolio: dir.join("portfolio.json"),
+        dir,
+        source: "test",
+        allow_portfolio,
+    }
+}
+
+fn writing(w: &Workspace) -> ToolContext<LongCharts> {
+    let mut c = ctx();
+    c.workspace = Some(w.clone());
+    c
+}
+
+#[test]
+fn write_tools_are_offered_only_when_turned_on() {
+    let c = ctx();
+    for t in WRITE_TOOLS.iter().chain(PORTFOLIO_TOOLS) {
+        assert!(c.find(t.name).is_none(), "{} offered read-only", t.name);
+        assert!(t.personal, "{} changes local files", t.name);
+        assert!(t.description.len() > 40, "{}", t.name);
+        let s = t.input_schema();
+        assert_eq!(s["additionalProperties"], false, "{}", t.name);
+        assert_ne!(access(t.name), Access::Read);
+        // Undoable changes that never order anything.
+        assert!(
+            !t.description.to_ascii_lowercase().contains("order")
+                || t.description.contains("no order"),
+            "{}",
+            t.name
+        );
+    }
+    let w = workspace("offer", false);
+    let c = writing(&w);
+    assert!(c.find("watchlist_add").is_some());
+    assert!(
+        c.find("portfolio_add").is_none(),
+        "lots need --allow-portfolio"
+    );
+    let all = workspace("offer-all", true);
+    assert!(writing(&all).find("portfolio_sell").is_some());
+    let names: Vec<&str> = TOOLS
+        .iter()
+        .chain(WRITE_TOOLS)
+        .chain(PORTFOLIO_TOOLS)
+        .map(|t| t.name)
+        .collect();
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), names.len(), "tool names are unique");
+    let _ = std::fs::remove_dir_all(&w.dir);
+    let _ = std::fs::remove_dir_all(&all.dir);
+}
+
+#[tokio::test]
+async fn watchlist_alert_goal_and_note_changes_are_journalled_and_undone() {
+    let w = workspace("changes", false);
+    let c = writing(&w);
+    let journal = crate::audit::Journal::new(&w.dir);
+
+    let v = c
+        .call("watchlist_add", &json!({"symbols": ["TCS", "INFY"]}))
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["added"], json!(["TCS.NS", "INFY.NS"]));
+    assert_eq!(v["data"]["undo"], "stockwise undo 1");
+    // Unknown tickers are refused and nothing is recorded.
+    assert!(
+        c.call("watchlist_add", &json!({"symbols": ["NOSUCH"]}))
+            .await
+            .is_err()
+    );
+    assert_eq!(journal.list().unwrap().len(), 1);
+
+    let v = c
+        .call(
+            "alert_add",
+            &json!({"symbol": "TCS", "condition": "above", "value": 4200}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["index"], 0);
+    // A stale index cannot remove another stock's alert.
+    let e = c
+        .call("alert_remove", &json!({"index": 0, "symbol": "INFY"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("is on TCS.NS"), "{e}");
+
+    c.call(
+        "goal_save",
+        &json!({"name": "house", "target": 5_000_000, "by": "2035-06", "inflation_pct": 6}),
+    )
+    .await
+    .unwrap();
+    let v = c
+        .call(
+            "goal_save",
+            &json!({"name": "House", "target": 6_000_000, "by": "2036-01"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["replaced"], true, "same name replaces");
+    assert!(
+        c.call(
+            "goal_save",
+            &json!({"name": "x", "target": 1, "by": "soon"})
+        )
+        .await
+        .is_err()
+    );
+
+    c.call(
+        "note_set",
+        &json!({"symbol": "TCS", "thesis": "Steady compounder", "max_pe": 30}),
+    )
+    .await
+    .unwrap();
+    let notes: crate::notes::NoteStore =
+        crate::store::load_from(&w.dir.join(crate::notes::FILE)).unwrap();
+    assert_eq!(notes.get("TCS.NS").unwrap().max_pe, Some(30.0));
+
+    let changes = journal.list().unwrap();
+    assert_eq!(changes.len(), 5);
+    assert!(changes.iter().all(|c| c.source == "test"));
+    // Undo, newest first, back to an empty workspace.
+    for _ in 0..5 {
+        journal.undo(None, false).unwrap();
+    }
+    assert!(!w.dir.join("watchlist.json").exists());
+    assert!(!w.dir.join("alerts.json").exists());
+    assert!(!w.dir.join("goals.json").exists());
+    assert!(!w.dir.join(crate::notes::FILE).exists());
+    let _ = std::fs::remove_dir_all(&w.dir);
+}
+
+#[tokio::test]
+async fn targets_profile_and_lots_change_their_files() {
+    let w = workspace("lots", true);
+    let c = writing(&w);
+    c.call(
+        "portfolio_add",
+        &json!({"symbol": "TCS", "shares": 10, "price": 3500, "date": "2024-01-10"}),
+    )
+    .await
+    .unwrap();
+    let v = c
+        .call(
+            "portfolio_sell",
+            &json!({"symbol": "TCS", "shares": 4, "price": 4100}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["realised_gain"], 2400.0);
+    let p = Portfolio::load_from(&w.portfolio).unwrap();
+    assert_eq!(p.holding("TCS.NS").unwrap().shares, 6.0);
+    assert!(
+        c.call(
+            "portfolio_sell",
+            &json!({"symbol": "TCS", "shares": 99, "price": 1})
+        )
+        .await
+        .is_err()
+    );
+
+    let v = c
+        .call("target_set", &json!({"key": "TCS", "percent": 40}))
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["key"], "TCS.NS");
+    c.call("target_set", &json!({"key": "Technology", "percent": 25}))
+        .await
+        .unwrap();
+    assert!(
+        c.call("target_remove", &json!({"key": "Energy"}))
+            .await
+            .is_err()
+    );
+
+    let v = c
+        .call(
+            "profile_set",
+            &json!({"mode": "passive", "max_stock_weight": 10}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["updated"], json!(["mode", "max_stock_weight"]));
+    let config = std::fs::read_to_string(&w.config).unwrap();
+    assert!(config.contains("max_stock_weight"), "{config}");
+    assert!(c.call("profile_set", &json!({})).await.is_err());
+
+    // Every change undone restores the original files.
+    let journal = crate::audit::Journal::new(&w.dir);
+    while journal.undo(None, false).is_ok() {}
+    assert!(!w.portfolio.exists());
+    assert!(!w.config.exists());
+    let _ = std::fs::remove_dir_all(&w.dir);
+}
+
+#[tokio::test]
+async fn onboarding_answers_set_the_profile() {
+    let q = data("profile_questions", json!({})).await;
+    assert!(q["questions"].as_array().unwrap().len() >= 5);
+    let w = workspace("onboard", false);
+    let c = writing(&w);
+    let v = c
+        .call(
+            "profile_onboard",
+            &json!({"involvement": "rarely", "fall_reaction": "wait", "horizon_years": 15, "tax_slab": 30}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["profile"]["mode"], "passive");
+    assert_eq!(v["data"]["profile"]["risk"], "med");
+    assert!(v["data"]["why"].as_array().unwrap().len() >= 2);
+    let config = std::fs::read_to_string(&w.config).unwrap();
+    assert!(config.contains("mode = \"passive\""), "{config}");
+    let _ = std::fs::remove_dir_all(&w.dir);
+}
+
+#[tokio::test]
+async fn fit_check_answers_against_the_users_own_rules() {
+    let w = workspace("fit", false);
+    let c = writing(&w);
+    // TCS is ~85% of the fixture portfolio: above any profile's limit.
+    let v = c
+        .call("fit_check", &json!({"symbol": "TCS"}))
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["fits_your_rules"], "no", "{v}");
+    assert_eq!(v["data"]["failed"][0]["rule"], "weight");
+    // RELIANCE is not held: its weight passes.
+    let v = c
+        .call("fit_check", &json!({"symbol": "RELIANCE"}))
+        .await
+        .unwrap();
+    assert_ne!(v["data"]["fits_your_rules"], "no", "{v}");
+    // A note's P/E limit is checked when the quote has a P/E.
+    c.call(
+        "note_set",
+        &json!({"symbol": "RELIANCE", "max_weight_pct": 1}),
+    )
+    .await
+    .unwrap();
+    let v = c
+        .call("fit_check", &json!({"symbol": "RELIANCE", "amount": 10000}))
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["fits_your_rules"], "no", "{v}");
+    crate::verdict::testing::assert_neutral(&v.to_string());
+    let _ = std::fs::remove_dir_all(&w.dir);
+}
+
+#[tokio::test]
+async fn analysis_movers_dividends_and_emergency_run_on_fixtures() {
+    let a = data("portfolio_analyze", json!({"quick": true})).await;
+    assert_eq!(a["positions"].as_array().unwrap().len(), 3);
+    assert!(a["by_market"].is_array() && a["observations"].is_array());
+    let m = data("movers", json!({"count": 2})).await;
+    assert!(m["gainers"].is_array() && m["losers"].is_array());
+    let d = data("dividends", json!({"symbol": "TCS"})).await;
+    assert!(d.is_object());
+    let e = data(
+        "goal_emergency",
+        json!({"monthly_expense": 50000, "liquid": 100000, "market": "us"}),
+    )
+    .await;
+    assert_eq!(e["months_cover"], 6);
+    let w = workspace("changes-list", false);
+    let c = writing(&w);
+    c.call("watchlist_add", &json!({"symbols": ["INFY"]}))
+        .await
+        .unwrap();
+    let v = c.call("changes_list", &json!({})).await.unwrap();
+    assert_eq!(v["data"]["changes"][0]["tool"], "watchlist_add");
+    let _ = std::fs::remove_dir_all(&w.dir);
+}

@@ -1871,21 +1871,13 @@ pub fn cmd_portfolio_list() -> Result<()> {
 // ── Target Allocations & Rebalance ──
 
 /// Set a target weight for a symbol or sector.
-pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> Result<()> {
-    if !(0.0..=100.0).contains(&percentage) {
-        bail!(
-            "Target percentage must be between 0 and 100, got {}",
-            percentage
-        );
-    }
-    let mut p = Portfolio::load()?;
-
-    // Resolve key:
-    // 1. If it matches an existing holding (exact or bare): use holding's exact symbol.
-    // 2. If it contains '.' or ':', keep as given (e.g. TCS.NS or MF:122639).
-    // 3. If it looks like a short uppercase ticker: resolve symbol for current market.
-    // 4. Otherwise (e.g. "Technology", "Financial Services"): keep as sector key.
-    let resolved_key = if let Some(h) = p.holdings.iter().find(|h| {
+/// The key a target weight is saved under:
+/// 1. a held symbol (exact, or its bare ticker) → that holding's symbol;
+/// 2. a key with `.` or `:` (TCS.NS, MF:122639) → as given, upper-cased;
+/// 3. a short upper-case ticker → resolved for `market`;
+/// 4. anything else ("Technology", "Financial Services") → a sector key.
+pub(crate) fn resolve_target_key(p: &Portfolio, key: &str, market: Market) -> String {
+    if let Some(h) = p.holdings.iter().find(|h| {
         h.symbol.eq_ignore_ascii_case(key)
             || h.symbol
                 .split_once('.')
@@ -1902,7 +1894,19 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
         market::resolve_symbol(key, market)
     } else {
         key.trim().to_string()
-    };
+    }
+}
+
+pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> Result<()> {
+    if !(0.0..=100.0).contains(&percentage) {
+        bail!(
+            "Target percentage must be between 0 and 100, got {}",
+            percentage
+        );
+    }
+    let mut p = Portfolio::load()?;
+
+    let resolved_key = resolve_target_key(&p, key, market);
 
     p = Portfolio::update(|p| {
         p.set_target(resolved_key.clone(), percentage);

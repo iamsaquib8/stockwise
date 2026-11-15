@@ -1,16 +1,23 @@
-//! Read-only tools for AI agents: `stockwise mcp` serves them over the Model
-//! Context Protocol and `stockwise ask` hands them to the configured model.
+//! Tools for AI agents: `stockwise mcp` serves them over the Model Context
+//! Protocol and `stockwise ask` hands them to the configured model.
 //!
 //! Each tool is a name, a description, a JSON-schema input built from a
 //! [`Param`] list, and a handler that returns JSON from the same functions
-//! the commands' `--json` output uses. Nothing here places orders, edits the
-//! portfolio or prints. Every result is wrapped in an envelope with a short
-//! "not financial advice" note and kept small enough for a model's context.
+//! the commands' `--json` output uses. Most only read. The workspace tools
+//! (`watchlist_add`, `alert_add`, `goal_save`, ...) and the portfolio tools
+//! (`portfolio_add`, `portfolio_sell`) change local files and are offered
+//! only when the host turns them on; every change is journalled and can be
+//! undone (see [`crate::audit`]). Nothing here places orders or prints.
+//! Every result is wrapped in an envelope with a short "not financial
+//! advice" note and kept small enough for a model's context.
 
 mod args;
+mod extra;
 mod handlers;
+mod workspace;
 
 pub use args::Args;
+pub use workspace::{Access, PORTFOLIO_TOOLS, WRITE_TOOLS, Workspace, access};
 
 /// Drop the Yahoo session crumb from error text before it leaves the process.
 pub(crate) fn redact(msg: &str) -> String {
@@ -165,6 +172,23 @@ pub fn market_codes() -> Vec<String> {
         .map(|v| v.get_name().to_string())
         .collect()
 }
+
+const UNIVERSE: Param = opt(
+    "universe",
+    Kind::Enum(&[
+        "nifty50",
+        "niftynext50",
+        "nifty100",
+        "banknifty",
+        "niftyit",
+        "nifty500",
+        "midcap150",
+        "smallcap250",
+        "bse",
+        "all",
+    ]),
+    "India only: an NSE index, `bse` (BSE main board) or `all` (every BSE stock) instead of the default (liquid BSE stocks)",
+);
 
 const MARKET: Param = opt(
     "market",
@@ -676,6 +700,13 @@ pub const TOOLS: &[Tool] = &[
                       stock weight, max small-cap weight, risk per trade).",
         params: &[],
         personal: true,
+    },
+    Tool {
+        name: "profile_questions",
+        title: "Profile onboarding questions",
+        description: "The few plain questions that set up the user's investor profile (how closely they follow investments, how they react to a fall, horizon, experience, tax slab and regime), with the answer choices. Ask them one at a time; with workspace changes on, send the answers to profile_onboard.",
+        params: &[],
+        personal: false,
     },
     Tool {
         name: "holdings_lots",
@@ -1225,6 +1256,145 @@ pub const TOOLS: &[Tool] = &[
         params: &[],
         personal: true,
     },
+    Tool {
+        name: "portfolio_analyze",
+        title: "Portfolio analysis",
+        description: "The portfolio dashboard: every holding's weight, P&L, today's move, gain by tax term and next lot to turn long-term, place against its 200-day average and 52-week range, volatility, beta and long-term score; the portfolio by market (with each market's own-currency total), currency, cap tier and sector; concentration and risk; and neutral observations with their figures.",
+        params: &[
+            opt(
+                "quick",
+                Kind::Bool,
+                "Skip the year of prices per holding (no risk figures; faster)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "market_conditions",
+        title: "Market conditions",
+        description: "Where a stock market stands, as readings: the main index against its 200- and 50-day averages and highs, India VIX or VIX against 5 years, breadth (share of stocks above their averages), and valuation (aggregate P/E, earnings yield against the 10-year bond yield), with how today ranks against earlier saved sessions. Readings, not a signal to invest or wait.",
+        params: &[UNIVERSE, MARKET],
+        personal: false,
+    },
+    Tool {
+        name: "picks",
+        title: "Highest-scoring stocks",
+        description: "Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data. A score of the data, not a recommendation.",
+        params: &[
+            UNIVERSE,
+            opt(
+                "cap",
+                Kind::Enum(&["mega", "large", "mid", "small", "micro"]),
+                "Rank only this market-cap tier",
+            ),
+            opt(
+                "top",
+                Kind::Integer { min: 1, max: 50 },
+                "How many of the highest scores (default 10)",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "movers",
+        title: "Top gainers and losers",
+        description: "Today's biggest gainers and losers among the market's large stocks (NIFTY 500, the S&P 1500, or the exchange's main index), with price, change and volume.",
+        params: &[
+            opt(
+                "count",
+                Kind::Integer { min: 1, max: 25 },
+                "How many on each side (default 5)",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "dividends",
+        title: "Dividend yield and income",
+        description: "A stock's trailing dividend yield, the yearly income it would pay on a few invested amounts, and the 10-year growth with dividends reinvested at the current yield.",
+        params: &[SYMBOL, MARKET],
+        personal: false,
+    },
+    Tool {
+        name: "goal_emergency",
+        title: "Emergency fund",
+        description: "The emergency reserve to keep (monthly expenses × months of cover), how much of it the user's liquid money already covers, and the monthly saving that builds the rest over a horizon.",
+        params: &[
+            req(
+                "monthly_expense",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1.0e9,
+                },
+                "Monthly expenses in the market's currency",
+            ),
+            opt(
+                "months_cover",
+                Kind::Integer { min: 1, max: 36 },
+                "Months of expenses to cover (default 6)",
+            ),
+            opt(
+                "liquid",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1.0e12,
+                },
+                "Money already set aside",
+            ),
+            opt(
+                "horizon_months",
+                Kind::Integer { min: 1, max: 120 },
+                "Months to build it over (default 12)",
+            ),
+            opt(
+                "return_pct",
+                Kind::Number {
+                    min: 0.0,
+                    max: 20.0,
+                },
+                "Yearly return on the reserve",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "fit_check",
+        title: "Does a stock fit my rules?",
+        description: "Yes or no: whether a stock meets the user's own rules: the investor profile's largest weight for one stock and for small and micro caps (with an amount, after buying it), the risk level the profile allows, and the P/E, ROE and weight limits the user saved in a note on the stock. Lists each rule passed, failed or without data. Measured against the user's rules; not a recommendation.",
+        params: &[
+            SYMBOL,
+            opt(
+                "amount",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1.0e12,
+                },
+                "Amount the user is considering adding, in the portfolio's currency",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "changes_list",
+        title: "Changes made by assistants",
+        description: "The workspace changes made through StockWise's assistant tools (watchlist, alerts, goals, targets, profile, notes, portfolio), newest first, with each change's id for `stockwise undo`.",
+        params: &[opt(
+            "limit",
+            Kind::Integer { min: 1, max: 100 },
+            "How many (default 20)",
+        )],
+        personal: true,
+    },
 ];
 
 /// Only with `stockwise mcp --allow-orders`: previews an order without
@@ -1283,6 +1453,8 @@ pub struct ToolContext<D> {
     pub source: D,
     pub market: Market,
     pub allow_orders: bool,
+    /// Where changes go when the host allows them; `None`: read-only.
+    pub workspace: Option<Workspace>,
     /// Results are cut to this size (small local models get less).
     pub max_result_bytes: usize,
 }
@@ -1293,6 +1465,7 @@ impl<D: DataSource> ToolContext<D> {
             source,
             market,
             allow_orders: false,
+            workspace: None,
             max_result_bytes: MAX_RESULT_BYTES,
         }
     }
@@ -1300,6 +1473,12 @@ impl<D: DataSource> ToolContext<D> {
     /// The tools this context offers.
     pub fn tools(&self) -> Vec<&'static Tool> {
         let mut out: Vec<&'static Tool> = TOOLS.iter().collect();
+        if let Some(w) = &self.workspace {
+            out.extend(WRITE_TOOLS);
+            if w.allow_portfolio {
+                out.extend(PORTFOLIO_TOOLS);
+            }
+        }
         if self.allow_orders {
             out.push(&ORDER_PREVIEW);
         }
@@ -1327,7 +1506,13 @@ impl<D: DataSource> ToolContext<D> {
             );
         };
         let args = Args::parse(tool, args)?;
-        let data = handlers::run(self, tool.name, &args).await?;
+        let data = match (&self.workspace, access(tool.name)) {
+            (Some(w), Access::Workspace | Access::Portfolio) => {
+                let m = args.market(self.market);
+                workspace::run(w, &self.source, tool.name, &args, m).await?
+            }
+            _ => handlers::run(self, tool.name, &args).await?,
+        };
         Ok(envelope(data, self.max_result_bytes))
     }
 }

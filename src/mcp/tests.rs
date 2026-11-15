@@ -204,9 +204,13 @@ async fn prompts_fill_in_their_arguments() {
         [
             "review_portfolio",
             "tax_harvest_check",
-            "explain_option_chain"
+            "explain_option_chain",
+            "onboard_profile"
         ]
     );
+    let onboard = prompt_text("onboard_profile", &Map::new()).unwrap();
+    assert!(onboard.contains("profile_questions") && onboard.contains("profile_onboard"));
+    assert!(onboard.contains("one at a time"));
     let r = c
         .request(
             "prompts/get",

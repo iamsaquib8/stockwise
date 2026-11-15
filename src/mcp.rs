@@ -34,14 +34,19 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 /// Told to the client at `initialize`; hosts show it to the model.
-const INSTRUCTIONS: &str = "StockWise gives read-only market data and the user's own \
-portfolio from a local command-line tool: quotes, history, technicals, risk, Indian mutual \
-funds, F&O option chains, screens, backtests, the portfolio and its tax, calendars and goal \
-calculators. Bare tickers use the user's default market (India/NSE unless configured); pass \
-`market` for US (`us`), crypto, fx, commodity or another exchange. Present results as \
+const INSTRUCTIONS: &str = "StockWise gives market data and the user's own portfolio from a \
+local command-line tool: quotes, history, technicals, risk, Indian mutual funds, F&O option \
+chains, screens, backtests, the portfolio and its analysis and tax, market conditions, \
+calendars and goal calculators. Bare tickers use the user's default market (India/NSE unless \
+configured); pass `market` for US (`us`), crypto, fx, commodity or another exchange. When the \
+user turned them on, tools also change the local workspace (watchlist, alerts, goals, target \
+weights, the investor profile, notes) and, separately, record purchases and sales in the \
+portfolio; every change is journalled and `stockwise undo` reverts it, so say what changed and \
+give the change id. Ask before changing anything the user did not ask for. Present results as \
 educational information, not personalised advice or buy/sell recommendations, and say that \
-prices can be delayed. Scores from the `verdict` tool describe data; never turn them into a \
-rating, price target, or entry or exit level. These tools never place orders.";
+prices can be delayed. Scores from the `verdict` and `picks` tools describe data; never turn \
+them into a rating, price target, or entry or exit level. `fit_check` says whether a stock \
+meets the user's own rules; it is not a recommendation. These tools never place orders.";
 
 const RESOURCES: &[(&str, &str, &str)] = &[
     (
@@ -95,14 +100,21 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
                 };
                 rmcp::model::Tool::new(t.name, t.description, Arc::new(schema))
                     .with_title(t.title)
-                    .with_annotations(
+                    .with_annotations({
+                        let access = crate::tools::access(t.name);
+                        let read = access == crate::tools::Access::Read;
                         ToolAnnotations::with_title(t.title)
-                            .read_only(true)
-                            .destructive(false)
-                            .idempotent(true)
+                            .read_only(read)
+                            // Removals and lot changes are undoable, but a
+                            // host should still confirm them.
+                            .destructive(
+                                t.name.ends_with("_remove")
+                                    || access == crate::tools::Access::Portfolio,
+                            )
+                            .idempotent(read)
                             // Market data comes from outside; the portfolio does not.
-                            .open_world(!t.personal),
-                    )
+                            .open_world(!t.personal)
+                    })
             })
             .collect()
     }
@@ -162,6 +174,12 @@ const PROMPTS: &[(&str, &str, &str, &[(&str, &str, bool)])] = &[
             ("expiry", "Expiry date YYYY-MM-DD (default nearest)", false),
         ],
     ),
+    (
+        "onboard_profile",
+        "Set up my investor profile",
+        "A few plain questions about how you invest, then your profile is saved (mode, risk, horizon, tax)",
+        &[],
+    ),
 ];
 
 /// The text of a prompt, with its arguments filled in.
@@ -173,6 +191,15 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
             .filter(|s| !s.is_empty())
     };
     Ok(match name {
+        "onboard_profile" => "Help me set up my StockWise investor profile. Call \
+             profile_questions and ask me its questions one at a time, in plain words, with the \
+             choices; accept my own words and map them to a choice, asking again if unsure. \
+             Skip the optional ones if I prefer. Then call profile_onboard with my answers and \
+             tell me the mode, risk level and guardrails it set and why, and that `stockwise \
+             undo` reverts it. If profile_onboard is not available (workspace changes are off), \
+             give me the matching `stockwise profile set` command instead. This sets how \
+             StockWise describes things for me; it is not investment advice."
+            .to_string(),
         "review_portfolio" => {
             let mut s = String::from(
                 "Review my StockWise portfolio. Call portfolio_summary first, then holdings_lots, \
@@ -350,20 +377,30 @@ impl<D: DataSource + 'static> ServerHandler for StockwiseMcp<D> {
 /// Streamable HTTP when `http` names an address.
 pub async fn run(
     market: Market,
-    allow_orders: bool,
+    access: crate::commands::McpAccess,
     http: Option<&str>,
     allow_remote: bool,
 ) -> Result<()> {
     let mut ctx = ToolContext::new(views::LiveSource::new(), market);
-    ctx.allow_orders = allow_orders;
+    ctx.allow_orders = access.orders;
+    if access.writes || access.portfolio {
+        ctx.workspace = Some(crate::tools::Workspace::for_user("mcp", access.portfolio)?);
+    }
+    let allow_orders = access.orders;
+    let mode = match (access.writes || access.portfolio, access.portfolio) {
+        (false, _) => "read-only",
+        (true, false) => "workspace changes on, undo with `stockwise undo`",
+        (true, true) => "workspace and portfolio changes on, undo with `stockwise undo`",
+    };
     let server = StockwiseMcp::new(ctx);
     match http {
         None => {
             // stdout belongs to the protocol: notes go to stderr.
             eprintln!(
-                "StockWise MCP server {} on stdio ({} tools, read-only{}). Ctrl+C to stop.",
+                "StockWise MCP server {} on stdio ({} tools, {}{}). Ctrl+C to stop.",
                 env!("CARGO_PKG_VERSION"),
                 server.ctx.tools().len(),
+                mode,
                 if allow_orders {
                     "; order previews only"
                 } else {
