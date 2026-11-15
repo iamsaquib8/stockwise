@@ -819,6 +819,24 @@ mod tests {
             .filter(|y| (0..37).any(|x| buf[(x, *y)].symbol() != " "))
             .count();
         assert_eq!(rendered_rows(&odd, 37), drawn);
+        // An ideographic space is two cells wide too: 18 + 2 + 19 is more
+        // than 38, so the line wraps.
+        let ideo = one(format!("{}\u{3000}{}", "a".repeat(18), "b".repeat(19)));
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(38, 6)).unwrap();
+        term.draw(|f| {
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(ideo.clone())
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                f.area(),
+            )
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let drawn = (0..6)
+            .filter(|y| (0..38).any(|x| buf[(x, *y)].symbol() != " "))
+            .count();
+        assert_eq!(drawn, 2);
+        assert_eq!(rendered_rows(&ideo, 38), drawn);
         // Several lines add up; padded key/value lines count their padding.
         let kv = format!(" {:<24}{}", "Long-term score", "62 of 100 (80% of inputs)");
         assert_eq!(rendered_rows(&[Line::from(kv), Line::from("x")], 38), 3);
