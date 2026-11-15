@@ -28,6 +28,16 @@ in `stockwise trade`, with its preview and confirmation.
 | Alerts | Triggered alerts first (marked `!`), then the rest, with the live price. An alert never fires without a price |
 | Footer | Key hints, or the latest message (errors in red) |
 
+Press `p` for the **portfolio analysis** screen: holdings with weight, P&L,
+today's move, tax term (`LT`, `ST 17d`, `mix`), long-term score and
+observation marks (`●` a notice, `○` information) on the left; summary,
+allocation by market and sector, risk and concentration, and the observations
+on the right. `Enter` opens a holding in detail: market, currency, cap tier,
+sector, value in its own and the base currency, gains by tax term, the next
+lot to turn long-term, volatility, beta, score and its observations. It is
+the same analysis as `stockwise portfolio analyze`, loaded when you first
+open the screen; `r` runs it again.
+
 The chart follows the selection: move through the watchlist or, after `Tab`,
 the portfolio. With both empty it shows the first index.
 
@@ -38,6 +48,7 @@ the portfolio. With both empty it shows the first index.
 | `↑` `↓` / `j` `k` | Move the selection (the chart follows) |
 | `g` `G` / `Home` `End` | First / last row |
 | `Tab` | Switch between watchlist and portfolio |
+| `p` | Open or close the portfolio analysis screen (`Esc` also closes it) |
 | `1`-`6` / `[` `]` | Chart period: `1d` `5d` `1mo` `6mo` `1y` `5y` |
 | `/` or `a` | Search a company or ticker and add it to the watchlist (`Enter` searches, `↑` `↓` choose, `Enter` adds, `Esc` cancels). Listings on your market's exchanges (NSE/BSE for India) are listed first |
 | `x` / `Del` | Remove the selected watchlist symbol |

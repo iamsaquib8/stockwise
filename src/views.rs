@@ -126,7 +126,7 @@ impl LiveSource {
         Self::default()
     }
 
-    async fn client(&self) -> Result<&YahooClient> {
+    pub(crate) async fn client(&self) -> Result<&YahooClient> {
         self.client.get_or_try_init(YahooClient::new).await
     }
 }

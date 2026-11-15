@@ -18,7 +18,7 @@ const SECTOR_LIMIT: usize = 40;
 /// What `portfolio analyze` prints with `--json`: the analysis and the
 /// tax a sale of everything today would bring.
 #[derive(Debug, Serialize)]
-pub(crate) struct AnalyzeReport {
+pub struct AnalyzeReport {
     #[serde(flatten)]
     pub analysis: Analysis,
     pub tax_if_sold_today: Option<TaxIfSold>,
@@ -28,7 +28,7 @@ pub(crate) struct AnalyzeReport {
 /// Estimated tax on every unrealised gain if all holdings were sold today,
 /// at the standard rates, before any other gain or loss of the year.
 #[derive(Debug, Serialize)]
-pub(crate) struct TaxIfSold {
+pub struct TaxIfSold {
     pub country: &'static str,
     pub currency: String,
     pub short_term_tax: f64,

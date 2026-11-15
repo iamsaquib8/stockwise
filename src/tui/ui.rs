@@ -1,7 +1,7 @@
 //! Drawing the TUI. Pure functions of [`App`]: nothing here fetches data or
 //! changes state, so a frame can be rendered into a test buffer.
 
-use super::app::{App, CHART_PERIODS, Focus, Mode, Series};
+use super::app::{App, CHART_PERIODS, Focus, Mode, Screen, Series};
 use crate::alerts::{Alert, AlertCondition};
 use crate::display::format_price;
 use crate::views::{AlertCheckRow, IndexRow};
@@ -82,7 +82,7 @@ pub fn no_color() -> bool {
 }
 
 /// `RELIANCE.NS` → `RELIANCE`: the NSE suffix is implied in the TUI.
-fn short(symbol: &str) -> &str {
+pub(super) fn short(symbol: &str) -> &str {
     symbol.strip_suffix(".NS").unwrap_or(symbol)
 }
 
@@ -125,7 +125,9 @@ pub fn render(f: &mut Frame, app: &App, theme: &Theme) {
 
     render_header(f, header, app, theme);
     render_indices(f, indices, app, theme);
-    if full {
+    if app.screen == Screen::Analysis {
+        super::analysis::render_body(f, body, app, theme, full);
+    } else if full {
         let [top, bottom] =
             Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
         let watch_w = (area.width * 2 / 5).clamp(34, 56);
@@ -154,6 +156,9 @@ pub fn render(f: &mut Frame, app: &App, theme: &Theme) {
 
     match &app.mode {
         Mode::Help => render_help(f, area, app, theme),
+        Mode::Detail if app.screen == Screen::Analysis => {
+            super::analysis::render_detail(f, area, app, theme)
+        }
         Mode::Detail => render_detail(f, area, app, theme),
         Mode::Search(_) => render_search(f, area, app, theme),
         Mode::Normal => {}
@@ -241,7 +246,7 @@ fn render_indices(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(line, area);
 }
 
-fn pane<'a>(title: impl Into<Line<'a>>, focused: bool, theme: &Theme) -> Block<'a> {
+pub(super) fn pane<'a>(title: impl Into<Line<'a>>, focused: bool, theme: &Theme) -> Block<'a> {
     Block::bordered()
         .title(title)
         .title_style(if focused {
@@ -256,7 +261,7 @@ fn pane<'a>(title: impl Into<Line<'a>>, focused: bool, theme: &Theme) -> Block<'
         })
 }
 
-fn placeholder(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+pub(super) fn placeholder(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
@@ -682,11 +687,20 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme, full: bool
         f.render_widget(Line::styled(format!(" {}", status.text), style), area);
         return;
     }
-    let keys: &[(&str, &str)] = if full {
+    let keys: &[(&str, &str)] = if app.screen == Screen::Analysis {
+        &[
+            ("↑↓", "select"),
+            ("Enter", "details"),
+            ("r", "re-analyse"),
+            ("p", "back"),
+            ("?", "help"),
+            ("q", "quit"),
+        ]
+    } else if full {
         &[
             ("↑↓", "select"),
             ("Tab", "pane"),
-            ("1-6", "period"),
+            ("p", "analysis"),
             ("/", "add"),
             ("x", "remove"),
             ("r", "refresh"),
@@ -711,7 +725,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme, full: bool
 }
 
 /// A centered popup no larger than `w`×`h`, cleared underneath.
-fn popup(f: &mut Frame, area: Rect, w: u16, h: u16, title: &str, theme: &Theme) -> Rect {
+pub(super) fn popup(f: &mut Frame, area: Rect, w: u16, h: u16, title: &str, theme: &Theme) -> Rect {
     let rect = area.centered(
         Constraint::Length(w.min(area.width)),
         Constraint::Length(h.min(area.height)),
@@ -729,6 +743,10 @@ const HELP: &[(&str, &str)] = &[
     ("↑ ↓  j k", "move the selection; the chart follows it"),
     ("g  G", "first / last row"),
     ("Tab", "switch between watchlist and portfolio"),
+    (
+        "p",
+        "portfolio analysis: markets, tax terms, risk, observations",
+    ),
     (
         "d  Enter",
         "inspect selected symbol (position, range, alerts)",

@@ -108,6 +108,23 @@ How to read it:
 Mixed INR and USD holdings are totalled in one currency. Pick it with
 `--base inr` or `--base usd`.
 
+For the whole picture, run the dashboard:
+
+```bash
+stockwise portfolio analyze
+```
+
+It groups your holdings by market (each with its own-currency total),
+currency, cap tier and sector, splits unrealised gains into short- and
+long-term with the next lots to turn long-term, estimates the tax if
+everything were sold today, measures volatility, beta and concentration, and
+lists observations with the figures behind them. In `stockwise tui`, press
+`p` for the same view.
+
+Bought a foreign share with rupees? Add it in its own market and say what you
+paid in: `stockwise portfolio add MSFT 3 30000 --currency INR -m us` converts
+₹30,000 a share at that day's USD/INR rate.
+
 ## 5. Check one holding
 
 ```bash
