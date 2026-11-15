@@ -491,6 +491,48 @@ pub async fn cmd_intraday(
 
 // ── AI-Powered Reports ──
 
+/// Most stocks a long-term scan fetches a year of prices for. Requests are
+/// spaced 200 ms apart, so an index of 500 would take minutes.
+const LONGTERM_CHART_LIMIT: usize = 60;
+
+/// Long-term scores of `quotes`. Every quote is scored on its fundamentals
+/// first; the [`LONGTERM_CHART_LIMIT`] highest then get a year of prices
+/// (volatility, Monte Carlo) and their final score. Only those are
+/// returned, with a note on stderr when the rest were left out.
+pub(super) async fn longterm_scores(
+    client: &YahooClient,
+    quotes: &[crate::api::Quote],
+) -> Vec<longterm::LongTermScore> {
+    use futures_util::StreamExt;
+    let mut first: Vec<(&crate::api::Quote, Option<f64>)> = quotes
+        .iter()
+        .map(|q| (q, longterm::score_for_longterm(q, None).total()))
+        .collect();
+    if first.len() > LONGTERM_CHART_LIMIT {
+        first.sort_by(|a, b| b.1.unwrap_or(f64::MIN).total_cmp(&a.1.unwrap_or(f64::MIN)));
+        eprintln!(
+            "  \u{24d8} {} stocks scored on fundamentals; the {} highest get a year of prices for the final score.",
+            first.len(),
+            LONGTERM_CHART_LIMIT
+        );
+        first.truncate(LONGTERM_CHART_LIMIT);
+    }
+    futures_util::stream::iter(first.into_iter().map(|(q, _)| async move {
+        let sym = q.symbol.as_deref().unwrap_or("");
+        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
+            c.indicators
+                .quote
+                .first()
+                .and_then(|qi| qi.close.as_ref())
+                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
+        });
+        longterm::score_for_longterm(q, hist.as_deref())
+    }))
+    .buffered(8)
+    .collect()
+    .await
+}
+
 pub async fn cmd_longterm(
     amount: Option<f64>,
     market: Market,
@@ -509,29 +551,7 @@ pub async fn cmd_longterm(
         quotes.len()
     );
 
-    // Fetch 1Y chart data for volatility analysis, a few symbols at a
-    // time (NIFTY 500 is 500 charts), keeping the quotes' order.
-    use futures_util::StreamExt;
-    let client_ref = &client;
-    let mut scores: Vec<longterm::LongTermScore> =
-        futures_util::stream::iter(quotes.iter().map(|q| async move {
-            let sym = q.symbol.as_deref().unwrap_or("");
-            let hist = client_ref
-                .get_chart(sym, "1y", "1d")
-                .await
-                .ok()
-                .and_then(|c| {
-                    c.indicators
-                        .quote
-                        .first()
-                        .and_then(|qi| qi.close.as_ref())
-                        .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-                });
-            longterm::score_for_longterm(q, hist.as_deref())
-        }))
-        .buffered(8)
-        .collect()
-        .await;
+    let mut scores = longterm_scores(&client, &quotes).await;
     longterm::rank(&mut scores);
 
     print!("{}", longterm::render_report(&scores, monthly, csym));

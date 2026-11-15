@@ -824,6 +824,10 @@ pub async fn scan_sector_heat(client: &YahooClient) -> Result<Vec<SectorHeat>> {
 // SCANNER
 // ══════════════════════════════════════════════════════════
 
+/// Most symbols an intraday scan fetches bars for: the most traded by
+/// value of the market's universe.
+const INTRADAY_SCAN_LIMIT: usize = 40;
+
 pub async fn scan_intraday(
     client: &YahooClient,
     market: market::Market,
@@ -889,11 +893,22 @@ pub async fn scan_intraday_with(
 ) -> Result<Vec<IntradaySignal>> {
     let symbols = market.universe();
     let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let mut quotes = client.get_quote(&sym_refs).await?;
+    // The scan is for liquid names and each one costs a chart request
+    // (spaced 200 ms apart): keep the most traded by value today, so a
+    // whole-index universe still scans in seconds and entries are not
+    // planned on stale prices.
+    if quotes.len() > INTRADAY_SCAN_LIMIT {
+        let traded = |q: &crate::api::Quote| {
+            q.regular_market_price.unwrap_or(0.0) * q.regular_market_volume.unwrap_or(0) as f64
+        };
+        quotes.sort_by(|a, b| traded(b).total_cmp(&traded(a)));
+        quotes.truncate(INTRADAY_SCAN_LIMIT);
+    }
     let mut signals = Vec::new();
 
-    // Daily bars a few symbols at a time (NIFTY 500 is 500 charts), in the
-    // quotes' order; priceless quotes skip the request.
+    // Daily bars a few symbols at a time, in the quotes' order; priceless
+    // quotes skip the request.
     use futures_util::StreamExt;
     let charts: Vec<Option<crate::api::ChartData>> =
         futures_util::stream::iter(quotes.iter().map(|q| async move {

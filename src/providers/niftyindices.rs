@@ -57,7 +57,7 @@ pub fn parse_members(csv: &str) -> Option<Vec<String>> {
 }
 
 /// Split one CSV row, honouring double quotes.
-fn split_csv(line: &str) -> Vec<String> {
+pub(super) fn split_csv(line: &str) -> Vec<String> {
     let mut cells = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;

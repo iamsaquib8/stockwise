@@ -918,6 +918,26 @@ fn no_history_message(symbol: &str) -> String {
     msg
 }
 
+/// The last Indian session that has closed: today once the close has
+/// passed on a trading day, else the trading day before.
+fn last_completed_session(now: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
+    use crate::market::Market;
+    let today = crate::clock::local(Market::In, now).date_naive();
+    if crate::clock::close_at(Market::In, today).is_some_and(|close| now >= close) {
+        return today;
+    }
+    let mut day = today;
+    // Exchanges never close for 30 days running.
+    for _ in 0..30 {
+        let Some(prev) = day.pred_opt() else { break };
+        day = prev;
+        if crate::clock::is_trading_day(Market::In, day) {
+            break;
+        }
+    }
+    day
+}
+
 /// Most symbols in one Yahoo quote request.
 const QUOTE_CHUNK: usize = 100;
 
@@ -1720,18 +1740,22 @@ impl YahooClient {
     }
 
     /// End-of-day quotes from BSE's latest bhavcopy for NSE-style symbols
-    /// (`ABB.NS`), and the day they are from. The file is downloaded at
-    /// most once per trading day (and looked for again at most every 30
-    /// minutes when a newer one is due), stored in `cache.db`. `None` with
-    /// `cache.db` off, in unit tests, or when no day is available.
+    /// (`ABB.NS`), the day they are from, and whether that is the last
+    /// completed session (false between the close and BSE posting the
+    /// day's file, when the stored file is a session behind). The file is
+    /// downloaded at most once per trading day (and looked for again at
+    /// most every 30 minutes while a newer one is due), stored in
+    /// `cache.db`. `None` with `cache.db` off, in unit tests, or when no
+    /// day is available.
     pub async fn bse_eod_quotes(
         &self,
         symbols: &[String],
-    ) -> Option<(chrono::NaiveDate, Vec<Quote>)> {
+    ) -> Option<(chrono::NaiveDate, Vec<Quote>, bool)> {
         if cfg!(test) || crate::db::l2().is_none() {
             return None;
         }
-        self.refresh_bse_eod().await;
+        let due = last_completed_session(chrono::Utc::now());
+        self.refresh_bse_eod(due).await;
         let (date, _) = crate::db::with_db(|d| d.eod_state()).flatten()?;
         let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
         let tickers: Vec<String> = symbols
@@ -1743,49 +1767,37 @@ impl YahooClient {
             .into_iter()
             .filter_map(|(_, json)| serde_json::from_str(&json).ok())
             .collect();
-        (!quotes.is_empty()).then_some((date, quotes))
+        (!quotes.is_empty()).then_some((date, quotes, date >= due))
     }
 
-    /// Download the newest bhavcopy when the stored one is older than the
-    /// last trading day whose file should be out (BSE posts it in the
-    /// evening, IST).
-    async fn refresh_bse_eod(&self) {
+    /// Download the bhavcopy of `due` (the last completed session) when
+    /// the stored one is older; an earlier day when that file is not out.
+    async fn refresh_bse_eod(&self, due: chrono::NaiveDate) {
         use crate::market::Market;
-        use chrono::{Datelike, Timelike};
-        let now = chrono::Utc::now();
-        let ist = crate::clock::local(Market::In, now);
-        let mut day = ist.date_naive();
-        if ist.hour() < 19 || !crate::clock::is_trading_day(Market::In, day) {
-            day = day.pred_opt().unwrap_or(day);
-        }
-        while !crate::clock::is_trading_day(Market::In, day) && day.year() > 2000 {
-            day = day.pred_opt().unwrap_or(day);
-        }
         let state = crate::db::with_db(|d| d.eod_state()).flatten();
         let stored = state
             .as_ref()
             .and_then(|(d, _)| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
-        if stored.is_some_and(|s| s >= day) {
+        if stored.is_some_and(|s| s >= due) {
             return;
         }
         if state
             .as_ref()
-            .is_some_and(|(_, checked)| now.timestamp() - checked < 30 * 60)
+            .is_some_and(|(_, checked)| chrono::Utc::now().timestamp() - checked < 30 * 60)
         {
             return;
         }
-        // The expected day first, then a few trading days back (a late or
-        // missing file).
+        // The due day first, then a few trading days back (a file that is
+        // late or missing), never past the stored day.
+        let mut day = due;
         let mut tries = 0;
-        while tries < 5 {
-            if stored.is_some_and(|s| s >= day) {
-                break;
-            }
+        while tries < 5 && stored.is_none_or(|s| s < day) {
             if crate::clock::is_trading_day(Market::In, day) {
                 tries += 1;
                 let url = providers::bse_bhav::url(day);
                 if let Ok(body) = self.fetch_with(&url, Duration::ZERO, &[]).await
                     && let Some((date, rows)) = providers::bse_bhav::parse(&body)
+                    && stored.is_none_or(|s| s < date)
                 {
                     let json: Vec<(String, String)> = rows
                         .iter()
@@ -1797,15 +1809,17 @@ impl YahooClient {
                         })
                         .collect();
                     let d = date.format("%Y-%m-%d").to_string();
-                    crate::db::with_db(|db| db.put_eod(&d, &json));
-                    return;
+                    // A failed store falls through to the 30-minute throttle.
+                    if crate::db::with_db(|db| db.put_eod(&d, &json)).is_some() && date >= due {
+                        return;
+                    }
+                    break;
                 }
             }
-            day = match day.pred_opt() {
-                Some(d) => d,
-                None => break,
-            };
+            let Some(prev) = day.pred_opt() else { break };
+            day = prev;
         }
+        // The due file is not out yet: look again in 30 minutes.
         crate::db::with_db(|d| d.touch_eod());
     }
 
@@ -2568,6 +2582,76 @@ mod tests {
         let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url));
         assert!(!client.has_router());
         assert!(client.get_quote(&["AAPL"]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn yahoo_quote_asks_in_chunks_and_keeps_what_answered() {
+        let body = |sym: &str| {
+            format!(
+                r#"{{"quoteResponse":{{"result":[{{"symbol":"{sym}","quoteType":"EQUITY","regularMarketPrice":10.0}}],"error":null}}}}"#
+            )
+        };
+        let symbols: Vec<String> = (0..150).map(|i| format!("S{i}.NS")).collect();
+        let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+
+        // 150 symbols: two requests, both answers kept.
+        let server =
+            crate::testutil::MockServer::start(vec![(200, body("A.NS")), (200, body("B.NS"))])
+                .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        let mut got: Vec<String> = client
+            .yahoo_quote(&refs)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|q| q.symbol)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["A.NS", "B.NS"]);
+
+        // One request refused: the other's quotes still come back.
+        let server =
+            crate::testutil::MockServer::start(vec![(200, body("A.NS")), (404, String::new())])
+                .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        assert_eq!(client.yahoo_quote(&refs).await.unwrap().len(), 1);
+
+        // Every request refused: an error, not an empty scan.
+        let server =
+            crate::testutil::MockServer::start(vec![(404, String::new()), (404, String::new())])
+                .await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "c",
+            to_server(&server.url),
+        );
+        assert!(client.yahoo_quote(&refs).await.is_err());
+    }
+
+    #[test]
+    fn last_completed_session_follows_the_indian_close() {
+        use chrono::TimeZone;
+        let ist = chrono::FixedOffset::east_opt(19_800).unwrap();
+        let at = |d: u32, h: u32, m: u32| {
+            ist.with_ymd_and_hms(2026, 11, d, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let day = |d: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        // Thursday 12 Nov 2026: before the close the last session is
+        // Wednesday's, after it Thursday's.
+        assert_eq!(last_completed_session(at(12, 11, 0)), day(11));
+        assert_eq!(last_completed_session(at(12, 15, 45)), day(12));
+        // Sunday: Friday's.
+        assert_eq!(last_completed_session(at(15, 12, 0)), day(13));
     }
 
     #[tokio::test]

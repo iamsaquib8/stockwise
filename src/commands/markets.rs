@@ -232,7 +232,7 @@ async fn scan_nse_index(
                 bulk: snap.members,
             })
         }
-        Err(e) => match client.index_members_csv(index).await {
+        Err(e) => match csv_members(client, index).await {
             Ok(symbols) => {
                 eprintln!(
                     "  \u{24d8} NSE did not answer ({:#}); using niftyindices.com's list of {} {} members.",
@@ -258,6 +258,27 @@ async fn scan_nse_index(
             ),
         },
     }
+}
+
+/// How long a member list read from niftyindices.com is reused. Indices
+/// change members twice a year.
+const CSV_MEMBERS_MAX_AGE_MS: i64 = 24 * 3600 * 1000;
+
+/// An index's members from niftyindices.com, kept in `cache.db` for a day
+/// (under `csv:<index>`, apart from the cap-tier lists) so the next scans
+/// ask nobody.
+async fn csv_members(client: &YahooClient, index: &str) -> Result<Vec<String>> {
+    let key = format!("csv:{}", index);
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Some((members, at)) = crate::db::with_db(|d| d.index_list(&key)).flatten()
+        && !members.is_empty()
+        && now - at < CSV_MEMBERS_MAX_AGE_MS
+    {
+        return Ok(members);
+    }
+    let members = client.index_members_csv(index).await?;
+    crate::db::with_db(|d| d.put_index_lists(&[(key, false, members.clone())]));
+    Ok(members)
 }
 
 /// The saved or built-in list when neither NSE nor niftyindices.com can
@@ -395,7 +416,7 @@ async fn scan_quotes_src(
         && no_tier
         && market == Market::In
         && !crate::clock::is_open(Market::In, chrono::Utc::now())
-        && let Some(q) = bse_eod(client, &scan.symbols, "the market is closed").await
+        && let Some(q) = bse_eod(client, &scan.symbols, "the market is closed", true).await
     {
         return Ok((q, false));
     }
@@ -427,8 +448,10 @@ async fn scan_quotes_src(
             );
             Ok((market::filter_by_cap(scan.bulk.clone(), cap), false))
         }
-        Err(e) if market == Market::In && no_tier => {
-            match bse_eod(client, &scan.symbols, "Yahoo Finance did not answer").await {
+        // Price-only scans only: scans that score fundamentals, and callers
+        // with their own stored-price fallback, get the error.
+        Err(e) if prefer_bulk && market == Market::In && no_tier => {
+            match bse_eod(client, &scan.symbols, "Yahoo Finance did not answer", false).await {
                 Some(q) => Ok((q, false)),
                 None => Err(e),
             }
@@ -438,14 +461,18 @@ async fn scan_quotes_src(
 }
 
 /// The scan's symbols at BSE's last close (bhavcopy), when the file covers
-/// at least half of them; says so on stderr. `why` names the reason.
+/// at least half of them; says so on stderr. `why` names the reason. With
+/// `current_only`, a file older than the last completed session is not
+/// used (between the close and BSE posting the day's file, Yahoo has the
+/// newer prices).
 async fn bse_eod(
     client: &YahooClient,
     symbols: &[String],
     why: &str,
+    current_only: bool,
 ) -> Option<Vec<crate::api::Quote>> {
-    let (date, quotes) = client.bse_eod_quotes(symbols).await?;
-    if quotes.len() * 2 < symbols.len() {
+    let (date, quotes, current) = client.bse_eod_quotes(symbols).await?;
+    if quotes.len() * 2 < symbols.len() || (current_only && !current) {
         return None;
     }
     eprintln!(

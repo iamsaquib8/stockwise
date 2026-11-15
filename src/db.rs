@@ -399,8 +399,9 @@ impl CacheDb {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM bse_eod", [])?;
         {
-            let mut st =
-                tx.prepare_cached("INSERT INTO bse_eod (ticker, quote_json) VALUES (?1, ?2)")?;
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO bse_eod (ticker, quote_json) VALUES (?1, ?2)",
+            )?;
             for (ticker, json) in rows {
                 st.execute(params![ticker, json])?;
             }
@@ -467,6 +468,28 @@ impl CacheDb {
     /// Every saved list: (index name, scanned, members in order).
     pub fn index_lists(&self) -> Result<Vec<IndexList>> {
         read_index_lists(&self.conn)
+    }
+
+    /// One saved list's members and when it was saved (Unix milliseconds).
+    pub fn index_list(&self, name: &str) -> Result<Option<(Vec<String>, i64)>> {
+        let Some(at) = self
+            .conn
+            .query_row(
+                "SELECT updated_at FROM index_lists WHERE index_name = ?1",
+                params![name],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut st = self.conn.prepare_cached(
+            "SELECT symbol FROM index_members WHERE index_name = ?1 ORDER BY rank",
+        )?;
+        let members: Vec<String> = st
+            .query_map(params![name], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some((members, at)))
     }
 
     /// Read, change and write the saved lists in one write transaction, so
@@ -981,6 +1004,96 @@ pub fn clear(target: CacheTarget) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quote_cache_returns_only_fresh_rows_of_the_asked_symbols() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        db.put_quotes(&[
+            ("A.NS".into(), "{\"a\":1}".into()),
+            ("B.NS".into(), "{}".into()),
+        ])
+        .unwrap();
+        let asked = ["A.NS".to_string(), "C.NS".to_string()];
+        let now = now_secs();
+        assert_eq!(
+            db.quotes_since(&asked, now - 60).unwrap(),
+            [("A.NS".to_string(), "{\"a\":1}".to_string())]
+        );
+        // Older than the cut-off: not served.
+        assert!(db.quotes_since(&asked, now + 60).unwrap().is_empty());
+        // A later put replaces the row.
+        db.put_quotes(&[("A.NS".into(), "{\"a\":2}".into())])
+            .unwrap();
+        assert_eq!(db.quotes_since(&asked, now - 60).unwrap()[0].1, "{\"a\":2}");
+    }
+
+    #[test]
+    fn index_lists_keep_order_and_update_in_one_transaction() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        assert_eq!(db.index_lists_version().unwrap(), None);
+        let list = |name: &str, scanned, syms: &[&str]| -> IndexList {
+            (
+                name.to_string(),
+                scanned,
+                syms.iter().map(|s| s.to_string()).collect(),
+            )
+        };
+        db.put_index_lists(&[list("NIFTY 500", false, &["Z.NS", "A.NS", "M.NS"])])
+            .unwrap();
+        assert_eq!(
+            db.index_lists().unwrap(),
+            [list("NIFTY 500", false, &["Z.NS", "A.NS", "M.NS"])]
+        );
+        assert!(db.index_lists_version().unwrap().is_some());
+        let (members, saved_at) = db.index_list("NIFTY 500").unwrap().unwrap();
+        assert_eq!(members, ["Z.NS", "A.NS", "M.NS"]);
+        assert!(saved_at > 0);
+        assert_eq!(db.index_list("NIFTY IT").unwrap(), None);
+        // The change sees the stored lists and its result replaces them;
+        // a shorter list leaves no old members behind.
+        db.update_index_lists(|mut lists| {
+            assert_eq!(lists.len(), 1);
+            lists[0].2.truncate(1);
+            lists.push(list("NIFTY 100", true, &["A.NS"]));
+            lists
+        })
+        .unwrap();
+        assert_eq!(
+            db.index_lists().unwrap(),
+            [
+                list("NIFTY 100", true, &["A.NS"]),
+                list("NIFTY 500", false, &["Z.NS"])
+            ]
+        );
+    }
+
+    #[test]
+    fn eod_day_is_replaced_whole_and_cleared_by_its_target() {
+        let mut db = CacheDb::open_in_memory().unwrap();
+        assert_eq!(db.eod_state().unwrap(), None);
+        // A look that found no file still records when it looked.
+        db.touch_eod().unwrap();
+        assert_eq!(db.eod_state().unwrap().unwrap().0, "");
+        db.put_eod(
+            "2026-11-05",
+            &[("ABB".into(), "{}".into()), ("OLD".into(), "{}".into())],
+        )
+        .unwrap();
+        db.put_eod("2026-11-06", &[("ABB".into(), "{\"d\":6}".into())])
+            .unwrap();
+        assert_eq!(db.eod_state().unwrap().unwrap().0, "2026-11-06");
+        let asked = ["ABB".to_string(), "OLD".to_string()];
+        assert_eq!(
+            db.eod_quotes(&asked).unwrap(),
+            [("ABB".to_string(), "{\"d\":6}".to_string())]
+        );
+        db.put_quotes(&[("A.NS".into(), "{}".into())]).unwrap();
+        // One row of bse_eod and one of eod_state; the quote cache stays.
+        assert_eq!(db.clear_table(CacheTarget::Bhavcopy).unwrap(), 2);
+        assert_eq!(db.eod_state().unwrap(), None);
+        assert_eq!(db.quotes_since(&["A.NS".to_string()], 0).unwrap().len(), 1);
+        assert_eq!(db.clear_table(CacheTarget::All).unwrap(), 1);
+    }
 
     #[test]
     fn set_then_get_round_trips() {

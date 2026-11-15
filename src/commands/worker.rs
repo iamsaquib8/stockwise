@@ -27,18 +27,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             let symbols = market.universe();
             let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
             let quotes = client.get_quote(&sym_refs).await?;
-            let mut scores: Vec<crate::longterm::LongTermScore> = Vec::new();
-            for q in &quotes {
-                let sym = q.symbol.as_deref().unwrap_or("");
-                let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-                    c.indicators
-                        .quote
-                        .first()
-                        .and_then(|qi| qi.close.as_ref())
-                        .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-                });
-                scores.push(crate::longterm::score_for_longterm(q, hist.as_deref()));
-            }
+            let mut scores = super::strategies::longterm_scores(&client, &quotes).await;
             crate::longterm::rank(&mut scores);
             let highest: Vec<String> = scores
                 .iter()

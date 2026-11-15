@@ -86,8 +86,9 @@ pub fn parse(csv: &str) -> Option<(NaiveDate, Vec<EodRow>)> {
     let mut date = None;
     let mut rows = Vec::new();
     for line in lines {
-        let cells: Vec<&str> = line.split(',').map(str::trim).collect();
-        let get = |c: usize| cells.get(c).copied().unwrap_or("");
+        // Quote-aware: a company name may hold a comma.
+        let cells = super::niftyindices::split_csv(line);
+        let get = |c: usize| cells.get(c).map_or("", |s| s.trim());
         let num = |c: Option<usize>| c.and_then(|c| get(c).parse::<f64>().ok());
         if !get(kind_c).eq_ignore_ascii_case("STK") {
             continue;

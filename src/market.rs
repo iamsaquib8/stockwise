@@ -1788,6 +1788,27 @@ impl IndiaMembership {
 mod tests {
     use super::{CapFilter, CapTier, IndiaMembership};
 
+    #[test]
+    fn membership_round_trips_through_saved_lists() {
+        let v = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let m = IndiaMembership {
+            nifty100: v(&["A.NS", "B.NS"]),
+            midcap150: v(&["C.NS"]),
+            smallcap250: Vec::new(),
+            nifty500: v(&["A.NS", "B.NS", "C.NS"]),
+            scanned: v(&["NIFTY MIDCAP 150"]),
+        };
+        let mut lists = m.to_lists();
+        // A list this version does not know is skipped, not an error.
+        lists.push(("csv:NIFTY IT".to_string(), false, v(&["X.NS"])));
+        let back = IndiaMembership::from_lists(lists);
+        assert_eq!(back.nifty100, m.nifty100);
+        assert_eq!(back.midcap150, m.midcap150);
+        assert_eq!(back.nifty500, m.nifty500);
+        assert_eq!(back.scanned, m.scanned);
+        assert!(back.smallcap250.is_empty());
+    }
+
     fn tier(sym: &str, mcap: f64, cur: &str) -> CapTier {
         CapTier::classify(sym, Some(mcap), Some(cur), None)
     }

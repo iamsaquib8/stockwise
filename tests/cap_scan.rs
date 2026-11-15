@@ -1,6 +1,7 @@
 //! `--cap` scans served from fresh `cache.db` snapshots, against the real
-//! binary and a scratch data directory. No network: the scan finds the
-//! stored rows and never asks a data source.
+//! binary and a scratch data directory. No network: every request fails
+//! at once (a plain India scan asks NSE and niftyindices.com for the
+//! members first), and the scan prices the stored rows.
 
 #![cfg(unix)]
 
