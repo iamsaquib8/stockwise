@@ -1758,16 +1758,44 @@ impl YahooClient {
         self.refresh_bse_eod(due).await;
         let (date, _) = crate::db::with_db(|d| d.eod_state()).flatten()?;
         let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
-        let tickers: Vec<String> = symbols
+        // Ticker → the symbol asked for (`ABB.NS` or `ABB.BO`).
+        let asked: HashMap<String, &String> = symbols
             .iter()
-            .filter_map(|s| s.strip_suffix(".NS"))
-            .map(str::to_ascii_uppercase)
+            .filter_map(|s| {
+                let t = s.strip_suffix(".NS").or_else(|| s.strip_suffix(".BO"))?;
+                Some((t.to_ascii_uppercase(), s))
+            })
             .collect();
-        let quotes: Vec<Quote> = crate::db::with_db(|d| d.eod_quotes(&tickers))?
+        let tickers: Vec<String> = asked.keys().cloned().collect();
+        let mut quotes: Vec<Quote> = crate::db::with_db(|d| d.eod_quotes(&tickers))?
             .into_iter()
-            .filter_map(|(_, json)| serde_json::from_str(&json).ok())
+            .filter_map(|(ticker, json)| {
+                let mut q: Quote = serde_json::from_str(&json).ok()?;
+                q.symbol = Some((*asked.get(&ticker)?).clone());
+                Some(q)
+            })
             .collect();
+        quotes.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         (!quotes.is_empty()).then_some((date, quotes, date >= due))
+    }
+
+    /// Tickers of the stocks in the given BSE listing groups that traded
+    /// at least `min_traded` rupees, from the latest bhavcopy (downloaded
+    /// when due), and its day. `None` as for [`Self::bse_eod_quotes`].
+    pub async fn bse_listed(
+        &self,
+        groups: &[&str],
+        min_traded: f64,
+    ) -> Option<(chrono::NaiveDate, Vec<String>)> {
+        if cfg!(test) || crate::db::l2().is_none() {
+            return None;
+        }
+        self.refresh_bse_eod(last_completed_session(chrono::Utc::now()))
+            .await;
+        let (date, _) = crate::db::with_db(|d| d.eod_state()).flatten()?;
+        let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+        let tickers = crate::db::with_db(|d| d.eod_tickers(groups, min_traded))?;
+        (!tickers.is_empty()).then_some((date, tickers))
     }
 
     /// Download the bhavcopy of `due` (the last completed session) when
@@ -1799,11 +1827,13 @@ impl YahooClient {
                     && let Some((date, rows)) = providers::bse_bhav::parse(&body)
                     && stored.is_none_or(|s| s < date)
                 {
-                    let json: Vec<(String, String)> = rows
+                    let json: Vec<crate::db::EodRecord> = rows
                         .iter()
                         .filter_map(|r| {
                             Some((
                                 r.ticker.clone(),
+                                r.group.clone(),
+                                r.traded,
                                 serde_json::to_string(&r.to_quote(date)).ok()?,
                             ))
                         })

@@ -96,19 +96,46 @@ impl Scan {
 /// Longest age of a `market_snapshots` row a `--cap` scan will use.
 const SNAPSHOT_MAX_AGE_SECS: i64 = 30 * 60;
 
-/// Symbols a scan covers and its title: the members of an NSE index with
-/// `--universe`, or NIFTY 500 for India without it (one bulk NSE request
-/// that also prices them; the saved or built-in list when NSE can't
-/// answer), else the market's built-in list. Index members are saved for
-/// the India cap tiers and the prices feed `market_snapshots`.
+/// Least value traded on the last session (rupees) for a stock to be in a
+/// plain India scan: ten lakh. Below it, prices move on a handful of
+/// trades. `--universe all` has no floor.
+const DEFAULT_MIN_TRADED_INR: f64 = 1_000_000.0;
+
+/// Symbols a scan covers and its title.
+///
+/// India without `--universe`: every stock listed on BSE that traded at
+/// least [`DEFAULT_MIN_TRADED_INR`] on the last session, from BSE's
+/// end-of-day file; NIFTY 500 when that file is unavailable. `--universe
+/// bse` / `all` take the BSE main board or every BSE stock from the same
+/// file. `--universe <NSE index>` takes the index's members (one bulk NSE
+/// request that also prices them; niftyindices.com's list, then the saved
+/// or built-in one, when NSE can't answer). Other markets use their
+/// built-in list. NSE index members are saved for the India cap tiers and
+/// the prices feed `market_snapshots`.
 pub(super) async fn scan_symbols(
     client: &YahooClient,
     market: Market,
     universe: Option<market::Universe>,
 ) -> Result<Scan> {
     match universe {
-        Some(u) => scan_nse_index(client, u.nse_index(), u.fallback()).await,
+        Some(u) => match u.bse_groups() {
+            Some(groups) => scan_bse(client, groups, 0.0, u.nse_index())
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "BSE's end-of-day file is unavailable (it needs cache.db and bseindia.com); \
+                         try --universe nifty500"
+                    )
+                }),
+            None => scan_nse_index(client, u.nse_index(), u.fallback()).await,
+        },
         None if market == Market::In => {
+            let all = crate::providers::bse_bhav::EQUITY_GROUPS;
+            if let Some(scan) =
+                scan_bse(client, all, DEFAULT_MIN_TRADED_INR, market.label()).await
+            {
+                return Ok(scan);
+            }
             let u = market::Universe::Nifty500;
             let mut scan = scan_nse_index(client, u.nse_index(), Some(market.universe())).await?;
             scan.scope = market.label().to_string();
@@ -120,6 +147,50 @@ pub(super) async fn scan_symbols(
             bulk: Vec::new(),
         }),
     }
+}
+
+/// The stocks of BSE's last end-of-day file in `groups` that traded at
+/// least `min_traded` rupees. NIFTY 500 members keep their NSE symbol
+/// (`RELIANCE.NS`: NSE prices, cap tiers, the symbol holdings use); the
+/// rest are BSE symbols (`XYZ.BO`). `None` when the file is unavailable.
+async fn scan_bse(
+    client: &YahooClient,
+    groups: &[&str],
+    min_traded: f64,
+    scope: &str,
+) -> Option<Scan> {
+    let (date, tickers) = client.bse_listed(groups, min_traded).await?;
+    let nifty500: std::collections::HashSet<String> = Market::In
+        .universe()
+        .iter()
+        .filter_map(|s| s.strip_suffix(".NS").map(str::to_ascii_uppercase))
+        .collect();
+    let symbols: Vec<String> = tickers
+        .into_iter()
+        .map(|t| {
+            let suffix = if nifty500.contains(&t) { "NS" } else { "BO" };
+            format!("{}.{}", t, suffix)
+        })
+        .collect();
+    let floor = if min_traded > 0.0 {
+        format!(
+            " that traded \u{20B9}{:.0} lakh or more",
+            min_traded / 100_000.0
+        )
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "  \u{24d8} {} stocks listed on BSE{} on {} (--universe narrows or widens this).",
+        symbols.len(),
+        floor,
+        date.format("%d %b %Y")
+    );
+    Some(Scan {
+        symbols,
+        scope: scope.to_string(),
+        bulk: Vec::new(),
+    })
 }
 
 /// Longest age of a `quote_cache` row an index scan will use.
@@ -1996,6 +2067,10 @@ pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) ->
 
 // ── Dividend Calendar ──
 
+/// Rows a heatmap shows from each end (biggest gains, biggest falls) when
+/// the scan is larger than both together.
+const HEATMAP_EDGE: usize = 30;
+
 pub async fn cmd_heatmap(
     market: Market,
     universe: Option<market::Universe>,
@@ -2016,7 +2091,18 @@ pub async fn cmd_heatmap(
     print_header(&format!("{} Market Heatmap", scope));
     println!();
 
-    for q in &quotes {
+    // A whole-market scan is thousands of rows: show both ends.
+    let total = quotes.len();
+    if total > 2 * HEATMAP_EDGE {
+        quotes.drain(HEATMAP_EDGE..total - HEATMAP_EDGE);
+    }
+    for (i, q) in quotes.iter().enumerate() {
+        if total > 2 * HEATMAP_EDGE && i == HEATMAP_EDGE {
+            println!(
+                "  {}",
+                format!("... {} more in between ...", total - 2 * HEATMAP_EDGE).dimmed()
+            );
+        }
         let sym = q.symbol.as_deref().unwrap_or("???");
         let short = sym.split('.').next().unwrap_or(sym);
         let pct = q.regular_market_change_percent.unwrap_or(0.0);

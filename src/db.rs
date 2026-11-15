@@ -32,6 +32,10 @@ pub struct CacheStats {
 }
 
 /// Current Unix time in seconds.
+/// One stock of the stored bhavcopy: (ticker, listing group, value traded
+/// in rupees, quote JSON).
+pub type EodRecord = (String, String, f64, String);
+
 /// One saved index list: (index name, scanned, members in order).
 pub type IndexList = (String, bool, Vec<String>);
 
@@ -279,8 +283,10 @@ impl CacheDb {
                  symbol TEXT PRIMARY KEY, quote_json TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
              ) WITHOUT ROWID;
-             CREATE TABLE IF NOT EXISTS bse_eod (
-                 ticker TEXT PRIMARY KEY, quote_json TEXT NOT NULL
+             DROP TABLE IF EXISTS bse_eod;
+             CREATE TABLE IF NOT EXISTS bse_bhav (
+                 ticker TEXT PRIMARY KEY, grp TEXT NOT NULL, traded REAL NOT NULL,
+                 quote_json TEXT NOT NULL
              ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS eod_state (
                  source TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
@@ -393,17 +399,18 @@ impl CacheDb {
 
     // ── bse_eod ──
 
-    /// Replace the stored end-of-day day with `rows` (ticker, quote JSON)
-    /// of `trade_date` (`YYYY-MM-DD`).
-    pub fn put_eod(&mut self, trade_date: &str, rows: &[(String, String)]) -> Result<()> {
+    /// Replace the stored end-of-day day with `rows` (ticker, listing
+    /// group, value traded, quote JSON) of `trade_date` (`YYYY-MM-DD`).
+    pub fn put_eod(&mut self, trade_date: &str, rows: &[EodRecord]) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM bse_eod", [])?;
+        tx.execute("DELETE FROM bse_bhav", [])?;
         {
             let mut st = tx.prepare_cached(
-                "INSERT OR REPLACE INTO bse_eod (ticker, quote_json) VALUES (?1, ?2)",
+                "INSERT OR REPLACE INTO bse_bhav (ticker, grp, traded, quote_json)
+                 VALUES (?1, ?2, ?3, ?4)",
             )?;
-            for (ticker, json) in rows {
-                st.execute(params![ticker, json])?;
+            for (ticker, group, traded, json) in rows {
+                st.execute(params![ticker, group, traded, json])?;
             }
         }
         tx.execute(
@@ -442,7 +449,7 @@ impl CacheDb {
     pub fn eod_quotes(&self, tickers: &[String]) -> Result<Vec<(String, String)>> {
         let mut st = self
             .conn
-            .prepare_cached("SELECT ticker, quote_json FROM bse_eod WHERE ticker = ?1")?;
+            .prepare_cached("SELECT ticker, quote_json FROM bse_bhav WHERE ticker = ?1")?;
         let mut out = Vec::new();
         for t in tickers {
             if let Some(row) = st
@@ -453,6 +460,22 @@ impl CacheDb {
             }
         }
         Ok(out)
+    }
+
+    /// Stored tickers of the given listing groups that traded at least
+    /// `min_traded` rupees on the day, by ticker.
+    pub fn eod_tickers(&self, groups: &[&str], min_traded: f64) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT ticker, grp FROM bse_bhav WHERE traded >= ?1 ORDER BY ticker",
+        )?;
+        let rows: Vec<(String, String)> = st
+            .query_map(params![min_traded], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, g)| groups.contains(&g.as_str()))
+            .map(|(t, _)| t)
+            .collect())
     }
 
     // ── index_members ──
@@ -525,7 +548,7 @@ impl CacheDb {
             CacheTarget::Bars => &["ohlcv_bars"],
             CacheTarget::Results => &["financial_results"],
             CacheTarget::Members => &["index_members", "index_lists"],
-            CacheTarget::Bhavcopy => &["bse_eod", "eod_state"],
+            CacheTarget::Bhavcopy => &["bse_bhav", "eod_state"],
             CacheTarget::All => &[
                 "http_cache",
                 "quote_cache",
@@ -534,7 +557,7 @@ impl CacheDb {
                 "financial_results",
                 "index_members",
                 "index_lists",
-                "bse_eod",
+                "bse_bhav",
                 "eod_state",
             ],
         };
@@ -1074,13 +1097,26 @@ mod tests {
         // A look that found no file still records when it looked.
         db.touch_eod().unwrap();
         assert_eq!(db.eod_state().unwrap().unwrap().0, "");
+        let rec = |t: &str, g: &str, traded: f64, j: &str| -> EodRecord {
+            (t.into(), g.into(), traded, j.into())
+        };
         db.put_eod(
             "2026-11-05",
-            &[("ABB".into(), "{}".into()), ("OLD".into(), "{}".into())],
+            &[rec("ABB", "A", 5e6, "{}"), rec("OLD", "B", 5e6, "{}")],
         )
         .unwrap();
-        db.put_eod("2026-11-06", &[("ABB".into(), "{\"d\":6}".into())])
-            .unwrap();
+        db.put_eod(
+            "2026-11-06",
+            &[
+                rec("ABB", "A", 5e6, "{\"d\":6}"),
+                rec("SMECO", "M", 2e4, "{}"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(db.eod_tickers(&["A", "B"], 0.0).unwrap(), ["ABB"]);
+        assert_eq!(db.eod_tickers(&["A", "M"], 0.0).unwrap(), ["ABB", "SMECO"]);
+        // The liquidity floor drops the thinly traded one.
+        assert_eq!(db.eod_tickers(&["A", "M"], 1e6).unwrap(), ["ABB"]);
         assert_eq!(db.eod_state().unwrap().unwrap().0, "2026-11-06");
         let asked = ["ABB".to_string(), "OLD".to_string()];
         assert_eq!(
@@ -1088,8 +1124,8 @@ mod tests {
             [("ABB".to_string(), "{\"d\":6}".to_string())]
         );
         db.put_quotes(&[("A.NS".into(), "{}".into())]).unwrap();
-        // One row of bse_eod and one of eod_state; the quote cache stays.
-        assert_eq!(db.clear_table(CacheTarget::Bhavcopy).unwrap(), 2);
+        // Two stocks and the eod_state row; the quote cache stays.
+        assert_eq!(db.clear_table(CacheTarget::Bhavcopy).unwrap(), 3);
         assert_eq!(db.eod_state().unwrap(), None);
         assert_eq!(db.quotes_since(&["A.NS".to_string()], 0).unwrap().len(), 1);
         assert_eq!(db.clear_table(CacheTarget::All).unwrap(), 1);

@@ -134,9 +134,9 @@ always works. Common names resolve to NSE symbols
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across NIFTY 500 (India) or the S&P 500 (US), or an NSE index's members (see below), with a cap-tier column |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 500 (US), or another universe (see below), with a cap-tier column |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of NIFTY 500 (India) or the S&P 500 (US), or an NSE index's members |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls |
 | `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
 | `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
 | `rotation` | Sector rotation vs 50-day average |
@@ -147,13 +147,21 @@ always works. Common names resolve to NSE symbols
 | `earnings` | Earnings growth for portfolio and watchlist |
 | `surprise [--universe INDEX]` | Earnings momentum — accelerating vs decelerating |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
-| `picks [--universe INDEX]` | The highest-scoring stocks of NIFTY 500 (India) or the S&P 500 (US) on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
+| `picks [--universe INDEX]` | The highest-scoring of the liquid stocks of BSE (India) or of the S&P 500 (US) on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
 | `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
+**Default India universe:** without `--universe`, an India scan covers every
+stock listed on BSE that traded ₹10 lakh or more on the last session (about
+1,900 stocks), read from BSE's end-of-day file (see below). NIFTY 500 members
+keep their NSE symbol (`RELIANCE.NS`); the rest are BSE symbols (`XYZ.BO`).
+When that file is unavailable the scan covers NIFTY 500.
+
 **`--universe`** (Indian market; `movers`, `heatmap`, `screen`, `picks`,
-`matrix`, `surprise`, `longterm`): scan the current members of a
-narrower NSE index instead of NIFTY 500, the default — `nifty50`, `niftynext50` (`next50`),
+`matrix`, `surprise`, `longterm`): `all` is every stock listed on BSE (about
+4,500, SME and thinly traded ones included) and `bse` is BSE's main board
+(groups A and B, about 2,500), both from the same file. Or scan the current
+members of an NSE index — `nifty50`, `niftynext50` (`next50`),
 `nifty100`, `banknifty` (`niftybank`), `niftyit`, `nifty500`, `midcap150` or
 `smallcap250`. NSE's website lists the members and prices them in one bulk
 request (all 500 of `nifty500`), whichever data provider you use. `movers` and
@@ -171,11 +179,12 @@ caps for `nifty50` / `nifty100`, a built-in member list for `banknifty` and
 `niftyit`); `niftynext50`, `midcap150` and `smallcap250` have no built-in list
 and fail with the reason.
 
-**End-of-day prices (India):** outside Indian market hours, `movers` and
-`heatmap` (without a `--cap` tier) take every stock's last close from BSE's
-daily bhavcopy, a public CSV of the whole exchange's day, instead of asking
-Yahoo Finance for each stock. Any India scan that has no P/E or cap filter
-also falls back to it when Yahoo does not answer. The file is downloaded once
+**End-of-day prices (India):** BSE's daily bhavcopy is a public CSV of the
+whole exchange's day. It lists the stocks of the default, `bse` and `all`
+universes. Once it holds the last completed session, `movers` and `heatmap`
+(without a `--cap` tier) take every stock's close from it outside market hours
+instead of asking Yahoo Finance, and they fall back to it when Yahoo does not
+answer. The file is downloaded once
 per trading day (BSE posts it in the evening, IST) and kept in `cache.db`;
 `stockwise cache clear bhavcopy` drops it. It has prices and volume only: no
 P/E, market cap or intraday prices.
@@ -188,7 +197,7 @@ no exchange rate for the currency). Indian stocks follow the SEBI/AMFI ranks
 when the index members are known: NIFTY 100 is large (the top 10, or above
 ₹5,00,000 Cr, is mega), NIFTY MIDCAP 150 is mid, NIFTY SMALLCAP 250 is small
 and anything outside NIFTY 500 is micro. Scanning those indexes with
-`--universe` (or any India scan, which covers NIFTY 500 by default) saves
+`--universe` saves
 their members in `cache.db` (`stockwise cache clear members` forgets them);
 until then, and offline, rupee cut-offs decide (large from
 ₹1,00,000 Cr, mid from ₹33,000 Cr, small from ₹10,000 Cr). Every other market

@@ -469,7 +469,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     // ── Market ──
     /// Top gainers and losers today
     Movers {
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -490,7 +491,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     },
     /// Market heatmap
     Heatmap {
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -530,19 +532,22 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     Earnings,
     /// Earnings momentum — accelerating vs decelerating
     Surprise {
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
     /// Quality vs growth quadrants
     Matrix {
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
     /// Highest-scoring stocks on eight factors (a score, not a recommendation)
     Picks {
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
@@ -550,7 +555,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     Screen {
         #[arg(value_enum, ignore_case = true)]
         category: ScreenCategory,
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
         /// Only this market-cap tier: all, mega, large, mid, small or micro
@@ -698,7 +704,8 @@ stockwise options TCS                     expected moves (same as `options moves
     Longterm {
         /// Monthly SIP budget (default 10000)
         amount: Option<f64>,
-        /// Scan an NSE index's members instead of NIFTY 500 (India)
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
@@ -6276,6 +6283,12 @@ mod tests {
             assert!(parses(&args), "{:?}", args);
         }
         assert!(!parses(&["stockwise", "movers", "--universe", "sensex"]));
+        for whole in ["bse", "all", "BSEALL"] {
+            assert!(
+                parses(&["stockwise", "picks", "--universe", whole]),
+                "{whole}"
+            );
+        }
         match Cli::try_parse_from(["stockwise", "movers", "--universe", "banknifty"])
             .unwrap()
             .command

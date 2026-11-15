@@ -20,11 +20,18 @@ pub fn url(date: NaiveDate) -> String {
     )
 }
 
+/// BSE listing groups that hold equity shares: A and B (main board), T
+/// (trade-for-trade), X and XT (BSE-only listings), M and MT (SME) and Z.
+/// Debt (F, G), ETFs (E) and the rest are left out.
+pub const EQUITY_GROUPS: &[&str] = &["A", "B", "T", "X", "XT", "M", "MT", "Z"];
+
 /// One stock's day.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EodRow {
     /// BSE ticker (`ABB`), the NSE symbol for dual-listed companies.
     pub ticker: String,
+    /// BSE listing group (`A`, `B`, `X`, ...).
+    pub group: String,
     pub name: String,
     pub open: Option<f64>,
     pub high: Option<f64>,
@@ -32,6 +39,8 @@ pub struct EodRow {
     pub close: f64,
     pub prev_close: Option<f64>,
     pub volume: Option<u64>,
+    /// Value traded on the day, rupees.
+    pub traded: f64,
 }
 
 impl EodRow {
@@ -76,12 +85,14 @@ pub fn parse(csv: &str) -> Option<(NaiveDate, Vec<EodRow>)> {
         col("FinInstrmNm")?,
         col("ClsPric")?,
     );
-    let (open_c, high_c, low_c, prev_c, vol_c) = (
+    let group_c = col("SctySrs")?;
+    let (open_c, high_c, low_c, prev_c, vol_c, val_c) = (
         col("OpnPric"),
         col("HghPric"),
         col("LwPric"),
         col("PrvsClsgPric"),
         col("TtlTradgVol"),
+        col("TtlTrfVal"),
     );
     let mut date = None;
     let mut rows = Vec::new();
@@ -90,7 +101,8 @@ pub fn parse(csv: &str) -> Option<(NaiveDate, Vec<EodRow>)> {
         let cells = super::niftyindices::split_csv(line);
         let get = |c: usize| cells.get(c).map_or("", |s| s.trim());
         let num = |c: Option<usize>| c.and_then(|c| get(c).parse::<f64>().ok());
-        if !get(kind_c).eq_ignore_ascii_case("STK") {
+        let group = get(group_c).to_ascii_uppercase();
+        if !get(kind_c).eq_ignore_ascii_case("STK") || !EQUITY_GROUPS.contains(&group.as_str()) {
             continue;
         }
         let ticker = get(tick_c).to_ascii_uppercase();
@@ -109,6 +121,7 @@ pub fn parse(csv: &str) -> Option<(NaiveDate, Vec<EodRow>)> {
         }
         rows.push(EodRow {
             ticker,
+            group,
             name: get(name_c).to_string(),
             open: num(open_c),
             high: num(high_c),
@@ -116,6 +129,7 @@ pub fn parse(csv: &str) -> Option<(NaiveDate, Vec<EodRow>)> {
             close,
             prev_close: num(prev_c),
             volume: num(vol_c).map(|v| v as u64),
+            traded: num(val_c).unwrap_or(0.0),
         });
     }
     Some((date?, rows)).filter(|(_, r)| !r.is_empty())
@@ -128,17 +142,28 @@ mod tests {
     const CSV: &str = "TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4\n\
 2026-11-06,2026-11-06,CM,BSE,STK,500002,INE117A01022,ABB,A,,,,,ABB INDIA LIMITED,6510.00,6774.00,6431.00,6774.00,6774.00,6640.10,,6774.00,,,28168,185307125.00,4355,F1,1,,,,,\n\
 2026-11-06,2026-11-06,CM,BSE,MF,590001,INF966L01EI5,SOMEETF,E,,,,,SOME ETF,10.00,10.00,10.00,10.00,10.00,10.00,,10.00,,,5,50.00,1,F1,1,,,,,\n\
+2026-11-06,2026-11-06,CM,BSE,STK,958001,INE001A07AB1,SOMEBOND,F,,,,,\"SOME BOND, 8.5%\",1000.00,1000.00,1000.00,1000.00,1000.00,1000.00,,1000.00,,,2,2000.00,1,F1,1,,,,,\n\
+2026-11-06,2026-11-06,CM,BSE,STK,543210,INE999X01011,SMECO,M,,,,,\"SME CO, LIMITED\",50.00,52.00,49.00,51.00,51.00,50.00,,51.00,,,300,15300.00,4,F1,1,,,,,\n\
 2026-11-06,2026-11-06,CM,BSE,STK,500570,INE155A01022,TMPV,A,,,,,TATA MOTORS PV,400.00,410.00,395.00,405.00,405.00,400.00,,405.00,,,1000,405000.00,90,F1,1,,,,,\n";
 
     #[test]
     fn keeps_stocks_and_reads_the_day() {
         let (date, rows) = parse(CSV).unwrap();
         assert_eq!(date, NaiveDate::from_ymd_opt(2026, 11, 6).unwrap());
-        assert_eq!(rows.len(), 2, "the ETF row is dropped");
+        assert_eq!(rows.len(), 3, "the ETF and the bond are dropped");
         assert_eq!(rows[0].ticker, "ABB");
+        assert_eq!(rows[0].group, "A");
+        // A quoted name with a comma keeps its columns in place.
+        assert_eq!(
+            (rows[1].ticker.as_str(), rows[1].group.as_str()),
+            ("SMECO", "M")
+        );
+        assert_eq!(rows[1].name, "SME CO, LIMITED");
+        assert_eq!(rows[1].close, 51.0);
         assert_eq!(rows[0].close, 6774.0);
         assert_eq!(rows[0].prev_close, Some(6640.1));
         assert_eq!(rows[0].volume, Some(28168));
+        assert_eq!(rows[0].traded, 185_307_125.0);
         let q = rows[0].to_quote(date);
         assert_eq!(q.symbol.as_deref(), Some("ABB.NS"));
         let pct = q.regular_market_change_percent.unwrap();

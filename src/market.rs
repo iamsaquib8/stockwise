@@ -1232,10 +1232,18 @@ pub enum Universe {
     /// NIFTY SMALLCAP 250
     #[value(name = "smallcap250")]
     Smallcap250,
+    /// BSE groups A and B (the main board, about 2,500 stocks), from BSE's
+    /// end-of-day file
+    #[value(name = "bse")]
+    Bse,
+    /// Every stock listed on BSE (about 4,500, SME and illiquid ones
+    /// included), from BSE's end-of-day file
+    #[value(name = "all", alias = "bseall")]
+    BseAll,
 }
 
 impl Universe {
-    /// NSE's name for the index.
+    /// NSE's name for the index (a label for the BSE universes).
     pub fn nse_index(self) -> &'static str {
         match self {
             Universe::Nifty50 => "NIFTY 50",
@@ -1246,6 +1254,18 @@ impl Universe {
             Universe::Nifty500 => "NIFTY 500",
             Universe::Midcap150 => "NIFTY MIDCAP 150",
             Universe::Smallcap250 => "NIFTY SMALLCAP 250",
+            Universe::Bse => "BSE A+B",
+            Universe::BseAll => "BSE (all)",
+        }
+    }
+
+    /// BSE listing groups of a whole-exchange universe (`None` for an NSE
+    /// index): its stocks come from BSE's end-of-day file, not from NSE.
+    pub fn bse_groups(self) -> Option<&'static [&'static str]> {
+        match self {
+            Universe::Bse => Some(&["A", "B"]),
+            Universe::BseAll => Some(crate::providers::bse_bhav::EQUITY_GROUPS),
+            _ => None,
         }
     }
 
@@ -1260,7 +1280,11 @@ impl Universe {
             Universe::BankNifty => BANK_NIFTY,
             Universe::NiftyIt => NIFTY_IT,
             Universe::Nifty500 => return Some(Market::In.universe()),
-            Universe::NiftyNext50 | Universe::Midcap150 | Universe::Smallcap250 => return None,
+            Universe::NiftyNext50
+            | Universe::Midcap150
+            | Universe::Smallcap250
+            | Universe::Bse
+            | Universe::BseAll => return None,
         };
         Some(list.iter().map(|s| s.to_string()).collect())
     }
