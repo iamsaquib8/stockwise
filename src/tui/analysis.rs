@@ -381,6 +381,52 @@ fn render_observations(f: &mut Frame, area: Rect, a: &Analysis, theme: &Theme) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
+/// Rows `line` takes when wrapped at word boundaries to `width` cells,
+/// as `Wrap { trim: true }` does: a word that does not fit on the row
+/// starts the next one; a word longer than a row is split.
+pub fn wrapped_rows(line: &Line, width: usize) -> usize {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let width = width.max(1);
+    // Words with the width of the whitespace before each (padding runs
+    // count in full; a row starts without its leading gap).
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut gap = 0;
+    let mut word = 0;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if word > 0 {
+                words.push((gap, word));
+                (gap, word) = (0, 0);
+            }
+            gap += 1;
+        } else {
+            word += crate::display::display_width(c.encode_utf8(&mut [0; 4]));
+        }
+    }
+    if word > 0 {
+        words.push((gap, word));
+    }
+    let mut rows = 1;
+    let mut used = 0;
+    for (gap, w) in words {
+        let need = if used == 0 { w } else { used + gap + w };
+        if need <= width {
+            used = need;
+        } else if w <= width {
+            rows += 1;
+            used = w;
+        } else {
+            // A long word is broken across rows.
+            if used > 0 {
+                rows += 1;
+            }
+            rows += (w - 1) / width;
+            used = (w - 1) % width + 1;
+        }
+    }
+    rows
+}
+
 /// The selected holding in detail.
 pub fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let (Some(report), Some(p)) = (&app.analysis, app.selected_position()) else {
@@ -529,10 +575,11 @@ pub fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         " Readings of the data, not a recommendation · Esc closes",
         theme.dim,
     ));
-    // Rows the wrapped text takes, so scrolling stops at its last line.
+    // Rows the word-wrapped text takes, so scrolling stops at its last line.
     let width = inner.width.max(1) as usize;
-    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+    let rows: usize = lines.iter().map(|l| wrapped_rows(l, width)).sum();
     let max_scroll = rows.saturating_sub(inner.height as usize) as u16;
+    app.detail_max.set(max_scroll);
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -740,10 +787,35 @@ mod tests {
         }
         let later = draw(&app, 40, 12);
         assert!(later.contains("Esc closes"), "{later}");
+        // The offset stops at the last line: one Up moves the view at once.
+        let at_end = app.detail_scroll;
+        assert_eq!(at_end, app.detail_max.get());
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.detail_scroll, at_end - 1);
         // Reopening starts from the top again.
         app.update(key(KeyCode::Esc));
         app.update(key(KeyCode::Enter));
         assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[test]
+    fn wrapped_rows_follow_word_boundaries() {
+        use super::wrapped_rows;
+        use ratatui::text::Line;
+        let twenty = "a".repeat(20);
+        // Three 20-cell words at width 38: one word a row, not two rows.
+        let line = Line::from(format!("{t} {t} {t}", t = twenty));
+        assert_eq!(wrapped_rows(&line, 38), 3);
+        assert_eq!(wrapped_rows(&Line::from("short line"), 38), 1);
+        assert_eq!(wrapped_rows(&Line::from(""), 10), 1);
+        // A word longer than the row is split.
+        assert_eq!(wrapped_rows(&Line::from("x".repeat(25)), 10), 3);
+        // Padding runs count in full: 24 cells of label, then the value.
+        let kv = Line::from(format!(
+            " {:<24}{}",
+            "Long-term score", "62 of 100 (80% of inputs)"
+        ));
+        assert_eq!(wrapped_rows(&kv, 38), 2);
     }
 
     #[test]

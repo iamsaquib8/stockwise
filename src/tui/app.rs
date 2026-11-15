@@ -184,6 +184,9 @@ pub struct App {
     pub analysis_sel: usize,
     /// Lines scrolled in the analysis detail popup.
     pub detail_scroll: u16,
+    /// The furthest the detail popup could scroll when last drawn (set by
+    /// the renderer, which alone knows the popup's size).
+    pub detail_max: std::cell::Cell<u16>,
 }
 
 impl App {
@@ -212,6 +215,7 @@ impl App {
             analysis_error: None,
             analysis_sel: 0,
             detail_scroll: 0,
+            detail_max: std::cell::Cell::new(u16::MAX),
         }
     }
 
@@ -475,7 +479,10 @@ impl App {
                     Vec::new()
                 }
                 KeyCode::Down | KeyCode::Char('j') if self.screen == Screen::Analysis => {
-                    self.detail_scroll = self.detail_scroll.saturating_add(1).min(40);
+                    self.detail_scroll = self
+                        .detail_scroll
+                        .saturating_add(1)
+                        .min(self.detail_max.get());
                     Vec::new()
                 }
                 KeyCode::Char(c @ '1'..='6') => {
@@ -529,6 +536,7 @@ impl App {
             KeyCode::Char('d') | KeyCode::Enter => {
                 if self.selected_position().is_some() {
                     self.detail_scroll = 0;
+                    self.detail_max.set(u16::MAX);
                     self.mode = Mode::Detail;
                 }
                 Vec::new()
