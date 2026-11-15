@@ -1153,6 +1153,9 @@ pub async fn cmd_portfolio_add(
     check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
     // A price paid in another currency (a US share bought with rupees):
     // convert it at that day's rate, so the cost is in the holding's own.
+    // The currency the cost ends up in: the instrument's quoted currency
+    // when `--currency` looked it up, else the one its suffix implies.
+    let mut cost_currency: Option<String> = None;
     if let Some(paid) = paid_in {
         // The currency the instrument is quoted in, from its quote (a few
         // London listings trade in USD), else from its suffix.
@@ -1170,6 +1173,7 @@ pub async fn cmd_portfolio_add(
                 resolved
             );
         };
+        cost_currency = Some(quote.clone());
         let quote = quote.as_str();
         let (_, major) = market::to_major(1.0, quote);
         let paid_cost = cost;
@@ -1201,7 +1205,9 @@ pub async fn cmd_portfolio_add(
         p.add_lot(&resolved, lot);
         Ok(p.holding(&resolved).cloned())
     })?;
-    let cur = pf::symbol_currency(&resolved);
+    let cur = cost_currency
+        .as_deref()
+        .or_else(|| pf::symbol_currency(&resolved));
     let units = offmarket::unit_word(&resolved);
     let where_ = if offmarket::is_off_market(&resolved) {
         String::new()
