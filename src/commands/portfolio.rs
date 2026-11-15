@@ -1057,12 +1057,56 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     Ok(())
 }
 
+/// A price paid in `paid` expressed in the holding's quote unit
+/// (`quote`, pence for `GBp`), given `rate` from the Yahoo pair that
+/// [`fx_pair`] names for (`paid`, the quote's major currency); `inverted`
+/// as `fx_pair` returns it.
+pub(crate) fn convert_paid(cost: f64, rate: f64, inverted: bool, quote: &str) -> f64 {
+    let major = if inverted { cost / rate } else { cost * rate };
+    match market::minor_unit(quote) {
+        Some((_, per)) => major * per,
+        None => major,
+    }
+}
+
+/// The close of `pair` on `date`, or on the nearest trading day before it
+/// (up to ten days back), and that day.
+async fn rate_on(
+    client: &YahooClient,
+    pair: &str,
+    date: chrono::NaiveDate,
+) -> Result<(f64, chrono::NaiveDate)> {
+    let end = date
+        .and_hms_opt(23, 59, 59)
+        .map(|t| t.and_utc().timestamp())
+        .unwrap_or_default();
+    let start = end - 12 * 86_400;
+    let chart = client.get_chart_between(pair, start, end, "1d").await?;
+    let stamps = chart.timestamp.clone().unwrap_or_default();
+    let closes = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.clone())
+        .unwrap_or_default();
+    stamps
+        .iter()
+        .zip(closes)
+        .filter_map(|(t, c)| {
+            let day = chrono::DateTime::from_timestamp(*t, 0)?.date_naive();
+            Some((c?, day)).filter(|(c, d)| *c > 0.0 && *d <= date)
+        })
+        .next_back()
+        .ok_or_else(|| anyhow::anyhow!("No {} rate on or before {}", pair, date))
+}
+
 pub async fn cmd_portfolio_add(
     symbol: &str,
     shares: f64,
     cost: f64,
     date: Option<&str>,
     force: bool,
+    paid_in: Option<&str>,
     market: Market,
 ) -> Result<()> {
     if !(shares > 0.0 && shares.is_finite()) {
@@ -1104,6 +1148,40 @@ pub async fn cmd_portfolio_add(
     }
     let resolved = market::resolve_symbol(&symbol, market);
     check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    // A price paid in another currency (a US share bought with rupees):
+    // convert it at that day's rate, so the cost is in the holding's own.
+    if let Some(paid) = paid_in {
+        let Some(quote) = pf::symbol_currency(&resolved) else {
+            bail!(
+                "Can't tell which currency {} trades in; enter the price in that currency instead of using --currency",
+                resolved
+            );
+        };
+        let (_, major) = market::to_major(1.0, quote);
+        let paid_cost = cost;
+        if paid.eq_ignore_ascii_case(&major) {
+            cost = convert_paid(cost, 1.0, false, quote);
+        } else {
+            let (pair, inverted) = fx_pair(paid, &major);
+            let day = pf::parse_date(&date)?;
+            let client = YahooClient::new().await?;
+            let (rate, on) = rate_on(&client, &pair, day).await?;
+            cost = convert_paid(cost, rate, inverted, quote);
+            let per = if inverted { rate } else { 1.0 / rate };
+            println!(
+                "  {} {} {:.2} a share is {} at {:.4} {} per {} ({} close of {})",
+                "·".dimmed(),
+                paid.to_uppercase(),
+                paid_cost,
+                format_price(cost, Some(quote)),
+                per,
+                paid.to_uppercase(),
+                major,
+                on,
+                pair
+            );
+        }
+    }
     let holding = Portfolio::update(|p| {
         let mut lot = Lot::new(shares, cost, &date, "manual");
         lot.units_as_of = units_as_of;
@@ -1112,14 +1190,24 @@ pub async fn cmd_portfolio_add(
     })?;
     let cur = pf::symbol_currency(&resolved);
     let units = offmarket::unit_word(&resolved);
+    let where_ = if offmarket::is_off_market(&resolved) {
+        String::new()
+    } else {
+        format!(
+            "; {}{}",
+            market::market_of_symbol(&resolved, market).label(),
+            cur.map_or(String::new(), |c| format!(", {}", c))
+        )
+    };
     println!(
-        "  {} Added {} {} of {} at {} (bought {})",
+        "  {} Added {} {} of {} at {} (bought {}{})",
         "✓".green(),
         shares,
         units,
         resolved,
         format_price(cost, cur),
-        date
+        date,
+        where_
     );
     if let Some(h) = &holding
         && h.lots.len() > 1
@@ -2730,6 +2818,26 @@ mod tests {
     }
 
     use super::fx_pair;
+
+    #[test]
+    fn a_price_paid_in_another_currency_is_converted_to_the_quote_unit() {
+        // ₹15,000 at USDINR 83.5 (fx_pair(INR, USD) → USDINR=X, inverted).
+        let (pair, inverted) = fx_pair("INR", "USD");
+        assert_eq!((pair.as_str(), inverted), ("USDINR=X", true));
+        assert!(
+            (convert_paid(15_000.0, 83.5, inverted, "USD") - 179.640_718_562_874_25).abs() < 1e-9
+        );
+        // $150 for a London share at GBPUSD 1.25: £120 = 12,000 pence.
+        let (pair, inverted) = fx_pair("USD", "GBP");
+        assert_eq!((pair.as_str(), inverted), ("GBPUSD=X", true));
+        assert!((convert_paid(150.0, 1.25, inverted, "GBp") - 12_000.0).abs() < 1e-9);
+        // Pounds for a pence quote: only the unit changes.
+        assert_eq!(convert_paid(1.5, 1.0, false, "GBp"), 150.0);
+        // €100 for a US share at EURUSD 1.08: $108.
+        let (pair, inverted) = fx_pair("EUR", "USD");
+        assert_eq!((pair.as_str(), inverted), ("EURUSD=X", false));
+        assert!((convert_paid(100.0, 1.08, inverted, "USD") - 108.0).abs() < 1e-9);
+    }
 
     #[test]
     fn fx_pair_follows_yahoo_quotation() {
