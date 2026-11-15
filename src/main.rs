@@ -55,6 +55,7 @@ mod payoff;
 mod picks;
 mod pme;
 mod portfolio;
+mod portfolio_analysis;
 mod practice;
 mod providers;
 mod rebalance;
