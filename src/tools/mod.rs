@@ -1571,3 +1571,15 @@ fn halve(v: &mut Value, len: usize) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// The investor profile as it is now: read again from the workspace's
+/// config file, so a `profile_set` or `profile_onboard` earlier in this
+/// process counts at once.
+pub(crate) fn current_profile<D: DataSource>(
+    ctx: &ToolContext<D>,
+) -> crate::config::EffectiveProfile {
+    match &ctx.workspace {
+        Some(w) => crate::config::effective_profile_at(&w.config),
+        None => crate::config::effective_profile(),
+    }
+}

@@ -678,15 +678,18 @@ impl CacheDb {
     ) -> Result<i64> {
         let now = now_secs();
         let id = match id {
-            Some(id) => {
-                self.conn.execute(
+            Some(id)
+                if self.conn.execute(
                     "UPDATE ask_sessions SET chat_json = ?2, turns = turns + 1, updated_at = ?3 \
                      WHERE id = ?1",
                     params![id, chat_json, now],
-                )?;
+                )? > 0 =>
+            {
                 id
             }
-            None => {
+            // New, or dropped meanwhile by another process saving newer
+            // ones: saved again as a new conversation.
+            _ => {
                 self.conn.execute(
                     "INSERT INTO ask_sessions (title, provider, model, chat_json, turns, created_at, updated_at) \
                      VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
@@ -1623,5 +1626,14 @@ mod tests {
         }
         assert_eq!(db.sessions(500).unwrap().len() as i64, KEEP_SESSIONS);
         assert!(db.session(Some(a)).unwrap().is_none());
+        // A dropped conversation that is still open is saved again.
+        let back = db
+            .save_session(Some(a), "first", "Ollama", "qwen3", "{\"y\":2}")
+            .unwrap();
+        assert_ne!(back, a);
+        assert_eq!(
+            db.session(Some(back)).unwrap().unwrap().chat_json,
+            "{\"y\":2}"
+        );
     }
 }

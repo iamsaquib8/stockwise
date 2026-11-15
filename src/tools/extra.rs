@@ -129,7 +129,7 @@ async fn fit_check<D: DataSource>(ctx: &ToolContext<D>, a: &Args, m: Market) -> 
     let src = &ctx.source;
     let sym = market::resolve_symbol(a.need_str("symbol")?.trim(), m);
     let amount = a.f64("amount").unwrap_or(0.0);
-    let profile = crate::config::effective_profile();
+    let profile = super::current_profile(ctx);
     let notes: crate::notes::NoteStore = match &ctx.workspace {
         Some(w) => crate::store::load_from(&w.dir.join(crate::notes::FILE))?,
         None => crate::store::load(crate::notes::FILE).unwrap_or_default(),
