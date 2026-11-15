@@ -245,12 +245,13 @@ traded.
 stockwise daemon longterm
 ```
 
-Runs 5 steps:
+Runs 6 steps:
 1. Score the market's universe (NIFTY 500, or the S&P 1500) on fundamentals, then the 60 highest on 6 pillars + Monte Carlo and print the three highest scores
 2. Check portfolio value, snapshot wealth tracker
 3. Check all price alerts
 4. List holdings priced below their average cost
-5. Generate AI research notes via Ollama
+5. Save the session's market breadth and valuation, the record `stockwise conditions` compares against
+6. Generate AI research notes via Ollama
 
 Run daily after market close, or weekly for deep analysis.
 

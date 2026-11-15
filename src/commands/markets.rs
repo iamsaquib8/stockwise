@@ -2097,6 +2097,85 @@ fn chart_closes(chart: &crate::api::ChartData) -> Vec<f64> {
         .unwrap_or_default()
 }
 
+/// The 10-year government bond yield, percent: CCIL / RBI for India,
+/// `^TNX` for the US, none elsewhere.
+async fn ten_year_yield(client: &YahooClient, market: Market) -> Option<f64> {
+    match market {
+        Market::In => crate::gsec::yields(std::time::Duration::from_secs(8))
+            .await
+            .ok()
+            .and_then(|set| crate::gsec::ten_year(&set.rows).and_then(|r| r.ytm)),
+        Market::Us => client
+            .get_quote(&["^TNX"])
+            .await
+            .ok()
+            .and_then(|q| q.first().and_then(|q| q.regular_market_price)),
+        _ => None,
+    }
+}
+
+/// Save the session's breadth and valuation and rank them against the
+/// sessions saved before (per market and scan scope). Returns the session
+/// date and the comparison; no comparison with `cache.db` off, no date
+/// when the quotes carry no trade time. A failed save is said on stderr.
+fn record_reading(
+    market: Market,
+    universe: Option<market::Universe>,
+    quotes: &[crate::api::Quote],
+    breadth: &crate::conditions::Breadth,
+    valuation: &crate::conditions::Valuation,
+) -> (Option<String>, Option<crate::conditions::History>) {
+    // The session the quotes are from: the latest trade time, as a date
+    // on the market's own calendar (a weekend run records Friday).
+    let as_of = quotes
+        .iter()
+        .filter_map(|q| q.regular_market_time)
+        .max()
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|t| crate::clock::local(market, t).date_naive().to_string());
+    // Breadth and valuation have no past to look up: save this session's
+    // and rank it against the ones saved before.
+    let history = as_of.as_ref().and_then(|date| {
+        let scope = universe.map_or("default", |u| u.nse_index());
+        let key = crate::value_name(market);
+        let today = crate::conditions::Reading::of(date, breadth, valuation);
+        let past: Vec<crate::conditions::Reading> =
+            crate::db::with_db(|d| d.conditions_history(&key, scope))?
+                .iter()
+                .filter_map(|json| serde_json::from_str(json).ok())
+                .collect();
+        // The read above worked, so cache.db is on: a failed save is a
+        // fault worth saying, or the record silently stops growing.
+        let saved = serde_json::to_string(&today)
+            .ok()
+            .and_then(|json| crate::db::with_db(|d| d.put_conditions(&key, scope, date, &json)))
+            .is_some();
+        if !saved {
+            eprintln!(
+                "  \u{24d8} Could not save this session's breadth and valuation to cache.db; it will be missing from later comparisons."
+            );
+        }
+        Some(crate::conditions::history(&past, &today))
+    });
+    (as_of, history)
+}
+
+/// Record today's `conditions` session without printing the report, for
+/// the daily daemon: the same scan and the same record as a plain
+/// `conditions` run. Returns the session date and how many earlier
+/// sessions are on record; `None` when nothing could be saved.
+pub(super) async fn record_conditions(
+    client: &YahooClient,
+    market: Market,
+) -> Result<Option<(String, usize)>> {
+    let bond_yield = ten_year_yield(client, market).await;
+    let quotes = universe_quotes(client, market, None).await?;
+    let breadth = crate::conditions::breadth(&quotes);
+    let valuation = crate::conditions::valuation(&quotes, bond_yield);
+    let (as_of, history) = record_reading(market, None, &quotes, &breadth, &valuation);
+    Ok(as_of.zip(history).map(|(date, h)| (date, h.sessions)))
+}
+
 /// `conditions`: trend, volatility, breadth and valuation of a market.
 /// Readings only: no call on whether to invest.
 pub async fn cmd_conditions(
@@ -2128,54 +2207,11 @@ pub async fn cmd_conditions(
             .and_then(|c| crate::conditions::volatility(name, &chart_closes(&c))),
         None => None,
     };
-    // The 10-year government yield: CCIL / RBI for India, ^TNX for the US.
-    let bond_yield = match market {
-        Market::In => crate::gsec::yields(std::time::Duration::from_secs(8))
-            .await
-            .ok()
-            .and_then(|set| crate::gsec::ten_year(&set.rows).and_then(|r| r.ytm)),
-        Market::Us => client
-            .get_quote(&["^TNX"])
-            .await
-            .ok()
-            .and_then(|q| q.first().and_then(|q| q.regular_market_price)),
-        _ => None,
-    };
+    let bond_yield = ten_year_yield(&client, market).await;
     let quotes = universe_quotes(&client, market, universe).await?;
     let breadth = crate::conditions::breadth(&quotes);
     let valuation = crate::conditions::valuation(&quotes, bond_yield);
-    // The session the quotes are from: the latest trade time, as a date
-    // on the market's own calendar (a weekend run records Friday).
-    let as_of = quotes
-        .iter()
-        .filter_map(|q| q.regular_market_time)
-        .max()
-        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-        .map(|t| crate::clock::local(market, t).date_naive().to_string());
-    // Breadth and valuation have no past to look up: save this session's
-    // and rank it against the ones saved before (per market and scan).
-    let history = as_of.as_ref().and_then(|date| {
-        let scope = universe.map_or("default", |u| u.nse_index());
-        let key = crate::value_name(market);
-        let today = crate::conditions::Reading::of(date, &breadth, &valuation);
-        let past: Vec<crate::conditions::Reading> =
-            crate::db::with_db(|d| d.conditions_history(&key, scope))?
-                .iter()
-                .filter_map(|json| serde_json::from_str(json).ok())
-                .collect();
-        // The read above worked, so cache.db is on: a failed save is a
-        // fault worth saying, or the record silently stops growing.
-        let saved = serde_json::to_string(&today)
-            .ok()
-            .and_then(|json| crate::db::with_db(|d| d.put_conditions(&key, scope, date, &json)))
-            .is_some();
-        if !saved {
-            eprintln!(
-                "  \u{24d8} Could not save this session's breadth and valuation to cache.db; it will be missing from later comparisons."
-            );
-        }
-        Some(crate::conditions::history(&past, &today))
-    });
+    let (as_of, history) = record_reading(market, universe, &quotes, &breadth, &valuation);
     let report = crate::conditions::Report {
         market: market.label().to_string(),
         index: index_name.to_string(),
@@ -2276,7 +2312,7 @@ pub async fn cmd_conditions(
         match &h.since {
             None => println!(
                 "  {}",
-                "First session on record. Each run of `conditions` saves one; ranks appear after 20."
+                "First session on record. `conditions` and the daily `daemon longterm` each save one; ranks appear after 20."
                     .dimmed()
             ),
             Some(since) => {
