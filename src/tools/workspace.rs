@@ -392,7 +392,7 @@ pub const PORTFOLIO_TOOLS: &[Tool] = &[
     Tool {
         name: "portfolio_add",
         title: "Record a purchase",
-        description: "Record a purchase in the portfolio as a new lot (shares, price paid per share in the stock's own currency, date). Records only: it places no order. Can be undone with `stockwise undo`.",
+        description: "Record a purchase in the portfolio as a new lot (shares, price paid per share in the stock's own currency, date). Two steps: called without confirm it only previews the change; show that to the user and call again with confirm: true once they agree. Records only: it places no order. Can be undone with `stockwise undo`.",
         params: &[
             SYMBOL,
             req(
@@ -416,6 +416,11 @@ pub const PORTFOLIO_TOOLS: &[Tool] = &[
                 Kind::Str,
                 "Purchase date, YYYY-MM-DD (default: today)",
             ),
+            opt(
+                "confirm",
+                Kind::Bool,
+                "true only after the user has seen this change's preview and agreed to it; without it, nothing is recorded and a preview comes back",
+            ),
             MARKET,
         ],
         personal: true,
@@ -423,7 +428,7 @@ pub const PORTFOLIO_TOOLS: &[Tool] = &[
     Tool {
         name: "portfolio_sell",
         title: "Record a sale",
-        description: "Record a sale: the oldest lots first (FIFO), keeping the realised gain for tax. Records only: it places no order. Run portfolio_sell_preview first to see the lots and tax. Can be undone with `stockwise undo`.",
+        description: "Record a sale: the oldest lots first (FIFO), keeping the realised gain for tax. Two steps: called without confirm it only previews the lots sold and the gain; show that to the user and call again with confirm: true once they agree. Records only: it places no order. Can be undone with `stockwise undo`.",
         params: &[
             SYMBOL,
             req(
@@ -443,6 +448,11 @@ pub const PORTFOLIO_TOOLS: &[Tool] = &[
                 "Price received per share",
             ),
             opt("date", Kind::Str, "Sale date, YYYY-MM-DD (default: today)"),
+            opt(
+                "confirm",
+                Kind::Bool,
+                "true only after the user has seen this change's preview and agreed to it; without it, nothing is recorded and a preview comes back",
+            ),
             MARKET,
         ],
         personal: true,
@@ -822,10 +832,8 @@ pub(super) async fn run<D: DataSource>(
                 price,
                 date
             );
-            w.apply(name, summary, &[path], move || {
-                let _lock = crate::store::lock(&p)?;
-                let mut pf = Portfolio::load_from(&p)?;
-                let out = if add {
+            let record = move |pf: &mut Portfolio| -> Result<Value> {
+                Ok(if add {
                     pf.add_lot(&sym, Lot::new(shares, price, &date, "assistant"));
                     json!({ "holding": pf.holding(&sym) })
                 } else {
@@ -835,7 +843,25 @@ pub(super) async fn run<D: DataSource>(
                         "realised_gain": sales.iter().map(|s| s.gain()).sum::<f64>(),
                         "holding": pf.holding(&sym),
                     })
-                };
+                })
+            };
+            // Portfolio changes are previewed first: the user agrees to
+            // the exact change before it is recorded.
+            if !a.bool("confirm") {
+                let mut pf = Portfolio::load_from(&p)?;
+                let mut out = record(&mut pf)?;
+                out["preview"] = json!(true);
+                out["would_record"] = json!(summary.replacen("Recorded", "Record", 1));
+                out["next"] = json!(format!(
+                    "Nothing is recorded yet. Show this to the user; only if they agree, call {} again with the same arguments and confirm: true.",
+                    name
+                ));
+                return Ok(out);
+            }
+            w.apply(name, summary, &[path], move || {
+                let _lock = crate::store::lock(&p)?;
+                let mut pf = Portfolio::load_from(&p)?;
+                let out = record(&mut pf)?;
                 pf.save_to(&p)?;
                 Ok(out)
             })

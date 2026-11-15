@@ -973,16 +973,44 @@ async fn watchlist_alert_goal_and_note_changes_are_journalled_and_undone() {
 async fn targets_profile_and_lots_change_their_files() {
     let w = workspace("lots", true);
     let c = writing(&w);
+    // Without confirm: a preview, and nothing written.
+    let v = c
+        .call(
+            "portfolio_add",
+            &json!({"symbol": "TCS", "shares": 10, "price": 3500, "date": "2024-01-10"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["preview"], true);
+    assert_eq!(v["data"]["holding"]["shares"], 10.0);
+    assert!(v["data"].get("change_id").is_none());
+    assert!(!w.portfolio.exists());
     c.call(
         "portfolio_add",
-        &json!({"symbol": "TCS", "shares": 10, "price": 3500, "date": "2024-01-10"}),
+        &json!({"symbol": "TCS", "shares": 10, "price": 3500, "date": "2024-01-10", "confirm": true}),
     )
     .await
     .unwrap();
-    let v = c
+    let preview = c
         .call(
             "portfolio_sell",
             &json!({"symbol": "TCS", "shares": 4, "price": 4100}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["data"]["realised_gain"], 2400.0);
+    assert_eq!(
+        Portfolio::load_from(&w.portfolio)
+            .unwrap()
+            .holding("TCS.NS")
+            .unwrap()
+            .shares,
+        10.0
+    );
+    let v = c
+        .call(
+            "portfolio_sell",
+            &json!({"symbol": "TCS", "shares": 4, "price": 4100, "confirm": true}),
         )
         .await
         .unwrap();
@@ -992,7 +1020,7 @@ async fn targets_profile_and_lots_change_their_files() {
     assert!(
         c.call(
             "portfolio_sell",
-            &json!({"symbol": "TCS", "shares": 99, "price": 1})
+            &json!({"symbol": "TCS", "shares": 99, "price": 1, "confirm": true})
         )
         .await
         .is_err()
