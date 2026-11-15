@@ -23,7 +23,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             let client = YahooClient::new().await?;
 
             // 1. Score all stocks
-            println!("  [1/5] Scoring stocks...");
+            println!("  [1/6] Scoring stocks...");
             let symbols = market.universe();
             let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
             let quotes = client.get_quote(&sym_refs).await?;
@@ -41,7 +41,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             }
 
             // 2. Check portfolio
-            println!("  [2/5] Checking portfolio...");
+            println!("  [2/6] Checking portfolio...");
             let portfolio = Portfolio::load()?;
             if !portfolio.holdings.is_empty() {
                 let p_syms: Vec<String> = portfolio
@@ -92,7 +92,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             }
 
             // 3. Check alerts
-            println!("  [3/5] Checking alerts...");
+            println!("  [3/6] Checking alerts...");
             let store = crate::alerts::AlertStore::load()?;
             if !store.alerts.is_empty() {
                 let a_syms: Vec<String> = store.alerts.iter().map(|a| a.symbol.clone()).collect();
@@ -126,7 +126,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             }
 
             // 4. Tax harvest check
-            println!("  [4/5] Holdings priced below cost...");
+            println!("  [4/6] Holdings priced below cost...");
             if !portfolio.holdings.is_empty() {
                 let p_syms: Vec<String> = portfolio
                     .holdings
@@ -156,7 +156,21 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             }
 
             // 5. AI report
-            println!("  [5/5] Generating AI research notes...");
+            // 5. Market conditions: one session on the record a day, so
+            // `conditions` has sessions to compare with.
+            println!("  [5/6] Recording market conditions...");
+            match super::markets::record_conditions(&client, market).await {
+                Ok(Some((date, earlier))) => println!(
+                    "    Breadth and valuation of {} saved ({} earlier sessions on record).",
+                    date, earlier
+                ),
+                Ok(None) => {
+                    println!("    Not saved (cache.db is off or the quotes carry no date).")
+                }
+                Err(e) => println!("    {} Not saved: {:#}", "!".yellow(), e),
+            }
+
+            println!("  [6/6] Generating AI research notes...");
             let mut ai = crate::ai::AiClient::connect().await;
             if ai.is_available().await {
                 let mut data = String::new();

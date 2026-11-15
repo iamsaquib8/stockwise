@@ -2086,6 +2086,296 @@ pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) ->
 
 // ── Dividend Calendar ──
 
+/// Daily closes of a chart, oldest first, gaps dropped.
+fn chart_closes(chart: &crate::api::ChartData) -> Vec<f64> {
+    chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_ref())
+        .map(|c| c.iter().filter_map(|v| *v).collect())
+        .unwrap_or_default()
+}
+
+/// The 10-year government bond yield, percent: CCIL / RBI for India,
+/// `^TNX` for the US, none elsewhere.
+async fn ten_year_yield(client: &YahooClient, market: Market) -> Option<f64> {
+    match market {
+        Market::In => crate::gsec::yields(std::time::Duration::from_secs(8))
+            .await
+            .ok()
+            .and_then(|set| crate::gsec::ten_year(&set.rows).and_then(|r| r.ytm)),
+        Market::Us => client
+            .get_quote(&["^TNX"])
+            .await
+            .ok()
+            .and_then(|q| q.first().and_then(|q| q.regular_market_price)),
+        _ => None,
+    }
+}
+
+/// Save the session's breadth and valuation and rank them against the
+/// sessions saved before (per market and scan scope). Returns the session
+/// date and the comparison; no comparison with `cache.db` off, no date
+/// when the quotes carry no trade time. A failed save is said on stderr.
+fn record_reading(
+    market: Market,
+    universe: Option<market::Universe>,
+    quotes: &[crate::api::Quote],
+    breadth: &crate::conditions::Breadth,
+    valuation: &crate::conditions::Valuation,
+) -> (Option<String>, Option<crate::conditions::History>) {
+    // The session the quotes are from: the latest trade time, as a date
+    // on the market's own calendar (a weekend run records Friday).
+    let as_of = quotes
+        .iter()
+        .filter_map(|q| q.regular_market_time)
+        .max()
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|t| crate::clock::local(market, t).date_naive().to_string());
+    // Breadth and valuation have no past to look up: save this session's
+    // and rank it against the ones saved before.
+    let history = as_of.as_ref().and_then(|date| {
+        let scope = universe.map_or("default", |u| u.nse_index());
+        let key = crate::value_name(market);
+        let today = crate::conditions::Reading::of(date, breadth, valuation);
+        let past: Vec<crate::conditions::Reading> =
+            crate::db::with_db(|d| d.conditions_history(&key, scope))?
+                .iter()
+                .filter_map(|json| serde_json::from_str(json).ok())
+                .collect();
+        // The read above worked, so cache.db is on: a failed save is a
+        // fault worth saying, or the record silently stops growing.
+        let saved = serde_json::to_string(&today)
+            .ok()
+            .and_then(|json| crate::db::with_db(|d| d.put_conditions(&key, scope, date, &json)))
+            .is_some();
+        if !saved {
+            eprintln!(
+                "  \u{24d8} Could not save this session's breadth and valuation to cache.db; it will be missing from later comparisons."
+            );
+        }
+        Some(crate::conditions::history(&past, &today))
+    });
+    (as_of, history)
+}
+
+/// Record today's `conditions` session without printing the report, for
+/// the daily daemon: the same scan and the same record as a plain
+/// `conditions` run. Returns the session date and how many earlier
+/// sessions are on record; `None` when nothing could be saved.
+pub(super) async fn record_conditions(
+    client: &YahooClient,
+    market: Market,
+) -> Result<Option<(String, usize)>> {
+    let bond_yield = ten_year_yield(client, market).await;
+    let quotes = universe_quotes(client, market, None).await?;
+    let breadth = crate::conditions::breadth(&quotes);
+    let valuation = crate::conditions::valuation(&quotes, bond_yield);
+    let (as_of, history) = record_reading(market, None, &quotes, &breadth, &valuation);
+    Ok(as_of.zip(history).map(|(date, h)| (date, h.sessions)))
+}
+
+/// `conditions`: trend, volatility, breadth and valuation of a market.
+/// Readings only: no call on whether to invest.
+pub async fn cmd_conditions(
+    market: Market,
+    universe: Option<market::Universe>,
+    json: bool,
+) -> Result<()> {
+    market.require_stocks("conditions")?;
+    let client = YahooClient::new().await?;
+    let (index_symbol, index_name, vol): (&str, &str, Option<(&str, &str)>) = match market {
+        Market::In => ("^NSEI", "NIFTY 50", Some(("^INDIAVIX", "India VIX"))),
+        Market::Us => ("^GSPC", "S&P 500", Some(("^VIX", "VIX"))),
+        Market::Global(x) => {
+            let (symbol, name) = x.info().benchmark();
+            (symbol, name, None)
+        }
+        _ => bail!("`conditions` works on stock markets"),
+    };
+    let trend = client
+        .get_chart(index_symbol, "10y", "1d")
+        .await
+        .ok()
+        .and_then(|c| crate::conditions::trend(&chart_closes(&c)));
+    let volatility = match vol {
+        Some((symbol, name)) => client
+            .get_chart(symbol, "5y", "1d")
+            .await
+            .ok()
+            .and_then(|c| crate::conditions::volatility(name, &chart_closes(&c))),
+        None => None,
+    };
+    let bond_yield = ten_year_yield(&client, market).await;
+    let quotes = universe_quotes(&client, market, universe).await?;
+    let breadth = crate::conditions::breadth(&quotes);
+    let valuation = crate::conditions::valuation(&quotes, bond_yield);
+    let (as_of, history) = record_reading(market, universe, &quotes, &breadth, &valuation);
+    let report = crate::conditions::Report {
+        market: market.label().to_string(),
+        index: index_name.to_string(),
+        trend,
+        volatility,
+        breadth,
+        valuation,
+        scanned: quotes.len(),
+        as_of,
+        history,
+    };
+    if json {
+        return output::print_json(&report);
+    }
+
+    print_header(&format!("Market Conditions — {}", report.market));
+    let pct = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{:.0}%", v));
+    let signed = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{:+.1}%", v));
+    let num = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{:.1}", v));
+
+    print_section(&format!("Trend — {}", report.index));
+    match &report.trend {
+        Some(t) => {
+            print_kv("Level", &format!("{:.2}", t.last));
+            print_kv("Against 200-day average", &signed(t.vs_200_day_pct));
+            print_kv(
+                "  days with a lower distance",
+                &match t.vs_200_day_percentile {
+                    Some(p) => format!("{:.0}% of the last {:.0} years", p, t.history_years),
+                    None => "n/a".to_string(),
+                },
+            );
+            print_kv("Against 50-day average", &signed(t.vs_50_day_pct));
+            print_kv(
+                "Below 52-week high",
+                &format!("{:.1}%", t.from_52_week_high_pct),
+            );
+            print_kv("Below highest close", &format!("{:.1}%", t.from_peak_pct));
+            print_kv("One-year change", &signed(t.return_1y_pct));
+        }
+        None => println!("  {}", "No index history available.".dimmed()),
+    }
+
+    if let Some(v) = &report.volatility {
+        print_section("Volatility");
+        print_kv(&v.name, &format!("{:.2}", v.last));
+        print_kv(
+            "  days it was lower",
+            &format!(
+                "{:.0}% of the last {:.0} years",
+                v.percentile, v.history_years
+            ),
+        );
+    }
+
+    let b = &report.breadth;
+    print_section(&format!("Breadth — {} stocks", b.stocks));
+    print_kv(
+        "Above 200-day average",
+        &format!(
+            "{} of {} with one",
+            pct(b.above_200_day_pct),
+            b.with_200_day_average
+        ),
+    );
+    print_kv("Above 50-day average", &pct(b.above_50_day_pct));
+    print_kv("Within 5% of 52-week high", &pct(b.near_52_week_high_pct));
+    print_kv("Within 5% of 52-week low", &pct(b.near_52_week_low_pct));
+    print_kv("Up on the day", &pct(b.advancing_pct));
+
+    let v = &report.valuation;
+    print_section(&format!("Valuation — {} profitable stocks", v.stocks));
+    print_kv("Aggregate P/E", &num(v.aggregate_pe));
+    print_kv("Median P/E", &num(v.median_pe));
+    print_kv(
+        "Earnings yield",
+        &v.earnings_yield_pct
+            .map_or("n/a".to_string(), |e| format!("{:.2}%", e)),
+    );
+    print_kv(
+        "10-year government yield",
+        &v.bond_yield_pct
+            .map_or("n/a".to_string(), |e| format!("{:.2}%", e)),
+    );
+    print_kv(
+        "Earnings minus bond yield",
+        &v.earnings_minus_bond_pct
+            .map_or("n/a".to_string(), |e| format!("{:+.2} points", e)),
+    );
+    print_kv(
+        "Median dividend yield",
+        &v.median_dividend_yield_pct
+            .map_or("n/a".to_string(), |e| format!("{:.2}%", e)),
+    );
+
+    if let Some(h) = &report.history {
+        print_section("Breadth and valuation against saved sessions");
+        match &h.since {
+            None => println!(
+                "  {}",
+                "First session on record. `conditions` and the daily `daemon longterm` each save one; ranks appear after 20."
+                    .dimmed()
+            ),
+            Some(since) => {
+                print_kv("Sessions on record", &format!("{} since {}", h.sessions, since));
+                // No figure today (no bond yield for this market, say) is
+                // "n/a"; a figure without enough sessions behind it waits.
+                let rank = |today: Option<f64>, p: Option<f64>| match (today, p) {
+                    (None, _) => "n/a".to_string(),
+                    (Some(_), Some(p)) => format!("lower on {:.0}% of them", p),
+                    (Some(_), None) => format!(
+                        "after {} sessions with this figure",
+                        crate::conditions::MIN_HISTORY
+                    ),
+                };
+                print_kv(
+                    "Above 200-day average",
+                    &rank(report.breadth.above_200_day_pct, h.above_200_day_percentile),
+                );
+                print_kv(
+                    "Aggregate P/E",
+                    &rank(report.valuation.aggregate_pe, h.aggregate_pe_percentile),
+                );
+                print_kv(
+                    "Earnings minus bond yield",
+                    &rank(
+                        report.valuation.earnings_minus_bond_pct,
+                        h.earnings_minus_bond_percentile,
+                    ),
+                );
+                if let Some(prev) = &h.previous {
+                    let change = |now: Option<f64>, then: Option<f64>, unit: &str| {
+                        match now.zip(then) {
+                            Some((n, t)) => format!("{:+.1}{}", n - t, unit),
+                            None => "n/a".to_string(),
+                        }
+                    };
+                    print_kv(
+                        &format!("Change since {}", prev.date),
+                        &format!(
+                            "above 200-day {}, aggregate P/E {}",
+                            change(report.breadth.above_200_day_pct, prev.above_200_day_pct, " points"),
+                            change(report.valuation.aggregate_pe, prev.aggregate_pe, "")
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    print_section("In words");
+    for line in crate::conditions::describe(&report) {
+        println!("  {}", line);
+    }
+    println!(
+        "\n  {}",
+        "These are readings of the data, not a forecast and not a signal to invest or to wait."
+            .dimmed()
+            .italic()
+    );
+    println!();
+    Ok(())
+}
+
 /// Rows a heatmap shows from each end (biggest gains, biggest falls) when
 /// the scan is larger than both together.
 const HEATMAP_EDGE: usize = 30;

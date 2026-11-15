@@ -24,6 +24,7 @@ mod charts;
 mod clock;
 mod commands;
 mod commodity;
+mod conditions;
 mod config;
 mod daemon;
 mod daemon_status;
@@ -503,6 +504,15 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     },
     /// Fear & Greed style sentiment gauge
     Sentiment,
+    /// Trend, volatility, breadth and valuation of the market (readings, not a signal)
+    Conditions {
+        /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
+        /// BSE stock) instead of the liquid stocks of BSE
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
     /// Recent news headlines for a stock
     News { symbol: String },
     /// Sector rotation — which sectors lead and lag
@@ -3060,6 +3070,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "sectors",
             "heatmap",
             "sentiment",
+            "conditions",
             "news",
             "rotation",
             "sectorcmp",
@@ -3968,6 +3979,9 @@ async fn dispatch(
         }
         Commands::Heatmap { universe, cap } => commands::cmd_heatmap(m, universe, cap).await,
         Commands::Sentiment => commands::cmd_sentiment().await,
+        Commands::Conditions { universe, out } => {
+            commands::cmd_conditions(m, universe, out.json).await
+        }
         Commands::News { symbol } => commands::cmd_news(&symbol, m).await,
         Commands::Rotation => commands::cmd_rotation(m).await,
         Commands::Sectorcmp { sector1, sector2 } => {

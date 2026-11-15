@@ -17,7 +17,7 @@ src/
     fno.rs           options chain, pcr, maxpain, oi, payoff
     commodities.rs   commodity spot, futures, etfs, sgb
     bonds.rs         bonds yields, list, calc
-    markets.rs       movers, sectors, news, sentiment, screen, picks, earnings, rotation, matrix, surprise, heatmap, sectorcmp
+    markets.rs       movers, sectors, news, sentiment, conditions, screen, picks, earnings, rotation, matrix, surprise, heatmap, sectorcmp
     ipo.rs           ipo (live board, one issue's analysis)
     calendar.rs      calendar (results, dividends and splits for holdings and watchlist)
     backtests.rs     backtest (single, portfolio, walkforward, strategies)
