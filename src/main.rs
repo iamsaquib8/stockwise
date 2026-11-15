@@ -50,6 +50,7 @@ mod offmarket;
 mod output;
 mod pagecache;
 mod payoff;
+mod picks;
 mod pme;
 mod portfolio;
 mod practice;
@@ -544,12 +545,21 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
-    /// Highest-scoring stocks on eight factors (a score, not a recommendation)
+    /// Stocks ranked against each other on value, quality, growth and trend (a score, not a
+    /// recommendation)
     Picks {
         /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
         /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Only this market-cap tier, ranked within itself: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
+        /// How many of the highest scores to show
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        #[command(flatten)]
+        out: TableOutput,
     },
     /// Screen large caps by a preset
     Screen {
@@ -3983,7 +3993,12 @@ async fn dispatch(
         Commands::Earnings => commands::cmd_earnings(m).await,
         Commands::Surprise { universe } => commands::cmd_surprise(m, universe).await,
         Commands::Matrix { universe } => commands::cmd_matrix(m, universe).await,
-        Commands::Picks { universe } => commands::cmd_picks(m, universe).await,
+        Commands::Picks {
+            universe,
+            cap,
+            top,
+            out,
+        } => commands::cmd_picks(m, universe, cap, top, out.into()).await,
         Commands::Screen {
             category,
             universe,
@@ -6283,6 +6298,15 @@ mod tests {
             assert!(parses(&args), "{:?}", args);
         }
         assert!(!parses(&["stockwise", "movers", "--universe", "sensex"]));
+        assert!(parses(&[
+            "stockwise",
+            "picks",
+            "--cap",
+            "large",
+            "--top",
+            "30",
+            "--json"
+        ]));
         for whole in ["bse", "all", "BSEALL"] {
             assert!(
                 parses(&["stockwise", "picks", "--universe", whole]),

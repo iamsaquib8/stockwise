@@ -147,7 +147,7 @@ always works. Common names resolve to NSE symbols
 | `earnings` | Earnings growth for portfolio and watchlist |
 | `surprise [--universe INDEX]` | Earnings momentum — accelerating vs decelerating |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
-| `picks [--universe INDEX]` | The highest-scoring of the liquid stocks of BSE (India) or of the S&P 500 (US) on 8 fundamental and technical factors, with the factors that raised each score. A score, not a recommendation |
+| `picks [--universe INDEX] [--cap TIER] [--top N] [--json\|--csv]` | Scores every stock of the scan (the liquid stocks of BSE for India, the S&P 500 for the US) from 0 to 100 and lists the highest. Four pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity), **growth** (forward against trailing EPS) and **trend** (price and 50-day average against the 200-day, place in the 52-week range). Weights 30/25/20/25; a pillar without data pulls the score toward 50, and the `Data` column shows how much of the score had data. `--cap` ranks one market-cap tier within itself. A score, not a recommendation |
 | `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr) |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
