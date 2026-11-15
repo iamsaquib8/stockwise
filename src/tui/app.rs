@@ -8,6 +8,9 @@ use crate::views::Snapshot;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 
+/// How the status line starts when an analysis re-run failed.
+const ANALYSIS_FAILED: &str = "Analysis failed";
+
 /// Chart periods, selected with the keys 1-6 or `[` / `]`.
 pub const CHART_PERIODS: [&str; 6] = ["1d", "5d", "1mo", "6mo", "1y", "5y"];
 const DEFAULT_PERIOD: usize = 2;
@@ -363,7 +366,10 @@ impl App {
                             && self.analysis.is_some()
                             && let Some(e) = self.analysis_error.clone()
                         {
-                            self.error(format!("Analysis failed ({}); showing the last one", e));
+                            self.error(format!(
+                                "{} ({}); showing the last one",
+                                ANALYSIS_FAILED, e
+                            ));
                         }
                         effects.extend(self.chart_effect(true));
                     }
@@ -438,11 +444,23 @@ impl App {
                         self.analysis_sel = self.analysis_sel.min(n.saturating_sub(1));
                         self.analysis = Some(report);
                         self.analysis_error = None;
+                        // A success replaces any earlier analysis failure on
+                        // the status line.
+                        if self
+                            .status
+                            .as_ref()
+                            .is_some_and(|s| s.error && s.text.starts_with(ANALYSIS_FAILED))
+                        {
+                            self.status = None;
+                        }
                     }
                     Err(e) => {
                         // A failed re-run keeps the last result; say it is stale.
                         if self.analysis.is_some() {
-                            self.error(format!("Analysis failed ({}); showing the last one", e));
+                            self.error(format!(
+                                "{} ({}); showing the last one",
+                                ANALYSIS_FAILED, e
+                            ));
                         }
                         self.analysis_error = Some(e);
                     }
