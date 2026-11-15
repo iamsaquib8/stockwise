@@ -782,6 +782,12 @@ mod tests {
         assert_eq!(at_end, app.detail_max.get());
         app.update(key(KeyCode::Up));
         assert_eq!(app.detail_scroll, at_end - 1);
+        // The terminal grows: everything fits, so the limit drops to 0 and
+        // one Up leaves the view at the top with no dead presses.
+        let _ = draw(&app, 160, 60);
+        assert_eq!(app.detail_max.get(), 0);
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.detail_scroll, 0);
         // Reopening starts from the top again.
         app.update(key(KeyCode::Esc));
         app.update(key(KeyCode::Enter));
