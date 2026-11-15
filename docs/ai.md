@@ -96,16 +96,56 @@ stockwise ask "how is my portfolio doing?"
 stockwise ask "compare TCS and INFY on RSI and one-year risk" --verbose
 stockwise ask "what SIP reaches 1 crore in 15 years at 12%?"
 stockwise ask "which of my holdings are long term for tax?" --json
+stockwise ask -c "and which of them pay dividends?"   # carry on the last conversation
+stockwise ask -i                                     # a conversation in the terminal
+stockwise ask --playbook checkup                     # a prepared portfolio checkup
+stockwise ask --auto "add TCS and INFY to my watchlist"
 ```
 
-`ask` sends your question and the list of StockWise tools to the configured
-model. The model picks tools, StockWise runs them (read-only, against live
-data and your local portfolio), sends the results back, and the model answers
-in plain English. The answer ends with the tools that ran. The tools are the
-same ones the [MCP server](#tools) offers.
+`ask` sends your question, your investor profile and the list of StockWise
+tools to the configured model. The model picks tools, StockWise runs them
+(against live data and your local files), sends the results back, and the
+model answers in plain English. The answer ends with the tools that ran. The
+tools are the same ones the [MCP server](#tools) offers.
+
+**Your profile.** The system prompt carries your `[profile]`: mode, risk
+level, horizon, the largest weight of one stock, the small-cap share and your
+tax slab. The model uses it to judge concentration, and answers "does this
+stock suit me?" with `fit_check`, which measures the stock against those
+limits and your own notes. If you have not set a profile up, the model can
+say so; `stockwise ask --auto "set up my profile"` walks through the
+questions.
+
+**Conversations.** Each answer is saved in `cache.db` (the newest 50
+conversations; `cache clear` leaves them). `-c` carries on the newest one,
+`--resume ID` a given one, `--sessions` lists them, and `-i` keeps asking
+until you type `exit` or press Ctrl-D. A conversation belongs to the provider
+and model it started with. Before each new question, long tool results from
+earlier turns are trimmed; the answers built from them stay.
+
+**Playbooks.** `--playbook` sends a prepared request that names its tools,
+so the same task runs the same way each time. Add a question to extend it.
+
+| Playbook | What it covers |
+|----------|----------------|
+| `checkup` | Value, P&L and XIRR; split by market, currency, cap tier and sector; holdings or small caps above your profile's limits; missing prices; results and dividend dates in the next 30 days; alerts close to triggering |
+| `tax-season` | Realised gains and losses by term, the 112A exemption used and left, unrealised losses that could offset gains, advance-tax dates and amounts |
+| `earnings` | Results dates for your holdings and watchlist in the next 30 days, and recent quarters against a year ago |
+
+**Changes (`--auto`).** Without it the tools only read. With `--auto` the
+model can also change your watchlist, alerts, goals, targets, notes and
+profile, the [workspace tools](#changes-the-assistant-can-make). Each change
+is recorded and `stockwise undo` reverses it. `ask` never records portfolio
+lots and never places orders.
 
 | Option | Default | Meaning |
 |--------|---------|---------|
+| `--interactive`, `-i` | off | Keep asking until you type `exit` (or press Ctrl-D) |
+| `--continue`, `-c` | off | Carry on the newest saved conversation |
+| `--resume ID` | — | Carry on conversation `ID` (see `--sessions`) |
+| `--sessions` | off | List saved conversations |
+| `--playbook NAME` | — | `checkup`, `tax-season` or `earnings` |
+| `--auto` | off | Let the model change your workspace (undo with `stockwise undo`) |
 | `--verbose`, `-v` | off | Print each tool call and the size of its result on stderr |
 | `--json` | off | Print the transcript: question, answer, every tool call with its arguments, token usage |
 | `--max-steps N` | 6 | Most model requests (1-20); the last one runs without tools, so the model must answer |
@@ -140,7 +180,7 @@ usual notice.
 
 ## Use StockWise from AI assistants (MCP)
 
-> **Guide:** [Use StockWise from Claude or Cursor](guide-mcp.md) is a short walkthrough of this section.
+> **Guide:** [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md) is a short walkthrough of this section.
 
 `stockwise mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server built on the official Rust SDK. AI assistants start it and call its
@@ -153,6 +193,45 @@ stockwise mcp --list-tools             # the tools and their JSON schemas
 ```
 
 ### Set it up
+
+**One command, any app.** `stockwise connect` adds the server to every AI app
+it finds on your computer, and installs the [agent skill](#for-agents-agent-skill-and-llmstxt)
+where the app reads skills:
+
+```bash
+stockwise connect                          # every app found
+stockwise connect antigravity gemini-cli   # just these
+stockwise connect --all --allow-writes     # let them change your watchlist, alerts, goals, notes, profile
+stockwise connect --list                   # the apps, found or not, and their config files
+stockwise connect --dry-run                # what would change
+stockwise connect cursor --remove
+```
+
+| App | `connect` name | Where it writes |
+|-----|----------------|-----------------|
+| Claude Desktop | `claude-desktop` | `claude_desktop_config.json` (`mcpServers`) |
+| Claude Code | `claude-code` | `claude mcp add --scope user`, skill in `~/.claude/skills/` |
+| Cursor | `cursor` | `~/.cursor/mcp.json` |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code (Copilot agent mode) | `vscode` | the user `mcp.json` (`servers`) |
+| Cline | `cline` | `cline_mcp_settings.json` |
+| Gemini CLI | `gemini-cli` | `~/.gemini/settings.json` |
+| Google Antigravity | `antigravity` | `~/.gemini/antigravity/mcp_config.json` (through its link, if it has one), skill in `~/.gemini/antigravity/skills/` |
+| OpenAI Codex CLI | `codex` | `~/.codex/config.toml` (`[mcp_servers.stockwise]`) |
+| Zed | `zed` | Zed's `settings.json` (`context_servers`) |
+| LM Studio | `lm-studio` | `~/.lmstudio/mcp.json` |
+| opencode | `opencode` | `~/.config/opencode/opencode.json` (`mcp`) |
+| Goose, Continue | `goose`, `continue` | nothing: prints what to paste |
+
+Only the `stockwise` entry changes; every other setting and server stays.
+Each file is backed up to `<file>.stockwise.bak` first. A file `connect`
+cannot read as plain JSON (Zed's comments, say) is left alone, with the
+entry printed to paste by hand. The entry runs this `stockwise` by its full
+path, so connect again after moving it. Restart the app afterwards. For
+another user account on the same computer (a second Antigravity profile, say),
+run `stockwise connect` while signed in as that user.
+
+To set it up by hand instead:
 
 **Claude Code**
 
@@ -204,8 +283,10 @@ the data directory. Add them to `args` or the client's `env`.
 
 ### Tools
 
-There are 35 tools. Every tool only reads. Each result is JSON with the data, a short "not
-financial advice" `note`, and `truncated` when long lists were shortened.
+There are 52 tools that read, and 13 more that change your files when you
+turn them on ([below](#changes-the-assistant-can-make)). Each result is JSON
+with the data, a short "not financial advice" `note`, and `truncated` when long
+lists were shortened.
 Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 `commodity`, `uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`).
 
@@ -242,9 +323,53 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `goal_list` | Your saved goals with live funded share | `goal list --json` |
 | `alerts_list` | Your alerts checked against live data | `alert check --json` |
 | `watchlist` | Your watchlist with live prices | `watch --json` |
+| `profile` / `profile_questions` | Your investor profile and its guardrails; the onboarding questions | `profile show --json` |
+| `portfolio_pme` / `portfolio_sell_preview` / `mf_bleed` / `income_calendar` | Index-twin comparison; what a sale would realise; fund cost drag; dividend calendar | `portfolio pme`, `portfolio income` |
+| `portfolio_analyze` | The portfolio dashboard: by market, currency, cap tier and sector, tax terms, risk and observations | `portfolio analyze --json` |
+| `market_conditions` | Trend, volatility, breadth and valuation with their history (readings, not a timing signal) | `conditions --json` |
+| `picks` | Stocks ranked on value, quality, growth and trend among those scanned (the default universe, or `universe`, `cap`) | `picks --json` |
+| `movers` | Top gainers and losers today | `movers --json` |
+| `dividends` | Dividend yield and income projection for one ticker | `dividends --json` |
+| `goal_emergency` | Emergency reserve size against your liquid money, and the build-up plan | `goal emergency --json` |
+| `fit_check` | Whether a stock fits **your own** rules: `yes`, `no` or `unclear`, with each rule passed, failed or unknown (weight of one stock and small caps against your profile, risk tier against your risk level, P/E and ROE limits from your note). Not a recommendation | — |
+| `changes_list` | The changes assistants made, newest first, with their undo command | `undo --list` |
 
 Hosts see each tool's read-only and open-world hints; the portfolio tools are
 marked as not reaching outside your machine.
+
+### Changes the assistant can make
+
+By default the server only reads. Two flags add tools that change your files:
+
+```bash
+stockwise mcp --allow-writes       # workspace: watchlist, alerts, goals, targets, notes, profile
+stockwise mcp --allow-portfolio    # also record portfolio lots and sales (implies --allow-writes)
+stockwise connect --allow-writes   # write the flag into every app's config
+```
+
+| Tier | Tools |
+|------|-------|
+| Workspace (`--allow-writes`) | `watchlist_add`, `watchlist_remove`, `alert_add`, `alert_remove`, `goal_save`, `goal_remove`, `target_set`, `target_remove`, `profile_set`, `profile_onboard`, `note_set` |
+| Portfolio (`--allow-portfolio`) | `portfolio_add`, `portfolio_sell` (record a purchase lot or a FIFO sale; never an order) |
+
+- **Every change can be undone.** Before a change, the files it touches are
+  copied to `undo/` in the data directory and the change is listed in
+  `audit.json` (the newest 200). The tool's result carries its `change_id` and
+  `stockwise undo N`. `stockwise undo` reverses the newest change,
+  `stockwise undo --list` shows them all. Undo refuses when a later change or
+  your own edit touched the same file; `--force` undoes anyway.
+- **Profile onboarding.** `profile_questions` returns six plain questions
+  (how closely you follow your investments, what you would do after a 20%
+  fall, your horizon, experience, tax slab and regime). `profile_onboard`
+  turns the answers into `[profile]` settings by a fixed mapping in StockWise,
+  not by the model, and returns the reason for each. The `onboard_profile`
+  prompt runs the whole conversation.
+- **Notes.** `note_set` keeps your thesis for a stock and your own limits
+  (largest weight, highest P/E, lowest ROE) in `notes.json`; `fit_check` reads
+  them.
+- Write tools are refused with `--allow-remote`: only a client on your own
+  machine can change your files. Hosts see them as not read-only, and the
+  `_remove` and portfolio tools as destructive, so most ask before each call.
 
 ### Resources and prompts
 
@@ -258,6 +383,7 @@ marked as not reaching outside your machine.
 |--------|------------------|
 | `review_portfolio` (optional `focus`) | Value, P&L, concentration and risk of your holdings, without buy/sell calls |
 | `tax_harvest_check` | Unrealized gains and losses by lot before 31 March, the LTCG exemption left and the set-off rules |
+| `onboard_profile` | Asks the onboarding questions one at a time and saves the profile (needs `--allow-writes`) |
 | `explain_option_chain` (`symbol`, optional `expiry`) | OI, PCR, max pain, IV and greeks in plain English |
 
 ### Orders stay with you
@@ -311,8 +437,11 @@ Put a TLS proxy in front of it before exposing it beyond your network.
 
 - [`skills/stockwise/SKILL.md`](../skills/stockwise/SKILL.md) is an
   [Agent Skill](https://agentskills.io) that tells Claude Code and other agents
-  how to use the CLI (`--json`, markets, safe commands) and the MCP server.
-  Copy the folder into `~/.claude/skills/` (or a project's `.claude/skills/`).
+  how to use the CLI (`--json`, markets, safe commands) and the MCP server: the
+  tool tiers, undo, onboarding, `fit_check` and the common workflows.
+  `stockwise connect` installs it for Claude Code and Antigravity; for other
+  agents, copy the folder into their skills folder (a project's
+  `.claude/skills/` or `.agents/skills/`).
 - The documentation site publishes
   [`llms.txt`](https://iamsaquib8.github.io/stockwise/llms.txt) (an index of
   the docs and the cheatsheet's commands) and

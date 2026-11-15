@@ -45,16 +45,23 @@ src/
   server/            `stockwise serve`: axum routes, bearer auth, Prometheus metrics; web.rs serves
                      the dashboard (web/, embedded with include_str!) and sets CSP/security headers
   daemon_status.rs   Reads the intraday daemon's daemon_state.json for /metrics
-  tools/             The 35 read-only tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
+  tools/             The tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
                      definitions, JSON schemas from typed Param lists, the result envelope with
                      the "not financial advice" note and size limit), args.rs (argument checks),
-                     handlers.rs (each tool calls the function behind the command's --json),
+                     handlers.rs and extra.rs (each read tool calls the function behind the
+                     command's --json; extra.rs also has fit_check), workspace.rs (the opt-in
+                     write tools, each run through the audit journal),
                      tests.rs (also checks that the Claude Desktop manifest lists every tool)
   mcp.rs, mcp/       `stockwise mcp`: rmcp ServerHandler (tools, resources, prompts), stdio and
                      Streamable HTTP transports (`mcp` feature); mcp/tests.rs
   ask.rs, ask/       `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
-                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent);
-                     ask/tests.rs
+                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent),
+                     saved conversations (ask_sessions in cache.db) and playbooks; ask/tests.rs
+  audit.rs           Journal of assistant changes (audit.json, file copies in undo/) for `undo`
+  onboarding.rs      Profile questions and the fixed mapping from answers to [profile]
+  notes.rs           Per-stock thesis and limits (notes.json) read by fit_check
+  connect.rs         `stockwise connect`: each AI app's MCP config file and format, merged in
+                     place with a backup; installs skills/stockwise/SKILL.md where apps read skills
   store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME); `update` locks a file
                      (`<file>.lock`) around load-change-save — do network work first, then update
   config.rs          Optional config.toml: defaults for market, AI, cache, data dir, periods

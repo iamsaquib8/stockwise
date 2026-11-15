@@ -116,4 +116,4 @@ stockwise import kite tradebook-latest.xlsx     # or import the new tradebook
   jq](guide-scripting.md).
 - Every option is in the commands reference under
   [Portfolio](commands.md#portfolio). A review prompt for assistants is in
-  [Use StockWise from Claude or Cursor](guide-mcp.md).
+  [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md).

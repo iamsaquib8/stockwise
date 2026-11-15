@@ -482,6 +482,7 @@ fn transcript_json_shape() {
         }],
         usage: Usage::default(),
         stopped_early: None,
+        session: None,
         note: NOTE,
     };
     let v = serde_json::to_value(&t).unwrap();
@@ -513,10 +514,111 @@ fn transcript_json_shape() {
 
 #[test]
 fn system_prompt_names_the_market_and_the_rules() {
-    let p = system_prompt(Market::Us);
+    let p = system_prompt(Market::Us, false);
     assert!(p.starts_with(crate::ai::prompts::RULES));
     assert!(p.contains("`us`"));
     assert!(p.contains("cannot place orders"));
+    assert!(p.contains("The user's investor profile"));
+    assert!(p.contains("only read data"));
+    let auto = system_prompt(Market::Us, true);
+    assert!(auto.contains("`undo` command"));
+    assert!(auto.contains("cannot place orders"));
+}
+
+#[test]
+fn the_profile_line_carries_the_limits_and_flags_defaults() {
+    let mut p = crate::config::EffectiveProfile::from_parts(None, None, &Default::default());
+    let line = profile_line(&p);
+    assert!(line.contains("These are defaults"), "{line}");
+    assert!(line.contains(&format!("{:.0}%", p.max_stock_weight)));
+    p.mode_source = crate::config::Source::File;
+    assert!(!profile_line(&p).contains("These are defaults"));
+    crate::verdict::testing::assert_neutral(&line);
+}
+
+#[test]
+fn playbooks_are_neutral_and_name_their_tools() {
+    use clap::ValueEnum;
+    for pb in Playbook::value_variants() {
+        let text = pb.prompt();
+        crate::verdict::testing::assert_neutral(text);
+        for tool in text
+            .split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+            .filter(|w| w.contains('_'))
+        {
+            assert!(
+                crate::tools::TOOLS.iter().any(|t| t.name == tool),
+                "{pb:?} names unknown tool {tool}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_chat_carries_on_after_saving_and_trims_old_results() {
+    let server = MockServer::start(
+        vec![
+            json!({
+                "message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "quote", "arguments": {"symbols": ["TCS"]}}}
+                ]},
+                "done_reason": "stop",
+            }),
+            json!({"message": {"role": "assistant", "content": "TCS is at 4,100."}, "done_reason": "stop"}),
+            json!({"message": {"role": "assistant", "content": "INFY is at 1,500."}, "done_reason": "stop"}),
+        ]
+        .into_iter()
+        .map(|r| (200, r.to_string()))
+        .collect(),
+    )
+    .await;
+    let ai = client(AiProvider::Ollama, &server.url);
+    let c = ctx();
+    let mut chat = Chat::new(&ai, "system one".into());
+    assert!(chat.is_empty());
+    let t = ask_in(&ai, &c, &mut chat, "TCS?", &AskOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(t.answer, "TCS is at 4,100.");
+    // Saved and resumed with a fresh system prompt.
+    let saved: SavedChat =
+        serde_json::from_str(&serde_json::to_string(&chat.saved()).unwrap()).unwrap();
+    let mut chat = Chat::resume(&ai, "system two".into(), saved.clone()).unwrap();
+    let t = ask_in(&ai, &c, &mut chat, "And INFY?", &AskOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(t.answer, "INFY is at 1,500.");
+    let reqs = server.requests();
+    let msgs = reqs[2].json()["messages"].as_array().unwrap().clone();
+    assert_eq!(msgs[0]["content"], "system two");
+    assert_eq!(msgs.iter().filter(|m| m["role"] == "system").count(), 1);
+    assert_eq!(msgs[1]["content"], "TCS?");
+    assert_eq!(msgs.last().unwrap()["content"], "And INFY?");
+    // The first turn's tool result is trimmed once the next question starts.
+    let tool = msgs.iter().find(|m| m["role"] == "tool").unwrap();
+    let full = saved.history.iter().find(|m| m["role"] == "tool").unwrap();
+    if full["content"].as_str().unwrap().len() > KEEP_RESULT_BYTES {
+        assert!(tool["content"].as_str().unwrap().contains("trimmed"));
+    }
+    assert!(msgs.iter().any(|m| m["content"] == "TCS is at 4,100."));
+    // Another provider or model cannot carry it on.
+    let other = client(AiProvider::Anthropic, &server.url);
+    let err = Chat::resume(&other, "s".into(), saved).err().unwrap();
+    assert!(err.to_string().contains("Ollama"), "{err}");
+}
+
+#[tokio::test]
+async fn a_failed_turn_leaves_the_chat_as_it_was() {
+    let server = MockServer::start(vec![(500, "{\"error\": \"boom\"}".into())]).await;
+    let ai = client(AiProvider::Ollama, &server.url);
+    let mut chat = Chat::new(&ai, "s".into());
+    let before = chat.saved().history.len();
+    assert!(
+        ask_in(&ai, &ctx(), &mut chat, "TCS?", &AskOptions::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(chat.saved().history.len(), before);
 }
 
 #[tokio::test]

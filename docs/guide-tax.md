@@ -214,7 +214,7 @@ these before you file:
 
 - [Rebalance to target weights](guide-rebalance.md). A buy-only rebalance adds
   money without selling, so it books no gain.
-- [Use StockWise from Claude or Cursor](guide-mcp.md). The `tax_harvest_check`
+- [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md). The `tax_harvest_check`
   prompt asks an assistant for the same review.
 - [Script it with JSON, CSV and jq](guide-scripting.md), for example
   `stockwise tax export in --fy 2025-26 --json | jq '.summary.taxable_ltcg'`.

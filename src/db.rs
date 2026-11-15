@@ -211,6 +211,38 @@ fn task_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 
 const TASK_COLS: &str = "id, kind, status, progress_pct, title, payload_json, result_json, error, created_at, updated_at";
 
+/// Saved `ask` conversations kept.
+pub const KEEP_SESSIONS: i64 = 50;
+
+/// A saved `ask` conversation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AskSession {
+    pub id: i64,
+    pub title: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(skip)]
+    pub chat_json: String,
+    pub turns: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+const SESSION_COLS: &str = "id, title, provider, model, chat_json, turns, created_at, updated_at";
+
+fn session_row(r: &rusqlite::Row) -> rusqlite::Result<AskSession> {
+    Ok(AskSession {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        provider: r.get(2)?,
+        model: r.get(3)?,
+        chat_json: r.get(4)?,
+        turns: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+    })
+}
+
 /// An open `cache.db`.
 pub struct CacheDb {
     conn: Connection,
@@ -304,7 +336,13 @@ impl CacheDb {
              CREATE TABLE IF NOT EXISTS index_members (
                  index_name TEXT NOT NULL, rank INTEGER NOT NULL, symbol TEXT NOT NULL,
                  PRIMARY KEY (index_name, rank)
-             ) WITHOUT ROWID;",
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS ask_sessions (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 title TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+                 chat_json TEXT NOT NULL, turns INTEGER NOT NULL DEFAULT 0,
+                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+             );",
         )?;
         Ok(Self { conn })
     }
@@ -624,6 +662,74 @@ impl CacheDb {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    // ── ask_sessions ──
+
+    /// Save a conversation: a new row when `id` is `None`, else that row.
+    /// Only the newest [`KEEP_SESSIONS`] are kept. Returns the id.
+    pub fn save_session(
+        &self,
+        id: Option<i64>,
+        title: &str,
+        provider: &str,
+        model: &str,
+        chat_json: &str,
+    ) -> Result<i64> {
+        let now = now_secs();
+        let id = match id {
+            Some(id) => {
+                self.conn.execute(
+                    "UPDATE ask_sessions SET chat_json = ?2, turns = turns + 1, updated_at = ?3 \
+                     WHERE id = ?1",
+                    params![id, chat_json, now],
+                )?;
+                id
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO ask_sessions (title, provider, model, chat_json, turns, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
+                    params![title, provider, model, chat_json, now],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+        };
+        self.conn.execute(
+            "DELETE FROM ask_sessions WHERE id NOT IN \
+             (SELECT id FROM ask_sessions ORDER BY updated_at DESC, id DESC LIMIT ?1)",
+            params![KEEP_SESSIONS],
+        )?;
+        Ok(id)
+    }
+
+    /// One session, or the most recently used when `id` is `None`.
+    pub fn session(&self, id: Option<i64>) -> Result<Option<AskSession>> {
+        let sql = format!(
+            "SELECT {SESSION_COLS} FROM ask_sessions {} ORDER BY updated_at DESC, id DESC LIMIT 1",
+            if id.is_some() {
+                "WHERE id = ?1"
+            } else {
+                "WHERE ?1 IS NULL"
+            }
+        );
+        Ok(self
+            .conn
+            .query_row(&sql, params![id], session_row)
+            .optional()?)
+    }
+
+    /// The newest sessions first, without their messages.
+    pub fn sessions(&self, limit: usize) -> Result<Vec<AskSession>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLS} FROM ask_sessions ORDER BY updated_at DESC, id DESC LIMIT ?1"
+        ))?;
+        let rows = st.query_map(params![limit as i64], |r| {
+            let mut s = session_row(r)?;
+            s.chat_json.clear();
+            Ok(s)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // ── market_snapshots ──
@@ -1493,5 +1599,29 @@ mod tests {
             Some("v")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ask_sessions_save_update_and_keep_the_newest() {
+        let db = CacheDb::open_in_memory().unwrap();
+        assert!(db.session(None).unwrap().is_none());
+        let a = db
+            .save_session(None, "first", "Ollama", "qwen3", "{}")
+            .unwrap();
+        let b = db
+            .save_session(None, "second", "Ollama", "qwen3", "{}")
+            .unwrap();
+        assert_eq!(db.session(None).unwrap().unwrap().id, b);
+        db.save_session(Some(a), "", "", "", "{\"x\":1}").unwrap();
+        let s = db.session(Some(a)).unwrap().unwrap();
+        assert_eq!((s.turns, s.chat_json.as_str()), (2, "{\"x\":1}"));
+        assert_eq!(db.sessions(10).unwrap().len(), 2);
+        assert!(db.sessions(10).unwrap()[0].chat_json.is_empty());
+        for i in 0..KEEP_SESSIONS {
+            db.save_session(None, &format!("q{i}"), "Ollama", "m", "{}")
+                .unwrap();
+        }
+        assert_eq!(db.sessions(500).unwrap().len() as i64, KEEP_SESSIONS);
+        assert!(db.session(Some(a)).unwrap().is_none());
     }
 }

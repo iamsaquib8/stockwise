@@ -990,17 +990,41 @@ Restart the app afterwards. Goose and Continue get the lines to paste.")]
         #[command(flatten)]
         out: JsonOutput,
     },
-    /// Ask in plain English; the AI model answers with StockWise's read-only tools
+    /// Ask in plain English; the AI model answers with StockWise's tools, knowing your profile
     #[command(after_help = "Examples:\n  \
 stockwise ask \"how is my portfolio doing?\"\n  \
 stockwise ask \"compare TCS and INFY on RSI and 1-year risk\" --verbose\n  \
-stockwise ask \"what SIP reaches 1 crore in 15 years at 12%?\" --json\n\n\
+stockwise ask -c \"and INFY's dividends?\"        # carry on the last conversation\n  \
+stockwise ask -i                                 # a conversation in the terminal\n  \
+stockwise ask --playbook checkup                 # portfolio checkup\n  \
+stockwise ask --auto \"add TCS to my watchlist\"   # let it change your workspace\n  \
+stockwise ask --sessions\n\n\
 Uses STOCKWISE_AI_PROVIDER (local Ollama by default) and needs a model with tool calling. \
-The tools only read data; nothing is ever ordered. Not financial advice.")]
+The tools read data; with --auto they may also change your watchlist, alerts, goals, targets, \
+notes and profile (undo with `stockwise undo`). Nothing is ever ordered. Not financial advice.")]
     Ask {
         /// The question (quote it, or give it as several words)
-        #[arg(required = true, num_args = 1..)]
+        #[arg(num_args = 0..)]
         question: Vec<String>,
+        /// A conversation: keep asking until you type exit (or press Ctrl-D)
+        #[arg(short, long)]
+        interactive: bool,
+        /// Carry on the most recent conversation
+        #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+        continue_last: bool,
+        /// Carry on conversation ID (see --sessions)
+        #[arg(long, value_name = "ID")]
+        resume: Option<i64>,
+        /// List saved conversations
+        #[arg(long, conflicts_with_all = ["question", "interactive", "continue_last", "resume", "playbook"])]
+        sessions: bool,
+        /// A prepared task: checkup (portfolio), tax-season, earnings
+        #[arg(long, value_enum)]
+        playbook: Option<ask::Playbook>,
+        /// Let the model change your watchlist, alerts, goals, targets, notes and profile
+        /// (each change is undoable with `stockwise undo`)
+        #[arg(long)]
+        auto: bool,
         /// Most model requests; the last one must answer without tools
         #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=20))]
         max_steps: u32,
@@ -1014,13 +1038,15 @@ The tools only read data; nothing is ever ordered. Not financial advice.")]
         out: JsonOutput,
     },
 
-    /// MCP server for AI assistants (Claude, ChatGPT, Cursor): read-only tools over stdio or HTTP
+    /// MCP server for AI assistants (Claude, Codex, Gemini, Antigravity, Cursor) over stdio or HTTP
     #[command(after_help = "Examples:\n  \
-stockwise mcp                          stdio, for Claude Desktop / Claude Code / Cursor\n  \
+stockwise mcp                          stdio, for Claude, Codex, Gemini, Antigravity, Cursor, ...\n  \
+stockwise mcp --allow-writes           also change the watchlist, alerts, goals, notes, profile\n  \
 stockwise mcp --http 127.0.0.1:8788    Streamable HTTP at http://127.0.0.1:8788/mcp\n  \
 stockwise mcp --list-tools             the tools and their input schemas as JSON\n\n\
-Claude Code: claude mcp add stockwise -- stockwise mcp\n\
-Tools are read-only. Live orders are never exposed: --allow-orders only adds a dry-run preview \
+Add it to your AI apps: stockwise connect\n\
+Tools read unless --allow-writes or --allow-portfolio is given; each change is undoable with \
+`stockwise undo`. Live orders are never exposed: --allow-orders only adds a dry-run preview \
 that returns the `stockwise trade` command for you to run yourself.")]
     Mcp {
         /// Serve Streamable HTTP at http://ADDR/mcp instead of stdio, e.g. 127.0.0.1:8788
@@ -4764,18 +4790,38 @@ async fn dispatch(
         } => commands::cmd_serve(&bind, allow_remote, open, m).await,
         Commands::Ask {
             question,
+            interactive,
+            continue_last,
+            resume,
+            sessions,
+            playbook,
+            auto,
             max_steps,
             max_tokens,
             verbose,
             out,
         } => {
+            if sessions {
+                return commands::cmd_ask_sessions(out.json);
+            }
             let opts = ask::AskOptions {
                 max_steps: max_steps as usize,
                 token_budget: max_tokens,
                 verbose,
                 ..Default::default()
             };
-            commands::cmd_ask(&question.join(" "), opts, m, out.json).await
+            let req = commands::AskRequest {
+                question: question.join(" "),
+                interactive,
+                session: match (continue_last, resume) {
+                    (_, Some(id)) => commands::AskSession::Id(id),
+                    (true, None) => commands::AskSession::Latest,
+                    _ => commands::AskSession::New,
+                },
+                playbook,
+                auto,
+            };
+            commands::cmd_ask(req, opts, m, out.json).await
         }
         Commands::Connect {
             clients,
