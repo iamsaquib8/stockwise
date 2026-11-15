@@ -389,22 +389,25 @@ pub fn wrapped_rows(line: &Line, width: usize) -> usize {
     let width = width.max(1);
     // Words with the width of the whitespace before each (padding runs
     // count in full; a row starts without its leading gap).
+    // Cell widths as ratatui measures them (CJK characters take two).
+    let cells = |w: &str| Span::raw(w).width();
     let mut words: Vec<(usize, usize)> = Vec::new();
     let mut gap = 0;
-    let mut word = 0;
+    let mut word = String::new();
     for c in text.chars() {
         if c.is_whitespace() {
-            if word > 0 {
-                words.push((gap, word));
-                (gap, word) = (0, 0);
+            if !word.is_empty() {
+                words.push((gap, cells(&word)));
+                word.clear();
+                gap = 0;
             }
             gap += 1;
         } else {
-            word += crate::display::display_width(c.encode_utf8(&mut [0; 4]));
+            word.push(c);
         }
     }
-    if word > 0 {
-        words.push((gap, word));
+    if !word.is_empty() {
+        words.push((gap, cells(&word)));
     }
     let mut rows = 1;
     let mut used = 0;
@@ -821,6 +824,19 @@ mod tests {
             "Long-term score", "62 of 100 (80% of inputs)"
         ));
         assert_eq!(wrapped_rows(&kv, 38), 2);
+        // Wide characters take two cells: 30 of them need two rows of 38.
+        let wide = Line::from("株".repeat(30));
+        assert_eq!(wrapped_rows(&wide, 38), 2);
+        // And the popup renders what the count says: a 30-character
+        // name wraps, the count matches the rows ratatui draws.
+        use ratatui::widgets::{Paragraph, Wrap};
+        let para = Paragraph::new(vec![wide.clone()]).wrap(Wrap { trim: true });
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 38, 4));
+        ratatui::widgets::Widget::render(para, buf.area, &mut buf);
+        let drawn = (0..4)
+            .filter(|y| (0..38).any(|x| buf[(x, *y)].symbol() != " "))
+            .count();
+        assert_eq!(drawn, wrapped_rows(&wide, 38));
     }
 
     #[test]
