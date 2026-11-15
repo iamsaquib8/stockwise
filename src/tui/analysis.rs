@@ -688,6 +688,14 @@ mod tests {
         app.update(Msg::Snapshot(Ok(super::super::app::tests::snapshot())));
         let after = draw(&app, 120, 40);
         assert!(after.contains("Analysis failed (offline)"), "{after}");
+        // Another `r`: the snapshot lands first (the failure is restated),
+        // then the analysis succeeds and the failure goes.
+        app.update(key(KeyCode::Char('r')));
+        app.update(Msg::Snapshot(Ok(super::super::app::tests::snapshot())));
+        app.update(Msg::Analysis(Ok(report())));
+        let fresh = draw(&app, 120, 40);
+        assert!(!fresh.contains("Analysis failed"), "{fresh}");
+        assert!(!fresh.contains("last run failed"), "{fresh}");
         // Esc returns to the overview.
         app.update(key(KeyCode::Esc));
         assert_eq!(app.screen, Screen::Overview);
