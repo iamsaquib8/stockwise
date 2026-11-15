@@ -414,7 +414,7 @@ pub async fn run(
             running.waiting().await.context("MCP server stopped")?;
             Ok(())
         }
-        Some(bind) => serve_http(server, bind, allow_remote).await,
+        Some(bind) => serve_http(server, bind, allow_remote, mode).await,
     }
 }
 
@@ -456,6 +456,7 @@ async fn serve_http<D: DataSource + 'static>(
     server: StockwiseMcp<D>,
     bind: &str,
     allow_remote: bool,
+    mode: &str,
 ) -> Result<()> {
     let token = std::env::var("STOCKWISE_API_TOKEN")
         .ok()
@@ -486,8 +487,9 @@ async fn serve_http<D: DataSource + 'static>(
     let app = http_app(server, token, config);
 
     eprintln!(
-        "StockWise MCP server {} — read-only, Streamable HTTP",
-        env!("CARGO_PKG_VERSION")
+        "StockWise MCP server {} — {}, Streamable HTTP",
+        env!("CARGO_PKG_VERSION"),
+        mode
     );
     eprintln!("  Endpoint: http://{}/mcp", local);
     eprintln!("  Auth:     {}", auth);

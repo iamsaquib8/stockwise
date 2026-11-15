@@ -1022,6 +1022,10 @@ async fn targets_profile_and_lots_change_their_files() {
     assert_eq!(v["data"]["updated"], json!(["mode", "max_stock_weight"]));
     let config = std::fs::read_to_string(&w.config).unwrap();
     assert!(config.contains("max_stock_weight"), "{config}");
+    // The same process sees the new profile at once (profile, fit_check).
+    let p = c.call("profile", &json!({})).await.unwrap();
+    assert_eq!(p["data"]["mode"], "passive");
+    assert_eq!(p["data"]["max_stock_weight"], 10.0);
     assert!(c.call("profile_set", &json!({})).await.is_err());
 
     // Every change undone restores the original files.

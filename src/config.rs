@@ -497,6 +497,20 @@ pub fn cli_profile() -> Option<(ProfileSpec, Source)> {
 }
 
 /// Resolve the active [`EffectiveProfile`] for this process.
+/// The profile as the config file at `path` says now, for a process that
+/// may have changed it since start-up (the assistant's `profile_set`).
+/// Falls back to [`effective_profile`] when the file cannot be read.
+pub fn effective_profile_at(path: &Path) -> EffectiveProfile {
+    let Some(cfg) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<Config>(&text).ok())
+    else {
+        return effective_profile();
+    };
+    let env_val = std::env::var(PROFILE_ENV_VAR).ok();
+    EffectiveProfile::from_parts(cli_profile(), env_val.as_deref(), &cfg.profile)
+}
+
 pub fn effective_profile() -> EffectiveProfile {
     let cli = cli_profile();
     let env_val = std::env::var(PROFILE_ENV_VAR).ok();

@@ -82,7 +82,7 @@ pub(super) async fn run<D: DataSource>(
         "goal_list" => goal_list(src, m).await,
         "alerts_list" => Ok(json!({ "alerts": views::alerts(src).await? })),
         "watchlist" => Ok(json!({ "watchlist": views::watchlist(src).await? })),
-        "profile" => Ok(serde_json::to_value(crate::config::effective_profile())?),
+        "profile" => Ok(serde_json::to_value(super::current_profile(ctx))?),
         "profile_questions" => Ok(crate::onboarding::questions_json()),
         "portfolio_analyze" | "market_conditions" | "picks" | "movers" | "dividends"
         | "goal_emergency" | "fit_check" | "changes_list" => {

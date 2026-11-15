@@ -743,3 +743,107 @@ async fn the_tool_call_limit_still_counts_each_call_when_they_run_together() {
     assert!(t.steps[0].ok && t.steps[1].ok);
     assert!(t.steps[2].error.as_deref().unwrap().contains("limit"));
 }
+
+#[test]
+fn trimming_gemini_results_leaves_text_parts_alone() {
+    let ai = client(AiProvider::Gemini, "http://127.0.0.1:9");
+    let mut chat = Chat::new(&ai, "s".into());
+    let big = "x".repeat(KEEP_RESULT_BYTES + 10);
+    chat.history = vec![
+        json!({"role": "user", "parts": [{"text": "TCS?"}]}),
+        json!({"role": "model", "parts": [{"functionCall": {"name": "quote", "args": {}}}]}),
+        json!({"role": "user", "parts": [{"functionResponse": {"name": "quote", "response": {"data": big}}}]}),
+        json!({"role": "model", "parts": [{"text": "TCS is at 4,100."}]}),
+    ];
+    chat.push_user("And INFY?");
+    let h = &chat.saved().history;
+    assert_eq!(h[0], json!({"role": "user", "parts": [{"text": "TCS?"}]}));
+    assert_eq!(
+        h[3],
+        json!({"role": "model", "parts": [{"text": "TCS is at 4,100."}]})
+    );
+    assert!(h[2]["parts"][0]["functionResponse"]["response"]["note"].is_string());
+    assert!(h[1]["parts"][0].get("functionResponse").is_none());
+}
+
+#[test]
+fn old_exchanges_are_dropped_whole_to_fit_the_context() {
+    let ai = client(AiProvider::Ollama, "http://127.0.0.1:9");
+    let mut chat = Chat::new(&ai, "system".into());
+    let long_answer = "y".repeat(6_000);
+    for i in 0..12 {
+        chat.push_user(&format!("question {i}"));
+        chat.history.push(json!({"role": "assistant", "content": "",
+            "tool_calls": [{"function": {"name": "quote", "arguments": {}}}]}));
+        chat.history
+            .push(json!({"role": "tool", "tool_name": "quote", "content": "{}"}));
+        chat.history
+            .push(json!({"role": "assistant", "content": long_answer}));
+    }
+    chat.push_user("last question");
+    assert!(chat.history_bytes() <= OLLAMA_NUM_CTX as usize * 2);
+    let h = chat.saved().history;
+    assert_eq!(h[0]["role"], "system");
+    // The oldest kept message after the system prompt is a question, so no
+    // tool result is left without its call.
+    assert!(h[1]["content"].as_str().unwrap().starts_with("question "));
+    assert_eq!(h.last().unwrap()["content"], "last question");
+    assert!(!h.iter().any(|m| m["content"] == "question 0"));
+}
+
+#[tokio::test]
+async fn a_change_made_before_a_failure_is_reported_and_carried_to_the_retry() {
+    let dir = std::env::temp_dir().join(format!(
+        "stockwise-ask-carry-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut c = ctx();
+    c.workspace = Some(crate::tools::Workspace {
+        config: dir.join("config.toml"),
+        portfolio: dir.join("portfolio.json"),
+        dir: dir.clone(),
+        source: "test",
+        allow_portfolio: false,
+    });
+    let server = MockServer::start(vec![
+        (
+            200,
+            json!({"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "watchlist_add", "arguments": {"symbols": ["TCS"]}}}
+            ]}, "done_reason": "stop"})
+            .to_string(),
+        ),
+        (500, "{\"error\": \"boom\"}".into()),
+        (
+            200,
+            json!({"message": {"role": "assistant", "content": "Done."}, "done_reason": "stop"})
+                .to_string(),
+        ),
+    ])
+    .await;
+    let ai = client(AiProvider::Ollama, &server.url);
+    let mut chat = Chat::new(&ai, "s".into());
+    let err = ask_in(&ai, &c, &mut chat, "Watch TCS", &AskOptions::default())
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("watchlist_add") && msg.contains("stockwise undo"),
+        "{msg}"
+    );
+    ask_in(&ai, &c, &mut chat, "Watch TCS", &AskOptions::default())
+        .await
+        .unwrap();
+    let retry = server.requests()[2].json();
+    let q = retry["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        q.contains("Do not make them again") && q.ends_with("Watch TCS"),
+        "{q}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

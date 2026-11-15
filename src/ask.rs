@@ -216,6 +216,11 @@ pub struct Chat {
     /// Ollama `messages`, OpenAI `input` items, Anthropic `messages`, Gemini `contents`.
     history: Vec<Value>,
     fallbacks: bool,
+    /// Changes the write tools made during the current question.
+    made: Vec<String>,
+    /// Told to the model with the next question: changes an earlier,
+    /// failed attempt made, so a retry does not make them twice.
+    carry: Option<String>,
 }
 
 /// A chat as it is saved between runs: the provider and model it belongs
@@ -244,6 +249,8 @@ impl Chat {
             system,
             history,
             fallbacks: ai.anthropic_fallbacks(),
+            made: Vec::new(),
+            carry: None,
         }
     }
 
@@ -287,11 +294,60 @@ STOCKWISE_AI_PROVIDER and STOCKWISE_MODEL to match, or start a new one.",
     /// Add the user's next question.
     fn push_user(&mut self, question: &str) {
         self.trim_old_results();
+        let question = match self.carry.take() {
+            Some(note) => format!("{note}\n\n{question}"),
+            None => question.to_string(),
+        };
         let msg = match self.provider {
             AiProvider::Gemini => json!({"role": "user", "parts": [{"text": question}]}),
             _ => json!({"role": "user", "content": question}),
         };
         self.history.push(msg);
+        self.drop_old_exchanges();
+    }
+
+    /// Whether `m` is one of the user's questions (not tool results).
+    fn is_question(&self, m: &Value) -> bool {
+        if m.get("role").and_then(Value::as_str) != Some("user") {
+            return false;
+        }
+        match self.provider {
+            AiProvider::Gemini => m
+                .get("parts")
+                .and_then(Value::as_array)
+                .is_some_and(|ps| ps.iter().any(|p| p.get("text").is_some())),
+            _ => m.get("content").is_some_and(Value::is_string),
+        }
+    }
+
+    /// Size of the history as sent, in bytes.
+    pub fn history_bytes(&self) -> usize {
+        self.history.iter().map(|m| m.to_string().len()).sum()
+    }
+
+    /// Most history bytes sent: half of Ollama's context window (the tool
+    /// definitions and the answer need the rest), about 100k tokens for a
+    /// cloud model.
+    fn history_budget(&self) -> usize {
+        match self.provider {
+            AiProvider::Ollama => OLLAMA_NUM_CTX as usize * 4 / 2,
+            _ => 400_000,
+        }
+    }
+
+    /// Drop the oldest whole exchanges (a question and everything up to the
+    /// next one, tool calls and results included) until the history fits
+    /// its budget. The system message and the newest question stay.
+    fn drop_old_exchanges(&mut self) {
+        while self.history_bytes() > self.history_budget() {
+            let qs: Vec<usize> = (0..self.history.len())
+                .filter(|&i| self.is_question(&self.history[i]))
+                .collect();
+            let [first, second, ..] = qs[..] else {
+                return;
+            };
+            self.history.drain(first..second);
+        }
     }
 
     /// Replace long tool results already in the history by a short note:
@@ -310,20 +366,27 @@ STOCKWISE_AI_PROVIDER and STOCKWISE_MODEL to match, or start a new one.",
                 AiProvider::OpenAi if m["type"] == "function_call_output" && long(&m["output"]) => {
                     m["output"] = json!(note);
                 }
+                // `get_mut`, not indexing: indexing a missing key would add it.
                 AiProvider::Anthropic => {
-                    if let Some(blocks) = m["content"].as_array_mut() {
+                    if let Some(blocks) = m.get_mut("content").and_then(Value::as_array_mut) {
                         for b in blocks {
-                            if b["type"] == "tool_result" && long(&b["content"]) {
-                                b["content"] = json!(note);
+                            if b.get("type").and_then(Value::as_str) != Some("tool_result") {
+                                continue;
+                            }
+                            if let Some(c) = b.get_mut("content").filter(|c| long(c)) {
+                                *c = json!(note);
                             }
                         }
                     }
                 }
                 AiProvider::Gemini => {
-                    if let Some(parts) = m["parts"].as_array_mut() {
+                    if let Some(parts) = m.get_mut("parts").and_then(Value::as_array_mut) {
                         for p in parts {
-                            let r = &mut p["functionResponse"]["response"];
-                            if !r.is_null() && long(r) {
+                            if let Some(r) = p
+                                .get_mut("functionResponse")
+                                .and_then(|f| f.get_mut("response"))
+                                .filter(|r| long(r))
+                            {
                                 *r = json!({ "note": note });
                             }
                         }
@@ -733,12 +796,36 @@ pub async fn ask_in<D: DataSource>(
         bail!("Ask a question, e.g. stockwise ask \"how did my portfolio do this month?\"");
     }
     let before = chat.history.clone();
+    let carried = chat.carry.clone();
+    chat.made.clear();
     chat.push_user(question);
     let out = turn(ai, ctx, chat, question, opts).await;
-    if out.is_err() {
-        chat.history = before;
+    match out {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            chat.history = before;
+            chat.carry = carried;
+            if chat.made.is_empty() {
+                return Err(e);
+            }
+            // The files changed although the answer failed: say so, and
+            // tell the model with the next question so a retry does not
+            // make the same change again.
+            let made = chat.made.join("; ");
+            let note = format!(
+                "(Note: a previous attempt at this failed after making these changes, which \
+are saved: {made}. Do not make them again.)"
+            );
+            chat.carry = Some(match chat.carry.take() {
+                Some(old) => format!("{old}\n{note}"),
+                None => note,
+            });
+            Err(e.context(format!(
+                "These changes were made before the failure and are saved (stockwise undo \
+reverses them): {made}"
+            )))
+        }
     }
-    out
 }
 
 async fn turn<D: DataSource>(
@@ -762,7 +849,7 @@ async fn turn<D: DataSource>(
     };
     // Estimated length of the next prompt, in tokens (for a model whose
     // context window it must fit).
-    let mut next_prompt: u64 = 0;
+    let mut next_prompt: u64 = chat.history_bytes() as u64 / 4;
     loop {
         let limit = if t.usage.requests + 1 >= opts.max_steps.max(1) {
             Some(format!("reached {} model requests", opts.max_steps))
@@ -845,7 +932,19 @@ async fn turn<D: DataSource>(
                 (json!({ "error": msg }), false, Some(msg))
             } else {
                 match outcome {
-                    Ok(v) => (v, true, None),
+                    Ok(v) => {
+                        if crate::tools::access(&call.name) != crate::tools::Access::Read {
+                            let id = v
+                                .pointer("/data/change_id")
+                                .or_else(|| v.get("change_id"))
+                                .and_then(Value::as_u64);
+                            chat.made.push(match id {
+                                Some(id) => format!("{} {} (change #{id})", call.name, call.args),
+                                None => format!("{} {}", call.name, call.args),
+                            });
+                        }
+                        (v, true, None)
+                    }
                     Err(e) => {
                         // This text goes back to the model, which may be a
                         // cloud one: no local paths, no Yahoo crumb. The full

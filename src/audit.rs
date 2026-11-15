@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 /// The audit log's file name in the data directory.
 pub const LOG_FILE: &str = "audit.json";
 /// The folder of file copies in the data directory.
+/// Lock file name (`<name>.lock`) held while a change is copied, made and logged.
+const WRITER_LOCK: &str = "audit.writer";
 pub const UNDO_DIR: &str = "undo";
 /// Changes kept; older ones (and their copies) are dropped.
 const KEEP: usize = 200;
@@ -92,10 +94,17 @@ impl Journal {
         self.dir.join(UNDO_DIR)
     }
 
+    /// The lock every journalled change and undo holds, so two StockWise
+    /// processes never copy the same file before either has changed it.
+    /// (Each data file's own lock cannot be held here: `change` takes it.)
+    fn writer_lock(&self) -> Result<crate::store::Lock> {
+        crate::store::lock(&self.dir.join(WRITER_LOCK))
+    }
+
     /// Run `change`, which may write any of `paths`, and record it. Each
-    /// existing file is copied first; when `change` fails, the copies are
-    /// put back and nothing is recorded. Returns `change`'s result and the
-    /// change's id.
+    /// existing file is copied first; when `change` fails, or the change
+    /// cannot be recorded, the copies are put back and nothing is recorded.
+    /// Returns `change`'s result and the change's id.
     pub fn record<R>(
         &self,
         source: &str,
@@ -104,6 +113,9 @@ impl Journal {
         paths: &[PathBuf],
         change: impl FnOnce() -> Result<R>,
     ) -> Result<(R, u64)> {
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("Cannot create {}", self.dir.display()))?;
+        let _writer = self.writer_lock()?;
         let stamp = chrono::Utc::now();
         let token = format!("{}", stamp.timestamp_nanos_opt().unwrap_or_default());
         std::fs::create_dir_all(self.undo_dir())
@@ -133,42 +145,72 @@ impl Journal {
         }
         let out = match change() {
             Ok(out) => out,
-            Err(e) => {
-                // Put every file back as it was.
-                for f in &files {
-                    let _ = self.restore(f);
-                }
-                return Err(e);
-            }
+            Err(e) => return Err(self.roll_back(&files, e)),
         };
-        for f in &mut files {
-            f.after = fingerprint_of(&f.path)?;
-        }
-        let undo_dir = self.undo_dir();
-        let id = crate::store::update_at(&self.log_path(), |log: &mut Log| {
-            let id = log.changes.last().map_or(1, |c| c.id + 1);
-            log.changes.push(Change {
-                id,
-                at: stamp.to_rfc3339(),
-                source: source.to_string(),
-                tool: tool.to_string(),
-                summary: summary.to_string(),
-                files: files.clone(),
-                undone: false,
-            });
-            if log.changes.len() > KEEP {
-                let old: Vec<Change> = log.changes.drain(..log.changes.len() - KEEP).collect();
-                for c in old {
-                    for f in c.files {
-                        if let Some(b) = f.before {
-                            let _ = std::fs::remove_file(undo_dir.join(b));
+        let logged = (|| -> Result<u64> {
+            for f in &mut files {
+                f.after = fingerprint_of(&f.path)?;
+            }
+            let undo_dir = self.undo_dir();
+            crate::store::update_at(&self.log_path(), |log: &mut Log| {
+                let id = log.changes.last().map_or(1, |c| c.id + 1);
+                log.changes.push(Change {
+                    id,
+                    at: stamp.to_rfc3339(),
+                    source: source.to_string(),
+                    tool: tool.to_string(),
+                    summary: summary.to_string(),
+                    files: files.clone(),
+                    undone: false,
+                });
+                if log.changes.len() > KEEP {
+                    let old: Vec<Change> = log.changes.drain(..log.changes.len() - KEEP).collect();
+                    for c in old {
+                        for f in c.files {
+                            if let Some(b) = f.before {
+                                let _ = std::fs::remove_file(undo_dir.join(b));
+                            }
                         }
                     }
                 }
-            }
-            Ok(id)
-        })?;
-        Ok((out, id))
+                Ok(id)
+            })
+        })();
+        match logged {
+            Ok(id) => Ok((out, id)),
+            // A change that cannot be undone is not kept.
+            Err(e) => Err(self.roll_back(
+                &files,
+                e.context("The change could not be recorded for undo, so it was reversed"),
+            )),
+        }
+    }
+
+    /// Put every file of a failed change back. Returns `cause`, with the
+    /// files that could not be restored and where their copies are kept.
+    fn roll_back(&self, files: &[FileChange], cause: anyhow::Error) -> anyhow::Error {
+        let failed: Vec<String> = files
+            .iter()
+            .filter_map(|f| {
+                self.restore(f).err().map(|e| match &f.before {
+                    Some(copy) => format!(
+                        "{} ({:#}); its earlier copy is {}",
+                        f.path.display(),
+                        e,
+                        self.undo_dir().join(copy).display()
+                    ),
+                    None => format!("{} ({:#}); it did not exist before", f.path.display(), e),
+                })
+            })
+            .collect();
+        if failed.is_empty() {
+            cause
+        } else {
+            cause.context(format!(
+                "The change failed and these files could not be put back; restore them by hand: {}",
+                failed.join("; ")
+            ))
+        }
     }
 
     fn restore(&self, f: &FileChange) -> Result<()> {
@@ -203,6 +245,7 @@ impl Journal {
     /// one on the same file stands would lose the newer one, so that is
     /// refused too.
     pub fn undo(&self, id: Option<u64>, force: bool) -> Result<Change> {
+        let _writer = self.writer_lock()?;
         crate::store::update_at(&self.log_path(), |log: &mut Log| {
             let pos = match id {
                 Some(id) => log
@@ -323,6 +366,31 @@ mod tests {
         assert_eq!(j.list().unwrap().len(), 1);
         j.undo(None, false).unwrap();
         assert!(!file.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_change_that_cannot_be_logged_is_reversed() {
+        let dir = scratch("unlogged");
+        let j = Journal::new(&dir);
+        let file = dir.join("watchlist.json");
+        std::fs::write(&file, "[\"TCS.NS\"]").unwrap();
+        // An unreadable log: the change runs, then cannot be recorded.
+        std::fs::write(dir.join(LOG_FILE), "not json").unwrap();
+        let err = j
+            .record::<()>(
+                "mcp",
+                "watchlist_add",
+                "Added INFY",
+                std::slice::from_ref(&file),
+                || {
+                    std::fs::write(&file, "[\"TCS.NS\",\"INFY.NS\"]")?;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("reversed"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "[\"TCS.NS\"]");
         std::fs::remove_dir_all(&dir).ok();
     }
 
