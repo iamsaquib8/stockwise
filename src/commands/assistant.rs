@@ -88,16 +88,36 @@ pub async fn cmd_ask(question: &str, opts: AskOptions, market: Market, json: boo
 }
 
 /// `stockwise mcp`.
+/// What an MCP server may do beyond reading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McpAccess {
+    /// `order_preview` (dry runs only).
+    pub orders: bool,
+    /// Workspace changes: watchlist, alerts, goals, targets, profile, notes.
+    pub writes: bool,
+    /// Portfolio lot changes too (implies `writes`).
+    pub portfolio: bool,
+}
+
 pub async fn cmd_mcp(
     http: Option<&str>,
     allow_remote: bool,
-    allow_orders: bool,
+    access: McpAccess,
     list_tools: bool,
     market: Market,
 ) -> Result<()> {
+    if allow_remote && (access.writes || access.portfolio) {
+        bail!(
+            "--allow-writes and --allow-portfolio are for a server on this machine; \
+             they cannot be combined with --allow-remote"
+        );
+    }
     if list_tools {
         let mut ctx = ToolContext::new(views::LiveSource::new(), market);
-        ctx.allow_orders = allow_orders;
+        ctx.allow_orders = access.orders;
+        if access.writes || access.portfolio {
+            ctx.workspace = Some(crate::tools::Workspace::for_user("mcp", access.portfolio)?);
+        }
         let tools: Vec<serde_json::Value> = ctx
             .tools()
             .iter()
@@ -112,30 +132,72 @@ pub async fn cmd_mcp(
             .collect();
         return output::print_json(&tools);
     }
-    serve_mcp(http, allow_remote, allow_orders, market).await
+    serve_mcp(http, allow_remote, access, market).await
 }
 
 #[cfg(feature = "mcp")]
 async fn serve_mcp(
     http: Option<&str>,
     allow_remote: bool,
-    allow_orders: bool,
+    access: McpAccess,
     market: Market,
 ) -> Result<()> {
     // Keeps held and watched quotes warm in cache.db while the server runs.
     let _ticker = crate::worker::spawn_ticker(market, crate::worker::bus());
-    crate::mcp::run(market, allow_orders, http, allow_remote).await
+    crate::mcp::run(market, access, http, allow_remote).await
 }
 
 #[cfg(not(feature = "mcp"))]
 async fn serve_mcp(
     _http: Option<&str>,
     _allow_remote: bool,
-    _allow_orders: bool,
+    _access: McpAccess,
     _market: Market,
 ) -> Result<()> {
     bail!(
         "This stockwise was built without the `mcp` feature. Reinstall with \
          `cargo install stockwise` (default features)."
     )
+}
+
+/// `stockwise undo`: put back the files of an assistant's change, or list
+/// the changes.
+pub fn cmd_undo(id: Option<u64>, list: bool, force: bool, json: bool) -> Result<()> {
+    let journal = crate::audit::Journal::default_location()?;
+    if list {
+        let changes = journal.list()?;
+        if json {
+            return output::print_json(&changes);
+        }
+        print_header("Assistant changes");
+        if changes.is_empty() {
+            println!("  {}", "No changes recorded.".dimmed());
+            println!();
+            return Ok(());
+        }
+        for c in changes.iter().take(30) {
+            let at = c.at.get(..16).unwrap_or(&c.at).replace('T', " ");
+            let line = format!("  #{:<4} {}  {:<4} {}", c.id, at, c.source, c.summary);
+            if c.undone {
+                println!("{}  {}", line.dimmed(), "(undone)".dimmed());
+            } else {
+                println!("{}", line);
+            }
+        }
+        println!();
+        return Ok(());
+    }
+    let change = journal.undo(id, force)?;
+    if json {
+        return output::print_json(&change);
+    }
+    println!(
+        "  {} Undid #{}: {} ({} file{})",
+        "✓".green(),
+        change.id,
+        change.summary,
+        change.files.len(),
+        if change.files.len() == 1 { "" } else { "s" }
+    );
+    Ok(())
 }

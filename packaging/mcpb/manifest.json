@@ -123,6 +123,10 @@
       "description": "Investor profile & personal guardrails. The user's active investor profile mode (passive, active, ultra), risk level, tax parameters (regime, slab rate), horizon, and portfolio guardrails (max stock weight, max small-cap weight, risk per trade)."
     },
     {
+      "name": "profile_questions",
+      "description": "Profile onboarding questions. The few plain questions that set up the user's investor profile (how closely they follow investments, how they react to a fall, horizon, experience, tax slab and regime), with the answer choices."
+    },
+    {
       "name": "holdings_lots",
       "description": "Holding lots. The user's purchase lots (quantity, price, date, days held, short or long term) for one holding or all, oldest first — what FIFO sales and tax use — and their most recent sales."
     },
@@ -201,6 +205,38 @@
     {
       "name": "watchlist",
       "description": "Watchlist. The user's watchlist with live prices and day change."
+    },
+    {
+      "name": "portfolio_analyze",
+      "description": "Portfolio analysis. The portfolio dashboard: every holding's weight, P&L, today's move, gain by tax term and next lot to turn long-term, place against its 200-day average and 52-week range, volatility, beta and long-term score; the portfolio by market (with each market's own-currency total), currency, cap tier and sector; concentration and risk; and neutral observations with their figures."
+    },
+    {
+      "name": "market_conditions",
+      "description": "Market conditions. Where a stock market stands, as readings: the main index against its 200- and 50-day averages and highs, India VIX or VIX against 5 years, breadth (share of stocks above their averages), and valuation (aggregate P/E, earnings yield against the 10-year bond yield), with how today ranks against earlier saved sessions."
+    },
+    {
+      "name": "picks",
+      "description": "Highest-scoring stocks. Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data."
+    },
+    {
+      "name": "movers",
+      "description": "Top gainers and losers. Today's biggest gainers and losers among the market's large stocks (NIFTY 500, the S&P 1500, or the exchange's main index), with price, change and volume."
+    },
+    {
+      "name": "dividends",
+      "description": "Dividend yield and income. A stock's trailing dividend yield, the yearly income it would pay on a few invested amounts, and the 10-year growth with dividends reinvested at the current yield."
+    },
+    {
+      "name": "goal_emergency",
+      "description": "Emergency fund. The emergency reserve to keep (monthly expenses × months of cover), how much of it the user's liquid money already covers, and the monthly saving that builds the rest over a horizon."
+    },
+    {
+      "name": "fit_check",
+      "description": "Does a stock fit my rules?. Yes or no: whether a stock meets the user's own rules: the investor profile's largest weight for one stock and for small and micro caps (with an amount, after buying it), the risk level the profile allows, and the P/E, ROE and weight limits the user saved in a note on the stock."
+    },
+    {
+      "name": "changes_list",
+      "description": "Changes made by assistants. The workspace changes made through StockWise's assistant tools (watchlist, alerts, goals, targets, profile, notes, portfolio), newest first, with each change's id for `stockwise undo`."
     }
   ],
   "tools_generated": false,
