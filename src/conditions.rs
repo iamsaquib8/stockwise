@@ -45,8 +45,11 @@ pub struct Volatility {
 /// How many of the scanned stocks share the index's direction.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Breadth {
-    /// Stocks with the figures.
+    /// Stocks with a price.
     pub stocks: usize,
+    /// Of those, the ones with a 200-day average: what
+    /// `above_200_day_pct` is a share of.
+    pub with_200_day_average: usize,
     pub above_200_day_pct: Option<f64>,
     pub above_50_day_pct: Option<f64>,
     /// Within 5% of the 52-week high.
@@ -258,6 +261,10 @@ pub fn breadth(quotes: &[Quote]) -> Breadth {
     };
     Breadth {
         stocks: priced.len(),
+        with_200_day_average: priced
+            .iter()
+            .filter(|(q, _)| q.two_hundred_day_average.is_some_and(|a| a > 0.0))
+            .count(),
         above_200_day_pct: above(|q| q.two_hundred_day_average),
         above_50_day_pct: above(|q| q.fifty_day_average),
         near_52_week_high_pct: pct_true(
@@ -360,8 +367,8 @@ pub fn describe(r: &Report) -> Vec<String> {
     }
     if let Some(a) = r.breadth.above_200_day_pct {
         out.push(format!(
-            "{:.0}% of the {} stocks scanned are above their 200-day average.",
-            a, r.breadth.stocks
+            "{:.0}% of the {} scanned stocks that have a 200-day average are above it.",
+            a, r.breadth.with_200_day_average
         ));
     }
     if let (Some(e), Some(b)) = (r.valuation.earnings_yield_pct, r.valuation.bond_yield_pct) {
@@ -434,6 +441,16 @@ mod tests {
         ];
         let b = breadth(&quotes);
         assert_eq!(b.stocks, 3);
+        assert_eq!(b.with_200_day_average, 3);
+        // A priced stock without the average is not in the share's base.
+        let mut more = quotes.to_vec();
+        more.push(Quote {
+            regular_market_price: Some(10.0),
+            ..Default::default()
+        });
+        let wider = breadth(&more);
+        assert_eq!((wider.stocks, wider.with_200_day_average), (4, 3));
+        assert_eq!(wider.above_200_day_pct, b.above_200_day_pct);
         assert!((b.above_200_day_pct.unwrap() - 100.0 / 3.0).abs() < 1e-9);
         assert!((b.near_52_week_high_pct.unwrap() - 100.0 / 3.0).abs() < 1e-9);
         assert!((b.near_52_week_low_pct.unwrap() - 100.0 / 3.0).abs() < 1e-9);

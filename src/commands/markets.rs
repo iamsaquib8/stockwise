@@ -2225,7 +2225,14 @@ pub async fn cmd_conditions(
 
     let b = &report.breadth;
     print_section(&format!("Breadth — {} stocks", b.stocks));
-    print_kv("Above 200-day average", &pct(b.above_200_day_pct));
+    print_kv(
+        "Above 200-day average",
+        &format!(
+            "{} of {} with one",
+            pct(b.above_200_day_pct),
+            b.with_200_day_average
+        ),
+    );
     print_kv("Above 50-day average", &pct(b.above_50_day_pct));
     print_kv("Within 5% of 52-week high", &pct(b.near_52_week_high_pct));
     print_kv("Within 5% of 52-week low", &pct(b.near_52_week_low_pct));
