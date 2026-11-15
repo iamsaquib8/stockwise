@@ -1164,6 +1164,10 @@ enum PortfolioCmd {
         /// Save even if Yahoo Finance does not know the ticker
         #[arg(long)]
         force: bool,
+        /// Currency the price was paid in (e.g. INR for a US share bought with rupees);
+        /// converted at that day's exchange rate. The market comes from -m/--market
+        #[arg(long, value_parser = currency_code)]
+        currency: Option<String>,
     },
     /// Record a sale: oldest lots first (FIFO), realized P&L kept for `tax`
     Sell {
@@ -1243,6 +1247,16 @@ enum PortfolioCmd {
         /// Print rebalance plan as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Dashboard: holdings by market, currency, cap tier and sector, tax terms, risk and
+    /// observations (readings, not recommendations)
+    #[command(alias = "dash")]
+    Analyze {
+        /// Skip the year of prices and sector lookups (no risk figures; faster)
+        #[arg(long)]
+        quick: bool,
+        #[command(flatten)]
+        out: JsonOutput,
     },
     /// Portfolio X-Ray: look-through overlap, market-cap and sector concentration
     #[command(alias = "x-ray")]
@@ -4348,8 +4362,18 @@ async fn dispatch(
                 cost,
                 date,
                 force,
+                currency,
             }) => {
-                commands::cmd_portfolio_add(&symbol, shares, cost, date.as_deref(), force, m).await
+                commands::cmd_portfolio_add(
+                    &symbol,
+                    shares,
+                    cost,
+                    date.as_deref(),
+                    force,
+                    currency.as_deref(),
+                    m,
+                )
+                .await
             }
             Some(PortfolioCmd::Sell {
                 symbol,
@@ -4427,6 +4451,9 @@ async fn dispatch(
             }) => {
                 let parsed = crate::rebalance::parse_targets(&targets)?;
                 commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
+            }
+            Some(PortfolioCmd::Analyze { quick, out }) => {
+                commands::cmd_portfolio_analyze(m, base.as_deref(), quick, out.json).await
             }
             Some(PortfolioCmd::Xray { json }) => {
                 commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await

@@ -483,6 +483,24 @@ impl CacheDb {
             .collect())
     }
 
+    /// Stored sectors of `symbols` (symbol, sector), from market snapshots.
+    pub fn snapshot_sectors(&self, symbols: &[String]) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT sector FROM market_snapshots
+             WHERE symbol = ?1 AND sector IS NOT NULL AND sector != '' LIMIT 1",
+        )?;
+        let mut out = Vec::new();
+        for sym in symbols {
+            if let Some(sector) = st
+                .query_row(params![sym], |r| r.get::<_, String>(0))
+                .optional()?
+            {
+                out.push((sym.clone(), sector));
+            }
+        }
+        Ok(out)
+    }
+
     // ── conditions_history ──
 
     /// Save one session's market reading (JSON), replacing that day's.

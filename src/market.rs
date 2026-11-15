@@ -1434,8 +1434,9 @@ impl CapTier {
         })
     }
 
-    /// Tier of a market cap given in `currency` (`GBp` pence and `JPY` yen
-    /// included), by symbol for Indian stocks. `members` is the cached NSE
+    /// Tier of a market cap given in `currency` (`JPY` yen included; for a
+    /// `GBp` quote the cap is in pounds, as Yahoo gives it), by symbol for
+    /// Indian stocks. `members` is the cached NSE
     /// index membership, if any.
     pub fn classify(
         symbol: &str,
@@ -1466,9 +1467,13 @@ impl CapTier {
                 None => CapTier::Unknown,
             };
         }
+        // Yahoo quotes London prices in pence (`GBp`) but its market caps
+        // in pounds (VOD.L: 27.1bn at 117p a share), so a cap is valued in
+        // the major unit.
+        let cap_currency = currency.map(|c| minor_unit(c).map_or(c, |(major, _)| major));
         let Some(usd) = mcap
             .filter(|v| *v > 0.0)
-            .and_then(|m| approx_usd(m, currency))
+            .and_then(|m| approx_usd(m, cap_currency))
         else {
             return CapTier::Unknown;
         };
@@ -1844,11 +1849,14 @@ mod tests {
 
     #[test]
     fn pence_and_yen_are_converted() {
-        // 100 billion pence = £1B ≈ $1.27B → small, not mega.
-        assert_eq!(tier("VOD.L", 1.0e11, "GBp"), CapTier::Small);
-        // £100B ≈ $127B → large.
-        assert_eq!(tier("SHEL.L", 1.0e13, "GBp"), CapTier::Large);
+        // A pence quote's cap is in pounds, as Yahoo gives it: VOD.L's
+        // 27.1bn is £27.1B ≈ $34B → large, not small.
+        assert_eq!(tier("VOD.L", 27.1e9, "GBp"), CapTier::Large);
+        // £100B ≈ $127B → large, whichever unit the price is quoted in.
+        assert_eq!(tier("SHEL.L", 100.0e9, "GBp"), CapTier::Large);
         assert_eq!(tier("SHEL.L", 100.0e9, "GBP"), CapTier::Large);
+        // £1B ≈ $1.27B → small.
+        assert_eq!(tier("X.L", 1.0e9, "GBp"), CapTier::Small);
         // ¥40 trillion ≈ $268B → mega; ¥1 trillion ≈ $6.7B → mid.
         assert_eq!(tier("7203.T", 4.0e13, "JPY"), CapTier::Mega);
         assert_eq!(tier("6758.T", 1.0e12, "JPY"), CapTier::Mid);
