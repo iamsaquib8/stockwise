@@ -1,102 +1,156 @@
 ---
 name: stockwise
-description: Look up Indian (NSE/BSE) and US stock quotes, price history, technical indicators, risk, mutual funds (AMFI NAVs, SIP returns), F&O option chains, screens and backtests, and the user's own StockWise portfolio, lots, capital-gains estimate, watchlist and alerts, with the `stockwise` command-line tool or its MCP server. Use when the user asks about Indian or US stocks, NIFTY/SENSEX, mutual funds, SIPs, options, goal planning, or their StockWise portfolio and tax.
+description: Research and track stocks, funds, markets, portfolios, goals and taxes with StockWise (its MCP tools or the `stockwise` command line). Covers Indian (NSE/BSE) and US stocks plus London, Frankfurt, Tokyo, Hong Kong, Singapore, Toronto and Sydney, mutual funds and SIPs, F&O option chains, screens, backtests, market conditions, the user's portfolio and capital-gains tax, watchlist, alerts, goals and investor profile. Use when the user asks about stocks, indices, mutual funds, their portfolio, whether a stock fits their own rules, financial goals or investment tax.
 license: MIT
 ---
 
 # StockWise
 
-StockWise is a stock-market toolkit for the terminal, built for Indian (NSE/BSE)
-and US stocks. It reads public market data (Yahoo Finance, NSE/BSE, AMFI) and
-the user's local portfolio files. Docs: https://iamsaquib8.github.io/stockwise/
-(agents: https://iamsaquib8.github.io/stockwise/llms.txt).
+StockWise is a local-first market toolkit. It reads public market data
+(Yahoo Finance, NSE/BSE, AMFI, niftyindices) and the user's own files
+(portfolio, watchlist, alerts, goals, profile, notes) on their computer.
+Docs: https://iamsaquib8.github.io/stockwise/ (agents: https://iamsaquib8.github.io/stockwise/llms.txt).
 
 ## Pick the interface
 
-1. **MCP tools** — if tools named `quote`, `technical`, `portfolio_summary`,
-   `tax_estimate` … from a `stockwise` server are available, use them. They
-   are read-only, take checked JSON arguments and return compact JSON.
-2. **The CLI** — otherwise run `stockwise` commands with `--json`. Check that
-   it is installed with `stockwise --version`; if not, tell the user how to
-   install it (`cargo binstall stockwise`, the installer on the docs site, or a
-   `.deb`/`.rpm` from the GitHub release) rather than installing it yourself.
+1. **MCP tools.** If tools such as `quote`, `portfolio_analyze`, `fit_check`
+   from a `stockwise` server are available, use them. They take checked JSON
+   arguments and return compact JSON.
+2. **The CLI.** Otherwise run `stockwise` commands with `--json`. Check it
+   with `stockwise --version`. If it is missing, tell the user how to install
+   it (`cargo binstall stockwise`, the installer on the docs site, or a release
+   package) instead of installing it yourself.
 
-To set up the MCP server for the user: `claude mcp add stockwise -- stockwise mcp`
-(Claude Code), or command `stockwise` with args `["mcp"]` in other clients.
+To connect StockWise to an AI app, the user runs `stockwise connect` (every
+app found on the computer) or names apps: `stockwise connect antigravity cursor`.
+`stockwise connect --list` shows Claude Desktop, Claude Code, Cursor, Windsurf,
+VS Code, Cline, Gemini CLI, Antigravity, Codex, Zed, LM Studio, opencode,
+Goose and Continue.
 
-## Use the CLI the machine-readable way
+## What the tools may change
 
-- Add `--json` to data commands (`stockwise <command> --help` shows which take it).
-  stdout then holds only JSON; messages go to stderr and failures exit with code 1.
-  Tables also take `--csv`.
+There are three tiers. The server's mode decides which tools you have.
+
+| Tier | Tools | Turned on by |
+|------|-------|--------------|
+| Read | everything else | always |
+| Workspace | `watchlist_add/remove`, `alert_add/remove`, `goal_save/remove`, `target_set/remove`, `profile_set`, `profile_onboard`, `note_set` | `stockwise mcp --allow-writes` |
+| Portfolio | `portfolio_add`, `portfolio_sell` (record lots and sales, never orders) | `stockwise mcp --allow-portfolio` |
+
+- Each change is recorded. The result holds `change_id` and an `undo`
+  command; tell the user both. `changes_list` and `stockwise undo --list`
+  show the journal; `stockwise undo` reverses the newest change.
+- Change only what the user asked for. Confirm a portfolio lot or sale
+  (symbol, quantity, price, date) before you record it.
+- Orders: `order_preview` only shows an order. Never place one. With the CLI,
+  `trade` commands send real orders through the user's broker: show the
+  command with `--dry-run` and let the user run the real one; never add `--yes`.
+
+## Workflows
+
+**First use: set up the profile.** If `profile` shows defaults (or the user
+asks), call `profile_questions`, ask the questions one at a time in plain
+words, then send the answers to `profile_onboard`. The mapping from answers to
+settings is fixed in StockWise; report the reasons it returns. Without write
+tools, show the user `stockwise profile set --help` instead.
+
+**"How is my portfolio doing?"** `portfolio_analyze` (or `stockwise portfolio analyze --json`)
+gives value, P&L, XIRR, split by market, currency, cap tier and sector, tax
+terms, risk and observations. Add `portfolio_summary` for live P&L, and
+`tax_estimate` or `harvest` for tax questions.
+
+**"Should I buy X?" or "Is X good for me?"** Do not answer buy, sell or hold.
+Run `fit_check` with the symbol (and `amount` if the user named one). It
+answers `fits_your_rules`: yes, no or unclear, against the user's own limits
+(largest weight of one stock, small-cap share, risk level, and the P/E and ROE
+limits in their note for that stock). Present it as "by your own rules", list
+the failed and unknown rules, and add `verdict`, `scorecard`, `risk` or
+`technical` for the facts behind it. Offer `note_set` to record the user's
+thesis and limits for next time.
+
+**"Is it a good time to invest?"** `market_conditions` (or `stockwise conditions --json`)
+shows trend, volatility, breadth and valuation with their history. These are
+readings, not a timing signal; say so.
+
+**Ideas to research.** `picks` ranks stocks on value, quality, growth and
+trend among the stocks scanned (the whole default universe unless the user
+names one, such as `nifty50` or `smallcap250`). `screen`, `movers` and
+`ipo_board` help too. Each is a starting list for research, not a
+recommendation.
+
+**Watchlist and alerts upkeep.** `watchlist` and `alerts_list` read;
+`watchlist_add`, `alert_add` (price levels or conditions such as RSI below 30)
+and their `_remove` pairs change them.
+
+**Goals.** `goal_sip`, `goal_retire`, `goal_education`, `goal_swp`,
+`goal_prepay` and `goal_emergency` calculate. `goal_save` keeps a goal, and
+`goal_list` shows each saved goal's funded share.
+
+**Tax season (India).** `tax_estimate` for capital gains, `tax_advance` for
+the advance-tax schedule, `harvest` for loss and 112A harvesting. With the CLI,
+`stockwise tax export in --fy 2025-26 --json` gives Schedule CG rows.
+
+**Results season.** `calendar` and `income_calendar` for dates,
+`quarterly_results` and `events` for what was reported.
+
+## CLI quick reference
+
+- Add `--json` to data commands. stdout then holds only JSON; messages go to
+  stderr and failures exit with code 1. Tables also take `--csv`.
 - Bare tickers are Indian: `TCS` means `TCS.NS`. Use `-m us` for US stocks,
   `-m crypto`, `-m fx`, `-m commodity`, or an exchange: `-m uk`, `-m de`,
-  `-m jp`, `-m hk`, `-m sg`, `-m ca`, `-m au`. A suffix (`TCS.NS`, `500325.BO`)
-  is used as given.
+  `-m jp`, `-m hk`, `-m sg`, `-m ca`, `-m au`. A suffix (`TCS.NS`,
+  `500325.BO`) is used as given.
 - Periods: `-p 1d|5d|1mo|3mo|6mo|ytd|1y|2y|5y|10y|max`.
 - Not sure of a ticker? `stockwise search "tata motors" --json` first.
 
 | Need | Command |
 |------|---------|
-| Quotes | `stockwise quote RELIANCE TCS --json` |
-| US quotes | `stockwise quote AAPL NVDA -m us --json` |
-| Indices (NIFTY, SENSEX, …) | `stockwise markets --json` |
+| Quotes | `stockwise quote RELIANCE TCS --json` · `stockwise quote AAPL NVDA -m us --json` |
+| Indices | `stockwise markets --json` |
+| Market conditions | `stockwise conditions --json` |
 | Price history | `stockwise history INFY -p 1y --json` |
 | RSI, MACD, moving averages | `stockwise technical TCS -p 6mo --json` |
 | Volatility, Sharpe, drawdown | `stockwise risk HDFCBANK -p 1y --json` |
+| 6-pillar score (not a rating) | `stockwise verdict TCS --json` |
+| Piotroski and Altman | `stockwise scorecard TCS --json` |
+| Ranked ideas | `stockwise picks --json` · `stockwise picks --universe nifty50 --json` |
+| Gainers and losers | `stockwise movers --json` |
 | Preset screen | `stockwise screen growth --json` |
-| Backtest a strategy | `stockwise backtest INFY -s macd -p 2y --json` |
-| Find a mutual fund | `stockwise mf search parag flexi direct --json` |
-| Fund NAV and expense ratio | `stockwise mf nav 122639 --json` |
-| Past SIP returns (XIRR) | `stockwise mf sip 122639 5000 -p 5y --json` |
-| Option chain with greeks | `stockwise options chain NIFTY --json` |
-| Open interest build-up & walls | `stockwise options oi NIFTY --json` |
-| Put/call ratio, max pain | `stockwise options pcr NIFTY --json` · `stockwise options maxpain NIFTY --json` |
-| Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --json` |
-| 6-pillar score, data coverage (not a recommendation) | `stockwise verdict TCS --json` |
-| Piotroski & Altman scorecards | `stockwise scorecard TCS --json` |
-| Categorized insights & shareholding | `stockwise insights TCS --json` |
-| Corporate events & filings timeline | `stockwise events TCS --json` |
-| The user's portfolio | `stockwise portfolio --json` |
-| Real exposure across stocks, funds and ETFs | `stockwise portfolio xray --json` |
-| Open and upcoming IPOs | `stockwise ipo --json` |
-| Portfolio rebalancing plan | `stockwise rebalance --inflow 50000 --json` |
-| Capital-gains estimate | `stockwise tax in --json` |
-| Schedule CG / 112A rows for a tax year | `stockwise tax export in --fy 2025-26 --json` |
-| Return against NIFTY, alpha and beta | `stockwise portfolio benchmark NIFTY -p 1y --json` |
-| Advance tax schedule & 234C | `stockwise tax advance --json` |
-| Tax-loss & 112A LTCG harvest | `stockwise harvest --json` |
-| Results and dividend dates | `stockwise calendar --json` |
+| Backtest | `stockwise backtest INFY -s macd -p 2y --json` |
+| Mutual funds | `stockwise mf search parag flexi direct --json` · `stockwise mf sip 122639 5000 -p 5y --json` |
+| Options | `stockwise options chain NIFTY --json` · `stockwise options pcr NIFTY --json` |
+| Portfolio dashboard | `stockwise portfolio analyze --json` |
+| Holdings | `stockwise portfolio --json` · `stockwise portfolio xray --json` |
+| Against an index | `stockwise portfolio benchmark NIFTY -p 1y --json` |
+| Capital gains | `stockwise tax in --json` · `stockwise harvest --json` |
+| Goals | `stockwise goal sip --target 1cr --years 15 --json` · `stockwise goal list --json` |
 | Watchlist, alerts | `stockwise watch --json` · `stockwise alert check --json` |
-| SIP for a goal | `stockwise goal sip --target 1cr --years 15 --json` (also `--months`, `--by 2031-06`, `--inflation`, `--net`) |
-| Saved goals and funded share | `stockwise goal list --json` |
-| SWP runway · loan prepayment vs SIP | `stockwise goal swp --corpus 1cr --withdrawal 50k --json` · `stockwise goal prepay --principal 50L --loan-rate 9 --remaining-months 240 --extra 10k --json` |
-| Retirement corpus | `stockwise goal retire --monthly-expense 80k --years-to-retire 20 --years-in-retirement 30 --json` |
+| Profile | `stockwise profile show --json` |
+| Assistant changes | `stockwise undo --list` |
 | Setup problems | `stockwise doctor` |
 
-`stockwise <command> --help` lists every option. For a question that needs
-several of these, `stockwise ask "…"` lets the user's configured model call
-them itself — only suggest it; it may send data to a cloud model.
+`stockwise <command> --help` lists every option. `stockwise ask "…"` lets the
+user's own configured model call the tools; suggest it, since it may send data
+to a cloud model.
 
 ## Rules
 
-- **Read only.** Do not run commands that change the user's data —
-  `portfolio add/sell/remove`, `import`, `watch add/remove`, `alert add/remove`,
-  `config init --force`, `sim` trades — unless the user asked for that change.
-- **Never place orders.** `trade buy`, `trade sell`, `trade limit` and
-  `trade gtt` send real orders through the user's broker. Do not run them on your own initiative.
-  If the user asks, show the command with `--dry-run` and let them run the
-  real one; never add `--yes`.
 - **Not financial advice.** Describe what the numbers show and their risks.
-  Do not tell the user to buy, sell or hold, and say that prices can be
-  delayed (NSE quotes from Yahoo are about 15 minutes behind). Scores such as
-  `verdict` and `scorecard` describe data; they are not ratings.
-- **Tax figures are estimates.** `tax`, `harvest` and `tax advance` cover only
-  the sales and lots StockWise has recorded. Say so, and tell the user to check
-  them against their broker's tax P&L before filing.
+  Never tell the user to buy, sell or hold, and never give price targets.
+  `verdict`, `scorecard`, `picks` and `fit_check` describe data or the user's
+  own rules; they are not ratings. Say that quotes can be delayed (NSE quotes
+  from Yahoo are about 15 minutes behind).
+- **Tax figures are estimates.** They cover only the sales and lots
+  StockWise has recorded. Tell the user to check them against their broker's
+  tax P&L before filing.
 - **Missing data stays missing.** Holdings without a price are listed in
-  `unpriced` and quotes StockWise could not find in `missing`; report them,
-  never treat them as zero.
+  `unpriced` and unknown quotes in `missing`; report them, never treat them
+  as zero. Report `unknown` rules from `fit_check` as unknown.
+- **The CLI changes files directly.** `portfolio add/sell/remove`, `import`,
+  `watch add/remove`, `alert add/remove`, `goal add/remove`, `profile set`
+  are not journalled for undo. Run them only when the user asked for that
+  change; prefer the MCP write tools, which are.
 - Leave `--ai` off: it is slow and may send data to a cloud model.
 - To try commands without touching the user's files, set
   `STOCKWISE_HOME=$(mktemp -d)`.
@@ -104,9 +158,9 @@ them itself — only suggest it; it may send data to a cloud model.
 ## Examples
 
 ```bash
-# How did NIFTY and the user's holdings do today?
+# How are the markets and the user's holdings today?
 stockwise markets --json
-stockwise portfolio --json
+stockwise portfolio analyze --json
 
 # Is INFY overbought, and how volatile has it been?
 stockwise technical INFY --json

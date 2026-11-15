@@ -27,6 +27,7 @@ mod commands;
 mod commodity;
 mod conditions;
 mod config;
+mod connect;
 mod daemon;
 mod daemon_status;
 mod db;
@@ -936,6 +937,45 @@ loads are estimates. Amounts take Indian units: 50k, 25L (lakh), 1cr (crore).")]
     },
 
     // ── AI assistants ──
+    /// Connect StockWise to AI apps and coding agents (Claude, ChatGPT Codex, Gemini,
+    /// Antigravity, Cursor, VS Code, ...): adds the MCP server and the skill
+    #[command(after_help = "Examples:\n  \
+stockwise connect                      # every app found on this computer\n  \
+stockwise connect antigravity cursor   # just these\n  \
+stockwise connect --all --allow-writes # watchlist, alerts, goals, notes, profile too\n  \
+stockwise connect --list\n  \
+stockwise connect cursor --remove\n\n\
+Each config file is backed up (<file>.stockwise.bak) and only the stockwise entry changes. \
+Restart the app afterwards. Goose and Continue get the lines to paste.")]
+    Connect {
+        /// Apps to connect (default: those found on this computer)
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(connect::IDS))]
+        clients: Vec<String>,
+        /// Every app StockWise knows, found or not
+        #[arg(long, conflicts_with = "clients")]
+        all: bool,
+        /// Show the apps, whether each is found, and where its config lives
+        #[arg(long)]
+        list: bool,
+        /// Take StockWise out of the apps instead
+        #[arg(long)]
+        remove: bool,
+        /// Let the assistant change the watchlist, alerts, goals, targets, notes and profile
+        /// (each change is undoable with `stockwise undo`)
+        #[arg(long)]
+        allow_writes: bool,
+        /// Also let it record portfolio lots (implies --allow-writes)
+        #[arg(long)]
+        allow_portfolio: bool,
+        /// Do not install the agent skill (Claude Code, Antigravity)
+        #[arg(long)]
+        no_skill: bool,
+        /// Show what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
     /// Undo a change an assistant made to the watchlist, alerts, goals, targets, profile,
     /// notes or portfolio (`stockwise mcp --allow-writes`, `ask --auto`)
     Undo {
@@ -3157,7 +3197,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Planning", &["goal"]),
-    ("AI assistants", &["ask", "mcp", "undo"]),
+    ("AI assistants", &["ask", "mcp", "connect", "undo"]),
     ("Interfaces", &["tui", "serve"]),
     ("Live trading", &["trade"]),
     (
@@ -4737,6 +4777,29 @@ async fn dispatch(
             };
             commands::cmd_ask(&question.join(" "), opts, m, out.json).await
         }
+        Commands::Connect {
+            clients,
+            all,
+            list,
+            remove,
+            allow_writes,
+            allow_portfolio,
+            no_skill,
+            dry_run,
+            out,
+        } => commands::cmd_connect(
+            commands::ConnectOptions {
+                clients,
+                all,
+                list,
+                remove,
+                writes: allow_writes || allow_portfolio,
+                portfolio: allow_portfolio,
+                skill: !no_skill,
+                dry_run,
+            },
+            out.json,
+        ),
         Commands::Undo {
             id,
             list,

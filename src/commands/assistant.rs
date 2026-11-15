@@ -201,3 +201,126 @@ pub fn cmd_undo(id: Option<u64>, list: bool, force: bool, json: bool) -> Result<
     );
     Ok(())
 }
+
+/// What `stockwise connect` does.
+#[derive(Debug, Default)]
+pub struct ConnectOptions {
+    pub clients: Vec<String>,
+    pub all: bool,
+    pub list: bool,
+    pub remove: bool,
+    pub writes: bool,
+    pub portfolio: bool,
+    pub skill: bool,
+    pub dry_run: bool,
+}
+
+pub fn cmd_connect(o: ConnectOptions, json: bool) -> Result<()> {
+    use crate::connect;
+    let home = dirs::home_dir().context("Cannot find your home folder")?;
+    let all = connect::clients(&home);
+    if o.list {
+        let rows: Vec<_> = all
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "found": connect::detected(c),
+                    "config": c.paths.first().map(|p| p.display().to_string()),
+                    "skill": c.skills.as_ref().map(|p| p.join("stockwise").display().to_string()),
+                })
+            })
+            .collect();
+        if json {
+            return output::print_json(&rows);
+        }
+        print_header("AI apps StockWise can connect to");
+        for (c, r) in all.iter().zip(&rows) {
+            let found = connect::detected(c);
+            let mark = if found { "●".green() } else { "○".dimmed() };
+            let where_ =
+                r["config"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| match c.format {
+                        connect::Format::ClaudeCli => "claude mcp add".into(),
+                        _ => "paste by hand".into(),
+                    });
+            println!("  {} {:<15} {:<30} {}", mark, c.id, c.name, where_.dimmed());
+        }
+        println!();
+        println!("  {}", "● found on this computer".dimmed());
+        println!();
+        return Ok(());
+    }
+    let chosen: Vec<&connect::Client> = if !o.clients.is_empty() {
+        all.iter()
+            .filter(|c| o.clients.iter().any(|id| id == c.id))
+            .collect()
+    } else if o.all {
+        all.iter().collect()
+    } else {
+        all.iter().filter(|c| connect::detected(c)).collect()
+    };
+    if chosen.is_empty() {
+        bail!(
+            "No AI apps found on this computer. Name one (stockwise connect --list shows them), or use --all."
+        );
+    }
+    let launch = connect::Launch::this(o.writes, o.portfolio)?;
+    let outcomes: Vec<connect::Outcome> = chosen
+        .iter()
+        .map(|c| connect::apply(c, &launch, o.remove, o.skill, o.dry_run))
+        .collect();
+    if json {
+        return output::print_json(&serde_json::json!({
+            "command": launch.line(),
+            "results": outcomes,
+        }));
+    }
+    print_header(if o.remove {
+        "Disconnecting StockWise"
+    } else {
+        "Connecting StockWise"
+    });
+    for (c, r) in chosen.iter().zip(&outcomes) {
+        let mark = match r.status {
+            "connected" | "removed" => "✓".green(),
+            "manual" => "→".yellow(),
+            _ => "✗".red(),
+        };
+        println!("  {} {:<30} {}", mark, c.name, r.detail.dimmed());
+    }
+    println!();
+    if !o.remove {
+        let mode = if o.portfolio {
+            "reads, workspace changes and portfolio lots (undo: stockwise undo)"
+        } else if o.writes {
+            "reads and workspace changes (undo: stockwise undo)"
+        } else {
+            "read-only (add --allow-writes to let it update your watchlist, alerts, goals and profile)"
+        };
+        println!("  Access: {}", mode);
+        if launch.command.contains("/target/") || launch.command.contains("\\target\\") {
+            println!(
+                "  {}",
+                "Note: this is a build folder copy; `cargo install --path .` (or a release download) and connect again so the apps keep working after a clean."
+                    .yellow()
+            );
+        }
+        println!(
+            "  Restart each app, then ask it: {}",
+            if o.writes {
+                "\"set up my StockWise profile\""
+            } else {
+                "\"how is my portfolio doing?\""
+            }
+        );
+        println!();
+    }
+    if outcomes.iter().any(|r| r.status == "failed") {
+        bail!("Some apps could not be connected (see above)");
+    }
+    Ok(())
+}
