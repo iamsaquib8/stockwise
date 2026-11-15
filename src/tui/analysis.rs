@@ -381,53 +381,28 @@ fn render_observations(f: &mut Frame, area: Rect, a: &Analysis, theme: &Theme) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-/// Rows `line` takes when wrapped at word boundaries to `width` cells,
-/// as `Wrap { trim: true }` does: a word that does not fit on the row
-/// starts the next one; a word longer than a row is split.
-pub fn wrapped_rows(line: &Line, width: usize) -> usize {
-    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+/// Rows `lines` take when ratatui word-wraps them to `width` cells, found
+/// by laying them out off-screen: the exact count, wide characters and
+/// ratatui's own wrapping rules included.
+pub fn rendered_rows(lines: &[Line<'static>], width: u16) -> usize {
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
     let width = width.max(1);
-    // Words with the width of the whitespace before each (padding runs
-    // count in full; a row starts without its leading gap).
-    // Cell widths as ratatui measures them (CJK characters take two).
-    let cells = |w: &str| Span::raw(w).width();
-    let mut words: Vec<(usize, usize)> = Vec::new();
-    let mut gap = 0;
-    let mut word = String::new();
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if !word.is_empty() {
-                words.push((gap, cells(&word)));
-                word.clear();
-                gap = 0;
-            }
-            gap += 1;
-        } else {
-            word.push(c);
-        }
-    }
-    if !word.is_empty() {
-        words.push((gap, cells(&word)));
-    }
-    let mut rows = 1;
-    let mut used = 0;
-    for (gap, w) in words {
-        let need = if used == 0 { w } else { used + gap + w };
-        if need <= width {
-            used = need;
-        } else if w <= width {
-            rows += 1;
-            used = w;
-        } else {
-            // A long word is broken across rows.
-            if used > 0 {
-                rows += 1;
-            }
-            rows += (w - 1) / width;
-            used = (w - 1) % width + 1;
-        }
-    }
-    rows
+    // Every line takes at least one row and at most one per character.
+    let most: usize = lines
+        .iter()
+        .map(|l| l.width().max(1))
+        .sum::<usize>()
+        .min(u16::MAX as usize);
+    let area = Rect::new(0, 0, width, most as u16);
+    let mut buf = Buffer::empty(area);
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: true })
+        .render(area, &mut buf);
+    (0..area.height)
+        .rev()
+        .find(|y| (0..width).any(|x| buf[(x, *y)].symbol() != " "))
+        .map_or(0, |y| y as usize + 1)
 }
 
 /// The selected holding in detail.
@@ -579,8 +554,7 @@ pub fn render_detail(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         theme.dim,
     ));
     // Rows the word-wrapped text takes, so scrolling stops at its last line.
-    let width = inner.width.max(1) as usize;
-    let rows: usize = lines.iter().map(|l| wrapped_rows(l, width)).sum();
+    let rows = rendered_rows(&lines, inner.width);
     let max_scroll = rows.saturating_sub(inner.height as usize) as u16;
     app.detail_max.set(max_scroll);
     f.render_widget(
@@ -807,36 +781,39 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_rows_follow_word_boundaries() {
-        use super::wrapped_rows;
+    fn rendered_rows_count_what_ratatui_draws() {
+        use super::rendered_rows;
         use ratatui::text::Line;
+        let one = |text: String| vec![Line::from(text)];
         let twenty = "a".repeat(20);
-        // Three 20-cell words at width 38: one word a row, not two rows.
-        let line = Line::from(format!("{t} {t} {t}", t = twenty));
-        assert_eq!(wrapped_rows(&line, 38), 3);
-        assert_eq!(wrapped_rows(&Line::from("short line"), 38), 1);
-        assert_eq!(wrapped_rows(&Line::from(""), 10), 1);
-        // A word longer than the row is split.
-        assert_eq!(wrapped_rows(&Line::from("x".repeat(25)), 10), 3);
-        // Padding runs count in full: 24 cells of label, then the value.
-        let kv = Line::from(format!(
-            " {:<24}{}",
-            "Long-term score", "62 of 100 (80% of inputs)"
-        ));
-        assert_eq!(wrapped_rows(&kv, 38), 2);
-        // Wide characters take two cells: 30 of them need two rows of 38.
-        let wide = Line::from("株".repeat(30));
-        assert_eq!(wrapped_rows(&wide, 38), 2);
-        // And the popup renders what the count says: a 30-character
-        // name wraps, the count matches the rows ratatui draws.
-        use ratatui::widgets::{Paragraph, Wrap};
-        let para = Paragraph::new(vec![wide.clone()]).wrap(Wrap { trim: true });
-        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 38, 4));
-        ratatui::widgets::Widget::render(para, buf.area, &mut buf);
-        let drawn = (0..4)
-            .filter(|y| (0..38).any(|x| buf[(x, *y)].symbol() != " "))
+        // Word wrapping: three 20-cell words at width 38 take 3 rows.
+        assert_eq!(
+            rendered_rows(&one(format!("{t} {t} {t}", t = twenty)), 38),
+            3
+        );
+        assert_eq!(rendered_rows(&one("short".into()), 38), 1);
+        // Wide characters take two cells: 30 at width 38 need two rows.
+        assert_eq!(rendered_rows(&one("株".repeat(30)), 38), 2);
+        // Whatever ratatui does at an odd width is what is counted: the
+        // count is the rows it draws, here for 37 wide characters at 37.
+        let odd = one("株".repeat(37));
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(37, 10)).unwrap();
+        term.draw(|f| {
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(odd.clone())
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                f.area(),
+            )
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let drawn = (0..10)
+            .filter(|y| (0..37).any(|x| buf[(x, *y)].symbol() != " "))
             .count();
-        assert_eq!(drawn, wrapped_rows(&wide, 38));
+        assert_eq!(rendered_rows(&odd, 37), drawn);
+        // Several lines add up; padded key/value lines count their padding.
+        let kv = format!(" {:<24}{}", "Long-term score", "62 of 100 (80% of inputs)");
+        assert_eq!(rendered_rows(&[Line::from(kv), Line::from("x")], 38), 3);
     }
 
     #[test]
