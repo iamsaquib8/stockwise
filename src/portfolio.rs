@@ -1037,6 +1037,21 @@ impl Portfolio {
     /// copies up to `<file>.5`), so `portfolio restore` can bring one back.
     /// A save that changes nothing rotates nothing.
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        self.save_with(
+            path,
+            |a: &Path, b: &Path| std::fs::rename(a, b),
+            |p: &Path| crate::store::save_to(p, self, false),
+        )
+    }
+
+    /// [`Portfolio::save_to`] with the rename and the final write passed in,
+    /// so tests can make either fail.
+    fn save_with(
+        &self,
+        path: &Path,
+        rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+        write: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
         if let Ok(old) = std::fs::read(path) {
             let new = serde_json::to_string_pretty(self)?;
             // Backup 1 already holding the current file means an earlier save
@@ -1044,10 +1059,10 @@ impl Portfolio {
             // retry must not shift it again.
             let kept = std::fs::read(numbered_backup(path, 1)).is_ok_and(|b| b == old);
             if old != new.as_bytes() && !kept {
-                rotate_backups(path)?;
+                rotate_backups_with(path, &rename)?;
             }
         }
-        crate::store::save_to(path, self, false)
+        write(path)
     }
 
     /// Replace `path` with its backup `n` (1 = newest). The file being
@@ -2175,7 +2190,15 @@ pub fn backups_of(path: &Path) -> Vec<(usize, PathBuf)> {
 /// Shift `<file>.1..4` up by one (dropping `.5`) and put a copy of `path`
 /// at `.1`. The copy is staged first, so a failed copy leaves the numbered
 /// history untouched and a retry does not push another version out.
+#[cfg(test)]
 fn rotate_backups(path: &Path) -> Result<()> {
+    rotate_backups_with(path, &|a: &Path, b: &Path| std::fs::rename(a, b))
+}
+
+fn rotate_backups_with(
+    path: &Path,
+    rename: &impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
     let mut staged = path.as_os_str().to_owned();
     staged.push(".1.tmp");
     let staged = PathBuf::from(staged);
@@ -2189,11 +2212,11 @@ fn rotate_backups(path: &Path) -> Result<()> {
         .unwrap_or(BACKUPS_KEPT);
     for n in (1..gap).rev() {
         let from = numbered_backup(path, n);
-        std::fs::rename(&from, numbered_backup(path, n + 1))
+        rename(&from, &numbered_backup(path, n + 1))
             .with_context(|| format!("Cannot rotate backup {}", from.display()))?;
     }
     let first = numbered_backup(path, 1);
-    std::fs::rename(&staged, &first)
+    rename(&staged, &first)
         .with_context(|| format!("Cannot move the backup to {}", first.display()))?;
     Ok(())
 }
@@ -4309,6 +4332,88 @@ mod tests {
         );
         let one = Portfolio::read_only(&numbered_backup(&path, 1)).unwrap();
         assert!(one.holding("INFY.NS").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A portfolio file plus backups `.1..=.5` holding `v1`..`v5`.
+    fn full_history(name: &str) -> (PathBuf, PathBuf, Portfolio) {
+        let dir = temp_dir(name);
+        let path = dir.join("portfolio.json");
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        crate::store::save_to(&path, &p, false).unwrap();
+        for n in 1..=BACKUPS_KEPT {
+            std::fs::write(numbered_backup(&path, n), format!("v{n}")).unwrap();
+        }
+        (dir, path, p)
+    }
+
+    fn history(path: &Path) -> Vec<String> {
+        (1..=BACKUPS_KEPT)
+            .map(|n| std::fs::read_to_string(numbered_backup(path, n)).unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_portfolio_write_then_retry_drops_one_version_only() {
+        let (dir, path, mut p) = full_history("inject-write");
+        let current = std::fs::read_to_string(&path).unwrap();
+        p.add_lot("INFY.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        let failed = p.save_with(
+            &path,
+            |a: &Path, b: &Path| std::fs::rename(a, b),
+            |_: &Path| anyhow::bail!("disk full"),
+        );
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        let after_failure = history(&path);
+        assert_eq!(
+            after_failure,
+            [
+                current.clone(),
+                "v1".into(),
+                "v2".into(),
+                "v3".into(),
+                "v4".into()
+            ]
+        );
+        // Retry for real: the history stays as the failed save left it.
+        p.save_to(&path).unwrap();
+        assert_eq!(history(&path), after_failure);
+        assert!(
+            Portfolio::read_only(&path)
+                .unwrap()
+                .holding("INFY.NS")
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_rename_then_retry_drops_one_version_only() {
+        let (dir, path, mut p) = full_history("inject-rename");
+        let current = std::fs::read_to_string(&path).unwrap();
+        p.add_lot("INFY.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        // Fail the third rename (.2 -> .3), after .4 -> .5 and .3 -> .4 moved.
+        let calls = std::cell::Cell::new(0);
+        let flaky = |from: &Path, to: &Path| -> std::io::Result<()> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                Err(std::io::Error::other("injected"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        };
+        assert!(
+            p.save_with(&path, flaky, |_: &Path| unreachable!())
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        p.save_to(&path).unwrap();
+        assert_eq!(
+            history(&path),
+            [current, "v1".into(), "v2".into(), "v3".into(), "v4".into()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
