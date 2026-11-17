@@ -676,6 +676,64 @@ stockwise tax advance --json                      # programmatic JSON output
 - **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
 
 
+### Plain-text accounting export
+
+`portfolio export --format beancount|hledger` writes the active portfolio as
+a double-entry journal for [beancount](https://beancount.github.io/) or
+[hledger](https://hledger.org/), to standard output or to `-o FILE`:
+
+```bash
+stockwise portfolio export --format beancount -o portfolio.beancount
+bean-check portfolio.beancount
+stockwise portfolio export --format hledger > portfolio.journal
+hledger -f portfolio.journal check
+stockwise --portfolio us portfolio export --format hledger   # a named portfolio
+```
+
+The journal is rebuilt from what StockWise records, in date order:
+
+- `commodity` declarations for each currency and holding, and `open` /
+  `account` declarations for each account used.
+- A purchase for every open lot and for every lot behind a recorded sale,
+  into `Assets:Investments:<Account>` (the demat account, such as
+  `Zerodha`, or `Default`), paid from `Assets:Cash:<CUR>`. In beancount the
+  lot carries its cost (`{2400.5 INR}`).
+- A sale for every realized lot, at its matched cost basis (beancount:
+  `{cost, buy date} @ sale price`; hledger: `@ cost` with the lot date and sale
+  price in a comment, because hledger balances at the `@` price), with the gain
+  on `Income:CapitalGains:ShortTerm` or `Income:CapitalGains:LongTerm`. The
+  split follows the listed-share holding period of the price currency's
+  country (more than 12 months for INR and USD; the UK has no split, so GBP
+  gains are short-term); same-day trades are short-term.
+- A dividend for every recorded dividend, into `Income:Dividends`. An
+  `Expenses:Tax:Withholding` leg is added when a record holds the tax
+  withheld; StockWise's dividend records hold the gross amount only, so it does
+  not appear yet.
+
+Commodity names follow beancount's rules (capital letters, digits and
+`'._-`; starting with a letter, ending with a letter or digit; at most 24
+characters). The symbol is upper-cased and any other character becomes `_`:
+
+| Symbol | Commodity |
+|--------|-----------|
+| `RELIANCE.NS` | `RELIANCE.NS` |
+| `M&M.NS` | `M_M.NS` |
+| `MF:120503` | `MF_120503` |
+| `^NSEI` | `X_NSEI` (an `X` in front when the name does not start with a letter) |
+| `9988.HK` | `X9988.HK` |
+
+A longer name is cut and ends in a short hash, and two symbols that map to
+the same name get `-2`, `-3`, ... The original symbol is kept in the
+`commodity` directive's `name` metadata (beancount) or comment (hledger), and
+in each transaction's `symbol` metadata or tag. hledger needs names with
+anything other than letters in double quotes (`"RELIANCE.NS"`).
+
+Quantities and prices are split-adjusted, as StockWise stores them; London
+prices in pence (`GBp`) are converted to pounds. Amounts are exact decimals,
+so every transaction balances to zero. Symbols with no exchange suffix are
+booked in the `-m` market's currency. The journal is for records and
+education; check it against your broker's statements.
+
 ### Portfolio analysis
 
 `stockwise portfolio analyze` prints a dashboard of every holding:
@@ -940,9 +998,60 @@ untested against a live account.
 | `config [show] [--json]` | Effective settings and where each comes from (flag, env, config file, default), plus the config file's status |
 | `config path` | Print the config file path (it may not exist yet) |
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |
+| `backup export [PATH.swbak] [--passphrase-fd N]` | Write your data to one passphrase-encrypted file (default `stockwise-YYYY-MM-DD.swbak`). See [Backups](#backups) |
+| `backup restore <PATH.swbak> [--dry-run] [--passphrase-fd N]` | Check a backup, list the files it would add or replace, copy each replaced file to `<file>.bak`, then write each file atomically |
 | `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, desktop) / send a test message. See [notifications](bots.md#notifications) |
 | `completions <bash\|zsh\|fish\|powershell\|elvish>` | Print a completion script, e.g. `stockwise completions zsh > ~/.zfunc/_stockwise` |
 | `man [--dir <DIR>]` | Print the `stockwise.1` man page, or write it plus one `stockwise-<command>.1` page per command into `DIR`, e.g. `stockwise man --dir ~/.local/share/man/man1` |
+
+### Backups
+
+`backup export` packs your own data into one encrypted file you can keep in
+Git, iCloud, Dropbox, Google Drive or S3, or carry to another computer;
+`backup restore` puts it back.
+
+```bash
+stockwise backup export ~/Dropbox/stockwise.swbak
+stockwise backup restore ~/Dropbox/stockwise.swbak --dry-run   # list changes only
+stockwise backup restore ~/Dropbox/stockwise.swbak
+STOCKWISE_BACKUP_PASSPHRASE=... stockwise backup export nightly.swbak   # cron
+stockwise backup export nightly.swbak --passphrase-fd 3 3< ~/.config/stockwise/backup-pass
+```
+
+**What is in it**: from the data directory (`STOCKWISE_HOME`),
+`portfolio.json`, every named portfolio (`portfolios/*.json`) and wealth
+history, `goals.json`, `watchlist.json`, `alerts.json`, `notes.json`, the
+undo log (`audit.json`) and the practice files (`sim_*.json`), plus
+`config.toml`. **Left out**: caches (`cache.db*`, `cache/`, `*_cache.json`),
+lock and temp files, rotating backups (`portfolio.json.1`..`.5`, `*.bak`),
+daemon and worker state, and all broker files (`*_config.json`,
+`gtt_seen_*.json`), because they hold session tokens. Notification secrets
+(`telegram_token`, `smtp_password`, ...) are removed from the copy of
+`config.toml`; after a restore, copy them back from `config.toml.bak` or set
+them as environment variables.
+
+**Passphrase**: by default StockWise asks for it with a hidden prompt (twice
+on export; at least 8 characters). For scripts, pass `--passphrase-fd N` to
+read the first line of an open file descriptor (Unix), or set
+`STOCKWISE_BACKUP_PASSPHRASE`. There is no argument that takes the passphrase
+itself, so it never shows up in `ps` or shell history. A lost passphrase
+cannot be recovered.
+
+**Restore** first checks the whole file: a wrong passphrase, a changed byte
+or a truncated file stops it with an error before anything is written. It then
+lists each file as `add`, `replace` or `same`; `--dry-run` stops there. Each
+file to be replaced is copied to `<file>.bak`, then every file is written to a
+temp file and renamed into place. Local files that are not in the backup are
+left alone.
+
+**Format** (`.swbak`, version 1): a 64-byte header (the magic `SWBAK\0\r\n`,
+format version, algorithm ids, Argon2id memory/time/parallelism costs, a
+random 16-byte salt and a random 24-byte nonce), then the archive encrypted
+with XChaCha20-Poly1305 under a key derived from the passphrase with
+Argon2id (64 MiB, 3 passes). The header is authenticated with the data. The
+archive inside is deterministic: files sorted by path, no timestamps or
+owners. The salt and nonce are new for every export, so two exports of the
+same data are different files.
 
 ## Scripting with `--json` and `--csv`
 
