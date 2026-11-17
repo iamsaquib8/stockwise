@@ -1016,6 +1016,7 @@ mod tests {
             intraday: false,
             account: None,
             bonuses: Vec::new(),
+            bonus_shares: false,
         }
     }
 

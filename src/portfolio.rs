@@ -312,6 +312,10 @@ pub struct Sale {
     /// the count before them, so dividends before them count those shares.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bonuses: Vec<String>,
+    /// Sold out of a lot of bonus shares: allotted, not bought, so never
+    /// intraday even when sold on the allotment date.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bonus_shares: bool,
 }
 
 impl Sale {
@@ -334,6 +338,7 @@ impl Sale {
                 .filter(|a| a.starts_with("bonus:"))
                 .cloned()
                 .collect(),
+            bonus_shares: lot.source == BONUS_SOURCE,
         }
     }
 
@@ -351,7 +356,8 @@ impl Sale {
     /// A same-day buy and sell: flagged when it was recorded, or bought and
     /// sold on one day with a real (not estimated) purchase date.
     pub fn is_intraday(&self) -> bool {
-        self.intraday || (self.buy_date == self.sell_date && !self.buy_date_estimated)
+        self.intraday
+            || (self.buy_date == self.sell_date && !self.buy_date_estimated && !self.bonus_shares)
     }
 }
 
@@ -1793,7 +1799,12 @@ impl Portfolio {
                 // Bonus shares received on the sold lot after `date`.
                 let bonus: f64 = splits
                     .iter()
-                    .filter(|b| b.date.as_str() > date && s.bonuses.contains(&b.bonus_id()))
+                    // Not a bonus after the sale: `later` already counts it.
+                    .filter(|b| {
+                        b.date.as_str() > date
+                            && b.date <= s.sell_date
+                            && s.bonuses.contains(&b.bonus_id())
+                    })
                     .map(Split::ratio)
                     .product();
                 s.qty * later(&s.sell_date, None) * bonus
@@ -2208,6 +2219,7 @@ mod tests {
             intraday: false,
             account: None,
             bonuses: Vec::new(),
+            bonus_shares: false,
         });
         old.save_to(&path).unwrap();
 
@@ -3656,6 +3668,32 @@ mod tests {
             (from.date.as_str(), *qty, *intraday),
             ("2023-05-01", 50.0, false)
         );
+
+        // Selling into the bonus shares on that day: still not intraday.
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &bonus_1_for_1());
+        let sales = p
+            .sell_fifo("TCS.NS", 150.0, 600.0, "2026-06-15", "manual")
+            .unwrap();
+        assert_eq!(sales.len(), 2);
+        assert!(sales[1].bonus_shares);
+        assert!(sales.iter().all(|s| !s.is_intraday()));
+    }
+
+    #[test]
+    fn a_sale_backdated_before_a_bonus_counts_it_once() {
+        let splits = vec![bonus_1_for_1()];
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &splits[0]);
+        p.sell_fifo("TCS.NS", 100.0, 600.0, "2026-06-01", "manual")
+            .unwrap();
+        let before = DividendEvent {
+            ex_date: "2025-06-01".into(),
+            per_share: 5.0,
+        };
+        assert_eq!(p.dividend_due("TCS.NS", &before, &splits), Some(200.0));
     }
 
     #[test]
