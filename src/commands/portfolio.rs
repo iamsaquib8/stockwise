@@ -1485,7 +1485,7 @@ fn backup_rows(path: &std::path::Path) -> Vec<BackupRow> {
                         .to_string()
                 })
                 .unwrap_or_default();
-            let p = Portfolio::load_from(&file).ok();
+            let p = Portfolio::read_only(&file).ok();
             BackupRow {
                 number,
                 saved,

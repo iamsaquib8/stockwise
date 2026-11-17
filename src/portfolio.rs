@@ -985,6 +985,22 @@ impl Portfolio {
     /// Load `path`, upgrading an old-format file in place: the original is
     /// copied to `<file>.bak` (only if no backup exists yet), then the new
     /// format is written.
+    /// Read `path` without writing anything: the format is upgraded and
+    /// symbols repaired in memory only. For backups, which must stay as saved.
+    pub fn read_only(path: &Path) -> Result<Self> {
+        let mut p: Self = crate::store::load_from(path)?;
+        if p.version > SCHEMA_VERSION {
+            bail!(
+                "{} was written by a newer StockWise (format {}). Upgrade StockWise to read it.",
+                path.display(),
+                p.version
+            );
+        }
+        p.normalize();
+        p.repair_symbols();
+        Ok(p)
+    }
+
     pub fn load_from(path: &Path) -> Result<Self> {
         let mut p: Self = crate::store::load_from(path)?;
         if p.version > SCHEMA_VERSION {
@@ -1037,7 +1053,7 @@ impl Portfolio {
         if !from.exists() {
             bail!("No backup #{} of {}", n, path.display());
         }
-        let p = Self::load_from(&from)
+        let p = Self::read_only(&from)
             .with_context(|| format!("Backup {} is not a readable portfolio", from.display()))?;
         p.save_to(path)?;
         Ok(p)
@@ -2147,12 +2163,16 @@ fn rotate_backups(path: &Path) -> Result<()> {
     let staged = PathBuf::from(staged);
     std::fs::copy(path, &staged)
         .with_context(|| format!("Cannot back up {} to {}", path.display(), staged.display()))?;
-    for n in (1..BACKUPS_KEPT).rev() {
+    // Shift only up to the first free number: with `.1..=.5` all present the
+    // oldest is dropped, but after a rotation that stopped half-way the gap
+    // it left absorbs the shift, so a retry drops nothing more.
+    let gap = (1..=BACKUPS_KEPT)
+        .find(|&n| !numbered_backup(path, n).exists())
+        .unwrap_or(BACKUPS_KEPT);
+    for n in (1..gap).rev() {
         let from = numbered_backup(path, n);
-        if from.exists() {
-            std::fs::rename(&from, numbered_backup(path, n + 1))
-                .with_context(|| format!("Cannot rotate backup {}", from.display()))?;
-        }
+        std::fs::rename(&from, numbered_backup(path, n + 1))
+            .with_context(|| format!("Cannot rotate backup {}", from.display()))?;
     }
     let first = numbered_backup(path, 1);
     std::fs::rename(&staged, &first)
@@ -4182,6 +4202,43 @@ mod tests {
             "one"
         );
         assert!(!numbered_backup(&path, 2).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rotation_retried_after_a_partial_failure_loses_no_version() {
+        let dir = temp_dir("backup-partial");
+        let path = dir.join("portfolio.json");
+        std::fs::write(&path, "now").unwrap();
+        // A rotation that moved .4 to .5 and then failed: .4 is missing.
+        for (n, body) in [(1, "v1"), (2, "v2"), (3, "v3"), (5, "v4")] {
+            std::fs::write(numbered_backup(&path, n), body).unwrap();
+        }
+        rotate_backups(&path).unwrap();
+        let read = |n| std::fs::read_to_string(numbered_backup(&path, n)).unwrap();
+        assert_eq!(
+            [read(1), read(2), read(3), read(4), read(5)],
+            ["now", "v1", "v2", "v3", "v4"]
+        );
+        // With every slot full, the oldest goes.
+        std::fs::write(&path, "next").unwrap();
+        rotate_backups(&path).unwrap();
+        assert_eq!(read(1), "next");
+        assert_eq!(read(5), "v3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_a_backup_never_writes_it() {
+        let dir = temp_dir("backup-readonly");
+        let path = dir.join("portfolio.json.1");
+        // An old-format file that `load_from` would upgrade in place.
+        let old = r#"{"holdings":[{"symbol":"TCS.NS","shares":5.0,"avg_cost":3000.0}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let p = Portfolio::read_only(&path).unwrap();
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 5.0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
