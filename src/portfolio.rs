@@ -307,6 +307,11 @@ pub struct Sale {
     /// The demat account the shares were sold from (see [`Lot::account`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Bonus issues received on the sold lot as a lot of their own
+    /// (`bonus:<split id>`, see [`Split::bonus_id`]): the sold quantity is in
+    /// the count before them, so dividends before them count those shares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bonuses: Vec<String>,
 }
 
 impl Sale {
@@ -323,6 +328,12 @@ impl Sale {
             order_id: None,
             intraday: false,
             account: lot.account_key().map(str::to_string),
+            bonuses: lot
+                .adjustments
+                .iter()
+                .filter(|a| a.starts_with("bonus:"))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -933,7 +944,8 @@ fn scoped<R>(lots: &mut Vec<Lot>, scope: &Scope, f: impl FnOnce(&mut Vec<Lot>) -
 fn take_netting(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64, bool)>, f64) {
     let (mut same_day, mut older): (Vec<Lot>, Vec<Lot>) = std::mem::take(lots)
         .into_iter()
-        .partition(|l| l.date == date && !l.date_estimated);
+        // Bonus shares are allotted, not bought: never an intraday buy.
+        .partition(|l| l.date == date && !l.date_estimated && l.source != BONUS_SOURCE);
     let (netted, rest) = take_fifo(&mut same_day, qty, date);
     let (before, left) = take_fifo(&mut older, rest, date);
     older.extend(same_day);
@@ -1777,7 +1789,15 @@ impl Portfolio {
             .filter(|s| {
                 s.symbol == sym && s.buy_date.as_str() < date && s.sell_date.as_str() >= date
             })
-            .map(|s| s.qty * later(&s.sell_date, None))
+            .map(|s| {
+                // Bonus shares received on the sold lot after `date`.
+                let bonus: f64 = splits
+                    .iter()
+                    .filter(|b| b.date.as_str() > date && s.bonuses.contains(&b.bonus_id()))
+                    .map(Split::ratio)
+                    .product();
+                s.qty * later(&s.sell_date, None) * bonus
+            })
             .sum();
         open + sold
     }
@@ -2187,6 +2207,7 @@ mod tests {
             order_id: None,
             intraday: false,
             account: None,
+            bonuses: Vec::new(),
         });
         old.save_to(&path).unwrap();
 
@@ -3593,6 +3614,48 @@ mod tests {
             per_share: 5.0,
         };
         assert_eq!(p.dividend_due("TCS.NS", &after, &splits), Some(200.0));
+    }
+
+    #[test]
+    fn dividends_before_a_bonus_count_the_bonus_shares_of_sold_lots() {
+        let splits = vec![bonus_1_for_1()];
+        let before = DividendEvent {
+            ex_date: "2025-06-01".into(),
+            per_share: 5.0,
+        };
+        // All 100 older shares sold after the bonus: still 200 on 2025-06-01.
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &splits[0]);
+        p.sell_fifo("TCS.NS", 100.0, 600.0, "2026-07-01", "manual")
+            .unwrap();
+        assert_eq!(p.realized[0].bonuses, vec![splits[0].bonus_id()]);
+        assert_eq!(p.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+        // A partial sale: 60 × 2 open plus 40 × 2 sold.
+        let mut q = Portfolio::default();
+        q.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        q.apply_split("TCS.NS", &splits[0]);
+        q.sell_fifo("TCS.NS", 40.0, 600.0, "2026-07-01", "manual")
+            .unwrap();
+        assert_eq!(q.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+        // A bonus lot sold is not counted twice.
+        q.sell_fifo("TCS.NS", 100.0, 600.0, "2026-08-01", "manual")
+            .unwrap();
+        assert_eq!(q.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+    }
+
+    #[test]
+    fn a_sale_on_the_allotment_date_does_not_net_against_bonus_shares() {
+        let mut lots = vec![lot(100.0, 1000.0, "2023-05-01")];
+        apply_split_to(&mut lots, &bonus_1_for_1());
+        let (taken, left) = take_netting(&mut lots, 50.0, "2026-06-15");
+        assert_eq!(left, 0.0);
+        assert_eq!(taken.len(), 1);
+        let (from, qty, intraday) = &taken[0];
+        assert_eq!(
+            (from.date.as_str(), *qty, *intraday),
+            ("2023-05-01", 50.0, false)
+        );
     }
 
     #[test]
