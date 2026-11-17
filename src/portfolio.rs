@@ -1039,7 +1039,11 @@ impl Portfolio {
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Ok(old) = std::fs::read(path) {
             let new = serde_json::to_string_pretty(self)?;
-            if old != new.as_bytes() {
+            // Backup 1 already holding the current file means an earlier save
+            // rotated and then failed to write: the history is in place, so a
+            // retry must not shift it again.
+            let kept = std::fs::read(numbered_backup(path, 1)).is_ok_and(|b| b == old);
+            if old != new.as_bytes() && !kept {
                 rotate_backups(path)?;
             }
         }
@@ -4276,5 +4280,35 @@ mod tests {
         let restored = h.lots.iter().find(|l| l.date == "2023-01-01").unwrap();
         assert_eq!(restored.qty, 8.0);
         assert!((restored.price - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_save_retried_after_a_failed_write_does_not_rotate_again() {
+        let dir = temp_dir("backup-retry");
+        let path = dir.join("portfolio.json");
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        p.save_to(&path).unwrap();
+        for n in 2..=BACKUPS_KEPT {
+            std::fs::write(numbered_backup(&path, n), format!("v{n}")).unwrap();
+        }
+        // The state a save leaves when rotation succeeded and the write failed:
+        // backup 1 is a copy of the unchanged current file.
+        std::fs::copy(&path, numbered_backup(&path, 1)).unwrap();
+        p.add_lot("INFY.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        p.save_to(&path).unwrap();
+        for n in 2..=BACKUPS_KEPT {
+            let body = std::fs::read_to_string(numbered_backup(&path, n)).unwrap();
+            assert_eq!(body, format!("v{n}"), "backup {n} moved");
+        }
+        assert!(
+            Portfolio::read_only(&path)
+                .unwrap()
+                .holding("INFY.NS")
+                .is_some()
+        );
+        let one = Portfolio::read_only(&numbered_backup(&path, 1)).unwrap();
+        assert!(one.holding("INFY.NS").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
