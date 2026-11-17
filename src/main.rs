@@ -22,6 +22,7 @@ mod bonds;
 mod brokers;
 mod calendar;
 mod charts;
+mod checkup;
 mod clock;
 mod commands;
 mod commodity;
@@ -85,6 +86,7 @@ mod views;
 mod watchlist;
 mod wealth;
 mod worker;
+mod wrap;
 mod xlsx;
 mod xray;
 
@@ -1352,6 +1354,36 @@ enum PortfolioCmd {
         /// `--csv` prints the holdings table (or, with --groups, the breakdowns); `--json` everything
         #[command(flatten)]
         out: TableOutput,
+    },
+    /// Scan for readings worth a look in six lenses (concentration, forensic flags, valuation,
+    /// downside, fees and tax, goals), ranked by the money at stake. Observations, not advice
+    Checkup {
+        /// Use only local data and the cache (no statements, fund costs or live prices)
+        #[arg(long)]
+        offline: bool,
+        /// Print the findings as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Year in review: return vs benchmark, winners and laggards, cash flows, diversification
+    /// and tax readiness. Default: the current Indian FY for a rupee portfolio, else the
+    /// current calendar year
+    Wrap {
+        /// Calendar year, e.g. 2026
+        #[arg(long, value_name = "YYYY", conflicts_with = "fy")]
+        year: Option<String>,
+        /// Indian financial year (April to March), e.g. 2026-27
+        #[arg(long, value_name = "YYYY-YY")]
+        fy: Option<String>,
+        /// Replace amounts with percentages and shares, for a card safe to share
+        #[arg(long)]
+        redact: bool,
+        /// Use only local data and the cache
+        #[arg(long)]
+        offline: bool,
+        /// Print the card as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Portfolio X-Ray: look-through overlap, market-cap and sector concentration
     #[command(alias = "x-ray")]
@@ -4549,6 +4581,27 @@ async fn dispatch(
             }
             Some(PortfolioCmd::Analyze { quick, groups, out }) => {
                 commands::cmd_portfolio_analyze(m, base.as_deref(), quick, groups, out.into()).await
+            }
+            Some(PortfolioCmd::Checkup { offline, json }) => {
+                commands::cmd_portfolio_checkup(m, base.as_deref(), offline, json).await
+            }
+            Some(PortfolioCmd::Wrap {
+                year,
+                fy,
+                redact,
+                offline,
+                json,
+            }) => {
+                commands::cmd_portfolio_wrap(
+                    m,
+                    base.as_deref(),
+                    year.as_deref(),
+                    fy.as_deref(),
+                    redact,
+                    offline,
+                    json,
+                )
+                .await
             }
             Some(PortfolioCmd::Xray { json }) => {
                 commands::cmd_portfolio_xray(None, m, base.as_deref(), json).await

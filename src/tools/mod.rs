@@ -1276,6 +1276,25 @@ pub const TOOLS: &[Tool] = &[
         personal: true,
     },
     Tool {
+        name: "portfolio_checkup",
+        title: "Portfolio checkup",
+        description: "A scan of the portfolio for readings worth a look, in six lenses: concentration (single-stock look-through weight and small-cap share against the profile's limits, fund overlap, effective number of bets), forensic flags (Piotroski, Altman Z, cash conversion, promoter pledge and stake, latest-quarter contraction), valuation stretch, downside (beta, drawdown, correlated pairs), fees and tax (unused long-term exemption, harvestable losses, Regular-plan cost, lots turning long-term) and goals and targets. Each finding has what was observed, the amount at stake and the command to inspect it, ranked by position value times severity. Observations only, never advice.",
+        params: &[
+            opt(
+                "offline",
+                Kind::Bool,
+                "Use only local data and the cache (no statements or fund costs)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
         name: "market_conditions",
         title: "Market conditions",
         description: "Where a stock market stands, as readings: the main index against its 200- and 50-day averages and highs, India VIX or VIX against 5 years, breadth (share of stocks above their averages), and valuation (aggregate P/E, earnings yield against the 10-year bond yield), with how today ranks against earlier saved sessions. Readings, not a signal to invest or wait.",

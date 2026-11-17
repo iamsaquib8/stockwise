@@ -287,6 +287,15 @@ async fn sectors(
     found
 }
 
+/// The inputs of an analysis, kept for callers that need more than the
+/// dashboard (`portfolio checkup` reads the closes for correlations).
+pub(crate) struct Gathered {
+    pub(crate) portfolio: Portfolio,
+    pub(crate) val: Valuation,
+    pub(crate) inputs: Vec<PositionInput>,
+    pub(crate) ctx: pa::Context,
+}
+
 /// Gather everything and analyse the active portfolio. `quick` skips the
 /// per-holding price history and sector lookups (no risk figures).
 pub(crate) async fn load_analysis(
@@ -296,6 +305,19 @@ pub(crate) async fn load_analysis(
     base: Option<&str>,
     quick: bool,
 ) -> Result<AnalyzeReport> {
+    let g = gather_inputs(src, client, market, base, quick).await?;
+    Ok(analysis_report(&g, market))
+}
+
+/// Prices, closes, sectors and scores of the active portfolio's holdings,
+/// ready for [`pa::analyze`].
+pub(crate) async fn gather_inputs(
+    src: &impl views::DataSource,
+    client: Option<&YahooClient>,
+    market: Market,
+    base: Option<&str>,
+    quick: bool,
+) -> Result<Gathered> {
     let portfolio = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     let today = chrono::Local::now().date_naive();
     let symbols: Vec<String> = portfolio
@@ -423,9 +445,21 @@ pub(crate) async fn load_analysis(
         benchmark_closes,
         benchmark_name: bench_name.to_string(),
     };
-    let analysis = pa::analyze(&inputs, &ctx);
+    Ok(Gathered {
+        portfolio,
+        val,
+        inputs,
+        ctx,
+    })
+}
+
+/// The dashboard for gathered inputs, with the tax a sale of everything
+/// today would bring.
+pub(crate) fn analysis_report(g: &Gathered, market: Market) -> AnalyzeReport {
+    let (portfolio, val, today) = (&g.portfolio, &g.val, g.ctx.today);
+    let analysis = pa::analyze(&g.inputs, &g.ctx);
     let tax_if_sold_today = home_country(market).map(|country| {
-        let report = super::holdings::tax_report(country, &portfolio, &val, today);
+        let report = super::holdings::tax_report(country, portfolio, val, today);
         let e = tax::estimate(country, report.unrealized);
         TaxIfSold {
             country: match country {
@@ -443,11 +477,11 @@ pub(crate) async fn load_analysis(
             exemption_used: e.exemption_used,
         }
     });
-    Ok(AnalyzeReport {
+    AnalyzeReport {
         analysis,
         tax_if_sold_today,
         disclaimer: crate::verdict::DISCLAIMER,
-    })
+    }
 }
 
 // ── Terminal dashboard ──

@@ -211,6 +211,10 @@
       "description": "Portfolio analysis. The portfolio dashboard: every holding's weight, P&L, today's move, gain by tax term and next lot to turn long-term, place against its 200-day average and 52-week range, volatility, beta and long-term score; the portfolio by market (with each market's own-currency total), currency, cap tier and sector; concentration and risk; and neutral observations with their figures."
     },
     {
+      "name": "portfolio_checkup",
+      "description": "Portfolio checkup. Findings in six lenses (concentration and fund overlap, forensic flags, valuation stretch, downside, fees and tax, goals and targets), ranked by position value times severity, each with what was observed, the amount at stake and the command to inspect it. Observations only, never advice."
+    },
+    {
       "name": "market_conditions",
       "description": "Market conditions. Where a stock market stands, as readings: the main index against its 200- and 50-day averages and highs, India VIX or VIX against 5 years, breadth (share of stocks above their averages), and valuation (aggregate P/E, earnings yield against the 10-year bond yield), with how today ranks against earlier saved sessions."
     },

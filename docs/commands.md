@@ -444,6 +444,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL>` | Remove a holding and its lots without recording a sale |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
+| `portfolio checkup [--offline] [--json]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it (see [below](#portfolio-checkup)) |
+| `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
 | `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
@@ -709,6 +711,82 @@ stockwise tax advance --json                      # programmatic JSON output
 These are readings of the data, not recommendations: nothing says to buy,
 sell or keep a holding. `--json` prints every figure. The TUI shows the same
 analysis on its own screen (key `p`).
+
+### Portfolio checkup
+
+`stockwise portfolio checkup` reads the active portfolio and reports
+findings in six lenses:
+
+1. **Concentration, overlap and cap tiers**: a single company above the
+   profile's `max_stock_weight` (12% unless set), counting shares held through
+   funds whose holdings are known; small and micro caps together above
+   `max_smallcap_weight`; two funds sharing more than 35% of their holdings;
+   fewer than 5 effective bets (1 / HHI of the look-through weights).
+2. **Forensic and fundamental flags**: Piotroski F-Score of 3 or less (with
+   at least 7 of 9 signals evaluated), Altman Z in the distress zone,
+   operating cash flow below 0.7× net profit, promoter shares pledged, a
+   promoter stake down a point or more in a quarter, and a latest quarter with
+   both net profit and operating margin below the same quarter a year ago.
+3. **Valuation stretch**: P/E above 60 or PEG above 2.5 while revenue growth
+   is slowing.
+4. **Downside**: portfolio beta above 1.2, a fall of more than 25% from the
+   peak of the last year, and pairs of holdings (each 2% or more) whose daily
+   returns correlate above 0.75.
+5. **Fees and tax**: the unused long-term exemption (India's ₹1.25 lakh under
+   Sec. 112A) when long-term gains could use it, harvestable losses, the yearly
+   cost of Regular-plan funds over their Direct twin, and lots turning
+   long-term within 45 days.
+6. **Goals and targets**: weights outside the `portfolio target` drift band
+   and saved goals still short of their target.
+
+Each finding states what was observed, the amount or weight at stake, and the
+command that shows the detail (`stockwise score TCS.NS --explain`,
+`stockwise harvest`, `stockwise mf bleed`, ...). Findings are ranked by the
+value of the position (or the amount itself, for portfolio-wide readings)
+times a severity weight of 1, 2 or 3. The summary line counts the checks that
+ran and how many raised nothing.
+
+Statements are read for the 30 largest stocks, four at a time; a source that
+fails or times out is listed under "Not checked" and its checks are skipped.
+`--offline` reads only the cache: prices from stored market snapshots
+(`cache snapshots`), closes from stored daily bars, and saved fund
+disclosures. It skips statements and Regular-plan costs. `--json` prints
+`{base_currency, total_value, herfindahl, effective_bets, findings: [{lens,
+rule, severity, symbol, observed, exposure, at_stake, weight_pct, inspect,
+impact}], checks: [{rule, lens, clean}], clean, evaluated, skipped,
+disclaimer}`. The MCP tool `portfolio_checkup` returns the same.
+
+These are observations, not advice: nothing says to buy, sell or keep a
+holding.
+
+### Portfolio wrap
+
+`stockwise portfolio wrap` prints a one-screen review of a year: the return
+against the market's index (NIFTY 50, S&P 500, ...) and the difference in
+basis points, the top three contributors and detractors, the money deployed,
+sale proceeds, dividends and realised gains, the cap-tier split, the top
+three sectors, the effective number of bets, how many checkup guardrails are
+clean, and a tax footer (days left in the tax year, the long-term exemption
+still unused, and for India the next advance-tax date).
+
+The period is `--year 2026` (calendar year) or `--fy 2026-27` (April to
+March). Without either, it is the current Indian financial year when the
+portfolio totals in rupees, and the current calendar year otherwise. A year
+still running is reviewed up to today.
+
+The return is a Modified Dietz return over the period: the gain (end value
+less start value less money added, net of sales and dividends) over the start
+value plus the money added, each flow weighted by the time it was invested.
+It is not annualised. The start values use the close of the day before the
+period; mutual funds use their NAV history. Amounts in other currencies are
+converted at today's rate. Holdings without a price at either end are named
+and left out of the return.
+
+`--redact` replaces every amount with a percentage: the cash flows become a
+share of the money at work, contributors show their share of the year's
+gains and losses, and the tax footer shows the share of the exemption used.
+The card can then be shared without showing what the portfolio is worth.
+`--json` prints the card, with the amounts set to null when redacted.
 
 ### Benchmark and attribution
 
