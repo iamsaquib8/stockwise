@@ -210,6 +210,17 @@ impl Schedule {
                 print_kv("Short-term gain or (loss)", &usd(m.short_term_gain));
                 print_kv("Long-term gain or (loss)", &usd(m.long_term_gain));
                 print_kv("Net gain or (loss)", &usd(m.net_gain));
+                if !s.wash_sales.is_empty() {
+                    let disallowed: f64 = s.wash_sales.iter().map(|w| w.disallowed).sum();
+                    print_kv(
+                        "Wash sales (code W)",
+                        &format!(
+                            "{}, {} loss disallowed",
+                            s.wash_sales.len(),
+                            usd(disallowed)
+                        ),
+                    );
+                }
                 print_kv("Estimated tax", &usd(m.total_tax).bold().to_string());
                 if m.loss_deductible_this_year > 0.0 {
                     print_kv(
@@ -281,7 +292,11 @@ pub async fn cmd_tax_export(
                 |sym| fmvs.iter().find(|(s, _)| s == sym).map(|(_, v)| *v),
             ))
         }
-        _ => Schedule::Us(tax_export::us_schedule(&portfolio.realized, start)),
+        _ => Schedule::Us(tax_export::us_schedule(
+            &portfolio.realized,
+            &portfolio.holdings,
+            start,
+        )),
     };
 
     let body = if json {

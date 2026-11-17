@@ -853,6 +853,185 @@ pub fn compute_advance_tax(
     }
 }
 
+// ── US wash sales (IRS Publication 550) ──
+
+/// Days either side of a sale in which buying substantially identical shares
+/// makes a loss on it a wash sale.
+pub const WASH_SALE_DAYS: i64 = 30;
+
+/// Shares bought in a wash sale's window that take on its disallowed loss.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WashReplacement {
+    /// Purchase date, `YYYY-MM-DD`.
+    pub date: String,
+    /// Shares of this purchase used as replacement shares.
+    pub qty: f64,
+    /// Disallowed loss added to the basis of these shares.
+    pub basis_added: f64,
+    /// When these shares were sold since: the index of that sale in the
+    /// `sales` passed to [`wash_sales`]. `None` for shares still held.
+    pub sale: Option<usize>,
+}
+
+/// A sale at a loss with replacement shares bought within 30 days before or
+/// after it. The disallowed part of the loss is added to the basis of the
+/// replacement shares.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Wash {
+    /// Index of the loss sale in the `sales` passed to [`wash_sales`].
+    pub sale: usize,
+    pub symbol: String,
+    pub sell_date: String,
+    /// The loss on the sale (positive), including basis added to it by an
+    /// earlier wash sale.
+    pub loss: f64,
+    /// Replacement shares found, at most the shares sold.
+    pub replacement_qty: f64,
+    /// The part of the loss that is disallowed (positive): the loss times
+    /// replacement shares over shares sold.
+    pub disallowed: f64,
+    pub replacements: Vec<WashReplacement>,
+}
+
+/// One purchase that can be a replacement: an open lot, or the buy side of
+/// a sale.
+struct Buy {
+    date: NaiveDate,
+    price: f64,
+    account: Option<String>,
+    left: f64,
+    /// The sale these shares went out in, with its date.
+    sold: Option<(usize, NaiveDate)>,
+}
+
+fn ymd_date(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
+
+/// Wash sales among `sales` (IRS Publication 550): a sale at a loss is a wash
+/// sale when shares of the same symbol were bought within 30 days before or
+/// after it. Purchases counted are the open lots in `holdings` and the buy
+/// side of the other sales; shares of the same purchase as the sold lot, and
+/// shares sold on the same day as the loss, are not replacements. The
+/// disallowed loss is the loss times replacement shares over shares sold.
+/// Each purchase is used as a replacement once, earliest purchase first, and
+/// losses are taken in sale-date order. Only USD (US-taxed) symbols are
+/// checked.
+pub fn wash_sales(
+    sales: &[crate::portfolio::Sale],
+    holdings: &[crate::portfolio::Holding],
+) -> Vec<Wash> {
+    use crate::portfolio::symbol_currency;
+    let is_usd = |symbol: &str| symbol_currency(symbol) == Some("USD");
+
+    // Every purchase of each USD symbol, earliest first.
+    let mut buys: std::collections::BTreeMap<&str, Vec<Buy>> = Default::default();
+    for h in holdings.iter().filter(|h| is_usd(&h.symbol)) {
+        for l in &h.lots {
+            if let Some(date) = ymd_date(&l.date) {
+                buys.entry(&h.symbol).or_default().push(Buy {
+                    date,
+                    price: l.price,
+                    account: l.account_key().map(str::to_string),
+                    left: l.qty,
+                    sold: None,
+                });
+            }
+        }
+    }
+    for (i, s) in sales.iter().enumerate().filter(|(_, s)| is_usd(&s.symbol)) {
+        if let (Some(date), Some(sold)) = (ymd_date(&s.buy_date), ymd_date(&s.sell_date)) {
+            buys.entry(&s.symbol).or_default().push(Buy {
+                date,
+                price: s.buy_price,
+                account: s.account_key().map(str::to_string),
+                left: s.qty,
+                sold: Some((i, sold)),
+            });
+        }
+    }
+    for list in buys.values_mut() {
+        list.sort_by_key(|b| b.date);
+    }
+
+    let mut order: Vec<usize> = (0..sales.len())
+        .filter(|&i| is_usd(&sales[i].symbol))
+        .collect();
+    order.sort_by(|&a, &b| {
+        (sales[a].sell_date.as_str(), sales[a].buy_date.as_str())
+            .cmp(&(sales[b].sell_date.as_str(), sales[b].buy_date.as_str()))
+    });
+    // Basis a wash sale added to a later sale of its replacement shares.
+    let mut added = vec![0.0; sales.len()];
+    let mut out = Vec::new();
+    for i in order {
+        let s = &sales[i];
+        let loss = s.qty * (s.buy_price - s.sell_price) + added[i];
+        if loss <= 1e-9 || s.qty <= 0.0 {
+            continue;
+        }
+        let (Some(bought), Some(sold)) = (ymd_date(&s.buy_date), ymd_date(&s.sell_date)) else {
+            continue;
+        };
+        let Some(list) = buys.get_mut(s.symbol.as_str()) else {
+            continue;
+        };
+        let same_purchase = |b: &Buy| {
+            b.date == bought
+                && b.account.as_deref() == s.account_key()
+                && (b.price - s.buy_price).abs() <= 1e-9 * s.buy_price.abs().max(1.0)
+        };
+        let mut need = s.qty;
+        let mut replacements = Vec::new();
+        for b in list.iter_mut() {
+            if need <= 1e-9 {
+                break;
+            }
+            if b.left <= 1e-9
+                || (b.date - sold).num_days().abs() > WASH_SALE_DAYS
+                || same_purchase(b)
+                || b.sold.is_some_and(|(_, d)| d == sold)
+            {
+                continue;
+            }
+            let qty = b.left.min(need);
+            b.left -= qty;
+            need -= qty;
+            let basis_added = loss * qty / s.qty;
+            if let Some((j, _)) = b.sold {
+                added[j] += basis_added;
+            }
+            replacements.push(WashReplacement {
+                date: b.date.to_string(),
+                qty,
+                basis_added,
+                sale: b.sold.map(|(j, _)| j),
+            });
+        }
+        if replacements.is_empty() {
+            continue;
+        }
+        let replacement_qty = s.qty - need.max(0.0);
+        out.push(Wash {
+            sale: i,
+            symbol: s.symbol.clone(),
+            sell_date: s.sell_date.clone(),
+            loss,
+            replacement_qty,
+            disallowed: loss * replacement_qty / s.qty,
+            replacements,
+        });
+    }
+    out.sort_by_key(|w| w.sale);
+    out
+}
+
+/// The last day a purchase of the same shares makes a loss on a sale on
+/// `sold` a wash sale.
+pub fn wash_sale_window_end(sold: NaiveDate) -> NaiveDate {
+    sold + chrono::Duration::days(WASH_SALE_DAYS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,5 +1650,182 @@ mod tests {
         let json_str = serde_json::to_string(&s).unwrap();
         let deserialized: AdvanceTaxSchedule = serde_json::from_str(&json_str).unwrap();
         assert_eq!(s, deserialized);
+    }
+
+    mod wash {
+        use super::super::*;
+        use crate::portfolio::{Holding, Lot, Sale};
+
+        fn sale(symbol: &str, qty: f64, buy: (&str, f64), sell: (&str, f64)) -> Sale {
+            Sale {
+                symbol: symbol.into(),
+                qty,
+                buy_date: buy.0.into(),
+                buy_price: buy.1,
+                sell_date: sell.0.into(),
+                sell_price: sell.1,
+                buy_date_estimated: false,
+                source: "manual".into(),
+                order_id: None,
+                intraday: false,
+                account: None,
+            }
+        }
+
+        fn held(symbol: &str, lots: &[(f64, f64, &str)]) -> Holding {
+            let lots: Vec<Lot> = lots
+                .iter()
+                .map(|(q, p, d)| Lot::new(*q, *p, *d, "manual"))
+                .collect();
+            Holding {
+                symbol: symbol.into(),
+                shares: lots.iter().map(|l| l.qty).sum(),
+                avg_cost: 0.0,
+                added_at: String::new(),
+                lots,
+            }
+        }
+
+        #[test]
+        fn a_buy_ten_days_after_the_loss_is_a_wash_sale() {
+            // 10 AAPL bought at 200, sold at 150 on 2025-03-01: loss 500.
+            // 10 more bought on 2025-03-11 and still held.
+            let sales = [sale(
+                "AAPL",
+                10.0,
+                ("2024-06-03", 200.0),
+                ("2025-03-01", 150.0),
+            )];
+            let holdings = [held("AAPL", &[(10.0, 155.0, "2025-03-11")])];
+            let w = wash_sales(&sales, &holdings);
+            assert_eq!(w.len(), 1);
+            assert_eq!((w[0].sale, w[0].loss, w[0].disallowed), (0, 500.0, 500.0));
+            assert_eq!(
+                w[0].replacements,
+                [WashReplacement {
+                    date: "2025-03-11".into(),
+                    qty: 10.0,
+                    basis_added: 500.0,
+                    sale: None,
+                }]
+            );
+        }
+
+        #[test]
+        fn a_buy_before_the_sale_counts_and_its_later_sale_carries_the_basis() {
+            // 10 bought 2025-01-02 at 100, 10 more 2025-02-10 at 90; the first
+            // 10 sold 2025-02-20 at 80 (loss 200). The second lot, bought 10
+            // days before, is the replacement and is sold on 2025-06-02.
+            let sales = [
+                sale("MSFT", 10.0, ("2025-01-02", 100.0), ("2025-02-20", 80.0)),
+                sale("MSFT", 10.0, ("2025-02-10", 90.0), ("2025-06-02", 120.0)),
+            ];
+            let w = wash_sales(&sales, &[]);
+            assert_eq!(w.len(), 1);
+            assert_eq!((w[0].sale, w[0].disallowed), (0, 200.0));
+            assert_eq!(w[0].replacements[0].sale, Some(1));
+            assert_eq!(w[0].replacements[0].date, "2025-02-10");
+        }
+
+        #[test]
+        fn a_partial_replacement_disallows_its_share_of_the_loss() {
+            // 100 sold at a 1,000 loss; 25 bought back 5 days later.
+            let sales = [sale(
+                "NVDA",
+                100.0,
+                ("2024-01-02", 50.0),
+                ("2025-04-01", 40.0),
+            )];
+            let holdings = [held("NVDA", &[(25.0, 41.0, "2025-04-06")])];
+            let w = wash_sales(&sales, &holdings);
+            assert_eq!((w[0].replacement_qty, w[0].disallowed), (25.0, 250.0));
+        }
+
+        #[test]
+        fn a_replacement_is_used_once() {
+            // Two losses of 100 each, one 10-share buy in both windows: only
+            // the first loss is a wash sale.
+            let sales = [
+                sale("X", 10.0, ("2024-01-02", 20.0), ("2025-05-01", 10.0)),
+                sale("X", 10.0, ("2024-02-02", 20.0), ("2025-05-05", 10.0)),
+            ];
+            let holdings = [held("X", &[(10.0, 11.0, "2025-05-10")])];
+            let w = wash_sales(&sales, &holdings);
+            assert_eq!(w.len(), 1);
+            assert_eq!(w[0].sale, 0);
+        }
+
+        #[test]
+        fn a_buy_more_than_30_days_away_is_not_a_wash_sale() {
+            let sales = [sale(
+                "AAPL",
+                10.0,
+                ("2024-06-03", 200.0),
+                ("2025-03-01", 150.0),
+            )];
+            let holdings = [held(
+                "AAPL",
+                &[(10.0, 155.0, "2025-04-01"), (5.0, 190.0, "2025-01-29")],
+            )];
+            assert!(wash_sales(&sales, &holdings).is_empty());
+            // Day 30 is still inside the window.
+            let holdings = [held("AAPL", &[(10.0, 155.0, "2025-03-31")])];
+            assert_eq!(wash_sales(&sales, &holdings).len(), 1);
+        }
+
+        #[test]
+        fn a_sale_at_a_gain_is_not_a_wash_sale() {
+            let sales = [sale(
+                "AAPL",
+                10.0,
+                ("2024-06-03", 150.0),
+                ("2025-03-01", 200.0),
+            )];
+            let holdings = [held("AAPL", &[(10.0, 195.0, "2025-03-11")])];
+            assert!(wash_sales(&sales, &holdings).is_empty());
+        }
+
+        #[test]
+        fn the_rest_of_the_sold_lot_is_not_a_replacement() {
+            // 20 bought on 2025-01-02, 10 of them sold at a loss 15 days later.
+            let sales = [sale(
+                "AAPL",
+                10.0,
+                ("2025-01-02", 200.0),
+                ("2025-01-17", 150.0),
+            )];
+            let holdings = [held("AAPL", &[(10.0, 200.0, "2025-01-02")])];
+            assert!(wash_sales(&sales, &holdings).is_empty());
+        }
+
+        #[test]
+        fn shares_sold_on_the_same_day_are_not_replacements() {
+            // Two lots, both sold at a loss on the same day.
+            let sales = [
+                sale("AAPL", 10.0, ("2025-01-02", 200.0), ("2025-01-20", 150.0)),
+                sale("AAPL", 10.0, ("2025-01-10", 190.0), ("2025-01-20", 150.0)),
+            ];
+            assert!(wash_sales(&sales, &[]).is_empty());
+        }
+
+        #[test]
+        fn non_usd_symbols_are_ignored() {
+            let sales = [sale(
+                "TCS.NS",
+                10.0,
+                ("2024-06-03", 4000.0),
+                ("2025-03-01", 3500.0),
+            )];
+            let holdings = [held("TCS.NS", &[(10.0, 3550.0, "2025-03-11")])];
+            assert!(wash_sales(&sales, &holdings).is_empty());
+        }
+
+        #[test]
+        fn the_window_ends_30_days_after_the_sale() {
+            assert_eq!(
+                wash_sale_window_end(NaiveDate::from_ymd_opt(2025, 3, 1).unwrap()),
+                NaiveDate::from_ymd_opt(2025, 3, 31).unwrap()
+            );
+        }
     }
 }

@@ -1030,6 +1030,7 @@ fn goal_and_tax_export_json_shapes() {
     };
     let us = serde_json::to_value(crate::tax_export::us_schedule(
         &[us_sale],
+        &[],
         day("2025-01-01"),
     ))
     .unwrap();
@@ -1045,6 +1046,14 @@ fn goal_and_tax_export_json_shapes() {
             ]
             .contains(k)
         })
+        .flat_map(|k| {
+            // The US schedule lists its wash sales after the summary.
+            if k == "summary" {
+                vec![k, "wash_sales"]
+            } else {
+                vec![k]
+            }
+        })
         .collect();
     assert_eq!(keys(&us), us_keys);
     assert_eq!(
@@ -1058,6 +1067,8 @@ fn goal_and_tax_export_json_shapes() {
             "date_sold",
             "proceeds",
             "cost_basis",
+            "code",
+            "adjustment",
             "gain_or_loss",
             "date_acquired_estimated"
         ]
@@ -1475,4 +1486,39 @@ fn portfolio_analyze_csv_has_one_flat_row_per_holding() {
         csv.lines().nth(1).unwrap().starts_with("market,India,2,"),
         "{csv}"
     );
+}
+
+/// `harvest -m us` flags a loss candidate bought in the last 30 days.
+#[test]
+fn us_harvest_flags_a_recent_buy_inside_the_wash_sale_window() {
+    // AAPL: 10 @ 200 (2026-01-05) and 5 @ 140 (2026-10-20), price 150. The
+    // first lot is the loss; the second, a gain bought 12 days ago, stays
+    // held and would replace it. MSFT has no recent buy.
+    let p = lots(&[
+        ("AAPL", 10.0, 200.0, "2026-01-05"),
+        ("AAPL", 5.0, 140.0, "2026-10-20"),
+        ("MSFT", 10.0, 400.0, "2026-02-02"),
+    ]);
+    let usd = |symbol: &str, price: f64| Quote {
+        currency: Some("USD".into()),
+        ..quote(symbol, Some(price), None)
+    };
+    let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let val = Valuation::new(
+        vec![usd("AAPL", 150.0), usd("MSFT", 350.0)],
+        &symbols,
+        Market::Us,
+        None,
+    );
+    let h = super::holdings::compute_harvest(&p, &val, Market::Us, day("2026-11-01"));
+    let row = |s: &str| h.loss_candidates.iter().find(|r| r.symbol == s).unwrap();
+    assert_eq!(row("AAPL").shares, 10.0);
+    assert_eq!(row("AAPL").recent_buy.as_deref(), Some("2026-10-20"));
+    assert_eq!(row("MSFT").recent_buy, None);
+    assert_eq!(
+        row("MSFT").wash_sale_window_end.as_deref(),
+        Some("2026-12-01")
+    );
+    let json = serde_json::to_value(&h.loss_candidates[0]).unwrap();
+    assert!(json.get("recent_buy").is_some() && json.get("wash_sale_window_end").is_some());
 }
