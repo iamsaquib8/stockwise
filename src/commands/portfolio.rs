@@ -1590,6 +1590,19 @@ fn apply_lot_change_inner(resolved: &str, change: &LotChange) -> Result<Option<P
             sale.qty,
             sale.buy_date
         );
+        if sale.origin.is_none() {
+            // Recorded before 0.9: the sale keeps no split history, so a split
+            // after it can only be found online.
+            println!(
+                "  {}",
+                format!(
+                    "This sale was recorded by an older StockWise and does not say which splits \
+                     its lot had. Run `stockwise portfolio actions {resolved} --apply` to bring \
+                     the restored shares into today's share count."
+                )
+                .yellow()
+            );
+        }
         println!("  {}", RESTORE_HINT.dimmed());
         return Ok(Some(p));
     }
