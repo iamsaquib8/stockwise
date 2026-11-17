@@ -111,6 +111,10 @@ const fn opt(name: &'static str, kind: Kind, description: &'static str) -> Param
     }
 }
 
+/// Personal tools that also fetch public market data on their default path
+/// (prices, statements, fund holdings), so hosts see them as open-world.
+pub const PERSONAL_OPEN_WORLD: &[&str] = &["portfolio_checkup"];
+
 /// One tool: its name (`^[a-z_]+$`), a title for people, a description for
 /// the model, and its parameters.
 #[derive(Debug, Clone, Copy)]

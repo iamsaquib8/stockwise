@@ -144,6 +144,9 @@ pub struct SymbolYear {
     pub realized_gain: f64,
     /// Dated flows into (+) and out of (−) the holding, for the period return.
     pub flows: Vec<(NaiveDate, f64)>,
+    /// No exchange rate into the base currency: every amount is still in
+    /// the symbol's own currency and stays out of the totals.
+    pub unconverted: bool,
 }
 
 impl SymbolYear {
@@ -331,6 +334,8 @@ pub struct WrapReport {
     pub tax: Option<TaxFooter>,
     /// Symbols held in the period without a price, left out of the return.
     pub unpriced: Vec<String>,
+    /// Symbols without an exchange rate, left out of every total.
+    pub unconverted: Vec<String>,
     pub disclaimer: &'static str,
 }
 
@@ -351,6 +356,7 @@ pub struct Totals {
     pub winners: Vec<Mover>,
     pub laggards: Vec<Mover>,
     pub unpriced: Vec<String>,
+    pub unconverted: Vec<String>,
 }
 
 /// Sum symbol years (each already in the base currency) into the card's
@@ -367,10 +373,15 @@ pub fn totals(years: &[SymbolYear], period: &Period, as_of: NaiveDate, top: usiz
         winners: Vec::new(),
         laggards: Vec::new(),
         unpriced: Vec::new(),
+        unconverted: Vec::new(),
     };
     let mut flows = Vec::new();
     let mut movers = Vec::new();
     for y in years {
+        if y.unconverted {
+            t.unconverted.push(y.symbol.clone());
+            continue;
+        }
         t.bought += y.bought;
         t.sold += y.sold;
         t.dividends += y.dividends;
@@ -602,6 +613,12 @@ pub fn render(r: &WrapReport) -> Vec<String> {
         }
         l.push(line);
     }
+    if !r.unconverted.is_empty() {
+        l.push(format!(
+            "No exchange rate for {}: left out of every figure.",
+            r.unconverted.join(", ")
+        ));
+    }
     if !r.unpriced.is_empty() {
         l.push(format!(
             "No price for {}: left out of the return.",
@@ -787,6 +804,20 @@ mod tests {
     }
 
     #[test]
+    fn unconverted_amounts_stay_out_of_totals() {
+        let p = Period::calendar(2026).unwrap();
+        let mut usd = year("AAPL", 100.0, 120.0);
+        usd.bought = 1_000.0;
+        usd.unconverted = true;
+        let mut inr = year("TCS.NS", 100.0, 110.0);
+        inr.bought = 50.0;
+        let t = totals(&[usd, inr], &p, d("2026-12-31"), 3);
+        assert_eq!(t.unconverted, ["AAPL"]);
+        assert_eq!(t.bought, 50.0);
+        assert_eq!(t.start_value, 100.0);
+    }
+
+    #[test]
     fn benchmark_and_advance_tax() {
         let c = vec![(d("2025-12-31"), 200.0), (d("2026-12-31"), 230.0)];
         let p = Period::calendar(2026).unwrap();
@@ -854,6 +885,7 @@ mod tests {
                 next_advance_tax: Some((d("2026-12-15"), 75.0)),
             }),
             unpriced: vec![],
+            unconverted: vec![],
             disclaimer: DISCLAIMER,
         }
     }

@@ -1361,9 +1361,9 @@ enum PortfolioCmd {
         /// Use only local data and the cache (no statements, fund costs or live prices)
         #[arg(long)]
         offline: bool,
-        /// Print the findings as JSON
-        #[arg(long)]
-        json: bool,
+        /// `--json` prints the whole report, `--csv` one row per finding
+        #[command(flatten)]
+        out: TableOutput,
     },
     /// Year in review: return vs benchmark, winners and laggards, cash flows, diversification
     /// and tax readiness. Default: the current Indian FY for a rupee portfolio, else the
@@ -4582,8 +4582,8 @@ async fn dispatch(
             Some(PortfolioCmd::Analyze { quick, groups, out }) => {
                 commands::cmd_portfolio_analyze(m, base.as_deref(), quick, groups, out.into()).await
             }
-            Some(PortfolioCmd::Checkup { offline, json }) => {
-                commands::cmd_portfolio_checkup(m, base.as_deref(), offline, json).await
+            Some(PortfolioCmd::Checkup { offline, out }) => {
+                commands::cmd_portfolio_checkup(m, base.as_deref(), offline, out.into()).await
             }
             Some(PortfolioCmd::Wrap {
                 year,

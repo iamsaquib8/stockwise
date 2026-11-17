@@ -261,7 +261,7 @@ pub(crate) async fn run_checkup(
     } else {
         src.yahoo().await.ok()
     };
-    let g = super::portfolio_analyze::gather_inputs(src, client, market, base, false).await?;
+    let mut g = super::portfolio_analyze::gather_inputs(src, client, market, base, false).await?;
     if g.portfolio.holdings.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
     }
@@ -368,6 +368,22 @@ pub(crate) async fn run_checkup(
         ));
     }
 
+    // Holdings whose year of closes could not be read.
+    let no_history: Vec<&str> = g
+        .inputs
+        .iter()
+        .filter(|i| {
+            i.closes.is_empty() && !offmarket::is_fund(&i.symbol) && !offmarket::is_sgb(&i.symbol)
+        })
+        .map(|i| i.symbol.as_str())
+        .collect();
+    if !no_history.is_empty() {
+        skipped.push(format!(
+            "No price history for {}: left out of beta, drawdown and correlations",
+            no_history.join(", ")
+        ));
+    }
+
     // Correlation from the year of closes.
     let series: Vec<ck::Series> = g
         .inputs
@@ -387,10 +403,27 @@ pub(crate) async fn run_checkup(
         .any(|s| s.closes.len() > ck::MIN_CORRELATION_OBS)
         .then(|| ck::correlated_pairs(&series));
 
+    // Amounts reported in the tax, fund or goal currency are ranked in the
+    // base currency: fetch those rates too.
+    let mut extra: Vec<String> = vec!["INR".into(), market_currency(market).into()];
+    if let Some(c) = home_country(market) {
+        extra.push(c.tax_currency().into());
+    }
+    g.val.add_rates(src, &extra).await;
+    let g = g;
+    let fx = |c: &str| g.val.fx.convert(1.0, c);
+
     // Tax headroom.
     let tax = match home_country(market) {
         None => None,
         Some(country) => match harvest(src, &g.portfolio, market, today, offline).await {
+            Ok(h) if fx(h.currency).is_none() => {
+                skipped.push(format!(
+                    "Tax headroom: no {} to {} exchange rate",
+                    h.currency, g.ctx.base_currency
+                ));
+                None
+            }
             Ok(h) => {
                 let (_, year_end) = country.tax_year(today);
                 let cess = if country == Country::India {
@@ -412,6 +445,7 @@ pub(crate) async fn run_checkup(
                     loss_tax_saved: h.estimated_loss_tax_saved,
                     days_to_year_end: (year_end - today).num_days(),
                     year_end: year_end.format("%d %b %Y").to_string(),
+                    fx_to_base: fx(h.currency).unwrap_or(1.0),
                 })
             }
             Err(e) => {
@@ -429,6 +463,12 @@ pub(crate) async fn run_checkup(
         .any(|h| offmarket::is_fund(&h.symbol));
     let bleed = if !has_funds {
         None
+    } else if fx("INR").is_none() {
+        skipped.push(format!(
+            "Regular vs Direct plan costs: no INR to {} exchange rate",
+            g.ctx.base_currency
+        ));
+        None
     } else if offline {
         skipped.push("Regular vs Direct plan costs: not read (offline)".into());
         None
@@ -441,6 +481,7 @@ pub(crate) async fn run_checkup(
                         symbol: f.bleed.symbol.clone(),
                         value: f.bleed.value,
                         annual_cost: f.bleed.annual_bleed,
+                        fx_to_base: fx("INR").unwrap_or(1.0),
                     })
                     .collect(),
             ),
@@ -463,6 +504,8 @@ pub(crate) async fn run_checkup(
                     funded_pct: r.funded_pct,
                     monthly_sip: r.monthly_sip,
                     gap: (r.target_future - r.linked_value).max(0.0),
+                    currency: market_currency(market).to_string(),
+                    fx_to_base: fx(market_currency(market)).unwrap_or(1.0),
                 })
                 .collect(),
         ),
@@ -510,6 +553,7 @@ pub(crate) async fn run_checkup(
         holdings,
         look_through,
         fund_overlaps: ck::fund_overlaps(&funds),
+        funds_compared: funds.len(),
         beta: analysis.risk.beta,
         max_drawdown_pct: analysis.risk.max_drawdown_pct,
         benchmark: analysis.risk.benchmark.clone(),
@@ -617,13 +661,69 @@ fn print_checkup(c: &Checkup) {
     println!("\n  {}\n", c.disclaimer.dimmed().italic());
 }
 
+/// One finding in `portfolio checkup --csv`; amounts in the base currency.
+#[derive(Debug, Serialize)]
+pub(crate) struct FindingCsv {
+    rank: usize,
+    lens: ck::Lens,
+    rule: ck::Rule,
+    severity: ck::Severity,
+    symbol: Option<String>,
+    observed: String,
+    exposure: f64,
+    at_stake: Option<f64>,
+    weight_percent: Option<f64>,
+    impact: f64,
+    inspect: String,
+    currency: String,
+}
+
+impl CsvRow for FindingCsv {
+    const COLUMNS: &'static [&'static str] = &[
+        "rank",
+        "lens",
+        "rule",
+        "severity",
+        "symbol",
+        "observed",
+        "exposure",
+        "at_stake",
+        "weight_percent",
+        "impact",
+        "inspect",
+        "currency",
+    ];
+}
+
+/// The findings of a checkup as CSV rows, in rank order.
+pub(crate) fn finding_csv_rows(c: &Checkup) -> Vec<FindingCsv> {
+    c.findings
+        .iter()
+        .enumerate()
+        .map(|(i, f)| FindingCsv {
+            rank: i + 1,
+            lens: f.lens,
+            rule: f.rule,
+            severity: f.severity,
+            symbol: f.symbol.clone(),
+            observed: f.observed.clone(),
+            exposure: round(f.exposure, 2),
+            at_stake: round_opt(f.at_stake, 2),
+            weight_percent: round_opt(f.weight_pct, 2),
+            impact: round(f.impact, 2),
+            inspect: f.inspect.clone(),
+            currency: c.base_currency.clone(),
+        })
+        .collect()
+}
+
 pub async fn cmd_portfolio_checkup(
     market: Market,
     base: Option<&str>,
     offline: bool,
-    json: bool,
+    fmt: Format,
 ) -> Result<()> {
-    if !json {
+    if fmt.is_table() {
         eprintln!(
             "  {} Checking the portfolio{}...",
             "⟳".yellow(),
@@ -639,11 +739,14 @@ pub async fn cmd_portfolio_checkup(
     } else {
         checkup_report(&views::LiveSource::new(), market, base, false).await?
     };
-    if json {
-        return output::print_json(&c);
+    match fmt {
+        Format::Json => output::print_json(&c),
+        Format::Csv => output::print_csv(&finding_csv_rows(&c)),
+        Format::Table => {
+            print_checkup(&c);
+            Ok(())
+        }
     }
-    print_checkup(&c);
-    Ok(())
 }
 
 // ── Wrap ──
@@ -728,23 +831,36 @@ pub(crate) async fn wrap_report(
     period: Option<Period>,
     offline: bool,
 ) -> Result<WrapReport> {
-    let run = run_checkup(src, market, base, offline, false).await?;
     let portfolio = src.portfolio().map_err(|e| e.context(views::LocalData))?;
-    let today = chrono::Local::now().date_naive();
-    let a = &run.analysis;
-    let period = period.unwrap_or_else(|| Period::default_for(&a.base_currency, today));
-    if period.start > today {
-        bail!("{} has not started yet", period.label);
+    if portfolio.holdings.is_empty() && portfolio.realized.is_empty() {
+        bail!("{}", t(Msg::PortfolioEmpty));
     }
-    let as_of = period.as_of(today);
-    let range = range_back_to(period.opening(), today);
+    // The checkup describes what is held now; a portfolio sold out during
+    // the year still gets its review, without that part.
+    let run = if portfolio.holdings.is_empty() {
+        None
+    } else {
+        Some(run_checkup(src, market, base, offline, false).await?)
+    };
+    let today = chrono::Local::now().date_naive();
+    let a = run.as_ref().map(|r| &r.analysis);
 
     let held: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let val = value_holdings(src, &held, market, base).await?;
+    let val = if held.is_empty() {
+        Valuation::new(Vec::new(), &portfolio.symbols_with_history(), market, base)
+    } else {
+        value_holdings(src, &held, market, base).await?
+    };
+    let period = period.unwrap_or_else(|| Period::default_for(val.base(), today));
+    if period.start > today {
+        bail!("{} has not started yet", period.label);
+    }
+    let as_of = period.as_of(today);
+    let range = range_back_to(period.opening(), today);
     let mut symbols = portfolio.symbols_with_history();
     // Sold-out holdings need their own exchange rates.
     let mut val = val;
@@ -783,9 +899,7 @@ pub(crate) async fn wrap_report(
                     f.1 *= fx;
                 }
             }
-            None => {
-                y.start_value = None;
-            }
+            None => y.unconverted = true,
         }
         years.push(y);
     }
@@ -809,7 +923,10 @@ pub(crate) async fn wrap_report(
     let tax = home_country(market).map(|country| {
         let (_, end) = country.tax_year(today);
         let limit = country.exemption();
-        let remaining = run.tax.as_ref().map(|t| t.exemption_remaining);
+        let remaining = run
+            .as_ref()
+            .and_then(|r| r.tax.as_ref())
+            .map(|t| t.exemption_remaining);
         wrap::TaxFooter {
             year: country.tax_year_label(today),
             days_left: (end - today).num_days(),
@@ -836,7 +953,7 @@ pub(crate) async fn wrap_report(
     };
     Ok(WrapReport {
         as_of,
-        base_currency: a.base_currency.clone(),
+        base_currency: val.base().to_string(),
         redacted: false,
         return_pct: t.return_pct,
         benchmark: bench_name.to_string(),
@@ -856,13 +973,14 @@ pub(crate) async fn wrap_report(
         realized_gain_pct: share(t.realized_gain),
         winners: t.winners,
         laggards: t.laggards,
-        cap_tiers: slices(&a.by_cap_tier, 5),
-        top_sectors: slices(&a.by_sector, 3),
-        holdings: a.positions.len(),
-        effective_bets: run.checkup.effective_bets,
-        checkup_clean: Some((run.checkup.clean, run.checkup.evaluated)),
+        cap_tiers: a.map_or(Vec::new(), |a| slices(&a.by_cap_tier, 5)),
+        top_sectors: a.map_or(Vec::new(), |a| slices(&a.by_sector, 3)),
+        holdings: a.map_or(0, |a| a.positions.len()),
+        effective_bets: run.as_ref().map_or(0.0, |r| r.checkup.effective_bets),
+        checkup_clean: run.as_ref().map(|r| (r.checkup.clean, r.checkup.evaluated)),
         tax,
         unpriced: t.unpriced,
+        unconverted: t.unconverted,
         disclaimer: wrap::DISCLAIMER,
         period,
     })
@@ -915,6 +1033,34 @@ pub async fn cmd_portfolio_wrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_has_one_row_per_finding_in_rank_order() {
+        let mut input = ck::CheckupInput {
+            base_currency: "INR".into(),
+            total_value: 1000.0,
+            beta: Some(1.5),
+            max_drawdown_pct: Some(-40.0),
+            benchmark: "NIFTY 50".into(),
+            ..Default::default()
+        };
+        input.holdings = vec![ck::HoldingFacts {
+            symbol: "A.NS".into(),
+            value: 1000.0,
+            weight_pct: 100.0,
+            ..Default::default()
+        }];
+        input.max_stock_weight = Some(150.0);
+        let c = ck::evaluate(&input, vec![]);
+        let rows = finding_csv_rows(&c);
+        assert_eq!(rows.len(), c.findings.len());
+        assert_eq!(rows[0].rank, 1);
+        let v = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), FindingCsv::COLUMNS.len());
+        for col in FindingCsv::COLUMNS {
+            assert!(v.get(*col).is_some(), "{col}");
+        }
+    }
 
     #[test]
     fn chart_range_reaches_the_opening() {

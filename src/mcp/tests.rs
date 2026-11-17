@@ -98,6 +98,11 @@ async fn initialize_advertises_tools_resources_and_prompts() {
         .find(|t| t["name"] == "portfolio_summary")
         .unwrap();
     assert_eq!(personal["annotations"]["openWorldHint"], false);
+    let checkup = list
+        .iter()
+        .find(|t| t["name"] == "portfolio_checkup")
+        .unwrap();
+    assert_eq!(checkup["annotations"]["openWorldHint"], true);
     assert!(list.iter().all(|t| t["name"] != "order_preview"));
 
     let ping = c.request("ping", json!({})).await;

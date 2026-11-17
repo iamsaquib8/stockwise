@@ -240,14 +240,19 @@ pub struct TaxFacts {
     pub loss_tax_saved: f64,
     pub days_to_year_end: i64,
     pub year_end: String,
+    /// Base currency per unit of `currency`, for exposure and ranking.
+    pub fx_to_base: f64,
 }
 
 /// A Regular-plan fund and what it costs a year over its Direct twin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BleedFacts {
     pub symbol: String,
+    /// Rupees, as AMFI reports them.
     pub value: f64,
     pub annual_cost: f64,
+    /// Base currency per rupee.
+    pub fx_to_base: f64,
 }
 
 /// A saved goal that needs more money than it has.
@@ -259,6 +264,9 @@ pub struct GoalFacts {
     pub monthly_sip: f64,
     /// Target (in money of the due date) less the linked value.
     pub gap: f64,
+    /// The goal's currency (the market's) and base currency per unit of it.
+    pub currency: String,
+    pub fx_to_base: f64,
 }
 
 /// A target weight (symbol or sector) and where it stands now.
@@ -280,6 +288,8 @@ pub struct CheckupInput {
     /// Empty when no fund holdings were known: direct weights are used.
     pub look_through: Vec<(String, f64)>,
     pub fund_overlaps: Vec<FundOverlap>,
+    /// Funds whose holdings are known, so overlap could be compared.
+    pub funds_compared: usize,
     pub beta: Option<f64>,
     pub max_drawdown_pct: Option<f64>,
     pub benchmark: String,
@@ -531,13 +541,13 @@ pub fn revenue_trend(quarters: &[crate::research::Period]) -> (Option<f64>, Opti
 /// Operating cash flow over net profit for the latest year with both, when
 /// the profit is positive.
 pub fn cfo_to_pat(annual: &[crate::research::Period]) -> Option<f64> {
-    annual
+    // The latest year with both figures; a loss there gives no ratio rather
+    // than an older year's.
+    let (c, n) = annual
         .iter()
         .rev()
-        .find_map(|p| match (p.ocf, p.net_income) {
-            (Some(c), Some(n)) if n > 0.0 => Some(c / n),
-            _ => None,
-        })
+        .find_map(|p| Some((p.ocf?, p.net_income?)))?;
+    (n > 0.0).then(|| c / n)
 }
 
 // ── Evaluation ──
@@ -600,9 +610,13 @@ fn is_small(t: Option<CapTier>) -> bool {
     matches!(t, Some(CapTier::Small | CapTier::Micro))
 }
 
+fn is_classified(t: Option<CapTier>) -> bool {
+    !matches!(t, None | Some(CapTier::Unknown))
+}
+
 /// Run every rule over `input`. `skipped` names the data that could not be
 /// read; it is carried into the report.
-pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
+pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
     let cur = input.base_currency.as_str();
     let total = input.total_value;
     let mut b = Builder {
@@ -686,9 +700,21 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
             );
         }
     }
+    let unclassified: Vec<&str> = input
+        .holdings
+        .iter()
+        .filter(|h| !h.is_fund && !is_classified(h.cap_tier))
+        .map(|h| h.symbol.as_str())
+        .collect();
     if let Some(max_small) = input.max_smallcap_weight
-        && input.holdings.iter().any(|h| h.cap_tier.is_some())
+        && input.holdings.iter().any(|h| is_classified(h.cap_tier))
     {
+        if !unclassified.is_empty() {
+            skipped.push(format!(
+                "Cap tier unknown for {}: left out of the small-cap share",
+                unclassified.join(", ")
+            ));
+        }
         b.ran(Rule::SmallcapWeight);
         let small: f64 = input
             .holdings
@@ -718,7 +744,7 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
             );
         }
     }
-    if fund_symbols.len() > 1 {
+    if input.funds_compared > 1 {
         b.ran(Rule::FundOverlap);
     }
     for o in &input.fund_overlaps {
@@ -851,10 +877,16 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
                 );
             }
         }
-        if f.pe.is_some() || f.peg.is_some() {
+        let rich =
+            f.pe.is_some_and(|p| p > STRETCHED_PE) || f.peg.is_some_and(|p| p > STRETCHED_PEG);
+        if rich && f.revenue_decelerating.is_none() {
+            // A high multiple alone is not the rule: without the revenue
+            // trend it cannot be judged.
+            skipped.push(format!(
+                "Revenue trend unknown for {sym}: valuation not judged"
+            ));
+        } else if f.pe.is_some() || f.peg.is_some() {
             b.ran(Rule::StretchedValuation);
-            let rich =
-                f.pe.is_some_and(|p| p > STRETCHED_PE) || f.peg.is_some_and(|p| p > STRETCHED_PEG);
             if rich && f.revenue_decelerating == Some(true) {
                 b.add(
                     Rule::StretchedValuation,
@@ -962,8 +994,8 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
                     t.days_to_year_end,
                     t.year_end
                 ),
-                saved,
-                Some(saved),
+                saved * t.fx_to_base,
+                Some(saved * t.fx_to_base),
                 None,
                 "stockwise harvest".into(),
             );
@@ -985,8 +1017,8 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
                     t.days_to_year_end,
                     t.year_end
                 ),
-                t.loss_tax_saved,
-                Some(t.loss_tax_saved),
+                t.loss_tax_saved * t.fx_to_base,
+                Some(t.loss_tax_saved * t.fx_to_base),
                 None,
                 "stockwise harvest".into(),
             );
@@ -1004,8 +1036,8 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
                     money(f.annual_cost, "INR"),
                     money(f.value, "INR")
                 ),
-                f.value,
-                Some(f.annual_cost),
+                f.value * f.fx_to_base,
+                Some(f.annual_cost * f.fx_to_base),
                 None,
                 "stockwise mf bleed".into(),
             );
@@ -1081,19 +1113,19 @@ pub fn evaluate(input: &CheckupInput, skipped: Vec<String>) -> Checkup {
                         "Goal `{}` is past its date and {:.0}% funded ({} short).",
                         g.name,
                         g.funded_pct,
-                        money(g.gap, cur)
+                        money(g.gap, &g.currency)
                     )
                 } else {
                     format!(
                         "Goal `{}` is {:.0}% funded; reaching it needs about {} a month ({} short today).",
                         g.name,
                         g.funded_pct,
-                        money(g.monthly_sip, cur),
-                        money(g.gap, cur)
+                        money(g.monthly_sip, &g.currency),
+                        money(g.gap, &g.currency)
                     )
                 },
-                g.gap,
-                Some(g.gap),
+                g.gap * g.fx_to_base,
+                Some(g.gap * g.fx_to_base),
                 None,
                 format!("stockwise goal show {}", g.name),
             );
@@ -1374,11 +1406,15 @@ mod tests {
                 .findings
                 .is_empty()
         );
+        let unknown = evaluate(&with_fundamentals(rich(None)), vec![]);
+        assert!(unknown.findings.is_empty());
         assert!(
-            evaluate(&with_fundamentals(rich(None)), vec![])
-                .findings
-                .is_empty()
+            !unknown
+                .checks
+                .iter()
+                .any(|c| c.rule == Rule::StretchedValuation)
         );
+        assert!(unknown.skipped[0].contains("Revenue trend unknown"));
         let peg = Fundamentals {
             pe: Some(30.0),
             peg: Some(2.6),
@@ -1466,6 +1502,7 @@ mod tests {
             loss_tax_saved: 2_000.0,
             days_to_year_end: 134,
             year_end: "31 Mar 2027".into(),
+            fx_to_base: 1.0,
         });
         let c = evaluate(&i, vec![]);
         let head = c
@@ -1514,11 +1551,13 @@ mod tests {
                 symbol: "MF:100".into(),
                 value: 200_000.0,
                 annual_cost: 1_400.0,
+                fx_to_base: 1.0,
             },
             BleedFacts {
                 symbol: "MF:200".into(),
                 value: 1.0,
                 annual_cost: 0.0,
+                fx_to_base: 1.0,
             },
         ]);
         i.drift = Some(vec![
@@ -1542,6 +1581,8 @@ mod tests {
                 funded_pct: 40.0,
                 monthly_sip: 10_000.0,
                 gap: 600_000.0,
+                currency: "INR".into(),
+                fx_to_base: 1.0,
             },
             GoalFacts {
                 name: "done".into(),
@@ -1549,6 +1590,8 @@ mod tests {
                 funded_pct: 100.0,
                 monthly_sip: 0.0,
                 gap: 0.0,
+                currency: "INR".into(),
+                fx_to_base: 1.0,
             },
         ]);
         let c = evaluate(&i, vec![]);
@@ -1647,5 +1690,66 @@ mod tests {
         assert!((cfo_to_pat(&annual).unwrap() - 0.6).abs() < 1e-12);
         annual[0].net_income = Some(-1.0);
         assert_eq!(cfo_to_pat(&annual), None);
+        // A loss in the latest year gives no ratio, not an older year's.
+        let mut older = period("2024-03-31", 100.0, 10.0, 20.0);
+        older.ocf = Some(5.0);
+        annual.insert(0, older);
+        assert_eq!(cfo_to_pat(&annual), None);
+    }
+
+    #[test]
+    fn unknown_cap_tiers_do_not_count_as_checked() {
+        let mut i = spread();
+        for x in &mut i.holdings {
+            x.cap_tier = Some(CapTier::Unknown);
+        }
+        let c = evaluate(&i, vec![]);
+        assert!(!c.checks.iter().any(|c| c.rule == Rule::SmallcapWeight));
+        i.holdings[0].cap_tier = Some(CapTier::Large);
+        let c = evaluate(&i, vec![]);
+        assert!(c.checks.iter().any(|c| c.rule == Rule::SmallcapWeight));
+        assert!(
+            c.skipped[0].starts_with("Cap tier unknown for S1.NS"),
+            "{:?}",
+            c.skipped
+        );
+    }
+
+    #[test]
+    fn overlap_counts_only_when_funds_were_compared() {
+        let mut i = spread();
+        i.holdings[0].is_fund = true;
+        i.holdings[1].is_fund = true;
+        assert!(
+            !evaluate(&i, vec![])
+                .checks
+                .iter()
+                .any(|c| c.rule == Rule::FundOverlap)
+        );
+        i.funds_compared = 2;
+        assert!(
+            evaluate(&i, vec![])
+                .checks
+                .iter()
+                .any(|c| c.rule == Rule::FundOverlap && c.clean)
+        );
+    }
+
+    #[test]
+    fn exposure_is_in_the_base_currency() {
+        let mut i = spread();
+        i.base_currency = "USD".into();
+        i.bleed = Some(vec![BleedFacts {
+            symbol: "MF:100".into(),
+            value: 200_000.0,
+            annual_cost: 1_400.0,
+            fx_to_base: 0.012,
+        }]);
+        let c = evaluate(&i, vec![]);
+        let f = &c.findings[0];
+        assert!((f.exposure - 2_400.0).abs() < 1e-9);
+        assert!((f.at_stake.unwrap() - 16.8).abs() < 1e-9);
+        // The text keeps the rupee amounts AMFI reports.
+        assert!(f.observed.contains("₹1,400"), "{}", f.observed);
     }
 }

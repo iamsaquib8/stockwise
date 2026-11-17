@@ -444,7 +444,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL>` | Remove a holding and its lots without recording a sale |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
-| `portfolio checkup [--offline] [--json]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it (see [below](#portfolio-checkup)) |
+| `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it (see [below](#portfolio-checkup)) |
 | `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
@@ -754,7 +754,12 @@ disclosures. It skips statements and Regular-plan costs. `--json` prints
 `{base_currency, total_value, herfindahl, effective_bets, findings: [{lens,
 rule, severity, symbol, observed, exposure, at_stake, weight_pct, inspect,
 impact}], checks: [{rule, lens, clean}], clean, evaluated, skipped,
-disclaimer}`. The MCP tool `portfolio_checkup` returns the same.
+disclaimer}`; `--csv` prints one row per finding in rank order. The MCP tool
+`portfolio_checkup` returns the JSON. Amounts are ranked in the base
+currency: tax, fund and goal amounts are converted at today's rate, and a
+source without a rate is listed under "Not checked". A check only counts as
+run when its data was there: unknown cap tiers, funds without disclosed
+holdings or a missing revenue trend leave the check out of the count.
 
 These are observations, not advice: nothing says to buy, sell or keep a
 holding.
