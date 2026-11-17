@@ -1015,6 +1015,7 @@ mod tests {
             order_id: None,
             intraday: false,
             account: None,
+            origin: None,
         }
     }
 

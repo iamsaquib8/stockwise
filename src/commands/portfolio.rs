@@ -1252,9 +1252,32 @@ pub async fn cmd_portfolio_add(
     Ok(())
 }
 
-pub async fn cmd_portfolio_remove(symbol: &str, market: Market) -> Result<()> {
+pub async fn cmd_portfolio_remove(symbol: &str, yes: bool, market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
+    let lots = portfolio.holding(&resolved).map_or(0, |h| h.lots.len());
+    if lots > 1 && !yes {
+        use std::io::{BufRead, IsTerminal, Write};
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "{} has {} lots; pass --yes to remove them all (or `portfolio lots {} --lot N --delete` for one)",
+                resolved,
+                lots,
+                resolved
+            );
+        }
+        print!(
+            "  Remove {} and all {} of its lots, without recording a sale? [y/N] ",
+            resolved, lots
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        if !answer.trim().to_ascii_lowercase().starts_with('y') {
+            println!("  Nothing removed.");
+            return Ok(());
+        }
+    }
     Portfolio::update(|p| {
         if !p.remove(&resolved) {
             bail!("{} is not in your portfolio", resolved);
@@ -1262,6 +1285,7 @@ pub async fn cmd_portfolio_remove(symbol: &str, market: Market) -> Result<()> {
         Ok(())
     })?;
     println!("  {} Removed {} from portfolio", "✓".green(), resolved);
+    println!("  {}", RESTORE_HINT.dimmed());
     println!(
         "  {}",
         "To record a sale (and its P&L for `tax`), use `stockwise portfolio sell` instead."
@@ -1407,27 +1431,174 @@ pub async fn cmd_portfolio_sell(
     Ok(())
 }
 
-pub async fn cmd_portfolio_lots(
-    symbol: &str,
-    fix_lot: Option<usize>,
-    fix_date: Option<&str>,
-    market: Market,
-) -> Result<()> {
-    let mut portfolio = Portfolio::load()?;
-    let resolved = held_symbol(&portfolio, symbol, market);
-    if let (Some(n), Some(d)) = (fix_lot, fix_date) {
-        let d = pf::parse_date(d)?.to_string();
-        portfolio = Portfolio::update(|p| {
-            p.set_lot_date(&resolved, n, &d)?;
-            Ok(p.clone())
+/// Printed after a change made by hand, so a mistake is one command away
+/// from undone.
+const RESTORE_HINT: &str =
+    "The previous version is kept: `stockwise portfolio restore` lists the backups.";
+
+/// A correction asked for with `portfolio lots`.
+#[derive(Debug, Default)]
+pub struct LotChange {
+    pub lot: Option<usize>,
+    pub date: Option<String>,
+    pub qty: Option<f64>,
+    pub price: Option<f64>,
+    pub delete: bool,
+    pub undo_sale: Option<usize>,
+}
+
+/// `portfolio restore`: list the backups, or bring backup `n` back.
+pub fn cmd_portfolio_restore(n: Option<usize>) -> Result<()> {
+    let path = crate::store::path(&pf::file_name(pf::active()))?;
+    let backups = pf::backups_of(&path);
+    let Some(n) = n else {
+        print_header(&portfolio_title("Backups"));
+        if backups.is_empty() {
+            println!(
+                "  {}",
+                "No backups yet: one is kept each time the portfolio changes.".dimmed()
+            );
+            println!();
+            return Ok(());
+        }
+        println!(
+            "  {:>3} {:<20} {:>8} {:>6}",
+            "#".bold(),
+            "Saved".bold(),
+            "Holdings".bold(),
+            "Sales".bold()
+        );
+        for (i, file) in &backups {
+            let saved = std::fs::metadata(file)
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    chrono::DateTime::<chrono::Local>::from(t)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            match Portfolio::load_from(file) {
+                Ok(p) => println!(
+                    "  {:>3} {:<20} {:>8} {:>6}",
+                    i,
+                    saved,
+                    p.holdings.len(),
+                    p.realized.len()
+                ),
+                Err(_) => println!("  {:>3} {:<20} {}", i, saved, "unreadable".red()),
+            }
+        }
+        println!(
+            "\n  {}",
+            "`stockwise portfolio restore N` brings one back; the current version becomes backup 1."
+                .dimmed()
+        );
+        println!();
+        return Ok(());
+    };
+    let _lock = crate::store::lock(&path)?;
+    let p = Portfolio::restore_backup(&path, n)?;
+    println!(
+        "  {} Restored backup #{} ({} holdings, {} sales)",
+        "✓".green(),
+        n,
+        p.holdings.len(),
+        p.realized.len()
+    );
+    println!(
+        "  {}",
+        "The version it replaced is now backup 1: `stockwise portfolio restore 1` undoes this."
+            .dimmed()
+    );
+    Ok(())
+}
+
+/// Apply a [`LotChange`] to the saved portfolio and say what changed.
+fn apply_lot_change(resolved: &str, change: &LotChange) -> Result<Option<Portfolio>> {
+    if let Some(n) = change.undo_sale {
+        let (p, sale) = Portfolio::update(|p| {
+            let sale = p.undo_sale(resolved, n)?;
+            Ok((p.clone(), sale))
         })?;
         println!(
-            "  {} Lot #{} of {} now dated {}",
+            "  {} Undid sale #{} of {}: {} shares bought {} are back in your lots",
             "✓".green(),
             n,
             resolved,
-            d
+            sale.qty,
+            sale.buy_date
         );
+        println!("  {}", RESTORE_HINT.dimmed());
+        return Ok(Some(p));
+    }
+    let Some(n) = change.lot else {
+        return Ok(None);
+    };
+    if change.delete {
+        let (p, lot) = Portfolio::update(|p| {
+            let lot = p.delete_lot(resolved, n)?;
+            Ok((p.clone(), lot))
+        })?;
+        println!(
+            "  {} Deleted lot #{} of {} ({} bought {}); no sale was recorded",
+            "✓".green(),
+            n,
+            resolved,
+            lot.qty,
+            lot.date
+        );
+        println!("  {}", RESTORE_HINT.dimmed());
+        return Ok(Some(p));
+    }
+    if change.date.is_none() && change.qty.is_none() && change.price.is_none() {
+        bail!("--lot {n} needs --date, --qty, --price or --delete");
+    }
+    let date = change
+        .date
+        .as_deref()
+        .map(|d| pf::parse_date(d).map(|d| d.to_string()))
+        .transpose()?;
+    let p = Portfolio::update(|p| {
+        if change.qty.is_some() || change.price.is_some() {
+            p.edit_lot(resolved, n, change.qty, change.price)?;
+        }
+        if let Some(d) = &date {
+            p.set_lot_date(resolved, n, d)?;
+        }
+        Ok(p.clone())
+    })?;
+    let mut what = Vec::new();
+    if let Some(d) = &date {
+        what.push(format!("dated {d}"));
+    }
+    if let Some(q) = change.qty {
+        what.push(format!("{q} shares"));
+    }
+    if let Some(pr) = change.price {
+        what.push(format!("price {pr}"));
+    }
+    println!(
+        "  {} Lot #{} of {} now {}",
+        "✓".green(),
+        n,
+        resolved,
+        what.join(", ")
+    );
+    if date.is_some() {
+        println!(
+            "  {}",
+            "Lots are kept oldest first, so the lot numbers may have changed.".dimmed()
+        );
+    }
+    println!("  {}", RESTORE_HINT.dimmed());
+    Ok(Some(p))
+}
+
+pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market) -> Result<()> {
+    let mut portfolio = Portfolio::load()?;
+    let resolved = held_symbol(&portfolio, symbol, market);
+    if let Some(p) = apply_lot_change(&resolved, &change)? {
+        portfolio = p;
     }
     let holding = portfolio.holding(&resolved);
     let sales: Vec<&pf::Sale> = portfolio
@@ -1530,7 +1701,8 @@ pub async fn cmd_portfolio_lots(
     if !sales.is_empty() {
         print_section("Sales (FIFO)");
         println!(
-            "  {:<12} {:>9} {:<12} {:>10} {:>10} {:>12} {:>5}",
+            "  {:>3} {:<12} {:>9} {:<12} {:>10} {:>10} {:>12} {:>5}",
+            "#".bold(),
             "Sold".bold(),
             "Qty".bold(),
             "Bought".bold(),
@@ -1539,7 +1711,7 @@ pub async fn cmd_portfolio_lots(
             "Gain".bold(),
             "Term".bold(),
         );
-        for s in &sales {
+        for (i, s) in sales.iter().enumerate() {
             let long = match (
                 chrono::NaiveDate::parse_from_str(&s.buy_date, "%Y-%m-%d"),
                 chrono::NaiveDate::parse_from_str(&s.sell_date, "%Y-%m-%d"),
@@ -1548,7 +1720,8 @@ pub async fn cmd_portfolio_lots(
                 _ => false,
             };
             println!(
-                "  {:<12} {:>9.2} {:<12} {:>10} {:>10} {:>12} {:>5}",
+                "  {:>3} {:<12} {:>9.2} {:<12} {:>10} {:>10} {:>12} {:>5}",
+                i + 1,
                 s.sell_date,
                 s.qty,
                 s.buy_date,

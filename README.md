@@ -22,6 +22,33 @@ no API key.
 > **Not financial advice.** StockWise is for education and information. See
 > [DISCLAIMER.md](DISCLAIMER.md).
 
+### New since 0.8.1 (unreleased, coming in 0.9)
+
+- **Set up in one go** — `stockwise init` picks a market and imports a broker
+  file; `stockwise profile set active:med` saves your investor profile and
+  guardrails, which research, goals, rebalancing and `ask` all read.
+- **Portfolio you can trust and fix** — `portfolio analyze` (by market,
+  currency, cap tier and sector, short- vs long-term gains, risk),
+  `portfolio pme` against an index twin, an `income` calendar with yield on
+  cost, `sell --preview` with the tax before you sell, and lot fixes
+  (`--qty`, `--price`, `--delete`, `--undo-sale`) with the last five versions
+  kept for `portfolio restore`.
+- **Deeper research** — `results` shows 8–12 quarters side by side (SEC EDGAR
+  for US stocks), cap-tier badges everywhere, `conditions` for where a market
+  stands, and scans of whole markets
+  (`--universe all|bse|nifty500|midcap150|smallcap250`).
+- **Funds and goals** — `mf bleed` prices the Regular-vs-Direct cost; `goal` is
+  a horizon-aware, post-tax planner with outcome bands.
+- **Runs in the background** — a SQLite `cache.db` and `stockwise worker` keep
+  quotes, NAVs and snapshots fresh and send notices (lots turning long-term,
+  new results, filings). Redis is opt-in.
+- **AI, wired up** — `stockwise connect` adds StockWise to every AI app on your
+  computer; `stockwise ask` remembers your profile and conversations and runs
+  playbooks; assistants can change your workspace only with `--allow-writes`,
+  and `stockwise undo` reverses it.
+
+Full list: [CHANGELOG.md](CHANGELOG.md) and [changelog.d](changelog.d/).
+
 ## Install
 
 ```bash
@@ -42,7 +69,10 @@ and import your holdings (or `stockwise doctor` to check your setup).
 ```bash
 stockwise import kite ~/Downloads/tradebook.xlsx  # CSV or .xlsx from Kite, Groww, Upstox, INDmoney; CAS too
 stockwise portfolio                               # live P&L, XIRR and allocation
+stockwise portfolio sell TCS 5 3900 --preview     # lots taken and tax due, before you record it
 stockwise portfolio sell TCS 5 3900               # FIFO sale; realised P&L kept for tax
+stockwise portfolio analyze                       # by market, currency, cap and sector; risk and tax
+stockwise portfolio lots TCS --lot 2 --qty 10     # fix a lot (--price, --date, --delete, --undo-sale N)
 stockwise portfolio benchmark NIFTY -p 1y         # return vs the index
 stockwise portfolio xray                          # real exposure across stocks, funds and ETFs
 stockwise portfolio target set TCS 30             # target weights; then rebalance --inflow 50000
@@ -53,7 +83,8 @@ XIRR are exact. Mutual funds are valued from AMFI's NAVs, and holdings in
 different currencies are totalled in one (`--base`). `rebalance --inflow` puts
 new money only into underweight holdings. A tradebook import keeps its trades and
 merges with the next file, so yearly Console downloads can be loaded one by one,
-in any order. More: [portfolio and imports](docs/commands.md#portfolio),
+in any order. Every change keeps the previous version (`portfolio.json.1` to
+`.5`), so `portfolio restore` brings one back. More: [portfolio and imports](docs/commands.md#portfolio),
 [X-Ray and benchmark](docs/commands.md#benchmark-and-attribution).
 
 ### Capital-gains tax
@@ -82,11 +113,13 @@ stockwise deep HDFCBANK                           # fundamentals, technicals and
 stockwise score INFY --explain                    # Piotroski F-score and Altman Z-score, with the working
 stockwise events TCS                              # filings and news timeline, and how the stock moved
 stockwise insights TCS                            # findings on ownership, growth, margins and valuation
+stockwise results INFY                            # 8-12 quarters side by side, with YoY, QoQ and TTM
+stockwise conditions                              # index vs its averages, VIX, breadth and valuation
 stockwise mf search parag flexi direct            # mutual funds from AMFI; `mf nav CODE` adds the expense ratio
 stockwise options chain NIFTY                     # option chain with IV and greeks
 stockwise options oi NIFTY                        # open-interest build-up, PCR and max pain
 stockwise ipo                                     # open and upcoming IPOs from NSE
-stockwise markets                                 # indices at a glance
+stockwise markets                                 # indices at a glance; --fx adds INR remittance pairs
 ```
 
 `q`, `d`, `a`, `t`, `c`, `p` and `w` are short for `quote`, `dashboard`,
@@ -139,6 +172,12 @@ list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assista
 <!-- mcp-name: io.github.iamsaquib8/stockwise -->
 
 ## Also included
+
+- **Background worker and cache** — `stockwise worker start` keeps a local
+  SQLite `cache.db` warm and sends post-close notices; `stockwise cache status`
+  shows what is stored. [Commands](docs/commands.md)
+- **Income and goals** — `stockwise income` projects dividends and coupons for
+  12 months; `stockwise goal` plans SIPs by horizon, after tax.
 
 - **Backtests that count Indian costs** — STT, brokerage, stamp duty, next-day
   fills, walk-forward tests; strategies as small TOML files.
