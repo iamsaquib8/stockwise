@@ -607,7 +607,10 @@ impl MarketData for Provider {
         let today = chrono::Utc::now().date_naive();
         let start = range_start(range, today);
         if let Some(days) = self.kind().history_days() {
-            let oldest = today - chrono::Duration::days(days);
+            // The same slack `Series::covers` allows at the start of a range:
+            // `1y` starts 366 days back, and CoinGecko's 365 days still cover
+            // it. `2y` stays out of reach.
+            let oldest = today - chrono::Duration::days(days + COVER_SLACK_DAYS);
             if start.is_none_or(|s| s < oldest) {
                 bail!(
                     "{} keeps {} days of history on the free plan",
@@ -1203,6 +1206,11 @@ impl Resample {
     }
 }
 
+/// Days a series may start after the start of its range and still cover
+/// it: weekends and holidays at the start, or a provider's window ending a
+/// day or two short of the range.
+const COVER_SLACK_DAYS: i64 = 7;
+
 /// First day a Yahoo `range` covers, or `None` for `max`.
 pub fn range_start(range: &str, today: NaiveDate) -> Option<NaiveDate> {
     let days = match range {
@@ -1242,7 +1250,7 @@ impl Series {
             return false;
         };
         match start {
-            Some(start) => first.date <= start + chrono::Duration::days(7),
+            Some(start) => first.date <= start + chrono::Duration::days(COVER_SLACK_DAYS),
             None => true,
         }
     }

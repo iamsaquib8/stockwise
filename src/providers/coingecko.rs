@@ -298,6 +298,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_year_of_history_fits_the_365_day_window_and_two_do_not() {
+        let today = chrono::Utc::now().date_naive();
+        let prices: Vec<String> = (0..365)
+            .rev()
+            .map(|i| {
+                let d = today - chrono::Duration::days(i);
+                let ms = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+                format!("[{ms},{}]", 60_000 + i)
+            })
+            .collect();
+        let body = format!(r#"{{"prices":[{}]}}"#, prices.join(","));
+        let server = MockServer::start(vec![(200, body)]).await;
+        let p = Provider::new(
+            ProviderKind::CoinGecko,
+            String::new(),
+            Some(server.url.clone()),
+        );
+        let chart = p.chart("BTC-USD", "1y", "1d").await.unwrap();
+        assert!(chart.timestamp.unwrap().len() >= 360);
+        assert!(server.requests()[0].target.contains("days=365"));
+        assert!(p.chart("BTC-USD", "2y", "1d").await.is_err());
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "2y is refused without a request"
+        );
+    }
+
+    #[tokio::test]
     async fn a_demo_key_goes_in_its_header() {
         let server = MockServer::start(vec![(200, PRICE.into())]).await;
         let p = Provider::new(

@@ -217,8 +217,9 @@ stockwise history BTC -m crypto --json   # ... "meta": {"sources": ["CoinGecko"]
   per run. Answers are cached in the shared cache and `cache.db`: ECB rates
   for 6 hours (they change once a day), CoinGecko history for an hour and
   CoinGecko prices for 2 minutes. A rate limit pauses the source and prints one `ⓘ` notice.
-- **Turning them off.** `STOCKWISE_KEYLESS_BACKUPS=off` keeps both out, for a
-  run that must ask nobody but Yahoo.
+- **Turning them off.** `STOCKWISE_KEYLESS_BACKUPS=off` keeps Frankfurter
+  and CoinGecko out. The primary provider and keyed backups such as Finnhub
+  and FMP stay enabled when their variables are set.
 
 **No keyless fallback for stock history.** Stooq's daily CSV download was
 the planned source ([#340](https://github.com/iamsaquib8/stockwise/issues/340)).
