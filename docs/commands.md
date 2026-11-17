@@ -10,7 +10,7 @@ task-based guides, and each section below links to its guide.
 
 | Option | Env var | Description |
 |--------|---------|-------------|
-| `-m, --market <MARKET>` | `STOCKWISE_MARKET` | Market for bare tickers. Default `in`: `TCS` → `TCS.NS`. `us`: `AAPL`. `crypto`: `BTC` → `BTC-USD`; `BTC/USD`, `BTC_USD` and `BTC USD` also resolve to `BTC-USD`. `fx` (or `forex`): `USDINR`, `usd/inr` → `USDINR=X`. `commodity`: `GOLD` → `GC=F`, `SILVER` → `SI=F`, other bare tickers → NSE (`GOLDBEES` → `GOLDBEES.NS`). Global exchanges from the [market table](markets.md): `uk` (`VOD` → `VOD.L`), `de` (`SAP.DE`), `jp` (`7203` → `7203.T`), `hk` (`5` → `0005.HK`), `sg` (`D05.SI`), `ca` (`RY.TO`), `au` (`BHP.AX`). Symbols with a suffix (`RELIANCE.BO`, `VOD.L`), indices (`^NSEI`), FX (`USDINR=X`), futures (`GC=F`) and crypto pairs (`BTC-INR`) pass through unchanged |
+| `-m, --market <MARKET>` | `STOCKWISE_MARKET` | Market for bare tickers. Default `in`, or the market saved by `stockwise use` (see [Market and portfolio context](#market-and-portfolio-context)): `TCS` → `TCS.NS`. `us`: `AAPL`. `crypto`: `BTC` → `BTC-USD`; `BTC/USD`, `BTC_USD` and `BTC USD` also resolve to `BTC-USD`. `fx` (or `forex`): `USDINR`, `usd/inr` → `USDINR=X`. `commodity`: `GOLD` → `GC=F`, `SILVER` → `SI=F`, other bare tickers → NSE (`GOLDBEES` → `GOLDBEES.NS`). Global exchanges from the [market table](markets.md): `uk` (`VOD` → `VOD.L`), `de` (`SAP.DE`), `jp` (`7203` → `7203.T`), `hk` (`5` → `0005.HK`), `sg` (`D05.SI`), `ca` (`RY.TO`), `au` (`BHP.AX`). Symbols with a suffix (`RELIANCE.BO`, `VOD.L`), indices (`^NSEI`), FX (`USDINR=X`), futures (`GC=F`) and crypto pairs (`BTC-INR`) pass through unchanged |
 | `--quote-currency <CODE>` | `STOCKWISE_QUOTE_CURRENCY` | Currency bare crypto tickers are quoted in with `-m crypto`. Default `usd`; `inr` gives `BTC-INR` |
 | `--lang <en\|hi>` | `STOCKWISE_LANG` | Language for help groups, tables and messages. Default: your locale (`LC_ALL` / `LC_MESSAGES` / `LANG` starting with `hi` picks Hindi), else English. `--json` and `--csv` output is never translated |
 | `--ai` | `STOCKWISE_AI` | Add an AI section to `analyze`, `technical`, `compare`, `screen`, `backtest`, `deep` (slow with a local model; see [ai.md](ai.md)) |
@@ -88,6 +88,9 @@ symbols, and `stockwise c TCS INFY` still compares. A longer ticker that spells 
 always works. Common names resolve to NSE symbols
 (`SBI` → `SBIN`, `L&T` → `LT`, index names), and `quote` suggests close matches for a mistyped symbol.
 
+Without `-m`, a symbol that says where it trades is looked up there: see
+[Market and portfolio context](#market-and-portfolio-context).
+
 | Command | Description |
 |---------|-------------|
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
@@ -96,6 +99,7 @@ always works. Common names resolve to NSE symbols
 | `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
 | `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config. Exits 1 if market data is unreachable or the config file is invalid |
+| `use [MARKET\|PORTFOLIO]... [--bind\|--unbind] [--json]` | Show the market and portfolio in use, or switch them: `use us`, `use long-term`, `use us-tech us --bind`. See [Market and portfolio context](#market-and-portfolio-context) |
 
 ## Analysis
 
@@ -1140,6 +1144,51 @@ stockwise calendar TCS INFY
 stockwise calendar AAPL MSFT -m us --json
 ```
 
+## Market and portfolio context
+
+`stockwise use` picks the market bare tickers belong to and the portfolio
+commands read, and saves both in the [configuration file](#configuration-file)
+(`market` and `portfolio`), the same way `stockwise init` saves the market.
+
+```bash
+stockwise use                       # what is in use, and where each value comes from
+stockwise use us                    # bare tickers are US stocks from now on
+stockwise use long-term             # work on the `long-term` portfolio
+stockwise use us-tech us --bind     # bind a portfolio to a market and switch to both
+stockwise use us-tech               # later: picks the portfolio and its market
+stockwise use us-tech --unbind      # remove the binding
+```
+
+A market word (`in`, `us`, `uk`, `crypto`, ...) is the market; anything else
+is a saved portfolio's name (`default` is `portfolio.json`). Bindings live in
+the config file under `[portfolio_markets]`, not in the portfolio file.
+
+The market for one command comes from the first of these that is set:
+
+1. `-m` / `--market`
+2. `STOCKWISE_MARKET`
+3. the market bound to a portfolio picked with `--portfolio` or `STOCKWISE_PORTFOLIO`
+4. the config file's `market` (what `stockwise use` saves)
+5. the market bound to the config file's portfolio
+6. `in`
+
+**No `-m` needed.** When the market comes from steps 3–6, a symbol that says
+where it trades is looked up there, offline:
+
+- an exchange suffix or index: `VOD.L` → London, `TCS.NS` → India, `^GSPC` → US, `BTC-USD` → crypto;
+- an ISIN: well-known ones map to their ticker (`US0378331005` → `AAPL`,
+  `IE00BK5BQT80` → `VWCE.DE`); others pick the market from the country prefix
+  (`IN` → India, `US` → US, `GB` → London, `DE`, `JP`, `HK`, `SG`, `CA`, `AU`),
+  and `stockwise search <ISIN>` finds the ticker;
+- a bare ticker that only one market's built-in list holds (S&P 1500, NIFTY 500,
+  the [global index lists](markets.md), the large coins, `GOLD`/`SILVER`):
+  `stockwise NVDA` with India as the default quotes NVIDIA and says so on stderr.
+
+A ticker listed in several markets (`RIO` in London and Sydney) stays on the
+current market, with a one-line "did you mean" hint naming the others. Numeric
+codes (BSE scrip codes, Tokyo and Hong Kong codes) always use the current
+market. With several symbols, the market moves only when they all agree.
+
 ## Configuration file
 
 Everything works without one. To set your own defaults:
@@ -1177,11 +1226,14 @@ sip = "10y"
 telegram_chat_id = "123456789"
 smtp_host = "smtp.gmail.com"
 email_to = "me@example.com"
+
+[portfolio_markets]                 # market per named portfolio (`stockwise use NAME MARKET --bind`)
+us-tech = "us"
 ```
 
 | Key | Overridden by | Built-in default |
 |-----|---------------|------------------|
-| `market` | `-m`, `STOCKWISE_MARKET` | `in` |
+| `market` (`stockwise use`) | `-m`, `STOCKWISE_MARKET` | `in` |
 | `ai` | `--ai` / `--no-ai`, `STOCKWISE_AI` | `false` |
 | `model` | `STOCKWISE_MODEL` | `qwen3:14b` |
 | `ollama_host` | `OLLAMA_HOST` | `http://localhost:11434` |
@@ -1190,6 +1242,7 @@ email_to = "me@example.com"
 | `lang` | `--lang`, `STOCKWISE_LANG` | your locale, else `en` |
 | `quote_currency` | `--quote-currency`, `STOCKWISE_QUOTE_CURRENCY` | `usd` |
 | `portfolio` | `--portfolio`, `STOCKWISE_PORTFOLIO` | `default` |
+| `[portfolio_markets] <portfolio>` | `-m`, `STOCKWISE_MARKET` | none; see [Market and portfolio context](#market-and-portfolio-context) |
 | `ai_provider` | `STOCKWISE_AI_PROVIDER` | `ollama` |
 | `data_provider` | `STOCKWISE_DATA_PROVIDER` | `yahoo` |
 | `[periods] <command>` | `-p` | per command, see `<command> --help` |
@@ -1202,7 +1255,7 @@ default from your file, e.g. `[default: 6mo]`.
 
 A file that doesn't parse — an unknown key, a wrong type, an unknown market or
 period — stops every command with exit code 1 and an error naming the file and
-the key. `config`, `doctor` and `completions` still run, so you can inspect it
+the key. `config`, `use`, `doctor` and `completions` still run, so you can inspect it
 or replace it with `stockwise config init --force`.
 
 API keys (`OPENAI_API_KEY`, the data provider's key, ...) and

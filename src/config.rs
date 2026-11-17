@@ -554,6 +554,10 @@ pub struct Config {
     /// prefix: `telegram_token = "..."`. Environment variables win.
     #[serde(default)]
     pub notify: BTreeMap<String, String>,
+    /// Market each named portfolio is bound to (`[portfolio_markets]`,
+    /// `us-tech = "us"`). Set with `stockwise use PORTFOLIO MARKET --bind`.
+    #[serde(default)]
+    pub portfolio_markets: BTreeMap<String, String>,
 }
 
 static EMPTY: Config = Config {
@@ -580,6 +584,7 @@ static EMPTY: Config = Config {
     },
     periods: BTreeMap::new(),
     notify: BTreeMap::new(),
+    portfolio_markets: BTreeMap::new(),
 };
 
 /// The `[notify]` key for a `STOCKWISE_*` notification variable.
@@ -824,9 +829,63 @@ impl Config {
             }
             period_value(period).with_context(|| format!("`periods.{}`", command))?;
         }
+        for (name, market) in &self.portfolio_markets {
+            crate::portfolio::normalize_name(Some(name))
+                .with_context(|| format!("`portfolio_markets.{}`", name))?;
+            market_value(market).with_context(|| format!("`portfolio_markets.{}`", name))?;
+        }
         self.profile.validate()?;
         Ok(())
     }
+
+    /// The market a portfolio is bound to, if any. `None` is the default
+    /// portfolio, whose key is `default`.
+    pub fn portfolio_market(&self, portfolio: Option<&str>) -> Option<&str> {
+        let key = portfolio.unwrap_or("default");
+        self.portfolio_markets
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The market for this run, from the first layer that sets one:
+///
+/// 1. `-m` / `--market` (`flag`),
+/// 2. `STOCKWISE_MARKET` (`env`),
+/// 3. the market bound to a portfolio picked for this run with
+///    `--portfolio` or `STOCKWISE_PORTFOLIO` (`bound`, `portfolio_explicit`),
+/// 4. the config file's `market`, which `stockwise use` and `stockwise init`
+///    write (`file`),
+/// 5. the market bound to the config file's portfolio (`bound`).
+///
+/// `None` means the built-in default (`in`). The binding lives in the config
+/// file, so it reports [`Source::File`].
+pub fn pick_market(
+    flag: Option<&str>,
+    env: Option<&str>,
+    bound: Option<&str>,
+    portfolio_explicit: bool,
+    file: Option<&str>,
+) -> Option<(String, Source)> {
+    if let Some(v) = nonempty(flag) {
+        return Some((v.to_string(), Source::Flag));
+    }
+    if let Some(v) = nonempty(env) {
+        return Some((v.to_string(), Source::Env));
+    }
+    let bound = nonempty(bound);
+    if portfolio_explicit && let Some(v) = bound {
+        return Some((v.to_string(), Source::File));
+    }
+    nonempty(file)
+        .or(bound)
+        .map(|v| (v.to_string(), Source::File))
+}
+
+/// `v` trimmed, or `None` when it is blank.
+fn nonempty(v: Option<&str>) -> Option<&str> {
+    v.map(str::trim).filter(|v| !v.is_empty())
 }
 
 /// The clap spelling (`in` / `us`) of a market name from the file.
@@ -1008,6 +1067,14 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # max_stock_weight = 12.0
 # max_smallcap_weight = 25.0
 # risk_per_trade = 1.0
+
+# Market each named portfolio uses (`stockwise use us-tech us --bind`).
+# Picking the portfolio with `stockwise use`, --portfolio or
+# STOCKWISE_PORTFOLIO makes its market the default; -m and STOCKWISE_MARKET
+# still win.
+[portfolio_markets]
+# us-tech = "us"
+# uk-isa = "uk"
 "#;
 
 /// Updates to apply to the `[profile]` section of `config.toml`.
@@ -1172,34 +1239,99 @@ pub fn init(path: &Path, force: bool) -> Result<()> {
 /// template's commented one, else a new line goes on top. Other lines and
 /// comments are kept.
 pub fn set_market(path: &Path, value: &str) -> Result<()> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
-        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
-    };
-    let new_line = format!("market = \"{value}\"");
-    let is_key = |l: &str, prefix: &str| {
-        l.strip_prefix(prefix)
-            .is_some_and(|r| r.trim_start().starts_with('='))
-    };
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    set_top_level(path, "market", value)
+}
+
+/// Set the top-level `key = "<value>"` in the config file at `path` the way
+/// [`set_market`] does.
+pub fn set_top_level(path: &Path, key: &str, value: &str) -> Result<()> {
+    let mut lines = config_lines(path)?;
+    let new_line = format!("{key} = \"{value}\"");
     // Only top-level keys count: stop at the first table header.
     let top = lines
         .iter()
         .position(|l| l.trim_start().starts_with('['))
         .unwrap_or(lines.len());
+    let commented = format!("# {key}");
     let at = lines[..top]
         .iter()
-        .position(|l| is_key(l.trim_start(), "market"))
+        .position(|l| is_key_line(l.trim_start(), key))
         .or_else(|| {
             lines[..top]
                 .iter()
-                .position(|l| is_key(l.trim_start(), "# market"))
+                .position(|l| is_key_line(l.trim_start(), &commented))
         });
     match at {
         Some(i) => lines[i] = new_line,
         None => lines.insert(0, new_line),
     }
+    write_lines(path, &lines)
+}
+
+/// Bind portfolio `name` to `market` in `[portfolio_markets]`, or remove its
+/// binding when `market` is `None`. Creates the file and the table as
+/// needed; comments and other sections are kept.
+pub fn set_portfolio_market(path: &Path, name: &str, market: Option<&str>) -> Result<()> {
+    let mut lines = config_lines(path)?;
+    let header = lines.iter().position(|l| l.trim() == "[portfolio_markets]");
+    let section_end = |start: usize, lines: &[String]| {
+        lines[start + 1..]
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .map_or(lines.len(), |i| start + 1 + i)
+    };
+    let existing = header.and_then(|h| {
+        let end = section_end(h, &lines);
+        (h + 1..end).find(|&i| is_key_line(lines[i].trim_start(), name))
+    });
+    match (market, existing) {
+        (Some(m), Some(i)) => lines[i] = format!("{name} = \"{m}\""),
+        (Some(m), None) => match header {
+            Some(h) => {
+                // After the table's last key, else right under the header.
+                let end = section_end(h, &lines);
+                let after = (h + 1..end)
+                    .rev()
+                    .find(|&i| {
+                        let t = lines[i].trim_start();
+                        !t.is_empty() && !t.starts_with('#')
+                    })
+                    .unwrap_or(h);
+                lines.insert(after + 1, format!("{name} = \"{m}\""));
+            }
+            None => {
+                if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push("[portfolio_markets]".into());
+                lines.push(format!("{name} = \"{m}\""));
+            }
+        },
+        (None, Some(i)) => {
+            lines.remove(i);
+        }
+        (None, None) => return Ok(()),
+    }
+    write_lines(path, &lines)
+}
+
+/// Whether `line` (trimmed at the start) sets `key`.
+fn is_key_line(line: &str, key: &str) -> bool {
+    line.strip_prefix(key)
+        .is_some_and(|r| r.trim_start().starts_with('='))
+}
+
+/// The config file's lines, or [`TEMPLATE`]'s when it does not exist.
+fn config_lines(path: &Path) -> Result<Vec<String>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Cannot create directory {}", dir.display()))?;
@@ -1237,6 +1369,75 @@ mod tests {
         let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
         assert_eq!((c.market.as_deref(), c.ai), (Some("in"), Some(true)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn market_precedence_chain() {
+        let pick = |flag, env, bound, explicit, file| pick_market(flag, env, bound, explicit, file);
+        let file = Source::File;
+        // Flag beats everything.
+        assert_eq!(
+            pick(Some("uk"), Some("us"), Some("jp"), true, Some("in")),
+            Some(("uk".into(), Source::Flag))
+        );
+        // Then the env var.
+        assert_eq!(
+            pick(None, Some("us"), Some("jp"), true, Some("in")),
+            Some(("us".into(), Source::Env))
+        );
+        // An empty env var does not count.
+        assert_eq!(
+            pick(None, Some(" "), None, false, Some("in")),
+            Some(("in".into(), file))
+        );
+        // Then a portfolio picked for this run brings its binding.
+        assert_eq!(
+            pick(None, None, Some("jp"), true, Some("in")),
+            Some(("jp".into(), file))
+        );
+        // Then the file's market (`stockwise use`).
+        assert_eq!(
+            pick(None, None, Some("jp"), false, Some("in")),
+            Some(("in".into(), file))
+        );
+        // Then the binding of the file's portfolio.
+        assert_eq!(
+            pick(None, None, Some("jp"), false, None),
+            Some(("jp".into(), file))
+        );
+        // Then the built-in default.
+        assert_eq!(pick(None, None, None, false, None), None);
+    }
+
+    #[test]
+    fn portfolio_markets_table_is_written_and_validated() {
+        let dir = std::env::temp_dir().join(format!("sw-pmarkets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+        // From the template: the commented example stays, the key is added.
+        set_portfolio_market(&file, "us-tech", Some("us")).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# us-tech = \"us\""), "{text}");
+        let c = parse(&text, CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), Some("us"));
+        assert_eq!(c.portfolio_market(None), None);
+        // Replace, add another, remove one.
+        set_portfolio_market(&file, "us-tech", Some("ca")).unwrap();
+        set_portfolio_market(&file, "default", Some("in")).unwrap();
+        set_portfolio_market(&file, "us-tech", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), None);
+        assert_eq!(c.portfolio_market(None), Some("in"));
+        // A file without the table gets one at the end.
+        std::fs::write(&file, "market = \"us\"\n[periods]\ndeep = \"3mo\"\n").unwrap();
+        set_portfolio_market(&file, "isa", Some("uk")).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("isa")), Some("uk"));
+        assert_eq!(c.periods.get("deep").map(String::as_str), Some("3mo"));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Bad entries are rejected.
+        assert!(err("[portfolio_markets]\nisa = \"mars\"\n").contains("portfolio_markets.isa"));
+        assert!(err("[portfolio_markets]\n\"bad name\" = \"us\"\n").contains("portfolio_markets"));
     }
 
     const CMDS: &[&str] = &[

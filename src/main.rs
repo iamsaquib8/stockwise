@@ -28,6 +28,7 @@ mod commodity;
 mod conditions;
 mod config;
 mod connect;
+mod crossmarket;
 mod daemon;
 mod daemon_status;
 mod db;
@@ -274,6 +275,27 @@ enum Commands {
         /// Skip the Claude / Cursor (MCP) step
         #[arg(long)]
         no_mcp: bool,
+    },
+
+    /// Switch the default market and/or the active portfolio; with no argument, show them
+    #[command(after_help = "Examples:\n  \
+stockwise use                 show the market and portfolio in use\n  \
+stockwise use us              bare tickers now mean US stocks\n  \
+stockwise use long-term       work on the `long-term` portfolio\n  \
+stockwise use us-tech us --bind   bind a portfolio to a market\n\n\
+-m and STOCKWISE_MARKET still win for a single command.")]
+    Use {
+        /// A market (`in`, `us`, `uk`, `crypto`, ...) and/or a portfolio name, in either order
+        #[arg(value_name = "MARKET|PORTFOLIO", num_args = 0..=2)]
+        targets: Vec<String>,
+        /// Bind the portfolio to the market: picking the portfolio later picks the market too
+        #[arg(long, conflicts_with = "unbind")]
+        bind: bool,
+        /// Remove the portfolio's market binding
+        #[arg(long)]
+        unbind: bool,
+        #[command(flatten)]
+        out: JsonOutput,
     },
 
     // ── Analysis ──
@@ -3146,6 +3168,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "worker",
             "tasks",
             "init",
+            "use",
         ],
     ),
     (
@@ -3565,6 +3588,45 @@ fn curated_quickstart_help(new_user: bool) -> String {
     out
 }
 
+/// The market for this run and where it came from: `-m` (`flag`), else
+/// `STOCKWISE_MARKET`, else the market bound to `portfolio` when it was
+/// picked for this run, else the config file (`stockwise use`), else the
+/// binding of the config file's portfolio, else India. See
+/// [`config::pick_market`].
+fn run_market(
+    flag: Option<Market>,
+    portfolio: Option<&str>,
+    portfolio_explicit: bool,
+) -> (Market, config::Source) {
+    let cfg = config::get();
+    let env = std::env::var("STOCKWISE_MARKET").ok();
+    let name = portfolio::normalize_name(portfolio).ok().flatten();
+    let bound = cfg.portfolio_market(name.as_deref());
+    config::pick_market(
+        flag.map(Market::code),
+        env.as_deref(),
+        bound,
+        portfolio_explicit,
+        cfg.market.as_deref(),
+    )
+    .and_then(|(v, src)| Market::from_str(&v, true).ok().map(|m| (m, src)))
+    .unwrap_or((Market::In, config::Source::Default))
+}
+
+/// The tickers given to the chosen command (its `symbol` or `symbols`
+/// argument); empty for commands without one.
+fn command_symbols(matches: &clap::ArgMatches) -> Vec<String> {
+    let Some((_, sub)) = matches.subcommand() else {
+        return Vec::new();
+    };
+    for id in ["symbols", "symbol"] {
+        if let Ok(Some(vals)) = sub.try_get_many::<String>(id) {
+            return vals.cloned().collect();
+        }
+    }
+    Vec::new()
+}
+
 /// Detect whether raw CLI arguments represent a bare symbol invocation such as
 /// `stockwise RELIANCE`, `stockwise AAPL -m us`, or `stockwise NIFTY --json`.
 fn parse_bare_symbol_invocation(
@@ -3794,7 +3856,7 @@ async fn async_main() {
     exit_quietly_on_broken_pipe();
     // The language is needed before parsing: the help text is built from it.
     // args_os: a non-UTF-8 argument is clap's to report, not a panic here.
-    let args: Vec<String> = std::env::args_os()
+    let mut args: Vec<String> = std::env::args_os()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     // The config file comes first: it can set the language too.
@@ -3827,19 +3889,29 @@ async fn async_main() {
     let matches = match cmd.try_get_matches_from_mut(&args) {
         Ok(m) => m,
         Err(e) => {
-            let default_market = config::get()
-                .market
-                .as_deref()
-                .and_then(|m| Market::from_str(m, true).ok())
-                .or_else(|| {
-                    std::env::var("STOCKWISE_MARKET")
-                        .ok()
-                        .and_then(|m| Market::from_str(&m, true).ok())
-                })
-                .unwrap_or(Market::In);
+            let env_portfolio = std::env::var("STOCKWISE_PORTFOLIO")
+                .ok()
+                .filter(|p| !p.trim().is_empty());
+            let portfolio = env_portfolio
+                .clone()
+                .or_else(|| config::get().portfolio.clone());
+            let (default_market, market_source) =
+                run_market(None, portfolio.as_deref(), env_portfolio.is_some());
             if matches!(e.kind(), clap::error::ErrorKind::InvalidSubcommand)
                 && let Some((sym, m, fmt)) = parse_bare_symbol_invocation(&args, default_market)
             {
+                let market_flag = args
+                    .iter()
+                    .any(|a| a == "-m" || a == "--market" || a.starts_with("--market="));
+                let (sym, m) = if market_flag || market_source == config::Source::Env {
+                    (sym, m)
+                } else {
+                    let r = crossmarket::resolve(&sym, m);
+                    if let Some(h) = &r.hint {
+                        eprintln!("  {}", colored::Colorize::dimmed(h.as_str()));
+                    }
+                    (r.symbol, r.market)
+                };
                 if let Err(err) = commands::cmd_smart_overview(&sym, m, fmt).await {
                     eprintln!(
                         "\n  {} {:#}\n",
@@ -3853,7 +3925,8 @@ async fn async_main() {
             e.exit();
         }
     };
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut matches = matches;
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // A broken config file stops everything except the commands that help fix it.
     if let config::Status::Invalid(msg) = &cfg_state.status
@@ -3862,6 +3935,7 @@ async fn async_main() {
             Commands::Profile { .. }
                 | Commands::Config { .. }
                 | Commands::Init { .. }
+                | Commands::Use { .. }
                 | Commands::Doctor
                 | Commands::Completions { .. }
         )
@@ -3883,7 +3957,58 @@ async fn async_main() {
         quote_currency: arg_source(&matches, "quote_currency", cfg.quote_currency.is_some()),
         portfolio: arg_source(&matches, "portfolio", cfg.portfolio.is_some()),
     };
-    let m = cli.market;
+    let mut sources = sources;
+    // -m > STOCKWISE_MARKET > portfolio binding > `stockwise use` / config.
+    let (mut m, market_source) = run_market(
+        (sources.market == config::Source::Flag).then_some(cli.market),
+        cli.portfolio.as_deref(),
+        matches!(
+            sources.portfolio,
+            config::Source::Flag | config::Source::Env
+        ),
+    );
+    sources.market = market_source;
+    // No -m: a symbol that names its market moves the command there.
+    if !matches!(market_source, config::Source::Flag | config::Source::Env) {
+        let symbols = command_symbols(&matches);
+        if !symbols.is_empty() {
+            let (picked, res) = crossmarket::resolve_all(&symbols, m);
+            let mut rewrote = false;
+            for (typed, r) in symbols.iter().zip(&res) {
+                if r.market == picked {
+                    if let Some(h) = &r.hint {
+                        eprintln!("  {}", colored::Colorize::dimmed(h.as_str()));
+                    }
+                    if r.symbol != *typed {
+                        for a in args.iter_mut().skip(1).filter(|a| *a == typed) {
+                            *a = r.symbol.clone();
+                            rewrote = true;
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "  {}",
+                        colored::Colorize::dimmed(
+                            format!(
+                                "{} looks like a {} symbol; look it up with -m {}",
+                                typed.to_ascii_uppercase(),
+                                r.market.label(),
+                                r.market.code()
+                            )
+                            .as_str()
+                        )
+                    );
+                }
+            }
+            if rewrote {
+                matches = with_config_defaults(build_cli(), config::get())
+                    .try_get_matches_from(&args)
+                    .unwrap_or_else(|e| e.exit());
+                cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+            }
+            m = picked;
+        }
+    }
     ai::set_auto_ai(cli.ai && !cli.no_ai);
     market::set_quote_currency(&cli.quote_currency);
     if let Err(e) = portfolio::select(cli.portfolio.as_deref()) {
@@ -4000,6 +4125,12 @@ async fn dispatch(
             .await
         }
 
+        Commands::Use {
+            targets,
+            bind,
+            unbind,
+            out,
+        } => commands::cmd_use(&targets, bind, unbind, m, sources, out.json),
         Commands::Analyze { symbol, out } => commands::cmd_analyze(&symbol, m, out.json).await,
         Commands::Events {
             symbol,

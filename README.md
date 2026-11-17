@@ -33,7 +33,9 @@ Also `.deb`/`.rpm`, Scoop, Nix and Docker — see [Install](docs/install.md) for
 every option, and the [five-minute quickstart](docs/quickstart.md) for your
 first commands. PyPI, Homebrew, winget and the AUR are not published yet. Building
 from source needs Rust 1.97 or newer. Then run `stockwise init` to pick a market
-and import your holdings (or `stockwise doctor` to check your setup).
+and import your holdings (or `stockwise doctor` to check your setup). Switch the
+default market later with `stockwise use us` (or `uk`, `crypto`, ...), so you don't
+need `-m` on every command.
 
 ## What it does
 
@@ -77,6 +79,8 @@ file. More: [how tax is worked out](docs/commands.md#lots-sales-and-tax),
 ```bash
 stockwise quote RELIANCE TCS                      # Indian stocks are the default
 stockwise quote AAPL NVDA -m us                   # US stocks; also crypto, FX and 7 global exchanges
+stockwise quote NVDA                              # a ticker only one market lists needs no -m
+stockwise use us                                  # make US stocks the default; `stockwise use` shows it
 stockwise TCS                                     # no command needed: a one-screen overview
 stockwise deep HDFCBANK                           # fundamentals, technicals and risk for one stock
 stockwise score INFY --explain                    # Piotroski F-score and Altman Z-score, with the working
