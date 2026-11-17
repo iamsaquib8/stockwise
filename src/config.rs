@@ -1368,7 +1368,9 @@ fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
 
 /// Replace `path` with `text` through a temporary file next to it, renamed
 /// over the original: a reader never sees a half-written file, and a failed
-/// write leaves the old file in place. Each call uses its own temporary
+/// write leaves the old file in place. The temporary file is synced before
+/// the rename and, on Unix, the directory after it, so a saved change
+/// survives a crash. Each call uses its own temporary
 /// name, and removes it when the write or the rename fails. On Unix the
 /// temporary file is created owner-only (0600) and then given the existing
 /// file's permissions, so a private config (it may hold `[notify]` secrets)
@@ -1398,7 +1400,17 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
             std::fs::set_permissions(&tmp, perms)
                 .with_context(|| format!("Cannot set permissions on {}", tmp.display()))?;
         }
-        std::fs::rename(&tmp, path).with_context(|| format!("Cannot replace {}", path.display()))
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("Cannot replace {}", path.display()))?;
+        // The rename is atomic but not yet durable: sync the directory so
+        // the new entry survives a crash (the file itself was synced above).
+        #[cfg(unix)]
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::File::open(dir)
+                .and_then(|d| d.sync_all())
+                .with_context(|| format!("Cannot sync {}", dir.display()))?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
