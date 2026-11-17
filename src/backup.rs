@@ -44,7 +44,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use colored::Colorize;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"SWBAK\0\r\n";
@@ -171,19 +171,31 @@ pub fn collect(loc: &Locations) -> Result<BTreeMap<String, Vec<u8>>> {
         }
     }
     let dir = loc.data_dir.join("portfolios");
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let file = e.file_name().to_string_lossy().to_string();
-            let name = format!("portfolios/{}", file);
-            if is_backed_up(&name) && e.path().is_file() {
-                files.insert(name, read(&e.path())?);
+    // No `portfolios/` directory means no named portfolios; any other error
+    // stops the export rather than leave them out of the backup unnoticed.
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for e in entries {
+                let e = e.with_context(|| format!("Cannot list {}", dir.display()))?;
+                let file = e.file_name().to_string_lossy().to_string();
+                let name = format!("portfolios/{}", file);
+                let kind = e
+                    .file_type()
+                    .with_context(|| format!("Cannot read {}", e.path().display()))?;
+                if is_backed_up(&name) && kind.is_file() {
+                    files.insert(name, read(&e.path())?);
+                }
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("Cannot list {}", dir.display())),
     }
     if let Some(cfg) = &loc.config_file
         && cfg.is_file()
     {
-        files.insert(CONFIG_ENTRY.to_string(), strip_secrets(&read(cfg)?));
+        let text = strip_secrets(&read(cfg)?)
+            .with_context(|| format!("Cannot back up {}", cfg.display()))?;
+        files.insert(CONFIG_ENTRY.to_string(), text);
     }
     Ok(files)
 }
@@ -192,27 +204,68 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("Cannot read {}", path.display()))
 }
 
-/// `config.toml` without lines that set a notification secret.
-fn strip_secrets(config: &[u8]) -> Vec<u8> {
-    let Ok(text) = std::str::from_utf8(config) else {
-        return config.to_vec();
-    };
-    if !text.lines().any(is_secret_line) {
-        return config.to_vec();
-    }
-    text.split_inclusive('\n')
+/// `config.toml` without the lines that set a notification secret. The
+/// result is parsed again. This fails, instead of copying a secret into the
+/// backup, when a secret is still there (an inline table, say), when
+/// removing the lines broke the file (a multi-line value), or when a file
+/// that is not valid TOML names a secret key.
+fn strip_secrets(config: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(config).context("config.toml is not UTF-8 text")?;
+    let stripped: String = text
+        .split_inclusive('\n')
         .filter(|l| !is_secret_line(l))
-        .collect::<String>()
-        .into_bytes()
+        .collect();
+    let leaks = match toml::from_str::<toml::Table>(&stripped) {
+        Ok(table) => has_secret(&table),
+        // Removing a line broke the file (it was part of a multi-line value),
+        // or the file was never valid TOML and names a secret key somewhere.
+        Err(_) => stripped != text || SECRET_KEY_NAMES.iter().any(|k| text.contains(k)),
+    };
+    if leaks {
+        bail!(
+            "config.toml sets a notification secret in a form the backup cannot leave out. \
+             Write it as `key = \"value\"` under [notify], or move it to its STOCKWISE_* \
+             environment variable, then export again."
+        );
+    }
+    Ok(if stripped == text {
+        config.to_vec()
+    } else {
+        stripped.into_bytes()
+    })
 }
 
+/// Secret `[notify]` keys, for the check of a file that is not valid TOML.
+const SECRET_KEY_NAMES: &[&str] = &[
+    "telegram_token",
+    "slack_webhook",
+    "discord_webhook",
+    "smtp_password",
+];
+
+/// Whether a parsed config still sets a secret `[notify]` key.
+fn has_secret(table: &toml::Table) -> bool {
+    table
+        .get("notify")
+        .and_then(|n| n.as_table())
+        .is_some_and(|n| n.keys().any(|k| crate::config::is_secret_notify_key(k)))
+}
+
+/// A line that sets a secret key: `telegram_token = ...`, `'telegram_token' = ...`
+/// or the dotted `notify.telegram_token = ...`.
 fn is_secret_line(line: &str) -> bool {
-    let line = line.trim_start();
-    let Some((key, _)) = line.split_once('=') else {
+    let Some((key, _)) = line.trim_start().split_once('=') else {
         return false;
     };
-    let key = key.trim().trim_matches('"');
-    crate::config::is_secret_notify_key(key)
+    let parts: Vec<String> = key
+        .split('.')
+        .map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        .collect();
+    match parts.as_slice() {
+        [k] => crate::config::is_secret_notify_key(k),
+        [n, k] if n == "notify" => crate::config::is_secret_notify_key(k),
+        _ => false,
+    }
 }
 
 /// The deterministic plaintext archive of `files`.
@@ -405,21 +458,61 @@ pub fn plan(loc: &Locations, files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<Pl
     Ok(out)
 }
 
-/// Write the planned files: each replaced file is copied to `<file>.bak`
-/// first, then every file is written to a temp file and renamed into place.
+/// Write the planned files: each replaced file is copied to a free
+/// `<file>.bak` name first (`.bak`, then `.bak.1`, `.bak.2`, ... so an
+/// earlier copy is never overwritten), then every file is written to a temp
+/// file and renamed into place. If a step fails, the error keeps its cause
+/// and lists which files were already restored and which were not.
 pub fn apply(plan: &[Planned], files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    for p in plan.iter().filter(|p| p.change != Change::Same) {
-        let data = &files[&p.name];
-        let _lock = crate::store::lock(&p.target)?;
-        if p.change == Change::Replace {
-            let mut bak = p.target.as_os_str().to_owned();
-            bak.push(".bak");
-            std::fs::copy(&p.target, &bak)
-                .with_context(|| format!("Cannot back up {}", p.target.display()))?;
+    let todo: Vec<&Planned> = plan.iter().filter(|p| p.change != Change::Same).collect();
+    let list = |ps: &[&Planned]| {
+        if ps.is_empty() {
+            "none".to_string()
+        } else {
+            ps.iter()
+                .map(|p| p.target.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         }
-        write_atomic(&p.target, data)?;
+    };
+    for (i, p) in todo.iter().enumerate() {
+        apply_one(p, &files[&p.name]).with_context(|| {
+            format!(
+                "Restore stopped at {}. Already restored: {}. Not restored: {}. \
+                 Each replaced file has a .bak copy next to it.",
+                p.target.display(),
+                list(&todo[..i]),
+                list(&todo[i..]),
+            )
+        })?;
     }
     Ok(())
+}
+
+fn apply_one(p: &Planned, data: &[u8]) -> Result<()> {
+    let _lock = crate::store::lock(&p.target)?;
+    if p.change == Change::Replace {
+        let bak = free_bak_path(&p.target);
+        std::fs::copy(&p.target, &bak)
+            .with_context(|| format!("Cannot back up {}", p.target.display()))?;
+    }
+    write_atomic(&p.target, data)
+}
+
+/// `<file>.bak`, or `<file>.bak.N` with the first N not in use.
+fn free_bak_path(target: &Path) -> PathBuf {
+    (0u32..)
+        .map(|n| {
+            let mut s = target.as_os_str().to_owned();
+            s.push(if n == 0 {
+                ".bak".to_string()
+            } else {
+                format!(".bak.{}", n)
+            });
+            PathBuf::from(s)
+        })
+        .find(|p| !p.exists())
+        .expect("a free .bak name")
 }
 
 /// Write `data` to a temp file next to `path`, flush it, rename it over `path`.
@@ -483,6 +576,7 @@ fn get_passphrase(src: PassphraseSource, confirm: bool) -> Result<String> {
 #[cfg(unix)]
 fn read_fd(fd: u32) -> Result<String> {
     let path = format!("/dev/fd/{}", fd);
+    use std::io::Read;
     let mut s = String::new();
     std::fs::File::open(&path)
         .with_context(|| format!("Cannot read the passphrase from file descriptor {}", fd))?
@@ -581,7 +675,7 @@ pub fn cmd_restore(path: &Path, dry_run: bool, src: PassphraseSource) -> Result<
     }
     apply(&plan, &files)?;
     println!(
-        "\n  {} Restored {} file(s). Replaced files were kept as <file>.bak.",
+        "\n  {} Restored {} file(s). Replaced files were copied to <file>.bak (or .bak.1, .bak.2, ... when an earlier copy exists).",
         "✓".green(),
         changes
     );
@@ -591,7 +685,7 @@ pub fn cmd_restore(path: &Path, dry_run: bool, src: PassphraseSource) -> Result<
     {
         println!(
             "  {}",
-            "Notification secrets are never in a backup; copy them back from config.toml.bak if you need them."
+            "Notification secrets are never in a backup; copy them back from the newest config.toml.bak* copy if you need them."
                 .dimmed()
         );
     }
@@ -818,14 +912,92 @@ mod tests {
 
     #[test]
     fn config_secrets_are_left_out() {
-        let cfg = b"market = \"in\"\n[notify]\ntelegram_token = \"123:abc\"\nsmtp_password=\"pw\"\ntelegram_chat_id = \"42\"\n";
-        let out = String::from_utf8(strip_secrets(cfg)).unwrap();
+        let cfg = b"market = \"in\"\n[notify]\ntelegram_token = \"123:abc\"\nsmtp_password=\"pw\"\n'slack_webhook' = \"x\"\ntelegram_chat_id = \"42\"\n";
+        let out = String::from_utf8(strip_secrets(cfg).unwrap()).unwrap();
         assert_eq!(
             out,
             "market = \"in\"\n[notify]\ntelegram_chat_id = \"42\"\n"
         );
+        let dotted = b"market = \"in\"\nnotify.telegram_token = \"t\"\n";
+        assert_eq!(strip_secrets(dotted).unwrap(), b"market = \"in\"\n");
         let clean = b"market = \"in\"\n";
-        assert_eq!(strip_secrets(clean), clean);
+        assert_eq!(strip_secrets(clean).unwrap(), clean);
+    }
+
+    #[test]
+    fn config_secrets_that_cannot_be_stripped_stop_the_export() {
+        for cfg in [
+            "notify = { telegram_token = \"t\", telegram_chat_id = \"1\" }\n",
+            "[notify]\nsmtp_password = \"\"\"\nsecret\n\"\"\"\n",
+            "[notify\ntelegram_token = \"t\"\n",
+        ] {
+            let e = strip_secrets(cfg.as_bytes()).unwrap_err().to_string();
+            assert!(e.contains("cannot leave out"), "{cfg}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_second_restore_keeps_the_first_bak() {
+        let root = tempdir("bak2");
+        let loc = locations(&root);
+        populate(&loc);
+        let files = collect(&loc).unwrap();
+        let goals = loc.data_dir.join("goals.json");
+        for (i, local) in [b"first".as_slice(), b"second"].into_iter().enumerate() {
+            put(&goals, local);
+            apply(&plan(&loc, &files).unwrap(), &files).unwrap();
+            let bak = if i == 0 {
+                "goals.json.bak"
+            } else {
+                "goals.json.bak.1"
+            };
+            assert_eq!(std::fs::read(loc.data_dir.join(bak)).unwrap(), local);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_restore_names_what_was_and_was_not_restored() {
+        let root = tempdir("partial");
+        let loc = locations(&root);
+        let mut files = BTreeMap::new();
+        files.insert("alerts.json".to_string(), b"{}".to_vec());
+        files.insert("goals.json".to_string(), b"{}".to_vec());
+        files.insert("watchlist.json".to_string(), b"{}".to_vec());
+        let planned = plan(&loc, &files).unwrap();
+        // A directory where goals.json should go makes its rename fail.
+        std::fs::create_dir_all(loc.data_dir.join("goals.json")).unwrap();
+        let e = format!("{:#}", apply(&planned, &files).unwrap_err());
+        assert!(e.contains("Restore stopped at"), "{e}");
+        assert!(
+            e.contains("Already restored: ") && e.contains("alerts.json"),
+            "{e}"
+        );
+        assert!(
+            e.contains("Not restored: ") && e.contains("watchlist.json"),
+            "{e}"
+        );
+        assert!(loc.data_dir.join("alerts.json").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_portfolios_directory_stops_the_export() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir("unreadable");
+        let loc = locations(&root);
+        populate(&loc);
+        let dir = loc.data_dir.join("portfolios");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root can read it anyway; then there is nothing to check.
+        let readable = std::fs::read_dir(&dir).is_ok();
+        let result = collect(&loc);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert!(result.unwrap_err().to_string().contains("Cannot list"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
