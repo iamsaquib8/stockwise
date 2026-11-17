@@ -1279,6 +1279,17 @@ pub async fn cmd_portfolio_remove(symbol: &str, yes: bool, market: Market) -> Re
         }
     }
     Portfolio::update(|p| {
+        // Another command may have changed the holding while the question
+        // was open; remove only what was confirmed.
+        let now = p.holding(&resolved).map_or(0, |h| h.lots.len());
+        if !yes && now != lots && now > 1 {
+            bail!(
+                "{} changed while you were asked ({} lots now, {} before); nothing removed, run the command again",
+                resolved,
+                now,
+                lots
+            );
+        }
         if !p.remove(&resolved) {
             bail!("{} is not in your portfolio", resolved);
         }
@@ -1447,11 +1458,55 @@ pub struct LotChange {
     pub undo_sale: Option<usize>,
 }
 
+/// One saved version in `portfolio restore`'s list.
+#[derive(Debug, serde::Serialize)]
+pub struct BackupRow {
+    pub number: usize,
+    /// Local time the version was saved, `YYYY-MM-DD HH:MM`.
+    pub saved: String,
+    /// `None` when the file can't be read as a portfolio.
+    pub holdings: Option<usize>,
+    pub sales: Option<usize>,
+}
+
+impl output::CsvRow for BackupRow {
+    const COLUMNS: &'static [&'static str] = &["number", "saved", "holdings", "sales"];
+}
+
+fn backup_rows(path: &std::path::Path) -> Vec<BackupRow> {
+    pf::backups_of(path)
+        .into_iter()
+        .map(|(number, file)| {
+            let saved = std::fs::metadata(&file)
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    chrono::DateTime::<chrono::Local>::from(t)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let p = Portfolio::load_from(&file).ok();
+            BackupRow {
+                number,
+                saved,
+                holdings: p.as_ref().map(|p| p.holdings.len()),
+                sales: p.as_ref().map(|p| p.realized.len()),
+            }
+        })
+        .collect()
+}
+
 /// `portfolio restore`: list the backups, or bring backup `n` back.
-pub fn cmd_portfolio_restore(n: Option<usize>) -> Result<()> {
+pub fn cmd_portfolio_restore(n: Option<usize>, format: Format) -> Result<()> {
     let path = crate::store::path(&pf::file_name(pf::active()))?;
-    let backups = pf::backups_of(&path);
     let Some(n) = n else {
+        let rows = backup_rows(&path);
+        match format {
+            Format::Json => return output::print_json(&rows),
+            Format::Csv => return output::print_csv(&rows),
+            Format::Table => {}
+        }
+        let backups = &rows;
         print_header(&portfolio_title("Backups"));
         if backups.is_empty() {
             println!(
@@ -1468,24 +1523,12 @@ pub fn cmd_portfolio_restore(n: Option<usize>) -> Result<()> {
             "Holdings".bold(),
             "Sales".bold()
         );
-        for (i, file) in &backups {
-            let saved = std::fs::metadata(file)
-                .and_then(|m| m.modified())
-                .map(|t| {
-                    chrono::DateTime::<chrono::Local>::from(t)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_default();
-            match Portfolio::load_from(file) {
-                Ok(p) => println!(
-                    "  {:>3} {:<20} {:>8} {:>6}",
-                    i,
-                    saved,
-                    p.holdings.len(),
-                    p.realized.len()
-                ),
-                Err(_) => println!("  {:>3} {:<20} {}", i, saved, "unreadable".red()),
+        for r in backups {
+            match (r.holdings, r.sales) {
+                (Some(h), Some(s)) => {
+                    println!("  {:>3} {:<20} {:>8} {:>6}", r.number, r.saved, h, s)
+                }
+                _ => println!("  {:>3} {:<20} {}", r.number, r.saved, "unreadable".red()),
             }
         }
         println!(
@@ -1515,6 +1558,24 @@ pub fn cmd_portfolio_restore(n: Option<usize>) -> Result<()> {
 
 /// Apply a [`LotChange`] to the saved portfolio and say what changed.
 fn apply_lot_change(resolved: &str, change: &LotChange) -> Result<Option<Portfolio>> {
+    let out = apply_lot_change_inner(resolved, change)?;
+    if let Some(p) = &out
+        && p.imported.iter().any(|t| t.symbol == resolved)
+    {
+        println!(
+            "  {}",
+            format!(
+                "Note: {resolved} has trades kept from an imported tradebook. Importing that \
+                 tradebook again rebuilds {resolved}'s lots and sales from the file and replaces \
+                 this correction; correct the file too."
+            )
+            .yellow()
+        );
+    }
+    Ok(out)
+}
+
+fn apply_lot_change_inner(resolved: &str, change: &LotChange) -> Result<Option<Portfolio>> {
     if let Some(n) = change.undo_sale {
         let (p, sale) = Portfolio::update(|p| {
             let sale = p.undo_sale(resolved, n)?;
@@ -1599,6 +1660,11 @@ pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market)
     let resolved = held_symbol(&portfolio, symbol, market);
     if let Some(p) = apply_lot_change(&resolved, &change)? {
         portfolio = p;
+        if portfolio.holding(&resolved).is_none() && portfolio.sales_of(&resolved).is_empty() {
+            // The change removed the last lot and there is no history left.
+            println!();
+            return Ok(());
+        }
     }
     let holding = portfolio.holding(&resolved);
     let sales: Vec<&pf::Sale> = portfolio

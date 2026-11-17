@@ -460,7 +460,7 @@ const CRYPTO_QUOTES: &[&str] = &["USD", "INR", "EUR", "GBP", "JPY", "USDT", "BTC
 impl AssetClass {
     pub fn of(symbol: &str) -> Self {
         let upper = symbol.trim().to_ascii_uppercase();
-        if upper.starts_with('^') {
+        if upper.starts_with('^') || upper == DOLLAR_INDEX {
             return AssetClass::Index;
         }
         if upper.ends_with("=X") {
@@ -2226,6 +2226,7 @@ mod tests {
         assert_eq!(resolve_symbol_in("DXY", Market::Fx, "USD"), "DX-Y.NYB");
         assert_eq!(resolve_symbol_in("usdx", Market::Fx, "USD"), "DX-Y.NYB");
         assert_eq!(resolve_symbol_in("dx-y.nyb", Market::Fx, "USD"), "DX-Y.NYB");
+        assert_eq!(AssetClass::of("DX-Y.NYB"), AssetClass::Index);
     }
 
     #[test]

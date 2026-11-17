@@ -1322,6 +1322,8 @@ enum PortfolioCmd {
     Restore {
         /// Backup to restore (1 = the version before the last change)
         n: Option<usize>,
+        #[command(flatten)]
+        out: TableOutput,
     },
     /// Show holdings with live P&L and XIRR
     Show {
@@ -4540,7 +4542,9 @@ async fn dispatch(
             Some(PortfolioCmd::Remove { symbol, yes }) => {
                 commands::cmd_portfolio_remove(&symbol, yes, m).await
             }
-            Some(PortfolioCmd::Restore { n }) => commands::cmd_portfolio_restore(n),
+            Some(PortfolioCmd::Restore { n, out }) => {
+                commands::cmd_portfolio_restore(n, out.into())
+            }
             Some(PortfolioCmd::List) => commands::cmd_portfolio_list(),
             Some(PortfolioCmd::Benchmark {
                 benchmark,
@@ -6095,6 +6099,8 @@ mod tests {
             vec!["stockwise", "portfolio", "remove", "TCS", "--yes"],
             vec!["stockwise", "portfolio", "restore"],
             vec!["stockwise", "portfolio", "restore", "2"],
+            vec!["stockwise", "portfolio", "restore", "--json"],
+            vec!["stockwise", "portfolio", "restore", "--csv"],
             vec!["stockwise", "portfolio", "actions"],
             vec!["stockwise", "portfolio", "actions", "RELIANCE", "--apply"],
             vec!["stockwise", "portfolio", "list"],

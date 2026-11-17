@@ -84,7 +84,7 @@ different currencies are totalled in one (`--base`). `rebalance --inflow` puts
 new money only into underweight holdings. A tradebook import keeps its trades and
 merges with the next file, so yearly Console downloads can be loaded one by one,
 in any order. Every change keeps the previous version (`portfolio.json.1` to
-`.5`), so `portfolio restore` brings one back. More: [portfolio and imports](docs/commands.md#portfolio),
+`.5`): `portfolio restore` lists them and `portfolio restore N` brings one back. More: [portfolio and imports](docs/commands.md#portfolio),
 [X-Ray and benchmark](docs/commands.md#benchmark-and-attribution).
 
 ### Capital-gains tax
