@@ -7,6 +7,7 @@
 //! - [`engine`]: the simulator for one symbol or a portfolio — next-open
 //!   fills, stops and targets, rebalancing — and performance metrics.
 //! - [`walkforward`]: rolling train/test parameter optimisation.
+//! - [`stats`]: Probabilistic and Deflated Sharpe ratios.
 //! - [`indicators`]: whole-series indicators matching `technical.rs`.
 //! - [`plugin`]: sandboxed WASM strategy plugins (`wasm-plugins` feature).
 
@@ -14,7 +15,10 @@ pub mod costs;
 pub mod engine;
 pub mod indicators;
 pub mod plugin;
+#[cfg(test)]
+mod regression;
 pub mod rules;
+pub mod stats;
 pub mod walkforward;
 
 use std::ops::Range;

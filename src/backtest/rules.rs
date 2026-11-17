@@ -8,6 +8,17 @@
 //! exit = "rsi($period) > $overbought"
 //! stop_loss_pct = 8          # optional
 //! take_profit_pct = 15       # optional
+//! trailing_stop_pct = 10     # optional, also trailing_atr_mult
+//!
+//! [position]                 # optional: side, sizing, fractional, borrow
+//! sizing = "fixed-fraction"
+//! fraction_pct = 50
+//!
+//! [cash]                     # optional: interest on idle cash
+//! yield_pct = 6.5
+//!
+//! [tax]                      # optional: tax on realised gains
+//! country = "in"
 //!
 //! [params]                   # defaults, referenced as $name
 //! period = 14
@@ -29,6 +40,7 @@
 //! it declares its parameters and grid, and computes the signals itself.
 
 use super::Bars;
+use super::engine::{Direction, Execution, Sizing, TaxDrag};
 use super::indicators::{self, Series};
 use super::plugin::{self, Plugin};
 use anyhow::{Context, Result, anyhow, bail};
@@ -116,10 +128,162 @@ struct StrategyFile {
     exit: Option<Conditions>,
     stop_loss_pct: Option<f64>,
     take_profit_pct: Option<f64>,
+    trailing_stop_pct: Option<f64>,
+    trailing_atr_mult: Option<f64>,
+    atr_period: Option<usize>,
     #[serde(default)]
     params: BTreeMap<String, f64>,
     #[serde(default)]
     grid: BTreeMap<String, Vec<f64>>,
+    position: Option<PositionFile>,
+    cash: Option<CashFile>,
+    tax: Option<TaxFile>,
+}
+
+/// `[position]`: direction and sizing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PositionFile {
+    side: Option<String>,
+    sizing: Option<String>,
+    fraction_pct: Option<f64>,
+    risk_pct: Option<f64>,
+    atr_mult: Option<f64>,
+    fractional: Option<bool>,
+    borrow_rate_pct: Option<f64>,
+}
+
+/// `[cash]`: interest on idle cash.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CashFile {
+    yield_pct: f64,
+}
+
+/// `[tax]`: a country's rates, or explicit ones.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaxFile {
+    country: Option<String>,
+    short_term_pct: Option<f64>,
+    long_term_pct: Option<f64>,
+    long_term_days: Option<u32>,
+}
+
+/// The `[position]`, `[cash]` and `[tax]` tables and the trailing-stop
+/// fields as engine settings. Everything left out keeps its default.
+fn execution(source: &str, f: &StrategyFile) -> Result<Execution> {
+    let mut x = Execution::default();
+    let pct = |name: &str, v: f64, max: f64| -> Result<f64> {
+        if !(v > 0.0 && v <= max && v.is_finite()) {
+            bail!("{source}: `{name}` must be above 0 and at most {max}, got {v}");
+        }
+        Ok(v)
+    };
+    if let Some(t) = f.trailing_stop_pct {
+        if !(t > 0.0 && t < 100.0) {
+            bail!("{source}: `trailing_stop_pct` must be between 0 and 100, got {t}");
+        }
+        x.trailing_stop_pct = Some(t);
+    }
+    if let Some(m) = f.trailing_atr_mult {
+        x.trailing_atr_mult = Some(pct("trailing_atr_mult", m, 100.0)?);
+    }
+    if let Some(p) = f.atr_period {
+        if !(1..=1_000).contains(&p) {
+            bail!("{source}: `atr_period` must be between 1 and 1000, got {p}");
+        }
+        x.atr_period = p;
+    }
+
+    let none = PositionFile::default();
+    let p = f.position.as_ref().unwrap_or(&none);
+    x.direction = match p.side.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("long") => Direction::Long,
+        Some("short") => Direction::Short,
+        Some(o) => bail!("{source}: [position] side `{o}`: use \"long\" or \"short\""),
+    };
+    let sizing = p.sizing.as_deref().map(str::to_ascii_lowercase);
+    x.sizing = match sizing.as_deref() {
+        None | Some("all-in") => Sizing::AllIn,
+        Some("fixed-fraction") => {
+            let Some(f) = p.fraction_pct else {
+                bail!("{source}: [position] sizing = \"fixed-fraction\" needs `fraction_pct`");
+            };
+            Sizing::FixedFraction {
+                fraction_pct: pct("fraction_pct", f, 100.0)?,
+            }
+        }
+        Some("atr-risk") => {
+            let Some(r) = p.risk_pct else {
+                bail!("{source}: [position] sizing = \"atr-risk\" needs `risk_pct`");
+            };
+            Sizing::AtrRisk {
+                risk_pct: pct("risk_pct", r, 100.0)?,
+                atr_mult: pct("atr_mult", p.atr_mult.unwrap_or(2.0), 100.0)?,
+            }
+        }
+        Some(o) => bail!(
+            "{source}: [position] sizing `{o}`: use \"all-in\", \"fixed-fraction\" or \"atr-risk\""
+        ),
+    };
+    let mode = sizing.as_deref().unwrap_or("all-in");
+    if p.fraction_pct.is_some() && mode != "fixed-fraction" {
+        bail!("{source}: [position] `fraction_pct` needs sizing = \"fixed-fraction\"");
+    }
+    if (p.risk_pct.is_some() || p.atr_mult.is_some()) && mode != "atr-risk" {
+        bail!("{source}: [position] `risk_pct` and `atr_mult` need sizing = \"atr-risk\"");
+    }
+    x.fractional = p.fractional.unwrap_or(false);
+    if let Some(b) = p.borrow_rate_pct {
+        if !(0.0..=100.0).contains(&b) {
+            bail!("{source}: [position] `borrow_rate_pct` must be between 0 and 100, got {b}");
+        }
+        if !x.is_short() {
+            bail!("{source}: [position] `borrow_rate_pct` needs side = \"short\"");
+        }
+        x.borrow_rate_pct = b;
+    }
+
+    if let Some(c) = &f.cash {
+        let y = c.yield_pct;
+        if !(0.0..100.0).contains(&y) {
+            bail!("{source}: [cash] `yield_pct` must be between 0 and 100, got {y}");
+        }
+        x.cash_yield_pct = y;
+    }
+
+    if let Some(t) = &f.tax {
+        let country = match t.country.as_deref() {
+            None => None,
+            Some(c) => Some(crate::tax::Country::parse(c).ok_or_else(|| {
+                anyhow!("{source}: [tax] country `{c}`: use \"in\", \"us\" or \"uk\"")
+            })?),
+        };
+        let st = t.short_term_pct.or(country.map(|c| c.st_rate()));
+        let lt = t.long_term_pct.or(country.map(|c| c.lt_rate()));
+        let (Some(st), Some(lt)) = (st, lt) else {
+            bail!("{source}: [tax] needs `country`, or both `short_term_pct` and `long_term_pct`");
+        };
+        for (name, v) in [("short_term_pct", st), ("long_term_pct", lt)] {
+            if !(0.0..=100.0).contains(&v) {
+                bail!("{source}: [tax] `{name}` must be between 0 and 100, got {v}");
+            }
+        }
+        // A year of months is 365 days; no holding period (UK) means every
+        // gain is long-term, which is taxed at the same rate there.
+        let days = t.long_term_days.unwrap_or_else(|| {
+            country
+                .map(|c| c.long_term_months().map_or(0, |m| (m * 365).div_ceil(12)))
+                .unwrap_or(365)
+        });
+        x.tax = Some(TaxDrag {
+            short_term_pct: st,
+            long_term_pct: lt,
+            long_term_days: days,
+        });
+    }
+    Ok(x)
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +315,10 @@ pub struct StrategyDef {
     pub take_profit_pct: Option<f64>,
     pub params: BTreeMap<String, f64>,
     pub grid: BTreeMap<String, Vec<f64>>,
+    /// Sizing, direction, trailing stops, cash interest and tax; shown only
+    /// when the file sets any of them.
+    #[serde(skip_serializing_if = "Execution::is_default")]
+    pub execution: Execution,
     /// Set for a WASM plugin, whose signals replace `entry` and `exit`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin: Option<Plugin>,
@@ -165,6 +333,7 @@ impl StrategyDef {
     /// and every indicator for the defaults and each grid combination.
     pub fn parse(text: &str, default_name: &str, source: &str) -> Result<StrategyDef> {
         let file: StrategyFile = toml::from_str(text).map_err(|e| anyhow!("{source}: {e}"))?;
+        let execution = execution(source, &file)?;
         let name = file
             .name
             .map(|n| n.trim().to_string())
@@ -185,10 +354,15 @@ impl StrategyDef {
         };
         let entry_ast = parse_all("entry", &entry)?;
         let exit_ast = parse_all("exit", &exit)?;
-        if exit.is_empty() && file.stop_loss_pct.is_none() && file.take_profit_pct.is_none() {
+        if exit.is_empty()
+            && file.stop_loss_pct.is_none()
+            && file.take_profit_pct.is_none()
+            && execution.trailing_stop_pct.is_none()
+            && execution.trailing_atr_mult.is_none()
+        {
             bail!(
-                "{source}: add an `exit` condition, `stop_loss_pct` or `take_profit_pct` — \
-                 otherwise a position never closes"
+                "{source}: add an `exit` condition, `stop_loss_pct`, `take_profit_pct` or a \
+                 trailing stop — otherwise a position never closes"
             );
         }
 
@@ -213,6 +387,7 @@ impl StrategyDef {
             take_profit_pct: file.take_profit_pct,
             params: file.params,
             grid: file.grid,
+            execution,
             plugin: None,
             entry_ast,
             exit_ast,
@@ -246,6 +421,7 @@ impl StrategyDef {
             take_profit_pct: meta.take_profit_pct,
             params: meta.params,
             grid: meta.grid,
+            execution: Execution::default(),
             plugin: Some(plugin),
             entry_ast: Vec::new(),
             exit_ast: Vec::new(),
@@ -318,6 +494,7 @@ impl StrategyDef {
                 params: params.clone(),
                 stop_loss_pct: self.stop_loss_pct,
                 take_profit_pct: self.take_profit_pct,
+                execution: self.execution.clone(),
                 inds: Vec::new(),
                 entry: Vec::new(),
                 exit: Vec::new(),
@@ -341,6 +518,7 @@ impl StrategyDef {
             params: params.clone(),
             stop_loss_pct: self.stop_loss_pct,
             take_profit_pct: self.take_profit_pct,
+            execution: self.execution.clone(),
             inds,
             entry,
             exit,
@@ -621,6 +799,7 @@ pub struct Strategy {
     pub params: BTreeMap<String, f64>,
     pub stop_loss_pct: Option<f64>,
     pub take_profit_pct: Option<f64>,
+    pub execution: Execution,
     inds: Vec<Ind>,
     entry: Vec<Cond>,
     exit: Vec<Cond>,
@@ -1304,6 +1483,8 @@ impl Parser {
 mod tests {
     use super::*;
 
+    use crate::backtest::engine::{Direction, Sizing, TaxDrag};
+
     fn def(toml: &str) -> Result<StrategyDef> {
         StrategyDef::parse(toml, "test", "test.toml")
     }
@@ -1314,6 +1495,87 @@ mod tests {
 
     fn bars(closes: &[f64]) -> Bars {
         Bars::from_closes(closes)
+    }
+
+    #[test]
+    fn execution_options_parse_with_defaults_left_alone() {
+        let plain = def(r#"entry = "close > 1"
+                           exit = "close < 1""#)
+        .unwrap();
+        assert!(plain.execution.is_default());
+
+        let d = def(r#"entry = "close > 1"
+                       trailing_stop_pct = 12
+                       atr_period = 10
+                       [position]
+                       side = "short"
+                       sizing = "fixed-fraction"
+                       fraction_pct = 25
+                       fractional = true
+                       borrow_rate_pct = 3
+                       [cash]
+                       yield_pct = 6.5
+                       [tax]
+                       country = "in""#)
+        .unwrap();
+        let x = &d.execution;
+        assert_eq!(x.direction, Direction::Short);
+        assert_eq!(x.sizing, Sizing::FixedFraction { fraction_pct: 25.0 });
+        assert!(x.fractional);
+        assert_eq!((x.borrow_rate_pct, x.cash_yield_pct), (3.0, 6.5));
+        assert_eq!((x.trailing_stop_pct, x.atr_period), (Some(12.0), 10));
+        // India's rates come from the tax engine: 20% / 12.5% after a year.
+        assert_eq!(
+            x.tax,
+            Some(TaxDrag {
+                short_term_pct: 20.0,
+                long_term_pct: 12.5,
+                long_term_days: 365
+            })
+        );
+        // The compiled strategy carries the same settings.
+        assert_eq!(d.compile().unwrap().execution, *x);
+
+        let d = def(r#"entry = "close > 1"
+                       exit = "close < 1"
+                       [position]
+                       sizing = "atr-risk"
+                       risk_pct = 1
+                       [tax]
+                       country = "us"
+                       short_term_pct = 30"#)
+        .unwrap();
+        assert_eq!(
+            d.execution.sizing,
+            Sizing::AtrRisk {
+                risk_pct: 1.0,
+                atr_mult: 2.0
+            }
+        );
+        let t = d.execution.tax.unwrap();
+        assert_eq!((t.short_term_pct, t.long_term_pct), (30.0, 20.0));
+    }
+
+    #[test]
+    fn execution_options_are_validated() {
+        let base = "entry = \"close > 1\"\nexit = \"close < 1\"\n";
+        let e = |rest: &str| err(&format!("{base}{rest}"));
+        assert!(e("[position]\nside = \"sideways\"").contains("\"long\" or \"short\""));
+        assert!(e("[position]\nsizing = \"kelly\"").contains("sizing `kelly`"));
+        assert!(e("[position]\nsizing = \"fixed-fraction\"").contains("needs `fraction_pct`"));
+        assert!(e("[position]\nfraction_pct = 10").contains("needs sizing"));
+        assert!(e("[position]\nborrow_rate_pct = 2").contains("needs side = \"short\""));
+        assert!(
+            e("[position]\nsizing = \"fixed-fraction\"\nfraction_pct = 150")
+                .contains("at most 100")
+        );
+        assert!(e("[position]\nsize = 1").contains("unknown field `size`"));
+        assert!(e("trailing_stop_pct = 100").contains("between 0 and 100"));
+        assert!(e("[cash]\nyield_pct = -1").contains("between 0 and 100"));
+        assert!(e("[tax]\nshort_term_pct = 20").contains("needs `country`"));
+        assert!(e("[tax]\ncountry = \"fr\"").contains("country `fr`"));
+        // A trailing stop is an exit on its own.
+        assert!(def("entry = \"close > 1\"\ntrailing_stop_pct = 5").is_ok());
     }
 
     #[test]

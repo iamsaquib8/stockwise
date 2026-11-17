@@ -3,9 +3,9 @@
 //! Only the stitched test windows count as results. A strategy that shines in
 //! training and fades out of sample is probably fitted to noise.
 
-use super::costs::CostModel;
 use super::engine::{self, Asset, Metrics, SimConfig, SimResult, Trade};
 use super::rules::{Signals, Strategy, StrategyDef};
+use super::stats::{self, SharpeTest};
 use super::{Bars, date};
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -130,6 +130,10 @@ pub struct WalkForward {
     pub efficiency: Option<f64>,
     pub verdict: Verdict,
     pub verdict_reason: String,
+    /// Probabilistic and Deflated Sharpe of the out-of-sample result, with
+    /// every grid combination counted as a trial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharpe_test: Option<SharpeTest>,
     pub trades: Vec<Trade>,
     #[serde(skip)]
     pub times: Vec<i64>,
@@ -280,6 +284,7 @@ pub fn run(
             let c = SimConfig {
                 stop_loss_pct: strategy.stop_loss_pct,
                 take_profit_pct: strategy.take_profit_pct,
+                execution: strategy.execution.clone(),
                 ..cfg.clone()
             };
             let r = sim(symbol, &train_bars, &signals.slice(train_r.clone()), &c);
@@ -296,20 +301,11 @@ pub fn run(
         let c = SimConfig {
             stop_loss_pct: strategy.stop_loss_pct,
             take_profit_pct: strategy.take_profit_pct,
+            execution: strategy.execution.clone(),
             ..cfg.clone()
         };
         let net = test_window(symbol, bars, signals, &train_r, &test_r, &c);
-        let gross = test_window(
-            symbol,
-            bars,
-            signals,
-            &train_r,
-            &test_r,
-            &SimConfig {
-                costs: CostModel::none(),
-                ..c.clone()
-            },
-        );
+        let gross = test_window(symbol, bars, signals, &train_r, &test_r, &c.gross());
         // Chain the windows: each one's growth applies to the capital so far.
         let scale = capital / net.base;
         times.extend_from_slice(&net.times);
@@ -367,6 +363,23 @@ pub fn run(
         efficiency,
     );
 
+    // Each parameter set over the whole history: the trials behind the DSR.
+    let trial_sharpes: Vec<f64> = candidates
+        .iter()
+        .filter_map(|(strategy, signals)| {
+            let c = SimConfig {
+                stop_loss_pct: strategy.stop_loss_pct,
+                take_profit_pct: strategy.take_profit_pct,
+                execution: strategy.execution.clone(),
+                ..cfg.clone()
+            };
+            stats::moments(&stats::curve(&sim(symbol, bars, signals, &c))).map(|m| m.sharpe)
+        })
+        .collect();
+    let mut oos_curve = vec![cfg.capital];
+    oos_curve.extend_from_slice(&equity);
+    let sharpe_test = stats::sharpe_test(&oos_curve, &trial_sharpes, ppy);
+
     Ok(WalkForward {
         train_bars: train,
         test_bars: test,
@@ -380,6 +393,7 @@ pub fn run(
         efficiency,
         verdict,
         verdict_reason,
+        sharpe_test,
         trades,
         times,
         equity,
@@ -454,6 +468,7 @@ fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backtest::costs::CostModel;
     use crate::backtest::engine::Fill;
     use crate::backtest::rules;
 
