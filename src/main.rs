@@ -3627,10 +3627,22 @@ fn command_symbols(matches: &clap::ArgMatches, args: &[String]) -> Vec<(String, 
         let Some(sc) = cmd.find_subcommand(name).cloned() else {
             break;
         };
+        // Skip argv slots that hold this level's option values and flags
+        // (`--portfolio backtest backtest ...`), so a value that spells the
+        // subcommand is never taken for it.
         offset = offset.and_then(|o| {
+            // Arguments only (not groups), from this level's definition.
+            let taken: std::collections::HashSet<usize> = cmd
+                .get_arguments()
+                .map(|a| a.get_id().as_str())
+                .filter(|id| level.value_source(id) == Some(ValueSource::CommandLine))
+                .filter_map(|id| level.indices_of(id))
+                .flatten()
+                .map(|i| o + i)
+                .collect();
             (o + 1..args.len()).find(|&i| {
                 let a = args[i].as_str();
-                sc.get_name() == a || sc.get_all_aliases().any(|x| x == a)
+                !taken.contains(&i) && (sc.get_name() == a || sc.get_all_aliases().any(|x| x == a))
             })
         });
         for id in ["symbols", "symbol"] {
@@ -6669,6 +6681,32 @@ mod tests {
         ]);
         let found = command_symbols(&m, &v);
         assert_eq!(found[0].1, Some(5));
+        // A global option whose value spells the command is not the command,
+        // and an option value with the symbol's text is not the symbol.
+        let (v, m) = argv(&[
+            "stockwise",
+            "--portfolio",
+            "sip",
+            "sip",
+            "--period",
+            "5y",
+            "NVDA",
+            "1000",
+        ]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[0].1, Some(6));
+        let (v, m) = argv(&[
+            "stockwise",
+            "--portfolio",
+            "backtest",
+            "backtest",
+            "-s",
+            "US0378331005",
+            "US0378331005",
+        ]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[0].0, "US0378331005");
+        assert_eq!(found[0].1, Some(6), "{found:?}");
         let (_, m) = argv(&["stockwise", "doctor"]);
         assert!(command_symbols(&m, &[]).is_empty());
     }

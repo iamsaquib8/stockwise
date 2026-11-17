@@ -1330,21 +1330,20 @@ fn table_header(line: &str) -> Option<&str> {
     (!inner.starts_with('[')).then(|| inner.trim().trim_matches('"'))
 }
 
-/// The key a `key = value` line sets, bare or quoted; `None` for comments,
-/// blank lines and headers.
-fn table_key(line: &str) -> Option<&str> {
+/// The key a `key = value` line sets, decoded the way TOML reads it (bare,
+/// quoted or escaped: `"us\u002dtech"` is `us-tech`); `None` for comments,
+/// blank lines, headers and lines that are not a single key/value pair.
+fn table_key(line: &str) -> Option<String> {
     let t = line.trim_start();
     if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
         return None;
     }
-    let (key, _) = t.split_once('=')?;
-    let key = key.trim();
-    let key = key
-        .strip_prefix('"')
-        .and_then(|k| k.strip_suffix('"'))
-        .or_else(|| key.strip_prefix('\'').and_then(|k| k.strip_suffix('\'')))
-        .unwrap_or(key);
-    Some(key)
+    let table: toml::Table = toml::from_str(t).ok()?;
+    let mut keys = table.keys();
+    match (keys.next(), keys.next()) {
+        (Some(k), None) => Some(k.clone()),
+        _ => None,
+    }
 }
 
 /// The config file's lines, or [`TEMPLATE`]'s when it does not exist.
@@ -1370,17 +1369,37 @@ fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
 /// Replace `path` with `text` through a temporary file next to it, renamed
 /// over the original: a reader never sees a half-written file, and a failed
 /// write leaves the old file in place. Each call uses its own temporary
-/// name, and removes it when the write or the rename fails.
+/// name, and removes it when the write or the rename fails. On Unix the
+/// temporary file is created owner-only (0600) and then given the existing
+/// file's permissions, so a private config (it may hold `[notify]` secrets)
+/// stays private.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("toml.{}.{}.tmp", std::process::id(), n));
-    let result = std::fs::write(&tmp, text)
-        .with_context(|| format!("Cannot write {}", tmp.display()))
-        .and_then(|()| {
-            std::fs::rename(&tmp, path)
-                .with_context(|| format!("Cannot replace {}", path.display()))
-        });
+    let existing = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let result = (|| -> Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("Cannot write {}", tmp.display()))?;
+        f.write_all(text.as_bytes())
+            .and_then(|()| f.sync_all())
+            .with_context(|| format!("Cannot write {}", tmp.display()))?;
+        drop(f);
+        if let Some(perms) = existing {
+            std::fs::set_permissions(&tmp, perms)
+                .with_context(|| format!("Cannot set permissions on {}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, path).with_context(|| format!("Cannot replace {}", path.display()))
+    })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -1495,6 +1514,21 @@ mod tests {
         set_portfolio_market(&file, "US-TECH", None).unwrap();
         let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
         assert_eq!(c.portfolio_market(Some("us-tech")), None);
+        // An escaped key is the same key too.
+        std::fs::write(&file, "[portfolio_markets]\n\"us\\u002dtech\" = \"us\"\n").unwrap();
+        assert_eq!(
+            parse(&std::fs::read_to_string(&file).unwrap(), CMDS)
+                .unwrap()
+                .portfolio_market(Some("us-tech")),
+            Some("us")
+        );
+        set_portfolio_market(&file, "us-tech", Some("uk")).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), Some("uk"));
+        std::fs::write(&file, "[portfolio_markets]\n\"us\\u002dtech\" = \"us\"\n").unwrap();
+        set_portfolio_market(&file, "us-tech", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), None);
         // No temporary file is left behind.
         let leftovers = std::fs::read_dir(&dir)
             .unwrap()
@@ -1505,6 +1539,40 @@ mod tests {
         // Bad entries are rejected.
         assert!(err("[portfolio_markets]\nisa = \"mars\"\n").contains("portfolio_markets.isa"));
         assert!(err("[portfolio_markets]\n\"bad name\" = \"us\"\n").contains("portfolio_markets"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_keep_a_private_config_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sw-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "[notify]\ntelegram_token = \"secret\"\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mode = |f: &Path| std::fs::metadata(f).unwrap().permissions().mode() & 0o777;
+        set_market(&file, "us").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        set_portfolio_market(&file, "isa", Some("uk")).unwrap();
+        assert_eq!(mode(&file), 0o600);
+        set_profile(
+            &file,
+            &ProfileUpdate {
+                horizon_years: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mode(&file), 0o600);
+        // A readable file keeps its mode too.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_market(&file, "in").unwrap();
+        assert_eq!(mode(&file), 0o644);
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.market.as_deref(), Some("in"));
+        assert_eq!(c.profile.horizon_years, Some(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     const CMDS: &[&str] = &[
