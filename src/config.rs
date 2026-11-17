@@ -1188,14 +1188,7 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    // Write a temporary file next to it, then rename: a reader never sees a
-    // half-written file, and a failed write leaves the old one in place.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, out).with_context(|| format!("Cannot write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("Cannot replace {}", path.display())
-    })
+    write_atomic(path, &out)
 }
 
 /// Comment out all active keys inside `[profile]` at `path`, restoring built-in defaults.
@@ -1371,7 +1364,27 @@ fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))
+    write_atomic(path, &out)
+}
+
+/// Replace `path` with `text` through a temporary file next to it, renamed
+/// over the original: a reader never sees a half-written file, and a failed
+/// write leaves the old file in place. Each call uses its own temporary
+/// name, and removes it when the write or the rename fails.
+fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("toml.{}.{}.tmp", std::process::id(), n));
+    let result = std::fs::write(&tmp, text)
+        .with_context(|| format!("Cannot write {}", tmp.display()))
+        .and_then(|()| {
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("Cannot replace {}", path.display()))
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
