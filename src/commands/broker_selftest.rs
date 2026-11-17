@@ -1014,6 +1014,7 @@ mod tests {
                 enable_orders: true,
             },
             last_price: Some(1300.0),
+            bid_ask: None,
             confirm: &yes,
         };
         let opts = OrderOpts {

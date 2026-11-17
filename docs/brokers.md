@@ -38,7 +38,7 @@ steps:
    `searchScrip`, Kite's instrument dump, Upstox's NSE instrument file, Dhan's
    NSE_EQ scrip master, Fyers' NSE_CM symbol master. Partial names, other
    series (`-BE`), ETFs with a similar name, and F&O contracts never match; two
-   matches are refused.
+   matches are refused. See [Instrument list cache](#instrument-list-cache).
 2. **Price checks.** Prices must be positive with at most 2 decimals (never
    silently rounded). For stop-loss orders the trigger must sit on the right
    side of the market (above it for a BUY, below it for a SELL — otherwise it
@@ -50,7 +50,8 @@ steps:
    can't be fetched the order is refused. Orders go to NSE only: a `.BO`
    symbol is refused rather than traded on NSE.
 3. **Preview.** Instrument and broker token, side, quantity, order type,
-   product (delivery / CNC), last price, estimated value.
+   product (delivery / CNC), last price, estimated value, and
+   [estimated charges and slippage](#estimated-charges-in-the-preview).
 4. **`max_order_value`.** If set in the broker's config file, any order whose
    estimated value is higher is refused (also on `--dry-run`). With a cap set,
    an order whose value can't be estimated (a MARKET order without a last
@@ -70,6 +71,61 @@ retrying, so you don't place it twice. Cancelling a GTT goes through the same
 preview, opt-in and confirmation.
 
 The paper-trading daemon never sends broker orders.
+
+### Estimated charges in the preview
+
+The preview lists what the order is likely to cost, for NSE equity, in two
+columns: as delivery (CNC, how StockWise places it) and, for comparison, as
+intraday (MIS).
+
+| Line                        | Delivery            | Intraday            |
+|-----------------------------|---------------------|---------------------|
+| Brokerage                   | per broker, below   | per broker, below   |
+| STT                         | 0.1% buy and sell   | 0.025% sell         |
+| Exchange transaction charge | 0.00297%            | 0.00297%            |
+| SEBI fee                    | ₹10 per crore       | ₹10 per crore       |
+| Stamp duty                  | 0.015% buy          | 0.003% buy          |
+| GST                         | 18% of brokerage, exchange charge and SEBI fee | same |
+| DP charge                   | ₹15.93 per sell     | —                   |
+
+The statutory rates are the same ones `stockwise backtest` uses
+(`src/backtest/costs.rs`), so the two never disagree. Brokerage follows each
+broker's published equity tariff (as of 2025):
+
+| Broker    | Delivery            | Intraday            |
+|-----------|---------------------|---------------------|
+| Angel One | ₹20 or 0.1%, lower  | ₹20 or 0.03%, lower |
+| Zerodha   | ₹0                  | ₹20 or 0.03%, lower |
+| Upstox    | ₹20 or 2.5%, lower  | ₹20 or 0.1%, lower  |
+| Dhan      | ₹0                  | ₹20 or 0.03%, lower |
+| Fyers     | ₹20 or 0.3%, lower  | ₹20 or 0.03%, lower |
+
+An **estimated slippage** line follows. LIMIT and SL orders show ₹0, since
+they fill at the limit or better. MARKET and SL-M orders use half the bid-ask
+spread times the quantity when the quote has a bid and ask, and 5 basis points
+of the order value (the backtest default) when it doesn't.
+
+All of these are estimates. Rates change, brokers round differently and some
+add their own fees, so the contract note from your broker is the final word.
+When the order value can't be estimated (a MARKET order without a last price)
+the charges are shown as unknown.
+
+### Instrument list cache
+
+Kite, Upstox, Dhan and Fyers publish their instrument lists once a day, and
+each file is 15–30 MB. StockWise downloads a list the first time it is needed
+on an IST day and keeps it in `cache/instruments/` in the data directory, one
+file per broker and exchange (for example `zerodha-NSE-2026-11-17.master`).
+Later lookups that day read the file, and lookups in the same process reuse
+the list already in memory, so a second order makes no download.
+
+On the next IST day the list is downloaded again and the old file is removed.
+Each file starts with its length and SHA-256; a file that is cut short,
+damaged or no longer parses is ignored and downloaded again. Files are written
+through a temporary file and renamed, so a crash never leaves half a list. If
+the data directory is read-only the lookup still works, just without the
+cache. Deleting `cache/instruments/` is always safe. Angel One looks symbols
+up with `searchScrip` and has no list to cache.
 
 ## Order types
 

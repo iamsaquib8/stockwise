@@ -7,6 +7,7 @@
 
 use super::app::{self, AppConfig, Needs};
 use super::http::{self, unknown_state};
+use super::masters::{self, MasterCache};
 use super::secrets::Secret;
 use super::{
     Broker, BrokerKind, Endpoint, Gtt, GttRequest, Holding, Instrument, Order, OrderAck, OrderKind,
@@ -15,6 +16,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const CONFIG_FILE: &str = "zerodha_config.json";
 pub const SECRET_KEYS: &[&str] = app::SECRET_KEYS;
@@ -109,6 +111,7 @@ pub struct KiteClient {
     api_key: String,
     token: Secret,
     api: String,
+    masters: Arc<MasterCache>,
 }
 
 /// The exact NSE cash-equity row for `symbol` in the instrument dump.
@@ -359,7 +362,9 @@ impl KiteClient {
     /// Use the session saved by `trade login --broker zerodha`.
     pub fn connect() -> Result<Self> {
         let config = app::session(KIND, NEEDS)?;
-        Self::with_url(config.api_key, config.access_token, API)
+        let mut c = Self::with_url(config.api_key, config.access_token, API)?;
+        c.masters = MasterCache::shared();
+        Ok(c)
     }
 
     fn with_url(api_key: String, token: Secret, api: &str) -> Result<Self> {
@@ -368,6 +373,7 @@ impl KiteClient {
             api_key,
             token,
             api: api.into(),
+            masters: MasterCache::off(),
         })
     }
 
@@ -493,18 +499,24 @@ impl Broker for KiteClient {
         if exchange != "NSE" {
             bail!("Kite orders support NSE only");
         }
-        let resp = self
-            .auth(self.http.get(format!("{}/instruments/NSE", self.api)))?
-            .send()
-            .await
-            .context("Could not download the Kite instrument list")?;
-        let status = resp.status().as_u16();
-        http::check_session(status, LABEL, KIND.id())?;
-        if status != 200 {
-            bail!("Kite instrument list: HTTP {status}");
-        }
-        let raw = http::maybe_gunzip(&resp.bytes().await?)?;
-        pick_equity(&String::from_utf8_lossy(&raw), symbol)
+        let fetch = || async {
+            let resp = self
+                .auth(self.http.get(format!("{}/instruments/NSE", self.api)))?
+                .send()
+                .await
+                .context("Could not download the Kite instrument list")?;
+            let status = resp.status().as_u16();
+            http::check_session(status, LABEL, KIND.id())?;
+            if status != 200 {
+                bail!("Kite instrument list: HTTP {status}");
+            }
+            Ok(resp.bytes().await?.to_vec())
+        };
+        let csv = self
+            .masters
+            .load(KIND.id(), "NSE", fetch, masters::csv_text)
+            .await?;
+        pick_equity(&csv, symbol)
     }
 
     async fn place_order(&self, o: &OrderRequest) -> Result<OrderAck> {
@@ -661,6 +673,55 @@ mod tests {
         assert!(pick_equity(csv, "RELIANCE").is_err());
         // F&O rows never match.
         assert!(pick_equity(csv, "BANKNIFTY18JAN23500CE").is_err());
+    }
+
+    /// Lookups on one IST day download the dump once; a new day, or a
+    /// damaged cache file, downloads it again. Only the mock server is called.
+    #[tokio::test]
+    async fn instrument_dump_is_cached_per_ist_day() {
+        let (server, mut c) = client(vec![Route::bytes(
+            "GET",
+            "/instruments/NSE",
+            include_str!("fixtures/kite_instruments.csv")
+                .as_bytes()
+                .to_vec(),
+            "text/csv",
+        )])
+        .await;
+        let dir = std::env::temp_dir().join(format!("sw-kite-masters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let date = Arc::new(std::sync::Mutex::new(
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 17).unwrap(),
+        ));
+        let cache = |date: &Arc<std::sync::Mutex<chrono::NaiveDate>>| {
+            let d = date.clone();
+            Arc::new(MasterCache::at(&dir, move || *d.lock().unwrap()))
+        };
+        let downloads = || server.count("GET", "/instruments/NSE");
+
+        c.masters = cache(&date);
+        assert_eq!(c.resolve_instrument("INFY", "NSE").await.unwrap(), infy());
+        assert_eq!(c.resolve_instrument("INFY", "NSE").await.unwrap(), infy());
+        assert_eq!(downloads(), 1, "second lookup is served from memory");
+
+        // A new process on the same day reads the file.
+        c.masters = cache(&date);
+        assert_eq!(c.resolve_instrument("INFY", "NSE").await.unwrap(), infy());
+        assert_eq!(downloads(), 1, "same-day lookup is served from the file");
+
+        // A damaged file is downloaded again.
+        let file = dir.join("zerodha-NSE-2026-11-17.master");
+        std::fs::write(&file, b"garbage").unwrap();
+        c.masters = cache(&date);
+        assert_eq!(c.resolve_instrument("INFY", "NSE").await.unwrap(), infy());
+        assert_eq!(downloads(), 2);
+
+        // The next IST day downloads again.
+        *date.lock().unwrap() = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        assert_eq!(c.resolve_instrument("INFY", "NSE").await.unwrap(), infy());
+        assert_eq!(downloads(), 3);
+        assert!(!file.exists(), "the old day's file is removed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

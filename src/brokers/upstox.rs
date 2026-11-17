@@ -9,6 +9,7 @@
 
 use super::app::{self, AppConfig, Needs};
 use super::http::{self, unknown_state};
+use super::masters::MasterCache;
 use super::secrets::Secret;
 use super::{
     Broker, BrokerKind, Endpoint, Holding, Instrument, Order, OrderAck, OrderKind, OrderRequest,
@@ -18,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const CONFIG_FILE: &str = "upstox_config.json";
 pub const SECRET_KEYS: &[&str] = app::SECRET_KEYS;
@@ -121,6 +123,7 @@ pub struct UpstoxClient {
     api: String,
     hft: String,
     instruments: String,
+    masters: Arc<MasterCache>,
 }
 
 /// One entry of the NSE instrument file (other fields ignored).
@@ -338,7 +341,9 @@ impl UpstoxClient {
     /// Use the session saved by `trade login --broker upstox`.
     pub fn connect() -> Result<Self> {
         let config = app::session(KIND, NEEDS)?;
-        Self::with_urls(config.access_token, API, HFT, INSTRUMENTS)
+        let mut c = Self::with_urls(config.access_token, API, HFT, INSTRUMENTS)?;
+        c.masters = MasterCache::shared();
+        Ok(c)
     }
 
     fn with_urls(token: Secret, api: &str, hft: &str, instruments: &str) -> Result<Self> {
@@ -348,6 +353,7 @@ impl UpstoxClient {
             api: api.into(),
             hft: hft.into(),
             instruments: instruments.into(),
+            masters: MasterCache::off(),
         })
     }
 
@@ -444,17 +450,23 @@ impl Broker for UpstoxClient {
         if exchange != "NSE" {
             bail!("Upstox orders support NSE only");
         }
-        let resp = self
-            .http
-            .get(&self.instruments)
-            .send()
-            .await
-            .context("Could not download the Upstox instrument list")?;
-        if !resp.status().is_success() {
-            bail!("Upstox instrument list: HTTP {}", resp.status());
-        }
-        let bytes = resp.bytes().await?;
-        pick_equity(&parse_instruments(&bytes)?, symbol)
+        let fetch = || async {
+            let resp = self
+                .http
+                .get(&self.instruments)
+                .send()
+                .await
+                .context("Could not download the Upstox instrument list")?;
+            if !resp.status().is_success() {
+                bail!("Upstox instrument list: HTTP {}", resp.status());
+            }
+            Ok(resp.bytes().await?.to_vec())
+        };
+        let rows = self
+            .masters
+            .load(KIND.id(), "NSE", fetch, parse_instruments)
+            .await?;
+        pick_equity(&rows, symbol)
     }
 
     async fn place_order(&self, o: &OrderRequest) -> Result<OrderAck> {

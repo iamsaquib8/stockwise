@@ -16,10 +16,12 @@
 
 pub mod angel;
 mod app;
+pub mod charges;
 pub mod dhan;
 pub mod fyers;
 pub mod gtt_watch;
 mod http;
+pub mod masters;
 #[cfg(test)]
 pub mod mock;
 pub mod readonly;

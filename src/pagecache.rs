@@ -58,14 +58,14 @@ pub fn write(name: &str, text: &str) {
 /// process id and a counter: two tasks (or threads) writing the same file at
 /// once each get their own temp file, and the last rename wins whole. A temp
 /// file is removed again when the write or the rename fails.
-pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, text: impl AsRef<[u8]>) -> std::io::Result<()> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
+    let result = std::fs::write(&tmp, text.as_ref()).and_then(|()| std::fs::rename(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

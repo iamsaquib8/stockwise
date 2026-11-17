@@ -90,6 +90,8 @@ pub(super) struct Guard<'a> {
     pub limits: OrderLimits,
     /// Last traded price (Yahoo), used for the value estimate and trigger checks.
     pub last_price: Option<f64>,
+    /// Best bid and ask from the same quote, for the slippage estimate.
+    pub bid_ask: Option<(f64, f64)>,
     /// Ask the user to type `yes`; the argument completes "Type yes to ...".
     pub confirm: &'a dyn Fn(&str) -> Result<bool>,
 }
@@ -341,6 +343,11 @@ pub(super) async fn place_live_order(
         "Est. value",
         &est_value.map_or("unknown".to_string(), |v| format!("₹{:.2}", v)),
     );
+    let priced = match intent {
+        Intent::Order(k) => k,
+        Intent::Gtt { limit, .. } => OrderKind::Limit { price: limit },
+    };
+    print_charges(kind, side, &priced, qty, est_value, guard.bid_ask);
     println!();
 
     check_cap(kind, guard.limits.max_order_value, est_value)?;
@@ -414,6 +421,71 @@ pub(super) async fn place_live_order(
     }
     println!();
     Ok(Outcome::Sent(id))
+}
+
+/// The estimated charges and slippage block of the order preview: this
+/// order as delivery (how it is placed) and, for comparison, as intraday.
+fn print_charges(
+    kind: BrokerKind,
+    side: Side,
+    order: &OrderKind,
+    qty: u32,
+    est_value: Option<f64>,
+    bid_ask: Option<(f64, f64)>,
+) {
+    use brokers::charges::{self, SlippageBasis};
+    let Some(e) = est_value.and_then(|v| charges::estimate(kind, side, order, qty, v, bid_ask))
+    else {
+        print_kv("Est. charges", "unknown (no price to value the order)");
+        return;
+    };
+    println!();
+    println!(
+        "  {}",
+        "Estimated charges (NSE equity) — estimates, not a contract note".bold()
+    );
+    let row = |label: &str, d: String, i: String| {
+        println!("  {} {:>16} {:>16}", pad_end(label, 28).dimmed(), d, i);
+    };
+    let rs = |v: f64| format!("₹{v:.2}");
+    row("", "Delivery (CNC)".into(), "If intraday (MIS)".into());
+    let (d, i) = (&e.delivery, &e.intraday);
+    for (label, dv, iv) in [
+        ("Brokerage", d.brokerage, i.brokerage),
+        ("STT", d.stt, i.stt),
+        ("Exchange transaction charge", d.exchange, i.exchange),
+        ("SEBI fee", d.sebi, i.sebi),
+        ("Stamp duty", d.stamp, i.stamp),
+        ("GST (18%)", d.gst, i.gst),
+        ("DP charge", d.dp, i.dp),
+    ] {
+        row(label, rs(dv), rs(iv));
+    }
+    row("Total", rs(d.total()), rs(i.total()));
+    let slip = match e.slippage.basis {
+        SlippageBasis::Limit => format!(
+            "{} (limit order: fills at the limit or better)",
+            rs(e.slippage.amount)
+        ),
+        SlippageBasis::Spread { bid, ask } => format!(
+            "{} (half the bid-ask spread, bid ₹{bid:.2} / ask ₹{ask:.2})",
+            rs(e.slippage.amount)
+        ),
+        SlippageBasis::Default { bps } => format!(
+            "{} ({bps} bps; the quote has no bid/ask)",
+            rs(e.slippage.amount)
+        ),
+    };
+    print_kv("Est. slippage", &slip);
+    println!(
+        "  {}",
+        format!(
+            "Brokerage at {}'s published rates; statutory rates as in backtests. \
+             This order is placed as delivery; the intraday column is for comparison.",
+            kind.label()
+        )
+        .dimmed()
+    );
 }
 
 /// Preview and confirm cancelling one GTT, through the same guards as an
@@ -502,9 +574,30 @@ pub(super) async fn last_price(symbol: &str) -> Option<f64> {
 }
 
 async fn last_price_with(y: &YahooClient, symbol: &str) -> Option<f64> {
+    prices_with(y, symbol).await.0
+}
+
+/// Last NSE price and, when the quote has a sane one, the bid and ask.
+pub(super) async fn prices(symbol: &str) -> (Option<f64>, Option<(f64, f64)>) {
+    match YahooClient::new().await {
+        Ok(y) => prices_with(&y, symbol).await,
+        Err(_) => (None, None),
+    }
+}
+
+async fn prices_with(y: &YahooClient, symbol: &str) -> (Option<f64>, Option<(f64, f64)>) {
     let yahoo_sym = format!("{}.NS", brokers::plain_symbol(symbol));
-    let quotes = y.get_quote(&[yahoo_sym.as_str()]).await.ok()?;
-    usable_price(quotes.first()?.regular_market_price)
+    let Ok(quotes) = y.get_quote(&[yahoo_sym.as_str()]).await else {
+        return (None, None);
+    };
+    let Some(q) = quotes.first() else {
+        return (None, None);
+    };
+    let bid_ask = match (usable_price(q.bid), usable_price(q.ask)) {
+        (Some(b), Some(a)) if a >= b => Some((b, a)),
+        _ => None,
+    };
+    (usable_price(q.regular_market_price), bid_ask)
 }
 
 /// Log in, look up the price, and run the safety flow for one order or GTT.
@@ -523,9 +616,11 @@ async fn run_order(
     // without touching the broker.
     require_cap_for_unattended(kind, opts, &limits)?;
     let broker = brokers::connect(kind).await?;
+    let (last_price, bid_ask) = prices(symbol).await;
     let guard = Guard {
         limits,
-        last_price: last_price(symbol).await,
+        last_price,
+        bid_ask,
         confirm: &confirm_live_order,
     };
     place_live_order(broker.as_ref(), side, symbol, qty, intent, opts, &guard).await?;
@@ -615,6 +710,7 @@ pub async fn cmd_trade(kind: BrokerKind, action: TradeAction, market: Market) ->
             let guard = Guard {
                 limits,
                 last_price: None,
+                bid_ask: None,
                 confirm: &confirm_live_order,
             };
             cancel_gtt(broker.as_ref(), &id, opts, &guard).await?;
@@ -1140,6 +1236,7 @@ mod tests {
                 enable_orders: true,
             },
             last_price: last,
+            bid_ask: None,
             confirm,
         }
     }

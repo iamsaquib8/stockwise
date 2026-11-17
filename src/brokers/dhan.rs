@@ -8,6 +8,7 @@
 
 use super::app::{self, Needs};
 use super::http::{self, unknown_state};
+use super::masters::{self, MasterCache};
 use super::secrets::Secret;
 use super::{
     Broker, BrokerKind, Endpoint, Gtt, GttRequest, Holding, Instrument, Order, OrderAck, OrderKind,
@@ -16,6 +17,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const CONFIG_FILE: &str = "dhan_config.json";
 pub const SECRET_KEYS: &[&str] = app::SECRET_KEYS;
@@ -79,6 +81,7 @@ pub struct DhanClient {
     token: Secret,
     api: String,
     instruments: String,
+    masters: Arc<MasterCache>,
 }
 
 /// `{errorType, errorCode, errorMessage}` → one line.
@@ -390,7 +393,9 @@ impl DhanClient {
     /// Use the token saved by `trade login --broker dhan`.
     pub fn connect() -> Result<Self> {
         let config = app::session(KIND, NEEDS)?;
-        Self::with_urls(config.api_key, config.access_token, API, INSTRUMENTS)
+        let mut c = Self::with_urls(config.api_key, config.access_token, API, INSTRUMENTS)?;
+        c.masters = MasterCache::shared();
+        Ok(c)
     }
 
     fn with_urls(client_id: String, token: Secret, api: &str, instruments: &str) -> Result<Self> {
@@ -400,6 +405,7 @@ impl DhanClient {
             token,
             api: api.into(),
             instruments: instruments.into(),
+            masters: MasterCache::off(),
         })
     }
 
@@ -493,19 +499,23 @@ impl DhanClient {
         )
     }
 
-    /// The NSE_EQ scrip master (CSV, gunzipped if needed).
-    async fn scrip_master(&self) -> Result<String> {
-        let resp = self
-            .http
-            .get(&self.instruments)
-            .send()
+    /// The NSE_EQ scrip master (CSV, gunzipped if needed), cached per IST day.
+    async fn scrip_master(&self) -> Result<Arc<String>> {
+        let fetch = || async {
+            let resp = self
+                .http
+                .get(&self.instruments)
+                .send()
+                .await
+                .context("Could not download the Dhan scrip master")?;
+            if !resp.status().is_success() {
+                bail!("Dhan scrip master: HTTP {}", resp.status());
+            }
+            Ok(resp.bytes().await?.to_vec())
+        };
+        self.masters
+            .load(KIND.id(), "NSE", fetch, masters::csv_text)
             .await
-            .context("Could not download the Dhan scrip master")?;
-        if !resp.status().is_success() {
-            bail!("Dhan scrip master: HTTP {}", resp.status());
-        }
-        let raw = http::maybe_gunzip(&resp.bytes().await?)?;
-        Ok(String::from_utf8_lossy(&raw).into_owned())
     }
 
     async fn profile_client_id(&self) -> Result<Option<String>> {
