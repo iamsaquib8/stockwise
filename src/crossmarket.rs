@@ -28,6 +28,10 @@ pub struct Resolution {
     /// A one-line note for the user: where the symbol was found, or which
     /// other markets list it.
     pub hint: Option<String>,
+    /// Whether the symbol itself names its market: an exchange suffix or
+    /// index, an ISIN, or a built-in list. False when the market is only
+    /// the current one by default.
+    pub found: bool,
 }
 
 /// Well-known ISINs and their Yahoo symbols, so they resolve offline.
@@ -225,6 +229,7 @@ pub fn resolve(symbol: &str, current: Market) -> Resolution {
 /// market from `stockwise use`, the config file or the portfolio binding.
 pub fn resolve_with(dir: &Directory, symbol: &str, current: Market) -> Resolution {
     let keep = |hint: Option<String>| Resolution {
+        found: false,
         symbol: symbol.to_string(),
         market: current,
         hint,
@@ -267,8 +272,9 @@ pub fn resolve_with(dir: &Directory, symbol: &str, current: Market) -> Resolutio
     }
     match markets.as_slice() {
         [] => keep(None),
-        [only] if *only == current => keep(None),
+        [only] if *only == current => keep_as(symbol, current),
         [only] => Resolution {
+            found: true,
             symbol: symbol.to_string(),
             market: *only,
             hint: Some({
@@ -314,6 +320,7 @@ pub fn resolve_with(dir: &Directory, symbol: &str, current: Market) -> Resolutio
 
 fn keep_as(symbol: &str, market: Market) -> Resolution {
     Resolution {
+        found: true,
         symbol: symbol.to_string(),
         market,
         hint: None,
@@ -324,6 +331,7 @@ fn resolve_isin(upper: &str, symbol: &str, current: Market) -> Resolution {
     if let Some((_, ticker)) = ISIN_DIRECTORY.iter().find(|(i, _)| *i == upper) {
         let m = market::market_of_symbol(ticker, current);
         return Resolution {
+            found: true,
             symbol: ticker.to_string(),
             market: m,
             hint: Some(format!("{} → {} ({})", upper, ticker, m.label())),
@@ -334,6 +342,7 @@ fn resolve_isin(upper: &str, symbol: &str, current: Market) -> Resolution {
         // Indian ISINs also name gold bonds, which `-m commodity` prices.
         Some(Market::In) if current == Market::Commodity => keep_as(symbol, current),
         Some(m) => Resolution {
+            found: true,
             symbol: symbol.to_string(),
             market: m,
             hint: Some(format!(
@@ -345,6 +354,7 @@ fn resolve_isin(upper: &str, symbol: &str, current: Market) -> Resolution {
             )),
         },
         None => Resolution {
+            found: false,
             symbol: symbol.to_string(),
             market: current,
             hint: Some(format!(
@@ -375,13 +385,9 @@ pub fn resolve_all(symbols: &[String], current: Market) -> (Market, Vec<Resoluti
     // A symbol that stays on the current market because it is listed there,
     // or because it is listed in several, keeps the others from moving the
     // whole command. Symbols found nowhere do not count.
-    let any_current = res.iter().any(|r| {
-        r.market == current
-            && (r.hint.is_some()
-                || !Directory::builtin()
-                    .markets(&bare_ticker(&r.symbol))
-                    .is_empty())
-    });
+    let any_current = res
+        .iter()
+        .any(|r| r.market == current && (r.found || r.hint.is_some()));
     let market = match picked {
         Some(p) if agree && !any_current => p,
         _ => current,
@@ -534,5 +540,16 @@ mod tests {
         assert_eq!(m, Market::In);
         let (m, _) = resolve_all(&to_vec(&["NVDA", "BTC"]), Market::In);
         assert_eq!(m, Market::In);
+        // An index of the current market counts as disagreement too.
+        let (m, _) = resolve_all(&to_vec(&["^GSPC", "RELIANCE"]), Market::Us);
+        assert_eq!(m, Market::Us);
+        let (m, _) = resolve_all(
+            &to_vec(&["VOD.L", "RELIANCE"]),
+            Market::Global(Exchange::Uk),
+        );
+        assert_eq!(m, Market::Global(Exchange::Uk));
+        // Symbols found nowhere do not hold the others back.
+        let (m, _) = resolve_all(&to_vec(&["NVDA", "ZZZQ"]), Market::In);
+        assert_eq!(m, Market::Us);
     }
 }

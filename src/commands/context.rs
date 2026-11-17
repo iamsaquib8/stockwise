@@ -124,10 +124,9 @@ pub fn cmd_use(
     let path = config::path()
         .context("Cannot determine the config directory — set STOCKWISE_CONFIG to a file path")?;
     let cfg = config::get();
-    let active = cfg
-        .portfolio
-        .as_deref()
-        .and_then(|p| crate::portfolio::normalize_name(Some(p)).ok().flatten());
+    // The portfolio this run selected (--portfolio, STOCKWISE_PORTFOLIO or
+    // the config file), for `--bind` / `--unbind` without a portfolio.
+    let active = crate::portfolio::active().map(str::to_string);
     let new_market = apply_use(
         &path,
         &req,

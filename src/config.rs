@@ -1188,7 +1188,14 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))
+    // Write a temporary file next to it, then rename: a reader never sees a
+    // half-written file, and a failed write leaves the old one in place.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, out).with_context(|| format!("Cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Cannot replace {}", path.display())
+    })
 }
 
 /// Comment out all active keys inside `[profile]` at `path`, restoring built-in defaults.
@@ -1273,7 +1280,9 @@ pub fn set_top_level(path: &Path, key: &str, value: &str) -> Result<()> {
 /// needed; comments and other sections are kept.
 pub fn set_portfolio_market(path: &Path, name: &str, market: Option<&str>) -> Result<()> {
     let mut lines = config_lines(path)?;
-    let header = lines.iter().position(|l| l.trim() == "[portfolio_markets]");
+    let header = lines
+        .iter()
+        .position(|l| table_header(l) == Some("portfolio_markets"));
     let section_end = |start: usize, lines: &[String]| {
         lines[start + 1..]
             .iter()
@@ -1282,7 +1291,7 @@ pub fn set_portfolio_market(path: &Path, name: &str, market: Option<&str>) -> Re
     };
     let existing = header.and_then(|h| {
         let end = section_end(h, &lines);
-        (h + 1..end).find(|&i| is_key_line(lines[i].trim_start(), name))
+        (h + 1..end).find(|&i| table_key(&lines[i]).is_some_and(|k| k.eq_ignore_ascii_case(name)))
     });
     match (market, existing) {
         (Some(m), Some(i)) => lines[i] = format!("{name} = \"{m}\""),
@@ -1319,6 +1328,30 @@ pub fn set_portfolio_market(path: &Path, name: &str, market: Option<&str>) -> Re
 fn is_key_line(line: &str, key: &str) -> bool {
     line.strip_prefix(key)
         .is_some_and(|r| r.trim_start().starts_with('='))
+}
+
+/// The name of the table a `[name]` line opens, ignoring a trailing comment.
+fn table_header(line: &str) -> Option<&str> {
+    let t = line.split('#').next()?.trim();
+    let inner = t.strip_prefix('[')?.strip_suffix(']')?;
+    (!inner.starts_with('[')).then(|| inner.trim().trim_matches('"'))
+}
+
+/// The key a `key = value` line sets, bare or quoted; `None` for comments,
+/// blank lines and headers.
+fn table_key(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let (key, _) = t.split_once('=')?;
+    let key = key.trim();
+    let key = key
+        .strip_prefix('"')
+        .and_then(|k| k.strip_suffix('"'))
+        .or_else(|| key.strip_prefix('\'').and_then(|k| k.strip_suffix('\'')))
+        .unwrap_or(key);
+    Some(key)
 }
 
 /// The config file's lines, or [`TEMPLATE`]'s when it does not exist.
@@ -1434,6 +1467,27 @@ mod tests {
         let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
         assert_eq!(c.portfolio_market(Some("isa")), Some("uk"));
         assert_eq!(c.periods.get("deep").map(String::as_str), Some("3mo"));
+        // A header with a trailing comment and a quoted key are the same
+        // table and key: no second table, no duplicate key.
+        std::fs::write(
+            &file,
+            "[portfolio_markets] # market per portfolio\n\"us-tech\" = \"us\"\n",
+        )
+        .unwrap();
+        set_portfolio_market(&file, "us-tech", Some("ca")).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("[portfolio_markets]").count(), 1, "{text}");
+        let c = parse(&text, CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), Some("ca"));
+        set_portfolio_market(&file, "US-TECH", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), None);
+        // No temporary file is left behind.
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name() != "config.toml")
+            .count();
+        assert_eq!(leftovers, 0);
         let _ = std::fs::remove_dir_all(&dir);
         // Bad entries are rejected.
         assert!(err("[portfolio_markets]\nisa = \"mars\"\n").contains("portfolio_markets.isa"));

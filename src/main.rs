@@ -3613,18 +3613,50 @@ fn run_market(
     .unwrap_or((Market::In, config::Source::Default))
 }
 
-/// The tickers given to the chosen command (its `symbol` or `symbols`
-/// argument); empty for commands without one.
-fn command_symbols(matches: &clap::ArgMatches) -> Vec<String> {
-    let Some((_, sub)) = matches.subcommand() else {
-        return Vec::new();
-    };
-    for id in ["symbols", "symbol"] {
-        if let Ok(Some(vals)) = sub.try_get_many::<String>(id) {
-            return vals.cloned().collect();
+/// The tickers given to the chosen command, at any depth (`quote AAPL`,
+/// `options chain NIFTY`), each with its position in argv when clap knows it.
+/// Empty for commands without a `symbol` or `symbols` argument.
+fn command_symbols(matches: &clap::ArgMatches, args: &[String]) -> Vec<(String, Option<usize>)> {
+    let mut found = Vec::new();
+    let mut level = matches;
+    let mut cmd = Cli::command();
+    // clap counts a subcommand's argument indices from the subcommand's own
+    // name, so track where each name sits in argv.
+    let mut offset = Some(0);
+    while let Some((name, sub)) = level.subcommand() {
+        let Some(sc) = cmd.find_subcommand(name).cloned() else {
+            break;
+        };
+        offset = offset.and_then(|o| {
+            (o + 1..args.len()).find(|&i| {
+                let a = args[i].as_str();
+                sc.get_name() == a || sc.get_all_aliases().any(|x| x == a)
+            })
+        });
+        for id in ["symbols", "symbol"] {
+            if let Ok(Some(vals)) = sub.try_get_many::<String>(id) {
+                let idx: Vec<usize> = sub
+                    .indices_of(id)
+                    .map(Iterator::collect)
+                    .unwrap_or_default();
+                found = vals
+                    .cloned()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let at = offset
+                            .zip(idx.get(i))
+                            .map(|(o, k)| o + k)
+                            .filter(|&a| args.get(a) == Some(&v));
+                        (v, at)
+                    })
+                    .collect();
+                break;
+            }
         }
+        cmd = sc;
+        level = sub;
     }
-    Vec::new()
+    found
 }
 
 /// Detect whether raw CLI arguments represent a bare symbol invocation such as
@@ -3970,17 +4002,20 @@ async fn async_main() {
     sources.market = market_source;
     // No -m: a symbol that names its market moves the command there.
     if !matches!(market_source, config::Source::Flag | config::Source::Env) {
-        let symbols = command_symbols(&matches);
+        let found = command_symbols(&matches, &args);
+        let symbols: Vec<String> = found.iter().map(|(s, _)| s.clone()).collect();
         if !symbols.is_empty() {
             let (picked, res) = crossmarket::resolve_all(&symbols, m);
             let mut rewrote = false;
-            for (typed, r) in symbols.iter().zip(&res) {
+            for ((typed, at), r) in found.iter().zip(&res) {
                 if r.market == picked {
                     if let Some(h) = &r.hint {
                         eprintln!("  {}", colored::Colorize::dimmed(h.as_str()));
                     }
                     if r.symbol != *typed {
-                        for a in args.iter_mut().skip(1).filter(|a| *a == typed) {
+                        // Only the symbol's own argv slot: an option value
+                        // with the same text stays as typed.
+                        if let Some(a) = at.and_then(|i| args.get_mut(i)).filter(|a| *a == typed) {
                             *a = r.symbol.clone();
                             rewrote = true;
                         }
@@ -6599,6 +6634,43 @@ mod tests {
         assert!(Cli::try_parse_from(["stockwise", "portfolio", "ad", "TCS", "1", "1"]).is_err());
         assert!(Cli::try_parse_from(["stockwise", "screen", "growht"]).is_err());
         assert!(Cli::try_parse_from(["stockwise", "trade", "by", "TCS", "1"]).is_err());
+    }
+
+    #[test]
+    fn command_symbols_reach_nested_commands_and_know_their_slot() {
+        let argv = |a: &[&str]| -> (Vec<String>, clap::ArgMatches) {
+            let v: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            let m = Cli::command().try_get_matches_from(&v).unwrap();
+            (v, m)
+        };
+        let (v, m) = argv(&["stockwise", "options", "chain", "US0378331005"]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "US0378331005");
+        assert_eq!(v[found[0].1.unwrap()], "US0378331005");
+        // An option value with the same text is not the symbol's slot.
+        let (v, m) = argv(&["stockwise", "sip", "--period", "5y", "NVDA", "1000"]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[0].0, "NVDA");
+        assert_eq!(found[0].1, Some(4));
+        assert_eq!(v[4], "NVDA");
+        let (v, m) = argv(&["stockwise", "quote", "AAPL", "MSFT"]);
+        let found = command_symbols(&m, &v);
+        let slots: Vec<&str> = found.iter().map(|(_, i)| v[i.unwrap()].as_str()).collect();
+        assert_eq!(slots, ["AAPL", "MSFT"]);
+        // Global options before the command shift every slot.
+        let (v, m) = argv(&[
+            "stockwise",
+            "--portfolio",
+            "isa",
+            "options",
+            "chain",
+            "NVDA",
+        ]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[0].1, Some(5));
+        let (_, m) = argv(&["stockwise", "doctor"]);
+        assert!(command_symbols(&m, &[]).is_empty());
     }
 
     fn parses(args: &[&str]) -> bool {
