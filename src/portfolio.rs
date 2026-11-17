@@ -1490,9 +1490,23 @@ impl Portfolio {
             .with_context(|| format!("{} has no sale #{} (it has {})", sym, n, positions.len()))?;
         let sale = self.realized.remove(idx);
         let mut lot = sale.to_lot();
+        // Splits the rest of the position took after this sale: on lots still
+        // held, and on the lots of later sales (which keep their split record).
+        let known: Vec<String> = self
+            .holding(&sym)
+            .into_iter()
+            .flat_map(|h| h.lots.iter().flat_map(|l| l.adjustments.iter().cloned()))
+            .chain(
+                self.realized
+                    .iter()
+                    .filter(|s| s.symbol == sym)
+                    .filter_map(|s| s.origin.as_ref())
+                    .flat_map(|o| o.adjustments.iter().cloned()),
+            )
+            .collect();
+        catch_up_splits(&mut lot, known);
         match self.holding_mut(&sym) {
             Some(h) => {
-                catch_up_splits(&mut lot, &h.lots);
                 let same = h.lots.iter_mut().find(|l| {
                     l.date == lot.date
                         && l.date_estimated == lot.date_estimated
@@ -2184,8 +2198,7 @@ fn rotate_backups(path: &Path) -> Result<()> {
 /// id, `DATE:NUM:DEN`) that falls after `lot`'s share count and that `lot`
 /// has not taken yet is applied to it, so a lot put back by an undone sale
 /// is in the same share count as the lots still held.
-fn catch_up_splits(lot: &mut Lot, others: &[Lot]) {
-    let mut ids: Vec<&String> = others.iter().flat_map(|l| &l.adjustments).collect();
+fn catch_up_splits(lot: &mut Lot, mut ids: Vec<String>) {
     ids.sort();
     ids.dedup();
     for id in ids {
@@ -2205,7 +2218,7 @@ fn catch_up_splits(lot: &mut Lot, others: &[Lot]) {
         if r.is_finite() && r > 0.0 && split.pending_for(lot) {
             lot.qty *= r;
             lot.price /= r;
-            lot.adjustments.push(id.clone());
+            lot.adjustments.push(id);
         }
     }
 }
@@ -4240,5 +4253,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_sale_finds_a_split_on_a_later_sale_when_the_lot_is_gone() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", Lot::new(10.0, 1000.0, "2023-01-01", "manual"));
+        p.sell_fifo("INFY.NS", 4.0, 1200.0, "2024-01-01", "manual")
+            .unwrap();
+        let split = Split {
+            date: "2024-06-01".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+        };
+        p.apply_split("INFY.NS", &split);
+        p.sell_fifo("INFY.NS", 12.0, 700.0, "2024-08-01", "manual")
+            .unwrap();
+        p.add_lot("INFY.NS", Lot::new(5.0, 800.0, "2024-09-01", "manual"));
+        p.undo_sale("INFY.NS", 1).unwrap();
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!(h.shares, 13.0);
+        let restored = h.lots.iter().find(|l| l.date == "2023-01-01").unwrap();
+        assert_eq!(restored.qty, 8.0);
+        assert!((restored.price - 500.0).abs() < 1e-9);
     }
 }

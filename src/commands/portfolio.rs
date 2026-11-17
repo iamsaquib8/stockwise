@@ -1565,9 +1565,10 @@ fn apply_lot_change(resolved: &str, change: &LotChange) -> Result<Option<Portfol
         println!(
             "  {}",
             format!(
-                "Note: {resolved} has trades kept from an imported tradebook. Importing that \
-                 tradebook again rebuilds {resolved}'s lots and sales from the file and replaces \
-                 this correction; correct the file too."
+                "Note: {resolved} has trades kept from an imported tradebook. Importing a \
+                 tradebook for it again rebuilds its lots and sales from the kept trades and \
+                 replaces this correction. To keep it, re-import only with `--replace` and a \
+                 file holding the complete corrected history."
             )
             .yellow()
         );
