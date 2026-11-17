@@ -50,7 +50,8 @@ Each import prints one line per symbol:
 ```
 
 Splits and bonuses are applied as they happened. This needs a network
-connection.
+connection. An Indian bonus issue becomes a separate lot of the bonus shares
+at zero cost, dated on the allotment date, as Indian tax treats it.
 
 If a symbol is skipped, the message says why. The usual cause is a sale with
 no earlier purchase, because an earlier year's file is missing. Import that
