@@ -1406,12 +1406,15 @@ fn recent_buy(
         .lots
         .iter()
         .zip(lots)
-        .filter(|(_, l)| l.2 >= 0.0)
+        // Bonus shares are allotted, not bought, so they are never replacements.
+        .filter(|(l, x)| x.2 >= 0.0 && l.source != crate::portfolio::BONUS_SOURCE)
         .map(|(l, _)| l.date.as_str());
     let sold_earlier = portfolio
         .realized
         .iter()
-        .filter(|s| s.symbol == h.symbol && parse_date(&s.sell_date) != Some(today))
+        .filter(|s| {
+            s.symbol == h.symbol && !s.bonus_shares && parse_date(&s.sell_date) != Some(today)
+        })
         .map(|s| s.buy_date.as_str());
     kept_lots
         .chain(sold_earlier)

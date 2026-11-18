@@ -1525,3 +1525,31 @@ fn us_harvest_flags_a_recent_buy_inside_the_wash_sale_window() {
     let json = serde_json::to_value(&h.loss_candidates[0]).unwrap();
     assert!(json.get("recent_buy").is_some() && json.get("wash_sale_window_end").is_some());
 }
+
+#[test]
+fn us_harvest_does_not_count_recent_bonus_shares_as_a_buy() {
+    // MSFT: 10 @ 400 (2026-02-02) at a loss, plus 5 bonus shares at zero
+    // cost allotted 2026-10-20. Bonus shares are not bought, so no flag.
+    let mut p = lots(&[
+        ("MSFT", 10.0, 400.0, "2026-02-02"),
+        ("MSFT", 5.0, 0.0, "2026-10-20"),
+    ]);
+    p.holdings[0].lots[1].source = crate::portfolio::BONUS_SOURCE.into();
+    let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let val = Valuation::new(
+        vec![Quote {
+            currency: Some("USD".into()),
+            ..quote("MSFT", Some(350.0), None)
+        }],
+        &symbols,
+        Market::Us,
+        None,
+    );
+    let h = super::holdings::compute_harvest(&p, &val, Market::Us, day("2026-11-01"));
+    let row = h
+        .loss_candidates
+        .iter()
+        .find(|r| r.symbol == "MSFT")
+        .unwrap();
+    assert_eq!(row.recent_buy, None);
+}

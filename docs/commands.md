@@ -597,7 +597,7 @@ For the US, `harvest -m us` also checks the 30-day wash-sale rule (IRS
 Publication 550): a loss is disallowed when the same shares are bought within 30
 days before or after the sale. A loss candidate with a purchase in the last 30
 days that the sale would not sell (a lot at a gain, or shares already bought and
-sold) is flagged, with that date in `recent_buy`. `wash_sale_window_end` is the
+sold; bonus shares do not count) is flagged, with that date in `recent_buy`. `wash_sale_window_end` is the
 last day of the window for a sale made today: a buy of the same shares on or
 before it would make the loss a wash sale. `estimated_tax_saved` does not subtract
 a disallowed loss.
@@ -630,7 +630,7 @@ Schedule D totals, the $3,000 loss deduction and the carryover.
 Wash sales (IRS Publication 550) are found from your StockWise records: a sale
 at a loss is one when shares of the same symbol were bought within 30 days
 before or after it, counting open lots and the buy side of other sales, but not
-the rest of the lot sold or shares sold the same day. The row gets code `W` in
+the rest of the lot sold or shares sold on or before the day of the loss. The row gets code `W` in
 column (f) and the disallowed loss as a positive amount in column (g); column
 (h) is (d) − (e) + (g). A partial replacement disallows only its share of the
 loss (replacement shares over shares sold), and each purchase replaces one loss
@@ -643,7 +643,8 @@ totals include the adjustments. A replacement with an estimated purchase date
 is named in a note, as that wash sale may not be one. Lots bought on the same
 day, in the same account and at the same price as the lot sold count as the same
 purchase, so they are not replacements. Bonus shares are not purchases. Only USD
-holdings are checked; purchases in accounts StockWise does not know about (an
+stocks are checked (crypto such as `BTC-USD` is left out); row amounts are split
+in whole cents, so the rows add up to the Schedule D totals. Purchases in accounts StockWise does not know about (an
 IRA, a spouse's account) are not seen.
 
 ```bash

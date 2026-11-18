@@ -836,15 +836,38 @@ pub fn us_schedule(sales: &[Sale], holdings: &[Holding], start: NaiveDate) -> Us
             Some(parts) if !parts.is_empty() => parts,
             _ => &whole,
         };
-        for p in parts {
+        // Split the sale's proceeds and cost between the parts in whole
+        // cents by running share count, so the rows add up to the sale.
+        let to_cents = |x: f64| (x * 100.0).round() as i64;
+        let proceeds_total = to_cents(s.qty * s.sell_price * scale);
+        let cost_total = to_cents(s.qty * s.buy_price * scale);
+        let (mut done_qty, mut done_proceeds, mut done_cost) = (0.0, 0, 0);
+        for (n, p) in parts.iter().enumerate() {
             let long = match (date(&s.buy_date), date(&s.sell_date)) {
                 (Some(b), Some(d)) => c.is_long_term(b - chrono::Duration::days(p.days_added), d),
                 _ => false,
             };
-            let adjustment = p.disallowed * scale;
-            let proceeds = p.qty * s.sell_price * scale;
-            let cost = (p.qty * s.buy_price + p.basis_added) * scale;
-            let gain = proceeds - cost + adjustment;
+            done_qty += p.qty;
+            let share = |total: i64| {
+                if n + 1 == parts.len() || s.qty <= 0.0 {
+                    total
+                } else {
+                    (total as f64 * done_qty / s.qty).round() as i64
+                }
+            };
+            let (upto_proceeds, upto_cost) = (share(proceeds_total), share(cost_total));
+            let proceeds_cents = upto_proceeds - done_proceeds;
+            let cost_cents = upto_cost - done_cost + to_cents(p.basis_added * scale);
+            (done_proceeds, done_cost) = (upto_proceeds, upto_cost);
+            let adjustment_cents = to_cents(p.disallowed * scale);
+            let gain_cents = proceeds_cents - cost_cents + adjustment_cents;
+            let dollars = |x: i64| x as f64 / 100.0;
+            let (proceeds, cost, adjustment, gain) = (
+                dollars(proceeds_cents),
+                dollars(cost_cents),
+                dollars(adjustment_cents),
+                dollars(gain_cents),
+            );
             buckets.add(gain, long);
             if long {
                 sum.long_term_proceeds += proceeds;
@@ -1662,6 +1685,31 @@ mod tests {
         assert_eq!((later[0].quantity, later[0].cost_basis), (10.0, 100.0));
         assert_eq!((later[1].quantity, later[1].cost_basis), (10.0, 200.0));
         assert_eq!(later[1].gain_or_loss, -80.0);
+    }
+
+    #[test]
+    fn us_split_rows_add_up_to_the_summary() {
+        // A $1 loss moves to half of a one-share purchase at 1.01. The two
+        // rows of the later sale split its 1.01 of cost in whole cents.
+        let sales = vec![
+            sale("X", 0.5, ("2025-01-02", 3.0), ("2025-02-01", 1.0)),
+            sale("X", 1.0, ("2025-02-05", 1.01), ("2025-05-01", 1.01)),
+        ];
+        let s = us_schedule(&sales, &[], d("2025-01-01"));
+        let later: Vec<_> = s
+            .sales
+            .iter()
+            .filter(|r| r.date_sold == "05/01/2025")
+            .collect();
+        assert_eq!(later.len(), 2);
+        let cost: f64 = later.iter().map(|r| r.cost_basis).sum();
+        let proceeds: f64 = later.iter().map(|r| r.proceeds).sum();
+        assert_eq!(round(cost, 2), 2.01);
+        assert_eq!(round(proceeds, 2), 1.01);
+        let all_cost: f64 = s.sales.iter().map(|r| r.cost_basis).sum();
+        let all_gain: f64 = s.sales.iter().map(|r| r.gain_or_loss).sum();
+        assert_eq!(round(all_cost, 2), s.summary.short_term_cost);
+        assert_eq!(round(all_gain, 2), s.summary.short_term_gain);
     }
 
     #[test]

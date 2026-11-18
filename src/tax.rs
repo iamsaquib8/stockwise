@@ -974,14 +974,17 @@ fn dollars(c: i64) -> f64 {
 /// replacement once, earliest purchase first, and losses are taken in
 /// sale-date order. Replacement shares take on the disallowed loss and the
 /// holding period of the washed shares, share by share: a later sale of them
-/// is split into parts, each matched on its own. Only USD (US-taxed) symbols
-/// are checked.
+/// is split into parts, each matched on its own. Only USD (US-taxed) stocks
+/// are checked: crypto such as `BTC-USD` is not stock or securities.
 pub fn wash_sales(
     sales: &[crate::portfolio::Sale],
     holdings: &[crate::portfolio::Holding],
 ) -> WashSales {
     use crate::portfolio::symbol_currency;
-    let is_usd = |symbol: &str| symbol_currency(symbol) == Some("USD");
+    let is_usd = |symbol: &str| {
+        symbol_currency(symbol) == Some("USD")
+            && crate::market::AssetClass::of(symbol) == crate::market::AssetClass::Stock
+    };
 
     // Every purchase of each USD symbol, earliest first.
     let mut buys: std::collections::BTreeMap<&str, Vec<Buy>> = Default::default();
@@ -1079,7 +1082,9 @@ pub fn wash_sales(
                 if b.left <= 1e-9
                     || (b.date - sold).num_days().abs() > WASH_SALE_DAYS
                     || same_purchase(b)
-                    || b.sold.is_some_and(|(_, d)| d == sold)
+                    // Shares sold on or before the loss date are not held
+                    // to take on the disallowed loss.
+                    || b.sold.is_some_and(|(_, d)| d <= sold)
                 {
                     continue;
                 }
@@ -1093,18 +1098,22 @@ pub fn wash_sales(
             }
             let replacement_qty = part.qty - need.max(0.0);
             let disallowed_cents = (loss_cents as f64 * replacement_qty / part.qty).round() as i64;
-            // Split the disallowed loss between the replacements; the last
-            // takes the rounding remainder.
-            let mut left_cents = disallowed_cents;
+            // Split the disallowed loss between the replacements by their
+            // running share count: each gets a non-negative amount and the
+            // amounts add up to the whole.
             let mut replacements = Vec::new();
+            let mut done_qty = 0.0;
+            let mut done_cents = 0;
             for (n, (k, qty)) in matched.iter().enumerate() {
                 let b = &list[*k];
-                let basis_cents = if n + 1 == matched.len() {
-                    left_cents
+                done_qty += qty;
+                let upto = if n + 1 == matched.len() {
+                    disallowed_cents
                 } else {
-                    (disallowed_cents as f64 * qty / replacement_qty).round() as i64
+                    (disallowed_cents as f64 * done_qty / replacement_qty).round() as i64
                 };
-                left_cents -= basis_cents;
+                let basis_cents = upto - done_cents;
+                done_cents = upto;
                 if let Some((j, _)) = b.sold {
                     split_off_replaced(&mut parts[j], *qty, basis_cents, days_added);
                 }
@@ -2040,6 +2049,56 @@ mod tests {
                 wash_sale_window_end(NaiveDate::from_ymd_opt(2025, 3, 1).unwrap()),
                 NaiveDate::from_ymd_opt(2025, 3, 31).unwrap()
             );
+        }
+
+        #[test]
+        fn every_replacement_gets_a_non_negative_share_of_the_loss() {
+            // A 2-cent loss split over four quarter-share replacements.
+            let sales = [sale("AAPL", 1.0, ("2024-06-03", 1.02), ("2025-03-01", 1.0))];
+            let holdings = [held(
+                "AAPL",
+                &[
+                    (0.25, 1.0, "2025-03-02"),
+                    (0.25, 1.0, "2025-03-03"),
+                    (0.25, 1.0, "2025-03-04"),
+                    (0.25, 1.0, "2025-03-05"),
+                ],
+            )];
+            let w = &wash_sales(&sales, &holdings).washes[0];
+            assert_eq!(w.disallowed, 0.02);
+            assert!(w.replacements.iter().all(|r| r.basis_added >= 0.0));
+            let split: i64 = w.replacements.iter().map(|r| cents(r.basis_added)).sum();
+            assert_eq!(split, 2);
+        }
+
+        #[test]
+        fn crypto_quoted_in_usd_is_not_checked() {
+            let sales = [sale(
+                "BTC-USD",
+                1.0,
+                ("2024-06-03", 60000.0),
+                ("2025-03-01", 50000.0),
+            )];
+            let holdings = [held("BTC-USD", &[(1.0, 51000.0, "2025-03-11")])];
+            let w = wash_sales(&sales, &holdings);
+            assert!(w.washes.is_empty());
+            assert!(w.parts[0].is_empty());
+        }
+
+        #[test]
+        fn shares_sold_before_the_loss_are_not_replacements() {
+            // A: bought 2025-01-02 at 20, sold 2025-01-20 at 10 (loss 100).
+            // B: bought 2025-01-10 at 19, sold 2025-01-25 at 9. B's shares
+            // replace A's; A's shares, already sold, cannot replace B's.
+            let sales = [
+                sale("XYZ", 10.0, ("2025-01-02", 20.0), ("2025-01-20", 10.0)),
+                sale("XYZ", 10.0, ("2025-01-10", 19.0), ("2025-01-25", 9.0)),
+            ];
+            let w = wash_sales(&sales, &[]);
+            assert_eq!(w.washes.len(), 1);
+            assert_eq!((w.washes[0].sale, w.washes[0].disallowed), (0, 100.0));
+            assert_eq!(w.parts[0][0].disallowed, 100.0);
+            assert_eq!(w.parts[1][0].basis_added, 100.0);
         }
     }
 }
