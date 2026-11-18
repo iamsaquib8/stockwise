@@ -41,6 +41,7 @@ fn range_days(range: &str) -> i64 {
         "2y" => 731,
         "5y" => 1827,
         "10y" => 3653,
+        "max" => 36_525,
         _ => 366,
     }
 }
@@ -148,13 +149,13 @@ async fn fetch_fundamentals(
     client: &YahooClient,
     symbols: Vec<String>,
     market: Market,
-) -> (Vec<(String, Fundamentals)>, Vec<String>) {
+) -> (Vec<(String, Fundamentals)>, Vec<String>, Vec<String>) {
     let needs = crate::research::Needs {
         statements: true,
         ownership: true,
         ..crate::research::Needs::NONE
     };
-    let results: Vec<(String, Result<Fundamentals>)> =
+    let results: Vec<(String, Result<(Fundamentals, Vec<String>)>)> =
         futures_util::stream::iter(symbols.into_iter().map(|sym| async move {
             let m = market::market_of_symbol(&sym, market);
             let r = tokio::time::timeout(
@@ -164,7 +165,7 @@ async fn fetch_fundamentals(
             .await
             .map_err(|_| anyhow::anyhow!("timed out"))
             .and_then(|r| r)
-            .map(|r| fundamentals_of(&r));
+            .map(|r| (fundamentals_of(&r), r.warnings));
             (sym, r)
         }))
         .buffer_unordered(CONCURRENCY)
@@ -172,14 +173,21 @@ async fn fetch_fundamentals(
         .await;
     let mut ok = Vec::new();
     let mut failed = Vec::new();
+    // Sources that failed for a stock whose other data came through: its
+    // facts are kept, and the gap is named.
+    let mut partial = Vec::new();
     for (sym, r) in results {
         match r {
-            Ok(f) => ok.push((sym, f)),
+            Ok((f, warnings)) => {
+                partial.extend(warnings.into_iter().map(|w| format!("{sym}: {w}")));
+                ok.push((sym, f));
+            }
             Err(_) => failed.push(sym),
         }
     }
     failed.sort();
-    (ok, failed)
+    partial.sort();
+    (ok, failed, partial)
 }
 
 /// Fund holdings for the look-through: saved disclosures first, then (online)
@@ -358,10 +366,11 @@ pub(crate) async fn run_checkup(
                 "Scorecards, cash conversion, shareholding and results: not read (offline)".into(),
             ),
             Some(c) => {
-                let (found, failed) = fetch_fundamentals(c, wanted, market).await;
+                let (found, failed, partial) = fetch_fundamentals(c, wanted, market).await;
                 if !failed.is_empty() {
                     skipped.push(format!("No statements for {}", failed.join(", ")));
                 }
+                skipped.extend(partial);
                 for (sym, f) in found {
                     if let Some(h) = holdings.iter_mut().find(|h| h.symbol == sym) {
                         h.fundamentals = Some(f);
@@ -780,15 +789,11 @@ pub async fn cmd_portfolio_checkup(
 /// The chart range that reaches back to `opening`.
 fn range_back_to(opening: chrono::NaiveDate, today: chrono::NaiveDate) -> &'static str {
     let days = (today - opening).num_days();
-    if days <= 360 {
-        "1y"
-    } else if days <= 725 {
-        "2y"
-    } else if days <= 1820 {
-        "5y"
-    } else {
-        "10y"
-    }
+    // Each range must cover the opening with a few days to spare.
+    ["1y", "2y", "5y", "10y"]
+        .into_iter()
+        .find(|r| range_days(r) - 5 >= days)
+        .unwrap_or("max")
 }
 
 fn closes_of(chart: &crate::api::ChartData) -> Vec<(chrono::NaiveDate, f64)> {
@@ -1116,7 +1121,15 @@ mod tests {
         assert_eq!(range_back_to(d("2026-03-31"), d("2026-11-18")), "1y");
         assert_eq!(range_back_to(d("2025-03-31"), d("2026-11-18")), "2y");
         assert_eq!(range_back_to(d("2022-12-31"), d("2026-11-18")), "5y");
-        assert_eq!(range_back_to(d("2015-12-31"), d("2026-11-18")), "10y");
+        assert_eq!(range_back_to(d("2016-12-31"), d("2026-11-18")), "10y");
+        assert_eq!(range_back_to(d("2009-12-31"), d("2026-11-18")), "max");
+        // Every range reaches back to its opening.
+        let today = d("2026-11-18");
+        for days in [1, 300, 361, 400, 726, 1800, 1830, 3600, 3700, 6000] {
+            let opening = today - chrono::Days::new(days);
+            let r = range_back_to(opening, today);
+            assert!(range_days(r) >= days as i64, "{days} days: {r}");
+        }
         assert_eq!(range_days("2y"), 731);
     }
 

@@ -10,7 +10,7 @@
 //! was invested. It is a money-weighted figure for the period, not
 //! annualised. Amounts in other currencies are converted at today's rate.
 
-use crate::portfolio::Portfolio;
+use crate::portfolio::{Portfolio, Split};
 use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 
@@ -162,28 +162,51 @@ impl SymbolYear {
     }
 }
 
-/// Shares of `symbol` held at the end of `day`: open lots bought by then
-/// and sold lots bought by then but sold after.
-pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
-    let open: f64 = p
+/// The splits and bonus issues recorded on `symbol`'s lots and sales
+/// (`2024-10-28:2:1`, `bonus:2024-10-28:2:1`), oldest first.
+pub fn recorded_splits(p: &Portfolio, symbol: &str) -> Vec<Split> {
+    let ids = p
         .holding(symbol)
-        .map(|h| {
-            h.lots
+        .into_iter()
+        .flat_map(|h| h.lots.iter().flat_map(|l| l.adjustments.iter()))
+        .chain(
+            p.realized
                 .iter()
-                .filter(|l| date(&l.date).is_some_and(|d| d <= day))
-                .map(|l| l.qty)
-                .sum()
-        })
-        .unwrap_or(0.0);
-    let sold: f64 = p
-        .realized
-        .iter()
-        .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
-        .filter(|s| date(&s.buy_date).is_some_and(|d| d <= day))
-        .filter(|s| date(&s.sell_date).is_some_and(|d| d > day))
-        .map(|s| s.qty)
-        .sum();
-    open + sold
+                .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
+                .flat_map(|s| s.bonuses.iter()),
+        );
+    let mut out: Vec<Split> = Vec::new();
+    for id in ids {
+        let id = id.strip_prefix("bonus:").unwrap_or(id);
+        let mut parts = id.split(':');
+        let (Some(d), Some(n), Some(m)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(n), Ok(m)) = (n.parse::<f64>(), m.parse::<f64>()) else {
+            continue;
+        };
+        let split = Split::new(d, n, m);
+        if n > 0.0 && m > 0.0 && !out.iter().any(|s| s.id() == split.id()) {
+            out.push(split);
+        }
+    }
+    out.sort_by(|a, b| a.date.cmp(&b.date));
+    out
+}
+
+/// Shares of `symbol` held at the end of `day`, in today's share count (the
+/// count daily closes are adjusted to): open lots bought by then and sold
+/// lots bought by then but sold after, with splits and bonus issues
+/// recorded after `day` applied (see [`Portfolio::shares_on`]).
+pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
+    let Some(next) = day.succ_opt() else {
+        return 0.0;
+    };
+    p.shares_on(
+        symbol,
+        &next.format("%Y-%m-%d").to_string(),
+        &recorded_splits(p, symbol),
+    )
 }
 
 /// `symbol` over `period` up to `as_of`, valued at `start_price` (the close
@@ -737,6 +760,37 @@ mod tests {
             currency: Some("INR".into()),
         });
         p
+    }
+
+    #[test]
+    fn shares_count_in_todays_units_after_a_split() {
+        // 10 bought; 5 sold in February; the other 5 split 2:1 in June
+        // (the lot now holds 10 at half the price).
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(10.0, 50.0, "2025-01-10", "manual");
+        lot.adjustments.push("2026-06-01:2:1".into());
+        p.add_lot("AAA.NS", lot);
+        p.realized.push(Sale {
+            symbol: "AAA.NS".into(),
+            qty: 5.0,
+            buy_date: "2025-01-10".into(),
+            buy_price: 100.0,
+            sell_date: "2026-02-01".into(),
+            sell_price: 120.0,
+            buy_date_estimated: false,
+            source: "manual".into(),
+            order_id: None,
+            intraday: false,
+            account: None,
+            bonuses: Vec::new(),
+            bonus_shares: false,
+        });
+        assert_eq!(recorded_splits(&p, "AAA.NS").len(), 1);
+        // Before the sale: 10 then = 20 in today's count.
+        assert_eq!(shares_at(&p, "AAA.NS", d("2025-12-31")), 20.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-01")), 10.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-11-17")), 10.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2025-01-01")), 0.0);
     }
 
     #[test]

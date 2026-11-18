@@ -500,13 +500,27 @@ pub fn correlated_pairs(series: &[Series]) -> Vec<CorrelatedPair> {
 // ── Statement helpers ──
 
 /// Latest quarter against the same quarter a year earlier (quarters oldest
-/// first): profit growth (percent) and operating-margin change (points).
+/// The quarter that ended about a year before `quarters[i]` (by end date,
+/// not position: a source may skip a quarter).
+fn year_before(quarters: &[crate::research::Period], i: usize) -> Option<&crate::research::Period> {
+    let end = quarters[i].end;
+    quarters[..i].iter().rev().find(|p| {
+        let days = (end - p.end).num_days();
+        (350..=380).contains(&days)
+    })
+}
+
+/// Latest quarter against the quarter that ended a year earlier (quarters
+/// oldest first): profit growth (percent) and operating-margin change
+/// (points).
 pub fn quarter_yoy(quarters: &[crate::research::Period]) -> (Option<f64>, Option<f64>) {
-    let n = quarters.len();
-    if n < 5 {
+    let Some(i) = quarters.len().checked_sub(1) else {
         return (None, None);
-    }
-    let (now, then) = (&quarters[n - 1], &quarters[n - 5]);
+    };
+    let Some(then) = year_before(quarters, i) else {
+        return (None, None);
+    };
+    let now = &quarters[i];
     let pat = match (now.net_income, then.net_income) {
         (Some(a), Some(b)) if b > 0.0 => Some((a / b - 1.0) * 100.0),
         _ => None,
@@ -519,18 +533,24 @@ pub fn quarter_yoy(quarters: &[crate::research::Period]) -> (Option<f64>, Option
 }
 
 /// Revenue growth of the latest quarter year on year (percent), and whether
-/// it is slower than the quarter before's.
+/// it is slower than the growth of the quarter just before it.
 pub fn revenue_trend(quarters: &[crate::research::Period]) -> (Option<f64>, Option<bool>) {
-    let n = quarters.len();
-    let yoy = |i: usize| match (quarters[i].revenue, quarters[i - 4].revenue) {
-        (Some(a), Some(b)) if b > 0.0 => Some((a / b - 1.0) * 100.0),
-        _ => None,
+    let yoy = |i: usize| {
+        let then = year_before(quarters, i)?;
+        match (quarters[i].revenue, then.revenue) {
+            (Some(a), Some(b)) if b > 0.0 => Some((a / b - 1.0) * 100.0),
+            _ => None,
+        }
     };
-    if n < 5 {
+    let Some(i) = quarters.len().checked_sub(1) else {
         return (None, None);
-    }
-    let latest = yoy(n - 1);
-    let prior = if n >= 6 { yoy(n - 2) } else { None };
+    };
+    let latest = yoy(i);
+    // The prior quarter must be the one right before (about three months).
+    let prior = (i >= 1)
+        .then(|| (quarters[i].end - quarters[i - 1].end).num_days())
+        .filter(|d| (80..=100).contains(d))
+        .and_then(|_| yoy(i - 1));
     let decel = match (latest, prior) {
         (Some(l), Some(p)) => Some(l < p),
         _ => None,
@@ -653,7 +673,10 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
     }
     for (sym, w) in &weights {
         // A fund's undisclosed remainder is not one company.
-        if fund_symbols.contains(&sym.as_str()) || *w <= limit {
+        let is_fund = fund_symbols.iter().any(|f| {
+            *f == sym || crate::xray::canonical_ticker(f) == crate::xray::canonical_ticker(sym)
+        });
+        if is_fund || *w <= limit {
             continue;
         }
         let exposure = total * w / 100.0;
@@ -1257,6 +1280,16 @@ mod tests {
     }
 
     #[test]
+    fn an_undisclosed_fund_is_not_a_company() {
+        let mut i = spread();
+        i.holdings[0].symbol = "ETF.NS".into();
+        i.holdings[0].is_fund = true;
+        // `look_through` keys an undisclosed fund without its suffix.
+        i.look_through = vec![("ETF".into(), 40.0), ("S1".into(), 10.0)];
+        assert!(!rules(&evaluate(&i, vec![])).contains(&Rule::StockWeight));
+    }
+
+    #[test]
     fn look_through_weight_raises_stock_finding() {
         let mut i = spread();
         i.look_through = vec![("S1".into(), 14.0), ("S2".into(), 9.0)];
@@ -1694,6 +1727,19 @@ mod tests {
         // 5% now against 22.2% the quarter before.
         assert_eq!(decel, Some(true));
         assert_eq!(quarter_yoy(&q[..4]), (None, None));
+        // A missing quarter: no comparison with the wrong period.
+        let gap = vec![
+            period("2025-03-31", 90.0, 9.0, 18.0),
+            period("2025-09-30", 100.0, 10.0, 20.0),
+            period("2025-12-31", 100.0, 10.0, 20.0),
+            period("2026-03-31", 110.0, 10.0, 20.0),
+            period("2026-06-30", 105.0, 8.0, 15.75),
+        ];
+        assert_eq!(quarter_yoy(&gap), (None, None));
+        // June 2025 is missing, so the latest quarter has no year-ago match.
+        let (yoy, decel) = revenue_trend(&gap);
+        assert_eq!(yoy, None);
+        assert_eq!(decel, None);
         let mut annual = vec![period("2025-03-31", 100.0, 10.0, 20.0)];
         annual[0].ocf = Some(6.0);
         assert!((cfo_to_pat(&annual).unwrap() - 0.6).abs() < 1e-12);
