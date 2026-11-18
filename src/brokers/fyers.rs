@@ -128,7 +128,7 @@ pub struct FyersClient {
 /// The symbol master as text, refused unless its first row has an
 /// `NSE:` ticker in [`TICKER_COL`] (the file has no header line).
 fn parse_master(bytes: &[u8]) -> Result<String> {
-    masters::csv_checked(bytes, "Fyers symbol master", |row| {
+    masters::csv_checked(bytes, "Fyers symbol master", false, |row| {
         row.get(TICKER_COL).is_some_and(|t| t.starts_with("NSE:"))
     })
 }

@@ -155,7 +155,7 @@ fn pick_equity(csv: &str, symbol: &str) -> Result<Instrument> {
 /// The instrument dump as text, refused unless it has the columns
 /// [`pick_equity`] reads.
 fn parse_master(bytes: &[u8]) -> Result<String> {
-    masters::csv_checked(bytes, "Kite instrument dump", |h| {
+    masters::csv_checked(bytes, "Kite instrument dump", true, |h| {
         masters::has_columns(
             h,
             &[
@@ -979,6 +979,11 @@ mod tests {
     fn a_master_without_the_lookup_columns_is_not_cached() {
         assert!(parse_master(b"{\"status\":\"error\",\"message\":\"Too many requests\",\"error_type\":\"NetworkException\"}").is_err());
         assert!(parse_master(b"a,b,c\n1,2,3\n").is_err());
+        let header = b"instrument_token,tradingsymbol,instrument_type,segment,exchange\n";
+        assert!(
+            parse_master(header).is_err(),
+            "a header with no rows is refused"
+        );
         assert!(parse_master(include_str!("fixtures/kite_instruments.csv").as_bytes()).is_ok());
     }
 }

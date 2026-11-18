@@ -114,6 +114,12 @@ impl MasterCache {
         }
         let body = fetch().await?;
         let parsed = parse(&body)?;
+        // A download that crossed IST midnight belongs to a day that is
+        // over: use it for this lookup, but never let it replace (or delete)
+        // the newer day's file or memory entry.
+        if (self.today)() != date {
+            return Ok(Arc::new(parsed));
+        }
         // Best effort: a cache that cannot be written only costs a download.
         if std::fs::create_dir_all(dir).is_ok()
             && crate::pagecache::write_atomic(&path, envelope(&body)).is_ok()
@@ -131,7 +137,11 @@ impl MasterCache {
     fn remember<T: Send + Sync + 'static>(&self, stem: &str, key: String, parsed: T) -> Arc<T> {
         let parsed = Arc::new(parsed);
         let mut memory = self.memory.lock().unwrap_or_else(|e| e.into_inner());
-        // Earlier days of the same master are no longer needed.
+        // Keys end in an ISO date, so they sort by day. A newer day already
+        // in memory wins; earlier days are no longer needed.
+        if memory.keys().any(|k| k.starts_with(stem) && *k > key) {
+            return parsed;
+        }
         memory.retain(|k, _| !k.starts_with(stem));
         memory.insert(key, parsed.clone() as Parsed);
         parsed
@@ -172,7 +182,10 @@ fn remove_older(dir: &Path, stem: &str, keep: &Path) {
     for e in entries.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(stem) && name.ends_with(".master") && e.path() != keep {
+        let older = keep
+            .file_name()
+            .is_some_and(|k| *name < *k.to_string_lossy());
+        if name.starts_with(stem) && name.ends_with(".master") && older {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -190,17 +203,27 @@ pub fn csv_text(bytes: &[u8]) -> Result<String> {
     Ok(text)
 }
 
-/// [`csv_text`], refused unless `ok` accepts the first line's fields. Each
-/// broker passes the check for the columns its lookup reads, so an error
-/// page or a changed layout is never cached for the rest of the day.
-pub fn csv_checked(bytes: &[u8], what: &str, ok: fn(&[String]) -> bool) -> Result<String> {
+/// [`csv_text`], refused unless `ok` accepts the first line's fields and at
+/// least one data row follows a header (`has_header`). Each broker passes
+/// the check for the columns its lookup reads, so an error page, a changed
+/// layout or an empty list is never cached for the rest of the day.
+pub fn csv_checked(
+    bytes: &[u8],
+    what: &str,
+    has_header: bool,
+    ok: fn(&[String]) -> bool,
+) -> Result<String> {
     let text = csv_text(bytes)?;
-    let first: Vec<String> = super::http::csv_fields(text.lines().next().unwrap_or_default())
+    let mut lines = text.lines();
+    let first: Vec<String> = super::http::csv_fields(lines.next().unwrap_or_default())
         .into_iter()
         .map(|f| f.trim().to_string())
         .collect();
     if !ok(&first) {
         anyhow::bail!("The {what} does not have the expected columns");
+    }
+    if has_header && !lines.any(|l| !l.trim().is_empty()) {
+        anyhow::bail!("The {what} has no instruments");
     }
     Ok(text)
 }
@@ -373,6 +396,61 @@ mod tests {
             rig.files(),
             ["dhan-NSE-2026-11-17.master", "kite-NSE-2026-11-17.master"]
         );
+    }
+
+    /// A lookup that starts on the 17th and finishes after another lookup
+    /// has already stored the 18th's list must not undo the newer state.
+    #[tokio::test]
+    async fn a_download_that_crosses_midnight_does_not_replace_the_new_day() {
+        let rig = Rig::new("midnight");
+        let cache = rig.cache();
+        let date = rig.date.clone();
+        let late = cache
+            .load(
+                "kite",
+                "NSE",
+                || async {
+                    // Midnight passes while the 17th's list downloads, and
+                    // a second lookup completes the 18th's first.
+                    *date.lock().unwrap() = day(18);
+                    let new = rig.load(&cache, "new,list\n").await.unwrap();
+                    assert_eq!(*new, "new,list\n");
+                    Ok(b"old,list\n".to_vec())
+                },
+                csv_text,
+            )
+            .await
+            .unwrap();
+        // The slow lookup still gets its own answer...
+        assert_eq!(*late, "old,list\n");
+        // ...but the 18th's file and memory entry survive.
+        assert_eq!(rig.files(), ["kite-NSE-2026-11-18.master"]);
+        let again = rig.load(&cache, "never,used\n").await.unwrap();
+        assert_eq!(*again, "new,list\n");
+        assert_eq!(rig.downloads(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_header_only_master_is_refused_and_retried() {
+        fn kite(b: &[u8]) -> Result<String> {
+            csv_checked(b, "test list", true, |h| has_columns(h, &["a", "b"]))
+        }
+        let rig = Rig::new("header-only");
+        let cache = rig.cache();
+        let load = |body: &'static str| {
+            cache.load(
+                "kite",
+                "NSE",
+                move || async move { Ok(body.as_bytes().to_vec()) },
+                kite,
+            )
+        };
+        assert!(load("a,b\n").await.is_err());
+        assert!(load("a,b\n\n  \n").await.is_err());
+        assert!(rig.files().is_empty());
+        // The next lookup downloads again and keeps the good list.
+        assert_eq!(*load("a,b\n1,2\n").await.unwrap(), "a,b\n1,2\n");
+        assert_eq!(rig.files(), ["kite-NSE-2026-11-17.master"]);
     }
 
     #[tokio::test]

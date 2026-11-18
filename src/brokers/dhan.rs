@@ -113,7 +113,7 @@ const COLUMNS: [[&str; 2]; 6] = [
 /// The scrip master as text, refused unless it has (in either layout) the
 /// columns [`pick_equity`] reads.
 fn parse_master(bytes: &[u8]) -> Result<String> {
-    masters::csv_checked(bytes, "Dhan scrip master", |h| {
+    masters::csv_checked(bytes, "Dhan scrip master", true, |h| {
         COLUMNS
             .iter()
             .all(|names| names.iter().any(|n| h.iter().any(|f| f == n)))
@@ -984,6 +984,9 @@ BSE,E,500180,EQUITY,0,HDFCBANK,1.0,HDFC Bank,,,,5.0000,NA,ES,A,HDFC BANK LTD\n";
         assert!(parse_master(b"{\"status\":\"error\",\"message\":\"Too many requests\",\"error_type\":\"NetworkException\"}").is_err());
         assert!(parse_master(include_str!("fixtures/dhan_scrip_master.csv").as_bytes()).is_ok());
         let compact = "SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID,SEM_INSTRUMENT_NAME,SEM_TRADING_SYMBOL,SEM_SERIES\n";
-        assert!(parse_master(compact.as_bytes()).is_ok());
+        // Header only: no instruments, never cached.
+        assert!(parse_master(compact.as_bytes()).is_err());
+        let one = format!("{compact}NSE,E,1333,EQUITY,HDFCBANK,EQ\n");
+        assert!(parse_master(one.as_bytes()).is_ok());
     }
 }

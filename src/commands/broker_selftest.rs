@@ -1020,6 +1020,7 @@ mod tests {
         let opts = OrderOpts {
             yes: true,
             dry_run: false,
+            format: crate::output::Format::Table,
         };
         let err = place_live_order(
             &ro,

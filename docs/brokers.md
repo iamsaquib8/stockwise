@@ -113,6 +113,20 @@ add their own fees, so the contract note from your broker is the final word.
 When the order value can't be estimated (a MARKET order without a last price)
 the charges are shown as unknown.
 
+`--dry-run --json` prints the preview as one JSON object: broker, side,
+symbol, exchange, token, quantity, order type, last price, estimated value and
+`charges` (`delivery` and `intraday` with every line and a `total`, plus
+`slippage` with its basis). `--dry-run --csv` prints the charges table as rows
+of `line,delivery,intraday`. Neither prints anything else, and both run the
+same checks as a text preview, `max_order_value` included. A live order is
+always previewed as text and confirmed, so `--json` and `--csv` without
+`--dry-run` are refused.
+
+```bash
+stockwise trade buy RELIANCE 10 --dry-run --json
+stockwise trade sell TCS 5 --limit 4200 --dry-run --csv
+```
+
 ### Instrument list cache
 
 Kite, Upstox, Dhan and Fyers publish their instrument lists once a day, and
@@ -125,8 +139,10 @@ the list already in memory, so a second order makes no download.
 On the next IST day the list is downloaded again and the old file is removed.
 Each file starts with its length and SHA-256; a file that is cut short,
 damaged or no longer parses is ignored and downloaded again. A download
-without the columns the lookup needs (an error page, or a changed layout) is
-refused and never cached. Files are written
+without the columns the lookup needs (an error page, or a changed layout), or
+with no instruments at all, is refused and never cached. A download that is
+still running when the IST date changes answers its own lookup but never
+replaces the new day's list. Files are written
 through a temporary file and renamed, so a crash never leaves half a list. If
 the data directory is read-only the lookup still works, just without the
 cache. Deleting `cache/instruments/` is always safe. Angel One looks symbols
