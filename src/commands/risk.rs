@@ -82,8 +82,13 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
         bail!("Not enough price data for risk analysis — try a longer period, e.g. -p 2y");
     }
 
+    let source = chart.meta.as_ref().and_then(|m| m.data_source.clone());
     if fmt == Format::Json {
-        return output::print_json(&risk_json(&resolved, cur, period, &closes));
+        let mut json = risk_json(&resolved, cur, period, &closes);
+        if let Some(s) = &source {
+            json["meta"] = serde_json::json!({ "sources": [s] });
+        }
+        return output::print_json(&json);
     }
 
     let current = *closes.last().unwrap();
@@ -190,6 +195,9 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
             .dimmed()
             .italic()
     );
+    if let Some(s) = &source {
+        println!("  {}", crate::providers::source_footer(s).dimmed());
+    }
     println!();
     Ok(())
 }

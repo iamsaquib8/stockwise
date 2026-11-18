@@ -2075,6 +2075,33 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn statement_conversion_uses_ecb_rates_when_yahoo_is_down() {
+        use crate::providers::{Provider, ProviderKind, router::Router};
+        use crate::testutil::MockServer;
+        let yahoo = MockServer::start(vec![(429, "no".into())]).await;
+        let fx = MockServer::start(vec![(
+            200,
+            include_str!("providers/fixtures/frankfurter_usd_inr.json").into(),
+        )])
+        .await;
+        let base = yahoo.url.clone();
+        let client = YahooClient::lazy_for_tests(None, move |url: &str| {
+            let u = reqwest::Url::parse(url).unwrap();
+            format!("{}{}?{}", base, u.path(), u.query().unwrap_or_default())
+        })
+        .with_router(Router::new(vec![Provider::new(
+            ProviderKind::Frankfurter,
+            String::new(),
+            Some(fx.url.clone()),
+        )]));
+        let mut warnings = Vec::new();
+        let foreign: BTreeSet<String> = ["USD".to_string()].into();
+        let rates = statement_fx(&client, Some("INR"), &foreign, &mut warnings).await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(rates.factor("USD"), Some(93.93));
+    }
+
     #[test]
     fn test_clean_company_name() {
         assert_eq!(

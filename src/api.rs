@@ -762,6 +762,10 @@ pub struct ChartMeta {
     /// Seconds east of UTC for the exchange's time zone, to date its bars.
     #[serde(default)]
     pub gmtoffset: Option<i64>,
+    /// The backup source that served the bars when Yahoo could not
+    /// (`providers::router`); `None` for Yahoo and a configured provider.
+    #[serde(skip)]
+    pub data_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -964,8 +968,9 @@ pub struct YahooClient {
     provider: Option<providers::Provider>,
     /// NSE, for index members when the provider isn't NSE-backed.
     nse: std::sync::OnceLock<providers::nse::Nse>,
-    /// Keyed providers (Finnhub, FMP) that answer when Yahoo fails or leaves
-    /// holes, one per capability (`providers::router`).
+    /// Keyed providers (Finnhub, FMP) and the keyless backups (Frankfurter,
+    /// CoinGecko) that answer when Yahoo fails or leaves holes, one per
+    /// capability (`providers::router`).
     router: providers::router::Router,
     #[cfg(test)]
     pub(crate) url_rewrite: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>,
@@ -1147,8 +1152,8 @@ impl YahooClient {
         }
     }
 
-    /// Back the client with keyed providers, as `FINNHUB_API_KEY` /
-    /// `FMP_API_KEY` would.
+    /// Back the client with router members, as `FINNHUB_API_KEY` /
+    /// `FMP_API_KEY` and the keyless backups would.
     #[cfg(test)]
     pub(crate) fn with_router(mut self, router: providers::router::Router) -> Self {
         self.router = router;
@@ -1419,9 +1424,9 @@ impl YahooClient {
     }
 
     /// Whether any keyed provider (`FINNHUB_API_KEY`, `FMP_API_KEY`) backs
-    /// Yahoo up.
+    /// Yahoo up with fundamentals or statements.
     pub fn has_router(&self) -> bool {
-        !self.router.is_empty()
+        self.router.has_keyed()
     }
 
     /// Quotes straight from Yahoo Finance, ignoring any configured provider.
@@ -1500,6 +1505,10 @@ impl YahooClient {
     /// Price history. A configured data provider serves daily, weekly and
     /// monthly bars when its plan covers the whole range; otherwise (and for
     /// intraday bars) Yahoo does.
+    ///
+    /// When Yahoo fails too, a keyless backup that covers the symbol (ECB
+    /// rates for FX, CoinGecko for the large coins) serves daily bars, named
+    /// in `meta.data_source`. If none covers it, Yahoo's error stands.
     pub async fn get_chart(&self, symbol: &str, range: &str, interval: &str) -> Result<ChartData> {
         if let Some(provider) = &self.provider
             && provider.supports(symbol)
@@ -1507,7 +1516,13 @@ impl YahooClient {
         {
             return Ok(chart);
         }
-        self.yahoo_chart(symbol, range, interval).await
+        match self.yahoo_chart(symbol, range, interval).await {
+            Ok(chart) => Ok(chart),
+            Err(e) => match self.router.chart(symbol, range, interval).await {
+                Some(chart) => Ok(chart),
+                None => Err(e),
+            },
+        }
     }
 
     /// Price history straight from Yahoo Finance.
@@ -2615,6 +2630,140 @@ mod tests {
         let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url));
         assert!(!client.has_router());
         assert!(client.get_quote(&["AAPL"]).await.is_err());
+    }
+
+    /// The keyless backups, each pointed at its own mock server.
+    fn keyless_router(fx_url: &str, crypto_url: &str) -> providers::router::Router {
+        providers::router::Router::new(vec![
+            providers::Provider::new(
+                providers::ProviderKind::Frankfurter,
+                String::new(),
+                Some(fx_url.to_string()),
+            ),
+            providers::Provider::new(
+                providers::ProviderKind::CoinGecko,
+                String::new(),
+                Some(crypto_url.to_string()),
+            ),
+        ])
+    }
+
+    /// `days` synthetic daily values ending today: Frankfurter's time series
+    /// and CoinGecko's market chart.
+    fn daily_bodies(days: i64) -> (String, String) {
+        let today = chrono::Utc::now().date_naive();
+        let dates: Vec<chrono::NaiveDate> = (0..days)
+            .rev()
+            .map(|i| today - chrono::Duration::days(i))
+            .collect();
+        let rates: Vec<String> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| format!(r#""{d}":{{"INR":{}}}"#, 90.0 + i as f64 * 0.1))
+            .collect();
+        let fx = format!(
+            r#"{{"amount":1.0,"base":"USD","rates":{{{}}}}}"#,
+            rates.join(",")
+        );
+        let prices: Vec<String> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let ms = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+                format!("[{ms},{}]", 60_000.0 + i as f64 * 100.0)
+            })
+            .collect();
+        let crypto = format!(r#"{{"prices":[{}]}}"#, prices.join(","));
+        (fx, crypto)
+    }
+
+    #[tokio::test]
+    async fn fx_quotes_fall_back_to_ecb_reference_rates_when_yahoo_is_down() {
+        let yahoo = crate::testutil::MockServer::start(vec![(429, "no".into())]).await;
+        let fx = crate::testutil::MockServer::start(vec![(
+            200,
+            include_str!("providers/fixtures/frankfurter_usd_inr.json").into(),
+        )])
+        .await;
+        let crypto = crate::testutil::MockServer::start(vec![(200, "{}".into())]).await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url))
+            .with_router(keyless_router(&fx.url, &crypto.url));
+        let quotes = client.get_quote(&["USDINR=X"]).await.unwrap();
+        assert_eq!(quotes[0].regular_market_price, Some(93.93));
+        let ecb = providers::ProviderKind::Frankfurter.name();
+        assert_eq!(ecb, "ECB reference rate, daily (Frankfurter)");
+        assert_eq!(quotes[0].data_source.as_deref(), Some(ecb));
+        let json = serde_json::to_value(&quotes[0]).unwrap();
+        assert_eq!(json["meta"]["sources"][0], ecb);
+        assert!(crypto.requests().is_empty());
+        assert!(
+            !client.has_router(),
+            "no keyed provider: statements stay Yahoo's"
+        );
+    }
+
+    #[tokio::test]
+    async fn crypto_and_fx_history_fall_back_to_the_keyless_backups() {
+        let yahoo = crate::testutil::MockServer::start(vec![(429, "no".into())]).await;
+        let (fx_body, crypto_body) = daily_bodies(40);
+        let fx = crate::testutil::MockServer::start(vec![(200, fx_body)]).await;
+        let crypto = crate::testutil::MockServer::start(vec![(200, crypto_body)]).await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url))
+            .with_router(keyless_router(&fx.url, &crypto.url));
+
+        let btc = crate::views::history(&client, "BTC-USD", "1mo", crate::market::Market::Crypto)
+            .await
+            .unwrap();
+        assert!(btc.bars.len() >= 30);
+        assert_eq!(btc.currency.as_deref(), Some("USD"));
+        assert_eq!(btc.meta.as_ref().unwrap().sources, ["CoinGecko"]);
+        let json = serde_json::to_value(&btc).unwrap();
+        assert_eq!(json["meta"]["sources"][0], "CoinGecko");
+        assert!(
+            crypto.requests()[0]
+                .target
+                .starts_with("/coins/bitcoin/market_chart?vs_currency=usd")
+        );
+
+        let inr = client.get_chart("USDINR=X", "1mo", "1d").await.unwrap();
+        let meta = inr.meta.unwrap();
+        assert_eq!(
+            meta.data_source.as_deref(),
+            Some(providers::ProviderKind::Frankfurter.name())
+        );
+        assert_eq!(meta.currency.as_deref(), Some("INR"));
+    }
+
+    #[tokio::test]
+    async fn a_symbol_no_backup_carries_keeps_the_yahoo_error() {
+        let yahoo = crate::testutil::MockServer::start(vec![(404, "{}".into())]).await;
+        let fx = crate::testutil::MockServer::start(vec![(200, "{}".into())]).await;
+        let crypto = crate::testutil::MockServer::start(vec![(200, "{}".into())]).await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url))
+            .with_router(keyless_router(&fx.url, &crypto.url));
+        let err = client.get_chart("AAPL", "1mo", "1d").await.unwrap_err();
+        assert!(is_not_found(&err), "{err:#}");
+        assert!(fx.requests().is_empty() && crypto.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_backup_leaves_the_yahoo_error() {
+        let yahoo = crate::testutil::MockServer::start(vec![(404, "{}".into())]).await;
+        let fx = crate::testutil::MockServer::start(vec![(200, "{}".into())]).await;
+        let crypto = crate::testutil::MockServer::start(vec![(
+            429,
+            r#"{"status":{"error_code":429,"error_message":"You've exceeded the Rate Limit"}}"#
+                .into(),
+        )])
+        .await;
+        let client = YahooClient::lazy_for_tests(None, to_server(&yahoo.url))
+            .with_router(keyless_router(&fx.url, &crypto.url));
+        let err = client.get_chart("BTC-USD", "1mo", "1d").await.unwrap_err();
+        assert!(
+            is_not_found(&err),
+            "Yahoo's error, not CoinGecko's: {err:#}"
+        );
+        assert_eq!(crypto.requests().len(), 1);
     }
 
     #[tokio::test]

@@ -442,6 +442,10 @@ pub struct History {
     pub period: String,
     pub interval: String,
     pub bars: Vec<Bar>,
+    /// The backup source that served the bars when Yahoo could not
+    /// (`{"sources": ["CoinGecko"]}`); omitted for Yahoo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<crate::api::QuoteMeta>,
 }
 
 /// One OHLCV bar of `history --json/--csv`.
@@ -501,12 +505,17 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
             ts,
         })
         .collect();
+    let (currency, source) = chart
+        .meta
+        .map(|m| (m.currency, m.data_source))
+        .unwrap_or_default();
     History {
         symbol: symbol.to_string(),
-        currency: chart.meta.and_then(|m| m.currency),
+        currency,
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
+        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s] }),
     }
 }
 
@@ -846,6 +855,7 @@ pub mod fixtures {
                 currency: Some(currency.to_string()),
                 exchange_name: None,
                 gmtoffset: None,
+                data_source: None,
             }),
             timestamp: Some(
                 (0..closes.len() as i64)
