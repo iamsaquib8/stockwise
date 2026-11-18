@@ -194,17 +194,39 @@ pub fn recorded_splits(p: &Portfolio, symbol: &str) -> Vec<Split> {
     out
 }
 
+/// Ex-dates of the bonus issues recorded on `symbol` (`bonus:` adjustments
+/// on lots and `bonuses` on sales), not splits.
+fn bonus_events(p: &Portfolio, symbol: &str) -> Vec<NaiveDate> {
+    let ids = p
+        .holding(symbol)
+        .into_iter()
+        .flat_map(|h| h.lots.iter().flat_map(|l| l.adjustments.iter()))
+        .chain(
+            p.realized
+                .iter()
+                .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
+                .flat_map(|s| s.bonuses.iter()),
+        );
+    let mut out: Vec<NaiveDate> = ids
+        .filter_map(|id| id.strip_prefix("bonus:")?.split(':').next())
+        .filter_map(date)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The ex-date of the bonus issue allotted on `allotted`: the latest
-/// recorded event on or before it, within 90 days (allotment follows the
-/// ex-date by days, never months).
-fn bonus_ex_date<'a>(splits: &'a [Split], allotted: &str) -> Option<&'a str> {
-    let allotted_day = date(allotted)?;
-    splits
+/// recorded bonus event on or before it, within 90 days (allotment follows
+/// the ex-date by days). `None` when no bonus event is recorded: the sale
+/// then counts from its allotment date.
+fn bonus_ex_date(bonus_dates: &[NaiveDate], allotted: &str) -> Option<NaiveDate> {
+    let allotted = date(allotted)?;
+    bonus_dates
         .iter()
-        .filter_map(|s| Some((s, date(&s.date)?)))
-        .filter(|(_, d)| *d <= allotted_day && (allotted_day - *d).num_days() <= 90)
-        .max_by_key(|(_, d)| *d)
-        .map(|(s, _)| s.date.as_str())
+        .copied()
+        .filter(|d| *d <= allotted && (allotted - *d).num_days() <= 90)
+        .max()
 }
 
 /// Shares of `symbol` held at the end of `day`, in today's share count (the
@@ -215,6 +237,7 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
     let day = day.format("%Y-%m-%d").to_string();
     let day = day.as_str();
     let splits = recorded_splits(p, symbol);
+    let bonus_dates = bonus_events(p, symbol);
     // Splits not yet applied to a lot (it was recorded before them), and
     // bonus issues it received as a lot of their own after `day`: the
     // close of `day` is adjusted for both.
@@ -258,11 +281,13 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
         .filter(|s| {
             // Sold bonus shares count from their event's ex-date too.
             let from = if s.bonus_shares {
-                bonus_ex_date(&splits, &s.buy_date).unwrap_or(s.buy_date.as_str())
+                bonus_ex_date(&bonus_dates, &s.buy_date)
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| s.buy_date.clone())
             } else {
-                s.buy_date.as_str()
+                s.buy_date.clone()
             };
-            from <= day && s.sell_date.as_str() > day
+            from.as_str() <= day && s.sell_date.as_str() > day
         })
         .map(|s| {
             // Every split after the sale applies to the sold quantity; a
@@ -959,6 +984,42 @@ mod tests {
         let y = symbol_year(&p, "AAA.NS", &fy, d("2026-04-02"), Some(50.0), Some(50.0));
         assert_eq!(y.start_value, Some(1000.0));
         assert_eq!(y.end_value, Some(1000.0));
+    }
+
+    #[test]
+    fn a_split_between_ex_date_and_allotment_is_not_the_bonus() {
+        let events = [d("2026-04-01")];
+        // Only bonus events count: a 2 Apr split is not in the list.
+        assert_eq!(bonus_ex_date(&events, "2026-04-03"), Some(d("2026-04-01")));
+        // Too old, or none recorded: the allotment date is used.
+        assert_eq!(bonus_ex_date(&events, "2026-08-01"), None);
+        assert_eq!(bonus_ex_date(&[], "2026-04-03"), None);
+
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(10.0, 50.0, "2025-01-10", "manual");
+        lot.adjustments.push("bonus:2026-04-01:2:1".into());
+        lot.adjustments.push("2026-04-02:2:1".into());
+        p.add_lot("AAA.NS", lot);
+        p.realized.push(Sale {
+            symbol: "AAA.NS".into(),
+            qty: 10.0,
+            buy_date: "2026-04-03".into(),
+            buy_price: 0.0,
+            sell_date: "2026-04-10".into(),
+            sell_price: 55.0,
+            buy_date_estimated: false,
+            source: "manual".into(),
+            order_id: None,
+            intraday: false,
+            account: None,
+            bonuses: Vec::new(),
+            bonus_shares: true,
+        });
+        assert_eq!(bonus_events(&p, "AAA.NS"), [d("2026-04-01")]);
+        // The sold bonus shares count from 1 Apr despite the 2 Apr split:
+        // 10 on the lot plus 10 sold bonus shares.
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-01")), 20.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 20.0);
     }
 
     #[test]
