@@ -381,6 +381,7 @@ pub(super) async fn fetch_actions(
                 date: to_date(s.date)?,
                 numerator: s.numerator,
                 denominator: s.denominator,
+                bonus: None,
             })
         })
         .collect();
@@ -418,6 +419,38 @@ pub(super) async fn pending_splits(
         .into_iter()
         .filter(|s| h.lots.iter().any(|l| s.pending_for(l)))
         .collect())
+}
+
+/// Ask NSE which of the `splits` Yahoo reported for an Indian `symbol` are
+/// bonus issues, and mark those (see [`crate::calendar::check_bonuses`]).
+/// Non-Indian symbols and an empty list cost no request. Returns false when
+/// NSE could not be asked, so the splits stay splits.
+pub(super) async fn mark_bonuses(
+    cal: &mut crate::calendar::Calendar<'_>,
+    symbol: &str,
+    splits: &mut [Split],
+) -> bool {
+    if splits.is_empty() || crate::calendar::nse_symbol(symbol).is_none() {
+        return true;
+    }
+    let actions = cal.nse_actions(symbol).await;
+    !matches!(
+        crate::calendar::check_bonuses(symbol, splits, actions.as_deref()),
+        crate::calendar::BonusCheck::Unavailable
+    )
+}
+
+/// The note printed when NSE could not tell bonus issues from splits.
+pub(super) fn nse_offline_note(cal: &crate::calendar::Calendar<'_>, symbols: &[String]) -> String {
+    format!(
+        "NSE could not be reached{}, so the splits of {} were applied as splits. \
+         If one was a bonus issue, Indian tax treats the bonus shares as bought at \
+         zero cost on the allotment date: check those lots against your tax statement.",
+        cal.nse_note()
+            .map(|n| format!(" ({n})"))
+            .unwrap_or_default(),
+        symbols.join(", ")
+    )
 }
 
 fn describe_splits(splits: &[Split]) -> String {
@@ -1890,11 +1923,14 @@ pub async fn cmd_portfolio_actions(
     }
 
     let client = YahooClient::new().await?;
+    let mut cal = crate::calendar::Calendar::new(&client);
     let today = pf::today();
     print_header(&portfolio_title("Corporate Actions"));
 
-    let (mut split_lots, mut new_divs, mut div_total) =
-        (0usize, 0usize, Vec::<(String, f64)>::new());
+    let (mut split_lots, mut bonus_lots, mut new_divs, mut div_total) =
+        (0usize, 0usize, 0usize, Vec::<(String, f64)>::new());
+    // Indian symbols whose splits NSE could not classify.
+    let mut nse_offline: Vec<String> = Vec::new();
     // Already applied or recorded by an earlier --apply: counted, not listed.
     let (mut done_splits, mut done_divs) = (0usize, 0usize);
     let mut plan = Vec::new();
@@ -1913,13 +1949,22 @@ pub async fn cmd_portfolio_actions(
             )
             .min()
             .unwrap_or_else(|| today.clone());
-        let (splits, divs, quote_currency) = match fetch_actions(&client, sym, &first).await {
+        let (mut splits, divs, quote_currency) = match fetch_actions(&client, sym, &first).await {
             Ok(a) => a,
             Err(e) => {
                 failed.push(format!("{}: {:#}", sym, e));
                 continue;
             }
         };
+        // Yahoo reports an Indian bonus as a split: NSE's filings tell them apart.
+        let pending_any = portfolio.holding(sym).is_some_and(|h| {
+            splits
+                .iter()
+                .any(|s| h.lots.iter().any(|l| s.pending_for(l)))
+        });
+        if pending_any && !mark_bonuses(&mut cal, sym, &mut splits).await {
+            nse_offline.push(sym.clone());
+        }
         let currency = quote_currency.or_else(|| pf::symbol_currency(sym).map(str::to_string));
         let cur = currency.as_deref();
 
@@ -1929,25 +1974,48 @@ pub async fn cmd_portfolio_actions(
                 continue;
             };
             let pending: Vec<&Lot> = h.lots.iter().filter(|l| split.pending_for(l)).collect();
-            let applied = h.lots.iter().any(|l| l.adjustments.contains(&split.id()));
-            let what = format!(
-                "Split/bonus {}:{} on {}",
-                split.numerator, split.denominator, split.date
-            );
+            let applied = h.lots.iter().any(|l| split.applied_to(l));
+            let bonus = split.bonus.as_deref().filter(|_| split.ratio() > 1.0);
+            let what = match bonus {
+                Some(_) => format!(
+                    "Bonus {}:{} (ex-date {})",
+                    split.numerator - split.denominator,
+                    split.denominator,
+                    split.date
+                ),
+                None => format!(
+                    "Split/bonus {}:{} on {}",
+                    split.numerator, split.denominator, split.date
+                ),
+            };
             if !pending.is_empty() {
-                split_lots += pending.len();
-                let detail: Vec<String> = pending
-                    .iter()
-                    .map(|l| {
-                        format!(
-                            "{} → {} @ {} → {}",
-                            l.qty,
-                            l.qty * split.ratio(),
-                            format_price(l.price, cur),
-                            format_price(l.price / split.ratio(), cur)
-                        )
-                    })
-                    .collect();
+                let detail: Vec<String> = match bonus {
+                    Some(allotted) => {
+                        bonus_lots += pending.len();
+                        let qty: f64 = pending.iter().map(|l| l.qty).sum();
+                        vec![format!(
+                            "+{} bonus shares at {} cost, dated {}; older lots keep their cost",
+                            qty * (split.ratio() - 1.0),
+                            format_price(0.0, cur),
+                            allotted
+                        )]
+                    }
+                    None => {
+                        split_lots += pending.len();
+                        pending
+                            .iter()
+                            .map(|l| {
+                                format!(
+                                    "{} → {} @ {} → {}",
+                                    l.qty,
+                                    l.qty * split.ratio(),
+                                    format_price(l.price, cur),
+                                    format_price(l.price / split.ratio(), cur)
+                                )
+                            })
+                            .collect()
+                    }
+                };
                 lines.push(format!(
                     "  {} {} — {} lot(s): {}",
                     if apply { "✓".green() } else { "+".yellow() },
@@ -2006,10 +2074,11 @@ pub async fn cmd_portfolio_actions(
         }
     }
 
+    cal.save();
     if failed.len() == targets.len() {
         bail!("Could not fetch corporate actions: {}", failed.join("; "));
     }
-    let pending = split_lots + new_divs;
+    let pending = split_lots + bonus_lots + new_divs;
     println!();
     let totals: Vec<String> = div_total
         .iter()
@@ -2043,10 +2112,16 @@ pub async fn cmd_portfolio_actions(
             }
             Ok(())
         })?;
+        let bonus = if bonus_lots > 0 {
+            format!(", added bonus shares for {} lot(s)", bonus_lots)
+        } else {
+            String::new()
+        };
         println!(
-            "  {} Adjusted {} lot(s) for splits/bonuses and recorded {} dividend(s){}.",
+            "  {} Adjusted {} lot(s) for splits/bonuses{} and recorded {} dividend(s){}.",
             "✓".green().bold(),
             split_lots,
+            bonus,
             new_divs,
             if totals.is_empty() {
                 String::new()
@@ -2056,8 +2131,8 @@ pub async fn cmd_portfolio_actions(
         );
     } else {
         println!(
-            "  {} lot(s) to adjust for splits/bonuses, {} dividend(s) to record. Nothing changed yet —",
-            split_lots, new_divs
+            "  {} lot(s) to adjust for splits/bonuses, {} lot(s) to receive bonus shares, {} dividend(s) to record. Nothing changed yet —",
+            split_lots, bonus_lots, new_divs
         );
         println!(
             "  run {} to apply them (safe to repeat).",
@@ -2070,10 +2145,23 @@ pub async fn cmd_portfolio_actions(
     if split_lots > 0 {
         println!(
             "\n  {}",
-            "Splits and bonuses multiply quantity and divide price, keeping cost and purchase date. \
-             Indian tax treats bonus shares as bought at zero cost on the allotment date, so check \
-             bonus lots against your tax statement."
+            "Splits multiply quantity and divide price, keeping cost and purchase date.".dimmed()
+        );
+    }
+    if bonus_lots > 0 {
+        println!(
+            "  {}",
+            "Indian bonus issues (checked against NSE filings) are recorded as a new lot at zero \
+             cost, dated on the allotment date (NSE's ex-date), as Indian tax treats them; the \
+             older lots keep their cost and purchase date."
                 .dimmed()
+        );
+    }
+    if !nse_offline.is_empty() {
+        println!(
+            "  {} {}",
+            "!".yellow(),
+            nse_offline_note(&cal, &nse_offline).dimmed()
         );
     }
     println!();
