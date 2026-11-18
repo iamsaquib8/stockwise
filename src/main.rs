@@ -16,6 +16,7 @@ mod api;
 mod ask;
 mod audit;
 mod backtest;
+mod backup;
 mod benchmark;
 mod bleed;
 mod bonds;
@@ -64,6 +65,7 @@ mod portfolio;
 mod portfolio_analysis;
 mod practice;
 mod providers;
+mod pta_export;
 mod rebalance;
 mod research;
 mod results;
@@ -1126,6 +1128,17 @@ that returns the `stockwise trade` command for you to run yourself.")]
     },
 
     // ── Setup ──
+    /// Encrypted, portable backup of your data: export to a .swbak file, restore from one
+    #[command(after_help = "Examples:\n  \
+stockwise backup export ~/Dropbox/stockwise.swbak\n  \
+stockwise backup restore ~/Dropbox/stockwise.swbak --dry-run\n\n\
+The passphrase is asked for (hidden), or read from --passphrase-fd N or \
+STOCKWISE_BACKUP_PASSPHRASE. Broker tokens, caches and notification secrets are never included.")]
+    Backup {
+        #[command(subcommand)]
+        action: BackupCmd,
+    },
+
     /// Investor profile mode (passive, active, ultra) and personal guardrails
     Profile(Box<ProfileArgs>),
 
@@ -1283,6 +1296,14 @@ enum CacheAction {
 
 #[derive(Subcommand)]
 enum PortfolioCmd {
+    /// Export lots, sales and dividends as a beancount or hledger journal
+    Export {
+        #[arg(long, value_enum, ignore_case = true)]
+        format: JournalFormat,
+        /// Write to this file instead of standard output
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+    },
     /// Add a purchase as a new lot
     Add {
         symbol: String,
@@ -1557,6 +1578,36 @@ under Section 208 and 211, with Section 234C(1) capital-gains proviso protection
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Write portfolios, goals, watchlist, alerts, notes and config.toml to an encrypted file
+    Export {
+        /// Backup file [default: stockwise-YYYY-MM-DD.swbak]
+        path: Option<std::path::PathBuf>,
+        /// Read the passphrase from this open file descriptor (for scripts)
+        #[arg(long, value_name = "N")]
+        passphrase_fd: Option<u32>,
+    },
+    /// Check a backup, show what it would change, keep <file>.bak copies, then restore it
+    Restore {
+        path: std::path::PathBuf,
+        /// Show what would be added or replaced without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Read the passphrase from this open file descriptor (for scripts)
+        #[arg(long, value_name = "N")]
+        passphrase_fd: Option<u32>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum JournalFormat {
+    /// beancount (.beancount)
+    Beancount,
+    /// hledger (.journal)
+    Hledger,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -3338,6 +3389,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "profile",
             "notify",
             "config",
+            "backup",
             "update",
             "completions",
             "man",
@@ -4208,11 +4260,27 @@ async fn async_main() {
                 | Commands::Init { .. }
                 | Commands::Use { .. }
                 | Commands::Doctor
+                | Commands::Backup { .. }
                 | Commands::Update { .. }
                 | Commands::Completions { .. }
         )
     {
         eprintln!("\n  {} {}\n", colored::Colorize::red("Error:"), msg);
+        std::process::exit(1);
+    }
+    // `backup` runs with a broken config file (a restore can replace it), but
+    // the file's `home` setting is unreadable then: insist on STOCKWISE_HOME
+    // rather than fall back to the default data directory without a word.
+    if let config::Status::Invalid(msg) = &cfg_state.status
+        && matches!(cli.command, Commands::Backup { .. })
+        && std::env::var_os("STOCKWISE_HOME").is_none_or(|v| v.is_empty())
+    {
+        eprintln!(
+            "\n  {} {}\n  `backup` cannot read the config file's `home` setting while the file is \
+             invalid. Fix it, or set STOCKWISE_HOME to your data directory.\n",
+            colored::Colorize::red("Error:"),
+            msg
+        );
         std::process::exit(1);
     }
 
@@ -4924,6 +4992,14 @@ async fn dispatch(
                 commands::cmd_portfolio_restore(n, out.into())
             }
             Some(PortfolioCmd::List) => commands::cmd_portfolio_list(),
+            Some(PortfolioCmd::Export { format, output }) => pta_export::cmd_export(
+                match format {
+                    JournalFormat::Beancount => pta_export::Format::Beancount,
+                    JournalFormat::Hledger => pta_export::Format::Hledger,
+                },
+                output.as_deref(),
+                m,
+            ),
             Some(PortfolioCmd::Benchmark {
                 benchmark,
                 period,
@@ -5357,6 +5433,23 @@ async fn dispatch(
             None => commands::cmd_config_show(m, sources, &periods, Format::Table),
         },
 
+        Commands::Backup { action } => {
+            let src = |fd: Option<u32>| match fd {
+                Some(n) => backup::PassphraseSource::Fd(n),
+                None => backup::PassphraseSource::EnvOrPrompt,
+            };
+            match action {
+                BackupCmd::Export {
+                    path,
+                    passphrase_fd,
+                } => backup::cmd_export(path, src(passphrase_fd)),
+                BackupCmd::Restore {
+                    path,
+                    dry_run,
+                    passphrase_fd,
+                } => backup::cmd_restore(&path, dry_run, src(passphrase_fd)),
+            }
+        }
         Commands::Notify { action } => match action {
             Some(NotifyCmd::Test) => commands::cmd_notify("test").await,
             Some(NotifyCmd::Status) | None => commands::cmd_notify("status").await,
