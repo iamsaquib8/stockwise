@@ -2440,18 +2440,18 @@ const GOALS_FILE: &str = "goals.json";
 
 #[derive(Serialize)]
 pub(crate) struct GoalRow {
-    name: String,
-    target: f64,
-    target_future: f64,
-    by: String,
-    months_left: u32,
-    holdings: Vec<String>,
-    linked_value: f64,
+    pub(crate) name: String,
+    pub(crate) target: f64,
+    pub(crate) target_future: f64,
+    pub(crate) by: String,
+    pub(crate) months_left: u32,
+    pub(crate) holdings: Vec<String>,
+    pub(crate) linked_value: f64,
     /// `market` (live prices), `cost` (offline) or `none` (no holdings linked).
-    valued_at: &'static str,
-    funded_pct: f64,
-    monthly_sip: f64,
-    status: &'static str,
+    pub(crate) valued_at: &'static str,
+    pub(crate) funded_pct: f64,
+    pub(crate) monthly_sip: f64,
+    pub(crate) status: &'static str,
 }
 
 fn goal_due(today: NaiveDate, by: &str) -> Option<NaiveDate> {

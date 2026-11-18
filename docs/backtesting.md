@@ -35,15 +35,18 @@ Every form takes `--json`.
   first price you could actually trade at. `--fill close` fills at the signal
   bar's close instead (how StockWise 0.3 and earlier filled); it peeks at a price that
   only exists once the bar is over, so it flatters results.
-- **Long only, whole shares.** An entry buys as many whole shares as the cash
-  allows after costs; an exit sells them all. Cash earns nothing. If the
-  capital can't buy one share the entry is skipped and counted.
+- **Long only, whole shares, by default.** An entry buys as many whole
+  shares as the cash allows after costs; an exit sells them all. Cash earns
+  nothing. If the capital can't buy one share the entry is skipped and
+  counted. A strategy file can change each of these: see
+  [Position sizing, shorts, cash and tax](#position-sizing-shorts-cash-and-tax).
 - **Entry and exit on the same bar** cancel: no new position is opened, and
   an open one is closed.
 - **Stops and targets** (`stop_loss_pct`, `take_profit_pct` in a strategy
   file) are measured from the entry price and checked against each bar's low
   and high. A gap through the level fills at the open. If one bar touches
-  both, the stop is assumed to have hit first.
+  both, the stop is assumed to have hit first. Trailing stops work the same
+  way, from the best price since entry.
 - **The last bar.** A position still open at the end is sold at the last
   close, with costs, and listed as `still open`.
 
@@ -102,6 +105,17 @@ Every report shows the **net** return (after costs), the **gross** return
 | Exposure | Average share of the portfolio invested rather than in cash |
 | Win rate, avg win / loss | Per round trip, after costs |
 | Profit factor | Money made on winners ÷ money lost on losers, after costs |
+| Probabilistic Sharpe | The probability that the true Sharpe ratio is above 0, given the number of daily returns and their skewness and kurtosis (Bailey & López de Prado, 2012) |
+| Deflated Sharpe | The same probability against the Sharpe ratio that the best of N random parameter sets would show by luck, where N is the number of parameter sets tried (Bailey & López de Prado, 2014). With no grid, N is 1 and it equals the Probabilistic Sharpe |
+
+Both Sharpe probabilities describe this historical sample. They are not a
+forecast. The trials behind the Deflated Sharpe are every `[grid]`
+combination, plus the reported parameters when they are not one of them,
+each run over the same bars with the same costs. A combination that never
+trades counts as a trial with a Sharpe ratio of 0. A parameter fixed with
+`-P` counts as one value. Trying ideas outside the grid (other
+strategies, other symbols) also inflates results, and the number cannot see
+those.
 
 ## Portfolio backtests
 
@@ -176,6 +190,9 @@ stockwise backtest walkforward RELIANCE -s rsi --train 1y --test 3mo -p 10y
     60% or a Sharpe gap over 0.5; otherwise `robust`.
 - A strategy without a `[grid]` has nothing to tune; walk-forward then checks
   how stable fixed parameters are across periods.
+- The report ends with the Probabilistic and Deflated Sharpe of the stitched
+  out-of-sample curve. The trials are the grid combinations, each run over
+  the whole history.
 
 ## Strategy files
 
@@ -199,7 +216,7 @@ stockwise backtest walkforward RELIANCE -s rsi --train 1y --test 3mo -p 10y
    [WASM plugins](#wasm-plugins). Needs a build with `--features wasm-plugins`.
 
 The built-ins live in [`examples/strategies/`](../examples/strategies/) next to
-two more examples (`trend_pullback`, `breakout`) — copy one to start.
+three more examples (`trend_pullback`, `breakout`, `trend_trail`) — copy one to start.
 `stockwise backtest strategies` lists everything and checks your files;
 `stockwise backtest strategies FILE...` checks specific files. Both exit 1 if
 a file has errors.
@@ -224,13 +241,86 @@ dip = [30, 35, 40]
 | Key | |
 |-----|---|
 | `entry` | A condition, or a list of conditions that must all hold. Required |
-| `exit` | Same. Optional when `stop_loss_pct` or `take_profit_pct` is set |
+| `exit` | Same. Optional when `stop_loss_pct`, `take_profit_pct` or a trailing stop is set |
 | `stop_loss_pct` | Exit when the price falls this far below the entry (0–100) |
 | `take_profit_pct` | Exit when the price rises this far above the entry |
 | `[params]` | Default parameter values; override with `-P name=value` (repeatable). A `-P` value also fixes that parameter for walk-forward |
 | `[grid]` | For each parameter, the values walk-forward tries (at most 500 combinations) |
+| `trailing_stop_pct`, `trailing_atr_mult`, `atr_period`, `[position]`, `[cash]`, `[tax]` | Optional; see [below](#position-sizing-shorts-cash-and-tax) |
 
 Unknown keys are errors, so a typo like `stop_los_pct` is caught.
+
+### Position sizing, shorts, cash and tax
+
+All of these are optional. A file that sets none of them trades exactly as
+before: long, all of the cash, whole shares, no interest, no tax.
+[`examples/strategies/trend_trail.toml`](../examples/strategies/trend_trail.toml)
+uses most of them.
+
+```toml
+trailing_stop_pct = 10        # exit 10% below the highest high since entry
+trailing_atr_mult = 3         # or: 3 × ATR below it (a Chandelier exit)
+atr_period = 14               # ATR length for trailing_atr_mult and atr-risk
+
+[position]
+side = "short"                # "long" (default) or "short"
+sizing = "atr-risk"           # "all-in" (default), "fixed-fraction" or "atr-risk"
+# fraction_pct = 25           # fixed-fraction only: share of the sleeve per entry
+risk_pct = 1                  # atr-risk: share of the sleeve lost on an adverse move ...
+atr_mult = 2.5                # ... of atr_mult × ATR (default 2)
+fractional = true             # buy fractions of a share, down to 0.000001
+borrow_rate_pct = 3           # short only: yearly fee on the value borrowed
+
+[cash]
+yield_pct = 6.5               # yearly interest on idle cash
+
+[tax]
+country = "in"                # "in", "us" or "uk": rates from `stockwise tax`
+short_term_pct = 20           # or set the rates yourself (these override country)
+long_term_pct = 12.5
+long_term_days = 365          # days held before a gain is long-term
+```
+
+| Key | |
+|-----|---|
+| `trailing_stop_pct` | Exit when the price falls this percent from the highest high since entry (rises from the lowest low, for a short). 0–100 |
+| `trailing_atr_mult` | Exit at the highest high since entry minus this many ATRs (plus, for a short). The ATR is the one known at the previous close |
+| `atr_period` | ATR length, 1–1000. Default 14 |
+| `[position] side` | `long` (default) or `short`: an entry signal sells short and an exit buys back |
+| `[position] sizing` | `all-in` (default): all of the sleeve's cash. `fixed-fraction`: `fraction_pct` percent of the sleeve's value. `atr-risk`: shares = sleeve value × `risk_pct` ÷ (`atr_mult` × ATR), capped by the cash |
+| `[position] fractional` | `true` allows fractional quantities (US shares, ETFs, crypto). Default `false`: whole shares |
+| `[position] borrow_rate_pct` | Yearly fee for borrowing shares, charged each calendar day on the previous close's value. Needs `side = "short"` |
+| `[cash] yield_pct` | Yearly interest on cash not in a position, compounded per calendar day |
+| `[tax] country` | Short- and long-term rates and holding period from StockWise's tax engine: India 20% / 12.5% after 12 months, US 37% / 20% after 12 months, UK 24% |
+| `[tax] short_term_pct`, `long_term_pct`, `long_term_days` | Your own rates and holding period; they override `country`. Without `country`, both rates are needed and `long_term_days` defaults to 365 |
+
+How they trade:
+
+- **Trailing stops** move only after a bar closes: the bar that makes a new
+  high is checked against the level from before it. A gap through the level
+  fills at the open. With a fixed stop as well, whichever level is tighter
+  applies; the exit reason is `trailing-stop` or `stop-loss`.
+- **ATR sizing** uses the ATR at the signal bar's close. Until the ATR has
+  `atr_period` bars, entries are skipped and counted. The size is a risk
+  budget only; set a stop (for example `trailing_atr_mult` equal to
+  `atr_mult`) for the exit.
+- **Shorts** are fully backed by cash: a sleeve can short at most its own
+  value, with no leverage. The sale proceeds stay in the sleeve and earn no
+  interest. Equity marks the short to the close each day. Stops sit above the
+  entry and targets below it. Costs are charged as for a sell on entry and a
+  buy on exit. Borrow fees count as costs, in the trade's `costs` and in
+  `costs.borrow`. `--rebalance` is refused for a short strategy.
+- **Cash interest** is credited before each day's open for the calendar days
+  since the last bar, so weekends count. It shows as *Interest on Idle Cash*
+  and in JSON as `cash_interest`. It is not part of any trade's P&L.
+- **Tax** is taken from cash when a round trip closes with a gain after
+  costs. A loss is kept and set off against later gains in the same symbol;
+  the holding period runs from the first buy to the final sale. Allowances
+  and exemptions (such as India's ₹1.25 lakh) are left out, so this is an
+  upper bound on the drag. The trade's `net_pnl` stays before tax; its `tax`
+  field and `tax_paid` in JSON hold the tax.
+- **Gross return** leaves out trading costs, borrow fees and tax. Interest
+  stays in.
 
 ### Conditions
 
@@ -445,11 +535,19 @@ stock's currency.
   avg_loss_percent, profit_factor, costs_paid`), `gross_return_percent,
   buy_hold_return_percent, alpha_percent, skipped_entries`, `costs`
   (`brokerage, stt, exchange, sebi, gst, stamp, dp, slippage, total`),
-  `cost_model`, `rules` (the strategy as loaded, with `-P` applied),
-  `trades: [trade]` and `equity: [{date, value}]`.
+  `cost_model`, `rules` (the strategy as loaded, with `-P` applied; it has
+  an `execution` object when the file sets any v2 option),
+  `trades: [trade]`, `equity: [{date, value}]` and `sharpe_test`
+  (`{probabilistic_sharpe, deflated_sharpe, trials, expected_max_sharpe,
+  skewness, kurtosis, observations}`; probabilities are 0–1 and
+  `expected_max_sharpe` is annualised). `cash_interest` and `tax_paid` appear
+  when the strategy has `[cash]` or `[tax]`, and `costs.borrow` when it
+  shorts with a borrow fee.
   A trade is `{symbol, entry_date, exit_date, qty, entry_price, exit_price,
   gross_pnl, costs, net_pnl, pnl_percent, bars_held, exit_reason}` with
-  `exit_reason` one of `signal, stop-loss, take-profit, rebalance, end-of-data`.
+  `exit_reason` one of `signal, stop-loss, trailing-stop, take-profit,
+  rebalance, end-of-data`. `qty` is a whole number unless the strategy uses
+  `fractional = true`; a trade has a `tax` field when it paid tax.
 - **`backtest portfolio`**: the same, with `symbols, weights, rebalance,
   rebalances` and `per_symbol: [{symbol, weight, pnl, contribution_percent,
   trades, win_rate_percent, costs, exposure_percent}]`.
@@ -459,7 +557,8 @@ stock's currency.
   bars, return_percent, annualised_percent, sharpe, max_drawdown_percent,
   trade_count}`), `out_of_sample` (the metrics), `out_of_sample_gross_return_percent,
   out_of_sample_annualised_percent, in_sample_annualised_percent,
-  in_sample_sharpe, efficiency, verdict, verdict_reason, trades, equity`.
+  in_sample_sharpe, efficiency, verdict, verdict_reason, sharpe_test, trades,
+  equity`.
 - **`backtest strategies`**: `{builtin: [{aliases, strategy}], directory,
   user: [{path, ok, strategy | error}], skipped_plugins: [path]}`.
   `skipped_plugins` lists `.wasm` files a build without `wasm-plugins` did
@@ -477,7 +576,10 @@ done
 
 ## Limits
 
-- Long only; no short selling, leverage or F&O.
+- Shorts are cash-backed only: no leverage, margin calls or F&O. A short
+  strategy cannot be rebalanced, and one strategy is long or short, not both.
+- Sizing modes `vol-target` and `half-kelly`, portfolio exposure caps, and
+  board-lot rounding are not modelled yet.
 - Daily bars only. Intraday costs (`--costs in-intraday`) can be applied, but
   positions are still held from one daily bar to another.
 - Dividends are not credited; symbols that were delisted are not in Yahoo's

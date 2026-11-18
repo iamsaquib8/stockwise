@@ -516,6 +516,9 @@ pub async fn cmd_history(symbol: &str, period: &str, market: Market, fmt: Format
         println!("  {:<14} {:>12} {:>14}", date.dimmed(), close, vol);
     }
 
+    if let Some(source) = hist.meta.as_ref().and_then(|m| m.sources.first()) {
+        println!("\n  {}", crate::providers::source_footer(source).dimmed());
+    }
     println!();
     Ok(())
 }

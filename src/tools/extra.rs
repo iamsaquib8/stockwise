@@ -38,6 +38,21 @@ pub(super) async fn run<D: DataSource>(
                     .await?;
             Ok(serde_json::to_value(report)?)
         }
+        "portfolio_checkup" => {
+            let base = a.str("base").map(str::to_ascii_uppercase);
+            let report = if a.bool("offline") {
+                crate::commands::checkup_report(
+                    &crate::commands::OfflineSource,
+                    m,
+                    base.as_deref(),
+                    true,
+                )
+                .await?
+            } else {
+                crate::commands::checkup_report(src, m, base.as_deref(), false).await?
+            };
+            Ok(serde_json::to_value(report)?)
+        }
         "market_conditions" => {
             let client = YahooClient::new().await?;
             let report = crate::commands::conditions_report(&client, m, universe(a, m)?).await?;

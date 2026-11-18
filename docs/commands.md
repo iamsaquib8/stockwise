@@ -10,7 +10,7 @@ task-based guides, and each section below links to its guide.
 
 | Option | Env var | Description |
 |--------|---------|-------------|
-| `-m, --market <MARKET>` | `STOCKWISE_MARKET` | Market for bare tickers. Default `in`: `TCS` → `TCS.NS`. `us`: `AAPL`. `crypto`: `BTC` → `BTC-USD`; `BTC/USD`, `BTC_USD` and `BTC USD` also resolve to `BTC-USD`. `fx` (or `forex`): `USDINR`, `usd/inr` → `USDINR=X`. `commodity`: `GOLD` → `GC=F`, `SILVER` → `SI=F`, other bare tickers → NSE (`GOLDBEES` → `GOLDBEES.NS`). Global exchanges from the [market table](markets.md): `uk` (`VOD` → `VOD.L`), `de` (`SAP.DE`), `jp` (`7203` → `7203.T`), `hk` (`5` → `0005.HK`), `sg` (`D05.SI`), `ca` (`RY.TO`), `au` (`BHP.AX`). Symbols with a suffix (`RELIANCE.BO`, `VOD.L`), indices (`^NSEI`), FX (`USDINR=X`), futures (`GC=F`) and crypto pairs (`BTC-INR`) pass through unchanged |
+| `-m, --market <MARKET>` | `STOCKWISE_MARKET` | Market for bare tickers. Default `in`, or the market saved by `stockwise use` (see [Market and portfolio context](#market-and-portfolio-context)): `TCS` → `TCS.NS`. `us`: `AAPL`. `crypto`: `BTC` → `BTC-USD`; `BTC/USD`, `BTC_USD` and `BTC USD` also resolve to `BTC-USD`. `fx` (or `forex`): `USDINR`, `usd/inr` → `USDINR=X`. `commodity`: `GOLD` → `GC=F`, `SILVER` → `SI=F`, other bare tickers → NSE (`GOLDBEES` → `GOLDBEES.NS`). Global exchanges from the [market table](markets.md): `uk` (`VOD` → `VOD.L`), `de` (`SAP.DE`), `jp` (`7203` → `7203.T`), `hk` (`5` → `0005.HK`), `sg` (`D05.SI`), `ca` (`RY.TO`), `au` (`BHP.AX`). Symbols with a suffix (`RELIANCE.BO`, `VOD.L`), indices (`^NSEI`), FX (`USDINR=X`), futures (`GC=F`) and crypto pairs (`BTC-INR`) pass through unchanged |
 | `--quote-currency <CODE>` | `STOCKWISE_QUOTE_CURRENCY` | Currency bare crypto tickers are quoted in with `-m crypto`. Default `usd`; `inr` gives `BTC-INR` |
 | `--lang <en\|hi>` | `STOCKWISE_LANG` | Language for help groups, tables and messages. Default: your locale (`LC_ALL` / `LC_MESSAGES` / `LANG` starting with `hi` picks Hindi), else English. `--json` and `--csv` output is never translated |
 | `--ai` | `STOCKWISE_AI` | Add an AI section to `analyze`, `technical`, `compare`, `screen`, `backtest`, `deep` (slow with a local model; see [ai.md](ai.md)) |
@@ -88,6 +88,9 @@ symbols, and `stockwise c TCS INFY` still compares. A longer ticker that spells 
 always works. Common names resolve to NSE symbols
 (`SBI` → `SBIN`, `L&T` → `LT`, index names), and `quote` suggests close matches for a mistyped symbol.
 
+Without `-m`, a symbol that says where it trades is looked up there: see
+[Market and portfolio context](#market-and-portfolio-context).
+
 | Command | Description |
 |---------|-------------|
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
@@ -95,7 +98,8 @@ always works. Common names resolve to NSE symbols
 | `markets [--crypto] [--fx] [--global] [--json\|--csv]` | US + India indices (S&P 500, Dow, NASDAQ, Russell, VIX, NIFTY 50, SENSEX, Bank NIFTY, NIFTY IT) and the India 10-year G-sec yield (CCIL, RBI fallback; left out when neither answers); `--crypto` adds the largest coins, `--fx` major pairs (USD/INR, EUR/USD, ...), `--global` one row per exchange's main index (NIFTY 50, S&P 500, FTSE 100, DAX, Nikkei 225, Hang Seng, Straits Times, S&P/TSX, S&P/ASX 200) with whether it is open and its local time. With `-m crypto`, `-m fx`, `-m commodity` or a global exchange that section comes first. `--json` rows carry `region`: `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Japan`, ...) or `Global` |
 | `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
-| `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config. Exits 1 if market data is unreachable or the config file is invalid |
+| `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Exits 1 if market data is unreachable or the config file is invalid |
+| `use [MARKET\|PORTFOLIO]... [--bind\|--unbind] [--json]` | Show the market and portfolio in use, or switch them: `use us`, `use long-term`, `use us-tech us --bind`. See [Market and portfolio context](#market-and-portfolio-context) |
 
 ## Analysis
 
@@ -445,6 +449,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL> [--yes]` | Remove a holding and its lots without recording a sale; asks first when it has more than one lot |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
+| `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it (see [below](#portfolio-checkup)) |
+| `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
 | `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
@@ -711,6 +717,87 @@ These are readings of the data, not recommendations: nothing says to buy,
 sell or keep a holding. `--json` prints every figure. The TUI shows the same
 analysis on its own screen (key `p`).
 
+### Portfolio checkup
+
+`stockwise portfolio checkup` reads the active portfolio and reports
+findings in six lenses:
+
+1. **Concentration, overlap and cap tiers**: a single company above the
+   profile's `max_stock_weight` (12% unless set), counting shares held through
+   funds whose holdings are known; small and micro caps together above
+   `max_smallcap_weight`; two funds sharing more than 35% of their holdings;
+   fewer than 5 effective bets (1 / HHI of the look-through weights).
+2. **Forensic and fundamental flags**: Piotroski F-Score of 3 or less (with
+   at least 7 of 9 signals evaluated), Altman Z in the distress zone,
+   operating cash flow below 0.7× net profit, promoter shares pledged, a
+   promoter stake down a point or more in a quarter, and a latest quarter with
+   both net profit and operating margin below the same quarter a year ago.
+3. **Valuation stretch**: P/E above 60 or PEG above 2.5 while revenue growth
+   is slowing.
+4. **Downside**: portfolio beta above 1.2, a fall of more than 25% from the
+   peak of the last year, and pairs of holdings (each 2% or more) whose daily
+   returns correlate above 0.75.
+5. **Fees and tax**: the unused long-term exemption (India's ₹1.25 lakh under
+   Sec. 112A) when long-term gains could use it, harvestable losses, the yearly
+   cost of Regular-plan funds over their Direct twin, and lots turning
+   long-term within 45 days.
+6. **Goals and targets**: weights outside the `portfolio target` drift band
+   and saved goals still short of their target.
+
+Each finding states what was observed, the amount or weight at stake, and the
+command that shows the detail (`stockwise score TCS.NS --explain`,
+`stockwise harvest`, `stockwise mf bleed`, ...). Findings are ranked by the
+value of the position (or the amount itself, for portfolio-wide readings)
+times a severity weight of 1, 2 or 3. The summary line counts the checks that
+ran and how many raised nothing.
+
+Statements are read for the 30 largest stocks, four at a time; a source that
+fails or times out is listed under "Not checked" and its checks are skipped.
+`--offline` reads only the cache: prices from stored market snapshots
+(`cache snapshots`), closes from stored daily bars, and saved fund
+disclosures. It skips statements and Regular-plan costs. `--json` prints
+`{base_currency, total_value, herfindahl, effective_bets, findings: [{lens,
+rule, severity, symbol, observed, exposure, at_stake, weight_pct, inspect,
+impact}], checks: [{rule, lens, clean}], clean, evaluated, skipped,
+disclaimer}`; `--csv` prints one row per finding in rank order. The MCP tool
+`portfolio_checkup` returns the JSON. Amounts are ranked in the base
+currency: tax, fund and goal amounts are converted at today's rate, and a
+source without a rate is listed under "Not checked". A check only counts as
+run when its data was there: unknown cap tiers, funds without disclosed
+holdings or a missing revenue trend leave the check out of the count.
+
+These are observations, not advice: nothing says to buy, sell or keep a
+holding.
+
+### Portfolio wrap
+
+`stockwise portfolio wrap` prints a one-screen review of a year: the return
+against the market's index (NIFTY 50, S&P 500, ...) and the difference in
+basis points, the top three contributors and detractors, the money deployed,
+sale proceeds, dividends and realised gains, the cap-tier split, the top
+three sectors, the effective number of bets, how many checkup guardrails are
+clean, and a tax footer (days left in the tax year, the long-term exemption
+still unused, and for India the next advance-tax date).
+
+The period is `--year 2026` (calendar year) or `--fy 2026-27` (April to
+March). Without either, it is the current Indian financial year when the
+portfolio totals in rupees, and the current calendar year otherwise. A year
+still running is reviewed up to today.
+
+The return is a Modified Dietz return over the period: the gain (end value
+less start value less money added, net of sales and dividends) over the start
+value plus the money added, each flow weighted by the time it was invested.
+It is not annualised. The start values use the close of the day before the
+period; mutual funds use their NAV history. Amounts in other currencies are
+converted at today's rate. Holdings without a price at either end are named
+and left out of the return.
+
+`--redact` replaces every amount with a percentage: the cash flows become a
+share of the money at work, contributors show their share of the year's
+gains and losses, and the tax footer shows the share of the exemption used.
+The card can then be shared without showing what the portfolio is worth.
+`--json` prints the card, with the amounts set to null when redacted.
+
 ### Benchmark and attribution
 
 > **Guide:** [Import your trades and see true returns](guide-portfolio.md#6-compare-with-the-index-and-look-through-your-funds).
@@ -955,6 +1042,7 @@ untested against a live account.
 | `config path` | Print the config file path (it may not exist yet) |
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |
 | `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, desktop) / send a test message. See [notifications](bots.md#notifications) |
+| `update [--check]` (`self-update`) | Check GitHub Releases for a newer version. A binary from install.sh or a release archive is replaced in place: the archive for this platform and its `.sha256` are downloaded, the checksum must match (a missing or wrong checksum stops the update and changes nothing), then the binary is swapped atomically (on Windows the old one is kept as `stockwise.exe.old`). Installs from Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv, pip, `.deb`/`.rpm` or Docker are never changed; the command prints that package manager's upgrade command instead. `--check` only reports the installed version, the latest release and the install channel |
 | `completions <bash\|zsh\|fish\|powershell\|elvish>` | Print a completion script, e.g. `stockwise completions zsh > ~/.zfunc/_stockwise` |
 | `man [--dir <DIR>]` | Print the `stockwise.1` man page, or write it plus one `stockwise-<command>.1` page per command into `DIR`, e.g. `stockwise man --dir ~/.local/share/man/man1` |
 
@@ -1154,6 +1242,51 @@ stockwise calendar TCS INFY
 stockwise calendar AAPL MSFT -m us --json
 ```
 
+## Market and portfolio context
+
+`stockwise use` picks the market bare tickers belong to and the portfolio
+commands read, and saves both in the [configuration file](#configuration-file)
+(`market` and `portfolio`), the same way `stockwise init` saves the market.
+
+```bash
+stockwise use                       # what is in use, and where each value comes from
+stockwise use us                    # bare tickers are US stocks from now on
+stockwise use long-term             # work on the `long-term` portfolio
+stockwise use us-tech us --bind     # bind a portfolio to a market and switch to both
+stockwise use us-tech               # later: picks the portfolio and its market
+stockwise use us-tech --unbind      # remove the binding
+```
+
+A market word (`in`, `us`, `uk`, `crypto`, ...) is the market; anything else
+is a saved portfolio's name (`default` is `portfolio.json`). Bindings live in
+the config file under `[portfolio_markets]`, not in the portfolio file.
+
+The market for one command comes from the first of these that is set:
+
+1. `-m` / `--market`
+2. `STOCKWISE_MARKET`
+3. the market bound to a portfolio picked with `--portfolio` or `STOCKWISE_PORTFOLIO`
+4. the config file's `market` (what `stockwise use` saves)
+5. the market bound to the config file's portfolio, when no portfolio was picked for this run (a portfolio picked with `--portfolio` and no binding of its own skips this step)
+6. `in`
+
+**No `-m` needed.** When the market comes from steps 3–6, a symbol that says
+where it trades is looked up there, offline:
+
+- an exchange suffix or index: `VOD.L` → London, `TCS.NS` → India, `^GSPC` → US, `BTC-USD` → crypto;
+- an ISIN: well-known ones map to their ticker (`US0378331005` → `AAPL`,
+  `IE00BK5BQT80` → `VWCE.DE`); others pick the market from the country prefix
+  (`IN` → India, `US` → US, `GB` → London, `DE`, `JP`, `HK`, `SG`, `CA`, `AU`),
+  and `stockwise search <ISIN>` finds the ticker;
+- a bare ticker that only one market's built-in list holds (S&P 1500, NIFTY 500,
+  the [global index lists](markets.md), the large coins, `GOLD`/`SILVER`):
+  `stockwise NVDA` with India as the default quotes NVIDIA and says so on stderr.
+
+A ticker listed in several markets (`RIO` in London and Sydney) stays on the
+current market, with a one-line "did you mean" hint naming the others. Numeric
+codes (BSE scrip codes, Tokyo and Hong Kong codes) always use the current
+market. With several symbols, the market moves only when they all agree.
+
 ## Configuration file
 
 Everything works without one. To set your own defaults:
@@ -1191,11 +1324,14 @@ sip = "10y"
 telegram_chat_id = "123456789"
 smtp_host = "smtp.gmail.com"
 email_to = "me@example.com"
+
+[portfolio_markets]                 # market per named portfolio (`stockwise use NAME MARKET --bind`)
+us-tech = "us"
 ```
 
 | Key | Overridden by | Built-in default |
 |-----|---------------|------------------|
-| `market` | `-m`, `STOCKWISE_MARKET` | `in` |
+| `market` (`stockwise use`) | `-m`, `STOCKWISE_MARKET` | `in` |
 | `ai` | `--ai` / `--no-ai`, `STOCKWISE_AI` | `false` |
 | `model` | `STOCKWISE_MODEL` | `qwen3:14b` |
 | `ollama_host` | `OLLAMA_HOST` | `http://localhost:11434` |
@@ -1204,6 +1340,7 @@ email_to = "me@example.com"
 | `lang` | `--lang`, `STOCKWISE_LANG` | your locale, else `en` |
 | `quote_currency` | `--quote-currency`, `STOCKWISE_QUOTE_CURRENCY` | `usd` |
 | `portfolio` | `--portfolio`, `STOCKWISE_PORTFOLIO` | `default` |
+| `[portfolio_markets] <portfolio>` | `-m`, `STOCKWISE_MARKET` | none; see [Market and portfolio context](#market-and-portfolio-context) |
 | `ai_provider` | `STOCKWISE_AI_PROVIDER` | `ollama` |
 | `data_provider` | `STOCKWISE_DATA_PROVIDER` | `yahoo` |
 | `[periods] <command>` | `-p` | per command, see `<command> --help` |
@@ -1216,7 +1353,7 @@ default from your file, e.g. `[default: 6mo]`.
 
 A file that doesn't parse — an unknown key, a wrong type, an unknown market or
 period — stops every command with exit code 1 and an error naming the file and
-the key. `config`, `doctor` and `completions` still run, so you can inspect it
+the key. `config`, `use`, `doctor` and `completions` still run, so you can inspect it
 or replace it with `stockwise config init --force`.
 
 API keys (`OPENAI_API_KEY`, the data provider's key, ...) and

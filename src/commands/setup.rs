@@ -173,11 +173,12 @@ pub(crate) fn setting_rows(
         };
         rows.push(row(&format!("notify.{}", key), value, source));
     }
-    // Keys of the keyed providers that back Yahoo up: only whether one is
-    // set, never its value.
+    // Keys of the providers that back Yahoo up (CoinGecko's is optional):
+    // only whether one is set, never its value.
     for kind in [
         crate::providers::ProviderKind::Finnhub,
         crate::providers::ProviderKind::Fmp,
+        crate::providers::ProviderKind::CoinGecko,
     ] {
         if let Some(env) = kind
             .key_envs()
