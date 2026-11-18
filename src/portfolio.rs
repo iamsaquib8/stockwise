@@ -307,6 +307,15 @@ pub struct Sale {
     /// The demat account the shares were sold from (see [`Lot::account`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Bonus issues received on the sold lot as a lot of their own
+    /// (`bonus:<split id>`, see [`Split::bonus_id`]): the sold quantity is in
+    /// the count before them, so dividends before them count those shares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bonuses: Vec<String>,
+    /// Sold out of a lot of bonus shares: allotted, not bought, so never
+    /// intraday even when sold on the allotment date.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bonus_shares: bool,
 }
 
 impl Sale {
@@ -323,6 +332,13 @@ impl Sale {
             order_id: None,
             intraday: false,
             account: lot.account_key().map(str::to_string),
+            bonuses: lot
+                .adjustments
+                .iter()
+                .filter(|a| a.starts_with("bonus:"))
+                .cloned()
+                .collect(),
+            bonus_shares: lot.source == BONUS_SOURCE,
         }
     }
 
@@ -340,7 +356,8 @@ impl Sale {
     /// A same-day buy and sell: flagged when it was recorded, or bought and
     /// sold on one day with a real (not estimated) purchase date.
     pub fn is_intraday(&self) -> bool {
-        self.intraday || (self.buy_date == self.sell_date && !self.buy_date_estimated)
+        self.intraday
+            || (self.buy_date == self.sell_date && !self.buy_date_estimated && !self.bonus_shares)
     }
 }
 
@@ -358,16 +375,35 @@ pub struct DividendReceived {
     pub currency: Option<String>,
 }
 
+/// The `source` of a lot of bonus shares (see [`Split::bonus`]).
+pub const BONUS_SOURCE: &str = "bonus";
+
 /// A stock split or bonus issue: `numerator` shares for every `denominator`
 /// held. Yahoo reports Indian bonus issues as splits (1:1 bonus = 2:1).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Split {
+    /// The ex-date.
     pub date: String,
     pub numerator: f64,
     pub denominator: f64,
+    /// For an Indian bonus issue: the allotment date. Indian tax treats
+    /// bonus shares as a new purchase at zero cost on that date
+    /// (Sec. 55(2)(aa)(iiia)), so the older lots keep their quantity and
+    /// cost and the new shares become a lot of their own. `None`: a real
+    /// split, or a bonus outside India, which multiplies the older lots.
+    pub bonus: Option<String>,
 }
 
 impl Split {
+    pub fn new(date: impl Into<String>, numerator: f64, denominator: f64) -> Self {
+        Self {
+            date: date.into(),
+            numerator,
+            denominator,
+            bonus: None,
+        }
+    }
+
     pub fn ratio(&self) -> f64 {
         self.numerator / self.denominator
     }
@@ -376,10 +412,77 @@ impl Split {
         format!("{}:{}:{}", self.date, self.numerator, self.denominator)
     }
 
+    /// The adjustment recorded on a lot that received this event as bonus
+    /// shares in a lot of their own (its quantity was left as it was).
+    pub fn bonus_id(&self) -> String {
+        format!("bonus:{}", self.id())
+    }
+
+    /// Whether this event was already applied to `lot`, as a split or as a bonus.
+    pub fn applied_to(&self, lot: &Lot) -> bool {
+        let (id, bonus) = (self.id(), self.bonus_id());
+        lot.adjustments.iter().any(|a| *a == id || *a == bonus)
+    }
+
     /// Whether `lot`'s quantity predates this split and was not yet adjusted for it.
     pub fn pending_for(&self, lot: &Lot) -> bool {
-        lot.units_date() < self.date.as_str() && !lot.adjustments.contains(&self.id())
+        lot.units_date() < self.date.as_str() && !self.applied_to(lot)
     }
+
+    /// The allotment date when this is to be recorded as zero-cost bonus
+    /// shares (a ratio above one); `None` for a split.
+    fn bonus_allotment(&self) -> Option<&str> {
+        self.bonus.as_deref().filter(|_| self.ratio() > 1.0)
+    }
+}
+
+/// Apply `split` to the `lots` bought before it that were not yet adjusted.
+/// A split multiplies quantity and divides price, keeping cost and date. A
+/// bonus ([`Split::bonus`]) leaves those lots as they are and adds the new
+/// shares, `qty × (ratio − 1)` per lot, as zero-cost lots dated on the
+/// allotment date (one per account). Returns how many of the older lots
+/// were adjusted. The lots are left sorted by date.
+fn apply_split_to(lots: &mut Vec<Lot>, split: &Split) -> usize {
+    let r = split.ratio();
+    if !r.is_finite() || r <= 0.0 {
+        return 0;
+    }
+    let id = split.id();
+    let mut changed = 0;
+    match split.bonus_allotment() {
+        None => {
+            for lot in lots.iter_mut().filter(|l| split.pending_for(l)) {
+                lot.qty *= r;
+                lot.price /= r;
+                lot.adjustments.push(id.clone());
+                changed += 1;
+            }
+        }
+        Some(allotted) => {
+            let mut bonus: Vec<(Option<String>, f64)> = Vec::new();
+            for lot in lots.iter_mut().filter(|l| split.pending_for(l)) {
+                let account = lot.account_key().map(str::to_string);
+                let qty = lot.qty * (r - 1.0);
+                match bonus.iter_mut().find(|(a, _)| *a == account) {
+                    Some((_, q)) => *q += qty,
+                    None => bonus.push((account, qty)),
+                }
+                lot.adjustments.push(split.bonus_id());
+                changed += 1;
+            }
+            for (account, qty) in bonus {
+                let mut lot = Lot::new(qty, 0.0, allotted, BONUS_SOURCE);
+                lot.account = account;
+                // Already in the share count after this event: never apply it again.
+                lot.adjustments.push(id.clone());
+                lots.push(lot);
+            }
+        }
+    }
+    if changed > 0 {
+        lots.sort_by(|a, b| a.date.cmp(&b.date));
+    }
+    changed
 }
 
 /// A dividend per share as Yahoo reports it (adjusted for later splits).
@@ -670,13 +773,8 @@ fn replay_trades(
     let mut applied: Vec<String> = Vec::new();
     let apply_until = |lots: &mut Vec<Lot>, date: &str, applied: &mut Vec<String>| {
         for split in splits.iter().filter(|s| s.date.as_str() <= date) {
-            for lot in lots.iter_mut().filter(|l| split.pending_for(l)) {
-                lot.qty *= split.ratio();
-                lot.price /= split.ratio();
-                lot.adjustments.push(split.id());
-                if !applied.contains(&split.id()) {
-                    applied.push(split.id());
-                }
+            if apply_split_to(lots, split) > 0 && !applied.contains(&split.id()) {
+                applied.push(split.id());
             }
         }
     };
@@ -852,7 +950,8 @@ fn scoped<R>(lots: &mut Vec<Lot>, scope: &Scope, f: impl FnOnce(&mut Vec<Lot>) -
 fn take_netting(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64, bool)>, f64) {
     let (mut same_day, mut older): (Vec<Lot>, Vec<Lot>) = std::mem::take(lots)
         .into_iter()
-        .partition(|l| l.date == date && !l.date_estimated);
+        // Bonus shares are allotted, not bought: never an intraday buy.
+        .partition(|l| l.date == date && !l.date_estimated && l.source != BONUS_SOURCE);
     let (netted, rest) = take_fifo(&mut same_day, qty, date);
     let (before, left) = take_fifo(&mut older, rest, date);
     older.extend(same_day);
@@ -1410,9 +1509,11 @@ impl Portfolio {
             // Only this account's lots and sales are rebuilt: another
             // account's are left alone.
             let scope = self.scope(&sym, account);
+            // Bonus lots of this account's shares are rebuilt by the replay.
+            let own_source = |l: &Lot| l.source == source || l.source == BONUS_SOURCE;
             let foreign_lots = self
                 .holding(&sym)
-                .is_some_and(|h| h.lots.iter().any(|l| scope.lot(l) && l.source != source));
+                .is_some_and(|h| h.lots.iter().any(|l| scope.lot(l) && !own_source(l)));
             let foreign_sales = self.realized.iter().any(|s| {
                 s.symbol == sym && scope.sale(s) && s.source != source && s.sell_date >= first
             });
@@ -1455,7 +1556,7 @@ impl Portfolio {
                 .map(|h| {
                     h.lots
                         .iter()
-                        .filter(|l| scope.lot(l) && l.source == source)
+                        .filter(|l| scope.lot(l) && own_source(l))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1644,25 +1745,17 @@ impl Portfolio {
         summary
     }
 
-    /// Apply a split or bonus to the lots bought before it: quantity × ratio,
-    /// price ÷ ratio, so cost and purchase date are unchanged. Lots already
-    /// adjusted for it are skipped. Returns how many lots changed.
+    /// Apply a split or bonus to the lots bought before it. A split
+    /// multiplies quantity and divides price, so cost and purchase date are
+    /// unchanged. An Indian bonus ([`Split::bonus`]) keeps those lots and
+    /// adds the bonus shares as a zero-cost lot dated on the allotment date.
+    /// Lots already adjusted for it are skipped. Returns how many of the
+    /// older lots were adjusted.
     pub fn apply_split(&mut self, symbol: &str, split: &Split) -> usize {
-        let r = split.ratio();
-        if !r.is_finite() || r <= 0.0 {
-            return 0;
-        }
         let Some(h) = self.holding_mut(symbol) else {
             return 0;
         };
-        let id = split.id();
-        let mut changed = 0;
-        for lot in h.lots.iter_mut().filter(|l| split.pending_for(l)) {
-            lot.qty *= r;
-            lot.price /= r;
-            lot.adjustments.push(id.clone());
-            changed += 1;
-        }
+        let changed = apply_split_to(&mut h.lots, split);
         if changed > 0 {
             h.recompute();
         }
@@ -1671,13 +1764,21 @@ impl Portfolio {
 
     /// Shares of `symbol` held at the start of `date` (bought before it, not
     /// yet sold), in today's share count: `splits` not yet applied to a lot,
-    /// and splits after a sale, are multiplied in.
+    /// and splits after a sale, are multiplied in. A lot that received a
+    /// bonus after `date` as a separate lot counts its bonus shares here too,
+    /// since that bonus lot was not yet held on `date`.
     pub fn shares_on(&self, symbol: &str, date: &str, splits: &[Split]) -> f64 {
         let sym = symbol.to_uppercase();
         let later = |after: &str, lot: Option<&Lot>| -> f64 {
             splits
                 .iter()
-                .filter(|s| s.date.as_str() > after && lot.is_none_or(|l| s.pending_for(l)))
+                .filter(|s| {
+                    s.date.as_str() > after
+                        && lot.is_none_or(|l| {
+                            s.pending_for(l)
+                                || (s.date.as_str() > date && l.adjustments.contains(&s.bonus_id()))
+                        })
+                })
                 .map(Split::ratio)
                 .product()
         };
@@ -1694,7 +1795,20 @@ impl Portfolio {
             .filter(|s| {
                 s.symbol == sym && s.buy_date.as_str() < date && s.sell_date.as_str() >= date
             })
-            .map(|s| s.qty * later(&s.sell_date, None))
+            .map(|s| {
+                // Bonus shares received on the sold lot after `date`.
+                let bonus: f64 = splits
+                    .iter()
+                    // Not a bonus after the sale: `later` already counts it.
+                    .filter(|b| {
+                        b.date.as_str() > date
+                            && b.date <= s.sell_date
+                            && s.bonuses.contains(&b.bonus_id())
+                    })
+                    .map(Split::ratio)
+                    .product();
+                s.qty * later(&s.sell_date, None) * bonus
+            })
             .sum();
         open + sold
     }
@@ -2104,6 +2218,8 @@ mod tests {
             order_id: None,
             intraday: false,
             account: None,
+            bonuses: Vec::new(),
+            bonus_shares: false,
         });
         old.save_to(&path).unwrap();
 
@@ -3170,6 +3286,7 @@ mod tests {
             date: "2019-09-19".into(),
             numerator: 2.0,
             denominator: 1.0,
+            bonus: None,
         }
     }
 
@@ -3178,6 +3295,7 @@ mod tests {
             date: "2025-08-26".into(),
             numerator: 2.0,
             denominator: 1.0,
+            bonus: None,
         }
     }
 
@@ -3352,6 +3470,7 @@ mod tests {
             date: "2024-10-28".into(),
             numerator: 2.0,
             denominator: 1.0,
+            bonus: None,
         }
     }
 
@@ -3374,6 +3493,253 @@ mod tests {
         assert_eq!(p.apply_split("RELIANCE.NS", &split_2_for_1()), 0);
         assert_eq!(p.holding("RELIANCE.NS").unwrap().shares, 24.0);
         assert_eq!(p.apply_split("NOPE", &split_2_for_1()), 0);
+    }
+
+    /// A 1:1 bonus (Yahoo: 2:1 split) with ex-date and allotment 2026-06-15.
+    fn bonus_1_for_1() -> Split {
+        Split {
+            bonus: Some("2026-06-15".into()),
+            ..Split::new("2026-06-15", 2.0, 1.0)
+        }
+    }
+
+    #[test]
+    fn indian_bonus_adds_a_zero_cost_lot_and_keeps_the_old_one() {
+        // Issue #95: 100 bought at 1,000; a 1:1 bonus allotted on 2026-06-15.
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        assert_eq!(p.apply_split("TCS.NS", &bonus_1_for_1()), 1);
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 2);
+        let (old, new) = (&h.lots[0], &h.lots[1]);
+        assert_eq!(
+            (old.qty, old.price, old.date.as_str()),
+            (100.0, 1000.0, "2023-05-01")
+        );
+        assert_eq!(old.adjustments, vec!["bonus:2026-06-15:2:1".to_string()]);
+        assert_eq!(
+            (new.qty, new.price, new.date.as_str()),
+            (100.0, 0.0, "2026-06-15")
+        );
+        assert_eq!(new.source, BONUS_SOURCE);
+        assert_eq!(new.adjustments, vec!["2026-06-15:2:1".to_string()]);
+        assert_eq!((h.shares, h.cost_basis()), (200.0, 100_000.0));
+
+        // Applying it again (as a bonus or as a plain split) changes nothing.
+        assert_eq!(p.apply_split("TCS.NS", &bonus_1_for_1()), 0);
+        assert_eq!(
+            p.apply_split("TCS.NS", &Split::new("2026-06-15", 2.0, 1.0)),
+            0
+        );
+        assert_eq!(p.holding("TCS.NS").unwrap().lots.len(), 2);
+
+        // FIFO sells the 2023 shares first: a long-term loss of 40,000.
+        let sales = p
+            .sell_fifo("TCS.NS", 100.0, 600.0, "2026-07-01", "manual")
+            .unwrap();
+        assert_eq!(sales.len(), 1);
+        assert_eq!(sales[0].buy_date, "2023-05-01");
+        assert_eq!(sales[0].gain(), -40_000.0);
+        assert!(crate::tax::Country::India.is_long_term(d(&sales[0].buy_date), d("2026-07-01")));
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 1);
+        assert_eq!((h.lots[0].qty, h.lots[0].price), (100.0, 0.0));
+    }
+
+    #[test]
+    fn bonus_shares_follow_each_lots_account() {
+        let mut p = Portfolio::default();
+        let mut a = lot(10.0, 1000.0, "2023-05-01");
+        a.account = Some("zerodha".into());
+        let mut b = lot(30.0, 1100.0, "2024-01-01");
+        b.account = Some("zerodha".into());
+        p.add_lot("TCS.NS", a);
+        p.add_lot("TCS.NS", b);
+        p.add_lot(
+            "TCS.NS",
+            Lot::new(5.0, 1200.0, "2024-02-01", "import:groww"),
+        );
+        assert_eq!(p.apply_split("TCS.NS", &bonus_1_for_1()), 3);
+        let bonus: Vec<(f64, Option<&str>)> = p
+            .holding("TCS.NS")
+            .unwrap()
+            .lots
+            .iter()
+            .filter(|l| l.source == BONUS_SOURCE)
+            .map(|l| (l.qty, l.account.as_deref()))
+            .collect();
+        assert_eq!(bonus, vec![(40.0, Some("zerodha")), (5.0, Some("groww"))]);
+    }
+
+    #[test]
+    fn a_real_split_after_a_bonus_adjusts_both_lots() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &bonus_1_for_1());
+        // A 5:1 split (no `bonus`) later multiplies both lots.
+        let split = Split::new("2026-09-01", 5.0, 1.0);
+        assert_eq!(p.apply_split("TCS.NS", &split), 2);
+        let h = p.holding("TCS.NS").unwrap();
+        let lots: Vec<(f64, f64, &str)> = h
+            .lots
+            .iter()
+            .map(|l| (l.qty, l.price, l.date.as_str()))
+            .collect();
+        assert_eq!(
+            lots,
+            vec![(500.0, 200.0, "2023-05-01"), (500.0, 0.0, "2026-06-15")]
+        );
+        assert_eq!(p.apply_split("TCS.NS", &split), 0);
+    }
+
+    #[test]
+    fn a_bonus_without_nse_or_outside_india_stays_a_split() {
+        // `bonus: None` is what a non-Indian symbol, or NSE being
+        // unreachable, leaves: the old behaviour.
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", lot(10.0, 150.0, "2023-05-01"));
+        assert_eq!(
+            p.apply_split("AAPL", &Split::new("2026-06-15", 2.0, 1.0)),
+            1
+        );
+        let h = p.holding("AAPL").unwrap();
+        assert_eq!(h.lots.len(), 1);
+        assert_eq!((h.lots[0].qty, h.lots[0].price), (20.0, 75.0));
+    }
+
+    #[test]
+    fn dividends_count_bonus_shares_in_todays_share_count() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        let splits = vec![bonus_1_for_1()];
+        p.apply_split("TCS.NS", &splits[0]);
+        // Before the bonus: Yahoo's per-share amount is in today's count, so
+        // the 100 shares held then count as 200.
+        let before = DividendEvent {
+            ex_date: "2025-06-01".into(),
+            per_share: 5.0,
+        };
+        assert_eq!(p.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+        // After it: the old lot and the bonus lot, 200 in all.
+        let after = DividendEvent {
+            ex_date: "2026-08-01".into(),
+            per_share: 5.0,
+        };
+        assert_eq!(p.dividend_due("TCS.NS", &after, &splits), Some(200.0));
+    }
+
+    #[test]
+    fn dividends_before_a_bonus_count_the_bonus_shares_of_sold_lots() {
+        let splits = vec![bonus_1_for_1()];
+        let before = DividendEvent {
+            ex_date: "2025-06-01".into(),
+            per_share: 5.0,
+        };
+        // All 100 older shares sold after the bonus: still 200 on 2025-06-01.
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &splits[0]);
+        p.sell_fifo("TCS.NS", 100.0, 600.0, "2026-07-01", "manual")
+            .unwrap();
+        assert_eq!(p.realized[0].bonuses, vec![splits[0].bonus_id()]);
+        assert_eq!(p.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+        // A partial sale: 60 × 2 open plus 40 × 2 sold.
+        let mut q = Portfolio::default();
+        q.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        q.apply_split("TCS.NS", &splits[0]);
+        q.sell_fifo("TCS.NS", 40.0, 600.0, "2026-07-01", "manual")
+            .unwrap();
+        assert_eq!(q.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+        // A bonus lot sold is not counted twice.
+        q.sell_fifo("TCS.NS", 100.0, 600.0, "2026-08-01", "manual")
+            .unwrap();
+        assert_eq!(q.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+    }
+
+    #[test]
+    fn a_sale_on_the_allotment_date_does_not_net_against_bonus_shares() {
+        let mut lots = vec![lot(100.0, 1000.0, "2023-05-01")];
+        apply_split_to(&mut lots, &bonus_1_for_1());
+        let (taken, left) = take_netting(&mut lots, 50.0, "2026-06-15");
+        assert_eq!(left, 0.0);
+        assert_eq!(taken.len(), 1);
+        let (from, qty, intraday) = &taken[0];
+        assert_eq!(
+            (from.date.as_str(), *qty, *intraday),
+            ("2023-05-01", 50.0, false)
+        );
+
+        // Selling into the bonus shares on that day: still not intraday.
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &bonus_1_for_1());
+        let sales = p
+            .sell_fifo("TCS.NS", 150.0, 600.0, "2026-06-15", "manual")
+            .unwrap();
+        assert_eq!(sales.len(), 2);
+        assert!(sales[1].bonus_shares);
+        assert!(sales.iter().all(|s| !s.is_intraday()));
+    }
+
+    #[test]
+    fn a_sale_backdated_before_a_bonus_counts_it_once() {
+        let splits = vec![bonus_1_for_1()];
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", lot(100.0, 1000.0, "2023-05-01"));
+        p.apply_split("TCS.NS", &splits[0]);
+        p.sell_fifo("TCS.NS", 100.0, 600.0, "2026-06-01", "manual")
+            .unwrap();
+        let before = DividendEvent {
+            ex_date: "2025-06-01".into(),
+            per_share: 5.0,
+        };
+        assert_eq!(p.dividend_due("TCS.NS", &before, &splits), Some(200.0));
+    }
+
+    #[test]
+    fn tradebook_replay_records_an_indian_bonus_as_a_zero_cost_lot() {
+        let rows = vec![
+            trade("TCS.NS", "2023-05-01", false, 100.0, 1000.0),
+            trade("TCS.NS", "2026-07-01", true, 100.0, 600.0),
+        ];
+        let splits = vec![("TCS.NS".to_string(), vec![bonus_1_for_1()])];
+        let tradebook = ImportOptions {
+            splits: &splits,
+            ..tradebook_opts("import:kite")
+        };
+        let mut p = Portfolio::default();
+        let out = p.apply_import(&rows, tradebook);
+        assert_eq!(
+            out[0].1,
+            ImportOutcome::Lots {
+                lots: 1,
+                sales: 1,
+                splits: 1
+            }
+        );
+        assert_eq!(p.realized[0].buy_date, "2023-05-01");
+        assert_eq!(p.realized[0].gain(), -40_000.0);
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 1);
+        let l = &h.lots[0];
+        assert_eq!(
+            (l.qty, l.price, l.date.as_str()),
+            (100.0, 0.0, "2026-06-15")
+        );
+        assert_eq!(
+            (l.source.as_str(), l.account.as_deref()),
+            (BONUS_SOURCE, Some("zerodha"))
+        );
+        // `actions --apply` has nothing left to do, and re-importing the
+        // file keeps the bonus lot instead of refusing to replace it.
+        assert_eq!(p.apply_split("TCS.NS", &bonus_1_for_1()), 0);
+        let before = state(&p);
+        let again = p.apply_import(&rows, tradebook);
+        assert!(
+            matches!(again[0].1, ImportOutcome::Lots { .. }),
+            "{again:?}"
+        );
+        assert_eq!(state(&p), before);
     }
 
     #[test]
