@@ -1032,7 +1032,10 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # "twelvedata", "finnhub", "fmp", or the exchanges' own websites: "nse",
 # "bse" or "exchange" (NSE for .NS, BSE for .BO; no key). API keys stay in
 # environment variables. Env: STOCKWISE_DATA_PROVIDER. FINNHUB_API_KEY and
-# FMP_API_KEY also back Yahoo up without naming a provider here.
+# FMP_API_KEY also back Yahoo up without naming a provider here. When Yahoo
+# fails, FX pairs fall back to ECB daily reference rates (Frankfurter) and
+# large coins to CoinGecko (optional COINGECKO_API_KEY), with no key needed;
+# STOCKWISE_KEYLESS_BACKUPS=off turns that off.
 # data_provider = "yahoo"
 
 # Default --period per command. Periods: 1d 5d 1w 1mo 3mo 6mo ytd 1y 2y 5y 10y max.

@@ -11,7 +11,11 @@
 //!
 //! Yahoo Finance stays the base of `YahooClient`; the router is what answers
 //! when Yahoo fails or leaves holes. Keyed providers join the router when
-//! their key variable is set (`FINNHUB_API_KEY`, `FMP_API_KEY`).
+//! their key variable is set (`FINNHUB_API_KEY`, `FMP_API_KEY`). Two keyless
+//! backups always join, ranked after them: Frankfurter (ECB daily reference
+//! rates, FX only) and CoinGecko (large coins only). They are asked only for
+//! symbols Yahoo could not serve, and daily history ([`Router::chart`]) comes
+//! from them only after Yahoo's chart failed.
 
 use super::{MarketData, Provider, ProviderKind};
 use crate::api::{Quote, QuoteMeta};
@@ -52,6 +56,7 @@ impl ProviderKind {
             ProviderKind::AlphaVantage | ProviderKind::Massive | ProviderKind::TwelveData => {
                 &[Quote, Chart, Search]
             }
+            ProviderKind::Frankfurter | ProviderKind::CoinGecko => &[Quote, Chart],
         }
     }
 
@@ -70,6 +75,8 @@ impl ProviderKind {
             (ProviderKind::Finnhub, _) => 0,
             (ProviderKind::Fmp, Capability::Quote) if batch > BATCH_PREFERRED => 0,
             (ProviderKind::Fmp, _) => 1,
+            // Keyless backups: after every provider the user configured.
+            (ProviderKind::Frankfurter | ProviderKind::CoinGecko, _) => 8,
             _ => 5,
         }
     }
@@ -266,7 +273,18 @@ fn note_source(q: &mut Quote, base: Option<&str>, name: &str) {
     }
 }
 
-/// The keyed providers that came with their key variable set.
+/// `STOCKWISE_KEYLESS_BACKUPS=off` keeps Frankfurter and CoinGecko out.
+fn keyless_backups_off(env: &impl Fn(&str) -> Option<String>) -> bool {
+    env("STOCKWISE_KEYLESS_BACKUPS").is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
+}
+
+/// The keyed providers that came with their key variable set, then the
+/// keyless backups.
 #[derive(Default)]
 pub struct Router {
     members: Vec<Provider>,
@@ -284,23 +302,36 @@ impl Router {
         cache: Option<&crate::api::SharedCache>,
         env: impl Fn(&str) -> Option<String>,
     ) -> Self {
-        let members = [ProviderKind::Finnhub, ProviderKind::Fmp]
-            .into_iter()
-            .filter(|k| Some(*k) != skip)
-            .filter_map(|kind| {
-                let key = kind
-                    .key_envs()
-                    .iter()
-                    .filter_map(|k| env(k))
-                    .map(|k| k.trim().to_string())
-                    .find(|k| !k.is_empty())?;
-                let provider = Provider::new(kind, key, None);
-                Some(match cache {
-                    Some(c) => provider.with_cache(c.clone()),
-                    None => provider,
-                })
+        let members = [
+            ProviderKind::Finnhub,
+            ProviderKind::Fmp,
+            ProviderKind::Frankfurter,
+            ProviderKind::CoinGecko,
+        ]
+        .into_iter()
+        .filter(|k| Some(*k) != skip)
+        .filter(|k| !k.is_keyless_backup() || !keyless_backups_off(&env))
+        .filter_map(|kind| {
+            let key = kind
+                .key_envs()
+                .iter()
+                .filter_map(|k| env(k))
+                .map(|k| k.trim().to_string())
+                .find(|k| !k.is_empty());
+            // Keyed providers join only with their key; the backups always
+            // do (CoinGecko's key is optional).
+            let key = match key {
+                Some(key) => key,
+                None if kind.is_keyless_backup() => String::new(),
+                None => return None,
+            };
+            let provider = Provider::new(kind, key, None);
+            Some(match cache {
+                Some(c) => provider.with_cache(c.clone()),
+                None => provider,
             })
-            .collect();
+        })
+        .collect();
         Self { members }
     }
 
@@ -310,6 +341,42 @@ impl Router {
 
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
+    }
+
+    /// Whether a keyed provider with fundamentals or statements is a member
+    /// (the keyless backups have neither).
+    pub fn has_keyed(&self) -> bool {
+        self.members.iter().any(|p| {
+            let caps = p.kind().capabilities();
+            caps.contains(&Capability::Fundamentals) || caps.contains(&Capability::Statements)
+        })
+    }
+
+    /// Price history from the first member that covers `symbol` and answers,
+    /// labelled with its name in `meta.data_source`. `None` when no member
+    /// covers the symbol or every one failed: the caller then reports its own
+    /// (Yahoo's) error, which says more than a backup's would.
+    pub async fn chart(
+        &self,
+        symbol: &str,
+        range: &str,
+        interval: &str,
+    ) -> Option<crate::api::ChartData> {
+        for p in self.serving(Capability::Chart, 1) {
+            // No allowance check here: `Http::get_json` serves a cached
+            // answer before it spends a request, and refuses an uncached one
+            // when the allowance is used up.
+            if !p.supports(symbol) {
+                continue;
+            }
+            if let Ok(mut chart) = p.chart(symbol, range, interval).await {
+                if let Some(meta) = chart.meta.as_mut() {
+                    meta.data_source = Some(p.name().to_string());
+                }
+                return Some(chart);
+            }
+        }
+        None
     }
 
     pub fn members(&self) -> &[Provider] {
@@ -569,8 +636,25 @@ mod tests {
                 .map(|p| p.kind())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(1), [ProviderKind::Finnhub, ProviderKind::Fmp]);
-        assert_eq!(names(30), [ProviderKind::Fmp, ProviderKind::Finnhub]);
+        assert_eq!(
+            names(1),
+            [
+                ProviderKind::Finnhub,
+                ProviderKind::Fmp,
+                ProviderKind::Frankfurter,
+                ProviderKind::CoinGecko
+            ]
+        );
+        assert_eq!(
+            names(30),
+            [
+                ProviderKind::Fmp,
+                ProviderKind::Finnhub,
+                ProviderKind::Frankfurter,
+                ProviderKind::CoinGecko
+            ],
+            "the keyless backups stay last"
+        );
         assert_eq!(
             r.serving(Capability::Statements, 1).len(),
             1,
@@ -580,14 +664,99 @@ mod tests {
 
     #[test]
     fn keys_decide_membership_and_the_primary_is_skipped() {
+        let kinds = |r: &Router| r.members().iter().map(|p| p.kind()).collect::<Vec<_>>();
         let only_fmp =
             Router::from_lookup(None, None, |k| (k == "FMP_API_KEY").then(|| "k".into()));
-        assert_eq!(only_fmp.members().len(), 1);
+        assert_eq!(
+            kinds(&only_fmp),
+            [
+                ProviderKind::Fmp,
+                ProviderKind::Frankfurter,
+                ProviderKind::CoinGecko
+            ]
+        );
+        assert!(only_fmp.has_keyed());
         let blank = Router::from_lookup(None, None, |_| Some("  ".into()));
-        assert!(blank.is_empty());
+        assert_eq!(
+            kinds(&blank),
+            [ProviderKind::Frankfurter, ProviderKind::CoinGecko],
+            "the keyless backups need no key"
+        );
+        assert!(!blank.has_keyed());
         let skip = Router::from_lookup(Some(ProviderKind::Fmp), None, |_| Some("k".into()));
-        assert_eq!(skip.members().len(), 1);
-        assert_eq!(skip.members()[0].kind(), ProviderKind::Finnhub);
+        assert_eq!(
+            kinds(&skip),
+            [
+                ProviderKind::Finnhub,
+                ProviderKind::Frankfurter,
+                ProviderKind::CoinGecko
+            ]
+        );
+    }
+
+    #[test]
+    fn keyless_backups_can_be_turned_off() {
+        let off = Router::from_lookup(None, None, |k| match k {
+            "STOCKWISE_KEYLESS_BACKUPS" => Some("off".into()),
+            "FINNHUB_API_KEY" => Some("k".into()),
+            _ => None,
+        });
+        assert_eq!(off.members().len(), 1);
+        assert_eq!(off.members()[0].kind(), ProviderKind::Finnhub);
+        let none = Router::from_lookup(None, None, |k| {
+            (k == "STOCKWISE_KEYLESS_BACKUPS").then(|| "0".into())
+        });
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cached_chart_is_served_after_the_allowance_is_used_up() {
+        let today = chrono::Utc::now().date_naive();
+        let prices: Vec<String> = (0..40)
+            .rev()
+            .map(|i| {
+                let d = today - chrono::Duration::days(i);
+                let ms = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+                format!("[{ms},{}]", 60_000 + i)
+            })
+            .collect();
+        let body = format!(r#"{{"prices":[{}]}}"#, prices.join(","));
+        let server = MockServer::start(vec![(200, body)]).await;
+        let cache: crate::api::SharedCache =
+            std::sync::Arc::new(tokio::sync::Mutex::new(crate::api::HybridCache::in_memory()));
+        let cg = Provider::new(
+            ProviderKind::CoinGecko,
+            String::new(),
+            Some(server.url.clone()),
+        )
+        .with_cache(cache);
+        let router = Router::new(vec![cg]);
+        assert!(router.chart("BTC-USD", "1mo", "1d").await.is_some());
+        // Spend the rest of the five-a-minute allowance on other coins.
+        for coin in ["ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD"] {
+            let _ = router.chart(coin, "1mo", "1d").await;
+        }
+        assert_eq!(router.members()[0].remaining(), 0);
+        assert_eq!(server.requests().len(), 5);
+        assert!(
+            router.chart("BTC-USD", "1mo", "1d").await.is_some(),
+            "the cached chart still answers"
+        );
+        assert!(router.chart("DOGE-USD", "1mo", "1d").await.is_none());
+        assert_eq!(server.requests().len(), 5, "no request past the allowance");
+    }
+
+    #[tokio::test]
+    async fn a_chart_comes_from_the_backup_that_covers_the_symbol() {
+        let fx = MockServer::start(vec![(200, "{}".into())]).await;
+        let router = Router::new(vec![Provider::new(
+            ProviderKind::Frankfurter,
+            String::new(),
+            Some(fx.url.clone()),
+        )]);
+        assert!(router.chart("AAPL", "1mo", "1d").await.is_none());
+        assert!(router.chart("BTC-USD", "1mo", "1d").await.is_none());
+        assert!(fx.requests().is_empty(), "no request for a symbol it lacks");
     }
 
     #[test]

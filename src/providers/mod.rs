@@ -21,6 +21,11 @@
 //! | Finnhub       | `finnhub`                 | `FINNHUB_API_KEY`     | US quotes, profile, analyst trend, surprises |
 //! | FMP           | `fmp`                     | `FMP_API_KEY`         | quotes, profile, statements, screener |
 //!
+//! Two keyless backups also join the router, behind Yahoo and any keyed
+//! provider: [`frankfurter`] (ECB daily reference rates for FX pairs) and
+//! [`coingecko`] (prices and daily history for the large coins;
+//! `COINGECKO_API_KEY` is an optional free Demo key).
+//!
 //! Beyond `STOCKWISE_DATA_PROVIDER`, [`router::Router`] routes each
 //! capability (quote, fundamentals, statements, screener) to the best
 //! configured provider, falling back down the list and merging fields, with
@@ -33,9 +38,11 @@
 pub mod alphavantage;
 pub mod bse;
 pub mod bse_bhav;
+pub mod coingecko;
 pub mod edgar;
 pub mod finnhub;
 pub mod fmp;
+pub mod frankfurter;
 pub mod massive;
 pub mod niftyindices;
 pub mod nse;
@@ -135,6 +142,11 @@ pub enum ProviderKind {
     Bse,
     /// NSE for `.NS` and NSE indices, BSE for `.BO`, Yahoo for the rest.
     Exchange,
+    /// Frankfurter: ECB daily reference rates for FX (no key). A backup only.
+    Frankfurter,
+    /// CoinGecko: crypto prices and daily history (optional
+    /// `COINGECKO_API_KEY`). A backup only.
+    CoinGecko,
 }
 
 impl ProviderKind {
@@ -167,6 +179,8 @@ impl ProviderKind {
             ProviderKind::Nse => "NSE",
             ProviderKind::Bse => "BSE",
             ProviderKind::Exchange => "NSE + BSE",
+            ProviderKind::Frankfurter => "ECB reference rate, daily (Frankfurter)",
+            ProviderKind::CoinGecko => "CoinGecko",
         }
     }
 
@@ -179,7 +193,12 @@ impl ProviderKind {
             ProviderKind::TwelveData => &["TWELVEDATA_API_KEY", "TWELVE_DATA_API_KEY"],
             ProviderKind::Finnhub => &["FINNHUB_API_KEY"],
             ProviderKind::Fmp => &["FMP_API_KEY"],
-            ProviderKind::Nse | ProviderKind::Bse | ProviderKind::Exchange => &[],
+            // Optional: the public API answers without one.
+            ProviderKind::CoinGecko => &["COINGECKO_API_KEY"],
+            ProviderKind::Nse
+            | ProviderKind::Bse
+            | ProviderKind::Exchange
+            | ProviderKind::Frankfurter => &[],
         }
     }
 
@@ -189,7 +208,12 @@ impl ProviderKind {
 
     /// Whether the provider needs an API key.
     pub fn needs_key(self) -> bool {
-        !self.key_envs().is_empty()
+        self != ProviderKind::CoinGecko && !self.key_envs().is_empty()
+    }
+
+    /// The keyless backups that join the router whenever Yahoo needs one.
+    pub fn is_keyless_backup(self) -> bool {
+        matches!(self, ProviderKind::Frankfurter | ProviderKind::CoinGecko)
     }
 
     /// Provider requests allowed per time window before the rest of the
@@ -217,6 +241,10 @@ impl ProviderKind {
             ProviderKind::Nse => (nse::QUOTE_BATCH, MINUTE),
             ProviderKind::Bse => (bse::QUOTE_BATCH, MINUTE),
             ProviderKind::Exchange => (nse::QUOTE_BATCH, MINUTE),
+            // No quota, but the service is run for free: stay modest.
+            ProviderKind::Frankfurter => (30, MINUTE),
+            // Keyless: about 5 calls a minute from a shared pool.
+            ProviderKind::CoinGecko => (5, MINUTE),
         }
     }
 
@@ -233,6 +261,9 @@ impl ProviderKind {
             ProviderKind::Finnhub | ProviderKind::Fmp => Some(0),
             ProviderKind::Nse | ProviderKind::Exchange => Some(nse::HISTORY_DAYS),
             ProviderKind::Bse => Some(bse::HISTORY_DAYS),
+            // ECB rates go back to January 1999.
+            ProviderKind::Frankfurter => None,
+            ProviderKind::CoinGecko => Some(365),
         }
     }
 }
@@ -296,6 +327,8 @@ pub enum Provider {
     Nse(nse::Nse),
     Bse(bse::Bse),
     Exchange(Exchange),
+    Frankfurter(frankfurter::Frankfurter),
+    CoinGecko(coingecko::CoinGecko),
 }
 
 /// `STOCKWISE_DATA_PROVIDER=exchange`: each Indian symbol from its own
@@ -353,6 +386,12 @@ impl Provider {
                 nse: nse(),
                 bse: bse(),
             }),
+            ProviderKind::Frankfurter => {
+                Provider::Frankfurter(frankfurter::Frankfurter::new(http(frankfurter::BASE_URL)))
+            }
+            ProviderKind::CoinGecko => {
+                Provider::CoinGecko(coingecko::CoinGecko::new(http(coingecko::BASE_URL)))
+            }
         }
     }
 
@@ -364,6 +403,8 @@ impl Provider {
             Provider::TwelveData(p) => Some(&p.http),
             Provider::Finnhub(p) => Some(&p.http),
             Provider::Fmp(p) => Some(&p.http),
+            Provider::Frankfurter(p) => Some(&p.http),
+            Provider::CoinGecko(p) => Some(&p.http),
             Provider::Nse(_) | Provider::Bse(_) | Provider::Exchange(_) => None,
         }
     }
@@ -378,6 +419,8 @@ impl Provider {
             Provider::TwelveData(p) => p.http.kind,
             Provider::Finnhub(p) => p.http.kind,
             Provider::Fmp(p) => p.http.kind,
+            Provider::Frankfurter(p) => p.http.kind,
+            Provider::CoinGecko(p) => p.http.kind,
         }
     }
 
@@ -390,6 +433,8 @@ impl Provider {
             Provider::TwelveData(p) => p.http.cache = Some(cache),
             Provider::Finnhub(p) => p.http.cache = Some(cache),
             Provider::Fmp(p) => p.http.cache = Some(cache),
+            Provider::Frankfurter(p) => p.http.cache = Some(cache),
+            Provider::CoinGecko(p) => p.http.cache = Some(cache),
             Provider::Nse(p) => p.session().set_cache(cache),
             Provider::Bse(p) => p.session().set_cache(cache),
             Provider::Exchange(p) => {
@@ -408,6 +453,8 @@ impl Provider {
             Provider::TwelveData(_) => twelvedata::target(symbol).is_some(),
             Provider::Finnhub(_) => finnhub::ticker(symbol).is_some(),
             Provider::Fmp(_) => fmp::ticker(symbol).is_some(),
+            Provider::Frankfurter(_) => frankfurter::pair(symbol).is_some(),
+            Provider::CoinGecko(_) => coingecko::target(symbol).is_some(),
             Provider::Nse(p) => p.supports(symbol),
             Provider::Bse(p) => p.supports(symbol),
             Provider::Exchange(p) => p.nse.supports(symbol) || p.bse.supports(symbol),
@@ -444,7 +491,7 @@ impl Provider {
                     && (bo.is_empty() || p.bse.quote_cost(&bo) <= p.bse.remaining())
             }
             // One batch request prices every symbol.
-            Provider::Fmp(_) => self.remaining() >= 1,
+            Provider::Fmp(_) | Provider::CoinGecko(_) => self.remaining() >= 1,
             _ => symbols.len() as u32 <= self.remaining(),
         }
     }
@@ -456,6 +503,8 @@ impl Provider {
             Provider::Nse(_) => vec![("NSE", "RELIANCE.NS")],
             Provider::Bse(_) => vec![("BSE", "500325.BO")],
             Provider::Exchange(_) => vec![("NSE", "RELIANCE.NS"), ("BSE", "500325.BO")],
+            Provider::Frankfurter(_) => vec![(self.name(), "USDINR=X")],
+            Provider::CoinGecko(_) => vec![(self.name(), "BTC-USD")],
             _ => vec![(self.name(), "AAPL")],
         }
     }
@@ -480,6 +529,13 @@ impl MarketData for Provider {
             Provider::Nse(p) => return p.quotes(symbols).await,
             Provider::Bse(p) => return p.quotes(symbols).await,
             Provider::Exchange(p) => return p.quotes(symbols).await,
+            Provider::CoinGecko(p) => {
+                let mut quotes = p.quotes(symbols).await?;
+                quotes
+                    .iter_mut()
+                    .for_each(|q| q.data_source = Some(self.name().to_string()));
+                return Ok(quotes);
+            }
             Provider::Fmp(p) => {
                 let mut quotes = p.quotes(symbols).await?;
                 quotes
@@ -496,7 +552,12 @@ impl MarketData for Provider {
                 Provider::Massive(p) => p.quote(symbol).await,
                 Provider::TwelveData(p) => p.quote(symbol).await,
                 Provider::Finnhub(p) => p.quote(symbol).await,
-                Provider::Nse(_) | Provider::Bse(_) | Provider::Exchange(_) | Provider::Fmp(_) => {
+                Provider::Frankfurter(p) => p.quote(symbol).await,
+                Provider::Nse(_)
+                | Provider::Bse(_)
+                | Provider::Exchange(_)
+                | Provider::Fmp(_)
+                | Provider::CoinGecko(_) => {
                     unreachable!()
                 }
             };
@@ -546,7 +607,10 @@ impl MarketData for Provider {
         let today = chrono::Utc::now().date_naive();
         let start = range_start(range, today);
         if let Some(days) = self.kind().history_days() {
-            let oldest = today - chrono::Duration::days(days);
+            // The same slack `Series::covers` allows at the start of a range:
+            // `1y` starts 366 days back, and CoinGecko's 365 days still cover
+            // it. `2y` stays out of reach.
+            let oldest = today - chrono::Duration::days(days + COVER_SLACK_DAYS);
             if start.is_none_or(|s| s < oldest) {
                 bail!(
                     "{} keeps {} days of history on the free plan",
@@ -559,6 +623,8 @@ impl MarketData for Provider {
             Provider::AlphaVantage(p) => p.daily(symbol, start).await?,
             Provider::Massive(p) => p.daily(symbol, start).await?,
             Provider::TwelveData(p) => p.daily(symbol, start).await?,
+            Provider::Frankfurter(p) => p.daily(symbol, start).await?,
+            Provider::CoinGecko(p) => p.daily(symbol, start).await?,
             Provider::Nse(_)
             | Provider::Bse(_)
             | Provider::Exchange(_)
@@ -585,7 +651,10 @@ impl MarketData for Provider {
             Provider::Nse(p) => p.search(query).await,
             Provider::Bse(p) => p.search(query).await,
             Provider::Exchange(p) => p.search(query).await,
-            Provider::Finnhub(_) | Provider::Fmp(_) => {
+            Provider::Finnhub(_)
+            | Provider::Fmp(_)
+            | Provider::Frankfurter(_)
+            | Provider::CoinGecko(_) => {
                 bail!("{} does not search symbols", self.name())
             }
         }
@@ -775,6 +844,17 @@ impl Allowance {
     }
 }
 
+/// The footer line naming a backup source that served the data, with the
+/// credit CoinGecko asks free users to show.
+pub fn source_footer(source: &str) -> String {
+    let line = crate::i18n::tf(crate::i18n::Msg::DataFrom, &[&source]);
+    if source == ProviderKind::CoinGecko.name() {
+        format!("{line} · Powered by CoinGecko")
+    } else {
+        line
+    }
+}
+
 /// When an end-of-day quote for trading day `date` was struck, as Unix
 /// seconds: the close of that day on the symbol's exchange, so the quote's
 /// trade date (the exchange's calendar day of this time) is `date`. Symbols
@@ -862,6 +942,8 @@ pub enum Auth {
     Query(&'static str),
     /// `name: prefix KEY`.
     Header(&'static str, &'static str),
+    /// No key (a keyless source).
+    None,
 }
 
 impl Http {
@@ -901,10 +983,16 @@ impl Http {
             a.announce()
         };
         if first {
+            let instead = if self.kind.is_keyless_backup() {
+                "not asking it again"
+            } else {
+                "using Yahoo Finance instead"
+            };
             eprintln!(
-                "  \u{24d8} {}: {} — using Yahoo Finance instead, trying again in {}",
+                "  \u{24d8} {}: {} — {}, trying again in {}",
                 self.kind.name(),
                 why,
+                instead,
                 format_wait(for_)
             );
         }
@@ -1118,6 +1206,11 @@ impl Resample {
     }
 }
 
+/// Days a series may start after the start of its range and still cover
+/// it: weekends and holidays at the start, or a provider's window ending a
+/// day or two short of the range.
+const COVER_SLACK_DAYS: i64 = 7;
+
 /// First day a Yahoo `range` covers, or `None` for `max`.
 pub fn range_start(range: &str, today: NaiveDate) -> Option<NaiveDate> {
     let days = match range {
@@ -1157,7 +1250,7 @@ impl Series {
             return false;
         };
         match start {
-            Some(start) => first.date <= start + chrono::Duration::days(7),
+            Some(start) => first.date <= start + chrono::Duration::days(COVER_SLACK_DAYS),
             None => true,
         }
     }
@@ -1215,6 +1308,7 @@ impl Series {
                 currency: self.currency,
                 exchange_name: None,
                 gmtoffset: None,
+                data_source: None,
             }),
             timestamp: Some(self.bars.iter().map(|b| noon(b.date)).collect()),
             indicators: Indicators {
@@ -1261,6 +1355,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
             currency: currency.map(str::to_string),
             exchange_name: None,
             gmtoffset: None,
+            data_source: None,
         }),
         timestamp: Some(bars.iter().map(|b| b.ts).collect()),
         indicators: Indicators {

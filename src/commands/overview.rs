@@ -346,7 +346,7 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             print_kv(t(Msg::DividendYield), &format!("{:.2}%", div * 100.0));
         }
         if let Some(source) = &q.data_source {
-            println!("\n  {}", tf(Msg::DataFrom, &[source]).dimmed());
+            println!("\n  {}", crate::providers::source_footer(source).dimmed());
         }
     }
     if quotes.len() == 1
@@ -1105,6 +1105,13 @@ pub fn cmd_cache(clear: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether one of the provider's key variables is set (never its value).
+fn provider_key_set(kind: crate::providers::ProviderKind) -> bool {
+    kind.key_envs()
+        .iter()
+        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+}
+
 pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> Result<()> {
     let ok = |s: &str| format!("{} {}", "✓".green(), s);
     let warn = |s: &str| format!("{} {}", "!".yellow(), s);
@@ -1282,8 +1289,9 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
         );
     }
 
-    // Keyed providers that back Yahoo up (Finnhub, FMP): one probe each,
-    // the key never shown.
+    // Providers that back Yahoo up: the keyed ones (Finnhub, FMP) and the
+    // keyless backups (Frankfurter for FX, CoinGecko for crypto). One probe
+    // each, the key never shown.
     {
         use crate::providers::router::Router;
         let primary = match Selection::from_env() {
@@ -1295,11 +1303,18 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
         for kind in [
             crate::providers::ProviderKind::Finnhub,
             crate::providers::ProviderKind::Fmp,
+            crate::providers::ProviderKind::Frankfurter,
+            crate::providers::ProviderKind::CoinGecko,
         ] {
             if Some(kind) == primary {
                 continue;
             }
             let line = match router.members().iter().find(|p| p.kind() == kind) {
+                None if kind.is_keyless_backup() => format!(
+                    "{} {}",
+                    kind.name(),
+                    "turned off (STOCKWISE_KEYLESS_BACKUPS)".dimmed()
+                ),
                 None => format!(
                     "{} {}",
                     kind.name(),
@@ -1310,11 +1325,12 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
                     .dimmed()
                 ),
                 Some(provider) => {
+                    let probe = provider.probes().first().map_or("AAPL", |p| p.1);
                     let started = std::time::Instant::now();
-                    match provider.quotes(&["AAPL"]).await {
+                    let line = match provider.quotes(&[probe]).await {
                         Ok(q) if q.iter().any(|q| q.regular_market_price.is_some()) => ok(&tf(
                             Msg::DoctorProviderAnswered,
-                            &[&kind.name(), &"AAPL", &started.elapsed().as_millis()],
+                            &[&kind.name(), &probe, &started.elapsed().as_millis()],
                         )),
                         Ok(_) => warn(&tf(
                             Msg::DoctorProviderFellBack,
@@ -1324,6 +1340,17 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
                             Msg::DoctorProviderFellBack,
                             &[&kind.name(), &format!("{:#}", e)],
                         )),
+                    };
+                    // CoinGecko's key is optional: say which way it runs.
+                    if kind == crate::providers::ProviderKind::CoinGecko {
+                        let how = if provider_key_set(kind) {
+                            "Demo key from COINGECKO_API_KEY"
+                        } else {
+                            "keyless; COINGECKO_API_KEY takes an optional free Demo key"
+                        };
+                        format!("{line} {}", format!("({how})").dimmed())
+                    } else {
+                        line
                     }
                 }
             };

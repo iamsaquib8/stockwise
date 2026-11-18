@@ -25,6 +25,8 @@ stockwise quote AAPL -m us  # ends with "Data: Twelve Data"
 | NSE + BSE | `exchange` | — | as above | `.NS` and NSE indices from NSE, `.BO` from BSE, everything else from Yahoo |
 | Finnhub | `finnhub` | `FINNHUB_API_KEY` | 60 calls/min | US quotes, company profile (market cap, industry), analyst recommendation trends, earnings surprises — see [Backup providers](#backup-providers-finnhub-and-fmp) |
 | Financial Modeling Prep | `fmp` | `FMP_API_KEY` | 250 calls/day; mostly US listings | Quotes (one request for a whole list), company profile, quarterly and annual income / balance-sheet / cash-flow statements, company screener |
+| Frankfurter (ECB) | — (backup only) | — | no key, no quota | FX pairs of ECB currencies (INR included): quotes, daily history and currency conversion **when Yahoo fails** — see [Keyless backups](#keyless-backups-frankfurter-and-coingecko) |
+| CoinGecko | — (backup only) | `COINGECKO_API_KEY` (optional) | keyless about 5 calls/min; free Demo key 10,000 calls/month; 365 days of history | The large coins: quotes and daily history **when Yahoo fails** |
 
 Free-tier limits are the providers' own and change over time; check their
 pricing pages. Twelve Data's free plan is licensed for internal, non-display
@@ -149,7 +151,8 @@ and still has calls left in its free-tier window, then down the list:
 | Fundamentals (profile, analyst trend, surprises) | Finnhub, FMP | missing market cap on a short quote list; earnings surprises in `results` when Yahoo has none |
 | Statements (quarterly, annual) | FMP | `results`, when Yahoo's statements are unavailable |
 | Screener | FMP | US scans (`movers`, `screen`, `heatmap`, `--cap`) when Yahoo fails: FMP lists the companies, the keyed providers price them |
-| Chart, search | — | stay with Yahoo and the primary provider |
+| Chart (daily, weekly, monthly) | Frankfurter for FX, CoinGecko for crypto | `history`, `risk`, `correlate`, `backtest`, when Yahoo's chart fails — see [Keyless backups](#keyless-backups-frankfurter-and-coingecko) |
+| Search | — | stays with Yahoo and the primary provider |
 
 **Field-level merge.** When two sources each supply part of a quote — Finnhub
 the price, FMP the market cap, or Yahoo the price and Finnhub's profile the
@@ -179,6 +182,50 @@ announcements and quarterly-result filings (`AnnGetData`) and the members of a
 BSE group (`ListofScripData` with `Group`). These follow the format
 open-source BSE clients read and are unconfirmed against the live site. BSE 500
 snapshots are not read yet.
+
+## Keyless backups (Frankfurter and CoinGecko)
+
+Two free sources need no account and join the router on their own, ranked
+after Yahoo, the primary provider and any keyed backup. They are asked only
+for what Yahoo could not serve:
+
+| Source | Symbols | Quote | Daily history | Label |
+|---|---|---|---|---|
+| [Frankfurter](https://frankfurter.dev) | FX pairs whose two currencies the ECB publishes (`USDINR=X`, `EURUSD=X`, `INR=X`; not `USDAED=X`) | the latest ECB rate, with the change from the day before | back to January 1999, one rate a working day | `ECB reference rate, daily (Frankfurter)` |
+| [CoinGecko](https://www.coingecko.com/en/api) | a fixed list of large coins (`BTC`, `ETH`, `SOL`, `XRP`, `BNB`, `DOGE`, `ADA`, `TRX`, ...) against `USD`, `INR`, `EUR`, `GBP`, `JPY`, `BTC` or `ETH` | price and 24-hour change, one request for the whole list | the last 365 days, one close a UTC day | `CoinGecko` and "Powered by CoinGecko" |
+
+```bash
+stockwise quote USDINR -m fx      # with Yahoo down: "Data: ECB reference rate, daily (Frankfurter)"
+stockwise history BTC -m crypto   # with Yahoo down: "Data: CoinGecko · Powered by CoinGecko"
+stockwise history BTC -m crypto --json   # ... "meta": {"sources": ["CoinGecko"]}
+```
+
+- **ECB rates are not live quotes.** The ECB sets one reference rate per
+  currency each working day, around 16:00 CET, and none on weekends or TARGET
+  holidays. The bars have a close only (no open, high, low or volume). The
+  same rates convert portfolio and statement amounts when Yahoo has no rate.
+- **CoinGecko** needs no key (about 5 calls a minute, shared). A free Demo key
+  in `COINGECKO_API_KEY` is sent as the `x-cg-demo-api-key` header and gives a
+  steadier allowance; `doctor` and `config show` say whether one is set,
+  never its value. Volumes are left out, because CoinGecko gives them in money,
+  not coins. History stops at 365 days, so `-p 2y` and `-p max` keep Yahoo's
+  error.
+- **The original error stands.** A symbol neither source carries (a stock, an
+  index, a coin off the list) costs no request and gives Yahoo's error. So
+  does a backup that refuses or fails.
+- **Politeness.** At most 30 Frankfurter and 5 CoinGecko requests a minute
+  per run. Answers are cached in the shared cache and `cache.db`: ECB rates
+  for 6 hours (they change once a day), CoinGecko history for an hour and
+  CoinGecko prices for 2 minutes. A rate limit pauses the source and prints one `ⓘ` notice.
+- **Turning them off.** `STOCKWISE_KEYLESS_BACKUPS=off` keeps Frankfurter
+  and CoinGecko out. The primary provider and keyed backups such as Finnhub
+  and FMP stay enabled when their variables are set.
+
+**No keyless fallback for stock history.** Stooq's daily CSV download was
+the planned source ([#340](https://github.com/iamsaquib8/stockwise/issues/340)).
+It now answers automated requests with a JavaScript browser check instead of
+the CSV, so StockWise does not use it. Stock and index history still come only
+from Yahoo or the configured provider.
 
 ## Limits and fallback
 
