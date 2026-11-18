@@ -1380,6 +1380,16 @@ fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
     write_atomic(path, &out)
 }
 
+/// The directory that holds `path`: its parent, or `.` for a bare file name
+/// such as `config.toml` (whose parent is the empty path).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn containing_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 /// Replace `path` with `text` through a temporary file next to it, renamed
 /// over the original: a reader never sees a half-written file, and a failed
 /// write leaves the old file in place. The temporary file is synced before
@@ -1419,8 +1429,9 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
         // The rename is atomic but not yet durable: sync the directory so
         // the new entry survives a crash (the file itself was synced above).
         #[cfg(unix)]
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::File::open(dir)
+        {
+            let dir = containing_dir(path);
+            std::fs::File::open(&dir)
                 .and_then(|d| d.sync_all())
                 .with_context(|| format!("Cannot sync {}", dir.display()))?;
         }
@@ -1603,6 +1614,19 @@ mod tests {
         assert_eq!(c.market.as_deref(), Some("in"));
         assert_eq!(c.profile.horizon_years, Some(5));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_config_file_name_syncs_the_current_directory() {
+        assert_eq!(containing_dir(Path::new("config.toml")), PathBuf::from("."));
+        assert_eq!(
+            containing_dir(Path::new("conf/config.toml")),
+            PathBuf::from("conf")
+        );
+        assert_eq!(
+            containing_dir(Path::new("/etc/sw/config.toml")),
+            PathBuf::from("/etc/sw")
+        );
     }
 
     const CMDS: &[&str] = &[
