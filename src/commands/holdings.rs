@@ -1301,6 +1301,14 @@ pub(crate) struct HarvestRow {
     pub(crate) lt_pnl: f64,
     pub(crate) estimated_tax_saved: f64,
     pub(crate) harvest_type: &'static str,
+    /// US loss candidates: the latest purchase of the symbol in the last 30
+    /// days that this sale would not sell. Selling now would make the loss a
+    /// wash sale, disallowed in proportion to those shares.
+    pub(crate) recent_buy: Option<String>,
+    /// US loss candidates: the last day of the wash-sale window if the
+    /// shares were sold today (30 days on). A purchase of the same shares up
+    /// to this day would make the loss a wash sale.
+    pub(crate) wash_sale_window_end: Option<String>,
 }
 
 impl CsvRow for HarvestRow {
@@ -1315,6 +1323,8 @@ impl CsvRow for HarvestRow {
         "lt_pnl",
         "estimated_tax_saved",
         "harvest_type",
+        "recent_buy",
+        "wash_sale_window_end",
     ];
 }
 
@@ -1376,6 +1386,41 @@ pub(crate) async fn harvest_summary(
     let val = tax_valuation(src, portfolio, market).await?;
     let summary = compute_harvest(portfolio, &val, market, today);
     Ok((summary, val))
+}
+
+/// The latest purchase of `h` in the 30 days up to `today` that a US harvest
+/// sale would not sell: an open lot at a gain (the sale sells only the losing
+/// lots), or shares bought and already sold on an earlier day. Bought within
+/// the wash-sale window, it would make the loss a wash sale.
+fn recent_buy(
+    portfolio: &Portfolio,
+    h: &crate::portfolio::Holding,
+    lots: &[(f64, f64, f64, bool)],
+    today: chrono::NaiveDate,
+) -> Option<String> {
+    let parse_date = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+    let recent = |d: &str| {
+        parse_date(d).is_some_and(|d| d <= today && (today - d).num_days() <= tax::WASH_SALE_DAYS)
+    };
+    let kept_lots = h
+        .lots
+        .iter()
+        .zip(lots)
+        // Bonus shares are allotted, not bought, so they are never replacements.
+        .filter(|(l, x)| x.2 >= 0.0 && l.source != crate::portfolio::BONUS_SOURCE)
+        .map(|(l, _)| l.date.as_str());
+    let sold_earlier = portfolio
+        .realized
+        .iter()
+        .filter(|s| {
+            s.symbol == h.symbol && !s.bonus_shares && parse_date(&s.sell_date) != Some(today)
+        })
+        .map(|s| s.buy_date.as_str());
+    kept_lots
+        .chain(sold_earlier)
+        .filter(|d| recent(d))
+        .max()
+        .map(str::to_string)
 }
 
 pub(crate) fn compute_harvest(
@@ -1509,7 +1554,7 @@ pub(crate) fn compute_harvest(
 
         if let Some(sale) = sale {
             let net = sale.st + sale.lt;
-            let row = HarvestRow {
+            let mut row = HarvestRow {
                 symbol: h.symbol.clone(),
                 shares: round(sale.shares, 4),
                 avg_cost: round(sale.cost / sale.shares / scale, 2),
@@ -1527,7 +1572,13 @@ pub(crate) fn compute_harvest(
                 lt_pnl: round(sale.lt, 2),
                 estimated_tax_saved: 0.0,
                 harvest_type: "tax_loss",
+                recent_buy: None,
+                wash_sale_window_end: None,
             };
+            if country == Country::Us {
+                row.recent_buy = recent_buy(portfolio, h, &lots, today);
+                row.wash_sale_window_end = Some(tax::wash_sale_window_end(today).to_string());
+            }
             losing.push((row, sale));
         } else if exemption_limit > 0.0 && lt_pnl > 0.0 {
             // The long-term lots are the oldest, so FIFO reaches them first.
@@ -1548,6 +1599,8 @@ pub(crate) fn compute_harvest(
                 lt_pnl: round(lt_pnl, 2),
                 estimated_tax_saved: 0.0,
                 harvest_type: "ltcg_exemption_step_up",
+                recent_buy: None,
+                wash_sale_window_end: None,
             });
         }
     }
@@ -1692,6 +1745,29 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
                 format!("{}{:.0}", csym, r.estimated_tax_saved).green(),
             );
         }
+        if let Some(end) = summary
+            .loss_candidates
+            .iter()
+            .find_map(|r| r.wash_sale_window_end.as_deref())
+        {
+            for r in summary.loss_candidates.iter() {
+                if let Some(bought) = &r.recent_buy {
+                    println!(
+                        "  {} {}: bought on {}, within 30 days — selling now would make this loss a wash sale.",
+                        "!".yellow(),
+                        r.symbol.cyan(),
+                        bought
+                    );
+                }
+            }
+            println!(
+                "  {}",
+                format!(
+                    "Wash-sale window: a buy of the same shares on or before {end} would make a loss sold today a wash sale."
+                )
+                .dimmed()
+            );
+        }
         println!(
             "\n  {} Harvestable losses: ST {}{:.0} | LT {}{:.0} → Est. tax offset: {}",
             "→".yellow(),
@@ -1753,7 +1829,7 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
 
     println!(
         "\n  {}",
-        "Consult a tax advisor. Wash-sale rules (US 30-day rule) and brokerage charges apply."
+        "Consult a tax advisor. Brokerage charges apply."
             .dimmed()
             .italic()
     );
