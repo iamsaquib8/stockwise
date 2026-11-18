@@ -211,6 +211,19 @@ fn read(path: &Path) -> Result<Vec<u8>> {
 /// that is not valid TOML names a secret key.
 fn strip_secrets(config: &[u8]) -> Result<Vec<u8>> {
     let text = std::str::from_utf8(config).context("config.toml is not UTF-8 text")?;
+    // A secret whose value does not end on its own line (a multi-line string
+    // or array) cannot be removed line by line: the rest of the value could
+    // survive as valid TOML, such as comment lines.
+    let multi_line = text
+        .split_inclusive('\n')
+        .filter(|l| is_secret_line(l))
+        .any(|l| {
+            let value = l.split_once('=').map_or("", |(_, v)| v);
+            toml::from_str::<toml::Table>(&format!("v = {}", value.trim())).is_err()
+        });
+    if multi_line {
+        bail!(SECRET_FORM_ERROR);
+    }
     let stripped: String = text
         .split_inclusive('\n')
         .filter(|l| !is_secret_line(l))
@@ -222,11 +235,7 @@ fn strip_secrets(config: &[u8]) -> Result<Vec<u8>> {
         Err(_) => stripped != text || SECRET_KEY_NAMES.iter().any(|k| text.contains(k)),
     };
     if leaks {
-        bail!(
-            "config.toml sets a notification secret in a form the backup cannot leave out. \
-             Write it as `key = \"value\"` under [notify], or move it to its STOCKWISE_* \
-             environment variable, then export again."
-        );
+        bail!(SECRET_FORM_ERROR);
     }
     Ok(if stripped == text {
         config.to_vec()
@@ -234,6 +243,10 @@ fn strip_secrets(config: &[u8]) -> Result<Vec<u8>> {
         stripped.into_bytes()
     })
 }
+
+const SECRET_FORM_ERROR: &str = "config.toml sets a notification secret in a form the backup \
+     cannot leave out. Write it on one line as `key = \"value\"` under [notify], or move it \
+     to its STOCKWISE_* environment variable, then export again.";
 
 /// Secret `[notify]` keys, for the check of a file that is not valid TOML.
 const SECRET_KEY_NAMES: &[&str] = &[
@@ -458,45 +471,80 @@ pub fn plan(loc: &Locations, files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<Pl
     Ok(out)
 }
 
-/// Write the planned files: each replaced file is copied to a free
-/// `<file>.bak` name first (`.bak`, then `.bak.1`, `.bak.2`, ... so an
-/// earlier copy is never overwritten), then every file is written to a temp
-/// file and renamed into place. If a step fails, the error keeps its cause
-/// and lists which files were already restored and which were not.
+/// Restore the planned files, all or nothing.
+///
+/// 1. Lock every target and read it again under the lock (the plan was made
+///    without locks, so a file may have appeared or changed since).
+/// 2. Copy each file that exists and differs from the backup to a free
+///    `<file>.bak` name (`.bak`, then `.bak.1`, `.bak.2`, ... so an earlier
+///    copy is never overwritten).
+/// 3. Write each file to a temp file and rename it into place.
+///
+/// If a write fails, the files already written get their previous content
+/// back (files the restore added are removed), so the data directory ends
+/// as it started. The error keeps its cause.
 pub fn apply(plan: &[Planned], files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    let todo: Vec<&Planned> = plan.iter().filter(|p| p.change != Change::Same).collect();
-    let list = |ps: &[&Planned]| {
-        if ps.is_empty() {
-            "none".to_string()
-        } else {
-            ps.iter()
-                .map(|p| p.target.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    };
-    for (i, p) in todo.iter().enumerate() {
-        apply_one(p, &files[&p.name]).with_context(|| {
-            format!(
-                "Restore stopped at {}. Already restored: {}. Not restored: {}. \
-                 Each replaced file has a .bak copy next to it.",
-                p.target.display(),
-                list(&todo[..i]),
-                list(&todo[i..]),
-            )
-        })?;
-    }
-    Ok(())
+    apply_with(plan, files, write_atomic)
 }
 
-fn apply_one(p: &Planned, data: &[u8]) -> Result<()> {
-    let _lock = crate::store::lock(&p.target)?;
-    if p.change == Change::Replace {
-        let bak = free_bak_path(&p.target);
-        std::fs::copy(&p.target, &bak)
-            .with_context(|| format!("Cannot back up {}", p.target.display()))?;
+/// [`apply`] with the function that writes one file (tests make it fail).
+fn apply_with(
+    plan: &[Planned],
+    files: &BTreeMap<String, Vec<u8>>,
+    write: impl Fn(&Path, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let todo: Vec<&Planned> = plan.iter().filter(|p| p.change != Change::Same).collect();
+    let mut _locks = Vec::with_capacity(todo.len());
+    for p in &todo {
+        _locks.push(crate::store::lock(&p.target)?);
     }
-    write_atomic(&p.target, data)
+    // (target, new content, content before the restore)
+    let mut writes: Vec<(&Path, &[u8], Option<Vec<u8>>)> = Vec::new();
+    for p in &todo {
+        let data = files[&p.name].as_slice();
+        let current = match std::fs::read(&p.target) {
+            Ok(cur) => Some(cur),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(e).with_context(|| format!("Cannot read {}", p.target.display()));
+            }
+        };
+        if current.as_deref() == Some(data) {
+            continue;
+        }
+        if current.is_some() {
+            let bak = free_bak_path(&p.target);
+            std::fs::copy(&p.target, &bak)
+                .with_context(|| format!("Cannot back up {}", p.target.display()))?;
+        }
+        writes.push((&p.target, data, current));
+    }
+    for (i, (target, data, _)) in writes.iter().enumerate() {
+        if let Err(e) = write(target, data) {
+            let mut not_undone = Vec::new();
+            for (t, _, before) in writes[..i].iter().rev() {
+                let undo = match before {
+                    Some(old) => write_atomic(t, old),
+                    None => std::fs::remove_file(t).map_err(Into::into),
+                };
+                if undo.is_err() {
+                    not_undone.push(t.display().to_string());
+                }
+            }
+            let state = if not_undone.is_empty() {
+                "No file was changed: the files written before it were put back as they were."
+                    .to_string()
+            } else {
+                format!(
+                    "These files could not be put back and hold the backup's version: {}. \
+                     Their previous content is in the newest <file>.bak* copy.",
+                    not_undone.join(", ")
+                )
+            };
+            return Err(e).context(format!("Restore failed at {}. {}", target.display(), state));
+        }
+    }
+    Ok(())
 }
 
 /// `<file>.bak`, or `<file>.bak.N` with the first N not in use.
@@ -681,11 +729,11 @@ pub fn cmd_restore(path: &Path, dry_run: bool, src: PassphraseSource) -> Result<
     );
     if plan
         .iter()
-        .any(|p| p.name == CONFIG_ENTRY && p.change == Change::Replace)
+        .any(|p| p.name == CONFIG_ENTRY && p.change != Change::Same)
     {
         println!(
             "  {}",
-            "Notification secrets are never in a backup; copy them back from the newest config.toml.bak* copy if you need them."
+            "Notification secrets are never in a backup: copy them back from the newest config.toml.bak* copy, or from the source computer's config.toml."
                 .dimmed()
         );
     }
@@ -922,6 +970,9 @@ mod tests {
         assert_eq!(strip_secrets(dotted).unwrap(), b"market = \"in\"\n");
         let clean = b"market = \"in\"\n";
         assert_eq!(strip_secrets(clean).unwrap(), clean);
+        // A one-line triple-quoted value is still removed.
+        let one_line = b"[notify]\nsmtp_password = \"\"\"pw\"\"\" # comment\n";
+        assert_eq!(strip_secrets(one_line).unwrap(), b"[notify]\n");
     }
 
     #[test]
@@ -930,6 +981,8 @@ mod tests {
             "notify = { telegram_token = \"t\", telegram_chat_id = \"1\" }\n",
             "[notify]\nsmtp_password = \"\"\"\nsecret\n\"\"\"\n",
             "[notify\ntelegram_token = \"t\"\n",
+            "[notify]\nsmtp_password = \"\"\"\n# sensitive-password\n# \"\"\"\n",
+            "[notify]\nsmtp_password = '''\npw\n'''\n",
         ] {
             let e = strip_secrets(cfg.as_bytes()).unwrap_err().to_string();
             assert!(e.contains("cannot leave out"), "{cfg}: {e}");
@@ -957,27 +1010,56 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_restore_names_what_was_and_was_not_restored() {
+    fn a_failed_restore_puts_everything_back() {
         let root = tempdir("partial");
         let loc = locations(&root);
+        put(&loc.data_dir.join("alerts.json"), b"old alerts");
         let mut files = BTreeMap::new();
         files.insert("alerts.json".to_string(), b"{}".to_vec());
         files.insert("goals.json".to_string(), b"{}".to_vec());
+        files.insert("notes.json".to_string(), b"{}".to_vec());
         files.insert("watchlist.json".to_string(), b"{}".to_vec());
         let planned = plan(&loc, &files).unwrap();
-        // A directory where goals.json should go makes its rename fail.
-        std::fs::create_dir_all(loc.data_dir.join("goals.json")).unwrap();
-        let e = format!("{:#}", apply(&planned, &files).unwrap_err());
-        assert!(e.contains("Restore stopped at"), "{e}");
-        assert!(
-            e.contains("Already restored: ") && e.contains("alerts.json"),
-            "{e}"
+        // Writing watchlist.json fails after alerts.json was replaced and
+        // goals.json and notes.json were added.
+        let failing = |path: &Path, data: &[u8]| {
+            if path.ends_with("watchlist.json") {
+                anyhow::bail!("disk full");
+            }
+            write_atomic(path, data)
+        };
+        let e = format!("{:#}", apply_with(&planned, &files, failing).unwrap_err());
+        assert!(e.contains("disk full"), "{e}");
+        assert!(e.contains("Restore failed at"), "{e}");
+        assert!(e.contains("No file was changed"), "{e}");
+        assert_eq!(
+            std::fs::read(loc.data_dir.join("alerts.json")).unwrap(),
+            b"old alerts"
         );
-        assert!(
-            e.contains("Not restored: ") && e.contains("watchlist.json"),
-            "{e}"
+        assert!(!loc.data_dir.join("goals.json").exists());
+        assert!(!loc.data_dir.join("notes.json").exists());
+        assert!(!loc.data_dir.join("watchlist.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_appears_after_the_plan_is_kept_as_bak() {
+        let root = tempdir("late");
+        let loc = locations(&root);
+        let mut files = BTreeMap::new();
+        files.insert("goals.json".to_string(), b"{}".to_vec());
+        let planned = plan(&loc, &files).unwrap();
+        assert_eq!(planned[0].change, Change::Add);
+        put(&loc.data_dir.join("goals.json"), b"saved meanwhile");
+        apply(&planned, &files).unwrap();
+        assert_eq!(
+            std::fs::read(loc.data_dir.join("goals.json.bak")).unwrap(),
+            b"saved meanwhile"
         );
-        assert!(loc.data_dir.join("alerts.json").is_file());
+        assert_eq!(
+            std::fs::read(loc.data_dir.join("goals.json")).unwrap(),
+            b"{}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

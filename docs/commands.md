@@ -1041,10 +1041,14 @@ lock and temp files, rotating backups (`portfolio.json.1`..`.5`, `*.bak`),
 daemon and worker state, and all broker files (`*_config.json`,
 `gtt_seen_*.json`), because they hold session tokens. Notification secrets
 (`telegram_token`, `smtp_password`, ...) are removed from the copy of
-`config.toml`; after a restore, copy them back from the newest
-`config.toml.bak*` copy or set them as environment variables. A secret set in
-a form the backup cannot remove (an inline `notify = { ... }` table or a
-multi-line string) stops the export with a message instead of being copied.
+`config.toml`, so a backup never holds them. Keep them on the source computer
+(or in a password manager). After a restore that replaced an existing
+`config.toml`, copy them back from the newest `config.toml.bak*` copy; on a new
+computer there is no such copy, so take them from the source computer's
+`config.toml` or set them as `STOCKWISE_*` environment variables. A secret
+written in a form the backup cannot remove (an inline `notify = { ... }` table,
+or a value that spans lines) stops the export with a message instead of being
+copied.
 
 **Passphrase**: by default StockWise asks for it with a hidden prompt (twice
 on export; at least 8 characters). For scripts, pass `--passphrase-fd N` to
@@ -1055,12 +1059,15 @@ cannot be recovered.
 
 **Restore** first checks the whole file: a wrong passphrase, a changed byte
 or a truncated file stops it with an error before anything is written. It then
-lists each file as `add`, `replace` or `same`; `--dry-run` stops there. Each
-file to be replaced is copied to `<file>.bak` (or `<file>.bak.1`, `.bak.2`,
-... when an earlier copy exists, so no copy is ever overwritten), then every
-file is written to a temp file and renamed into place. If a write fails
-partway, the error names the files already restored and those not restored.
-Local files that are not in the backup are left alone.
+lists each file as `add`, `replace` or `same`; `--dry-run` stops there.
+Otherwise it locks every file, reads it again (it may have changed since the
+list was made), and copies each file that differs from the backup to
+`<file>.bak` (or `<file>.bak.1`, `.bak.2`, ... when an earlier copy exists, so
+no copy is ever overwritten). Then every file is written to a temp file and
+renamed into place. The restore is all or nothing: if one write fails, the
+files already written get their previous content back and files it added are
+removed, so the data directory ends as it started. Local files that are not in
+the backup are left alone.
 
 **Format** (`.swbak`, version 1): a 64-byte header (the magic `SWBAK\0\r\n`,
 format version, algorithm ids, Argon2id memory/time/parallelism costs, a
