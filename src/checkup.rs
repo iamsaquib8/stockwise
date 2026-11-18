@@ -682,7 +682,7 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
     }
     let herf = herfindahl(&weights.iter().map(|w| w.1).collect::<Vec<_>>());
     let bets = if herf > 0.0 { 1.0 / herf } else { 0.0 };
-    if weights.len() > 1 {
+    if !weights.is_empty() {
         b.ran(Rule::EffectiveBets);
         if bets < MIN_EFFECTIVE_BETS {
             b.add(
@@ -706,15 +706,15 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
         .filter(|h| !h.is_fund && !is_classified(h.cap_tier))
         .map(|h| h.symbol.as_str())
         .collect();
+    if input.max_smallcap_weight.is_some() && !unclassified.is_empty() {
+        skipped.push(format!(
+            "Cap tier unknown for {}: left out of the small-cap share",
+            unclassified.join(", ")
+        ));
+    }
     if let Some(max_small) = input.max_smallcap_weight
         && input.holdings.iter().any(|h| is_classified(h.cap_tier))
     {
-        if !unclassified.is_empty() {
-            skipped.push(format!(
-                "Cap tier unknown for {}: left out of the small-cap share",
-                unclassified.join(", ")
-            ));
-        }
         b.ran(Rule::SmallcapWeight);
         let small: f64 = input
             .holdings
@@ -1312,6 +1312,15 @@ mod tests {
     }
 
     #[test]
+    fn a_single_holding_is_one_bet() {
+        let mut i = input(vec![h("A.NS", 1000.0, 1000.0)]);
+        i.max_stock_weight = Some(100.0);
+        let c = evaluate(&i, vec![]);
+        assert!(rules(&c).contains(&Rule::EffectiveBets));
+        assert!((c.effective_bets - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn smallcap_share_above_limit() {
         let mut i = spread();
         for x in i.holdings.iter_mut().take(3) {
@@ -1705,6 +1714,11 @@ mod tests {
         }
         let c = evaluate(&i, vec![]);
         assert!(!c.checks.iter().any(|c| c.rule == Rule::SmallcapWeight));
+        assert!(
+            c.skipped[0].starts_with("Cap tier unknown for S0.NS"),
+            "{:?}",
+            c.skipped
+        );
         i.holdings[0].cap_tier = Some(CapTier::Large);
         let c = evaluate(&i, vec![]);
         assert!(c.checks.iter().any(|c| c.rule == Rule::SmallcapWeight));

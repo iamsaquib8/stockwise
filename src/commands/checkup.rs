@@ -220,6 +220,34 @@ async fn fund_holdings(
     .await
 }
 
+/// Saved goals still short of their target, in `currency` with its rate to
+/// the base. `Ok(None)` without goals; `Err` when goals exist but no rate is
+/// known (never ranked as if already in the base currency).
+fn goal_facts(
+    rows: &[super::planning::GoalRow],
+    currency: &str,
+    fx_to_base: Option<f64>,
+) -> std::result::Result<Option<Vec<ck::GoalFacts>>, ()> {
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let fx_to_base = fx_to_base.ok_or(())?;
+    Ok(Some(
+        rows.iter()
+            .filter(|r| r.status != "funded")
+            .map(|r| ck::GoalFacts {
+                name: r.name.clone(),
+                overdue: r.status == "overdue",
+                funded_pct: r.funded_pct,
+                monthly_sip: r.monthly_sip,
+                gap: (r.target_future - r.linked_value).max(0.0),
+                currency: currency.to_string(),
+                fx_to_base,
+            })
+            .collect(),
+    ))
+}
+
 /// The harvest report. Offline it skips the 31 Jan 2018 price lookup, so
 /// grandfathered lots count at their cost.
 async fn harvest(
@@ -494,21 +522,19 @@ pub(crate) async fn run_checkup(
 
     // Goals and targets.
     let goals = match super::planning::goal_rows(Some(src), market).await {
-        Ok(rows) if rows.is_empty() => None,
-        Ok(rows) => Some(
-            rows.iter()
-                .filter(|r| r.status != "funded")
-                .map(|r| ck::GoalFacts {
-                    name: r.name.clone(),
-                    overdue: r.status == "overdue",
-                    funded_pct: r.funded_pct,
-                    monthly_sip: r.monthly_sip,
-                    gap: (r.target_future - r.linked_value).max(0.0),
-                    currency: market_currency(market).to_string(),
-                    fx_to_base: fx(market_currency(market)).unwrap_or(1.0),
-                })
-                .collect(),
-        ),
+        Ok(rows) => {
+            let cur = market_currency(market);
+            match goal_facts(&rows, cur, fx(cur)) {
+                Ok(facts) => facts,
+                Err(()) => {
+                    skipped.push(format!(
+                        "Goals: no {cur} to {} exchange rate",
+                        g.ctx.base_currency
+                    ));
+                    None
+                }
+            }
+        }
         Err(e) => {
             skipped.push(format!("Goals: {e:#}"));
             None
@@ -1060,6 +1086,28 @@ mod tests {
         for col in FindingCsv::COLUMNS {
             assert!(v.get(*col).is_some(), "{col}");
         }
+    }
+
+    #[test]
+    fn goals_without_an_exchange_rate_are_not_ranked() {
+        let row = super::super::planning::GoalRow {
+            name: "home".into(),
+            target: 1_000_000.0,
+            target_future: 1_000_000.0,
+            by: "2030-01".into(),
+            months_left: 38,
+            holdings: vec![],
+            linked_value: 400_000.0,
+            valued_at: "none",
+            funded_pct: 40.0,
+            monthly_sip: 10_000.0,
+            status: "needs_sip",
+        };
+        assert_eq!(goal_facts(&[], "INR", None), Ok(None));
+        assert_eq!(goal_facts(std::slice::from_ref(&row), "INR", None), Err(()));
+        let facts = goal_facts(&[row], "INR", Some(0.012)).unwrap().unwrap();
+        assert_eq!(facts[0].gap, 600_000.0);
+        assert_eq!(facts[0].fx_to_base, 0.012);
     }
 
     #[test]
