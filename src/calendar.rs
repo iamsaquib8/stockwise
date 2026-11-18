@@ -279,6 +279,57 @@ pub fn parse_nse_actions(symbol: &str, v: &Value) -> Vec<Event> {
     out
 }
 
+/// What NSE's filings said about the splits Yahoo reported for a symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BonusCheck {
+    /// Not an Indian stock: every split stays a split.
+    NotIndian,
+    /// NSE answered; this many splits were bonus issues.
+    Checked(usize),
+    /// NSE could not be asked: every split stays a split.
+    Unavailable,
+}
+
+/// Mark the bonus issues among `splits` for `symbol`. Yahoo reports an
+/// Indian bonus as a split (a 1:1 bonus is a 2:1 split). A split whose date
+/// is within three days of an NSE "Bonus" filing gets [`Split::bonus`],
+/// dated on that filing's ex-date, since NSE's feed has no allotment date.
+/// A split NSE files as a split, or does not list, stays a split, and so
+/// does every split of a non-Indian stock. `actions` is NSE's answer
+/// ([`Calendar::nse_actions`]), `None` when NSE could not be asked.
+pub fn check_bonuses(
+    symbol: &str,
+    splits: &mut [crate::portfolio::Split],
+    actions: Option<&[Event]>,
+) -> BonusCheck {
+    if nse_symbol(symbol).is_none() {
+        return BonusCheck::NotIndian;
+    }
+    let Some(actions) = actions else {
+        return BonusCheck::Unavailable;
+    };
+    let mut marked = 0;
+    for split in splits.iter_mut() {
+        let Ok(date) = NaiveDate::parse_from_str(&split.date, "%Y-%m-%d") else {
+            continue;
+        };
+        // The closest bonus or split filing: a stock rarely has both
+        // within days of each other, but the nearer one is the event.
+        let filing = actions
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::Bonus | EventKind::Split))
+            .map(|e| ((e.date - date).num_days().abs(), e))
+            .filter(|(gap, _)| *gap <= 3)
+            .min_by_key(|(gap, _)| *gap)
+            .map(|(_, e)| e);
+        if let Some(e) = filing.filter(|e| e.kind == EventKind::Bonus) {
+            split.bonus = Some(e.date.to_string());
+            marked += 1;
+        }
+    }
+    BonusCheck::Checked(marked)
+}
+
 // ── Merging and rows ──
 
 /// Events from `today` to `days` days later (each symbol's own exchange
@@ -529,6 +580,36 @@ impl<'a> Calendar<'a> {
             }
         }
         events
+    }
+
+    /// NSE's corporate-action filings (splits, bonus issues, dividends, ...)
+    /// for an Indian stock, from the day cache or the network. `None` for
+    /// other stocks, and when NSE refused or could not be reached (see
+    /// [`Calendar::nse_note`]).
+    pub async fn nse_actions(&mut self, symbol: &str) -> Option<Vec<Event>> {
+        let nse = nse_symbol(symbol)?;
+        let now = Utc::now().timestamp();
+        if self.nse_blocked.is_none()
+            && let Some(e) = self.cached(NSE_BLOCKED, now)
+        {
+            self.nse_blocked = e.error;
+        }
+        let (path, referer) = NSE_ENDPOINTS[1];
+        let key = format!("nse:{path}:{nse}");
+        let entry = match self.cached(&key, now) {
+            Some(e) => e,
+            None => {
+                let fetched = self.fetch_nse(path, referer, symbol, &nse).await?;
+                self.store(key, now, fetched)
+            }
+        };
+        if let Some(err) = entry.error {
+            if self.nse_blocked.is_none() {
+                self.nse_blocked = Some(err);
+            }
+            return None;
+        }
+        Some(entry.events)
     }
 
     /// Indian stocks among `symbols` whose NSE filings aren't cached yet;
@@ -898,6 +979,45 @@ mod tests {
             classify_action("Face Value Split (Sub-Division) - From Rs 10/- To Rs 2/-"),
             EventKind::Split
         );
+    }
+
+    #[test]
+    fn bonus_issues_are_told_from_splits_by_nse_filings() {
+        use crate::portfolio::Split;
+        // TCS fixture: a split with ex-date 2026-11-05, a 1:1 bonus on 2026-11-12.
+        let actions = parse_nse_actions("TCS.NS", &actions_fixture());
+        let yahoo = || {
+            vec![
+                Split::new("2026-11-05", 2.0, 1.0),
+                // Yahoo's date a day off NSE's ex-date still matches.
+                Split::new("2026-11-13", 2.0, 1.0),
+                // Nothing filed near it: stays a split.
+                Split::new("2025-01-01", 2.0, 1.0),
+            ]
+        };
+        let mut splits = yahoo();
+        assert_eq!(
+            check_bonuses("TCS.NS", &mut splits, Some(&actions)),
+            BonusCheck::Checked(1)
+        );
+        let bonus: Vec<Option<&str>> = splits.iter().map(|s| s.bonus.as_deref()).collect();
+        assert_eq!(bonus, vec![None, Some("2026-11-12"), None]);
+
+        // Not an Indian stock: never a bonus lot.
+        let mut splits = yahoo();
+        assert_eq!(
+            check_bonuses("AAPL", &mut splits, Some(&actions)),
+            BonusCheck::NotIndian
+        );
+        assert!(splits.iter().all(|s| s.bonus.is_none()));
+
+        // NSE unreachable: every split stays a split.
+        let mut splits = yahoo();
+        assert_eq!(
+            check_bonuses("TCS.NS", &mut splits, None),
+            BonusCheck::Unavailable
+        );
+        assert_eq!(splits, yahoo());
     }
 
     #[test]

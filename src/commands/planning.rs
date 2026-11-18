@@ -776,6 +776,7 @@ fn history_from_chart(data: ChartData, gmtoffset: i64) -> History {
                         date: to_date(s.date)?.to_string(),
                         numerator: s.numerator,
                         denominator: s.denominator,
+                        bonus: None,
                     })
                 })
                 .collect()

@@ -961,7 +961,23 @@ pub(super) async fn apply_import_rows(
     if tradebook {
         let client = YahooClient::new().await?;
         let dated_symbols: Vec<&String> = symbols.iter().filter(|s| dated(s)).collect();
-        let (found, unchecked) = fetch_import_splits(&client, &rows, &dated_symbols).await?;
+        let (mut found, unchecked) = fetch_import_splits(&client, &rows, &dated_symbols).await?;
+        // Indian bonus issues are replayed as zero-cost lots, not as splits.
+        let mut cal = crate::calendar::Calendar::new(&client);
+        let mut nse_offline = Vec::new();
+        for (sym, sym_splits) in found.iter_mut() {
+            if !super::portfolio::mark_bonuses(&mut cal, sym, sym_splits).await {
+                nse_offline.push(sym.clone());
+            }
+        }
+        cal.save();
+        if !nse_offline.is_empty() {
+            println!(
+                "  {} {}",
+                "!".yellow(),
+                super::portfolio::nse_offline_note(&cal, &nse_offline)
+            );
+        }
         splits = found;
         for sym in unchecked {
             println!(
