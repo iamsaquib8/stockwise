@@ -125,6 +125,14 @@ pub struct FyersClient {
     masters: Arc<MasterCache>,
 }
 
+/// The symbol master as text, refused unless its first row has an
+/// `NSE:` ticker in [`TICKER_COL`] (the file has no header line).
+fn parse_master(bytes: &[u8]) -> Result<String> {
+    masters::csv_checked(bytes, "Fyers symbol master", |row| {
+        row.get(TICKER_COL).is_some_and(|t| t.starts_with("NSE:"))
+    })
+}
+
 /// The exact `NSE:<SYMBOL>-EQ` row in the NSE_CM symbol master.
 fn pick_equity(csv: &str, symbol: &str) -> Result<Instrument> {
     let wanted = format!("NSE:{symbol}-EQ");
@@ -534,7 +542,7 @@ impl Broker for FyersClient {
         };
         let csv = self
             .masters
-            .load(KIND.id(), "NSE", fetch, masters::csv_text)
+            .load(KIND.id(), "NSE", fetch, parse_master)
             .await?;
         pick_equity(&csv, symbol)
     }
@@ -840,5 +848,11 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[test]
+    fn a_master_without_tickers_is_not_cached() {
+        assert!(parse_master(b"{\"status\":\"error\",\"message\":\"Too many requests\",\"error_type\":\"NetworkException\"}").is_err());
+        assert!(parse_master(include_str!("fixtures/fyers_nse_cm.csv").as_bytes()).is_ok());
     }
 }

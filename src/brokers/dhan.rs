@@ -100,6 +100,26 @@ fn is_auth_error(v: &Value) -> bool {
     http::text(v.get("errorCode")).as_deref() == Some("DH-901")
 }
 
+/// Column names in the detailed and the compact scrip master layouts.
+const COLUMNS: [[&str; 2]; 6] = [
+    ["EXCH_ID", "SEM_EXM_EXCH_ID"],
+    ["SEGMENT", "SEM_SEGMENT"],
+    ["SECURITY_ID", "SEM_SMST_SECURITY_ID"],
+    ["INSTRUMENT", "SEM_INSTRUMENT_NAME"],
+    ["UNDERLYING_SYMBOL", "SEM_TRADING_SYMBOL"],
+    ["SERIES", "SEM_SERIES"],
+];
+
+/// The scrip master as text, refused unless it has (in either layout) the
+/// columns [`pick_equity`] reads.
+fn parse_master(bytes: &[u8]) -> Result<String> {
+    masters::csv_checked(bytes, "Dhan scrip master", |h| {
+        COLUMNS
+            .iter()
+            .all(|names| names.iter().any(|n| h.iter().any(|f| f == n)))
+    })
+}
+
 /// The exact NSE cash-equity (`EQ` series) row for `symbol` in the scrip
 /// master, by column name. Accepts the detailed / segment-wise layout
 /// (symbol in `UNDERLYING_SYMBOL`) and the compact one (`SEM_*`).
@@ -514,7 +534,7 @@ impl DhanClient {
             Ok(resp.bytes().await?.to_vec())
         };
         self.masters
-            .load(KIND.id(), "NSE", fetch, masters::csv_text)
+            .load(KIND.id(), "NSE", fetch, parse_master)
             .await
     }
 
@@ -957,5 +977,13 @@ BSE,E,500180,EQUITY,0,HDFCBANK,1.0,HDFC Bank,,,,5.0000,NA,ES,A,HDFC BANK LTD\n";
     async fn fixtures_match_the_documented_shape() {
         let (_s, c) = client(read_routes()).await;
         crate::brokers::mock::assert_fixture_shapes(&c, &Endpoint::ALL).await;
+    }
+
+    #[test]
+    fn a_master_without_the_lookup_columns_is_not_cached() {
+        assert!(parse_master(b"{\"status\":\"error\",\"message\":\"Too many requests\",\"error_type\":\"NetworkException\"}").is_err());
+        assert!(parse_master(include_str!("fixtures/dhan_scrip_master.csv").as_bytes()).is_ok());
+        let compact = "SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID,SEM_INSTRUMENT_NAME,SEM_TRADING_SYMBOL,SEM_SERIES\n";
+        assert!(parse_master(compact.as_bytes()).is_ok());
     }
 }

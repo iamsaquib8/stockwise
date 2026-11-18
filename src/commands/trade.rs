@@ -434,8 +434,17 @@ fn print_charges(
     bid_ask: Option<(f64, f64)>,
 ) {
     use brokers::charges::{self, SlippageBasis};
-    let Some(e) = est_value.and_then(|v| charges::estimate(kind, side, order, qty, v, bid_ask))
-    else {
+    let Some(e) = est_value.and_then(|v| {
+        charges::estimate(
+            kind,
+            side,
+            order,
+            qty,
+            v,
+            bid_ask,
+            brokers::masters::ist_today(),
+        )
+    }) else {
         print_kv("Est. charges", "unknown (no price to value the order)");
         return;
     };
@@ -480,7 +489,7 @@ fn print_charges(
     println!(
         "  {}",
         format!(
-            "Brokerage at {}'s published rates; statutory rates as in backtests. \
+            "Brokerage and DP charge at {}'s published rates; statutory rates as in backtests. \
              This order is placed as delivery; the intraday column is for comparison.",
             kind.label()
         )

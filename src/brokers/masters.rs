@@ -190,6 +190,26 @@ pub fn csv_text(bytes: &[u8]) -> Result<String> {
     Ok(text)
 }
 
+/// [`csv_text`], refused unless `ok` accepts the first line's fields. Each
+/// broker passes the check for the columns its lookup reads, so an error
+/// page or a changed layout is never cached for the rest of the day.
+pub fn csv_checked(bytes: &[u8], what: &str, ok: fn(&[String]) -> bool) -> Result<String> {
+    let text = csv_text(bytes)?;
+    let first: Vec<String> = super::http::csv_fields(text.lines().next().unwrap_or_default())
+        .into_iter()
+        .map(|f| f.trim().to_string())
+        .collect();
+    if !ok(&first) {
+        anyhow::bail!("The {what} does not have the expected columns");
+    }
+    Ok(text)
+}
+
+/// Whether `fields` holds every name in `names`.
+pub fn has_columns(fields: &[String], names: &[&str]) -> bool {
+    names.iter().all(|n| fields.iter().any(|f| f == n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

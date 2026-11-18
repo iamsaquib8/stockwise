@@ -82,23 +82,26 @@ intraday (MIS).
 |-----------------------------|---------------------|---------------------|
 | Brokerage                   | per broker, below   | per broker, below   |
 | STT                         | 0.1% buy and sell   | 0.025% sell         |
-| Exchange transaction charge | 0.00297%            | 0.00297%            |
+| Exchange transaction charge | 0.00307%            | 0.00307%            |
 | SEBI fee                    | ₹10 per crore       | ₹10 per crore       |
 | Stamp duty                  | 0.015% buy          | 0.003% buy          |
 | GST                         | 18% of brokerage, exchange charge and SEBI fee | same |
-| DP charge                   | ₹15.93 per sell     | —                   |
+| DP charge                   | per broker, on sells| —                   |
 
-The statutory rates are the same ones `stockwise backtest` uses
-(`src/backtest/costs.rs`), so the two never disagree. Brokerage follows each
-broker's published equity tariff (as of 2025):
+STT, SEBI fee, stamp duty and GST use the same rates as `stockwise backtest`
+(`src/backtest/costs.rs`), so the two never disagree. The NSE transaction
+charge is the one in force on the day: 0.00297% until 28 February 2026 and
+0.00307% from 1 March 2026. Backtest presets keep 0.00297% so earlier results
+do not change. Brokerage and the DP charge follow each broker's published
+equity tariff (checked November 2026):
 
-| Broker    | Delivery            | Intraday            |
-|-----------|---------------------|---------------------|
-| Angel One | ₹20 or 0.1%, lower  | ₹20 or 0.03%, lower |
-| Zerodha   | ₹0                  | ₹20 or 0.03%, lower |
-| Upstox    | ₹20 or 2.5%, lower  | ₹20 or 0.1%, lower  |
-| Dhan      | ₹0                  | ₹20 or 0.03%, lower |
-| Fyers     | ₹20 or 0.3%, lower  | ₹20 or 0.03%, lower |
+| Broker    | Delivery            | Intraday            | Minimum | DP charge per sell |
+|-----------|---------------------|---------------------|---------|--------------------|
+| Angel One | ₹20 or 0.1%, lower  | ₹20 or 0.1%, lower  | ₹5      | ₹20 + GST          |
+| Zerodha   | ₹0                  | ₹20 or 0.03%, lower | —       | ₹15.34 incl. GST   |
+| Upstox    | ₹20                 | ₹20 or 0.1%, lower  | —       | ₹20 + GST          |
+| Dhan      | ₹0                  | ₹20 or 0.03%, lower | —       | ₹12.50 + GST       |
+| Fyers     | ₹20 or 0.3%, lower  | ₹20 or 0.03%, lower | —       | ₹12.50 + GST       |
 
 An **estimated slippage** line follows. LIMIT and SL orders show ₹0, since
 they fill at the limit or better. MARKET and SL-M orders use half the bid-ask
@@ -121,7 +124,9 @@ the list already in memory, so a second order makes no download.
 
 On the next IST day the list is downloaded again and the old file is removed.
 Each file starts with its length and SHA-256; a file that is cut short,
-damaged or no longer parses is ignored and downloaded again. Files are written
+damaged or no longer parses is ignored and downloaded again. A download
+without the columns the lookup needs (an error page, or a changed layout) is
+refused and never cached. Files are written
 through a temporary file and renamed, so a crash never leaves half a list. If
 the data directory is read-only the lookup still works, just without the
 cache. Deleting `cache/instruments/` is always safe. Angel One looks symbols
