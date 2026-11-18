@@ -179,10 +179,14 @@ pub fn collect(loc: &Locations) -> Result<BTreeMap<String, Vec<u8>>> {
                 let e = e.with_context(|| format!("Cannot list {}", dir.display()))?;
                 let file = e.file_name().to_string_lossy().to_string();
                 let name = format!("portfolios/{}", file);
-                let kind = e
-                    .file_type()
+                if !is_backed_up(&name) {
+                    continue;
+                }
+                // Follow symlinks, as the portfolio loader does; a broken
+                // link stops the export instead of being skipped.
+                let meta = std::fs::metadata(e.path())
                     .with_context(|| format!("Cannot read {}", e.path().display()))?;
-                if is_backed_up(&name) && kind.is_file() {
+                if meta.is_file() {
                     files.insert(name, read(&e.path())?);
                 }
             }
@@ -547,6 +551,25 @@ fn apply_with(
     Ok(())
 }
 
+/// The `<file>.bak`, `<file>.bak.1`, ... copies of a config file that still
+/// set a notification secret (copies of a config from before any restore).
+fn bak_copies_with_secrets(config: &Path) -> Vec<PathBuf> {
+    (0u32..)
+        .map(|n| {
+            let mut s = config.as_os_str().to_owned();
+            s.push(if n == 0 {
+                ".bak".to_string()
+            } else {
+                format!(".bak.{}", n)
+            });
+            PathBuf::from(s)
+        })
+        .take(1000)
+        .filter(|p| p.exists())
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.lines().any(is_secret_line)))
+        .collect()
+}
+
 /// `<file>.bak`, or `<file>.bak.N` with the first N not in use.
 fn free_bak_path(target: &Path) -> PathBuf {
     (0u32..)
@@ -564,7 +587,17 @@ fn free_bak_path(target: &Path) -> PathBuf {
 }
 
 /// Write `data` to a temp file next to `path`, flush it, rename it over `path`.
+///
+/// The temp file is created owner-only (0600 on Unix), so nothing is
+/// readable by others while it is written. When `path` exists, the temp file
+/// gets its permissions before the rename, so a private file stays private;
+/// a new file stays owner-only.
 fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    write_file(path, data, true)
+}
+
+/// [`write_atomic`]; with `keep_mode` false the file is always owner-only.
+fn write_file(path: &Path, data: &[u8], keep_mode: bool) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Cannot create directory {}", dir.display()))?;
@@ -573,8 +606,27 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     tmp.push(format!(".{}.restore.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let _ = std::fs::remove_file(&tmp);
-    let mut f =
-        std::fs::File::create(&tmp).with_context(|| format!("Cannot write {}", tmp.display()))?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(&tmp)
+        .with_context(|| format!("Cannot write {}", tmp.display()))?;
+    #[cfg(not(unix))]
+    let _ = keep_mode;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(m) = std::fs::metadata(path).ok().filter(|_| keep_mode) {
+            let mode = m.permissions().mode() & 0o7777;
+            f.set_permissions(std::fs::Permissions::from_mode(mode))
+                .with_context(|| format!("Cannot set permissions on {}", tmp.display()))?;
+        }
+    }
     f.write_all(data)?;
     f.sync_all()?;
     drop(f);
@@ -644,6 +696,7 @@ fn read_fd(_fd: u32) -> Result<String> {
 /// `stockwise backup export [PATH]`.
 pub fn cmd_export(path: Option<PathBuf>, src: PassphraseSource) -> Result<()> {
     let loc = Locations::current()?;
+    println!("\n  Data directory: {}", loc.data_dir.display());
     let files = collect(&loc)?;
     if files.is_empty() {
         bail!(
@@ -665,8 +718,7 @@ pub fn cmd_export(path: Option<PathBuf>, src: PassphraseSource) -> Result<()> {
         );
     }
     let sealed = seal(&pack(&files), &pass, KdfParams::default())?;
-    write_atomic(&path, &sealed)?;
-    let _ = crate::store::restrict_permissions(&path);
+    write_file(&path, &sealed, false)?;
     println!(
         "\n  {} Backed up {} file(s) to {}",
         "✓".green(),
@@ -695,6 +747,7 @@ pub fn cmd_restore(path: &Path, dry_run: bool, src: PassphraseSource) -> Result<
     let pass = get_passphrase(src, false)?;
     let files = unpack(&open(&bytes, &pass)?)?;
     let loc = Locations::current()?;
+    println!("\n  Data directory: {}", loc.data_dir.display());
     let plan = plan(&loc, &files)?;
     println!(
         "\n  Backup {} holds {} file(s):",
@@ -731,11 +784,27 @@ pub fn cmd_restore(path: &Path, dry_run: bool, src: PassphraseSource) -> Result<
         .iter()
         .any(|p| p.name == CONFIG_ENTRY && p.change != Change::Same)
     {
-        println!(
-            "  {}",
-            "Notification secrets are never in a backup: copy them back from the newest config.toml.bak* copy, or from the source computer's config.toml."
-                .dimmed()
-        );
+        let with_secrets = loc
+            .config_file
+            .as_deref()
+            .map(bak_copies_with_secrets)
+            .unwrap_or_default();
+        let hint = if with_secrets.is_empty() {
+            "Notification secrets are never in a backup, and no config.toml.bak copy holds any: \
+             take them from the source computer's config.toml, or set them as STOCKWISE_* \
+             environment variables."
+                .to_string()
+        } else {
+            format!(
+                "Notification secrets are never in a backup. They are in: {}",
+                with_secrets
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        println!("  {}", hint.dimmed());
     }
     Ok(())
 }
@@ -1039,6 +1108,72 @@ mod tests {
         assert!(!loc.data_dir.join("goals.json").exists());
         assert!(!loc.data_dir.join("notes.json").exists());
         assert!(!loc.data_dir.join("watchlist.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_named_portfolios_are_backed_up() {
+        let root = tempdir("symlink");
+        let loc = locations(&root);
+        populate(&loc);
+        let real = root.join("elsewhere.json");
+        put(&real, b"{\"linked\":true}");
+        std::os::unix::fs::symlink(&real, loc.data_dir.join("portfolios/linked.json")).unwrap();
+        let files = collect(&loc).unwrap();
+        assert_eq!(files["portfolios/linked.json"], b"{\"linked\":true}");
+        // A broken link stops the export.
+        std::os::unix::fs::symlink(
+            root.join("gone.json"),
+            loc.data_dir.join("portfolios/gone.json"),
+        )
+        .unwrap();
+        assert!(collect(&loc).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_keeps_a_private_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir("mode");
+        let loc = locations(&root);
+        let cfg = loc.config_file.clone().unwrap();
+        put(&cfg, b"market = \"us\"\n");
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let goals = loc.data_dir.join("goals.json");
+        put(&goals, b"old");
+        std::fs::set_permissions(&goals, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut files = BTreeMap::new();
+        files.insert(CONFIG_ENTRY.to_string(), b"market = \"in\"\n".to_vec());
+        files.insert("goals.json".to_string(), b"{}".to_vec());
+        files.insert("notes.json".to_string(), b"{}".to_vec());
+        apply(&plan(&loc, &files).unwrap(), &files).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&cfg), 0o600);
+        assert_eq!(mode(&goals), 0o644);
+        assert_eq!(mode(&loc.data_dir.join("notes.json")), 0o600);
+        let archive = root.join("b.swbak");
+        put(&archive, b"old");
+        std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_file(&archive, b"new", false).unwrap();
+        assert_eq!(mode(&archive), 0o600);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_secrets_hint_names_the_copies_that_hold_secrets() {
+        let root = tempdir("hint");
+        let cfg = root.join("config.toml");
+        put(
+            &root.join("config.toml.bak"),
+            b"[notify]\nsmtp_password = \"pw\"\n",
+        );
+        put(&root.join("config.toml.bak.1"), b"[notify]\n");
+        assert_eq!(
+            bak_copies_with_secrets(&cfg),
+            [root.join("config.toml.bak")]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

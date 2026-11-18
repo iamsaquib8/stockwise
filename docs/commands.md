@@ -1028,7 +1028,8 @@ Git, iCloud, Dropbox, Google Drive or S3, or carry to another computer;
 stockwise backup export ~/Dropbox/stockwise.swbak
 stockwise backup restore ~/Dropbox/stockwise.swbak --dry-run   # list changes only
 stockwise backup restore ~/Dropbox/stockwise.swbak
-STOCKWISE_BACKUP_PASSPHRASE=... stockwise backup export nightly.swbak   # cron
+STOCKWISE_BACKUP_PASSPHRASE="$(cat ~/.config/stockwise/backup-pass)" \
+  stockwise backup export nightly.swbak                                   # cron or CI
 stockwise backup export nightly.swbak --passphrase-fd 3 3< ~/.config/stockwise/backup-pass
 ```
 
@@ -1042,10 +1043,11 @@ daemon and worker state, and all broker files (`*_config.json`,
 `gtt_seen_*.json`), because they hold session tokens. Notification secrets
 (`telegram_token`, `smtp_password`, ...) are removed from the copy of
 `config.toml`, so a backup never holds them. Keep them on the source computer
-(or in a password manager). After a restore that replaced an existing
-`config.toml`, copy them back from the newest `config.toml.bak*` copy; on a new
-computer there is no such copy, so take them from the source computer's
-`config.toml` or set them as `STOCKWISE_*` environment variables. A secret
+(or in a password manager). After a restore that replaces `config.toml`, the
+restore names the `config.toml.bak*` copies that still hold secrets (those made
+from a config from before any restore). On a new computer there is no such
+copy, so take them from the source computer's `config.toml` or set them as
+`STOCKWISE_*` environment variables. A secret
 written in a form the backup cannot remove (an inline `notify = { ... }` table,
 or a value that spans lines) stops the export with a message instead of being
 copied.
@@ -1054,8 +1056,11 @@ copied.
 on export; at least 8 characters). For scripts, pass `--passphrase-fd N` to
 read the first line of an open file descriptor (Unix), or set
 `STOCKWISE_BACKUP_PASSPHRASE`. There is no argument that takes the passphrase
-itself, so it never shows up in `ps` or shell history. A lost passphrase
-cannot be recovered.
+itself, so it never shows up in the process argument list. Set the variable
+from a protected file or a secret store, not by typing the passphrase in an
+interactive shell, where it is saved in the shell history; other processes of
+the same user can also read a process's environment. A lost passphrase cannot
+be recovered.
 
 **Restore** first checks the whole file: a wrong passphrase, a changed byte
 or a truncated file stops it with an error before anything is written. It then
@@ -1067,7 +1072,11 @@ no copy is ever overwritten). Then every file is written to a temp file and
 renamed into place. The restore is all or nothing: if one write fails, the
 files already written get their previous content back and files it added are
 removed, so the data directory ends as it started. Local files that are not in
-the backup are left alone.
+the backup are left alone. A replaced file keeps its permissions (a `chmod 600`
+`config.toml` stays owner-only); new files and the `.swbak` file itself are
+owner-only. Both commands print the data directory they use. When the config
+file is invalid, its `home` setting cannot be read, so `backup` refuses to run
+unless `STOCKWISE_HOME` names the data directory.
 
 **Format** (`.swbak`, version 1): a 64-byte header (the magic `SWBAK\0\r\n`,
 format version, algorithm ids, Argon2id memory/time/parallelism costs, a

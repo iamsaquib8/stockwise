@@ -3948,6 +3948,21 @@ async fn async_main() {
         eprintln!("\n  {} {}\n", colored::Colorize::red("Error:"), msg);
         std::process::exit(1);
     }
+    // `backup` runs with a broken config file (a restore can replace it), but
+    // the file's `home` setting is unreadable then: insist on STOCKWISE_HOME
+    // rather than fall back to the default data directory without a word.
+    if let config::Status::Invalid(msg) = &cfg_state.status
+        && matches!(cli.command, Commands::Backup { .. })
+        && std::env::var_os("STOCKWISE_HOME").is_none_or(|v| v.is_empty())
+    {
+        eprintln!(
+            "\n  {} {}\n  `backup` cannot read the config file's `home` setting while the file is \
+             invalid. Fix it, or set STOCKWISE_HOME to your data directory.\n",
+            colored::Colorize::red("Error:"),
+            msg
+        );
+        std::process::exit(1);
+    }
 
     let cfg = config::get();
     let profile_source = arg_source(&matches, "profile", cfg.profile.mode.is_some());
