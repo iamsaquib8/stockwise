@@ -363,7 +363,10 @@ impl Router {
         interval: &str,
     ) -> Option<crate::api::ChartData> {
         for p in self.serving(Capability::Chart, 1) {
-            if !p.supports(symbol) || p.remaining() == 0 {
+            // No allowance check here: `Http::get_json` serves a cached
+            // answer before it spends a request, and refuses an uncached one
+            // when the allowance is used up.
+            if !p.supports(symbol) {
                 continue;
             }
             if let Ok(mut chart) = p.chart(symbol, range, interval).await {
@@ -704,6 +707,43 @@ mod tests {
             (k == "STOCKWISE_KEYLESS_BACKUPS").then(|| "0".into())
         });
         assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cached_chart_is_served_after_the_allowance_is_used_up() {
+        let today = chrono::Utc::now().date_naive();
+        let prices: Vec<String> = (0..40)
+            .rev()
+            .map(|i| {
+                let d = today - chrono::Duration::days(i);
+                let ms = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+                format!("[{ms},{}]", 60_000 + i)
+            })
+            .collect();
+        let body = format!(r#"{{"prices":[{}]}}"#, prices.join(","));
+        let server = MockServer::start(vec![(200, body)]).await;
+        let cache: crate::api::SharedCache =
+            std::sync::Arc::new(tokio::sync::Mutex::new(crate::api::HybridCache::in_memory()));
+        let cg = Provider::new(
+            ProviderKind::CoinGecko,
+            String::new(),
+            Some(server.url.clone()),
+        )
+        .with_cache(cache);
+        let router = Router::new(vec![cg]);
+        assert!(router.chart("BTC-USD", "1mo", "1d").await.is_some());
+        // Spend the rest of the five-a-minute allowance on other coins.
+        for coin in ["ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD"] {
+            let _ = router.chart(coin, "1mo", "1d").await;
+        }
+        assert_eq!(router.members()[0].remaining(), 0);
+        assert_eq!(server.requests().len(), 5);
+        assert!(
+            router.chart("BTC-USD", "1mo", "1d").await.is_some(),
+            "the cached chart still answers"
+        );
+        assert!(router.chart("DOGE-USD", "1mo", "1d").await.is_none());
+        assert_eq!(server.requests().len(), 5, "no request past the allowance");
     }
 
     #[tokio::test]
