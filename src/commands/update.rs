@@ -40,9 +40,20 @@ pub async fn cmd_update(check: bool) -> Result<()> {
     );
     println!();
 
-    if newer != Some(true) {
-        println!("  {} StockWise is up to date.\n", "✓".green());
-        return Ok(());
+    match newer {
+        Some(true) => {}
+        Some(false) => {
+            println!("  {} StockWise is up to date.\n", "✓".green());
+            return Ok(());
+        }
+        None => {
+            println!(
+                "  {} Cannot compare v{current} with the latest release tag {}; nothing was changed.\n",
+                "!".yellow(),
+                release.tag_name
+            );
+            return Ok(());
+        }
     }
     if !release.html_url.is_empty() {
         println!("  Release notes: {}\n", release.html_url);
@@ -116,7 +127,11 @@ pub(crate) async fn doctor_version_line() -> String {
                     tag,
                     when.dimmed()
                 ),
-                _ => format!("{} v{current} is the latest{}", "✓".green(), when.dimmed()),
+                Some(false) => format!("{} v{current} is the latest{}", "✓".green(), when.dimmed()),
+                None => format!(
+                    "v{current} {}",
+                    format!("(cannot compare with the latest release tag {tag})").dimmed()
+                ),
             }
         }
         Err(_) => format!(

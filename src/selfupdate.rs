@@ -106,32 +106,75 @@ pub struct ChannelHints {
     pub home: Option<PathBuf>,
     /// `/.dockerenv` or `/run/.containerenv` exists.
     pub in_container: bool,
-    /// The directory above the binary's directory holds `pyvenv.cfg`.
-    pub in_python_venv: bool,
+    /// pip owns the binary: the directory above the binary's directory is a
+    /// virtualenv (`pyvenv.cfg`), or a `stockwise-*.dist-info` sits in that
+    /// prefix's site-packages (`pip install --user` puts the binary in
+    /// `~/.local/bin`, the same place install.sh does).
+    pub python_owned: bool,
 }
 
 impl ChannelHints {
     /// Hints for the running process, read from the environment and disk.
     pub fn current(exe: &Path) -> Self {
-        let in_python_venv = exe
+        let python_owned = exe
             .parent()
             .and_then(Path::parent)
-            .is_some_and(|venv| venv.join("pyvenv.cfg").is_file());
+            .is_some_and(|prefix| prefix.join("pyvenv.cfg").is_file() || has_pip_record(prefix));
+        // Resolved like the executable path, so symlinks and Windows
+        // verbatim (`\\?\`) prefixes compare equal.
+        let resolve = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
         Self {
             cargo_home: std::env::var_os("CARGO_HOME")
                 .filter(|v| !v.is_empty())
-                .map(PathBuf::from),
-            home: dirs::home_dir(),
+                .map(PathBuf::from)
+                .map(resolve),
+            home: dirs::home_dir().map(resolve),
             in_container: Path::new("/.dockerenv").exists()
                 || Path::new("/run/.containerenv").exists(),
-            in_python_venv,
+            python_owned,
         }
     }
 }
 
+/// Whether pip recorded a `stockwise` install under `prefix` (the directory
+/// above the binary's `bin/` or `Scripts/`): a `stockwise-*.dist-info` in
+/// one of the site-packages layouts pip uses on Linux, macOS and Windows.
+pub fn has_pip_record(prefix: &Path) -> bool {
+    let mut site_dirs = vec![
+        prefix.join("site-packages"),
+        prefix.join("Lib").join("site-packages"),
+        prefix.join("lib").join("python").join("site-packages"),
+    ];
+    if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
+        site_dirs.extend(
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("python"))
+                .map(|e| e.path().join("site-packages")),
+        );
+    }
+    site_dirs.iter().any(|dir| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                name.starts_with("stockwise-") && name.ends_with(".dist-info")
+            })
+        })
+    })
+}
+
 /// `path` as a forward-slash string, for marker matching on every OS.
 fn slashed(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let s = path.to_string_lossy().replace('\\', "/");
+    // Windows `canonicalize` returns verbatim paths: `\\?\C:\...` or
+    // `\\?\UNC\server\share\...`.
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        s
+    }
 }
 
 /// Which channel owns the binary at `exe` (already canonicalised, so
@@ -139,7 +182,8 @@ fn slashed(path: &Path) -> String {
 pub fn detect_channel(exe: &Path, hints: &ChannelHints) -> Channel {
     let p = slashed(exe);
     let lower = p.to_lowercase();
-    let dir = slashed(exe.parent().unwrap_or(Path::new("")));
+    // Directory from the slashed string, so Windows paths split on any OS.
+    let dir = p.rsplit_once('/').map_or("", |(d, _)| d).to_string();
 
     if hints.in_container {
         return Channel::Docker;
@@ -175,7 +219,7 @@ pub fn detect_channel(exe: &Path, hints: &ChannelHints) -> Channel {
     if p.contains("/uv/tools/") {
         return Channel::Uv;
     }
-    if p.contains("/site-packages/") || hints.in_python_venv {
+    if p.contains("/site-packages/") || hints.python_owned {
         return Channel::Pip;
     }
     if dir == "/usr/bin" {
@@ -1030,12 +1074,64 @@ mod tests {
             Channel::Pip
         );
         let venv = ChannelHints {
-            in_python_venv: true,
+            python_owned: true,
             ..Default::default()
         };
         assert_eq!(
             detect_channel(Path::new("/home/me/project/.venv/bin/stockwise"), &venv),
             Channel::Pip
+        );
+    }
+
+    #[test]
+    fn pip_user_install_in_local_bin_is_pip() {
+        // `pip install --user` puts the binary where install.sh does.
+        for site in [
+            "lib/python3.12/site-packages",
+            "lib/python/site-packages",
+            "Lib/site-packages",
+            "site-packages",
+        ] {
+            let dir = TempDir::new("pipuser");
+            assert!(!has_pip_record(&dir.0));
+            let info = dir.0.join(site).join("stockwise-0.9.0.dist-info");
+            std::fs::create_dir_all(&info).unwrap();
+            assert!(has_pip_record(&dir.0), "{site}");
+        }
+        // Another package's record does not count.
+        let dir = TempDir::new("pipother");
+        std::fs::create_dir_all(
+            dir.0
+                .join("lib/python3.12/site-packages/stockwise_extra-1.0.dist-info"),
+        )
+        .unwrap();
+        assert!(!has_pip_record(&dir.0));
+        let pip = ChannelHints {
+            python_owned: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            detect_channel(Path::new("/home/me/.local/bin/stockwise"), &pip),
+            Channel::Pip
+        );
+    }
+
+    #[test]
+    fn windows_verbatim_paths_match_cargo_home() {
+        let hints = ChannelHints {
+            home: Some(PathBuf::from(r"C:\Users\me")),
+            ..Default::default()
+        };
+        assert_eq!(
+            detect_channel(
+                Path::new(r"\\?\C:\Users\me\.cargo\bin\stockwise.exe"),
+                &hints
+            ),
+            Channel::Cargo
+        );
+        assert_eq!(
+            slashed(Path::new(r"\\?\UNC\server\share\stockwise.exe")),
+            "//server/share/stockwise.exe"
         );
     }
 
