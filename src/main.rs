@@ -3659,13 +3659,28 @@ fn command_symbols(matches: &clap::ArgMatches, args: &[String]) -> Vec<(String, 
             }
             i += 1;
         }
+        // Each comma-separated piece pairs with one symbol, so a repeated
+        // symbol (`--symbols A A`) gets its own slot.
+        let mut pieces: Vec<(usize, String, bool)> = opt_slots
+            .iter()
+            .flat_map(|&i| {
+                let value = args[i].strip_prefix(&attached).unwrap_or(&args[i]);
+                value
+                    .split(',')
+                    .map(move |p| (i, p.to_string(), false))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         return vals
             .into_iter()
             .map(|v| {
-                let at = opt_slots
-                    .iter()
-                    .copied()
-                    .find(|&i| replace_symbol(&args[i], &v, &v).is_some());
+                let at = pieces
+                    .iter_mut()
+                    .find(|(_, p, used)| !*used && *p == v)
+                    .map(|(i, _, used)| {
+                        *used = true;
+                        *i
+                    });
                 (v, at)
             })
             .collect();
@@ -6900,6 +6915,23 @@ mod tests {
             Some("--symbols=NVDA,AAPL")
         );
         assert_eq!(replace_symbol("2022-01-03", "US0378331005", "AAPL"), None);
+        // A repeated symbol in separate values: one slot each.
+        let (v, m) = argv(&[
+            "stockwise",
+            "sim",
+            "replay",
+            "start",
+            "--from",
+            "2022-01-03",
+            "--to",
+            "2022-06-30",
+            "--symbols",
+            "US0378331005",
+            "US0378331005",
+        ]);
+        let found = command_symbols(&m, &v);
+        let slots: Vec<_> = found.iter().map(|(_, at)| *at).collect();
+        assert_eq!(slots, [Some(9), Some(10)], "{found:?}");
         let (_, m) = argv(&["stockwise", "doctor"]);
         assert!(command_symbols(&m, &[]).is_empty());
     }

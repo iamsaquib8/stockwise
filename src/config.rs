@@ -1296,10 +1296,21 @@ pub fn set_portfolio_market(path: &Path, name: &str, market: Option<&str>) -> Re
             .position(|l| l.trim_start().starts_with('['))
             .map_or(lines.len(), |i| start + 1 + i)
     };
-    let existing = header.and_then(|h| {
-        let end = section_end(h, &lines);
-        (h + 1..end).find(|&i| table_key(&lines[i]).is_some_and(|k| k.eq_ignore_ascii_case(name)))
-    });
+    // Every line that binds this portfolio, in any spelling or case. Extra
+    // ones (only a hand-edited file has them) are dropped, so the table ends
+    // with at most one key per portfolio.
+    let mut matching: Vec<usize> = header
+        .map(|h| {
+            let end = section_end(h, &lines);
+            (h + 1..end)
+                .filter(|&i| table_key(&lines[i]).is_some_and(|k| k.eq_ignore_ascii_case(name)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let existing = (!matching.is_empty()).then(|| matching.remove(0));
+    for &i in matching.iter().rev() {
+        lines.remove(i);
+    }
     match (market, existing) {
         (Some(m), Some(i)) => lines[i] = format!("{name} = \"{m}\""),
         (Some(m), None) => match header {
@@ -1572,6 +1583,25 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().file_name() != "config.toml")
             .count();
         assert_eq!(leftovers, 0);
+        // Case-equivalent duplicates collapse into one key on write.
+        std::fs::write(
+            &file,
+            "[portfolio_markets]\nDEFAULT = \"us\"\ndefault = \"uk\"\n",
+        )
+        .unwrap();
+        set_portfolio_market(&file, "default", Some("ca")).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_markets.len(), 1);
+        assert_eq!(c.portfolio_market(None), Some("ca"));
+        std::fs::write(
+            &file,
+            "[portfolio_markets]\nDEFAULT = \"us\"\ndefault = \"uk\"\nisa = \"uk\"\n",
+        )
+        .unwrap();
+        set_portfolio_market(&file, "default", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(None), None);
+        assert_eq!(c.portfolio_market(Some("isa")), Some("uk"));
         let _ = std::fs::remove_dir_all(&dir);
         // Bad entries are rejected.
         assert!(
