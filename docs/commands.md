@@ -95,7 +95,7 @@ always works. Common names resolve to NSE symbols
 | `markets [--crypto] [--fx] [--global] [--json\|--csv]` | US + India indices (S&P 500, Dow, NASDAQ, Russell, VIX, NIFTY 50, SENSEX, Bank NIFTY, NIFTY IT) and the India 10-year G-sec yield (CCIL, RBI fallback; left out when neither answers); `--crypto` adds the largest coins, `--fx` major pairs (USD/INR, EUR/USD, ...), `--global` one row per exchange's main index (NIFTY 50, S&P 500, FTSE 100, DAX, Nikkei 225, Hang Seng, Straits Times, S&P/TSX, S&P/ASX 200) with whether it is open and its local time. With `-m crypto`, `-m fx`, `-m commodity` or a global exchange that section comes first. `--json` rows carry `region`: `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Japan`, ...) or `Global` |
 | `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
-| `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config. Exits 1 if market data is unreachable or the config file is invalid |
+| `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Exits 1 if market data is unreachable or the config file is invalid |
 
 ## Analysis
 
@@ -954,6 +954,7 @@ untested against a live account.
 | `config path` | Print the config file path (it may not exist yet) |
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |
 | `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, desktop) / send a test message. See [notifications](bots.md#notifications) |
+| `update [--check]` (`self-update`) | Check GitHub Releases for a newer version. A binary from install.sh or a release archive is replaced in place: the archive for this platform and its `.sha256` are downloaded, the checksum must match (a missing or wrong checksum stops the update and changes nothing), then the binary is swapped atomically (on Windows the old one is kept as `stockwise.exe.old`). Installs from Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv, pip, `.deb`/`.rpm` or Docker are never changed; the command prints that package manager's upgrade command instead. `--check` only reports the installed version, the latest release and the install channel |
 | `completions <bash\|zsh\|fish\|powershell\|elvish>` | Print a completion script, e.g. `stockwise completions zsh > ~/.zfunc/_stockwise` |
 | `man [--dir <DIR>]` | Print the `stockwise.1` man page, or write it plus one `stockwise-<command>.1` page per command into `DIR`, e.g. `stockwise man --dir ~/.local/share/man/man1` |
 

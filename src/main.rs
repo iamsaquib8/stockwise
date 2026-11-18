@@ -66,6 +66,7 @@ mod rebalance;
 mod research;
 mod results;
 mod scorecard;
+mod selfupdate;
 mod sellpreview;
 #[cfg(feature = "server")]
 mod server;
@@ -1114,6 +1115,22 @@ that returns the `stockwise trade` command for you to run yourself.")]
     Notify {
         #[command(subcommand)]
         action: Option<NotifyCmd>,
+    },
+
+    /// Check for a new release and update this binary (or print the package manager's command)
+    #[command(
+        alias = "self-update",
+        after_help = "Examples:\n  \
+stockwise update --check   # show the installed and latest version and the install channel\n  \
+stockwise update           # install the latest release (install.sh or archive installs)\n\n\
+Installs from Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv, .deb/.rpm or Docker are \
+never changed: the command prints that package manager's upgrade command instead. \
+The download is verified against its SHA-256 checksum before the binary is replaced."
+    )]
+    Update {
+        /// Only report the installed version, the latest release and the install channel
+        #[arg(long)]
+        check: bool,
     },
 
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish)
@@ -3228,7 +3245,15 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("Live trading", &["trade"]),
     (
         "Setup",
-        &["profile", "notify", "config", "completions", "man", "help"],
+        &[
+            "profile",
+            "notify",
+            "config",
+            "update",
+            "completions",
+            "man",
+            "help",
+        ],
     ),
 ];
 
@@ -3863,6 +3888,7 @@ async fn async_main() {
                 | Commands::Config { .. }
                 | Commands::Init { .. }
                 | Commands::Doctor
+                | Commands::Update { .. }
                 | Commands::Completions { .. }
         )
     {
@@ -4914,6 +4940,7 @@ async fn dispatch(
             Some(NotifyCmd::Status) | None => commands::cmd_notify("status").await,
         },
 
+        Commands::Update { check } => commands::cmd_update(check).await,
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

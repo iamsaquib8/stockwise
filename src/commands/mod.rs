@@ -88,6 +88,7 @@ mod strategies;
 mod taxpreview;
 mod technicals;
 mod trade;
+mod update;
 mod worker;
 
 #[cfg(test)]
@@ -125,4 +126,5 @@ pub use strategies::*;
 pub use taxpreview::*;
 pub use technicals::*;
 pub use trade::*;
+pub use update::*;
 pub use worker::*;
