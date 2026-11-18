@@ -111,6 +111,10 @@ const fn opt(name: &'static str, kind: Kind, description: &'static str) -> Param
     }
 }
 
+/// Personal tools that also fetch public market data on their default path
+/// (prices, statements, fund holdings), so hosts see them as open-world.
+pub const PERSONAL_OPEN_WORLD: &[&str] = &["portfolio_checkup"];
+
 /// One tool: its name (`^[a-z_]+$`), a title for people, a description for
 /// the model, and its parameters.
 #[derive(Debug, Clone, Copy)]
@@ -1265,6 +1269,25 @@ pub const TOOLS: &[Tool] = &[
                 "quick",
                 Kind::Bool,
                 "Skip the year of prices per holding (no risk figures; faster)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "portfolio_checkup",
+        title: "Portfolio checkup",
+        description: "A scan of the portfolio for readings worth a look, in six lenses: concentration (single-stock look-through weight and small-cap share against the profile's limits, fund overlap, effective number of bets), forensic flags (Piotroski, Altman Z, cash conversion, promoter pledge and stake, latest-quarter contraction), valuation stretch, downside (beta, drawdown, correlated pairs), fees and tax (unused long-term exemption, harvestable losses, Regular-plan cost, lots turning long-term) and goals and targets. Each finding has what was observed, the amount at stake and the command to inspect it, ranked by position value times severity. Observations only, never advice.",
+        params: &[
+            opt(
+                "offline",
+                Kind::Bool,
+                "Use only local data and the cache (no statements or fund costs)",
             ),
             opt(
                 "base",

@@ -113,7 +113,9 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
                             )
                             .idempotent(read)
                             // Market data comes from outside; the portfolio does not.
-                            .open_world(!t.personal)
+                            .open_world(
+                                !t.personal || crate::tools::PERSONAL_OPEN_WORLD.contains(&t.name),
+                            )
                     })
             })
             .collect()

@@ -326,6 +326,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `profile` / `profile_questions` | Your investor profile and its guardrails; the onboarding questions | `profile show --json` |
 | `portfolio_pme` / `portfolio_sell_preview` / `mf_bleed` / `income_calendar` | Index-twin comparison; what a sale would realise; fund cost drag; dividend calendar | `portfolio pme`, `portfolio income` |
 | `portfolio_analyze` | The portfolio dashboard: by market, currency, cap tier and sector, tax terms, risk and observations | `portfolio analyze --json` |
+| `portfolio_checkup` | Findings in six lenses (concentration, forensic flags, valuation, downside, fees and tax, goals) ranked by the money at stake, each with the command to inspect it | `portfolio checkup --json` |
 | `market_conditions` | Trend, volatility, breadth and valuation with their history (readings, not a timing signal) | `conditions --json` |
 | `picks` | Stocks ranked on value, quality, growth and trend among those scanned (the default universe, or `universe`, `cap`) | `picks --json` |
 | `movers` | Top gainers and losers today | `movers --json` |
