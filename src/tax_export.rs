@@ -1129,6 +1129,7 @@ mod tests {
             order_id: None,
             intraday: false,
             account: None,
+            origin: None,
             bonuses: Vec::new(),
             bonus_shares: false,
         }

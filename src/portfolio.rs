@@ -307,6 +307,11 @@ pub struct Sale {
     /// The demat account the shares were sold from (see [`Lot::account`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// What the sold lot carried besides its date and price, so
+    /// `portfolio lots --undo-sale` can put it back exactly. Sales recorded
+    /// before 0.9 have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SoldLot>,
     /// Bonus issues received on the sold lot as a lot of their own
     /// (`bonus:<split id>`, see [`Split::bonus_id`]): the sold quantity is in
     /// the count before them, so dividends before them count those shares.
@@ -317,6 +322,24 @@ pub struct Sale {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bonus_shares: bool,
 }
+
+/// The parts of a [`Lot`] a [`Sale`] does not otherwise keep.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SoldLot {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adjustments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_as_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// How many earlier versions of a portfolio file are kept
+/// (`portfolio.json.1` is the newest).
+pub const BACKUPS_KEPT: usize = 5;
 
 impl Sale {
     fn from_lot(symbol: &str, lot: &Lot, qty: f64, date: &str, price: f64, source: &str) -> Self {
@@ -332,6 +355,13 @@ impl Sale {
             order_id: None,
             intraday: false,
             account: lot.account_key().map(str::to_string),
+            origin: Some(SoldLot {
+                source: lot.source.clone(),
+                adjustments: lot.adjustments.clone(),
+                units_as_of: lot.units_as_of.clone(),
+                order_id: lot.order_id.clone(),
+                account: lot.account.clone(),
+            }),
             bonuses: lot
                 .adjustments
                 .iter()
@@ -340,6 +370,31 @@ impl Sale {
                 .collect(),
             bonus_shares: lot.source == BONUS_SOURCE,
         }
+    }
+
+    /// The lot this sale took its shares from, with the sold quantity.
+    pub fn to_lot(&self) -> Lot {
+        let mut lot = Lot::new(self.qty, self.buy_price, self.buy_date.clone(), "manual");
+        lot.date_estimated = self.buy_date_estimated;
+        match &self.origin {
+            Some(o) => {
+                lot.source = o.source.clone();
+                lot.adjustments = o.adjustments.clone();
+                lot.units_as_of = o.units_as_of.clone();
+                lot.order_id = o.order_id.clone();
+                lot.account = o.account.clone();
+            }
+            None => {
+                // An older sale does not say which splits its lot had taken.
+                // Its quantity is in the share count of the sale date, so
+                // only splits after that day can still apply.
+                lot.account = self.account_key().map(str::to_string);
+                if self.sell_date > self.buy_date {
+                    lot.units_as_of = Some(self.sell_date.clone());
+                }
+            }
+        }
+        lot
     }
 
     /// The sale's account: the one saved with it, else the one its source names.
@@ -1029,6 +1084,22 @@ impl Portfolio {
     /// Load `path`, upgrading an old-format file in place: the original is
     /// copied to `<file>.bak` (only if no backup exists yet), then the new
     /// format is written.
+    /// Read `path` without writing anything: the format is upgraded and
+    /// symbols repaired in memory only. For backups, which must stay as saved.
+    pub fn read_only(path: &Path) -> Result<Self> {
+        let mut p: Self = crate::store::load_from(path)?;
+        if p.version > SCHEMA_VERSION {
+            bail!(
+                "{} was written by a newer StockWise (format {}). Upgrade StockWise to read it.",
+                path.display(),
+                p.version
+            );
+        }
+        p.normalize();
+        p.repair_symbols();
+        Ok(p)
+    }
+
     pub fn load_from(path: &Path) -> Result<Self> {
         let mut p: Self = crate::store::load_from(path)?;
         if p.version > SCHEMA_VERSION {
@@ -1061,8 +1132,49 @@ impl Portfolio {
         Ok(p)
     }
 
+    /// Write `path`, first moving the current file to `<file>.1` (and older
+    /// copies up to `<file>.5`), so `portfolio restore` can bring one back.
+    /// A save that changes nothing rotates nothing.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        crate::store::save_to(path, self, false)
+        self.save_with(
+            path,
+            |a: &Path, b: &Path| std::fs::rename(a, b),
+            |p: &Path| crate::store::save_to(p, self, false),
+        )
+    }
+
+    /// [`Portfolio::save_to`] with the rename and the final write passed in,
+    /// so tests can make either fail.
+    fn save_with(
+        &self,
+        path: &Path,
+        rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+        write: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
+        if let Ok(old) = std::fs::read(path) {
+            let new = serde_json::to_string_pretty(self)?;
+            // Backup 1 already holding the current file means an earlier save
+            // rotated and then failed to write: the history is in place, so a
+            // retry must not shift it again.
+            let kept = std::fs::read(numbered_backup(path, 1)).is_ok_and(|b| b == old);
+            if old != new.as_bytes() && !kept {
+                rotate_backups_with(path, &rename)?;
+            }
+        }
+        write(path)
+    }
+
+    /// Replace `path` with its backup `n` (1 = newest). The file being
+    /// replaced becomes backup 1, so a restore can itself be restored.
+    pub fn restore_backup(path: &Path, n: usize) -> Result<Self> {
+        let from = numbered_backup(path, n);
+        if !from.exists() {
+            bail!("No backup #{} of {}", n, path.display());
+        }
+        let p = Self::read_only(&from)
+            .with_context(|| format!("Backup {} is not a readable portfolio", from.display()))?;
+        p.save_to(path)?;
+        Ok(p)
     }
 
     /// Save symbols repaired on load, keeping the original once as `.bak`.
@@ -1412,6 +1524,126 @@ impl Portfolio {
         lot.date_estimated = false;
         h.recompute();
         Ok(())
+    }
+
+    /// Change the quantity and/or price of lot `n` (1-based, oldest first).
+    pub fn edit_lot(
+        &mut self,
+        symbol: &str,
+        n: usize,
+        qty: Option<f64>,
+        price: Option<f64>,
+    ) -> Result<Lot> {
+        if let Some(q) = qty
+            && !(q > EPS && q.is_finite())
+        {
+            bail!("Quantity must be positive (use --delete to drop the lot)");
+        }
+        if let Some(p) = price
+            && !(p >= 0.0 && p.is_finite())
+        {
+            bail!("Price can't be negative");
+        }
+        let sym = symbol.to_uppercase();
+        let Some(h) = self.holding_mut(&sym) else {
+            bail!("{} is not in this portfolio", sym);
+        };
+        let count = h.lots.len();
+        let lot = n
+            .checked_sub(1)
+            .and_then(|i| h.lots.get_mut(i))
+            .with_context(|| format!("{} has no lot #{} (it has {})", sym, n, count))?;
+        if let Some(q) = qty {
+            lot.qty = q;
+        }
+        if let Some(p) = price {
+            lot.price = p;
+        }
+        let edited = lot.clone();
+        h.recompute();
+        Ok(edited)
+    }
+
+    /// Delete lot `n` (1-based, oldest first) without recording a sale.
+    /// The holding goes when its last lot does.
+    pub fn delete_lot(&mut self, symbol: &str, n: usize) -> Result<Lot> {
+        let sym = symbol.to_uppercase();
+        let Some(h) = self.holding_mut(&sym) else {
+            bail!("{} is not in this portfolio", sym);
+        };
+        let count = h.lots.len();
+        if n == 0 || n > count {
+            bail!("{} has no lot #{} (it has {})", sym, n, count);
+        }
+        let lot = h.lots.remove(n - 1);
+        h.recompute();
+        if h.lots.is_empty() {
+            self.holdings.retain(|h| h.symbol != sym);
+        }
+        Ok(lot)
+    }
+
+    /// The sales of `symbol`, in the order recorded (numbered from 1 in
+    /// `portfolio lots`).
+    pub fn sales_of(&self, symbol: &str) -> Vec<&Sale> {
+        let sym = symbol.to_uppercase();
+        self.realized.iter().filter(|s| s.symbol == sym).collect()
+    }
+
+    /// Undo sale `n` of `symbol` (1-based, see [`Portfolio::sales_of`]): drop
+    /// it from the realised gains and put its shares back as the lot they
+    /// came from, merged into that lot when part of it is still held.
+    pub fn undo_sale(&mut self, symbol: &str, n: usize) -> Result<Sale> {
+        let sym = symbol.to_uppercase();
+        let positions: Vec<usize> = self
+            .realized
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.symbol == sym)
+            .map(|(i, _)| i)
+            .collect();
+        let idx = n
+            .checked_sub(1)
+            .and_then(|i| positions.get(i).copied())
+            .with_context(|| format!("{} has no sale #{} (it has {})", sym, n, positions.len()))?;
+        let sale = self.realized.remove(idx);
+        let mut lot = sale.to_lot();
+        // Splits the rest of the position took after this sale: on lots still
+        // held, and on the lots of later sales (which keep their split record).
+        let known: Vec<String> = self
+            .holding(&sym)
+            .into_iter()
+            .flat_map(|h| h.lots.iter().flat_map(|l| l.adjustments.iter().cloned()))
+            .chain(
+                self.realized
+                    .iter()
+                    .filter(|s| s.symbol == sym)
+                    .filter_map(|s| s.origin.as_ref())
+                    .flat_map(|o| o.adjustments.iter().cloned()),
+            )
+            .collect();
+        catch_up_splits(&mut lot, known);
+        match self.holding_mut(&sym) {
+            Some(h) => {
+                let same = h.lots.iter_mut().find(|l| {
+                    l.date == lot.date
+                        && l.date_estimated == lot.date_estimated
+                        && (l.price - lot.price).abs() < 1e-9
+                        && l.source == lot.source
+                        && l.account == lot.account
+                        && l.adjustments == lot.adjustments
+                        && l.units_as_of == lot.units_as_of
+                        && l.order_id == lot.order_id
+                });
+                match same {
+                    Some(l) => l.qty += lot.qty,
+                    None => h.lots.push(lot),
+                }
+                h.recompute();
+            }
+            None => self.holdings.push(Holding::new(sym, vec![lot])),
+        }
+        Ok(sale)
     }
 
     pub fn remove(&mut self, symbol: &str) -> bool {
@@ -2054,6 +2286,85 @@ pub fn list_names() -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// `<file>.<n>`: the `n`th newest earlier version of a portfolio file.
+pub fn numbered_backup(path: &Path, n: usize) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(format!(".{n}"));
+    PathBuf::from(s)
+}
+
+/// The backups of `path` that exist, newest first, with their numbers.
+pub fn backups_of(path: &Path) -> Vec<(usize, PathBuf)> {
+    (1..=BACKUPS_KEPT)
+        .map(|n| (n, numbered_backup(path, n)))
+        .filter(|(_, p)| p.exists())
+        .collect()
+}
+
+/// Shift `<file>.1..4` up by one (dropping `.5`) and put a copy of `path`
+/// at `.1`. The copy is staged first, so a failed copy leaves the numbered
+/// history untouched and a retry does not push another version out.
+#[cfg(test)]
+fn rotate_backups(path: &Path) -> Result<()> {
+    rotate_backups_with(path, &|a: &Path, b: &Path| std::fs::rename(a, b))
+}
+
+fn rotate_backups_with(
+    path: &Path,
+    rename: &impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".1.tmp");
+    let staged = PathBuf::from(staged);
+    std::fs::copy(path, &staged)
+        .with_context(|| format!("Cannot back up {} to {}", path.display(), staged.display()))?;
+    // Shift only up to the first free number: with `.1..=.5` all present the
+    // oldest is dropped, but after a rotation that stopped half-way the gap
+    // it left absorbs the shift, so a retry drops nothing more.
+    let gap = (1..=BACKUPS_KEPT)
+        .find(|&n| !numbered_backup(path, n).exists())
+        .unwrap_or(BACKUPS_KEPT);
+    for n in (1..gap).rev() {
+        let from = numbered_backup(path, n);
+        rename(&from, &numbered_backup(path, n + 1))
+            .with_context(|| format!("Cannot rotate backup {}", from.display()))?;
+    }
+    let first = numbered_backup(path, 1);
+    rename(&staged, &first)
+        .with_context(|| format!("Cannot move the backup to {}", first.display()))?;
+    Ok(())
+}
+
+/// A split recorded on another lot of the same holding (an `adjustments`
+/// id, `DATE:NUM:DEN`) that falls after `lot`'s share count and that `lot`
+/// has not taken yet is applied to it, so a lot put back by an undone sale
+/// is in the same share count as the lots still held.
+fn catch_up_splits(lot: &mut Lot, mut ids: Vec<String>) {
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let mut parts = id.splitn(3, ':');
+        let (Some(date), Some(num), Some(den)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(num), Ok(den)) = (num.parse::<f64>(), den.parse::<f64>()) else {
+            continue;
+        };
+        let split = Split {
+            date: date.to_string(),
+            numerator: num,
+            denominator: den,
+            bonus: None,
+        };
+        let r = split.ratio();
+        if r.is_finite() && r > 0.0 && split.pending_for(lot) {
+            lot.qty *= r;
+            lot.price /= r;
+            lot.adjustments.push(id);
+        }
+    }
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".bak");
@@ -2218,6 +2529,7 @@ mod tests {
             order_id: None,
             intraday: false,
             account: None,
+            origin: None,
             bonuses: Vec::new(),
             bonus_shares: false,
         });
@@ -4114,5 +4426,365 @@ mod tests {
         let empty_json = serde_json::to_string(&old).unwrap();
         assert!(!empty_json.contains("targets"));
         assert!(!empty_json.contains("drift_tolerance"));
+    }
+
+    #[test]
+    fn edit_lot_changes_qty_and_price_and_refreshes_the_average() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", Lot::new(10.0, 3000.0, "2024-01-01", "manual"));
+        p.add_lot("TCS.NS", Lot::new(5.0, 3600.0, "2024-06-01", "manual"));
+        p.edit_lot("TCS.NS", 2, Some(10.0), Some(3300.0)).unwrap();
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.shares, 20.0);
+        assert!((h.avg_cost - 3150.0).abs() < 1e-9);
+        assert!(p.edit_lot("TCS.NS", 1, Some(0.0), None).is_err());
+        assert!(p.edit_lot("TCS.NS", 1, None, Some(-1.0)).is_err());
+        assert!(p.edit_lot("TCS.NS", 3, Some(1.0), None).is_err());
+    }
+
+    #[test]
+    fn delete_lot_drops_one_lot_and_the_holding_with_the_last() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", Lot::new(10.0, 1500.0, "2024-01-01", "manual"));
+        p.add_lot("INFY.NS", Lot::new(10.0, 1500.0, "2024-01-01", "manual"));
+        assert_eq!(p.holding("INFY.NS").unwrap().lots.len(), 2);
+        p.delete_lot("INFY.NS", 1).unwrap();
+        assert_eq!(p.holding("INFY.NS").unwrap().shares, 10.0);
+        assert!(p.delete_lot("INFY.NS", 2).is_err());
+        p.delete_lot("INFY.NS", 1).unwrap();
+        assert!(p.holding("INFY.NS").is_none());
+        assert!(p.realized.is_empty(), "deleting is not a sale");
+    }
+
+    #[test]
+    fn undo_sale_restores_the_exact_lot() {
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(100.0, 1000.0, "2023-05-01", "import:kite");
+        lot.adjustments.push("2024-01-01:2:1".into());
+        lot.order_id = Some("A1".into());
+        p.add_lot("RELIANCE.NS", lot.clone());
+        let before = p.holding("RELIANCE.NS").unwrap().lots.clone();
+
+        p.sell_fifo("RELIANCE.NS", 100.0, 1200.0, "2025-01-10", "manual")
+            .unwrap();
+        assert!(p.holding("RELIANCE.NS").is_none());
+        let sale = p.undo_sale("RELIANCE.NS", 1).unwrap();
+        assert_eq!(sale.qty, 100.0);
+        assert!(p.realized.is_empty());
+        assert_eq!(p.holding("RELIANCE.NS").unwrap().lots, before);
+        // The restored lot keeps its split record, so it is not split again.
+        let split = Split {
+            date: "2024-01-01".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+            bonus: None,
+        };
+        assert_eq!(p.apply_split("RELIANCE.NS", &split), 0);
+    }
+
+    #[test]
+    fn undo_sale_merges_into_the_rest_of_its_lot() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", Lot::new(100.0, 400.0, "2023-01-01", "manual"));
+        p.add_lot("ITC.NS", Lot::new(50.0, 450.0, "2024-01-01", "manual"));
+        p.sell_fifo("ITC.NS", 30.0, 480.0, "2025-02-01", "manual")
+            .unwrap();
+        p.sell_fifo("ITC.NS", 10.0, 490.0, "2025-03-01", "manual")
+            .unwrap();
+        assert_eq!(p.sales_of("ITC.NS").len(), 2);
+        // Undo the first sale only; the second stays.
+        p.undo_sale("itc.ns", 1).unwrap();
+        let h = p.holding("ITC.NS").unwrap();
+        assert_eq!(h.lots.len(), 2);
+        assert_eq!(h.lots[0].qty, 90.0);
+        assert_eq!(p.sales_of("ITC.NS").len(), 1);
+        assert_eq!(p.realized[0].sell_date, "2025-03-01");
+        assert!(p.undo_sale("ITC.NS", 2).is_err());
+    }
+
+    #[test]
+    fn undoing_an_older_sale_only_takes_splits_after_it() {
+        let mut p = Portfolio::default();
+        let mut old = Sale::from_lot(
+            "TCS.NS",
+            &Lot::new(10.0, 3000.0, "2020-01-01", "manual"),
+            10.0,
+            "2023-01-01",
+            3500.0,
+            "manual",
+        );
+        old.origin = None;
+        p.realized.push(old);
+        p.undo_sale("TCS.NS", 1).unwrap();
+        let lot = &p.holding("TCS.NS").unwrap().lots[0];
+        assert_eq!(lot.units_as_of.as_deref(), Some("2023-01-01"));
+        let before = Split {
+            date: "2022-01-01".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+            bonus: None,
+        };
+        assert_eq!(p.apply_split("TCS.NS", &before), 0);
+    }
+
+    #[test]
+    fn saves_keep_five_backups_and_restore_brings_one_back() {
+        let dir = temp_dir("backups");
+        let path = dir.join("portfolio.json");
+        let mut p = Portfolio::default();
+        for i in 1..=7 {
+            p.add_lot(
+                "TCS.NS",
+                Lot::new(1.0, 100.0 * i as f64, "2024-01-01", "manual"),
+            );
+            p.save_to(&path).unwrap();
+        }
+        // 7 saves: the first wrote the file, the next 6 each kept one; only 5 stay.
+        assert_eq!(backups_of(&path).len(), BACKUPS_KEPT);
+        assert!(!numbered_backup(&path, 6).exists());
+        let one = Portfolio::load_from(&numbered_backup(&path, 1)).unwrap();
+        assert_eq!(one.holding("TCS.NS").unwrap().lots.len(), 6);
+
+        // A save that changes nothing rotates nothing.
+        let newest = std::fs::read(numbered_backup(&path, 1)).unwrap();
+        p.save_to(&path).unwrap();
+        assert_eq!(std::fs::read(numbered_backup(&path, 1)).unwrap(), newest);
+
+        let restored = Portfolio::restore_backup(&path, 1).unwrap();
+        assert_eq!(restored.holding("TCS.NS").unwrap().lots.len(), 6);
+        let now = Portfolio::load_from(&path).unwrap();
+        assert_eq!(now.holding("TCS.NS").unwrap().lots.len(), 6);
+        // The replaced version became backup 1, so the restore can be undone.
+        let undo = Portfolio::load_from(&numbered_backup(&path, 1)).unwrap();
+        assert_eq!(undo.holding("TCS.NS").unwrap().lots.len(), 7);
+        assert!(Portfolio::restore_backup(&path, 6).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_sale_catches_up_a_split_after_the_sale() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", Lot::new(10.0, 1000.0, "2023-01-01", "manual"));
+        p.sell_fifo("INFY.NS", 4.0, 1200.0, "2024-01-01", "manual")
+            .unwrap();
+        let split = Split {
+            date: "2024-06-01".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+            bonus: None,
+        };
+        assert_eq!(p.apply_split("INFY.NS", &split), 1);
+        p.undo_sale("INFY.NS", 1).unwrap();
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!(h.shares, 20.0);
+        assert!((h.cost_basis() - 10_000.0).abs() < 1e-6);
+        assert_eq!(p.apply_split("INFY.NS", &split), 0);
+    }
+
+    #[test]
+    fn undoing_a_legacy_sale_keeps_the_account_its_source_names() {
+        let mut p = Portfolio::default();
+        let mut sale = Sale::from_lot(
+            "TCS.NS",
+            &Lot::new(5.0, 3000.0, "2022-01-01", "import:kite"),
+            5.0,
+            "2023-01-01",
+            3500.0,
+            "import:kite",
+        );
+        sale.origin = None;
+        sale.account = None;
+        p.realized.push(sale);
+        p.undo_sale("TCS.NS", 1).unwrap();
+        let lot = &p.holding("TCS.NS").unwrap().lots[0];
+        assert_eq!(lot.account_key(), Some("zerodha"));
+    }
+
+    #[test]
+    fn a_failed_backup_copy_leaves_the_history_alone() {
+        let dir = temp_dir("backup-fail");
+        let path = dir.join("portfolio.json");
+        std::fs::write(numbered_backup(&path, 1), "one").unwrap();
+        // No portfolio file: the copy fails before anything is renamed.
+        assert!(rotate_backups(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(numbered_backup(&path, 1)).unwrap(),
+            "one"
+        );
+        assert!(!numbered_backup(&path, 2).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rotation_retried_after_a_partial_failure_loses_no_version() {
+        let dir = temp_dir("backup-partial");
+        let path = dir.join("portfolio.json");
+        std::fs::write(&path, "now").unwrap();
+        // A rotation that moved .4 to .5 and then failed: .4 is missing.
+        for (n, body) in [(1, "v1"), (2, "v2"), (3, "v3"), (5, "v4")] {
+            std::fs::write(numbered_backup(&path, n), body).unwrap();
+        }
+        rotate_backups(&path).unwrap();
+        let read = |n| std::fs::read_to_string(numbered_backup(&path, n)).unwrap();
+        assert_eq!(
+            [read(1), read(2), read(3), read(4), read(5)],
+            ["now", "v1", "v2", "v3", "v4"]
+        );
+        // With every slot full, the oldest goes.
+        std::fs::write(&path, "next").unwrap();
+        rotate_backups(&path).unwrap();
+        assert_eq!(read(1), "next");
+        assert_eq!(read(5), "v3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_a_backup_never_writes_it() {
+        let dir = temp_dir("backup-readonly");
+        let path = dir.join("portfolio.json.1");
+        // An old-format file that `load_from` would upgrade in place.
+        let old = r#"{"holdings":[{"symbol":"TCS.NS","shares":5.0,"avg_cost":3000.0}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let p = Portfolio::read_only(&path).unwrap();
+        assert_eq!(p.holding("TCS.NS").unwrap().shares, 5.0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_sale_finds_a_split_on_a_later_sale_when_the_lot_is_gone() {
+        let mut p = Portfolio::default();
+        p.add_lot("INFY.NS", Lot::new(10.0, 1000.0, "2023-01-01", "manual"));
+        p.sell_fifo("INFY.NS", 4.0, 1200.0, "2024-01-01", "manual")
+            .unwrap();
+        let split = Split {
+            date: "2024-06-01".into(),
+            numerator: 2.0,
+            denominator: 1.0,
+            bonus: None,
+        };
+        p.apply_split("INFY.NS", &split);
+        p.sell_fifo("INFY.NS", 12.0, 700.0, "2024-08-01", "manual")
+            .unwrap();
+        p.add_lot("INFY.NS", Lot::new(5.0, 800.0, "2024-09-01", "manual"));
+        p.undo_sale("INFY.NS", 1).unwrap();
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!(h.shares, 13.0);
+        let restored = h.lots.iter().find(|l| l.date == "2023-01-01").unwrap();
+        assert_eq!(restored.qty, 8.0);
+        assert!((restored.price - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_save_retried_after_a_failed_write_does_not_rotate_again() {
+        let dir = temp_dir("backup-retry");
+        let path = dir.join("portfolio.json");
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        p.save_to(&path).unwrap();
+        for n in 2..=BACKUPS_KEPT {
+            std::fs::write(numbered_backup(&path, n), format!("v{n}")).unwrap();
+        }
+        // The state a save leaves when rotation succeeded and the write failed:
+        // backup 1 is a copy of the unchanged current file.
+        std::fs::copy(&path, numbered_backup(&path, 1)).unwrap();
+        p.add_lot("INFY.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        p.save_to(&path).unwrap();
+        for n in 2..=BACKUPS_KEPT {
+            let body = std::fs::read_to_string(numbered_backup(&path, n)).unwrap();
+            assert_eq!(body, format!("v{n}"), "backup {n} moved");
+        }
+        assert!(
+            Portfolio::read_only(&path)
+                .unwrap()
+                .holding("INFY.NS")
+                .is_some()
+        );
+        let one = Portfolio::read_only(&numbered_backup(&path, 1)).unwrap();
+        assert!(one.holding("INFY.NS").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A portfolio file plus backups `.1..=.5` holding `v1`..`v5`.
+    fn full_history(name: &str) -> (PathBuf, PathBuf, Portfolio) {
+        let dir = temp_dir(name);
+        let path = dir.join("portfolio.json");
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        crate::store::save_to(&path, &p, false).unwrap();
+        for n in 1..=BACKUPS_KEPT {
+            std::fs::write(numbered_backup(&path, n), format!("v{n}")).unwrap();
+        }
+        (dir, path, p)
+    }
+
+    fn history(path: &Path) -> Vec<String> {
+        (1..=BACKUPS_KEPT)
+            .map(|n| std::fs::read_to_string(numbered_backup(path, n)).unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_portfolio_write_then_retry_drops_one_version_only() {
+        let (dir, path, mut p) = full_history("inject-write");
+        let current = std::fs::read_to_string(&path).unwrap();
+        p.add_lot("INFY.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        let failed = p.save_with(
+            &path,
+            |a: &Path, b: &Path| std::fs::rename(a, b),
+            |_: &Path| anyhow::bail!("disk full"),
+        );
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        let after_failure = history(&path);
+        assert_eq!(
+            after_failure,
+            [
+                current.clone(),
+                "v1".into(),
+                "v2".into(),
+                "v3".into(),
+                "v4".into()
+            ]
+        );
+        // Retry for real: the history stays as the failed save left it.
+        p.save_to(&path).unwrap();
+        assert_eq!(history(&path), after_failure);
+        assert!(
+            Portfolio::read_only(&path)
+                .unwrap()
+                .holding("INFY.NS")
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_rename_then_retry_drops_one_version_only() {
+        let (dir, path, mut p) = full_history("inject-rename");
+        let current = std::fs::read_to_string(&path).unwrap();
+        p.add_lot("INFY.NS", Lot::new(1.0, 100.0, "2024-01-01", "manual"));
+        // Fail the third rename (.2 -> .3), after .4 -> .5 and .3 -> .4 moved.
+        let calls = std::cell::Cell::new(0);
+        let flaky = |from: &Path, to: &Path| -> std::io::Result<()> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                Err(std::io::Error::other("injected"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        };
+        assert!(
+            p.save_with(&path, flaky, |_: &Path| unreachable!())
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        p.save_to(&path).unwrap();
+        assert_eq!(
+            history(&path),
+            [current, "v1".into(), "v2".into(), "v3".into(), "v4".into()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

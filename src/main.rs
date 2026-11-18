@@ -1315,15 +1315,33 @@ enum PortfolioCmd {
         #[arg(long, alias = "dry-run")]
         preview: bool,
     },
-    /// A holding's lots, sales and dividends; --lot N --date fixes a purchase date
+    /// A holding's lots, sales and dividends; --lot N fixes or deletes a lot, --undo-sale N puts a sale back
+    #[command(group(clap::ArgGroup::new("lot_change").multiple(true)))]
     Lots {
         symbol: String,
-        /// Lot number (from the list) whose purchase date to correct
-        #[arg(long, requires = "date")]
+        /// Lot number (from the list) to change with --date, --qty, --price or --delete
+        #[arg(long, requires = "lot_change")]
         lot: Option<usize>,
         /// Correct purchase date for --lot, YYYY-MM-DD
-        #[arg(long, requires = "lot")]
+        #[arg(long, requires = "lot", group = "lot_change")]
         date: Option<String>,
+        /// Correct quantity for --lot
+        #[arg(long, requires = "lot", group = "lot_change")]
+        qty: Option<f64>,
+        /// Correct price per share for --lot
+        #[arg(long, requires = "lot", group = "lot_change")]
+        price: Option<f64>,
+        /// Delete --lot without recording a sale
+        #[arg(
+            long,
+            requires = "lot",
+            group = "lot_change",
+            conflicts_with_all = ["date", "qty", "price"]
+        )]
+        delete: bool,
+        /// Undo sale N (from the list): drop it from realised gains and put the shares back as their lot
+        #[arg(long, value_name = "N", conflicts_with = "lot")]
+        undo_sale: Option<usize>,
     },
     /// Splits, bonuses and dividends since you bought; --apply records them
     Actions {
@@ -1335,7 +1353,19 @@ enum PortfolioCmd {
     },
     /// Remove a holding and its lots without recording a sale
     #[command(alias = "rm")]
-    Remove { symbol: String },
+    Remove {
+        symbol: String,
+        /// Don't ask, even when the holding has more than one lot
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// List the last 5 saved versions of the portfolio, or bring version N back
+    Restore {
+        /// Backup to restore (1 = the version before the last change)
+        n: Option<usize>,
+        #[command(flatten)]
+        out: TableOutput,
+    },
     /// Show holdings with live P&L and XIRR
     Show {
         #[command(flatten)]
@@ -4861,14 +4891,33 @@ async fn dispatch(
                 date,
                 ..
             }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
-            Some(PortfolioCmd::Lots { symbol, lot, date }) => {
-                commands::cmd_portfolio_lots(&symbol, lot, date.as_deref(), m).await
+            Some(PortfolioCmd::Lots {
+                symbol,
+                lot,
+                date,
+                qty,
+                price,
+                delete,
+                undo_sale,
+            }) => {
+                let change = commands::LotChange {
+                    lot,
+                    date,
+                    qty,
+                    price,
+                    delete,
+                    undo_sale,
+                };
+                commands::cmd_portfolio_lots(&symbol, change, m).await
             }
             Some(PortfolioCmd::Actions { symbol, apply }) => {
                 commands::cmd_portfolio_actions(symbol.as_deref(), apply, m).await
             }
-            Some(PortfolioCmd::Remove { symbol }) => {
-                commands::cmd_portfolio_remove(&symbol, m).await
+            Some(PortfolioCmd::Remove { symbol, yes }) => {
+                commands::cmd_portfolio_remove(&symbol, yes, m).await
+            }
+            Some(PortfolioCmd::Restore { n, out }) => {
+                commands::cmd_portfolio_restore(n, out.into())
             }
             Some(PortfolioCmd::List) => commands::cmd_portfolio_list(),
             Some(PortfolioCmd::Benchmark {
@@ -6409,6 +6458,45 @@ mod tests {
                 "--date",
                 "2022-01-03",
             ],
+            vec![
+                "stockwise",
+                "portfolio",
+                "lots",
+                "TCS",
+                "--lot",
+                "2",
+                "--qty",
+                "10",
+                "--price",
+                "3400",
+            ],
+            vec![
+                "stockwise",
+                "portfolio",
+                "lots",
+                "TCS",
+                "--lot",
+                "1",
+                "--date",
+                "2022-01-03",
+                "--qty",
+                "4",
+            ],
+            vec![
+                "stockwise",
+                "portfolio",
+                "lots",
+                "TCS",
+                "--lot",
+                "3",
+                "--delete",
+            ],
+            vec!["stockwise", "portfolio", "lots", "TCS", "--undo-sale", "1"],
+            vec!["stockwise", "portfolio", "remove", "TCS", "--yes"],
+            vec!["stockwise", "portfolio", "restore"],
+            vec!["stockwise", "portfolio", "restore", "2"],
+            vec!["stockwise", "portfolio", "restore", "--json"],
+            vec!["stockwise", "portfolio", "restore", "--csv"],
             vec!["stockwise", "portfolio", "actions"],
             vec!["stockwise", "portfolio", "actions", "RELIANCE", "--apply"],
             vec!["stockwise", "portfolio", "list"],
@@ -6423,10 +6511,40 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} should parse");
         }
-        // --lot and --date only make sense together.
-        assert!(
-            Cli::try_parse_from(["stockwise", "portfolio", "lots", "TCS", "--lot", "1"]).is_err()
-        );
+        // --lot needs a change, a change needs --lot, and --delete changes nothing else.
+        for bad in [
+            vec!["stockwise", "portfolio", "lots", "TCS", "--lot", "1"],
+            vec!["stockwise", "portfolio", "lots", "TCS", "--qty", "5"],
+            vec!["stockwise", "portfolio", "lots", "TCS", "--delete"],
+            vec![
+                "stockwise",
+                "portfolio",
+                "lots",
+                "TCS",
+                "--lot",
+                "1",
+                "--delete",
+                "--qty",
+                "2",
+            ],
+            vec![
+                "stockwise",
+                "portfolio",
+                "lots",
+                "TCS",
+                "--lot",
+                "1",
+                "--qty",
+                "2",
+                "--undo-sale",
+                "1",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(&bad).is_err(),
+                "{bad:?} should not parse"
+            );
+        }
         assert!(Cli::try_parse_from(["stockwise", "portfolio", "--base", "eur"]).is_ok());
         assert!(Cli::try_parse_from(["stockwise", "portfolio", "--base", "euro"]).is_err());
         assert!(Cli::try_parse_from(["stockwise", "--portfolio", "../x", "portfolio"]).is_err());

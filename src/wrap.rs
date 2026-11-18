@@ -845,6 +845,7 @@ mod tests {
             account: None,
             bonuses: Vec::new(),
             bonus_shares: false,
+            origin: None,
         });
         p.dividends.push(DividendReceived {
             symbol: "AAA.NS".into(),
@@ -887,6 +888,7 @@ mod tests {
             account: None,
             bonuses: Vec::new(),
             bonus_shares: false,
+            origin: None,
         });
         assert_eq!(recorded_splits(&p, "AAA.NS").len(), 1);
         // Before the sale: 10 then = 20 in today's count.
@@ -941,6 +943,7 @@ mod tests {
             account: None,
             bonuses: vec!["bonus:2026-04-01:2:1".into()],
             bonus_shares: false,
+            origin: None,
         });
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 200.0);
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-02")), 200.0);
@@ -965,6 +968,7 @@ mod tests {
                 account: None,
                 bonuses,
                 bonus_shares,
+                origin: None,
             };
         let mut p = Portfolio::default();
         p.realized.push(sale(
@@ -1014,6 +1018,7 @@ mod tests {
             account: None,
             bonuses: Vec::new(),
             bonus_shares: true,
+            origin: None,
         });
         assert_eq!(bonus_events(&p, "AAA.NS"), [d("2026-04-01")]);
         // The sold bonus shares count from 1 Apr despite the 2 Apr split:

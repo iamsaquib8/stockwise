@@ -978,6 +978,7 @@ fn goal_and_tax_export_json_shapes() {
         order_id: None,
         intraday: false,
         account: None,
+        origin: None,
         bonuses: Vec::new(),
         bonus_shares: false,
     };

@@ -460,7 +460,7 @@ const CRYPTO_QUOTES: &[&str] = &["USD", "INR", "EUR", "GBP", "JPY", "USDT", "BTC
 impl AssetClass {
     pub fn of(symbol: &str) -> Self {
         let upper = symbol.trim().to_ascii_uppercase();
-        if upper.starts_with('^') {
+        if upper.starts_with('^') || upper == DOLLAR_INDEX {
             return AssetClass::Index;
         }
         if upper.ends_with("=X") {
@@ -662,7 +662,10 @@ fn resolve_symbol_in(symbol: &str, market: Market, crypto_quote: &str) -> String
                 .join("-")
         }
         Market::Crypto => format!("{}-{}", upper, crypto_quote),
-        Market::Fx if upper.contains('=') || upper.starts_with('^') => upper,
+        // Yahoo lists the US dollar index as `DX-Y.NYB`, not `DXY=X`.
+        Market::Fx if matches!(upper.as_str(), "DXY" | "USDX") => DOLLAR_INDEX.to_string(),
+        // `^…`, `…=X` and dotted symbols (`DX-Y.NYB`) are already Yahoo symbols.
+        Market::Fx if upper.contains(['=', '.']) || upper.starts_with('^') => upper,
         Market::Fx => {
             let pair: String = upper
                 .chars()
@@ -1330,7 +1333,18 @@ pub const FX_MAJORS: &[(&str, &str)] = &[
     ("EURUSD=X", "EUR/USD"),
     ("GBPUSD=X", "GBP/USD"),
     ("USDJPY=X", "USD/JPY"),
+    // Remittance corridors for Indians abroad (Gulf, Singapore, Japan,
+    // Australia, Canada, Switzerland).
+    ("AEDINR=X", "AED/INR"),
+    ("SGDINR=X", "SGD/INR"),
+    ("JPYINR=X", "JPY/INR"),
+    ("AUDINR=X", "AUD/INR"),
+    ("CADINR=X", "CAD/INR"),
+    ("CHFINR=X", "CHF/INR"),
 ];
+
+/// Yahoo symbol of the ICE US dollar index (`DXY`).
+pub const DOLLAR_INDEX: &str = "DX-Y.NYB";
 
 /// Gold and silver for `-m commodity`: COMEX futures (USD per troy ounce)
 /// and NSE-listed ETFs (₹ per unit).
@@ -2204,6 +2218,24 @@ mod tests {
         assert_eq!(resolve_symbol_in("eur-usd", Market::Fx, "USD"), "EURUSD=X");
         assert_eq!(resolve_symbol_in("USDINR=X", Market::Fx, "USD"), "USDINR=X");
         assert_eq!(resolve_symbol_in("INR", Market::Fx, "USD"), "INR=X");
+        assert_eq!(resolve_symbol_in("EUR/USD", Market::Fx, "USD"), "EURUSD=X");
+    }
+
+    #[test]
+    fn fx_maps_the_dollar_index() {
+        assert_eq!(resolve_symbol_in("DXY", Market::Fx, "USD"), "DX-Y.NYB");
+        assert_eq!(resolve_symbol_in("usdx", Market::Fx, "USD"), "DX-Y.NYB");
+        assert_eq!(resolve_symbol_in("dx-y.nyb", Market::Fx, "USD"), "DX-Y.NYB");
+        assert_eq!(AssetClass::of("DX-Y.NYB"), AssetClass::Index);
+    }
+
+    #[test]
+    fn fx_majors_include_nri_corridors() {
+        for pair in [
+            "AEDINR=X", "SGDINR=X", "JPYINR=X", "AUDINR=X", "CADINR=X", "CHFINR=X",
+        ] {
+            assert!(FX_MAJORS.iter().any(|(s, _)| *s == pair), "{pair}");
+        }
     }
 
     #[test]
