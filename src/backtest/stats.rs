@@ -207,7 +207,8 @@ pub struct SharpeTest {
     pub probabilistic_sharpe: f64,
     /// P(true Sharpe > what the best of `trials` random variants would show).
     pub deflated_sharpe: f64,
-    /// Parameter sets tried (the strategy's `[grid]`; 1 without one).
+    /// Parameter sets tried: the `[grid]` combinations, plus the reported
+    /// parameters when they are not one of them (1 without a grid).
     pub trials: usize,
     /// Annualised Sharpe that luck alone would give the best trial.
     pub expected_max_sharpe: f64,
@@ -216,8 +217,10 @@ pub struct SharpeTest {
     pub observations: usize,
 }
 
-/// PSR and DSR for `curve`, where `trial_sharpes` are the per-period Sharpe
-/// ratios of every parameter set tried (including the one reported).
+/// PSR and DSR for `curve`, where `trial_sharpes` holds one per-period
+/// Sharpe ratio for every parameter set tried, the reported one included
+/// (see [`trial_sharpe`]). With fewer than two trials, or no spread between
+/// them, nothing is deflated and the DSR equals the PSR.
 pub fn sharpe_test(
     curve: &[f64],
     trial_sharpes: &[f64],
@@ -246,12 +249,24 @@ pub fn curve(r: &SimResult) -> Vec<f64> {
     c
 }
 
+/// One trial's per-period Sharpe ratio. A curve with no variation (a
+/// parameter set that never traded) earned nothing over cash: 0. It still
+/// counts as a trial.
+pub fn trial_sharpe(curve: &[f64]) -> f64 {
+    moments(curve).map_or(0.0, |m| m.sharpe)
+}
+
 /// Per-period Sharpe ratio of every parameter set in the strategy's grid,
-/// each run over the same bars with the same settings. These are the trials
-/// the Deflated Sharpe Ratio corrects for.
+/// plus its current parameters when the grid does not contain them, each
+/// run over the same bars with the same settings. These are the trials the
+/// Deflated Sharpe Ratio corrects for; there is one per parameter set.
 pub fn grid_trials(def: &StrategyDef, data: &[(&str, &Bars)], cfg: &SimConfig) -> Result<Vec<f64>> {
-    let mut out = Vec::new();
-    for combo in def.grid_combos() {
+    let mut combos = def.grid_combos();
+    if !combos.contains(&def.params) {
+        combos.push(def.params.clone());
+    }
+    let mut out = Vec::with_capacity(combos.len());
+    for combo in combos {
         let s = def.compile_with(&combo)?;
         let signals = data
             .iter()
@@ -272,9 +287,7 @@ pub fn grid_trials(def: &StrategyDef, data: &[(&str, &Bars)], cfg: &SimConfig) -
             execution: s.execution.clone(),
             ..cfg.clone()
         };
-        if let Some(m) = moments(&curve(&engine::simulate(&assets, &c))) {
-            out.push(m.sharpe);
-        }
+        out.push(trial_sharpe(&curve(&engine::simulate(&assets, &c))));
     }
     Ok(out)
 }
@@ -372,6 +385,38 @@ mod tests {
         assert_eq!(m.n, 4);
         assert!(moments(&[100.0, 100.0, 100.0, 100.0]).is_none());
         assert!(moments(&[100.0, 101.0]).is_none());
+    }
+
+    #[test]
+    fn every_attempted_combination_is_a_trial() {
+        let def = crate::backtest::rules::StrategyDef::parse(
+            "entry = \"close > $level\"\nexit = \"close < 50\"\n\
+             [params]\nlevel = 5\n[grid]\nlevel = [10, 1000]",
+            "t",
+            "t.toml",
+        )
+        .unwrap();
+        let closes: Vec<f64> = (0..60)
+            .map(|i| 100.0 + (i as f64 * 0.5).sin() * 5.0)
+            .collect();
+        let bars = Bars::from_closes(&closes);
+        let cfg = SimConfig::single(
+            10_000.0,
+            engine::Fill::NextOpen,
+            crate::backtest::costs::CostModel::none(),
+        );
+        // level = 1000 never trades but counts (Sharpe 0), and the default
+        // level = 5 is outside the grid, so it is added: three trials.
+        let t = grid_trials(&def, &[("X", &bars)], &cfg).unwrap();
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[1], 0.0);
+        assert!(t[0] != 0.0 && t[2] != 0.0);
+        // Defaults inside the grid are not counted twice.
+        let pinned = def.with_params(&[("level".into(), 10.0)]).unwrap();
+        assert_eq!(
+            grid_trials(&pinned, &[("X", &bars)], &cfg).unwrap().len(),
+            1
+        );
     }
 
     #[test]

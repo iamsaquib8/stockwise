@@ -364,16 +364,17 @@ pub fn run(
     );
 
     // Each parameter set over the whole history: the trials behind the DSR.
+    // Every candidate counts, including one that never trades.
     let trial_sharpes: Vec<f64> = candidates
         .iter()
-        .filter_map(|(strategy, signals)| {
+        .map(|(strategy, signals)| {
             let c = SimConfig {
                 stop_loss_pct: strategy.stop_loss_pct,
                 take_profit_pct: strategy.take_profit_pct,
                 execution: strategy.execution.clone(),
                 ..cfg.clone()
             };
-            stats::moments(&stats::curve(&sim(symbol, bars, signals, &c))).map(|m| m.sharpe)
+            stats::trial_sharpe(&stats::curve(&sim(symbol, bars, signals, &c)))
         })
         .collect();
     let mut oos_curve = vec![cfg.capital];

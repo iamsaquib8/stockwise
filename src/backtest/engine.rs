@@ -1089,6 +1089,18 @@ pub fn simulate(assets: &[Asset], cfg: &SimConfig) -> SimResult {
                 let s = &mut sim.sleeves[k];
                 s.last_close = Some(assets[k].bars.close[bar]);
                 s.cursor += 1;
+                // This symbol has no more bars: close the position at its
+                // last close, so borrow fees, tax and the exit date all stop
+                // there, even if other symbols trade on.
+                if s.cursor == assets[k].bars.len() && s.pos.is_some() {
+                    sim.exit(
+                        k,
+                        bar,
+                        assets[k].bars.close[bar],
+                        None,
+                        ExitReason::EndOfData,
+                    );
+                }
             }
         }
         let (mut eq, mut inv) = (0.0, 0.0);
@@ -1106,19 +1118,6 @@ pub fn simulate(assets: &[Asset], cfg: &SimConfig) -> SimResult {
         invested.push(inv);
     }
 
-    // Close whatever is still open at each symbol's last close.
-    for k in 0..n {
-        if sim.sleeves[k].pos.is_some() {
-            let last = assets[k].bars.len() - 1;
-            sim.exit(
-                k,
-                last,
-                assets[k].bars.close[last],
-                None,
-                ExitReason::EndOfData,
-            );
-        }
-    }
     if let Some(e) = equity.last_mut() {
         *e = sim.sleeves.iter().map(|s| s.cash).sum();
         if let Some(i) = invested.last_mut() {
@@ -1740,6 +1739,39 @@ mod tests {
         let r = run(&b, &signals(400, &[0], &[]), &with(x, 10_000.0));
         let t = &r.trades[0];
         assert!((t.tax - t.net_pnl * 0.125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_symbol_that_ends_early_stops_paying_borrow_there() {
+        // A has three bars, B eight. A's short is closed at A's last close;
+        // borrow is charged for the two nights A traded, not after.
+        let a = bars(&[100.0; 3], &[100.0; 3]);
+        let b = bars(&[50.0; 8], &[50.0; 8]);
+        let (sa, sb) = (signals(3, &[0], &[]), signals(8, &[], &[]));
+        let assets = [
+            Asset {
+                symbol: "A",
+                bars: &a,
+                signals: &sa,
+            },
+            Asset {
+                symbol: "B",
+                bars: &b,
+                signals: &sb,
+            },
+        ];
+        let x = Execution {
+            direction: Direction::Short,
+            borrow_rate_pct: 36.5,
+            ..Execution::default()
+        };
+        let r = simulate(&assets, &with(x, 20_000.0));
+        let t = &r.trades[0];
+        assert_eq!(t.exit_date, date(a.time[2]));
+        // 100 shares × 100 × 0.1% for one night (bar 1 → bar 2).
+        assert!((r.costs.borrow - 10.0).abs() < 1e-9, "{}", r.costs.borrow);
+        assert!((t.costs - 10.0).abs() < 1e-9);
+        assert!(r.invested[3..].iter().all(|v| *v == 0.0));
     }
 
     #[test]

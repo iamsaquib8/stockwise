@@ -106,12 +106,14 @@ Every report shows the **net** return (after costs), the **gross** return
 | Win rate, avg win / loss | Per round trip, after costs |
 | Profit factor | Money made on winners ÷ money lost on losers, after costs |
 | Probabilistic Sharpe | The probability that the true Sharpe ratio is above 0, given the number of daily returns and their skewness and kurtosis (Bailey & López de Prado, 2012) |
-| Deflated Sharpe | The same probability against the Sharpe ratio that the best of N random parameter sets would show by luck, where N is the number of `[grid]` combinations (Bailey & López de Prado, 2014). With no grid, N is 1 and it equals the Probabilistic Sharpe |
+| Deflated Sharpe | The same probability against the Sharpe ratio that the best of N random parameter sets would show by luck, where N is the number of parameter sets tried (Bailey & López de Prado, 2014). With no grid, N is 1 and it equals the Probabilistic Sharpe |
 
 Both Sharpe probabilities describe this historical sample. They are not a
 forecast. The trials behind the Deflated Sharpe are every `[grid]`
-combination run over the same bars with the same costs; a parameter fixed
-with `-P` counts as one value. Trying ideas outside the grid (other
+combination, plus the reported parameters when they are not one of them,
+each run over the same bars with the same costs. A combination that never
+trades counts as a trial with a Sharpe ratio of 0. A parameter fixed with
+`-P` counts as one value. Trying ideas outside the grid (other
 strategies, other symbols) also inflates results, and the number cannot see
 those.
 
@@ -261,9 +263,9 @@ trailing_atr_mult = 3         # or: 3 × ATR below it (a Chandelier exit)
 atr_period = 14               # ATR length for trailing_atr_mult and atr-risk
 
 [position]
-side = "long"                 # or "short"
+side = "short"                # "long" (default) or "short"
 sizing = "atr-risk"           # "all-in" (default), "fixed-fraction" or "atr-risk"
-fraction_pct = 25             # fixed-fraction: share of the sleeve per entry
+# fraction_pct = 25           # fixed-fraction only: share of the sleeve per entry
 risk_pct = 1                  # atr-risk: share of the sleeve lost on an adverse move ...
 atr_mult = 2.5                # ... of atr_mult × ATR (default 2)
 fractional = true             # buy fractions of a share, down to 0.000001

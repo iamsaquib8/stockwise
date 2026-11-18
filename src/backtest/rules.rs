@@ -1556,6 +1556,26 @@ mod tests {
         assert_eq!((t.short_term_pct, t.long_term_pct), (30.0, 20.0));
     }
 
+    /// The annotated example in docs/backtesting.md is a valid file.
+    #[test]
+    fn documented_execution_example_parses() {
+        let doc = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/backtesting.md"),
+        )
+        .unwrap();
+        let section = &doc[doc
+            .find("### Position sizing, shorts, cash and tax")
+            .unwrap()..];
+        let start = section.find("```toml\n").unwrap() + "```toml\n".len();
+        let block = &section[start..start + section[start..].find("```").unwrap()];
+        let d = def(&format!(
+            "entry = \"close > 1\"\nexit = \"close < 1\"\n{block}"
+        ))
+        .unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(d.execution.direction, Direction::Short);
+        assert_eq!(d.execution.borrow_rate_pct, 3.0);
+    }
+
     #[test]
     fn execution_options_are_validated() {
         let base = "entry = \"close > 1\"\nexit = \"close < 1\"\n";
