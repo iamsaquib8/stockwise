@@ -1829,6 +1829,7 @@ mod tests {
                 account: None,
                 bonuses: Vec::new(),
                 bonus_shares: false,
+                origin: None,
             }
         }
 
