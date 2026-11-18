@@ -566,8 +566,20 @@ fn bak_copies_with_secrets(config: &Path) -> Vec<PathBuf> {
         })
         .take(1000)
         .filter(|p| p.exists())
-        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.lines().any(is_secret_line)))
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| holds_secret(&t)))
         .collect()
+}
+
+/// Whether a config text sets a notification secret in any form: parsed
+/// when it is valid TOML (sections, dotted keys, inline tables), else by
+/// line and by key name, so a damaged copy is not reported as secret-free.
+fn holds_secret(text: &str) -> bool {
+    match toml::from_str::<toml::Table>(text) {
+        Ok(table) => has_secret(&table),
+        Err(_) => {
+            text.lines().any(is_secret_line) || SECRET_KEY_NAMES.iter().any(|k| text.contains(k))
+        }
+    }
 }
 
 /// `<file>.bak`, or `<file>.bak.N` with the first N not in use.
@@ -1170,9 +1182,28 @@ mod tests {
             b"[notify]\nsmtp_password = \"pw\"\n",
         );
         put(&root.join("config.toml.bak.1"), b"[notify]\n");
+        put(
+            &root.join("config.toml.bak.2"),
+            b"notify = { smtp_password = \"pw\" }\n",
+        );
+        put(
+            &root.join("config.toml.bak.3"),
+            b"notify.telegram_token = \"t\"\n",
+        );
+        put(
+            &root.join("config.toml.bak.4"),
+            b"[notify\nslack_webhook = \"x\"\n",
+        );
+        put(&root.join("config.toml.bak.5"), b"market = \"in\"\n");
         assert_eq!(
             bak_copies_with_secrets(&cfg),
-            [root.join("config.toml.bak")]
+            [
+                "config.toml.bak",
+                "config.toml.bak.2",
+                "config.toml.bak.3",
+                "config.toml.bak.4"
+            ]
+            .map(|n| root.join(n))
         );
         std::fs::remove_dir_all(root).unwrap();
     }
