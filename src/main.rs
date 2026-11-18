@@ -3614,61 +3614,92 @@ fn run_market(
 }
 
 /// The tickers given to the chosen command, at any depth (`quote AAPL`,
-/// `options chain NIFTY`), each with its position in argv when clap knows it.
+/// `options chain NIFTY`), each with its slot in argv when one is found.
 /// Empty for commands without a `symbol` or `symbols` argument.
 fn command_symbols(matches: &clap::ArgMatches, args: &[String]) -> Vec<(String, Option<usize>)> {
-    let mut found = Vec::new();
     let mut level = matches;
-    let mut cmd = Cli::command();
-    // clap counts a subcommand's argument indices from the subcommand's own
-    // name, so track where each name sits in argv.
-    let mut offset = Some(0);
-    while let Some((name, sub)) = level.subcommand() {
-        let Some(sc) = cmd.find_subcommand(name).cloned() else {
-            break;
-        };
-        // Skip argv slots that hold this level's option values and flags
-        // (`--portfolio backtest backtest ...`), so a value that spells the
-        // subcommand is never taken for it.
-        offset = offset.and_then(|o| {
-            // Arguments only (not groups), from this level's definition.
-            let taken: std::collections::HashSet<usize> = cmd
-                .get_arguments()
-                .map(|a| a.get_id().as_str())
-                .filter(|id| level.value_source(id) == Some(ValueSource::CommandLine))
-                .filter_map(|id| level.indices_of(id))
-                .flatten()
-                .map(|i| o + i)
-                .collect();
-            (o + 1..args.len()).find(|&i| {
-                let a = args[i].as_str();
-                !taken.contains(&i) && (sc.get_name() == a || sc.get_all_aliases().any(|x| x == a))
-            })
-        });
+    let mut vals: Vec<String> = Vec::new();
+    while let Some((_, sub)) = level.subcommand() {
         for id in ["symbols", "symbol"] {
-            if let Ok(Some(vals)) = sub.try_get_many::<String>(id) {
-                let idx: Vec<usize> = sub
-                    .indices_of(id)
-                    .map(Iterator::collect)
-                    .unwrap_or_default();
-                found = vals
-                    .cloned()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        let at = offset
-                            .zip(idx.get(i))
-                            .map(|(o, k)| o + k)
-                            .filter(|&a| args.get(a) == Some(&v));
-                        (v, at)
-                    })
-                    .collect();
+            if let Ok(Some(v)) = sub.try_get_many::<String>(id) {
+                vals = v.cloned().collect();
                 break;
             }
         }
-        cmd = sc;
         level = sub;
     }
-    found
+    // Pair each symbol with the next positional slot of the leaf command
+    // that holds the same text.
+    let slots = leaf_positional_slots(args);
+    let mut next = 0;
+    vals.into_iter()
+        .map(|v| {
+            let at = slots[next.min(slots.len())..]
+                .iter()
+                .position(|&i| args[i] == v)
+                .map(|k| next + k);
+            if let Some(k) = at {
+                next = k + 1;
+            }
+            (v, at.map(|k| slots[k]))
+        })
+        .collect()
+}
+
+/// The argv slots that hold positional values of the innermost command,
+/// read from the raw arguments the way clap reads them: option values
+/// (`--portfolio isa`, `-s FILE`), attached ones (`--portfolio=isa`, `-sFILE`)
+/// and subcommand names are skipped, and `--` ends the options.
+fn leaf_positional_slots(args: &[String]) -> Vec<usize> {
+    let mut chain = vec![Cli::command()];
+    let mut slots = Vec::new();
+    // Whether an argument (of this command or an ancestor: globals) takes a value.
+    let takes_value = |chain: &[clap::Command], pick: &dyn Fn(&clap::Arg) -> bool| {
+        chain
+            .iter()
+            .rev()
+            .flat_map(|c| c.get_arguments())
+            .find(|a| pick(a))
+            .is_some_and(|a| a.get_action().takes_values())
+    };
+    let mut i = 1;
+    let mut only_positional = false;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if only_positional {
+            slots.push(i);
+        } else if a == "--" {
+            only_positional = true;
+        } else if let Some(long) = a.strip_prefix("--") {
+            if !long.contains('=')
+                && takes_value(&chain, &|arg: &clap::Arg| {
+                    arg.get_long() == Some(long)
+                        || arg.get_all_aliases().is_some_and(|al| al.contains(&long))
+                })
+            {
+                i += 1; // the value is the next slot
+            }
+        } else if let Some(short) = a.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // `-s FILE` takes the next slot; `-sFILE` and `-abc` do not.
+            let mut chars = short.chars();
+            if let (Some(c), None) = (chars.next(), chars.next())
+                && takes_value(&chain, &|arg: &clap::Arg| arg.get_short() == Some(c))
+            {
+                i += 1;
+            }
+        } else if let Some(sc) = chain
+            .last()
+            .and_then(|c| c.find_subcommand(a))
+            .cloned()
+            .filter(|_| slots.is_empty())
+        {
+            chain.push(sc);
+        } else {
+            slots.push(i);
+        }
+        i += 1;
+    }
+    slots
 }
 
 /// Detect whether raw CLI arguments represent a bare symbol invocation such as
@@ -6707,6 +6738,20 @@ mod tests {
         let found = command_symbols(&m, &v);
         assert_eq!(found[0].0, "US0378331005");
         assert_eq!(found[0].1, Some(6), "{found:?}");
+        // Attached option values take one slot (clap counts two).
+        let (v, m) = argv(&["stockwise", "--portfolio=isa", "quote", "US0378331005"]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[0].1, Some(3), "{found:?}");
+        let (v, m) = argv(&[
+            "stockwise",
+            "--portfolio=isa",
+            "options",
+            "chain",
+            "--expiry=2026-12-31",
+            "NVDA",
+        ]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[0].1, Some(5), "{found:?}");
         let (_, m) = argv(&["stockwise", "doctor"]);
         assert!(command_symbols(&m, &[]).is_empty());
     }
