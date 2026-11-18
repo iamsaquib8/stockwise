@@ -46,6 +46,27 @@ fn range_days(range: &str) -> i64 {
     }
 }
 
+/// A chart of the bars stored for `symbol` over `range` back from `now`
+/// (Unix seconds); an error when none are stored.
+fn stored_chart(
+    db: &crate::db::CacheDb,
+    symbol: &str,
+    range: &str,
+    interval: &str,
+    now: i64,
+) -> Result<crate::api::ChartData> {
+    let bars = db.get_bars(symbol, interval, now - range_days(range) * 86_400, now)?;
+    if bars.is_empty() {
+        bail!("no stored {interval} bars for {symbol}");
+    }
+    let chart = serde_json::json!({
+        "meta": { "symbol": symbol },
+        "timestamp": bars.iter().map(|b| b.ts).collect::<Vec<_>>(),
+        "indicators": { "quote": [{ "close": bars.iter().map(|b| Some(b.close)).collect::<Vec<_>>() }] },
+    });
+    Ok(serde_json::from_value(chart)?)
+}
+
 impl views::DataSource for OfflineSource {
     async fn quotes(&self, symbols: &[&str]) -> Result<Vec<crate::api::Quote>> {
         let rows =
@@ -76,19 +97,9 @@ impl views::DataSource for OfflineSource {
         range: &str,
         interval: &str,
     ) -> Result<crate::api::ChartData> {
-        let to = chrono::Utc::now().timestamp();
-        let from = to - range_days(range) * 86_400;
-        let bars =
-            crate::db::with_db(|d| d.get_bars(symbol, interval, from, to)).unwrap_or_default();
-        if bars.is_empty() {
-            bail!("no stored {interval} bars for {symbol} (offline)");
-        }
-        let chart = serde_json::json!({
-            "meta": { "symbol": symbol },
-            "timestamp": bars.iter().map(|b| b.ts).collect::<Vec<_>>(),
-            "indicators": { "quote": [{ "close": bars.iter().map(|b| Some(b.close)).collect::<Vec<_>>() }] },
-        });
-        Ok(serde_json::from_value(chart)?)
+        let now = chrono::Utc::now().timestamp();
+        crate::db::with_db(|d| stored_chart(d, symbol, range, interval, now))
+            .ok_or_else(|| anyhow::anyhow!("no stored {interval} bars for {symbol} (offline)"))
     }
 
     async fn search(&self, _query: &str) -> Result<Vec<crate::api::SearchResult>> {
@@ -1113,6 +1124,46 @@ mod tests {
         let facts = goal_facts(&[row], "INR", Some(0.012)).unwrap().unwrap();
         assert_eq!(facts[0].gap, 600_000.0);
         assert_eq!(facts[0].fx_to_base, 0.012);
+    }
+
+    #[test]
+    fn offline_history_reaches_an_old_period() {
+        // Stored daily bars for 2009-2010; a 2010 wrap reviewed in 2026.
+        let mut db = crate::db::CacheDb::open_in_memory().unwrap();
+        let bar = |day: &str, close: f64| {
+            let ts = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp();
+            crate::db::Bar {
+                ts,
+                open: close,
+                high: close,
+                low: close,
+                close,
+                volume: 0.0,
+            }
+        };
+        db.put_bars(
+            "OLD.NS",
+            "1d",
+            &[
+                bar("2009-12-31", 100.0),
+                bar("2010-06-30", 110.0),
+                bar("2010-12-31", 125.0),
+            ],
+        )
+        .unwrap();
+        let period = Period::calendar(2010).unwrap();
+        let today = chrono::NaiveDate::parse_from_str("2026-11-18", "%Y-%m-%d").unwrap();
+        let now = today.and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp();
+        let range = range_back_to(period.opening(), today);
+        let closes = closes_of(&stored_chart(&db, "OLD.NS", range, "1d", now).unwrap());
+        assert_eq!(wrap::close_on(&closes, period.opening()), Some(100.0));
+        assert_eq!(wrap::close_on(&closes, period.as_of(today)), Some(125.0));
+        assert!(stored_chart(&db, "NONE.NS", range, "1d", now).is_err());
     }
 
     #[test]

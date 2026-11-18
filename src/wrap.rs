@@ -216,10 +216,25 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
             .map(Split::ratio)
             .product()
     };
+    // A bonus lot counts from the event's ex-date, when the price adjusts,
+    // not only from its allotment date.
+    let counted_from = |l: &crate::portfolio::Lot| -> String {
+        if l.source == crate::portfolio::BONUS_SOURCE
+            && let Some(ex) = l
+                .adjustments
+                .iter()
+                .filter_map(|a| a.split(':').next())
+                .filter(|d| d.len() == 10)
+                .min()
+        {
+            return ex.to_string().min(l.date.clone());
+        }
+        l.date.clone()
+    };
     let open: f64 = p.holding(symbol).map_or(0.0, |h| {
         h.lots
             .iter()
-            .filter(|l| l.date.as_str() <= day)
+            .filter(|l| counted_from(l).as_str() <= day)
             .map(|l| l.qty * lot_factor(l))
             .sum()
     });
@@ -843,10 +858,47 @@ mod tests {
         let mut lot = Lot::new(10.0, 100.0, "2025-01-10", "manual");
         lot.adjustments.push("bonus:2026-04-01:2:1".into());
         p.add_lot("AAA.NS", lot);
-        p.add_lot("AAA.NS", Lot::new(10.0, 0.0, "2026-04-03", "bonus"));
+        let mut bonus = Lot::new(10.0, 0.0, "2026-04-03", crate::portfolio::BONUS_SOURCE);
+        bonus.adjustments.push("2026-04-01:2:1".into());
+        p.add_lot("AAA.NS", bonus);
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 20.0);
-        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-01")), 10.0);
+        // Between the ex-date and the allotment the bonus shares are owed
+        // and the price already adjusted: still 20.
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-01")), 20.0);
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-03")), 20.0);
+        // Valued at the adjusted closes, the holding keeps its value.
+        let fy = Period::indian_fy(2026).unwrap();
+        let y = symbol_year(&p, "AAA.NS", &fy, d("2026-04-02"), Some(50.0), Some(50.0));
+        assert_eq!(y.start_value, Some(1000.0));
+        assert_eq!(y.contribution(), Some(0.0));
+    }
+
+    #[test]
+    fn a_sold_lot_keeps_the_bonus_it_received() {
+        // 100 bought; 1:1 bonus ex 1 Apr, allotted 3 Apr; the original 100
+        // sold on 10 Apr after the bonus.
+        let mut p = Portfolio::default();
+        let mut bonus = Lot::new(100.0, 0.0, "2026-04-03", crate::portfolio::BONUS_SOURCE);
+        bonus.adjustments.push("2026-04-01:2:1".into());
+        p.add_lot("AAA.NS", bonus);
+        p.realized.push(Sale {
+            symbol: "AAA.NS".into(),
+            qty: 100.0,
+            buy_date: "2025-01-10".into(),
+            buy_price: 100.0,
+            sell_date: "2026-04-10".into(),
+            sell_price: 60.0,
+            buy_date_estimated: false,
+            source: "manual".into(),
+            order_id: None,
+            intraday: false,
+            account: None,
+            bonuses: vec!["bonus:2026-04-01:2:1".into()],
+            bonus_shares: false,
+        });
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 200.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-02")), 200.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-15")), 100.0);
     }
 
     #[test]
