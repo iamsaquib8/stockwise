@@ -437,7 +437,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N --date YYYY-MM-DD]` | Lots, sales, dividends and XIRR of one holding; `--lot N --date` corrects a purchase date |
-| `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo). Shows them; `--apply` adjusts lots and records dividends, and is safe to repeat |
+| `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares and records dividends, and is safe to repeat |
 | `portfolio list` | Your portfolios: the default one and every named one |
 | `portfolio benchmark [NIFTY\|SENSEX\|SP500\|...] [-p 1y] [--base inr\|usd] [--json\|--csv]` | Time-weighted return against an index over the period, from the lots held each day: alpha, beta, tracking error, and attribution by holding and sector (see [below](#benchmark-and-attribution)) |
 | `portfolio pme [NIFTY\|SPY\|VOO\|VWCE\|NIFTYBEES\|...] [--base inr\|usd] [--json\|--csv]` | Public Market Equivalent (Index Twin): mirror exact tradebook cash flows into a passive benchmark; computes Kaplan-Schoar PME, Direct Alpha, twin value, and net currency value added vs the index (see [below](#public-market-equivalent-index-twin)) |
@@ -862,9 +862,21 @@ reports a 1:1 bonus as a 2:1 split) and dividends since each holding's first
 purchase. Nothing changes until `--apply`, which multiplies the quantity and
 divides the price of lots bought before the split (cost and date unchanged)
 and records each dividend on the shares held at its ex-date. Each lot
-remembers the splits applied to it, so running it again is a no-op. Indian tax
-treats bonus shares as bought at zero cost on the allotment date — check bonus
-lots against your tax statement.
+remembers the splits applied to it, so running it again is a no-op.
+
+Indian tax treats bonus shares as a new purchase at zero cost on the
+allotment date (Sec. 55(2)(aa)(iiia)), and the original shares keep their
+cost and date. So for a `.NS` or `.BO` stock, StockWise looks each split up in
+NSE's corporate-action filings. When NSE filed it as a bonus, `--apply` leaves
+the older lots as they are and adds the bonus shares, `qty × (ratio − 1)`, as a
+new lot at price 0 with source `bonus`, dated on the allotment date (NSE's
+ex-date, since its feed gives no allotment date). FIFO then sells the older
+shares first. For example, 100 shares bought at ₹1,000 plus a 1:1 bonus become
+two lots — 100 @ ₹1,000 and 100 @ ₹0 — and selling 100 at ₹600 records a
+₹40,000 loss on the older lot. A real split, and any split of a non-Indian
+stock, still multiplies the lots. When NSE cannot be reached, splits are
+applied as splits and the output says so: check any bonus lots among them
+against your tax statement.
 
 **Imports.** A holdings export (Kite, INDmoney) has no purchase dates: existing
 lots are kept and only the quantity is matched — more shares add a lot dated
@@ -877,7 +889,8 @@ counted twice). A file with a date column (`Date`, `Purchase Date`,
 rebuilt from it. With a buy/sell column (`trade_type`, `Type`, `Side`) it is a
 tradebook — such as Zerodha Console's — sells come out FIFO as realized sales,
 and splits and bonuses are applied as they happened (this needs a network
-connection). StockWise keeps the trades of each tradebook import and merges the
+connection; Indian bonus issues become zero-cost lots, as in `portfolio
+actions`). StockWise keeps the trades of each tradebook import and merges the
 next file with them, so several yearly tradebooks (Console allows 365 days per
 download) can be imported one after another, in any order, and re-importing a
 file changes nothing. A symbol is left unchanged when its sells have no earlier
