@@ -194,6 +194,19 @@ pub fn recorded_splits(p: &Portfolio, symbol: &str) -> Vec<Split> {
     out
 }
 
+/// The ex-date of the bonus issue allotted on `allotted`: the latest
+/// recorded event on or before it, within 90 days (allotment follows the
+/// ex-date by days, never months).
+fn bonus_ex_date<'a>(splits: &'a [Split], allotted: &str) -> Option<&'a str> {
+    let allotted_day = date(allotted)?;
+    splits
+        .iter()
+        .filter_map(|s| Some((s, date(&s.date)?)))
+        .filter(|(_, d)| *d <= allotted_day && (allotted_day - *d).num_days() <= 90)
+        .max_by_key(|(_, d)| *d)
+        .map(|(s, _)| s.date.as_str())
+}
+
 /// Shares of `symbol` held at the end of `day`, in today's share count (the
 /// count daily closes are adjusted to): open lots bought by then and sold
 /// lots bought by then but sold after, with splits and bonus issues
@@ -242,7 +255,15 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
         .realized
         .iter()
         .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
-        .filter(|s| s.buy_date.as_str() <= day && s.sell_date.as_str() > day)
+        .filter(|s| {
+            // Sold bonus shares count from their event's ex-date too.
+            let from = if s.bonus_shares {
+                bonus_ex_date(&splits, &s.buy_date).unwrap_or(s.buy_date.as_str())
+            } else {
+                s.buy_date.as_str()
+            };
+            from <= day && s.sell_date.as_str() > day
+        })
         .map(|s| {
             // Every split after the sale applies to the sold quantity; a
             // bonus between `day` and the sale only when the lot got it.
@@ -899,6 +920,45 @@ mod tests {
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 200.0);
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-02")), 200.0);
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-15")), 100.0);
+    }
+
+    #[test]
+    fn sold_bonus_shares_count_from_the_ex_date() {
+        // 10 bought; 1:1 bonus ex 1 Apr, allotted 3 Apr; all 20 sold 10 Apr.
+        let sale =
+            |qty: f64, buy: &str, price: f64, bonus_shares: bool, bonuses: Vec<String>| Sale {
+                symbol: "AAA.NS".into(),
+                qty,
+                buy_date: buy.into(),
+                buy_price: price,
+                sell_date: "2026-04-10".into(),
+                sell_price: 55.0,
+                buy_date_estimated: false,
+                source: "manual".into(),
+                order_id: None,
+                intraday: false,
+                account: None,
+                bonuses,
+                bonus_shares,
+            };
+        let mut p = Portfolio::default();
+        p.realized.push(sale(
+            10.0,
+            "2025-01-10",
+            100.0,
+            false,
+            vec!["bonus:2026-04-01:2:1".into()],
+        ));
+        p.realized.push(sale(10.0, "2026-04-03", 0.0, true, vec![]));
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 20.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-01")), 20.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-03")), 20.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-10")), 0.0);
+        // At adjusted closes of 50 the value holds between ex-date and allotment.
+        let fy = Period::indian_fy(2026).unwrap();
+        let y = symbol_year(&p, "AAA.NS", &fy, d("2026-04-02"), Some(50.0), Some(50.0));
+        assert_eq!(y.start_value, Some(1000.0));
+        assert_eq!(y.end_value, Some(1000.0));
     }
 
     #[test]
