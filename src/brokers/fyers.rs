@@ -7,6 +7,7 @@
 
 use super::app::{self, AppConfig, Needs};
 use super::http::{self, unknown_state};
+use super::masters::{self, MasterCache};
 use super::secrets::Secret;
 use super::{
     Broker, BrokerKind, Endpoint, Gtt, GttRequest, Holding, Instrument, Order, OrderAck, OrderKind,
@@ -15,6 +16,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const CONFIG_FILE: &str = "fyers_config.json";
 pub const SECRET_KEYS: &[&str] = app::SECRET_KEYS;
@@ -120,6 +122,15 @@ pub struct FyersClient {
     token: Secret,
     api: String,
     symbols: String,
+    masters: Arc<MasterCache>,
+}
+
+/// The symbol master as text, refused unless its first row has an
+/// `NSE:` ticker in [`TICKER_COL`] (the file has no header line).
+fn parse_master(bytes: &[u8]) -> Result<String> {
+    masters::csv_checked(bytes, "Fyers symbol master", false, |row| {
+        row.get(TICKER_COL).is_some_and(|t| t.starts_with("NSE:"))
+    })
 }
 
 /// The exact `NSE:<SYMBOL>-EQ` row in the NSE_CM symbol master.
@@ -373,7 +384,9 @@ impl FyersClient {
     /// Use the session saved by `trade login --broker fyers`.
     pub fn connect() -> Result<Self> {
         let config = app::session(KIND, NEEDS)?;
-        Self::with_urls(config.api_key, config.access_token, API, SYMBOLS)
+        let mut c = Self::with_urls(config.api_key, config.access_token, API, SYMBOLS)?;
+        c.masters = MasterCache::shared();
+        Ok(c)
     }
 
     fn with_urls(app_id: String, token: Secret, api: &str, symbols: &str) -> Result<Self> {
@@ -383,6 +396,7 @@ impl FyersClient {
             token,
             api: api.into(),
             symbols: symbols.into(),
+            masters: MasterCache::off(),
         })
     }
 
@@ -514,17 +528,23 @@ impl Broker for FyersClient {
         if exchange != "NSE" {
             bail!("Fyers orders support NSE only");
         }
-        let resp = self
-            .http
-            .get(&self.symbols)
-            .send()
-            .await
-            .context("Could not download the Fyers symbol master")?;
-        if !resp.status().is_success() {
-            bail!("Fyers symbol master: HTTP {}", resp.status());
-        }
-        let raw = http::maybe_gunzip(&resp.bytes().await?)?;
-        pick_equity(&String::from_utf8_lossy(&raw), symbol)
+        let fetch = || async {
+            let resp = self
+                .http
+                .get(&self.symbols)
+                .send()
+                .await
+                .context("Could not download the Fyers symbol master")?;
+            if !resp.status().is_success() {
+                bail!("Fyers symbol master: HTTP {}", resp.status());
+            }
+            Ok(resp.bytes().await?.to_vec())
+        };
+        let csv = self
+            .masters
+            .load(KIND.id(), "NSE", fetch, parse_master)
+            .await?;
+        pick_equity(&csv, symbol)
     }
 
     async fn place_order(&self, o: &OrderRequest) -> Result<OrderAck> {
@@ -828,5 +848,11 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[test]
+    fn a_master_without_tickers_is_not_cached() {
+        assert!(parse_master(b"{\"status\":\"error\",\"message\":\"Too many requests\",\"error_type\":\"NetworkException\"}").is_err());
+        assert!(parse_master(include_str!("fixtures/fyers_nse_cm.csv").as_bytes()).is_ok());
     }
 }

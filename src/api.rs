@@ -477,6 +477,9 @@ pub struct Quote {
     pub long_name: Option<String>,
     #[serde(rename = "regularMarketPrice")]
     pub regular_market_price: Option<f64>,
+    /// Best bid and ask, when the quote has them (order preview slippage).
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
     #[serde(rename = "regularMarketChange")]
     pub regular_market_change: Option<f64>,
     #[serde(rename = "regularMarketChangePercent")]

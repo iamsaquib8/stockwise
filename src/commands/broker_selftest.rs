@@ -1014,11 +1014,13 @@ mod tests {
                 enable_orders: true,
             },
             last_price: Some(1300.0),
+            bid_ask: None,
             confirm: &yes,
         };
         let opts = OrderOpts {
             yes: true,
             dry_run: false,
+            format: crate::output::Format::Table,
         };
         let err = place_live_order(
             &ro,

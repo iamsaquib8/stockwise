@@ -2792,6 +2792,9 @@ struct OrderFlags {
     /// Resolve and preview the order, but don't send it
     #[arg(long)]
     dry_run: bool,
+    /// With --dry-run: print the preview and estimated charges as JSON or CSV
+    #[command(flatten)]
+    out: TableOutput,
 }
 
 impl From<OrderFlags> for commands::OrderOpts {
@@ -2799,6 +2802,7 @@ impl From<OrderFlags> for commands::OrderOpts {
         Self {
             yes: f.yes,
             dry_run: f.dry_run,
+            format: f.out.into(),
         }
     }
 }

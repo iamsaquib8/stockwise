@@ -186,6 +186,17 @@ impl CostPreset {
 /// Default slippage for every preset except `none`.
 pub const DEFAULT_SLIPPAGE_BPS: f64 = 5.0;
 
+/// NSE cash-market transaction charge, as a percent of turnover, in force
+/// on `date`. NSE raised it from 0.00297% to 0.00307% on 1 March 2026. The
+/// presets below keep 0.00297% so existing backtest results do not move;
+/// the live order preview uses the rate for the day.
+pub fn nse_exchange_pct_on(date: chrono::NaiveDate) -> f64 {
+    match chrono::NaiveDate::from_ymd_opt(2026, 3, 1) {
+        Some(change) if date >= change => 0.00307,
+        _ => 0.00297,
+    }
+}
+
 impl CostModel {
     pub fn none() -> Self {
         CostModel {
@@ -392,6 +403,14 @@ mod tests {
         assert!(close(sell.stt, 25.25)); // 0.025%
         assert!(close(sell.dp, 0.0));
         assert!(close(sell.total(), 52.508826));
+    }
+
+    #[test]
+    fn nse_exchange_rate_follows_the_date() {
+        let d = |y, m, day| chrono::NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        assert!(close(nse_exchange_pct_on(d(2026, 2, 28)), 0.00297));
+        assert!(close(nse_exchange_pct_on(d(2026, 3, 1)), 0.00307));
+        assert!(close(CostModel::in_delivery().exchange_pct, 0.00297));
     }
 
     #[test]

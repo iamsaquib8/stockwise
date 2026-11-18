@@ -8,6 +8,7 @@
 
 use super::app::{self, Needs};
 use super::http::{self, unknown_state};
+use super::masters::{self, MasterCache};
 use super::secrets::Secret;
 use super::{
     Broker, BrokerKind, Endpoint, Gtt, GttRequest, Holding, Instrument, Order, OrderAck, OrderKind,
@@ -16,6 +17,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const CONFIG_FILE: &str = "dhan_config.json";
 pub const SECRET_KEYS: &[&str] = app::SECRET_KEYS;
@@ -79,6 +81,7 @@ pub struct DhanClient {
     token: Secret,
     api: String,
     instruments: String,
+    masters: Arc<MasterCache>,
 }
 
 /// `{errorType, errorCode, errorMessage}` → one line.
@@ -95,6 +98,26 @@ fn error_message(v: &Value, text: &str) -> String {
 
 fn is_auth_error(v: &Value) -> bool {
     http::text(v.get("errorCode")).as_deref() == Some("DH-901")
+}
+
+/// Column names in the detailed and the compact scrip master layouts.
+const COLUMNS: [[&str; 2]; 6] = [
+    ["EXCH_ID", "SEM_EXM_EXCH_ID"],
+    ["SEGMENT", "SEM_SEGMENT"],
+    ["SECURITY_ID", "SEM_SMST_SECURITY_ID"],
+    ["INSTRUMENT", "SEM_INSTRUMENT_NAME"],
+    ["UNDERLYING_SYMBOL", "SEM_TRADING_SYMBOL"],
+    ["SERIES", "SEM_SERIES"],
+];
+
+/// The scrip master as text, refused unless it has (in either layout) the
+/// columns [`pick_equity`] reads.
+fn parse_master(bytes: &[u8]) -> Result<String> {
+    masters::csv_checked(bytes, "Dhan scrip master", true, |h| {
+        COLUMNS
+            .iter()
+            .all(|names| names.iter().any(|n| h.iter().any(|f| f == n)))
+    })
 }
 
 /// The exact NSE cash-equity (`EQ` series) row for `symbol` in the scrip
@@ -390,7 +413,9 @@ impl DhanClient {
     /// Use the token saved by `trade login --broker dhan`.
     pub fn connect() -> Result<Self> {
         let config = app::session(KIND, NEEDS)?;
-        Self::with_urls(config.api_key, config.access_token, API, INSTRUMENTS)
+        let mut c = Self::with_urls(config.api_key, config.access_token, API, INSTRUMENTS)?;
+        c.masters = MasterCache::shared();
+        Ok(c)
     }
 
     fn with_urls(client_id: String, token: Secret, api: &str, instruments: &str) -> Result<Self> {
@@ -400,6 +425,7 @@ impl DhanClient {
             token,
             api: api.into(),
             instruments: instruments.into(),
+            masters: MasterCache::off(),
         })
     }
 
@@ -493,19 +519,23 @@ impl DhanClient {
         )
     }
 
-    /// The NSE_EQ scrip master (CSV, gunzipped if needed).
-    async fn scrip_master(&self) -> Result<String> {
-        let resp = self
-            .http
-            .get(&self.instruments)
-            .send()
+    /// The NSE_EQ scrip master (CSV, gunzipped if needed), cached per IST day.
+    async fn scrip_master(&self) -> Result<Arc<String>> {
+        let fetch = || async {
+            let resp = self
+                .http
+                .get(&self.instruments)
+                .send()
+                .await
+                .context("Could not download the Dhan scrip master")?;
+            if !resp.status().is_success() {
+                bail!("Dhan scrip master: HTTP {}", resp.status());
+            }
+            Ok(resp.bytes().await?.to_vec())
+        };
+        self.masters
+            .load(KIND.id(), "NSE", fetch, parse_master)
             .await
-            .context("Could not download the Dhan scrip master")?;
-        if !resp.status().is_success() {
-            bail!("Dhan scrip master: HTTP {}", resp.status());
-        }
-        let raw = http::maybe_gunzip(&resp.bytes().await?)?;
-        Ok(String::from_utf8_lossy(&raw).into_owned())
     }
 
     async fn profile_client_id(&self) -> Result<Option<String>> {
@@ -947,5 +977,16 @@ BSE,E,500180,EQUITY,0,HDFCBANK,1.0,HDFC Bank,,,,5.0000,NA,ES,A,HDFC BANK LTD\n";
     async fn fixtures_match_the_documented_shape() {
         let (_s, c) = client(read_routes()).await;
         crate::brokers::mock::assert_fixture_shapes(&c, &Endpoint::ALL).await;
+    }
+
+    #[test]
+    fn a_master_without_the_lookup_columns_is_not_cached() {
+        assert!(parse_master(b"{\"status\":\"error\",\"message\":\"Too many requests\",\"error_type\":\"NetworkException\"}").is_err());
+        assert!(parse_master(include_str!("fixtures/dhan_scrip_master.csv").as_bytes()).is_ok());
+        let compact = "SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID,SEM_INSTRUMENT_NAME,SEM_TRADING_SYMBOL,SEM_SERIES\n";
+        // Header only: no instruments, never cached.
+        assert!(parse_master(compact.as_bytes()).is_err());
+        let one = format!("{compact}NSE,E,1333,EQUITY,HDFCBANK,EQ\n");
+        assert!(parse_master(one.as_bytes()).is_ok());
     }
 }

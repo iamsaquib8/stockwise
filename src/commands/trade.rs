@@ -15,6 +15,20 @@ pub struct OrderOpts {
     pub yes: bool,
     /// Resolve and preview the order, but never send it.
     pub dry_run: bool,
+    /// How a `--dry-run` preview is printed. JSON and CSV need `--dry-run`:
+    /// a live order is always previewed as text before it is confirmed.
+    pub format: Format,
+}
+
+/// Refuse `--json` / `--csv` on anything but a dry-run preview.
+pub(super) fn check_format(opts: OrderOpts) -> Result<()> {
+    if !opts.format.is_table() && !opts.dry_run {
+        bail!(
+            "--json and --csv print a --dry-run preview; a live order is always previewed as \
+             text and confirmed. Add --dry-run, or leave out --json/--csv."
+        );
+    }
+    Ok(())
 }
 
 /// A `trade` subcommand, as parsed in `main.rs`.
@@ -90,6 +104,8 @@ pub(super) struct Guard<'a> {
     pub limits: OrderLimits,
     /// Last traded price (Yahoo), used for the value estimate and trigger checks.
     pub last_price: Option<f64>,
+    /// Best bid and ask from the same quote, for the slippage estimate.
+    pub bid_ask: Option<(f64, f64)>,
     /// Ask the user to type `yes`; the argument completes "Type yes to ...".
     pub confirm: &'a dyn Fn(&str) -> Result<bool>,
 }
@@ -310,12 +326,53 @@ pub(super) async fn place_live_order(
     opts: OrderOpts,
     guard: &Guard<'_>,
 ) -> Result<Outcome> {
+    check_format(opts)?;
     let kind = broker.kind();
     let last = usable_price(guard.last_price);
     let Prepared {
         instrument,
         est_value,
     } = prepare_order(broker, side, symbol, qty, intent, last).await?;
+    let priced = match intent {
+        Intent::Order(k) => k,
+        Intent::Gtt { limit, .. } => OrderKind::Limit { price: limit },
+    };
+    let estimate = est_value.and_then(|v| {
+        brokers::charges::estimate(
+            kind,
+            side,
+            &priced,
+            qty,
+            v,
+            guard.bid_ask,
+            brokers::masters::ist_today(),
+        )
+    });
+
+    if !opts.format.is_table() {
+        // Structured output is a dry-run preview (checked above): the same
+        // checks run, nothing else is printed, and nothing is sent.
+        check_cap(kind, guard.limits.max_order_value, est_value)?;
+        let preview = Preview {
+            dry_run: true,
+            broker: kind.id(),
+            side: side.as_str(),
+            symbol: &instrument.tradingsymbol,
+            exchange: &instrument.exchange,
+            token: &instrument.token,
+            qty,
+            order_type: type_line(&intent),
+            product: "CNC",
+            last_price: last,
+            est_value,
+            charges: estimate.as_ref().map(ChargesOut::from),
+        };
+        match opts.format {
+            Format::Csv => output::print_csv(&charge_rows(estimate.as_ref()))?,
+            _ => output::print_json(&preview)?,
+        }
+        return Ok(Outcome::DryRun);
+    }
 
     let title = match intent {
         Intent::Order(_) => format!("{} order — REAL MONEY", side.as_str()),
@@ -341,6 +398,7 @@ pub(super) async fn place_live_order(
         "Est. value",
         &est_value.map_or("unknown".to_string(), |v| format!("₹{:.2}", v)),
     );
+    print_charges(kind, estimate.as_ref());
     println!();
 
     check_cap(kind, guard.limits.max_order_value, est_value)?;
@@ -416,6 +474,174 @@ pub(super) async fn place_live_order(
     Ok(Outcome::Sent(id))
 }
 
+/// `--dry-run --json`: the preview as data. Money values are estimates in
+/// rupees.
+#[derive(Debug, Serialize)]
+struct Preview<'a> {
+    dry_run: bool,
+    broker: &'a str,
+    side: &'a str,
+    symbol: &'a str,
+    exchange: &'a str,
+    token: &'a str,
+    qty: u32,
+    order_type: String,
+    product: &'a str,
+    last_price: Option<f64>,
+    est_value: Option<f64>,
+    /// Absent when the order value can't be estimated.
+    charges: Option<ChargesOut>,
+}
+
+/// One column of the charges table, with its total.
+#[derive(Debug, Serialize)]
+struct ChargeColumn {
+    #[serde(flatten)]
+    lines: crate::backtest::costs::Charges,
+    total: f64,
+}
+
+impl From<&crate::backtest::costs::Charges> for ChargeColumn {
+    fn from(c: &crate::backtest::costs::Charges) -> Self {
+        ChargeColumn {
+            lines: *c,
+            total: c.total(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct SlippageOut {
+    amount: f64,
+    /// `limit`, `spread` or `default`.
+    basis: &'static str,
+    bid: Option<f64>,
+    ask: Option<f64>,
+    bps: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChargesOut {
+    delivery: ChargeColumn,
+    intraday: ChargeColumn,
+    slippage: SlippageOut,
+}
+
+impl From<&brokers::charges::Estimate> for ChargesOut {
+    fn from(e: &brokers::charges::Estimate) -> Self {
+        use brokers::charges::SlippageBasis as B;
+        let (basis, bid, ask, bps) = match e.slippage.basis {
+            B::Limit => ("limit", None, None, None),
+            B::Spread { bid, ask } => ("spread", Some(bid), Some(ask), None),
+            B::Default { bps } => ("default", None, None, Some(bps)),
+        };
+        ChargesOut {
+            delivery: (&e.delivery).into(),
+            intraday: (&e.intraday).into(),
+            slippage: SlippageOut {
+                amount: e.slippage.amount,
+                basis,
+                bid,
+                ask,
+                bps,
+            },
+        }
+    }
+}
+
+/// `--dry-run --csv`: one row per line of the charges table. Slippage does
+/// not depend on the product, so it fills both columns.
+#[derive(Debug, Serialize)]
+struct ChargeRow {
+    line: &'static str,
+    delivery: f64,
+    intraday: f64,
+}
+
+impl output::CsvRow for ChargeRow {
+    const COLUMNS: &'static [&'static str] = &["line", "delivery", "intraday"];
+}
+
+fn charge_rows(estimate: Option<&brokers::charges::Estimate>) -> Vec<ChargeRow> {
+    let Some(e) = estimate else {
+        return Vec::new();
+    };
+    let (d, i) = (&e.delivery, &e.intraday);
+    let row = |line, delivery, intraday| ChargeRow {
+        line,
+        delivery,
+        intraday,
+    };
+    vec![
+        row("brokerage", d.brokerage, i.brokerage),
+        row("stt", d.stt, i.stt),
+        row("exchange", d.exchange, i.exchange),
+        row("sebi", d.sebi, i.sebi),
+        row("stamp", d.stamp, i.stamp),
+        row("gst", d.gst, i.gst),
+        row("dp", d.dp, i.dp),
+        row("total", d.total(), i.total()),
+        row("slippage", e.slippage.amount, e.slippage.amount),
+    ]
+}
+
+/// The estimated charges and slippage block of the order preview: this
+/// order as delivery (how it is placed) and, for comparison, as intraday.
+fn print_charges(kind: BrokerKind, estimate: Option<&brokers::charges::Estimate>) {
+    use brokers::charges::SlippageBasis;
+    let Some(e) = estimate else {
+        print_kv("Est. charges", "unknown (no price to value the order)");
+        return;
+    };
+    println!();
+    println!(
+        "  {}",
+        "Estimated charges (NSE equity) — estimates, not a contract note".bold()
+    );
+    let row = |label: &str, d: String, i: String| {
+        println!("  {} {:>16} {:>16}", pad_end(label, 28).dimmed(), d, i);
+    };
+    let rs = |v: f64| format!("₹{v:.2}");
+    row("", "Delivery (CNC)".into(), "If intraday (MIS)".into());
+    let (d, i) = (&e.delivery, &e.intraday);
+    for (label, dv, iv) in [
+        ("Brokerage", d.brokerage, i.brokerage),
+        ("STT", d.stt, i.stt),
+        ("Exchange transaction charge", d.exchange, i.exchange),
+        ("SEBI fee", d.sebi, i.sebi),
+        ("Stamp duty", d.stamp, i.stamp),
+        ("GST (18%)", d.gst, i.gst),
+        ("DP charge", d.dp, i.dp),
+    ] {
+        row(label, rs(dv), rs(iv));
+    }
+    row("Total", rs(d.total()), rs(i.total()));
+    let slip = match e.slippage.basis {
+        SlippageBasis::Limit => format!(
+            "{} (limit order: fills at the limit or better)",
+            rs(e.slippage.amount)
+        ),
+        SlippageBasis::Spread { bid, ask } => format!(
+            "{} (half the bid-ask spread, bid ₹{bid:.2} / ask ₹{ask:.2})",
+            rs(e.slippage.amount)
+        ),
+        SlippageBasis::Default { bps } => format!(
+            "{} ({bps} bps; the quote has no bid/ask)",
+            rs(e.slippage.amount)
+        ),
+    };
+    print_kv("Est. slippage", &slip);
+    println!(
+        "  {}",
+        format!(
+            "Brokerage and DP charge at {}'s published rates; statutory rates as in backtests. \
+             This order is placed as delivery; the intraday column is for comparison.",
+            kind.label()
+        )
+        .dimmed()
+    );
+}
+
 /// Preview and confirm cancelling one GTT, through the same guards as an
 /// order (cancelling a stop-loss GTT can leave a position unprotected).
 pub(super) async fn cancel_gtt(
@@ -425,6 +651,9 @@ pub(super) async fn cancel_gtt(
     guard: &Guard<'_>,
 ) -> Result<Outcome> {
     let kind = broker.kind();
+    if !opts.format.is_table() {
+        bail!("--json and --csv apply to order and GTT previews, not to cancelling a GTT");
+    }
     if !broker.supports_gtt() {
         bail!("{} GTT orders are not supported yet", kind.label());
     }
@@ -502,9 +731,30 @@ pub(super) async fn last_price(symbol: &str) -> Option<f64> {
 }
 
 async fn last_price_with(y: &YahooClient, symbol: &str) -> Option<f64> {
+    prices_with(y, symbol).await.0
+}
+
+/// Last NSE price and, when the quote has a sane one, the bid and ask.
+pub(super) async fn prices(symbol: &str) -> (Option<f64>, Option<(f64, f64)>) {
+    match YahooClient::new().await {
+        Ok(y) => prices_with(&y, symbol).await,
+        Err(_) => (None, None),
+    }
+}
+
+async fn prices_with(y: &YahooClient, symbol: &str) -> (Option<f64>, Option<(f64, f64)>) {
     let yahoo_sym = format!("{}.NS", brokers::plain_symbol(symbol));
-    let quotes = y.get_quote(&[yahoo_sym.as_str()]).await.ok()?;
-    usable_price(quotes.first()?.regular_market_price)
+    let Ok(quotes) = y.get_quote(&[yahoo_sym.as_str()]).await else {
+        return (None, None);
+    };
+    let Some(q) = quotes.first() else {
+        return (None, None);
+    };
+    let bid_ask = match (usable_price(q.bid), usable_price(q.ask)) {
+        (Some(b), Some(a)) if a >= b => Some((b, a)),
+        _ => None,
+    };
+    (usable_price(q.regular_market_price), bid_ask)
 }
 
 /// Log in, look up the price, and run the safety flow for one order or GTT.
@@ -517,15 +767,18 @@ async fn run_order(
     opts: OrderOpts,
 ) -> Result<()> {
     check_args(qty, &intent)?;
+    check_format(opts)?;
     brokers::nse_symbol(symbol)?;
     let limits = brokers::order_limits(kind)?;
     // Before logging in: an unattended order without a cap is refused
     // without touching the broker.
     require_cap_for_unattended(kind, opts, &limits)?;
     let broker = brokers::connect(kind).await?;
+    let (last_price, bid_ask) = prices(symbol).await;
     let guard = Guard {
         limits,
-        last_price: last_price(symbol).await,
+        last_price,
+        bid_ask,
         confirm: &confirm_live_order,
     };
     place_live_order(broker.as_ref(), side, symbol, qty, intent, opts, &guard).await?;
@@ -615,6 +868,7 @@ pub async fn cmd_trade(kind: BrokerKind, action: TradeAction, market: Market) ->
             let guard = Guard {
                 limits,
                 last_price: None,
+                bid_ask: None,
                 confirm: &confirm_live_order,
             };
             cancel_gtt(broker.as_ref(), &id, opts, &guard).await?;
@@ -1140,6 +1394,7 @@ mod tests {
                 enable_orders: true,
             },
             last_price: last,
+            bid_ask: None,
             confirm,
         }
     }
@@ -1147,14 +1402,17 @@ mod tests {
     const LIVE: OrderOpts = OrderOpts {
         yes: false,
         dry_run: false,
+        format: Format::Table,
     };
     const DRY: OrderOpts = OrderOpts {
         yes: false,
         dry_run: true,
+        format: Format::Table,
     };
     const YES: OrderOpts = OrderOpts {
         yes: true,
         dry_run: false,
+        format: Format::Table,
     };
 
     #[tokio::test]
@@ -1173,6 +1431,88 @@ mod tests {
         let out = cancel_gtt(&b, "G1", DRY, &g).await;
         assert_eq!(out.unwrap(), Outcome::DryRun);
         assert_eq!(b.sent(), 0);
+    }
+
+    #[tokio::test]
+    async fn json_and_csv_are_dry_run_previews_only() {
+        let b = FakeBroker::default();
+        let g = guard(Some(800.0), Some(50_000.0), &never_confirm);
+        let market = Intent::Order(OrderKind::Market);
+        for format in [Format::Json, Format::Csv] {
+            let dry = OrderOpts { format, ..DRY };
+            let out = place_live_order(&b, Side::Buy, "SBIN", 10, market, dry, &g).await;
+            assert_eq!(out.unwrap(), Outcome::DryRun);
+            // Without --dry-run, structured output is refused before anything
+            // is resolved or sent.
+            let live = OrderOpts { format, ..YES };
+            let err = place_live_order(&b, Side::Buy, "SBIN", 10, market, live, &g)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("--dry-run"), "{err}");
+            let err = cancel_gtt(&b, "G1", OrderOpts { format, ..DRY }, &g)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("cancelling"), "{err}");
+        }
+        // The cap still applies to a structured preview.
+        let capped = guard(Some(800.0), Some(1_000.0), &never_confirm);
+        let json = OrderOpts {
+            format: Format::Json,
+            ..DRY
+        };
+        let err = place_live_order(&b, Side::Buy, "SBIN", 10, market, json, &capped)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("max_order_value"), "{err}");
+        assert_eq!(b.sent(), 0);
+    }
+
+    #[test]
+    fn structured_charges_match_the_table() {
+        use brokers::charges::estimate;
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        let e = estimate(
+            BrokerKind::Zerodha,
+            Side::Buy,
+            &OrderKind::Market,
+            100,
+            100_000.0,
+            Some((999.8, 1000.2)),
+            date,
+        )
+        .unwrap();
+        let rows = charge_rows(Some(&e));
+        let lines: Vec<&str> = rows.iter().map(|r| r.line).collect();
+        assert_eq!(
+            lines,
+            [
+                "brokerage",
+                "stt",
+                "exchange",
+                "sebi",
+                "stamp",
+                "gst",
+                "dp",
+                "total",
+                "slippage"
+            ]
+        );
+        let total = rows.iter().find(|r| r.line == "total").unwrap();
+        assert!((total.delivery - 118.7406).abs() < 1e-6);
+        let slip = rows.last().unwrap();
+        assert!((slip.delivery - 20.0).abs() < 1e-6 && slip.delivery == slip.intraday);
+        assert!(charge_rows(None).is_empty());
+        let csv = output::to_csv(&rows).unwrap();
+        assert!(
+            csv.starts_with("line,delivery,intraday\nbrokerage,0.0,"),
+            "{csv}"
+        );
+
+        let v = serde_json::to_value(ChargesOut::from(&e)).unwrap();
+        assert!((v["delivery"]["total"].as_f64().unwrap() - 118.7406).abs() < 1e-6);
+        assert!((v["delivery"]["stt"].as_f64().unwrap() - 100.0).abs() < 1e-6);
+        assert_eq!(v["slippage"]["basis"], "spread");
+        assert_eq!(v["slippage"]["bid"], 999.8);
     }
 
     #[tokio::test]
@@ -1280,6 +1620,7 @@ mod tests {
         let dry_yes = OrderOpts {
             yes: true,
             dry_run: true,
+            format: Format::Table,
         };
         assert!(require_cap_for_unattended(BrokerKind::Angel, dry_yes, &g.limits).is_ok());
         // Typing yes at the prompt keeps working without a cap.
