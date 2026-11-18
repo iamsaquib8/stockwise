@@ -829,6 +829,15 @@ impl Config {
             }
             period_value(period).with_context(|| format!("`periods.{}`", command))?;
         }
+        let mut seen = std::collections::BTreeSet::new();
+        for name in self.portfolio_markets.keys() {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                bail!(
+                    "`portfolio_markets` names `{}` twice (names ignore case); keep one line",
+                    name.to_ascii_lowercase()
+                );
+            }
+        }
         for (name, market) in &self.portfolio_markets {
             crate::portfolio::normalize_name(Some(name))
                 .with_context(|| format!("`portfolio_markets.{}`", name))?;
@@ -857,7 +866,12 @@ impl Config {
 ///    `--portfolio` or `STOCKWISE_PORTFOLIO` (`bound`, `portfolio_explicit`),
 /// 4. the config file's `market`, which `stockwise use` and `stockwise init`
 ///    write (`file`),
-/// 5. the market bound to the config file's portfolio (`bound`).
+/// 5. the market bound to the config file's portfolio (`bound`), when no
+///    portfolio was picked for this run.
+///
+/// `bound` is the binding of the portfolio in use: the one picked for this
+/// run when there is one (so an unbound portfolio picked with `--portfolio`
+/// never borrows another portfolio's market), else the config file's.
 ///
 /// `None` means the built-in default (`in`). The binding lives in the config
 /// file, so it reports [`Source::File`].
@@ -1549,6 +1563,10 @@ mod tests {
         assert_eq!(leftovers, 0);
         let _ = std::fs::remove_dir_all(&dir);
         // Bad entries are rejected.
+        assert!(
+            err("[portfolio_markets]\nUS-TECH = \"us\"\nus-tech = \"uk\"\n").contains("twice"),
+            "case-equivalent names"
+        );
         assert!(err("[portfolio_markets]\nisa = \"mars\"\n").contains("portfolio_markets.isa"));
         assert!(err("[portfolio_markets]\n\"bad name\" = \"us\"\n").contains("portfolio_markets"));
     }

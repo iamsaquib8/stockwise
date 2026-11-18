@@ -3591,7 +3591,9 @@ fn curated_quickstart_help(new_user: bool) -> String {
 /// The market for this run and where it came from: `-m` (`flag`), else
 /// `STOCKWISE_MARKET`, else the market bound to `portfolio` when it was
 /// picked for this run, else the config file (`stockwise use`), else the
-/// binding of the config file's portfolio, else India. See
+/// binding of `portfolio` when it is the config file's, else India. A
+/// portfolio picked for this run without a binding never borrows the config
+/// file portfolio's binding. See
 /// [`config::pick_market`].
 fn run_market(
     flag: Option<Market>,
@@ -3619,14 +3621,54 @@ fn run_market(
 fn command_symbols(matches: &clap::ArgMatches, args: &[String]) -> Vec<(String, Option<usize>)> {
     let mut level = matches;
     let mut vals: Vec<String> = Vec::new();
-    while let Some((_, sub)) = level.subcommand() {
+    let mut cmd = Cli::command();
+    let mut long: Option<String> = None;
+    while let Some((name, sub)) = level.subcommand() {
+        let Some(sc) = cmd.find_subcommand(name).cloned() else {
+            break;
+        };
         for id in ["symbols", "symbol"] {
             if let Ok(Some(v)) = sub.try_get_many::<String>(id) {
                 vals = v.cloned().collect();
+                long = sc
+                    .get_arguments()
+                    .find(|a| a.get_id() == id)
+                    .and_then(|a| a.get_long())
+                    .map(str::to_string);
                 break;
             }
         }
+        cmd = sc;
         level = sub;
+    }
+    // An option-backed list (`--symbols A,B` / `--symbols=A,B`): the slots
+    // of its values, each of which may hold several delimited symbols.
+    if let Some(long) = long {
+        let flag = format!("--{long}");
+        let attached = format!("--{long}=");
+        let mut opt_slots = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            if args[i].starts_with(&attached) {
+                opt_slots.push(i);
+            } else if args[i] == flag {
+                while i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    i += 1;
+                    opt_slots.push(i);
+                }
+            }
+            i += 1;
+        }
+        return vals
+            .into_iter()
+            .map(|v| {
+                let at = opt_slots
+                    .iter()
+                    .copied()
+                    .find(|&i| replace_symbol(&args[i], &v, &v).is_some());
+                (v, at)
+            })
+            .collect();
     }
     // Pair each symbol with the next positional slot of the leaf command
     // that holds the same text.
@@ -3644,6 +3686,32 @@ fn command_symbols(matches: &clap::ArgMatches, args: &[String]) -> Vec<(String, 
             (v, at.map(|k| slots[k]))
         })
         .collect()
+}
+
+/// `token` with the symbol `typed` replaced by `new`: the whole token, or
+/// one comma-separated piece of an option value (`--symbols=A,B`, `A,B`).
+/// `None` when the token does not hold `typed`.
+fn replace_symbol(token: &str, typed: &str, new: &str) -> Option<String> {
+    if token == typed {
+        return Some(new.to_string());
+    }
+    let (prefix, rest) = match token.split_once('=') {
+        Some((p, r)) if token.starts_with("--") => (format!("{p}="), r),
+        _ => (String::new(), token),
+    };
+    let mut hit = false;
+    let pieces: Vec<&str> = rest
+        .split(',')
+        .map(|p| {
+            if p == typed {
+                hit = true;
+                new
+            } else {
+                p
+            }
+        })
+        .collect();
+    hit.then(|| format!("{prefix}{}", pieces.join(",")))
 }
 
 /// The argv slots that hold positional values of the innermost command,
@@ -3729,6 +3797,12 @@ fn parse_bare_symbol_invocation(
         } else if let Some(val) = a.strip_prefix("--market=") {
             market = Market::from_str(val, true).ok()?;
             market_flag = true;
+            i += 1;
+        } else if a == "--portfolio" {
+            portfolio_name(args.get(i + 1)?).ok()?;
+            i += 2;
+        } else if let Some(val) = a.strip_prefix("--portfolio=") {
+            portfolio_name(val).ok()?;
             i += 1;
         } else if a == "--profile" {
             let val = args.get(i + 1)?;
@@ -3964,17 +4038,33 @@ async fn async_main() {
     let matches = match cmd.try_get_matches_from_mut(&args) {
         Ok(m) => m,
         Err(e) => {
-            let env_portfolio = std::env::var("STOCKWISE_PORTFOLIO")
-                .ok()
-                .filter(|p| !p.trim().is_empty());
-            let portfolio = env_portfolio
+            // `--portfolio NAME` / `--portfolio=NAME`, else the env var.
+            let flag_portfolio = args.iter().enumerate().find_map(|(i, a)| {
+                a.strip_prefix("--portfolio=")
+                    .map(str::to_string)
+                    .or_else(|| {
+                        (a == "--portfolio")
+                            .then(|| args.get(i + 1).cloned())
+                            .flatten()
+                    })
+            });
+            let explicit_portfolio = flag_portfolio.clone().or_else(|| {
+                std::env::var("STOCKWISE_PORTFOLIO")
+                    .ok()
+                    .filter(|p| !p.trim().is_empty())
+            });
+            let portfolio = explicit_portfolio
                 .clone()
                 .or_else(|| config::get().portfolio.clone());
             let (default_market, market_source) =
-                run_market(None, portfolio.as_deref(), env_portfolio.is_some());
+                run_market(None, portfolio.as_deref(), explicit_portfolio.is_some());
             if matches!(e.kind(), clap::error::ErrorKind::InvalidSubcommand)
                 && let Some((sym, m, fmt)) = parse_bare_symbol_invocation(&args, default_market)
             {
+                if let Err(e) = portfolio::select(portfolio.as_deref()) {
+                    eprintln!("\n  {} {:#}\n", colored::Colorize::red("Error:"), e);
+                    std::process::exit(2);
+                }
                 let market_flag = args
                     .iter()
                     .any(|a| a == "-m" || a == "--market" || a.starts_with("--market="));
@@ -4058,8 +4148,10 @@ async fn async_main() {
                     if r.symbol != *typed {
                         // Only the symbol's own argv slot: an option value
                         // with the same text stays as typed.
-                        if let Some(a) = at.and_then(|i| args.get_mut(i)).filter(|a| *a == typed) {
-                            *a = r.symbol.clone();
+                        if let Some(a) = at.and_then(|i| args.get_mut(i))
+                            && let Some(new) = replace_symbol(a, typed, &r.symbol)
+                        {
+                            *a = new;
                             rewrote = true;
                         }
                     }
@@ -6680,6 +6772,28 @@ mod tests {
     }
 
     #[test]
+    fn bare_symbol_accepts_a_portfolio() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let got = parse_bare_symbol_invocation(
+            &a(&["stockwise", "--portfolio", "us-tech", "NVDA"]),
+            Market::In,
+        );
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("NVDA"));
+        let got = parse_bare_symbol_invocation(
+            &a(&["stockwise", "NVDA", "--portfolio=us-tech"]),
+            Market::In,
+        );
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("NVDA"));
+        assert!(
+            parse_bare_symbol_invocation(
+                &a(&["stockwise", "--portfolio", "bad name!", "NVDA"]),
+                Market::In
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn command_symbols_reach_nested_commands_and_know_their_slot() {
         let argv = |a: &[&str]| -> (Vec<String>, clap::ArgMatches) {
             let v: Vec<String> = a.iter().map(|s| s.to_string()).collect();
@@ -6752,6 +6866,40 @@ mod tests {
         ]);
         let found = command_symbols(&m, &v);
         assert_eq!(found[0].1, Some(5), "{found:?}");
+        // Option-backed lists: delimited and attached forms.
+        let (v, m) = argv(&[
+            "stockwise",
+            "sim",
+            "replay",
+            "start",
+            "--from",
+            "2022-01-03",
+            "--to",
+            "2022-06-30",
+            "--symbols",
+            "US0378331005,US5949181045",
+        ]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|(_, at)| *at == Some(9)), "{found:?}");
+        let (v, m) = argv(&[
+            "stockwise",
+            "sim",
+            "replay",
+            "start",
+            "--from",
+            "2022-01-03",
+            "--to",
+            "2022-06-30",
+            "--symbols=NVDA,US0378331005",
+        ]);
+        let found = command_symbols(&m, &v);
+        assert_eq!(found[1], ("US0378331005".to_string(), Some(8)));
+        assert_eq!(
+            replace_symbol(&v[8], "US0378331005", "AAPL").as_deref(),
+            Some("--symbols=NVDA,AAPL")
+        );
+        assert_eq!(replace_symbol("2022-01-03", "US0378331005", "AAPL"), None);
         let (_, m) = argv(&["stockwise", "doctor"]);
         assert!(command_symbols(&m, &[]).is_empty());
     }

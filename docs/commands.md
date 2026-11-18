@@ -1182,7 +1182,7 @@ The market for one command comes from the first of these that is set:
 2. `STOCKWISE_MARKET`
 3. the market bound to a portfolio picked with `--portfolio` or `STOCKWISE_PORTFOLIO`
 4. the config file's `market` (what `stockwise use` saves)
-5. the market bound to the config file's portfolio
+5. the market bound to the config file's portfolio, when no portfolio was picked for this run (a portfolio picked with `--portfolio` and no binding of its own skips this step)
 6. `in`
 
 **No `-m` needed.** When the market comes from steps 3–6, a symbol that says
