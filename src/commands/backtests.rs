@@ -7,6 +7,7 @@ use backtest::engine::{
 };
 use backtest::plugin;
 use backtest::rules::{self, StrategyDef};
+use backtest::stats::{self, SharpeTest};
 use backtest::{Bars, walkforward};
 use serde_json::json;
 
@@ -48,6 +49,7 @@ impl BacktestOpts {
             stop_loss_pct: def.stop_loss_pct,
             take_profit_pct: def.take_profit_pct,
             periods_per_year: engine::bars_per_year(symbols.iter().map(String::as_str)),
+            execution: def.execution.clone(),
             ..SimConfig::single(self.capital, self.fill, costs)
         }
     }
@@ -173,11 +175,71 @@ fn print_strategy(def: &StrategyDef) {
     if let Some(tp) = def.take_profit_pct {
         exit.push(format!("target {tp}%"));
     }
+    let x = &def.execution;
+    if let Some(t) = x.trailing_stop_pct {
+        exit.push(format!("trailing stop {t}%"));
+    }
+    if let Some(m) = x.trailing_atr_mult {
+        exit.push(format!("trailing stop {m}×ATR({})", x.atr_period));
+    }
     if !exit.is_empty() {
         print_kv("Exit", &exit.join(" · "));
     }
+    if let Some(p) = describe_position(x) {
+        print_kv("Position", &p);
+    }
+    if x.cash_yield_pct > 0.0 {
+        print_kv("Idle Cash", &format!("earns {}% a year", x.cash_yield_pct));
+    }
+    if let Some(t) = x.tax {
+        print_kv(
+            "Tax on Gains",
+            &format!(
+                "{}% short-term, {}% long-term (held {}+ days); losses offset later gains",
+                t.short_term_pct, t.long_term_pct, t.long_term_days
+            ),
+        );
+    }
     if !def.params.is_empty() {
         print_kv("Parameters", &rules::format_params(&def.params));
+    }
+}
+
+/// `[position]` in words, or `None` for the default (long, all-in, whole shares).
+fn describe_position(x: &engine::Execution) -> Option<String> {
+    let mut parts = Vec::new();
+    if x.is_short() {
+        parts.push(if x.borrow_rate_pct > 0.0 {
+            format!("short, borrow fee {}% a year", x.borrow_rate_pct)
+        } else {
+            "short".to_string()
+        });
+    }
+    match x.sizing {
+        engine::Sizing::AllIn => {}
+        engine::Sizing::FixedFraction { fraction_pct } => {
+            parts.push(format!("{fraction_pct}% of the sleeve per entry"));
+        }
+        engine::Sizing::AtrRisk { risk_pct, atr_mult } => parts.push(format!(
+            "size to lose {risk_pct}% of the sleeve on a {atr_mult}×ATR({}) move",
+            x.atr_period
+        )),
+    }
+    if x.fractional {
+        parts.push("fractional shares".to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// A quantity: whole shares as an integer, fractions to six places.
+fn qty(q: f64) -> String {
+    if q.fract() == 0.0 {
+        format!("{q:.0}")
+    } else {
+        format!("{q:.6}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -202,6 +264,59 @@ fn print_chart(equity: &[f64], capital: f64, title: &str) {
     for line in charts::line_chart(&scaled, 55, 8, if up { "green" } else { "red" }, title) {
         println!("{line}");
     }
+}
+
+/// Probabilistic and Deflated Sharpe, when the sample allows them.
+fn print_sharpe_test(t: Option<&SharpeTest>) {
+    let Some(t) = t else { return };
+    print_kv(
+        "Probabilistic Sharpe",
+        &format!(
+            "{:.0}% chance the true Sharpe is above 0 (this sample)",
+            t.probabilistic_sharpe * 100.0
+        ),
+    );
+    let trials = if t.trials == 1 {
+        "1 parameter set tried".to_string()
+    } else {
+        format!(
+            "{} parameter sets tried; luck alone would show Sharpe {:.2}",
+            t.trials, t.expected_max_sharpe
+        )
+    };
+    print_kv(
+        "Deflated Sharpe",
+        &format!("{:.0}% ({trials})", t.deflated_sharpe * 100.0),
+    );
+}
+
+/// Cash interest and tax, when the strategy has them.
+fn print_carry(r: &SimResult, cur: Option<&str>) {
+    if r.interest > 0.0 {
+        print_kv("Interest on Idle Cash", &format_price(r.interest, cur));
+    }
+    if r.costs.borrow > 0.0 {
+        print_kv("Borrow Fees (in costs)", &format_price(r.costs.borrow, cur));
+    }
+    if r.tax > 0.0 {
+        print_kv("Tax on Gains", &format_price(r.tax, cur));
+    }
+}
+
+/// JSON fields for cash interest, tax and the Sharpe test, present only
+/// when they apply.
+fn extras_json(r: &SimResult, test: Option<&SharpeTest>) -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    if r.interest != 0.0 {
+        o.insert("cash_interest".into(), json!(r.interest));
+    }
+    if r.tax != 0.0 {
+        o.insert("tax_paid".into(), json!(r.tax));
+    }
+    if let Some(t) = test {
+        o.insert("sharpe_test".into(), json!(t));
+    }
+    serde_json::Value::Object(o)
 }
 
 fn print_risk(m: &Metrics) {
@@ -291,6 +406,7 @@ fn print_trades(trades: &[Trade], cur: Option<&str>, with_symbol: bool) {
         let reason = match t.exit_reason {
             engine::ExitReason::Signal => "signal",
             engine::ExitReason::StopLoss => "stop",
+            engine::ExitReason::TrailingStop => "trailing",
             engine::ExitReason::TakeProfit => "target",
             engine::ExitReason::Rebalance => "rebalance",
             engine::ExitReason::EndOfData => "still open",
@@ -306,7 +422,7 @@ fn print_trades(trades: &[Trade], cur: Option<&str>, with_symbol: bool) {
             "  {sym}{:<11} {:<11} {:>6} {:>11} {:>11} {}  {}",
             t.entry_date,
             t.exit_date,
-            t.qty,
+            qty(t.qty),
             format_price(t.entry_price, cur),
             format_price(t.exit_price, cur),
             net,
@@ -368,6 +484,7 @@ pub(crate) fn single_json(
     net: &SimResult,
     gross: &Metrics,
     buy_hold_pct: f64,
+    sharpe_test: Option<&SharpeTest>,
 ) -> Result<serde_json::Value> {
     let m = net.metrics();
     let mut out = json!({
@@ -397,6 +514,7 @@ pub(crate) fn single_json(
             "equity": equity_json(&net.times, &net.equity),
         }),
     )?;
+    extend(&mut out, extras_json(net, sharpe_test))?;
     Ok(out)
 }
 
@@ -412,6 +530,7 @@ pub(crate) struct SingleRun {
     pub(crate) net: SimResult,
     pub(crate) gross: SimResult,
     pub(crate) buy_hold_pct: f64,
+    pub(crate) sharpe_test: Option<SharpeTest>,
 }
 
 impl SingleRun {
@@ -428,6 +547,7 @@ impl SingleRun {
             &self.net,
             &self.gross.metrics(),
             self.buy_hold_pct,
+            self.sharpe_test.as_ref(),
         )
     }
 }
@@ -448,16 +568,10 @@ pub(crate) async fn run_single(
     let costs = opts.cost_model(&resolved, currency.as_deref())?;
     let cfg = opts.sim_config(&def, costs.clone(), std::slice::from_ref(&resolved));
     let net = single(&resolved, &bars, &def, &cfg)?;
-    let gross = single(
-        &resolved,
-        &bars,
-        &def,
-        &SimConfig {
-            costs: CostModel::none(),
-            ..cfg.clone()
-        },
-    )?;
+    let gross = single(&resolved, &bars, &def, &cfg.gross())?;
     let buy_hold_pct = backtest::buy_and_hold_pct(&bars).unwrap_or(0.0);
+    let trials = stats::grid_trials(&def, &[(&resolved, &bars)], &cfg)?;
+    let sharpe_test = stats::sharpe_test(&stats::curve(&net), &trials, cfg.periods_per_year);
     Ok(SingleRun {
         resolved,
         currency,
@@ -467,6 +581,7 @@ pub(crate) async fn run_single(
         net,
         gross,
         buy_hold_pct,
+        sharpe_test,
     })
 }
 
@@ -492,6 +607,7 @@ pub async fn cmd_backtest(
         net,
         gross,
         buy_hold_pct: bh,
+        sharpe_test,
     } = run;
     let cur = currency.as_deref();
     let (m, gm) = (net.metrics(), gross.metrics());
@@ -523,7 +639,9 @@ pub async fn cmd_backtest(
         "Alpha (net vs B&H)",
         &signed_pct(m.total_return_pct - bh).bold().to_string(),
     );
+    print_carry(&net, cur);
     print_risk(&m);
+    print_sharpe_test(sharpe_test.as_ref());
 
     print_section("Trade Statistics");
     print_trade_stats(&m, net.skipped_entries);
@@ -575,6 +693,12 @@ pub async fn cmd_backtest_portfolio(
     let initial = weights
         .initial(resolved.len())
         .map_err(|e| anyhow::anyhow!(e))?;
+    if def.execution.is_short() && rebalance != Rebalance::None {
+        bail!(
+            "--rebalance works with long strategies only; this strategy sells short \
+             ([position] side = \"short\")"
+        );
+    }
     if weights == Weights::InverseVol && rebalance == Rebalance::None {
         bail!(
             "--weights inverse-vol needs --rebalance monthly or quarterly: weights come from the \
@@ -639,13 +763,14 @@ pub async fn cmd_backtest_portfolio(
         ..opts.sim_config(&def, costs.clone(), &resolved)
     };
     let net = engine::simulate(&assets, &cfg);
-    let gross = engine::simulate(
-        &assets,
-        &SimConfig {
-            costs: CostModel::none(),
-            ..cfg.clone()
-        },
-    );
+    let gross = engine::simulate(&assets, &cfg.gross());
+    let data_refs: Vec<(&str, &Bars)> = resolved
+        .iter()
+        .zip(&data)
+        .map(|(s, (b, _))| (s.as_str(), b))
+        .collect();
+    let trials = stats::grid_trials(&def, &data_refs, &cfg)?;
+    let sharpe_test = stats::sharpe_test(&stats::curve(&net), &trials, cfg.periods_per_year);
     let (m, gm) = (net.metrics(), gross.metrics());
     let bh: f64 = data
         .iter()
@@ -685,6 +810,7 @@ pub async fn cmd_backtest_portfolio(
                 "equity": equity_json(&net.times, &net.equity),
             }),
         )?;
+        extend(&mut out, extras_json(&net, sharpe_test.as_ref()))?;
         return output::print_json(&out);
     }
 
@@ -719,7 +845,9 @@ pub async fn cmd_backtest_portfolio(
         "Alpha (net vs B&H)",
         &signed_pct(m.total_return_pct - bh).bold().to_string(),
     );
+    print_carry(&net, cur);
     print_risk(&m);
+    print_sharpe_test(sharpe_test.as_ref());
     print_trade_stats(&m, net.skipped_entries);
 
     print_section("Per Symbol");
@@ -938,6 +1066,7 @@ pub async fn cmd_backtest_walkforward(
         walkforward::Verdict::Inconclusive => "INCONCLUSIVE".dimmed().bold(),
     };
     print_kv("Verdict", &format!("{verdict} — {}", wf.verdict_reason));
+    print_sharpe_test(wf.sharpe_test.as_ref());
     footer();
     Ok(())
 }

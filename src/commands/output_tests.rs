@@ -655,6 +655,7 @@ fn backtest_json_and_trade_rows() {
         &net,
         &gross,
         5.0,
+        None,
     )
     .unwrap();
     assert_eq!(

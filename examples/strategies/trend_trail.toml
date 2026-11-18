@@ -1,0 +1,29 @@
+# Example: the v2 execution options. A trend follower that risks 1% of the
+# capital per trade, trails a 3×ATR stop behind the best high, earns interest
+# on idle cash and pays tax on its gains.
+# Run it in place with `stockwise backtest AAPL -s file:examples/strategies/trend_trail.toml`.
+# Every table below is optional; leave one out and the engine behaves as before.
+name = "trend_trail"
+description = "Donchian breakout above the 200-day average, 3×ATR trailing stop, ATR risk sizing"
+entry = ["close > sma(200)", "close >= highest($breakout)"]
+exit = "close < sma(200)"
+trailing_atr_mult = 3
+atr_period = 14
+
+[params]
+breakout = 55
+
+[grid]
+breakout = [20, 55, 100]
+
+[position]
+sizing = "atr-risk"   # all-in (default), fixed-fraction or atr-risk
+risk_pct = 1          # lose 1% of the capital on a move of atr_mult × ATR
+atr_mult = 3
+fractional = true     # US shares and crypto can be bought in fractions
+
+[cash]
+yield_pct = 4         # idle cash earns 4% a year
+
+[tax]
+country = "us"        # US top short- and long-term rates; or set them yourself
