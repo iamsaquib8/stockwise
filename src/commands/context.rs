@@ -335,6 +335,30 @@ mod tests {
     }
 
     #[test]
+    fn use_bind_repairs_case_equivalent_bindings_in_an_invalid_config() {
+        let path = temp_config("dupes");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = "[portfolio_markets]\nDEFAULT = \"us\"\ndefault = \"uk\"\n";
+        std::fs::write(&path, broken).unwrap();
+        // The file is invalid as written: one portfolio named twice.
+        assert!(config::parse(broken, &[]).is_err());
+        // `stockwise use default ca --bind` runs on it (invalid configs are
+        // allowed for `use`) and leaves one valid binding.
+        let req = parse_use_targets(&strings(&["default", "ca"])).unwrap();
+        apply_use(&path, &req, true, false, None, &BTreeMap::new()).unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.portfolio_markets.len(), 1);
+        assert_eq!(cfg.portfolio_market(None), Some("ca"));
+        assert_eq!(cfg.market.as_deref(), Some("ca"));
+        // `--unbind` on the same broken file removes every spelling.
+        std::fs::write(&path, broken).unwrap();
+        let req = parse_use_targets(&strings(&["default"])).unwrap();
+        apply_use(&path, &req, false, true, None, &BTreeMap::new()).unwrap();
+        assert!(read(&path).portfolio_markets.is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn portfolio_binding_sets_and_follows_the_market() {
         let path = temp_config("bind");
         let req = parse_use_targets(&strings(&["us-tech", "us"])).unwrap();
