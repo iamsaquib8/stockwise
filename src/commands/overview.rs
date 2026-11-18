@@ -1232,6 +1232,10 @@ pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> R
         },
     );
 
+    // New release: checked at most once a week (cached in the data directory).
+    // Only `doctor` and `update` look; no other command checks for updates.
+    print_kv("StockWise release", &super::doctor_version_line().await);
+
     // Optional data provider
     use crate::providers::{MarketData, Selection};
     let provider_lines = match Selection::from_env() {

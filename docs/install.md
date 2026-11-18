@@ -22,14 +22,14 @@ These work today with the [latest release](https://github.com/iamsaquib8/stockwi
 
 | Platform | Command | Man pages and completions | Updates |
 |----------|---------|:---:|---------|
-| macOS, Linux, Termux | the quick install above | — | run it again |
+| macOS, Linux, Termux | the quick install above | — | `stockwise update` |
 | Debian 12+, Ubuntu 22.04+ | `curl -fsSLO https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise_amd64.deb && sudo apt install ./stockwise_amd64.deb` | ✓ | download the new `.deb` |
 | Fedora, RHEL 9+ | `sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm` | ✓ | run the same command again |
 | Nix | `nix profile install github:iamsaquib8/stockwise` | ✓ | `nix profile upgrade stockwise` |
 | Windows | `scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json` | — | `scoop update stockwise` |
 | Docker | `docker run --rm -it -v stockwise-data:/data ghcr.io/iamsaquib8/stockwise quote TCS` | — | `docker pull` |
 | Rust | `cargo binstall stockwise` (prebuilt) or `cargo install --locked stockwise` | — | run it again |
-| Any | archives from the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest) | man pages included | download again |
+| Any | archives from the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest) | man pages included | `stockwise update` |
 
 ### Coming soon
 
@@ -59,6 +59,34 @@ stockwise completions zsh > ~/.zfunc/_stockwise           # bash, zsh, fish, pow
 stockwise man --dir ~/.local/share/man/man1               # then: man stockwise
 ```
 
+## Update
+
+```bash
+stockwise update --check   # installed version, latest release, install channel
+stockwise update           # install the latest release
+```
+
+`stockwise update` (or `stockwise self-update`) first works out how this copy
+was installed, from where the binary lives:
+
+- **Quick install or release archive**: it downloads the archive for your
+  system and its `.sha256`, checks the SHA-256, and only then replaces the
+  binary. If the checksum is missing or does not match, it stops and nothing
+  changes. The swap is atomic: on macOS and Linux the new binary is renamed over
+  the old one; on Windows the old one is moved to `stockwise.exe.old` first.
+- **A package manager** (Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv,
+  pip, `.deb`/`.rpm`, Docker): it changes nothing and prints that package
+  manager's upgrade command, such as `brew upgrade stockwise`, so the package
+  manager stays in charge of its files.
+
+If the binary sits in a directory you cannot write to (for example
+`/usr/local/bin`), run the command again with the permissions you installed it
+with.
+
+`stockwise doctor` also says when a newer release is out. It asks GitHub at most
+once a week and keeps the answer in `update-check.json` in the data directory.
+No other command checks for updates.
+
 ## Check it
 
 ```bash
@@ -77,7 +105,9 @@ messages and what to do about each.
 
 ## Privacy
 
-StockWise sends no telemetry. The project counts downloads only from the
+StockWise sends no telemetry. The only update checks are the ones you run:
+`stockwise update` and `stockwise doctor` (at most weekly) ask the GitHub
+Releases API for the latest version and send nothing about you or your data. The project counts downloads only from the
 public numbers each registry already shows (crates.io, GitHub releases,
 PyPI, Homebrew, Docker); see
 [download stats](https://github.com/iamsaquib8/stockwise/blob/main/packaging/README.md#download-stats).
