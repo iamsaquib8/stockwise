@@ -554,6 +554,10 @@ pub struct Config {
     /// prefix: `telegram_token = "..."`. Environment variables win.
     #[serde(default)]
     pub notify: BTreeMap<String, String>,
+    /// Market each named portfolio is bound to (`[portfolio_markets]`,
+    /// `us-tech = "us"`). Set with `stockwise use PORTFOLIO MARKET --bind`.
+    #[serde(default)]
+    pub portfolio_markets: BTreeMap<String, String>,
 }
 
 static EMPTY: Config = Config {
@@ -580,6 +584,7 @@ static EMPTY: Config = Config {
     },
     periods: BTreeMap::new(),
     notify: BTreeMap::new(),
+    portfolio_markets: BTreeMap::new(),
 };
 
 /// The `[notify]` key for a `STOCKWISE_*` notification variable.
@@ -824,9 +829,77 @@ impl Config {
             }
             period_value(period).with_context(|| format!("`periods.{}`", command))?;
         }
+        let mut seen = std::collections::BTreeSet::new();
+        for name in self.portfolio_markets.keys() {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                bail!(
+                    "`portfolio_markets` names `{}` twice (names ignore case); keep one line",
+                    name.to_ascii_lowercase()
+                );
+            }
+        }
+        for (name, market) in &self.portfolio_markets {
+            crate::portfolio::normalize_name(Some(name))
+                .with_context(|| format!("`portfolio_markets.{}`", name))?;
+            market_value(market).with_context(|| format!("`portfolio_markets.{}`", name))?;
+        }
         self.profile.validate()?;
         Ok(())
     }
+
+    /// The market a portfolio is bound to, if any. `None` is the default
+    /// portfolio, whose key is `default`.
+    pub fn portfolio_market(&self, portfolio: Option<&str>) -> Option<&str> {
+        let key = portfolio.unwrap_or("default");
+        self.portfolio_markets
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The market for this run, from the first layer that sets one:
+///
+/// 1. `-m` / `--market` (`flag`),
+/// 2. `STOCKWISE_MARKET` (`env`),
+/// 3. the market bound to a portfolio picked for this run with
+///    `--portfolio` or `STOCKWISE_PORTFOLIO` (`bound`, `portfolio_explicit`),
+/// 4. the config file's `market`, which `stockwise use` and `stockwise init`
+///    write (`file`),
+/// 5. the market bound to the config file's portfolio (`bound`), when no
+///    portfolio was picked for this run.
+///
+/// `bound` is the binding of the portfolio in use: the one picked for this
+/// run when there is one (so an unbound portfolio picked with `--portfolio`
+/// never borrows another portfolio's market), else the config file's.
+///
+/// `None` means the built-in default (`in`). The binding lives in the config
+/// file, so it reports [`Source::File`].
+pub fn pick_market(
+    flag: Option<&str>,
+    env: Option<&str>,
+    bound: Option<&str>,
+    portfolio_explicit: bool,
+    file: Option<&str>,
+) -> Option<(String, Source)> {
+    if let Some(v) = nonempty(flag) {
+        return Some((v.to_string(), Source::Flag));
+    }
+    if let Some(v) = nonempty(env) {
+        return Some((v.to_string(), Source::Env));
+    }
+    let bound = nonempty(bound);
+    if portfolio_explicit && let Some(v) = bound {
+        return Some((v.to_string(), Source::File));
+    }
+    nonempty(file)
+        .or(bound)
+        .map(|v| (v.to_string(), Source::File))
+}
+
+/// `v` trimmed, or `None` when it is blank.
+fn nonempty(v: Option<&str>) -> Option<&str> {
+    v.map(str::trim).filter(|v| !v.is_empty())
 }
 
 /// The clap spelling (`in` / `us`) of a market name from the file.
@@ -1008,6 +1081,14 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # max_stock_weight = 12.0
 # max_smallcap_weight = 25.0
 # risk_per_trade = 1.0
+
+# Market each named portfolio uses (`stockwise use us-tech us --bind`).
+# Picking the portfolio with `stockwise use`, --portfolio or
+# STOCKWISE_PORTFOLIO makes its market the default; -m and STOCKWISE_MARKET
+# still win.
+[portfolio_markets]
+# us-tech = "us"
+# uk-isa = "uk"
 "#;
 
 /// Updates to apply to the `[profile]` section of `config.toml`.
@@ -1121,7 +1202,7 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))
+    write_atomic(path, &out)
 }
 
 /// Comment out all active keys inside `[profile]` at `path`, restoring built-in defaults.
@@ -1172,41 +1253,205 @@ pub fn init(path: &Path, force: bool) -> Result<()> {
 /// template's commented one, else a new line goes on top. Other lines and
 /// comments are kept.
 pub fn set_market(path: &Path, value: &str) -> Result<()> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
-        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
-    };
-    let new_line = format!("market = \"{value}\"");
-    let is_key = |l: &str, prefix: &str| {
-        l.strip_prefix(prefix)
-            .is_some_and(|r| r.trim_start().starts_with('='))
-    };
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    set_top_level(path, "market", value)
+}
+
+/// Set the top-level `key = "<value>"` in the config file at `path` the way
+/// [`set_market`] does.
+pub fn set_top_level(path: &Path, key: &str, value: &str) -> Result<()> {
+    let mut lines = config_lines(path)?;
+    let new_line = format!("{key} = \"{value}\"");
     // Only top-level keys count: stop at the first table header.
     let top = lines
         .iter()
         .position(|l| l.trim_start().starts_with('['))
         .unwrap_or(lines.len());
+    let commented = format!("# {key}");
     let at = lines[..top]
         .iter()
-        .position(|l| is_key(l.trim_start(), "market"))
+        .position(|l| is_key_line(l.trim_start(), key))
         .or_else(|| {
             lines[..top]
                 .iter()
-                .position(|l| is_key(l.trim_start(), "# market"))
+                .position(|l| is_key_line(l.trim_start(), &commented))
         });
     match at {
         Some(i) => lines[i] = new_line,
         None => lines.insert(0, new_line),
     }
+    write_lines(path, &lines)
+}
+
+/// Bind portfolio `name` to `market` in `[portfolio_markets]`, or remove its
+/// binding when `market` is `None`. Creates the file and the table as
+/// needed; comments and other sections are kept.
+pub fn set_portfolio_market(path: &Path, name: &str, market: Option<&str>) -> Result<()> {
+    let mut lines = config_lines(path)?;
+    let header = lines
+        .iter()
+        .position(|l| table_header(l) == Some("portfolio_markets"));
+    let section_end = |start: usize, lines: &[String]| {
+        lines[start + 1..]
+            .iter()
+            .position(|l| l.trim_start().starts_with('['))
+            .map_or(lines.len(), |i| start + 1 + i)
+    };
+    // Every line that binds this portfolio, in any spelling or case. Extra
+    // ones (only a hand-edited file has them) are dropped, so the table ends
+    // with at most one key per portfolio.
+    let mut matching: Vec<usize> = header
+        .map(|h| {
+            let end = section_end(h, &lines);
+            (h + 1..end)
+                .filter(|&i| table_key(&lines[i]).is_some_and(|k| k.eq_ignore_ascii_case(name)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let existing = (!matching.is_empty()).then(|| matching.remove(0));
+    for &i in matching.iter().rev() {
+        lines.remove(i);
+    }
+    match (market, existing) {
+        (Some(m), Some(i)) => lines[i] = format!("{name} = \"{m}\""),
+        (Some(m), None) => match header {
+            Some(h) => {
+                // After the table's last key, else right under the header.
+                let end = section_end(h, &lines);
+                let after = (h + 1..end)
+                    .rev()
+                    .find(|&i| {
+                        let t = lines[i].trim_start();
+                        !t.is_empty() && !t.starts_with('#')
+                    })
+                    .unwrap_or(h);
+                lines.insert(after + 1, format!("{name} = \"{m}\""));
+            }
+            None => {
+                if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push("[portfolio_markets]".into());
+                lines.push(format!("{name} = \"{m}\""));
+            }
+        },
+        (None, Some(i)) => {
+            lines.remove(i);
+        }
+        (None, None) => return Ok(()),
+    }
+    write_lines(path, &lines)
+}
+
+/// Whether `line` (trimmed at the start) sets `key`.
+fn is_key_line(line: &str, key: &str) -> bool {
+    line.strip_prefix(key)
+        .is_some_and(|r| r.trim_start().starts_with('='))
+}
+
+/// The name of the table a `[name]` line opens, ignoring a trailing comment.
+fn table_header(line: &str) -> Option<&str> {
+    let t = line.split('#').next()?.trim();
+    let inner = t.strip_prefix('[')?.strip_suffix(']')?;
+    (!inner.starts_with('[')).then(|| inner.trim().trim_matches('"'))
+}
+
+/// The key a `key = value` line sets, decoded the way TOML reads it (bare,
+/// quoted or escaped: `"us\u002dtech"` is `us-tech`); `None` for comments,
+/// blank lines, headers and lines that are not a single key/value pair.
+fn table_key(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let table: toml::Table = toml::from_str(t).ok()?;
+    let mut keys = table.keys();
+    match (keys.next(), keys.next()) {
+        (Some(k), None) => Some(k.clone()),
+        _ => None,
+    }
+}
+
+/// The config file's lines, or [`TEMPLATE`]'s when it does not exist.
+fn config_lines(path: &Path) -> Result<Vec<String>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("Cannot create directory {}", dir.display()))?;
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    std::fs::write(path, out).with_context(|| format!("Cannot write {}", path.display()))
+    write_atomic(path, &out)
+}
+
+/// The directory that holds `path`: its parent, or `.` for a bare file name
+/// such as `config.toml` (whose parent is the empty path).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn containing_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Replace `path` with `text` through a temporary file next to it, renamed
+/// over the original: a reader never sees a half-written file, and a failed
+/// write leaves the old file in place. The temporary file is synced before
+/// the rename and, on Unix, the directory after it, so a saved change
+/// survives a crash. Each call uses its own temporary
+/// name, and removes it when the write or the rename fails. On Unix the
+/// temporary file is created owner-only (0600) and then given the existing
+/// file's permissions, so a private config (it may hold `[notify]` secrets)
+/// stays private.
+fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("toml.{}.{}.tmp", std::process::id(), n));
+    let existing = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let result = (|| -> Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("Cannot write {}", tmp.display()))?;
+        f.write_all(text.as_bytes())
+            .and_then(|()| f.sync_all())
+            .with_context(|| format!("Cannot write {}", tmp.display()))?;
+        drop(f);
+        if let Some(perms) = existing {
+            std::fs::set_permissions(&tmp, perms)
+                .with_context(|| format!("Cannot set permissions on {}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("Cannot replace {}", path.display()))?;
+        // The rename is atomic but not yet durable: sync the directory so
+        // the new entry survives a crash (the file itself was synced above).
+        #[cfg(unix)]
+        {
+            let dir = containing_dir(path);
+            std::fs::File::open(&dir)
+                .and_then(|d| d.sync_all())
+                .with_context(|| format!("Cannot sync {}", dir.display()))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1237,6 +1482,181 @@ mod tests {
         let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
         assert_eq!((c.market.as_deref(), c.ai), (Some("in"), Some(true)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn market_precedence_chain() {
+        let pick = |flag, env, bound, explicit, file| pick_market(flag, env, bound, explicit, file);
+        let file = Source::File;
+        // Flag beats everything.
+        assert_eq!(
+            pick(Some("uk"), Some("us"), Some("jp"), true, Some("in")),
+            Some(("uk".into(), Source::Flag))
+        );
+        // Then the env var.
+        assert_eq!(
+            pick(None, Some("us"), Some("jp"), true, Some("in")),
+            Some(("us".into(), Source::Env))
+        );
+        // An empty env var does not count.
+        assert_eq!(
+            pick(None, Some(" "), None, false, Some("in")),
+            Some(("in".into(), file))
+        );
+        // Then a portfolio picked for this run brings its binding.
+        assert_eq!(
+            pick(None, None, Some("jp"), true, Some("in")),
+            Some(("jp".into(), file))
+        );
+        // Then the file's market (`stockwise use`).
+        assert_eq!(
+            pick(None, None, Some("jp"), false, Some("in")),
+            Some(("in".into(), file))
+        );
+        // Then the binding of the file's portfolio.
+        assert_eq!(
+            pick(None, None, Some("jp"), false, None),
+            Some(("jp".into(), file))
+        );
+        // Then the built-in default.
+        assert_eq!(pick(None, None, None, false, None), None);
+    }
+
+    #[test]
+    fn portfolio_markets_table_is_written_and_validated() {
+        let dir = std::env::temp_dir().join(format!("sw-pmarkets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+        // From the template: the commented example stays, the key is added.
+        set_portfolio_market(&file, "us-tech", Some("us")).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# us-tech = \"us\""), "{text}");
+        let c = parse(&text, CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), Some("us"));
+        assert_eq!(c.portfolio_market(None), None);
+        // Replace, add another, remove one.
+        set_portfolio_market(&file, "us-tech", Some("ca")).unwrap();
+        set_portfolio_market(&file, "default", Some("in")).unwrap();
+        set_portfolio_market(&file, "us-tech", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), None);
+        assert_eq!(c.portfolio_market(None), Some("in"));
+        // A file without the table gets one at the end.
+        std::fs::write(&file, "market = \"us\"\n[periods]\ndeep = \"3mo\"\n").unwrap();
+        set_portfolio_market(&file, "isa", Some("uk")).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("isa")), Some("uk"));
+        assert_eq!(c.periods.get("deep").map(String::as_str), Some("3mo"));
+        // A header with a trailing comment and a quoted key are the same
+        // table and key: no second table, no duplicate key.
+        std::fs::write(
+            &file,
+            "[portfolio_markets] # market per portfolio\n\"us-tech\" = \"us\"\n",
+        )
+        .unwrap();
+        set_portfolio_market(&file, "us-tech", Some("ca")).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("[portfolio_markets]").count(), 1, "{text}");
+        let c = parse(&text, CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), Some("ca"));
+        set_portfolio_market(&file, "US-TECH", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), None);
+        // An escaped key is the same key too.
+        std::fs::write(&file, "[portfolio_markets]\n\"us\\u002dtech\" = \"us\"\n").unwrap();
+        assert_eq!(
+            parse(&std::fs::read_to_string(&file).unwrap(), CMDS)
+                .unwrap()
+                .portfolio_market(Some("us-tech")),
+            Some("us")
+        );
+        set_portfolio_market(&file, "us-tech", Some("uk")).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), Some("uk"));
+        std::fs::write(&file, "[portfolio_markets]\n\"us\\u002dtech\" = \"us\"\n").unwrap();
+        set_portfolio_market(&file, "us-tech", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(Some("us-tech")), None);
+        // No temporary file is left behind.
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name() != "config.toml")
+            .count();
+        assert_eq!(leftovers, 0);
+        // Case-equivalent duplicates collapse into one key on write.
+        std::fs::write(
+            &file,
+            "[portfolio_markets]\nDEFAULT = \"us\"\ndefault = \"uk\"\n",
+        )
+        .unwrap();
+        set_portfolio_market(&file, "default", Some("ca")).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_markets.len(), 1);
+        assert_eq!(c.portfolio_market(None), Some("ca"));
+        std::fs::write(
+            &file,
+            "[portfolio_markets]\nDEFAULT = \"us\"\ndefault = \"uk\"\nisa = \"uk\"\n",
+        )
+        .unwrap();
+        set_portfolio_market(&file, "default", None).unwrap();
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.portfolio_market(None), None);
+        assert_eq!(c.portfolio_market(Some("isa")), Some("uk"));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Bad entries are rejected.
+        assert!(
+            err("[portfolio_markets]\nUS-TECH = \"us\"\nus-tech = \"uk\"\n").contains("twice"),
+            "case-equivalent names"
+        );
+        assert!(err("[portfolio_markets]\nisa = \"mars\"\n").contains("portfolio_markets.isa"));
+        assert!(err("[portfolio_markets]\n\"bad name\" = \"us\"\n").contains("portfolio_markets"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_keep_a_private_config_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sw-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "[notify]\ntelegram_token = \"secret\"\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mode = |f: &Path| std::fs::metadata(f).unwrap().permissions().mode() & 0o777;
+        set_market(&file, "us").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        set_portfolio_market(&file, "isa", Some("uk")).unwrap();
+        assert_eq!(mode(&file), 0o600);
+        set_profile(
+            &file,
+            &ProfileUpdate {
+                horizon_years: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mode(&file), 0o600);
+        // A readable file keeps its mode too.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_market(&file, "in").unwrap();
+        assert_eq!(mode(&file), 0o644);
+        let c = parse(&std::fs::read_to_string(&file).unwrap(), CMDS).unwrap();
+        assert_eq!(c.market.as_deref(), Some("in"));
+        assert_eq!(c.profile.horizon_years, Some(5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_config_file_name_syncs_the_current_directory() {
+        assert_eq!(containing_dir(Path::new("config.toml")), PathBuf::from("."));
+        assert_eq!(
+            containing_dir(Path::new("conf/config.toml")),
+            PathBuf::from("conf")
+        );
+        assert_eq!(
+            containing_dir(Path::new("/etc/sw/config.toml")),
+            PathBuf::from("/etc/sw")
+        );
     }
 
     const CMDS: &[&str] = &[
