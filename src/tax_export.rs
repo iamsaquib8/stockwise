@@ -759,6 +759,9 @@ pub struct UsRow {
     /// (h) Gain or (loss): (d) − (e) + (g).
     pub gain_or_loss: f64,
     pub date_acquired_estimated: bool,
+    /// Days added to the holding period because these shares replaced shares
+    /// sold in a wash sale; they decide Part I or II with (b) and (c).
+    pub holding_days_added: i64,
 }
 
 /// Schedule D totals and the netting between short- and long-term results.
@@ -815,58 +818,62 @@ pub fn us_schedule(sales: &[Sale], holdings: &[Holding], start: NaiveDate) -> Us
     let c = Country::Us;
     let (from, to) = c.tax_year(start);
     let (kept, other_currency) = sales_in_year(c, sales, start);
-    let washes = tax::wash_sales(sales, holdings);
-    // Per sale: the loss disallowed on it (g), and basis added to it as the
-    // replacement of an earlier wash sale (e).
-    let mut disallowed = vec![0.0; sales.len()];
-    let mut basis_added = vec![0.0; sales.len()];
-    for w in &washes {
-        disallowed[w.sale] += w.disallowed;
-        for r in &w.replacements {
-            if let Some(j) = r.sale {
-                basis_added[j] += r.basis_added;
-            }
-        }
-    }
+    let wash = tax::wash_sales(sales, holdings);
     let index_of = |s: &Sale| sales.iter().position(|x| std::ptr::eq(x, s));
     let mut rows = Vec::new();
     let mut sum = UsSummary::default();
     let mut buckets = tax::Buckets::default();
-    // Part I first, then Part II, as on the form.
-    let mut kept = kept;
-    kept.sort_by_key(|(s, _)| is_long_term(c, s));
     for (s, scale) in kept {
-        let long = is_long_term(c, s);
-        let i = index_of(s);
-        let adjustment = i.map_or(0.0, |i| disallowed[i]) * scale;
-        let proceeds = s.qty * s.sell_price * scale;
-        let cost = s.qty * s.buy_price * scale + i.map_or(0.0, |i| basis_added[i]) * scale;
-        let gain = proceeds - cost + adjustment;
-        buckets.add(gain, long);
-        if long {
-            sum.long_term_proceeds += proceeds;
-            sum.long_term_cost += cost;
-            sum.long_term_adjustment += adjustment;
-        } else {
-            sum.short_term_proceeds += proceeds;
-            sum.short_term_cost += cost;
-            sum.short_term_adjustment += adjustment;
+        // A sale whose shares partly replaced shares sold in a wash sale is
+        // split into parts: each has its own basis and holding period.
+        let whole = [tax::SalePart {
+            qty: s.qty,
+            basis_added: 0.0,
+            days_added: 0,
+            disallowed: 0.0,
+        }];
+        let parts = match index_of(s).map(|i| wash.parts[i].as_slice()) {
+            Some(parts) if !parts.is_empty() => parts,
+            _ => &whole,
+        };
+        for p in parts {
+            let long = match (date(&s.buy_date), date(&s.sell_date)) {
+                (Some(b), Some(d)) => c.is_long_term(b - chrono::Duration::days(p.days_added), d),
+                _ => false,
+            };
+            let adjustment = p.disallowed * scale;
+            let proceeds = p.qty * s.sell_price * scale;
+            let cost = (p.qty * s.buy_price + p.basis_added) * scale;
+            let gain = proceeds - cost + adjustment;
+            buckets.add(gain, long);
+            if long {
+                sum.long_term_proceeds += proceeds;
+                sum.long_term_cost += cost;
+                sum.long_term_adjustment += adjustment;
+            } else {
+                sum.short_term_proceeds += proceeds;
+                sum.short_term_cost += cost;
+                sum.short_term_adjustment += adjustment;
+            }
+            rows.push(UsRow {
+                part: if long { "II" } else { "I" },
+                description: format!("{} sh {}", qty(p.qty), s.symbol),
+                symbol: s.symbol.clone(),
+                quantity: p.qty,
+                date_acquired: us_date(&s.buy_date),
+                date_sold: us_date(&s.sell_date),
+                proceeds: round(proceeds, 2),
+                cost_basis: round(cost, 2),
+                code: if adjustment > 0.0 { "W" } else { "" },
+                adjustment: round(adjustment, 2),
+                gain_or_loss: round(gain, 2),
+                date_acquired_estimated: s.buy_date_estimated,
+                holding_days_added: p.days_added,
+            });
         }
-        rows.push(UsRow {
-            part: if long { "II" } else { "I" },
-            description: format!("{} sh {}", qty(s.qty), s.symbol),
-            symbol: s.symbol.clone(),
-            quantity: s.qty,
-            date_acquired: us_date(&s.buy_date),
-            date_sold: us_date(&s.sell_date),
-            proceeds: round(proceeds, 2),
-            cost_basis: round(cost, 2),
-            code: if adjustment > 0.0 { "W" } else { "" },
-            adjustment: round(adjustment, 2),
-            gain_or_loss: round(gain, 2),
-            date_acquired_estimated: s.buy_date_estimated,
-        });
     }
+    // Part I first, then Part II, as on the form.
+    rows.sort_by_key(|r| r.part == "II");
     let e = tax::estimate(c, buckets);
     sum.short_term_gain = sum.short_term_proceeds - sum.short_term_cost + sum.short_term_adjustment;
     sum.long_term_gain = sum.long_term_proceeds - sum.long_term_cost + sum.long_term_adjustment;
@@ -911,43 +918,45 @@ pub fn us_schedule(sales: &[Sale], holdings: &[Holding], start: NaiveDate) -> Us
             .into(),
     ];
     let in_year = |d: &str| date(d).is_some_and(|d| d >= from && d <= to);
-    let washes: Vec<tax::Wash> = washes
+    let washes: Vec<tax::Wash> = wash
+        .washes
         .into_iter()
         .filter(|w| in_year(&w.sell_date))
-        .map(|w| tax::Wash {
-            loss: round(w.loss, 2),
-            disallowed: round(w.disallowed, 2),
-            replacements: w
-                .replacements
-                .into_iter()
-                .map(|r| tax::WashReplacement {
-                    basis_added: round(r.basis_added, 2),
-                    ..r
-                })
-                .collect(),
-            ..w
-        })
         .collect();
     for w in &washes {
         for r in w.replacements.iter().filter(|r| r.sale.is_none()) {
             notes.push(format!(
                 "Wash sale: ${} of the loss on {} sold {} is added to the basis of {} shares \
-                 bought {} and still held",
+                 bought {} and still held, and {} days to their holding period",
                 money(r.basis_added),
                 w.symbol,
                 us_date(&w.sell_date),
                 qty(r.qty),
-                us_date(&r.date)
+                us_date(&r.date),
+                r.days_added
             ));
         }
     }
-    if !washes.is_empty() {
+    if rows.iter().any(|r| r.holding_days_added > 0) {
         notes.push(
-            "The holding period of shares sold in a wash sale carries over to their \
-             replacement shares; StockWise does not add it, so check the Part of each \
-             replacement sale"
+            "Replacement shares sold this year carry the basis and holding period of the \
+             shares sold in the wash sale (Part and column e include them); \
+             `holding_days_added` in the JSON gives the days added"
                 .into(),
         );
+    }
+    let estimated: Vec<String> = washes
+        .iter()
+        .filter(|w| w.replacements.iter().any(|r| r.date_estimated))
+        .map(|w| format!("{} sold {}", w.symbol, us_date(&w.sell_date)))
+        .collect();
+    if !estimated.is_empty() {
+        notes.push(format!(
+            "Wash sales found through a replacement with an estimated purchase date may not \
+             be wash sales; fix the date with `stockwise portfolio lots SYMBOL --lot N --date \
+             YYYY-MM-DD`: {}",
+            estimated.join(", ")
+        ));
     }
     if rows.iter().any(|r| r.date_acquired_estimated) {
         notes.push(
@@ -1611,6 +1620,48 @@ mod tests {
             "{:?}",
             s.notes
         );
+    }
+
+    #[test]
+    fn us_replacement_shares_carry_the_holding_period() {
+        // Bought 01/02/2023, sold at a loss 06/02/2025; the replacement,
+        // bought 06/12/2025 and sold 09/02/2025, is held over a year once the
+        // first lot's days are added, so it goes in Part II.
+        let sales = vec![
+            sale("MSFT", 10.0, ("2023-01-02", 400.0), ("2025-06-02", 380.0)),
+            sale("MSFT", 10.0, ("2025-06-12", 385.0), ("2025-09-02", 390.0)),
+        ];
+        let s = us_schedule(&sales, &[], d("2025-01-01"));
+        let repl = s
+            .sales
+            .iter()
+            .find(|r| r.date_acquired == "06/12/2025")
+            .unwrap();
+        assert_eq!(repl.part, "II");
+        assert_eq!(repl.holding_days_added, 882);
+        assert_eq!((repl.cost_basis, repl.gain_or_loss), (4050.0, -150.0));
+        assert_eq!(s.summary.long_term_gain, -150.0);
+        assert_eq!(s.summary.long_term_adjustment, 200.0);
+    }
+
+    #[test]
+    fn us_sale_partly_of_replacement_shares_is_split() {
+        // 10 washed shares are replaced by 10 of a 20-share purchase; selling
+        // all 20 gives two rows: 10 with the added basis, 10 without.
+        let sales = vec![
+            sale("X", 10.0, ("2025-01-02", 30.0), ("2025-03-01", 20.0)),
+            sale("X", 20.0, ("2025-03-05", 10.0), ("2025-05-01", 12.0)),
+        ];
+        let s = us_schedule(&sales, &[], d("2025-01-01"));
+        let later: Vec<_> = s
+            .sales
+            .iter()
+            .filter(|r| r.date_sold == "05/01/2025")
+            .collect();
+        assert_eq!(later.len(), 2);
+        assert_eq!((later[0].quantity, later[0].cost_basis), (10.0, 100.0));
+        assert_eq!((later[1].quantity, later[1].cost_basis), (10.0, 200.0));
+        assert_eq!(later[1].gain_or_loss, -80.0);
     }
 
     #[test]

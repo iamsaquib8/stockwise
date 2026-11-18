@@ -1072,7 +1072,8 @@ fn goal_and_tax_export_json_shapes() {
             "code",
             "adjustment",
             "gain_or_loss",
-            "date_acquired_estimated"
+            "date_acquired_estimated",
+            "holding_days_added"
         ]
     );
 }
