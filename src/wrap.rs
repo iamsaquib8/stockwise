@@ -199,14 +199,56 @@ pub fn recorded_splits(p: &Portfolio, symbol: &str) -> Vec<Split> {
 /// lots bought by then but sold after, with splits and bonus issues
 /// recorded after `day` applied (see [`Portfolio::shares_on`]).
 pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
-    let Some(next) = day.succ_opt() else {
-        return 0.0;
+    let day = day.format("%Y-%m-%d").to_string();
+    let day = day.as_str();
+    let splits = recorded_splits(p, symbol);
+    // Splits not yet applied to a lot (it was recorded before them), and
+    // bonus issues it received as a lot of their own after `day`: the
+    // close of `day` is adjusted for both.
+    let lot_factor = |l: &crate::portfolio::Lot| -> f64 {
+        splits
+            .iter()
+            .filter(|s| {
+                s.date.as_str() > l.date.as_str()
+                    && (s.pending_for(l)
+                        || (s.date.as_str() > day && l.adjustments.contains(&s.bonus_id())))
+            })
+            .map(Split::ratio)
+            .product()
     };
-    p.shares_on(
-        symbol,
-        &next.format("%Y-%m-%d").to_string(),
-        &recorded_splits(p, symbol),
-    )
+    let open: f64 = p.holding(symbol).map_or(0.0, |h| {
+        h.lots
+            .iter()
+            .filter(|l| l.date.as_str() <= day)
+            .map(|l| l.qty * lot_factor(l))
+            .sum()
+    });
+    let sold: f64 = p
+        .realized
+        .iter()
+        .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
+        .filter(|s| s.buy_date.as_str() <= day && s.sell_date.as_str() > day)
+        .map(|s| {
+            // Every split after the sale applies to the sold quantity; a
+            // bonus between `day` and the sale only when the lot got it.
+            let after: f64 = splits
+                .iter()
+                .filter(|x| x.date > s.sell_date)
+                .map(Split::ratio)
+                .product();
+            let bonus: f64 = splits
+                .iter()
+                .filter(|b| {
+                    b.date.as_str() > day
+                        && b.date <= s.sell_date
+                        && s.bonuses.contains(&b.bonus_id())
+                })
+                .map(Split::ratio)
+                .product();
+            s.qty * after * bonus
+        })
+        .sum();
+    open + sold
 }
 
 /// `symbol` over `period` up to `as_of`, valued at `start_price` (the close
@@ -791,6 +833,20 @@ mod tests {
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-01")), 10.0);
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-11-17")), 10.0);
         assert_eq!(shares_at(&p, "AAA.NS", d("2025-01-01")), 0.0);
+    }
+
+    #[test]
+    fn a_bonus_the_day_after_counts_at_that_close() {
+        // 10 held; a 1:1 bonus (ratio 2) with ex-date 1 Apr allotted as a
+        // lot of its own. The 31 Mar close is adjusted for it: 20 shares.
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(10.0, 100.0, "2025-01-10", "manual");
+        lot.adjustments.push("bonus:2026-04-01:2:1".into());
+        p.add_lot("AAA.NS", lot);
+        p.add_lot("AAA.NS", Lot::new(10.0, 0.0, "2026-04-03", "bonus"));
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 20.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-01")), 10.0);
+        assert_eq!(shares_at(&p, "AAA.NS", d("2026-04-03")), 20.0);
     }
 
     #[test]
