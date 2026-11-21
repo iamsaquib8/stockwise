@@ -959,50 +959,49 @@ pub fn render_report(scores: &[LongTermScore], monthly: f64, csym: &str) -> Stri
     o
 }
 
-/// Simplified Monte Carlo: 1000 simulations of 5-year returns
+/// Monte Carlo: 1000 simulated 5-year returns.
 fn monte_carlo_5y(closes: &[f64], est_annual: f64) -> Option<(f64, f64, f64)> {
     let vol = technical::annualized_volatility(closes)?;
     Some(simple_monte_carlo(est_annual, vol))
 }
 
+/// Simulated 5-year returns in percent: (median, 10th, 90th percentile).
+///
+/// Prices follow geometric Brownian motion with a log drift of ln(1 + r) a
+/// year, so the median compounds at the assumed return and volatility only
+/// widens the range around it. The sum of 1,260 independent daily log returns
+/// is itself normal, with mean 5·ln(1 + r) and standard deviation vol·√5, so
+/// each path draws its 5-year endpoint in one step instead of looping day by
+/// day (the same distribution, 1,260 times less work per stock).
 fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
-    // Log returns with a drift of ln(1 + r) a year: the median path then
-    // compounds at the assumed return, so the median matches the 5-year
-    // projection and volatility only widens the range around it.
-    let daily_log_drift = (1.0 + est_annual / 100.0).ln() / 252.0;
-    let daily_vol = vol / (252.0_f64).sqrt();
-    let days = 252 * 5; // 5 years
-    let sims = 1000;
+    const YEARS: f64 = 5.0;
+    const SIMS: usize = 1000;
+    let log_drift = YEARS * (1.0 + est_annual / 100.0).ln();
+    let log_vol = vol * YEARS.sqrt();
 
-    let mut results: Vec<f64> = Vec::with_capacity(sims);
-
-    // Use a simple deterministic pseudo-random for reproducibility
+    // A fixed-seed LCG with Box-Muller: the same input gives the same output.
     let mut seed: u64 = 42;
-    for _ in 0..sims {
-        let mut value = 100.0_f64;
-        for _ in 0..days {
-            // Simple LCG PRNG → Box-Muller approximation
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let u1 = (seed >> 33) as f64 / (1u64 << 31) as f64;
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let u2 = (seed >> 33) as f64 / (1u64 << 31) as f64;
-            let u1 = u1.max(1e-10);
+    let mut uniform = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as f64 / (1u64 << 31) as f64
+    };
+    let mut results: Vec<f64> = (0..SIMS)
+        .map(|_| {
+            let u1 = uniform().max(1e-10);
+            let u2 = uniform();
             let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-            value *= (daily_log_drift + daily_vol * z).exp();
-        }
-        results.push(value - 100.0); // return %
-    }
+            ((log_drift + log_vol * z).exp() - 1.0) * 100.0
+        })
+        .collect();
 
     results.sort_by(f64::total_cmp);
-    let median = results[sims / 2];
-    let p10 = results[sims / 10];
-    let p90 = results[sims * 9 / 10];
-
-    (median, p10, p90)
+    (
+        results[SIMS / 2],
+        results[SIMS / 10],
+        results[SIMS * 9 / 10],
+    )
 }
 
 #[cfg(test)]
@@ -1140,6 +1139,23 @@ mod tests {
         let score = score_for_longterm(&q, None);
         assert!(score.projected_5y_return > 0.0);
         assert!(score.projected_10y_return > score.projected_5y_return);
+    }
+
+    #[test]
+    fn monte_carlo_percentiles_match_the_lognormal_quantiles() {
+        // 12% a year, 25% volatility: log return ~ N(5 ln 1.12, 0.25 √5).
+        let (median, p10, p90) = simple_monte_carlo(12.0, 0.25);
+        let mu = 5.0 * 1.12_f64.ln();
+        let sd = 0.25 * 5.0_f64.sqrt();
+        let q = |z: f64| ((mu + sd * z).exp() - 1.0) * 100.0;
+        // 1000 draws: within a few percent of the exact quantiles.
+        assert!((median - q(0.0)).abs() < 0.12 * q(0.0), "median {median}");
+        assert!(
+            (p10 - q(-1.2816)).abs() < 12.0,
+            "p10 {p10} vs {}",
+            q(-1.2816)
+        );
+        assert!((p90 - q(1.2816)).abs() < 25.0, "p90 {p90} vs {}", q(1.2816));
     }
 
     #[test]

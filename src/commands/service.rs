@@ -303,7 +303,7 @@ fn uid() -> Result<String> {
     Ok(uid)
 }
 
-fn locations(platform: Platform) -> Result<PathBuf> {
+pub(crate) fn locations(platform: Platform) -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot find your home directory")?;
     let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
     Ok(unit_path(platform, &home, &config))

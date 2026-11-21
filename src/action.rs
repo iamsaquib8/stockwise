@@ -294,18 +294,28 @@ impl Action {
 }
 
 fn size_text(a: &Action, s: &SizeHint) -> String {
+    // "1 share", "2 shares": by the rounded number that is printed.
+    let shares = |n: f64| {
+        let n = format!("{n:.0}");
+        let word = if n == "1" { "share" } else { "shares" };
+        format!("{n} {word}")
+    };
     match (a.kind, s.shares) {
         (Kind::Trim, Some(n)) => format!(
-            "Size: sell about {n:.0} shares to get back to {:.1}% of the portfolio ({})",
-            s.max_weight_pct, s.limited_by
+            "Size: sell about {} to get back to {:.1}% of the portfolio ({})",
+            shares(n),
+            s.max_weight_pct,
+            s.limited_by
         ),
         (Kind::Trim, None) => format!(
             "Size: bring the position back to {:.1}% of the portfolio ({})",
             s.max_weight_pct, s.limited_by
         ),
         (_, Some(n)) => format!(
-            "Size: at most {:.1}% of the portfolio, about {n:.0} shares ({})",
-            s.max_weight_pct, s.limited_by
+            "Size: at most {:.1}% of the portfolio, about {} ({})",
+            s.max_weight_pct,
+            shares(n),
+            s.limited_by
         ),
         (_, None) => format!(
             "Size: at most {:.1}% of the portfolio ({})",
@@ -877,12 +887,24 @@ fn tax_note(i: &Inputs) -> Option<String> {
     ))
 }
 
+/// An exchange-traded fund Yahoo labels EQUITY (NSE's NIFTYBEES, for one):
+/// "ETF" or "BeES" in its name, or a known index fund.
+fn fund_by_name(symbol: &str, q: &crate::api::Quote) -> bool {
+    let name = q.long_name.as_deref().or(q.short_name.as_deref());
+    let etf_word = name.is_some_and(|n| {
+        n.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w.eq_ignore_ascii_case("etf") || w.eq_ignore_ascii_case("bees"))
+    });
+    etf_word || crate::index_weights::index_of_fund(symbol, name).is_some()
+}
+
 /// The action for `i`. Deterministic: no clock, no network, no randomness.
 pub fn decide(i: &Inputs) -> Action {
     if !i.is_stock {
         return no_call(
             i,
-            "Actions cover listed stocks only; this instrument has no company data to judge"
+            "Actions cover listed company stocks only; ETFs, funds, indices, FX and crypto \
+             have no company data to judge"
                 .to_string(),
         );
     }
@@ -1171,8 +1193,17 @@ pub fn inputs_from_research(
 ) -> Inputs {
     let mut i = Inputs::new(&r.symbol, &v.currency, today);
     i.horizon = horizon;
+    // Same test as `inputs_from_quote`: an ETF or fund says it is not a
+    // listed company instead of failing on data coverage.
     i.is_stock = crate::market::AssetClass::of(&r.symbol) == crate::market::AssetClass::Stock
-        && !crate::offmarket::is_fund(&r.symbol);
+        && !crate::offmarket::is_fund(&r.symbol)
+        && !crate::offmarket::is_sgb(&r.symbol)
+        && !r
+            .quote
+            .quote_type
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case("EQUITY"))
+        && !fund_by_name(&r.symbol, &r.quote);
     i.price = r.price();
     // The key-field coverage from the data layer (`meta.coverage`), or the
     // pillar-input coverage when the bundle carries no provenance.
@@ -1260,7 +1291,8 @@ pub fn inputs_from_quote(
         && !q
             .quote_type
             .as_deref()
-            .is_some_and(|t| !t.eq_ignore_ascii_case("EQUITY"));
+            .is_some_and(|t| !t.eq_ignore_ascii_case("EQUITY"))
+        && !fund_by_name(&symbol, q);
     i.price = q.regular_market_price;
     let meta = crate::provenance::for_fundamentals(q);
     i.coverage = meta.coverage;
@@ -1603,6 +1635,32 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn an_etf_labelled_equity_is_not_a_stock() {
+        let q = |sym: &str, name: &str| crate::api::Quote {
+            symbol: Some(sym.into()),
+            long_name: Some(name.into()),
+            quote_type: Some("EQUITY".into()),
+            ..Default::default()
+        };
+        assert!(fund_by_name(
+            "NIFTYBEES.NS",
+            &q("NIFTYBEES.NS", "Nippon India ETF Nifty 50 BeES")
+        ));
+        assert!(fund_by_name(
+            "SETFNIF50.NS",
+            &q("SETFNIF50.NS", "SBI-ETF Nifty 50")
+        ));
+        assert!(!fund_by_name(
+            "TCS.NS",
+            &q("TCS.NS", "Tata Consultancy Services Limited")
+        ));
+        assert!(!fund_by_name(
+            "BEETEL.NS",
+            &q("BEETEL.NS", "Beetel Teletech Limited")
+        ));
+    }
 
     fn day(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()

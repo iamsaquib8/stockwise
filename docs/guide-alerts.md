@@ -142,7 +142,9 @@ because the price is already beyond it.
 The background worker monitors every holding with no setup — big day drops,
 new 52-week lows, gaps, falls from cost or the peak, dates tomorrow, pledge,
 shareholding, rating and insider changes — and sends one digest after the
-close. See [Holding monitor and digest](commands.md#holding-monitor-and-digest).
+close. See [Holding monitor and digest](commands.md#holding-monitor-and-digest),
+and [See what's hot and what changed today](guide-daily.md) for `today`, `hot`
+and the digest in full.
 
 ```bash
 stockwise worker start        # or `stockwise worker install` for a login service

@@ -716,6 +716,7 @@ pub(super) async fn run<D: DataSource>(
                 max_stock_weight: a.f64("max_stock_weight"),
                 max_smallcap_weight: a.f64("max_smallcap_weight"),
                 risk_per_trade: a.f64("risk_per_trade"),
+                residence: None,
             };
             let given: Vec<&str> = [
                 ("mode", update.mode.is_some()),

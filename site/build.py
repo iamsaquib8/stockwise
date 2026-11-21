@@ -122,7 +122,7 @@ DESCRIPTIONS = {
     "bot-design.md": "How the intraday and long-term bots and the daemon work, and what is planned.",
     "contributing.md": "How to build StockWise, run the checks and send a change.",
     "architecture.md": "Map of the source tree, data flow, caching, storage and dependencies.",
-    "guides.md": "Task-based guides: import trades, Indian capital-gains tax, quick lookups, rebalancing, AI assistants over MCP, alerts, backtests and practice, scripting.",
+    "guides.md": "Task-based guides: import trades, review holdings with rule-based actions, what's hot and today's moves, finding candidates with picks, Indian capital-gains tax and broker reconciliation, quick lookups, tax-aware rebalancing, AI assistants over MCP, alerts, backtests and practice, scripting.",
     "quickstart.md": "Five minutes from install to a quote, a portfolio with XIRR and a tax estimate.",
     "troubleshooting.md": "What to do when Yahoo or NSE does not answer, price data is missing, a ticker is unknown or an import skips a symbol, and where your data folder is.",
 }

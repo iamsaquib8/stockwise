@@ -424,6 +424,10 @@ S&P 1500. Only stocks that clear two floors are scored:
 | US, `--cap small` | $300 million | $2 million |
 | US, `--cap micro` | $50 million | $0.5 million |
 
+`--cap mega|large|mid|small|micro` keeps one tier (see the cap tiers in the
+[commands reference](commands.md#market)) before scoring, so its stocks are
+ranked within the tier, not against the whole market.
+
 A stock without a market cap or a trading history doesn't clear a floor.
 `--min-mcap` and `--min-adv` change the floors (in crore in India, millions
 elsewhere); 0 turns one off. The liquidity floor matters most for small
@@ -456,6 +460,10 @@ volatility, drawdown, beta and debt.
 | Trend, long term | 12-1 month momentum divided by volatility (60%), price against the 200-day average (40%); without a price history, the 200-day average (60%) and the place in the 52-week range (40%) |
 | Trend, short term | 3-month momentum to a week ago, divided by volatility (35%); price against the 50-day average (20%); place in the 52-week range (20%); last 20 sessions' volume against the 60 before (25%) |
 | Risk | low volatility (40%), small drawdown over the year (30%), low beta (30%) |
+
+The price measures need enough daily closes: volatility and drawdown need 60,
+12-1 month momentum needs 200, 3-month momentum needs 69 (a quarter plus a
+week). With fewer, that measure is missing (see below).
 
 Pillar weights depend on `--horizon`:
 
@@ -519,7 +527,8 @@ stock without it.
 
 ### 8. Track record
 
-Every `picks` run appends its list to `signal_log.json` in the data folder:
+Every `picks` run, and every call of the MCP `picks` tool, appends its list
+to `signal_log.json` in the data folder:
 date, market, scope, horizon, rank, score, price and methodology version. A
 re-run on the same day doesn't log a stock twice. `cache clear` never
 touches this file.
@@ -538,6 +547,17 @@ margin a stock had on a past date isn't available, only today's. So this
 method can't be backtested without look-ahead bias, and no backtest is
 claimed. The forward track record, which builds up from the first run, is
 the evidence. Check it before trusting a list.
+
+### 9. The table's last columns
+
+- **Top fifth on** names the pillars where the stock ranks 80 or more.
+- **Action** is the rule-based action of the [Actions](#actions-methodology-1)
+  rules for each finalist, as if you did not hold it: BUY, WATCH, AVOID or NO
+  CALL. It uses the quote-based long-term score as the composite, a year of
+  daily bars, and the scan's sector median P/E (or the scan median) as the
+  valuation reference. The rank and the action are separate: the rank is
+  relative to this scan; the action applies fixed rules, so a high rank can
+  be WATCH or AVOID. `--horizon` sets the action's horizon too.
 
 ## Long-term scores (`longterm`)
 

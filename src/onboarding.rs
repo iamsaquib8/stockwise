@@ -169,6 +169,7 @@ pub fn derive(a: &Answers) -> Result<(ProfileUpdate, Vec<String>), String> {
             max_stock_weight: None,
             max_smallcap_weight: None,
             risk_per_trade: None,
+            residence: None,
         },
         why,
     ))

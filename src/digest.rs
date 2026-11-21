@@ -107,7 +107,7 @@ impl Digest {
 fn money(v: f64, base: &str) -> String {
     let sym = crate::market::currency_symbol(Some(base));
     let sign = if v < 0.0 { "−" } else { "+" };
-    format!("{sign}{sym}{}", group(v.abs()))
+    format!("{sign}{sym}{}", group_in(v.abs(), base))
 }
 
 /// Thousands separators, no decimals above 100.
@@ -124,6 +124,15 @@ pub fn group(v: f64) -> String {
         out.push(c);
     }
     out
+}
+
+/// Like [`group`], with digits grouped the way `currency` writes them:
+/// lakhs for INR (`5,37,572`), thousands otherwise, as the other tables do.
+pub fn group_in(v: f64, currency: &str) -> String {
+    if v < 10.0 {
+        return format!("{v:.2}");
+    }
+    crate::display::grouped_decimal(&format!("{v:.0}"), crate::market::is_inr(Some(currency)))
 }
 
 fn pct(v: Option<f64>) -> String {
@@ -152,7 +161,7 @@ pub fn render(d: &Digest) -> Message {
         body.push(format!(
             "Portfolio {}{}",
             crate::market::currency_symbol(Some(&d.base_currency)),
-            group(v)
+            group_in(v, &d.base_currency)
         ));
     }
     if !d.backdrop.is_empty() {
@@ -219,6 +228,10 @@ pub fn render(d: &Digest) -> Message {
         .max()
         .unwrap_or(Priority::Normal)
         .max(Priority::Normal);
+    if d.up.iter().chain(&d.down).any(|l| l.action.is_some()) {
+        body.push(String::new());
+        body.push(crate::action::DISCLAIMER.to_string());
+    }
     Message::new(title, body.join("\n")).with_priority(priority)
 }
 
@@ -328,7 +341,7 @@ mod tests {
         let m = render(&digest());
         assert_eq!(m.title, "StockWise digest 2026-11-20: −₹8,240 (-0.65%)");
         for needle in [
-            "Portfolio ₹1,250,000",
+            "Portfolio ₹12,50,000",
             "Market: NIFTY 50 +0.4%",
             "Top contributors\n• ITC.NS +1.2% +₹1,100 — with the market (+0.4%)",
             "Top detractors\n• TCS.NS -4.1% −₹6,400 — unexplained",
@@ -338,6 +351,8 @@ mod tests {
             "Notices\n• Lot turns long-term soon: HDFCBANK.NS",
             "• New filing: ITC.NS",
             "Coming up\n• Tue 24 Nov: ITC.NS ex-dividend",
+            // Actions are shown, so the disclaimer is too.
+            "not a SEBI-registered investment adviser",
         ] {
             assert!(m.body.contains(needle), "missing {needle:?} in\n{}", m.body);
         }
@@ -356,5 +371,7 @@ mod tests {
         assert_eq!(group(999.4), "999");
         assert_eq!(group(12.5), "12");
         assert_eq!(group(7.25), "7.25");
+        assert_eq!(group_in(537572.4, "INR"), "5,37,572");
+        assert_eq!(group_in(537572.4, "USD"), "537,572");
     }
 }

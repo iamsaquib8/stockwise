@@ -921,8 +921,10 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
         );
     }
 
-    // Analyst consensus from the quote
-    print_section("Analyst Consensus");
+    // Analyst consensus from the quote (no header when there is none)
+    if has_analyst_data(q) {
+        print_section("Analyst Consensus");
+    }
     if let Some(rec) = q.recommendation_mean {
         print_kv("Analyst Rating", &mean_rating_text(rec));
     }

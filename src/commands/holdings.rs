@@ -473,7 +473,11 @@ pub async fn cmd_export(what: &str, market: Market) -> Result<()> {
         "portfolio" => {
             let portfolio = Portfolio::load()?;
             if portfolio.holdings.is_empty() {
-                println!("  {}", "Portfolio is empty.".dimmed());
+                // Export output may be piped into a file: the hint goes to stderr.
+                eprintln!(
+                    "  {}",
+                    crate::i18n::t(crate::i18n::Msg::PortfolioEmpty).dimmed()
+                );
                 return Ok(());
             }
             let client = YahooClient::new().await?;
@@ -1246,7 +1250,10 @@ pub async fn cmd_wealth(market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
 
     if portfolio.holdings.is_empty() {
-        println!("\n  {}", "Portfolio is empty. Add holdings first.".dimmed());
+        println!(
+            "\n  {}",
+            crate::i18n::t(crate::i18n::Msg::PortfolioEmpty).dimmed()
+        );
         return Ok(());
     }
 

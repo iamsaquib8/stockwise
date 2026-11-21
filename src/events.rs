@@ -888,7 +888,15 @@ pub fn is_routine_filing(h: &Headline) -> bool {
 /// News after the close (15:30 IST / 16:00 ET) reacts in the next session.
 pub fn reaction_for(ts: i64, prices: &Series, bench: &Series, is_india: bool) -> Option<Reaction> {
     let dt = DateTime::from_timestamp(ts, 0)?;
-    let close_cutoff_utc = if is_india { 10 } else { 20 }; // 10:00 UTC = 15:30 IST; 20:00 UTC = 16:00 ET
+    // 15:30 IST is 10:00 UTC all year; 16:00 New York is 20:00 UTC in
+    // daylight-saving time and 21:00 UTC in winter.
+    let close_cutoff_utc = if is_india {
+        10
+    } else if crate::clock::us_dst_on(dt.date_naive()) {
+        20
+    } else {
+        21
+    };
     let mut date = dt.date_naive();
     if dt.hour() >= close_cutoff_utc {
         date = date.succ_opt()?;

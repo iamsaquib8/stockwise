@@ -596,7 +596,7 @@ fn last_sunday(year: i32, month: u32) -> NaiveDate {
 /// Whether US daylight saving time is in effect on `date` (local), using the
 /// rule in force since 2007. Market hours never fall in the 02:00 changeover
 /// hour, so the date alone decides.
-fn us_dst_on(date: NaiveDate) -> bool {
+pub fn us_dst_on(date: NaiveDate) -> bool {
     let start = nth_weekday(date.year(), 3, Weekday::Sun, 2);
     let end = nth_weekday(date.year(), 11, Weekday::Sun, 1);
     date >= start && date < end

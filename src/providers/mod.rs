@@ -738,16 +738,23 @@ impl Exchange {
             .iter()
             .filter(|s| self.nse.supports(s) || self.bse.supports(s))
             .partition(|s| self.nse.supports(s));
-        let from_nse = if ns.is_empty() {
-            Ok(Vec::new())
-        } else {
-            self.nse.quotes(&ns).await
-        };
-        let from_bse = if bo.is_empty() {
-            Ok(Vec::new())
-        } else {
-            self.bse.quotes(&bo).await
-        };
+        // Each exchange has its own session and rate limit: ask both at once.
+        let (from_nse, from_bse) = tokio::join!(
+            async {
+                if ns.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    self.nse.quotes(&ns).await
+                }
+            },
+            async {
+                if bo.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    self.bse.quotes(&bo).await
+                }
+            }
+        );
         let mut all = match (from_nse, from_bse) {
             (Err(e), Err(_)) => return Err(e),
             (Err(e), Ok(b)) if b.is_empty() => return Err(e),
@@ -773,8 +780,7 @@ impl Exchange {
 
     /// NSE's matches first, then BSE's, ten in all.
     async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        let from_nse = self.nse.search(query).await;
-        let from_bse = self.bse.search(query).await;
+        let (from_nse, from_bse) = tokio::join!(self.nse.search(query), self.bse.search(query));
         let (n, b) = match (from_nse, from_bse) {
             (Err(e), Err(_)) => return Err(e),
             (n, b) => (n.unwrap_or_default(), b.unwrap_or_default()),
@@ -1075,7 +1081,16 @@ impl Http {
         if let Auth::Header(header, prefix) = auth {
             req = req.header(header, format!("{}{}", prefix, self.key));
         }
-        let resp = match req.send().await {
+        let started = Instant::now();
+        let sent = req.send().await;
+        // The key may sit in the query string: netlog prints host and path only.
+        crate::netlog::request(
+            name,
+            sent.as_ref().map_or("", |r| r.url().as_str()),
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+            started.elapsed(),
+        );
+        let resp = match sent {
             Ok(resp) => resp,
             // Unreachable or timing out: don't make every remaining symbol
             // wait for it too.

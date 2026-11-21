@@ -131,8 +131,50 @@ stockwise rebalance --raise 50000
 
 Sells only, until ₹50,000 is raised after costs: losses first, then long-term
 gains the exemption still covers, then long-term, then short-term gains, the
-most overweight holding first among equals. The summary shows what you keep
-after the tax on it.
+most overweight holding first among equals. Nothing is bought.
+
+Output from a sample portfolio of nine large caps on 21 Nov 2026 (trimmed):
+
+```text
+  Raise ₹50,000.00 (sell only, lowest tax first)
+  Total Value                  ₹5,37,572.50
+
+  Symbol              Current    Now% Target%  After%             Action        Value       Tax    Costs
+  TCS.NS           ₹59,405.00   11.1%   11.1%   12.2%                 OK
+  INFY.NS          ₹60,390.00   11.2%   11.1%    2.0%     SELL 46 shares   ₹50,508.00     ₹0.00   ₹68.33
+                   lot 1 (2025-01-15): 46 × ₹1,500.00 cost, -₹18,492.00 long-term
+  ...
+
+  Sells                        ₹50,508.00
+  Buys                         ₹0.00
+  Costs                        ₹68.33 (STT, stamp duty, exchange fees, DP, brokerage, FX spread as they apply)
+  Net cash                     frees ₹50,439.67
+  Cash left                    ₹439.67
+  Tax on sells                 ₹0.00 (STCG +₹0.00, LTCG -₹18,492.00; incl. cess, after this year's gains and exemption)
+  Raised                       ₹50,439.67 after costs; ₹50,439.67 after the tax on it
+```
+
+Read the bottom lines:
+
+- **Costs**: the trading charges of every sell (STT, stamp duty, exchange and
+  SEBI fees with GST, the DP charge, and `--brokerage` if you set it).
+- **Tax on sells**: the tax these sells add to this year's estimate, after the
+  gains you already booked this year, the ₹1.25 lakh LTCG exemption and the
+  4% cess. A loss shows as a negative gain and lowers the tax.
+- **Raised**: the cash after costs, and after the tax on it.
+
+Here a holding at a loss covers the whole amount, so the tax is nil. Each
+sell row names the lots it takes and their gain. A holding left above the
+profile's single-stock limit gets a note above the table. Preview a sell with
+`stockwise portfolio sell INFY 46 --preview`; after you place it at your
+broker, record it with the same command without `--preview`.
+
+Combine it with a cash buffer, or ask for JSON:
+
+```bash
+stockwise rebalance --raise 50000 --cash-buffer 5000
+stockwise rebalance --raise 50000 --json
+```
 
 ## 6. Try a plan without saving it
 
