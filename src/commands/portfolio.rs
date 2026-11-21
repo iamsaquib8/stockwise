@@ -291,6 +291,23 @@ impl Valuation {
         Some((cost * rate, historical))
     }
 
+    /// Base-currency units per unit of `symbol`'s quote currency at `lot`'s purchase.
+    pub fn lot_purchase_rate(&self, symbol: &str, lot: &Lot) -> Option<f64> {
+        let cur = self.currency(symbol)?;
+        if let Some(r) = lot
+            .fx_currency
+            .as_deref()
+            .zip(lot.fx_rate)
+            .filter(|(c, r)| c.eq_ignore_ascii_case(self.base()) && *r > 0.0)
+            .map(|(_, r)| r)
+        {
+            let (major_one, _) = market::to_major(1.0, &cur);
+            return Some(r * major_one);
+        }
+        let date = pf::parse_date(&lot.date).ok()?;
+        self.currency_rate_on(&cur, date).map(|(r, _)| r)
+    }
+
     /// [`Valuation::lot_cost_base`] summed over a holding's lots.
     pub fn holding_cost_base(&self, h: &pf::Holding) -> Option<(f64, bool)> {
         h.lots.iter().try_fold((0.0, true), |(sum, all), l| {
@@ -3962,7 +3979,11 @@ pub(crate) async fn plan_inputs(
             }
         }
     }
-    let val = value_holdings(src, &symbols, market, None).await?;
+    let mut val = value_holdings(src, &symbols, market, None).await?;
+    if src.yahoo().await.is_ok() {
+        val.fmv_2018 = super::holdings::grandfathering_prices(portfolio).await;
+    }
+    val.load_history(portfolio).await;
     let base = val.base().to_string();
     let home = super::portfolio_analyze::residence(market);
     // Sector targets need sectors: stored snapshots, then a lookup each.
@@ -4076,7 +4097,12 @@ pub(crate) async fn plan_inputs(
                             unit = cost / l.qty;
                         }
                         if l.qty > 0.0 {
-                            unit += l.charges.unwrap_or(0.0) / l.qty * scale;
+                            let charges_scale = if foreign {
+                                val.lot_purchase_rate(sym, l).unwrap_or(scale)
+                            } else {
+                                scale
+                            };
+                            unit += l.charges.unwrap_or(0.0) / l.qty * charges_scale;
                         }
                         LotInput {
                             lot_no: i + 1,
@@ -5613,5 +5639,26 @@ mod tests {
                 "{cur}->{base}"
             );
         }
+    }
+
+    #[test]
+    fn lot_purchase_rate_uses_lot_fx_instead_of_live_rate() {
+        let mut q = Quote::default();
+        q.symbol = Some("AAPL".into());
+        q.currency = Some("USD".into());
+        q.regular_market_price = Some(200.0);
+        let mut val = Valuation::new(vec![q], &["AAPL".into()], Market::In, Some("INR"));
+        val.fx.set_rate("USD", 85.0);
+        let mut lot = Lot::new(1.0, 100.0, "2020-01-10", "manual");
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(75.0);
+        lot.charges = Some(10.0);
+        let rate = val.lot_purchase_rate("AAPL", &lot).unwrap();
+        assert_eq!(rate, 75.0);
+        let (cost, _) = val.lot_cost_base("AAPL", &lot).unwrap();
+        assert_eq!(
+            cost / lot.qty + lot.charges.unwrap() / lot.qty * rate,
+            8250.0
+        );
     }
 }

@@ -905,15 +905,20 @@ pub fn compute_advance_tax_with_income(
         } else {
             0.0
         };
-        let covered = paid_by_due + PAISA >= required_at_due
-            && paid_by_cutoff + PAISA >= min_cumulative_tax_required;
+        let basis_cutoff = if relief_lost {
+            basis_required
+        } else {
+            min_cumulative_tax_required
+        };
+        let covered =
+            paid_by_due + PAISA >= basis_required && paid_by_cutoff + PAISA >= basis_cutoff;
         let status = if as_of < m.period_start {
             if covered && min_cumulative_tax_required > 0.0 {
                 AdvanceTaxStatus::Paid
             } else {
                 AdvanceTaxStatus::Upcoming
             }
-        } else if min_cumulative_tax_required < 0.005 {
+        } else if basis_cutoff < 0.005 {
             AdvanceTaxStatus::NothingDue
         } else if covered {
             AdvanceTaxStatus::Paid
@@ -2854,5 +2859,13 @@ mod tests {
         let n = next_instalment(&s, d("2026-11-21")).unwrap();
         assert!(n.required_by_due > 0.0);
         assert_eq!(n.amount_due, 0.0);
+    }
+
+    #[test]
+    fn relief_lost_marks_prior_quarters_overdue_not_nothing_due() {
+        let q3_gain = [AdvanceTaxSale::new(d("2026-11-01"), 400_000.0, false)];
+        let after = schedule_with(&q3_gain, &[], &[], "2027-04-05");
+        assert!(after.quarters[0].sec_234c_interest > 0.0);
+        assert_eq!(after.quarters[0].status, AdvanceTaxStatus::Overdue);
     }
 }

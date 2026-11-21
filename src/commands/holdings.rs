@@ -2568,7 +2568,7 @@ pub(crate) async fn tax_valuation(
 /// The 31 Jan 2018 price of every rupee symbol with an old lot that Indian
 /// grandfathering could apply to: open lots, and long-term sales of this tax
 /// year. Looked up once and cached; none when no lot is that old.
-async fn grandfathering_prices(portfolio: &Portfolio) -> Vec<(String, f64)> {
+pub(crate) async fn grandfathering_prices(portfolio: &Portfolio) -> Vec<(String, f64)> {
     let rupee = |s: &str| pf::symbol_currency(s) == Some("INR");
     let mut symbols: Vec<String> = portfolio
         .holdings

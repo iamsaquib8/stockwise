@@ -1282,9 +1282,11 @@ pub fn plan(
                 let want = orders[i].target_value - h.value;
                 if want < 0.0 {
                     let mut q = h.units_down((-want / h.price).min(h.shares));
-                    // Rounding down must not leave a stock above the limit.
+                    // Rounding down must not leave a stock above the limit, nor sell more than held.
                     if !under_cap(h, h.value - q * h.price, kept, o) {
-                        q = h.units_up((-want / h.price).min(h.shares));
+                        q = h
+                            .units_up((-want / h.price).min(h.shares))
+                            .min(h.units_down(h.shares));
                     }
                     if q * h.price >= o.min_trade.max(EPS) {
                         orders[i].sell = q;
@@ -2379,5 +2381,33 @@ mod tests {
         assert_eq!(buy.items[0].action_type, RebalanceActionType::Buy);
         assert_eq!(buy.items[0].diff_shares, 1.0);
         assert_eq!(buy.items[0].action_display, "BUY 1 share");
+    }
+
+    #[test]
+    fn single_stock_cap_fallback_never_sells_more_shares_than_held() {
+        let mut a = sample_holding("A", 0.6, 1000.0, None);
+        a.is_fund = false;
+        let b = sample_holding("B", 14.0, 100.0, None);
+        let mut o = PlanOptions::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        o.max_stock_weight = Some(20.0);
+        o.drift_tolerance = 0.0;
+        o.min_trade = 0.0;
+        let p = plan(&[a, b], &targets(&[("A", 20.0), ("B", 80.0)]), &o, "INR").unwrap();
+        assert!(
+            p.items[0].diff_shares.abs() <= 0.6,
+            "sold more than held: {:?}",
+            p.items[0]
+        );
+        assert!(p.items[0].projected_value >= 0.0);
+
+        let mut a2 = sample_holding("A", 1.5, 1000.0, None);
+        a2.is_fund = false;
+        let b2 = sample_holding("B", 5.0, 100.0, None);
+        let p2 = plan(&[a2, b2], &targets(&[("A", 20.0), ("B", 80.0)]), &o, "INR").unwrap();
+        assert!(
+            p2.items[0].diff_shares.abs() <= 1.5,
+            "sold more than held: {:?}",
+            p2.items[0]
+        );
     }
 }

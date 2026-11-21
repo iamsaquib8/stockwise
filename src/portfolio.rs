@@ -2033,12 +2033,13 @@ impl Portfolio {
                 bail!("Lot #{} is listed twice", n);
             }
             let lot = &h.lots[n - 1];
-            if lot.date.as_str() > date {
+            let held_from = lot.held_from();
+            if held_from > date {
                 bail!(
-                    "Lot #{} of {} was bought on {}, after the sale date {}",
+                    "Lot #{} of {} was received on {}, after the sale date {}",
                     n,
                     sym,
-                    lot.date,
+                    held_from,
                     date
                 );
             }
@@ -2741,6 +2742,7 @@ impl Portfolio {
         let accounts = entitlements(&items, r);
 
         // Child shares the portfolio may already hold for this demerger.
+        let mut touched: Vec<usize> = Vec::new();
         let mut skip: Vec<Option<String>> = Vec::new();
         for (account, exact) in &accounts {
             let whole = (exact + 1e-9).floor();
@@ -2761,6 +2763,7 @@ impl Portfolio {
                     let lot = &mut self.holdings[hi].lots[li];
                     let take = left.min(lot.qty);
                     lot.shrink(take);
+                    touched.push(hi);
                     left -= take;
                     if left <= EPS {
                         break;
@@ -2788,7 +2791,6 @@ impl Portfolio {
                 .map_or(0.0, |(_, q)| *q)
         };
 
-        let mut touched: Vec<usize> = Vec::new();
         for (hi, li, account, held) in lots {
             if skip.contains(&account) {
                 continue;
@@ -2853,6 +2855,7 @@ impl Portfolio {
             child.charges = child_charges;
             out.child_lots.push((d.child_symbol(&sale.symbol), child));
         }
+        touched.sort_unstable();
         touched.dedup();
         for hi in touched {
             self.holdings[hi].recompute();
@@ -7187,5 +7190,24 @@ mod tests {
             DemergerOutcome::default()
         );
         assert_eq!(serde_json::to_string(&p).unwrap(), once);
+    }
+
+    #[test]
+    fn apply_demerger_recomputes_reconciled_child_on_other_listing_and_sell_specific_checks_held_from()
+     {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(100.0, "2022-01-03", "zerodha"));
+        p.add_lot("ITCHOTELS.BO", snapshot_lot(10.0, "zerodha"));
+
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.reconciled, 10.0);
+        assert_eq!(p.holding("ITCHOTELS.BO").unwrap().shares, 0.0);
+        assert_eq!(p.holding("ITCHOTELS.NS").unwrap().shares, 10.0);
+
+        let err = p
+            .sell_specific("ITCHOTELS.NS", 10.0, 100.0, "2023-06-01", "manual", &[1])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2025-01-06"), "{err}");
     }
 }

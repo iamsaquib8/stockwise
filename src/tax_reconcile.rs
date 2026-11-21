@@ -93,6 +93,10 @@ pub struct BrokerRow {
     pub sell_date: NaiveDate,
     pub buy_value: f64,
     pub sell_value: f64,
+    #[serde(skip)]
+    pub has_buy_value: bool,
+    #[serde(skip)]
+    pub has_sell_value: bool,
     /// The profit the broker reports.
     pub profit: f64,
     /// Profit after Sec. 112A grandfathering, where the file has it.
@@ -440,6 +444,8 @@ fn parse_sheet(
             sell_date,
             buy_value: buy_value.unwrap_or(0.0),
             sell_value: sell_value.unwrap_or(0.0),
+            has_buy_value: buy_value.is_some(),
+            has_sell_value: sell_value.is_some(),
             profit,
             taxable_profit,
             fmv: cell(c.fmv).and_then(amount).filter(|v| *v > 0.0),
@@ -890,8 +896,10 @@ fn compare(os: &[&OurSale], ts: &[&BrokerRow]) -> Matched {
     if !qty_differs {
         let grandfathered = old && term_ours == Term::Long;
         let by_charges = |diff: f64| charges > 0.5 && close(diff, charges, proc_o);
-        let cost_differs = !close(cost_o, cost_t, cost_o.max(cost_t));
-        let proc_differs = !close(proc_o, proc_t, proc_o.max(proc_t));
+        let check_cost = ts.iter().all(|t| t.has_buy_value);
+        let check_proc = ts.iter().all(|t| t.has_sell_value);
+        let cost_differs = check_cost && !close(cost_o, cost_t, cost_o.max(cost_t));
+        let proc_differs = check_proc && !close(proc_o, proc_t, proc_o.max(proc_t));
         if cost_differs {
             add(if by_charges(cost_t - cost_o) {
                 Reason::Charges
@@ -1076,6 +1084,8 @@ mod tests {
             sell_date: d("2026-06-01"),
             buy_value: 30.0 * 400.0,
             sell_value: 30.0 * 450.0,
+            has_buy_value: true,
+            has_sell_value: true,
             profit: 30.0 * 50.0,
             taxable_profit: None,
             fmv: None,
@@ -1104,6 +1114,8 @@ mod tests {
             sell_date: d("2026-06-01"),
             buy_value: 20.0 * 1_000.0,
             sell_value: 20.0 * 1_250.0,
+            has_buy_value: true,
+            has_sell_value: true,
             profit: 5_000.0,
             taxable_profit: None,
             fmv: None,
@@ -1133,6 +1145,8 @@ mod tests {
             sell_date: d("2026-06-01"),
             buy_value: 800.0,
             sell_value: 900.0,
+            has_buy_value: true,
+            has_sell_value: true,
             profit: 100.0,
             taxable_profit: None,
             fmv: None,
@@ -1162,6 +1176,8 @@ mod tests {
             sell_date: d(sell),
             buy_value: bv,
             sell_value: sv,
+            has_buy_value: true,
+            has_sell_value: true,
             profit: sv - bv,
             taxable_profit: None,
             fmv: None,
@@ -1299,5 +1315,31 @@ mod tests {
         assert_eq!(r.by_symbol.len(), 1);
         assert_eq!(r.by_symbol[0].symbol, "TATAMOTORS");
         assert_eq!(r.by_symbol[0].difference, 0.0);
+    }
+
+    #[test]
+    fn missing_buy_or_sell_value_with_profit_does_not_flag_false_cost_or_proceeds_mismatch() {
+        let rows = vec![
+            vec![
+                "Symbol".into(),
+                "Quantity".into(),
+                "Sell Date".into(),
+                "Profit".into(),
+                "Term".into(),
+            ],
+            vec![
+                "TCS".into(),
+                "10".into(),
+                "2026-06-15".into(),
+                "500".into(),
+                "Short Term".into(),
+            ],
+        ];
+        let parsed = parse_rows(&rows);
+        assert!(parsed.skipped.is_empty());
+        assert!(!parsed.rows[0].has_buy_value && !parsed.rows[0].has_sell_value);
+        let ours = vec![ours("TCS", 10.0, "2026-01-10", "2026-06-15", 300.0, 350.0)];
+        let r = reconcile(Broker::Other, "FY 2026-27", &ours, &parsed.rows);
+        assert!(r.matched[0].agrees(), "{:?}", r.matched[0].reasons);
     }
 }
