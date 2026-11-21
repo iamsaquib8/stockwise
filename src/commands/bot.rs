@@ -1,4 +1,4 @@
-//! `stockwise bot`: a two-way Telegram bot (#265). It answers `/hot`,
+//! `stockwise telegram`: a two-way Telegram bot (#265). It answers `/hot`,
 //! `/today`, `/review` and `/digest` from the configured chat only, and sends
 //! the digest every trading day at `STOCKWISE_DIGEST_TIME` (local time) if
 //! the worker has not sent it already.
@@ -130,7 +130,8 @@ fn review_text(p: &crate::pulse::Pulse, portfolio: &Portfolio) -> String {
     for r in rows {
         let gain = portfolio
             .holding(&r.symbol)
-            .and_then(|h| Some((r.price? / h.avg_cost - 1.0) * 100.0).filter(|_| h.avg_cost > 0.0));
+            .filter(|h| h.avg_cost > 0.0)
+            .and_then(|h| Some((r.price? / h.avg_cost - 1.0) * 100.0));
         let signals: Vec<&str> = state
             .recent
             .iter()
@@ -209,7 +210,7 @@ fn digest_time() -> Option<chrono::NaiveTime> {
         .and_then(|t| chrono::NaiveTime::parse_from_str(t.trim(), "%H:%M").ok())
 }
 
-pub async fn cmd_bot(once: bool, market: Market) -> Result<()> {
+pub async fn cmd_telegram_bot(once: bool, market: Market) -> Result<()> {
     let notifier = Notifier::from_env();
     let Some(tg) = notifier.config().telegram.clone() else {
         bail!(

@@ -399,7 +399,7 @@ pledge), normal, or low (dates coming up, routine changes).
 |---------|--------|
 | `STOCKWISE_NOTIFY_ROUTES=desktop=high,telegram=low` | Each listed channel gets only notices at or above its priority; unlisted channels get everything |
 | `STOCKWISE_QUIET_HOURS=22:00-07:00` | Local time. Notices below high priority are held (in `notify_held.json`) and sent as one message when the quiet hours end |
-| `STOCKWISE_DIGEST_TIME=16:15` | `stockwise bot` sends the digest every trading day at this local time, unless the worker already has |
+| `STOCKWISE_DIGEST_TIME=16:15` | `stockwise telegram` sends the digest every trading day at this local time, unless the worker already has |
 
 The same settings can live in the [config file](commands.md#configuration-file)
 under `[notify]`, named without the `STOCKWISE_` prefix in lower case

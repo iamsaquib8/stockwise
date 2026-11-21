@@ -161,7 +161,7 @@ export STOCKWISE_NOTIFY_ROUTES=desktop=high,telegram=low
 
 ### A Telegram bot you can ask
 
-With the Telegram token and chat id set, `stockwise bot` answers `/today`,
+With the Telegram token and chat id set, `stockwise telegram` answers `/today`,
 `/hot`, `/review` and `/digest` from your chat (and ignores every other chat).
 `STOCKWISE_DIGEST_TIME=16:15` also sends the digest every trading day.
 

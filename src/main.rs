@@ -1252,7 +1252,7 @@ STOCKWISE_BACKUP_PASSPHRASE. Broker tokens, caches and notification secrets are 
     },
 
     /// Two-way Telegram bot: /hot, /today, /review, /digest, plus scheduled digests
-    Bot {
+    Telegram {
         /// Answer pending messages once and exit
         #[arg(long)]
         once: bool,
@@ -3546,7 +3546,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         &[
             "profile",
             "notify",
-            "bot",
+            "telegram",
             "config",
             "backup",
             "update",
@@ -5668,7 +5668,7 @@ async fn dispatch(
             }
         },
         Commands::Digest { send, out } => commands::cmd_digest(send, out.json, m).await,
-        Commands::Bot { once } => commands::cmd_bot(once, m).await,
+        Commands::Telegram { once } => commands::cmd_telegram_bot(once, m).await,
         Commands::Notify { action } => match action {
             Some(NotifyCmd::Test) => commands::cmd_notify("test").await,
             Some(NotifyCmd::Status) | None => commands::cmd_notify("status").await,
