@@ -1131,6 +1131,7 @@ mod tests {
         let pending = crate::corp_actions::PendingSplits {
             by_symbol: vec![("BBB.NS".into(), vec![Split::new("2026-06-02", 2.0, 1.0)])],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
         };
         let adj = pending.adjusted(&p);

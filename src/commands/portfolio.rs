@@ -123,6 +123,12 @@ impl Valuation {
         self.quote(symbol).and_then(|q| q.regular_market_price)
     }
 
+    /// The day `symbol`'s price was set (UTC), when the quote says.
+    pub fn priced_on(&self, symbol: &str) -> Option<chrono::NaiveDate> {
+        let t = self.quote(symbol)?.regular_market_time?;
+        chrono::DateTime::from_timestamp(t, 0).map(|d| d.date_naive())
+    }
+
     /// The 31 Jan 2018 price of `symbol`, when it was looked up and found.
     pub fn fmv_2018(&self, symbol: &str) -> Option<f64> {
         self.fmv_2018
@@ -973,7 +979,8 @@ pub(crate) async fn load_portfolio_report_named(
         .collect();
     let symbols = crate::corp_actions::with_demerger_children(&portfolio, symbols);
     let mut val = value_holdings(src, &symbols, market, base).await?;
-    let pending = crate::corp_actions::pending_splits_live(&portfolio).await;
+    let mut pending = crate::corp_actions::pending_splits_live(&portfolio).await;
+    pending.align_to_quotes(|s| val.priced_on(s));
     let portfolio = pending.adjusted(&portfolio);
     if !cfg!(test) {
         val.load_history(&portfolio).await;
@@ -1119,7 +1126,8 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     let today = chrono::Local::now().date_naive();
     // A split or bonus Yahoo reports but the lots have not taken yet would
     // show as a fake loss: value a copy with it applied, and say so.
-    let pending = crate::corp_actions::pending_splits(&client, &loaded).await;
+    let mut pending = crate::corp_actions::pending_splits(&client, &loaded).await;
+    pending.align_to_quotes(|s| val.priced_on(s));
     let portfolio = pending.adjusted(&loaded);
     // Rates for closed positions and dividends in currencies no open
     // holding uses, before anything is totalled; then each day's rate.
@@ -1858,7 +1866,10 @@ pub async fn cmd_portfolio_add(
             lot.fx_currency = Some(cur.clone());
             lot.fx_rate = Some(*rate);
         }
-        lot.charges = charges.filter(|c| *c > 0.0);
+        // Recorded in whole paise (cents, pence): the one rounding point.
+        lot.charges = charges
+            .map(|c| (c * 100.0).round() / 100.0)
+            .filter(|c| *c > 0.0);
         p.add_lot(&resolved, lot);
         Ok(p.holding(&resolved).cloned())
     })?;
@@ -3480,14 +3491,18 @@ pub async fn cmd_portfolio_xray(
     let client = YahooClient::new().await?;
     // A split or bonus not yet applied to the lots: value the share count
     // after it, so the look-through is not halved.
-    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
-    let portfolio = pending.adjusted(&portfolio);
-    let symbols: Vec<String> = portfolio
+    let mut pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    // Symbols after the pending events (a demerger adds one), priced; then
+    // only the splits those prices already reflect are applied.
+    let symbols: Vec<String> = pending
+        .adjusted(&portfolio)
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
     let val = value_holdings(&client, &symbols, market, base).await?;
+    pending.align_to_quotes(|s| val.priced_on(s));
+    let portfolio = pending.adjusted(&portfolio);
 
     let mut fund_profiles = std::collections::HashMap::new();
     for h in &portfolio.holdings {
@@ -4238,6 +4253,7 @@ mod tests {
                 vec![Split::new("2024-10-28", 2.0, 1.0)],
             )],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
         };
         let q = Quote {

@@ -513,18 +513,22 @@ pub(crate) async fn gather_inputs(
     let loaded = src.portfolio().map_err(|e| e.context(views::LocalData))?;
     // A split or bonus not yet applied to the lots would show as a fake
     // loss: analyse a copy with it applied, and say so.
-    let pending = match client {
+    let mut pending = match client {
         Some(c) if !cfg!(test) => crate::corp_actions::pending_splits(c, &loaded).await,
         _ => crate::corp_actions::PendingSplits::offline(&loaded),
     };
-    let portfolio = pending.adjusted(&loaded);
     let today = chrono::Local::now().date_naive();
-    let symbols: Vec<String> = portfolio
+    // Price the holdings after the pending events, then apply only the
+    // splits those prices already reflect.
+    let symbols: Vec<String> = pending
+        .adjusted(&loaded)
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
     let mut val = value_holdings(src, &symbols, market, base).await?;
+    pending.align_to_quotes(|s| val.priced_on(s));
+    let portfolio = pending.adjusted(&loaded);
     if client.is_some() {
         val.load_history(&portfolio).await;
     }

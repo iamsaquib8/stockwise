@@ -956,13 +956,13 @@ pub(crate) async fn wrap_report(
     }
     // A split Yahoo reports but the lots have not taken yet: value a copy
     // with it applied (closes are in today's share count).
-    let pending = if offline {
+    let mut pending = if offline {
         crate::corp_actions::PendingSplits::offline(&portfolio)
     } else {
         crate::corp_actions::pending_splits_live(&portfolio).await
     };
-    pending.print();
-    let portfolio = pending.adjusted(&portfolio);
+    let recorded = portfolio;
+    let portfolio = pending.adjusted(&recorded);
     // The checkup describes what is held now; a portfolio sold out during
     // the year still gets its review, without that part.
     let run = if portfolio.holdings.is_empty() {
@@ -983,6 +983,10 @@ pub(crate) async fn wrap_report(
     } else {
         value_holdings(src, &held, market, base).await?
     };
+    // Only the splits today's prices already reflect.
+    pending.align_to_quotes(|s| val.priced_on(s));
+    pending.print();
+    let portfolio = pending.adjusted(&recorded);
     let period = period.unwrap_or_else(|| Period::default_for(val.base(), today));
     if period.start > today {
         bail!("{} has not started yet", period.label);
