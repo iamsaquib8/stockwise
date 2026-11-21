@@ -2,6 +2,7 @@ use crate::api::{Quote, YahooClient};
 use crate::market;
 use crate::technical;
 use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDate};
 
 // ══════════════════════════════════════════════════════════
 // MULTI-STRATEGY INTRADAY ENGINE
@@ -102,7 +103,11 @@ pub struct IntradaySignal {
     pub price: f64,
     pub currency: Option<String>,
     pub change_pct: f64,
+    /// Today's volume over the usual volume by this time of day; 0 when
+    /// unknown (see `volume_known`).
     pub volume_ratio: f64,
+    /// Whether `volume_ratio` was measured. Unknown volume lowers the score.
+    pub volume_known: bool,
     pub regime: MarketRegime,
     pub confidence: Confidence,
     pub direction: Direction,
@@ -164,7 +169,8 @@ fn obv_trend(obv_data: &[f64]) -> OBVTrend {
     }
 }
 
-/// Trade plan with Kelly-criterion position sizing
+/// Paper trade plan: levels from the ATR, size from a fixed risk budget
+/// (Kelly once the paper record is long enough)
 #[derive(Debug)]
 pub struct TradePlan {
     pub signal: IntradaySignal,
@@ -178,7 +184,7 @@ pub struct TradePlan {
     pub max_risk: f64, // max loss in currency
     pub expected_profit: f64,
     pub risk_reward: f64,
-    pub kelly_fraction: f64, // optimal bet fraction
+    pub kelly_fraction: f64, // half-Kelly from the measured record; 0 before it
     pub position_pct: f64,   // % of capital allocated
 }
 
@@ -227,73 +233,192 @@ fn detect_regime(closes: &[f64]) -> MarketRegime {
     }
 }
 
-/// Run all strategies and compute a composite signal
+/// Today's session from 5-minute bars: the session VWAP and how today's
+/// volume so far compares with the volume earlier sessions had traded by the
+/// same time of day.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SessionStats {
+    pub vwap: Option<f64>,
+    /// Today's volume over the average volume of the previous sessions at
+    /// the same minute of the session. None when unknown (before the open,
+    /// or without enough intraday history).
+    pub volume_pace: Option<f64>,
+}
+
+/// One intraday bar with every price present.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct IntradayBar {
+    time: i64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: u64,
+}
+
+/// Bars of an intraday chart, aligned by index: a bar missing its high, low
+/// or close is dropped as a whole (never shifted against the other columns);
+/// missing volume counts as zero.
+fn intraday_bars(chart: &crate::api::ChartData) -> Vec<IntradayBar> {
+    let Some(q) = chart.indicators.quote.first() else {
+        return Vec::new();
+    };
+    let at = |c: &Option<Vec<Option<f64>>>, i: usize| {
+        c.as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|p| p.is_finite() && *p > 0.0)
+    };
+    chart
+        .timestamp
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &time)| {
+            Some(IntradayBar {
+                time,
+                high: at(&q.high, i)?,
+                low: at(&q.low, i)?,
+                close: at(&q.close, i)?,
+                volume: q
+                    .volume
+                    .as_ref()
+                    .and_then(|v| v.get(i).copied().flatten())
+                    .unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// Fewest earlier sessions the volume pace is averaged over.
+const MIN_PACE_SESSIONS: usize = 2;
+
+/// [`SessionStats`] for the session dated `today` from several sessions of
+/// 5-minute bars (`5d` of them from Yahoo).
+fn session_stats(bars: &[IntradayBar], market: market::Market, today: NaiveDate) -> SessionStats {
+    use std::collections::BTreeMap;
+    let open_of = |date: NaiveDate| {
+        crate::clock::hours(market, date)
+            .map(|h| crate::clock::at(market, date, h.open).timestamp())
+    };
+    let mut days: BTreeMap<NaiveDate, Vec<&IntradayBar>> = BTreeMap::new();
+    for b in bars {
+        if let Some(t) = DateTime::from_timestamp(b.time, 0) {
+            days.entry(crate::clock::session_date(market, t))
+                .or_default()
+                .push(b);
+        }
+    }
+    let Some(session) = days.get(&today).filter(|d| !d.is_empty()) else {
+        return SessionStats::default();
+    };
+    let traded: f64 = session.iter().map(|b| b.volume as f64).sum();
+    let vwap = (traded > 0.0).then(|| {
+        session
+            .iter()
+            .map(|b| (b.high + b.low + b.close) / 3.0 * b.volume as f64)
+            .sum::<f64>()
+            / traded
+    });
+
+    // Minutes into the session of today's latest bar, then each earlier
+    // session's volume up to the same minute.
+    let volume_pace = open_of(today).and_then(|open| {
+        let elapsed = session.last()?.time - open;
+        let expected: Vec<f64> = days
+            .range(..today)
+            .filter_map(|(date, bars)| {
+                let open = open_of(*date)?;
+                let v: f64 = bars
+                    .iter()
+                    .filter(|b| b.time - open <= elapsed)
+                    .map(|b| b.volume as f64)
+                    .sum();
+                (v > 0.0).then_some(v)
+            })
+            .collect();
+        if expected.len() < MIN_PACE_SESSIONS {
+            return None;
+        }
+        let expected = expected.iter().sum::<f64>() / expected.len() as f64;
+        (expected > 0.0).then(|| traded / expected)
+    });
+    SessionStats { vwap, volume_pace }
+}
+
+/// Scale on the score when the volume pace is unknown: the same as a
+/// below-average day, so a missing average is never read as normal volume.
+const UNKNOWN_VOLUME_MULT: f64 = 0.85;
+
+/// Run all strategies and compute a composite signal from daily bars (about
+/// three months, for the trend, RSI, MACD, Bollinger bands, ATR and OBV) and
+/// today's 5-minute session (VWAP and volume pace).
+#[allow(clippy::too_many_arguments)]
 fn compute_signal(
     symbol: &str,
     quote: &Quote,
     price: f64,
-    closes: &[f64],
-    highs: &[f64],
-    lows: &[f64],
-    volumes: &[u64],
-    opens: &[f64],
+    daily: &crate::backtest::Bars,
+    session: SessionStats,
     prior: Option<crate::api::PriorSession>,
     custom: Option<StrategySignal>,
 ) -> IntradaySignal {
+    let (closes, highs, lows, opens, volumes) = (
+        &daily.close[..],
+        &daily.high[..],
+        &daily.low[..],
+        &daily.open[..],
+        &daily.volume[..],
+    );
     let mut strategies: Vec<StrategySignal> = custom.into_iter().collect();
     let regime = detect_regime(closes);
+    // Oversold readings (RSI, the lower Bollinger band, distance below the
+    // 20-day average, accumulation on weak price) describe one thing: a dip.
+    // They become one vote, as strong as the strongest reading, so a single
+    // fall is not counted four times. Overbought readings likewise.
+    let mut dip: Vec<(f64, String)> = Vec::new();
+    let mut stretched: Vec<(f64, String)> = Vec::new();
 
-    // ── Strategy 1: RSI Reversal ──
+    // ── RSI ──
     let rsi = technical::rsi(closes, 14);
     if let Some(r) = rsi {
         if r < 30.0 {
-            strategies.push(StrategySignal {
-                name: "RSI Reversal",
-                direction: Direction::Long,
-                strength: 85.0 + (30.0 - r), // stronger as RSI drops
-                reason: format!("RSI deeply oversold at {:.0}", r),
-            });
+            dip.push((
+                (85.0 + (30.0 - r)).min(100.0),
+                format!("RSI deeply oversold at {:.0}", r),
+            ));
         } else if r < 40.0 {
-            strategies.push(StrategySignal {
-                name: "RSI Reversal",
-                direction: Direction::Long,
-                strength: 60.0,
-                reason: format!("RSI approaching oversold at {:.0}", r),
-            });
+            dip.push((60.0, format!("RSI approaching oversold at {:.0}", r)));
         } else if r > 70.0 {
-            strategies.push(StrategySignal {
-                name: "RSI Reversal",
-                direction: Direction::Short,
-                strength: 60.0 + (r - 70.0),
-                reason: format!("RSI overbought at {:.0}", r),
-            });
+            stretched.push((
+                (60.0 + (r - 70.0)).min(100.0),
+                format!("RSI overbought at {:.0}", r),
+            ));
         }
     }
 
-    // ── Strategy 2: VWAP Reclaim ──
-    let vwap = technical::vwap(highs, lows, closes, volumes);
+    // ── Strategy: VWAP Reclaim (today's session VWAP) ──
+    let vwap = session.vwap;
     let above_vwap = vwap.is_some_and(|v| price > v);
     if let Some(v) = vwap {
         let dist_pct = ((price - v) / v) * 100.0;
         if dist_pct > 0.0 && dist_pct < 0.5 {
-            // Just reclaimed VWAP — strong long signal
             strategies.push(StrategySignal {
                 name: "VWAP Reclaim",
                 direction: Direction::Long,
                 strength: 75.0,
-                reason: "Price just reclaimed VWAP from below".into(),
+                reason: "Price just reclaimed the session VWAP from below".into(),
             });
         } else if dist_pct < 0.0 && dist_pct > -0.5 {
             strategies.push(StrategySignal {
                 name: "VWAP Rejection",
                 direction: Direction::Short,
                 strength: 65.0,
-                reason: "Price just lost VWAP".into(),
+                reason: "Price just lost the session VWAP".into(),
             });
         }
     }
 
-    // ── Strategy 3: Bollinger Band Squeeze & Breakout ──
+    // ── Strategy: Bollinger Band Squeeze; band touches feed the families ──
     let bb = technical::bollinger_bands(closes, 20);
     let bb_position = bb.map(|(upper, _, lower)| {
         if (upper - lower).abs() < f64::EPSILON {
@@ -305,7 +430,6 @@ fn compute_signal(
     if let Some((upper, middle, lower)) = bb {
         let bandwidth = (upper - lower) / middle * 100.0;
         if bandwidth < 3.0 && price > middle {
-            // Squeeze about to break out long
             strategies.push(StrategySignal {
                 name: "BB Squeeze",
                 direction: Direction::Long,
@@ -316,23 +440,13 @@ fn compute_signal(
                 ),
             });
         } else if bb_position.unwrap_or(0.5) < 0.1 {
-            strategies.push(StrategySignal {
-                name: "BB Bounce",
-                direction: Direction::Long,
-                strength: 65.0,
-                reason: "Price touching lower Bollinger Band".into(),
-            });
+            dip.push((65.0, "Price touching lower Bollinger Band".into()));
         } else if bb_position.unwrap_or(0.5) > 0.95 {
-            strategies.push(StrategySignal {
-                name: "BB Rejection",
-                direction: Direction::Short,
-                strength: 60.0,
-                reason: "Price at upper Bollinger Band".into(),
-            });
+            stretched.push((60.0, "Price at upper Bollinger Band".into()));
         }
     }
 
-    // ── Strategy 4: MACD Crossover ──
+    // ── Strategy: MACD Crossover (needs 36+ daily bars) ──
     let macd = technical::macd(closes);
     let macd_histogram = macd.map(|(_, _, h)| h);
     if closes.len() > 36 {
@@ -356,27 +470,22 @@ fn compute_signal(
         }
     }
 
-    // ── Strategy 5: Volume Breakout ──
-    let avg_vol = quote.average_daily_volume_3_month.unwrap_or(1) as f64;
-    let today_vol = quote.regular_market_volume.unwrap_or(0) as f64;
-    let volume_ratio = if avg_vol > 0.0 {
-        today_vol / avg_vol
-    } else {
-        1.0
-    };
+    // ── Strategy: Volume Breakout (volume against the time-of-day pace) ──
+    let volume_known = session.volume_pace.is_some();
+    let volume_ratio = session.volume_pace.unwrap_or(0.0);
     if volume_ratio > 2.0 && quote.regular_market_change_percent.unwrap_or(0.0) > 0.5 {
         strategies.push(StrategySignal {
             name: "Volume Breakout",
             direction: Direction::Long,
             strength: 80.0,
             reason: format!(
-                "Volume {:.1}x average with positive price action",
+                "Volume {:.1}x the usual pace for this time of day, with positive price action",
                 volume_ratio
             ),
         });
     }
 
-    // ── Strategy 6: Support/Resistance Bounce ──
+    // ── Strategy: Support/Resistance Bounce ──
     let (mut near_support, mut near_resistance) = (false, false);
     let (mut pivot_val, mut s1_val, mut r1_val) = (None, None, None);
     // Pivots come from the last completed session, not today's live bar.
@@ -407,7 +516,7 @@ fn compute_signal(
         }
     }
 
-    // ── Strategy 7: Gap Play ──
+    // ── Strategy: Gap Play ──
     let gap_detected = if opens.len() >= 2 && highs.len() >= 2 && lows.len() >= 2 {
         let gaps = technical::detect_gaps(opens, highs, lows, closes);
         let recent_unfilled: Vec<_> = gaps
@@ -442,93 +551,35 @@ fn compute_signal(
         false
     };
 
-    // ── Strategy 8: OBV Divergence ──
+    // ── OBV accumulation on weak price ──
     let obv_trend = obv_trend(&technical::obv(closes, volumes));
     if obv_trend == OBVTrend::Rising
         && (regime == MarketRegime::Ranging || regime == MarketRegime::Downtrend)
     {
-        // OBV rising while price might be flat = accumulation
-        strategies.push(StrategySignal {
-            name: "OBV Divergence",
-            direction: Direction::Long,
-            strength: 68.0,
-            reason: "OBV rising (accumulation) despite weak price".into(),
-        });
+        dip.push((68.0, "OBV rising (accumulation) despite weak price".into()));
     }
 
-    // ── Strategy 9: Mean Reversion ──
+    // ── Distance below the 20-day average ──
     if let Some(sma20) = technical::sma(closes, 20) {
         let deviation = ((price - sma20) / sma20) * 100.0;
         if deviation < -3.0 && regime != MarketRegime::StrongDowntrend {
-            strategies.push(StrategySignal {
-                name: "Mean Reversion",
-                direction: Direction::Long,
-                strength: 62.0 + deviation.abs().min(5.0) * 2.0,
-                reason: format!(
-                    "Price {:.1}% below 20-SMA, mean reversion expected",
-                    deviation
-                ),
-            });
+            dip.push((
+                62.0 + deviation.abs().min(5.0) * 2.0,
+                format!("Price {:.1}% below 20-SMA", deviation),
+            ));
         }
     }
 
-    // ── Compute Composite Score ──
-    let long_signals: Vec<&StrategySignal> = strategies
-        .iter()
-        .filter(|s| s.direction == Direction::Long)
-        .collect();
-    let short_signals: Vec<&StrategySignal> = strategies
-        .iter()
-        .filter(|s| s.direction == Direction::Short)
-        .collect();
+    if let Some(v) = family_vote("Dip", Direction::Long, dip) {
+        strategies.push(v);
+    }
+    if let Some(v) = family_vote("Overextended", Direction::Short, stretched) {
+        strategies.push(v);
+    }
 
-    let long_strength: f64 = long_signals.iter().map(|s| s.strength).sum();
-    let short_strength: f64 = short_signals.iter().map(|s| s.strength).sum();
+    let (direction, score, net_count) = composite(&strategies, session.volume_pace, regime);
 
-    let (direction, raw_score) = if long_strength > short_strength {
-        (Direction::Long, long_strength)
-    } else if short_strength > long_strength {
-        (Direction::Short, short_strength)
-    } else {
-        (Direction::Long, 0.0)
-    };
-
-    // Normalize: more strategies agreeing = higher score
-    let agreeing_count = if direction == Direction::Long {
-        long_signals.len()
-    } else {
-        short_signals.len()
-    };
-    let consensus_bonus = (agreeing_count as f64 - 1.0).max(0.0) * 8.0; // bonus for multi-strategy agreement
-
-    // Volume confirmation multiplier
-    let vol_mult = if volume_ratio > 1.5 {
-        1.15
-    } else if volume_ratio > 1.0 {
-        1.0
-    } else {
-        0.85
-    };
-
-    // Regime alignment bonus
-    let regime_mult = match (direction, &regime) {
-        (Direction::Long, MarketRegime::StrongUptrend) => 1.2,
-        (Direction::Long, MarketRegime::Uptrend) => 1.1,
-        (Direction::Short, MarketRegime::StrongDowntrend) => 1.2,
-        (Direction::Short, MarketRegime::Downtrend) => 1.1,
-        (Direction::Long, MarketRegime::StrongDowntrend) => 0.6, // counter-trend = penalize
-        (Direction::Short, MarketRegime::StrongUptrend) => 0.6,
-        _ => 1.0,
-    };
-
-    let avg_strength = if agreeing_count > 0 {
-        raw_score / agreeing_count as f64
-    } else {
-        0.0
-    };
-    let score = ((avg_strength + consensus_bonus) * vol_mult * regime_mult).clamp(0.0, 100.0);
-
-    let confidence = match (score, agreeing_count) {
+    let confidence = match (score, net_count) {
         (s, c) if s >= 75.0 && c >= 3 => Confidence::High,
         (s, c) if s >= 60.0 && c >= 2 => Confidence::Medium,
         _ => Confidence::Low,
@@ -550,6 +601,7 @@ fn compute_signal(
         currency: quote.currency.clone(),
         change_pct,
         volume_ratio,
+        volume_known,
         regime,
         confidence,
         direction,
@@ -571,27 +623,111 @@ fn compute_signal(
     }
 }
 
+/// One vote for a family of readings that describe the same move: as strong
+/// as its strongest reading (at most 100), with every reason listed.
+fn family_vote(
+    name: &'static str,
+    direction: Direction,
+    readings: Vec<(f64, String)>,
+) -> Option<StrategySignal> {
+    let strength = readings.iter().map(|(s, _)| *s).reduce(f64::max)?;
+    Some(StrategySignal {
+        name,
+        direction,
+        strength: strength.min(100.0),
+        reason: readings
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>()
+            .join("; "),
+    })
+}
+
+/// Direction, score (0–100) and net vote count of a set of votes. Opposing
+/// votes are netted, not dropped: the score is the net strength per
+/// agreeing vote, the consensus bonus counts agreeing minus opposing votes,
+/// and so does the count that sets the confidence. Then volume pace (unknown
+/// counts as weak) and the regime scale it: a trade against any downtrend or
+/// uptrend is penalised, more so against a strong one.
+fn composite(
+    strategies: &[StrategySignal],
+    volume_pace: Option<f64>,
+    regime: MarketRegime,
+) -> (Direction, f64, usize) {
+    let sum = |d: Direction| -> (f64, usize) {
+        strategies
+            .iter()
+            .filter(|s| s.direction == d)
+            .fold((0.0, 0), |(s, n), x| (s + x.strength, n + 1))
+    };
+    let (long_sum, long_n) = sum(Direction::Long);
+    let (short_sum, short_n) = sum(Direction::Short);
+    let (direction, agree, oppose) = if long_sum > short_sum {
+        (Direction::Long, long_n, short_n)
+    } else if short_sum > long_sum {
+        (Direction::Short, short_n, long_n)
+    } else {
+        return (Direction::Long, 0.0, 0);
+    };
+    let net_strength = (long_sum - short_sum).abs();
+    let net_count = agree.saturating_sub(oppose);
+    let avg_strength = net_strength / agree as f64;
+    let consensus_bonus = (net_count as f64 - 1.0).max(0.0) * 8.0;
+
+    let vol_mult = match volume_pace {
+        None => UNKNOWN_VOLUME_MULT,
+        Some(r) if r > 1.5 => 1.15,
+        Some(r) if r > 1.0 => 1.0,
+        Some(_) => 0.85,
+    };
+    let regime_mult = match (direction, regime) {
+        (Direction::Long, MarketRegime::StrongUptrend) => 1.2,
+        (Direction::Long, MarketRegime::Uptrend) => 1.1,
+        (Direction::Short, MarketRegime::StrongDowntrend) => 1.2,
+        (Direction::Short, MarketRegime::Downtrend) => 1.1,
+        // Counter-trend: penalised in any trend against the trade.
+        (Direction::Long, MarketRegime::StrongDowntrend) => 0.6,
+        (Direction::Long, MarketRegime::Downtrend) => 0.75,
+        (Direction::Short, MarketRegime::StrongUptrend) => 0.6,
+        (Direction::Short, MarketRegime::Uptrend) => 0.75,
+        (_, MarketRegime::Ranging) => 1.0,
+    };
+    let score = ((avg_strength + consensus_bonus) * vol_mult * regime_mult).clamp(0.0, 100.0);
+    (direction, score, net_count)
+}
+
 // ══════════════════════════════════════════════════════════
 // POSITION SIZING
 // ══════════════════════════════════════════════════════════
 
-/// Kelly Criterion for optimal position sizing
-/// win_rate: 0-1, avg_win/avg_loss: ratio
+/// Half-Kelly fraction of capital to risk, from a measured win rate (0–1)
+/// and average win over average loss. Capped at 25%.
 fn kelly_fraction(win_rate: f64, win_loss_ratio: f64) -> f64 {
     let kelly = win_rate - (1.0 - win_rate) / win_loss_ratio;
     // Half-Kelly for safety
-    (kelly * 0.5).clamp(0.0, 0.25) // never bet more than 25% of capital
+    (kelly * 0.5).clamp(0.0, 0.25)
 }
+
+/// Capital risked per trade (if its exit level is hit) until the paper
+/// record has [`crate::simulator::MIN_TRADES_FOR_KELLY`] closed trades.
+pub const FIXED_RISK_PCT: f64 = 0.5;
+
+/// Risk per trade when the measured record shows no edge (Kelly ≤ 0): small,
+/// so the paper record keeps growing and can show whether that changes.
+pub const NO_EDGE_RISK_PCT: f64 = 0.25;
 
 /// Sizing limits for [`generate_trade_plans_with`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanLimits {
-    /// Max % of capital to lose on one trade if its stop is hit.
+    /// Most % of capital to lose on one trade if its exit level is hit.
     pub max_risk_pct: f64,
     /// Max % of capital in one position.
     pub max_position_pct: f64,
     /// Max number of plans returned.
     pub max_positions: usize,
+    /// Measured paper record (30+ closed trades) for Kelly sizing; None
+    /// risks [`FIXED_RISK_PCT`] per trade.
+    pub track_record: Option<crate::simulator::TrackRecord>,
 }
 
 impl Default for PlanLimits {
@@ -600,23 +736,41 @@ impl Default for PlanLimits {
             max_risk_pct: 1.0,
             max_position_pct: 30.0,
             max_positions: 5,
+            track_record: None,
         }
     }
 }
 
-/// Generate trade plans with intelligent position sizing and the default
-/// [`PlanLimits`] (30% per position, 5 positions) with `max_risk_pct` risk
-/// per trade.
+impl PlanLimits {
+    /// Percent of capital risked per trade and the Kelly fraction behind it
+    /// (0 without a track record).
+    pub fn risk_pct(&self) -> (f64, f64) {
+        match self.track_record {
+            None => (FIXED_RISK_PCT.min(self.max_risk_pct), 0.0),
+            Some(tr) => {
+                let kf = kelly_fraction(tr.win_rate, tr.win_loss_ratio);
+                let pct = if kf > 0.0 {
+                    kf * 100.0
+                } else {
+                    NO_EDGE_RISK_PCT
+                };
+                (pct.min(self.max_risk_pct), kf)
+            }
+        }
+    }
+}
+
+/// Generate trade plans with the default [`PlanLimits`] (30% per position,
+/// 5 positions, the fixed 0.5% risk) and at most `max_risk_pct` risk per
+/// trade.
 pub fn generate_trade_plans(
     signals: &[IntradaySignal],
     capital: f64,
-    target_pct: f64,
-    max_risk_pct: f64, // max % of capital to risk per trade (e.g., 1.0 = 1%)
+    max_risk_pct: f64,
 ) -> Vec<TradePlan> {
     generate_trade_plans_with(
         signals,
         capital,
-        target_pct,
         PlanLimits {
             max_risk_pct,
             ..PlanLimits::default()
@@ -624,18 +778,25 @@ pub fn generate_trade_plans(
     )
 }
 
-/// Generate trade plans, best first, sized so that together they never need
-/// more than `capital`: each position is capped by Kelly, by per-trade risk
-/// and by `max_position_pct`; then, walking down the ranking, a plan that
-/// doesn't fit in the capital left is shrunk to what does (or dropped).
+/// Generate trade plans, highest score first, sized so that together they
+/// never need more than `capital`.
+///
+/// - The exit level is at least 1 × ATR from the price: the prior session's
+///   S1 (R1 for a short) is used only when it lies 1–2 ATR away.
+/// - Each trade risks [`PlanLimits::risk_pct`] of capital if its exit level
+///   is hit, and no position takes more than `max_position_pct`.
+/// - Walking down the ranking, a plan that doesn't fit in the capital left is
+///   shrunk to what does (or dropped).
+///
+/// Ranking is by score alone: the reward-to-risk ratio of a level set this
+/// way says nothing about the odds, so it no longer lifts a plan.
 pub fn generate_trade_plans_with(
     signals: &[IntradaySignal],
     capital: f64,
-    target_pct: f64,
     limits: PlanLimits,
 ) -> Vec<TradePlan> {
-    let _target_profit = capital * (target_pct / 100.0);
-    let max_risk_per_trade = capital * (limits.max_risk_pct / 100.0);
+    let (risk_pct, kf) = limits.risk_pct();
+    let max_risk_per_trade = capital * (risk_pct / 100.0);
     let mut plans = Vec::new();
 
     for signal in signals
@@ -643,11 +804,14 @@ pub fn generate_trade_plans_with(
         .filter(|s| s.score >= 50.0 && s.confidence != Confidence::Low)
     {
         let price = signal.price;
-        let atr_pct = signal.atr_pct.unwrap_or(2.0);
-
+        // No ATR, no plan: the levels and the size both depend on it.
+        let Some(atr_pct) = signal.atr_pct.filter(|a| a.is_finite()) else {
+            continue;
+        };
         if atr_pct < 0.3 {
             continue; // not enough daily range
         }
+        let atr = price * atr_pct / 100.0;
 
         // Dynamic target based on regime + score
         let target_multiplier = match signal.regime {
@@ -668,31 +832,18 @@ pub fn generate_trade_plans_with(
             Direction::Short => price * (1.0 - move_pct / 100.0),
         };
 
-        // Smart stop-loss: use support level if available, else ATR-based
-        let atr_stop = match signal.direction {
-            Direction::Long => price * (1.0 - atr_pct * 0.4 / 100.0),
-            Direction::Short => price * (1.0 + atr_pct * 0.4 / 100.0),
-        };
-        // A support at or above the price (or a resistance at or below it)
-        // would put the stop on the wrong side of the entry: ignore it.
-        let stop_loss = if signal.direction == Direction::Long {
-            signal
-                .support1
-                .filter(|s| *s < price)
-                .map(|s| s.max(atr_stop))
-                .unwrap_or(atr_stop)
-        } else {
-            signal
-                .resistance1
-                .filter(|r| *r > price)
-                .map(|r| r.min(atr_stop))
-                .unwrap_or(atr_stop)
-        };
+        let stop_loss = exit_level(
+            signal.direction,
+            price,
+            atr,
+            signal.support1,
+            signal.resistance1,
+        );
 
-        // Trailing stop: 1.5x ATR from current price
+        // Trailing exit level: 1.5 × ATR from the price.
         let trailing_stop = match signal.direction {
-            Direction::Long => price - (atr_pct * 1.5 / 100.0) * price,
-            Direction::Short => price + (atr_pct * 1.5 / 100.0) * price,
+            Direction::Long => price - 1.5 * atr,
+            Direction::Short => price + 1.5 * atr,
         };
 
         let risk_per_share = (price - stop_loss).abs();
@@ -702,20 +853,10 @@ pub fn generate_trade_plans_with(
         }
         let risk_reward = profit_per_share / risk_per_share;
 
-        // Kelly-based position sizing
-        // Estimate win rate from confidence: High=65%, Medium=55%, Low=45%
-        let est_win_rate = match signal.confidence {
-            Confidence::High => 0.65,
-            Confidence::Medium => 0.55,
-            Confidence::Low => 0.45,
-        };
-        let kf = kelly_fraction(est_win_rate, risk_reward);
-
-        // Position size: min of Kelly allocation, max risk constraint, and total capital
-        let kelly_capital = capital * kf;
+        // Size from the risk budget, capped per position.
         let risk_capital = max_risk_per_trade / risk_per_share * price;
         let max_capital = capital * (limits.max_position_pct / 100.0);
-        let position_capital = kelly_capital.min(risk_capital).min(max_capital);
+        let position_capital = risk_capital.min(max_capital);
 
         let qty = (position_capital / price).floor() as u32;
         if qty == 0 {
@@ -744,16 +885,31 @@ pub fn generate_trade_plans_with(
         });
     }
 
-    // Sort by score * risk_reward (best risk-adjusted opportunities first)
-    plans.sort_by(|a, b| {
-        let a_val = a.signal.score * a.risk_reward;
-        let b_val = b.signal.score * b.risk_reward;
-        b_val
-            .partial_cmp(&a_val)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Highest score first (stable: ties keep the scan's order).
+    plans.sort_by(|a, b| b.signal.score.total_cmp(&a.signal.score));
 
     cap_total_allocation(plans, capital, limits.max_positions)
+}
+
+/// The exit level for a paper trade: 1 × ATR from the price, or the prior
+/// session's S1 (R1 for a short) when it is 1–2 ATR away. A level closer than
+/// 1 ATR would be hit by ordinary noise; one on the wrong side of the price,
+/// or past 2 ATR, is ignored.
+fn exit_level(
+    direction: Direction,
+    price: f64,
+    atr: f64,
+    support1: Option<f64>,
+    resistance1: Option<f64>,
+) -> f64 {
+    match direction {
+        Direction::Long => support1
+            .filter(|s| (price - 2.0 * atr..=price - atr).contains(s))
+            .unwrap_or(price - atr),
+        Direction::Short => resistance1
+            .filter(|r| (price + atr..=price + 2.0 * atr).contains(r))
+            .unwrap_or(price + atr),
+    }
 }
 
 /// Keep the best `max_positions` plans whose combined capital fits in
@@ -827,6 +983,9 @@ pub async fn scan_sector_heat(client: &YahooClient) -> Result<Vec<SectorHeat>> {
 /// Most symbols an intraday scan fetches bars for: the most traded by
 /// value of the market's universe.
 const INTRADAY_SCAN_LIMIT: usize = 40;
+
+/// Daily history the scan reads: about 63 bars, past MACD's 35.
+const DAILY_RANGE: &str = "3mo";
 
 pub async fn scan_intraday(
     client: &YahooClient,
@@ -907,20 +1066,30 @@ pub async fn scan_intraday_with(
     }
     let mut signals = Vec::new();
 
-    // Daily bars a few symbols at a time, in the quotes' order; priceless
-    // quotes skip the request.
+    // Daily bars (three months, enough for MACD's 35) and the last five
+    // sessions of 5-minute bars (today's VWAP and volume pace), a few
+    // symbols at a time, in the quotes' order; priceless quotes skip both.
     use futures_util::StreamExt;
-    let charts: Vec<Option<crate::api::ChartData>> =
-        futures_util::stream::iter(quotes.iter().map(|q| async move {
-            let sym = q.symbol.as_deref()?;
-            q.regular_market_price.filter(|p| *p > 0.0)?;
-            client.get_chart(sym, "1mo", "1d").await.ok()
-        }))
-        .buffered(8)
-        .collect()
-        .await;
+    type Charts = (Option<crate::api::ChartData>, Option<crate::api::ChartData>);
+    let charts: Vec<Charts> = futures_util::stream::iter(quotes.iter().map(|q| async move {
+        let Some(sym) = q.symbol.as_deref() else {
+            return (None, None);
+        };
+        if q.regular_market_price.is_none_or(|p| p <= 0.0) {
+            return (None, None);
+        }
+        let (daily, intraday) = futures_util::join!(
+            client.get_chart(sym, DAILY_RANGE, "1d"),
+            client.get_chart(sym, "5d", "5m"),
+        );
+        (daily.ok(), intraday.ok())
+    }))
+    .buffered(8)
+    .collect()
+    .await;
 
-    for (quote, chart) in quotes.iter().zip(charts) {
+    let now = chrono::Utc::now();
+    for (quote, (daily, intraday)) in quotes.iter().zip(charts) {
         let symbol = match &quote.symbol {
             Some(s) => s.clone(),
             None => continue,
@@ -929,49 +1098,32 @@ pub async fn scan_intraday_with(
             Some(p) if p > 0.0 => p,
             _ => continue,
         };
-
-        let Some(chart) = chart else {
+        let Some(chart) = daily else {
             continue;
         };
-
-        let extract =
-            |f: &dyn Fn(&crate::api::QuoteIndicator) -> &Option<Vec<Option<f64>>>| -> Vec<f64> {
-                chart
-                    .indicators
-                    .quote
-                    .first()
-                    .and_then(|q| f(q).as_ref())
-                    .map(|c| c.iter().filter_map(|v| *v).collect())
-                    .unwrap_or_default()
-            };
-
-        let closes: Vec<f64> = extract(&|q| &q.close);
-        let highs: Vec<f64> = extract(&|q| &q.high);
-        let lows: Vec<f64> = extract(&|q| &q.low);
-        let opens: Vec<f64> = extract(&|q| &q.open);
-        let volumes: Vec<u64> = chart
-            .indicators
-            .quote
-            .first()
-            .and_then(|q| q.volume.as_ref())
-            .map(|c| c.iter().filter_map(|v| *v).collect())
-            .unwrap_or_default();
-
-        if closes.len() < 15 {
+        // Columns aligned by index: a bar with any missing price is dropped
+        // whole, never shifted against the others.
+        let bars = crate::backtest::Bars::from_chart(&chart);
+        if bars.len() < 15 {
             continue;
         }
+        let sym_market = market::market_of_symbol(&symbol, market);
+        let session = intraday
+            .map(|c| {
+                session_stats(
+                    &intraday_bars(&c),
+                    sym_market,
+                    crate::clock::session_date(sym_market, now),
+                )
+            })
+            .unwrap_or_default();
 
         let custom = match rule {
             Some(rule) => custom_rule_signal(client, &symbol, rule).await?,
             None => None,
         };
-        let prior = chart.prior_session(
-            chrono::Utc::now(),
-            market::market_of_symbol(&symbol, market),
-        );
-        let signal = compute_signal(
-            &symbol, quote, price, &closes, &highs, &lows, &volumes, &opens, prior, custom,
-        );
+        let prior = chart.prior_session(now, sym_market);
+        let signal = compute_signal(&symbol, quote, price, &bars, session, prior, custom);
         signals.push(signal);
     }
 
@@ -993,6 +1145,7 @@ impl IntradaySignal {
             currency: self.currency.clone(),
             change_pct: self.change_pct,
             volume_ratio: self.volume_ratio,
+            volume_known: self.volume_known,
             regime: self.regime,
             confidence: self.confidence,
             direction: self.direction,
@@ -1048,6 +1201,7 @@ mod tests {
             currency: None,
             change_pct: 0.5,
             volume_ratio: 1.2,
+            volume_known: true,
             regime: MarketRegime::Uptrend,
             confidence,
             direction: Direction::Long,
@@ -1172,35 +1326,35 @@ mod tests {
 
     #[test]
     fn test_generate_trade_plans_empty() {
-        let plans = generate_trade_plans(&[], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[], 25000.0, 1.0);
         assert!(plans.is_empty());
     }
 
     #[test]
     fn test_generate_trade_plans_low_score_filtered() {
         let signal = make_signal(30.0, Confidence::Low, 2.0); // score below 50
-        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[signal], 25000.0, 1.0);
         assert!(plans.is_empty());
     }
 
     #[test]
     fn test_generate_trade_plans_low_confidence_filtered() {
         let signal = make_signal(80.0, Confidence::Low, 2.0); // Low confidence filtered
-        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[signal], 25000.0, 1.0);
         assert!(plans.is_empty());
     }
 
     #[test]
     fn test_generate_trade_plans_low_atr_filtered() {
         let signal = make_signal(80.0, Confidence::High, 0.2); // ATR too small
-        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[signal], 25000.0, 1.0);
         assert!(plans.is_empty());
     }
 
     #[test]
     fn test_generate_trade_plans_valid_signal() {
         let signal = make_signal(75.0, Confidence::High, 2.5);
-        let plans = generate_trade_plans(&[signal], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[signal], 25000.0, 1.0);
         // Should generate a plan
         assert!(!plans.is_empty());
         let plan = &plans[0];
@@ -1211,17 +1365,326 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_trade_plans_sorted_by_quality() {
+    fn plans_are_ranked_by_score_alone() {
         let s1 = make_signal(60.0, Confidence::Medium, 2.5);
         let mut s2 = make_signal(85.0, Confidence::High, 3.0);
         s2.symbol = "BETTER.NS".into();
-        let plans = generate_trade_plans(&[s1, s2], 50000.0, 2.0, 1.0);
-        if plans.len() >= 2 {
-            // First plan should have higher score
-            let q0 = plans[0].signal.score * plans[0].risk_reward;
-            let q1 = plans[1].signal.score * plans[1].risk_reward;
-            assert!(q0 >= q1);
+        let plans = generate_trade_plans(&[s1, s2], 50000.0, 1.0);
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].signal.symbol, "BETTER.NS");
+    }
+
+    #[test]
+    fn exit_level_is_never_tighter_than_one_atr() {
+        // ATR 2% of 100 = 2. An S1 just under the price (a "Support Bounce"
+        // fires within 0.5% of it) used to become a 0.1-point stop.
+        for s1 in [99.9, 99.0, 98.5, 101.0] {
+            let mut long = make_signal(80.0, Confidence::High, 2.0);
+            long.support1 = Some(s1);
+            let plan = &generate_trade_plans(&[long], 25000.0, 1.0)[0];
+            assert!(
+                plan.entry - plan.stop_loss >= 2.0 - 1e-9,
+                "S1 {s1}: {}",
+                plan.stop_loss
+            );
         }
+        // An S1 1–2 ATR away is used as it is.
+        let mut long = make_signal(80.0, Confidence::High, 2.0);
+        long.support1 = Some(97.0);
+        assert_eq!(
+            generate_trade_plans(&[long], 25000.0, 1.0)[0].stop_loss,
+            97.0
+        );
+        // Too far away: back to 1 ATR.
+        let mut long = make_signal(80.0, Confidence::High, 2.0);
+        long.support1 = Some(90.0);
+        assert!((generate_trade_plans(&[long], 25000.0, 1.0)[0].stop_loss - 98.0).abs() < 1e-9);
+        // Shorts mirror it with R1.
+        let mut short = make_signal(80.0, Confidence::High, 2.0);
+        short.direction = Direction::Short;
+        short.resistance1 = Some(100.1);
+        let plan = &generate_trade_plans(&[short], 25000.0, 1.0)[0];
+        assert!(plan.stop_loss - plan.entry >= 2.0 - 1e-9);
+        // The trail hangs 1.5 ATR behind.
+        assert!((plan.trailing_stop - 103.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_tight_support_no_longer_buys_rank_or_size() {
+        // Same score; one sits right on S1. Before, its 0.1-point stop gave an
+        // R:R near 9, the largest Kelly size and the top rank.
+        let mut tight = make_signal(70.0, Confidence::High, 2.0);
+        tight.symbol = "TIGHT.NS".into();
+        tight.support1 = Some(99.9);
+        let mut plain = make_signal(75.0, Confidence::High, 2.0);
+        plain.symbol = "PLAIN.NS".into();
+        let plans = generate_trade_plans(&[tight, plain], 1_000_000.0, 1.0);
+        assert_eq!(plans[0].signal.symbol, "PLAIN.NS");
+        let tight = plans
+            .iter()
+            .find(|p| p.signal.symbol == "TIGHT.NS")
+            .unwrap();
+        assert!(tight.risk_reward < 1.0, "R:R {}", tight.risk_reward);
+        // Both risk the same fixed 0.5% of capital: ₹5,000 over a 2-point stop.
+        for p in &plans {
+            assert!(p.max_risk <= 5_000.0 + 1e-6, "{}", p.max_risk);
+            assert!(p.max_risk >= 5_000.0 - p.entry, "{}", p.max_risk);
+            assert_eq!(p.kelly_fraction, 0.0);
+        }
+    }
+
+    #[test]
+    fn kelly_needs_a_measured_record() {
+        let limits = PlanLimits::default();
+        assert_eq!(limits.risk_pct(), (FIXED_RISK_PCT, 0.0));
+        // 55% won, wins 1.5× losses: half-Kelly = (0.55 − 0.45/1.5) / 2 = 0.125,
+        // capped by the 1% risk limit.
+        let tr = crate::simulator::TrackRecord {
+            trades: 40,
+            win_rate: 0.55,
+            win_loss_ratio: 1.5,
+        };
+        let with = PlanLimits {
+            track_record: Some(tr),
+            ..limits
+        };
+        let (pct, kf) = with.risk_pct();
+        assert!((kf - 0.125).abs() < 1e-9);
+        assert_eq!(pct, 1.0);
+        // No edge measured: the small floor, not zero (the record must grow).
+        let none = PlanLimits {
+            track_record: Some(crate::simulator::TrackRecord {
+                win_rate: 0.3,
+                win_loss_ratio: 1.0,
+                ..tr
+            }),
+            ..limits
+        };
+        assert_eq!(none.risk_pct(), (NO_EDGE_RISK_PCT, 0.0));
+    }
+
+    fn quote() -> Quote {
+        Quote::default()
+    }
+
+    fn strategy_names(sig: &IntradaySignal) -> Vec<&'static str> {
+        sig.strategies.iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn dip_readings_make_one_vote() {
+        // Sixty calm days, then a slide: RSI low, under the lower band and
+        // well below the 20-day average all at once.
+        let mut closes: Vec<f64> = (0..60).map(|i| 100.0 + (i % 2) as f64 * 0.5).collect();
+        for i in 0..8 {
+            closes.push(99.0 - i as f64 * 1.5);
+        }
+        let bars = crate::backtest::Bars::from_closes(&closes);
+        let price = *closes.last().unwrap();
+        let sig = compute_signal(
+            "T.NS",
+            &quote(),
+            price,
+            &bars,
+            SessionStats::default(),
+            None,
+            None,
+        );
+        let names = strategy_names(&sig);
+        assert_eq!(
+            names.iter().filter(|n| **n == "Dip").count(),
+            1,
+            "{names:?}"
+        );
+        for old in [
+            "RSI Reversal",
+            "BB Bounce",
+            "Mean Reversion",
+            "OBV Divergence",
+        ] {
+            assert!(!names.contains(&old), "{old} in {names:?}");
+        }
+        let dip = sig.strategies.iter().find(|s| s.name == "Dip").unwrap();
+        assert!(dip.strength <= 100.0);
+        // Several readings fired; they share the one vote.
+        assert!(
+            dip.reason.contains("RSI") && dip.reason.contains("Bollinger"),
+            "{}",
+            dip.reason
+        );
+    }
+
+    #[test]
+    fn rsi_strength_is_clamped_and_families_merge() {
+        let vote = family_vote(
+            "Dip",
+            Direction::Long,
+            vec![(85.0 + 30.0, "RSI 0".into()), (65.0, "band".into())],
+        )
+        .unwrap();
+        assert_eq!(vote.strength, 100.0);
+        assert_eq!(vote.reason, "RSI 0; band");
+        assert!(family_vote("Dip", Direction::Long, vec![]).is_none());
+    }
+
+    fn vote(direction: Direction, strength: f64) -> StrategySignal {
+        StrategySignal {
+            name: "x",
+            direction,
+            strength,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn opposing_votes_are_netted() {
+        let longs = vec![vote(Direction::Long, 70.0); 3];
+        let (d, alone, n) = composite(&longs, Some(1.2), MarketRegime::Ranging);
+        assert_eq!((d, n), (Direction::Long, 3));
+        assert!((alone - 86.0).abs() < 1e-9); // 70 + 2 × 8
+        let mut mixed = longs.clone();
+        mixed.push(vote(Direction::Short, 60.0));
+        let (d, netted, n) = composite(&mixed, Some(1.2), MarketRegime::Ranging);
+        assert_eq!((d, n), (Direction::Long, 2));
+        // (210 − 60) / 3 = 50, + 1 × 8.
+        assert!((netted - 58.0).abs() < 1e-9, "{netted}");
+        // Unknown volume is penalised like a quiet day.
+        let (_, unknown, _) = composite(&longs, None, MarketRegime::Ranging);
+        assert!((unknown - 86.0 * UNKNOWN_VOLUME_MULT).abs() < 1e-9);
+    }
+
+    #[test]
+    fn counter_trend_penalty_applies_in_any_downtrend() {
+        let longs = vec![vote(Direction::Long, 70.0)];
+        let score = |r| composite(&longs, Some(1.2), r).1;
+        assert!(score(MarketRegime::Downtrend) < score(MarketRegime::Ranging));
+        assert!(score(MarketRegime::StrongDowntrend) < score(MarketRegime::Downtrend));
+        let shorts = vec![vote(Direction::Short, 70.0)];
+        let score = |r| composite(&shorts, Some(1.2), r).1;
+        assert!(score(MarketRegime::Uptrend) < score(MarketRegime::Ranging));
+    }
+
+    #[test]
+    fn macd_fires_with_three_months_of_daily_bars() {
+        // A slide then a recovery: find the bar where the MACD histogram
+        // turns up and stop the series there.
+        let series: Vec<f64> = (0..63)
+            .map(|i| {
+                let i = i as f64;
+                if i < 40.0 {
+                    120.0 - i * 0.8
+                } else {
+                    88.0 + (i - 40.0) * 1.5
+                }
+            })
+            .collect();
+        let crossed = (37..=series.len())
+            .find(|&n| {
+                let h = |k: usize| technical::macd(&series[..k]).map(|(_, _, h)| h);
+                matches!((h(n), h(n - 1)), (Some(a), Some(b)) if a > 0.0 && b <= 0.0)
+            })
+            .expect("the recovery turns the histogram up within three months");
+        let closes = &series[..crossed];
+        let sig = compute_signal(
+            "T.NS",
+            &quote(),
+            *closes.last().unwrap(),
+            &crate::backtest::Bars::from_closes(closes),
+            SessionStats::default(),
+            None,
+            None,
+        );
+        assert!(
+            strategy_names(&sig).contains(&"MACD Cross"),
+            "{:?}",
+            strategy_names(&sig)
+        );
+        // The old one-month window (about 21 bars) can never see a cross.
+        let short = &closes[closes.len() - 21..];
+        let sig = compute_signal(
+            "T.NS",
+            &quote(),
+            *short.last().unwrap(),
+            &crate::backtest::Bars::from_closes(short),
+            SessionStats::default(),
+            None,
+            None,
+        );
+        assert!(!strategy_names(&sig).contains(&"MACD Cross"));
+    }
+
+    fn chart(json: serde_json::Value) -> crate::api::ChartData {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn a_null_in_one_column_drops_the_whole_bar() {
+        // Bar 1 has no close. Filtering each column separately used to
+        // shift every close after it against its high, low and volume.
+        let c = chart(serde_json::json!({
+            "timestamp": [1_700_000_000i64, 1_700_086_400i64, 1_700_172_800i64],
+            "indicators": {"quote": [{
+                "open":   [10.0, 20.0, 30.0],
+                "high":   [11.0, 21.0, 31.0],
+                "low":    [9.0, 19.0, 29.0],
+                "close":  [10.5, null, 30.5],
+                "volume": [100, 200, 300]
+            }]}
+        }));
+        let daily = crate::backtest::Bars::from_chart(&c);
+        assert_eq!(daily.close, vec![10.5, 30.5]);
+        assert_eq!(daily.high, vec![11.0, 31.0]);
+        assert_eq!(daily.volume, vec![100, 300]);
+        let intraday = intraday_bars(&c);
+        assert_eq!(intraday.len(), 2);
+        assert_eq!(
+            (intraday[1].high, intraday[1].close, intraday[1].volume),
+            (31.0, 30.5, 300)
+        );
+    }
+
+    /// 5-minute bars for an NSE session dated `day` of October 2026, from
+    /// 09:15 IST, one per volume given.
+    fn session_bars(day: u32, price: f64, volumes: &[u64]) -> Vec<IntradayBar> {
+        let date = NaiveDate::from_ymd_opt(2026, 10, day).unwrap();
+        let open = crate::clock::at(
+            market::Market::In,
+            date,
+            chrono::NaiveTime::from_hms_opt(9, 15, 0).unwrap(),
+        )
+        .timestamp();
+        volumes
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| IntradayBar {
+                time: open + i as i64 * 300,
+                high: price + 1.0,
+                low: price - 1.0,
+                close: price,
+                volume: v,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn volume_pace_compares_the_same_time_of_day() {
+        // Two earlier sessions traded 100 + 100 in their first ten minutes
+        // (and much more later); today has traded 400 by then: pace 2.0,
+        // not 400 against a full day's average.
+        let mut bars = session_bars(26, 50.0, &[100, 100, 5_000, 5_000]);
+        bars.extend(session_bars(27, 50.0, &[100, 100, 5_000, 5_000]));
+        bars.extend(session_bars(28, 60.0, &[300, 100]));
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let s = session_stats(&bars, market::Market::In, today);
+        assert!((s.volume_pace.unwrap() - 2.0).abs() < 1e-9, "{s:?}");
+        // Today's VWAP only: typical price 60, never the earlier sessions'.
+        assert!((s.vwap.unwrap() - 60.0).abs() < 1e-9);
+        // One earlier session is not enough to know the pace.
+        let s = session_stats(&bars[4..], market::Market::In, today);
+        assert_eq!(s.volume_pace, None);
+        // Before today's first bar: nothing known.
+        let s = session_stats(&bars[..8], market::Market::In, today);
+        assert_eq!(s, SessionStats::default());
     }
 
     #[test]
@@ -1282,8 +1745,9 @@ mod tests {
             max_risk_pct: 5.0,
             max_position_pct: 30.0,
             max_positions: 10,
+            track_record: None,
         };
-        let plans = generate_trade_plans_with(&signals, 25000.0, 2.0, limits);
+        let plans = generate_trade_plans_with(&signals, 25000.0, limits);
         assert!(!plans.is_empty());
         let total: f64 = plans.iter().map(|p| p.capital_required).sum();
         assert!(total <= 25000.0 + 1e-9, "deployed {total}");
@@ -1298,13 +1762,13 @@ mod tests {
         // Support above the price (an oversold bounce) must not become the stop.
         let mut long = make_signal(80.0, Confidence::High, 2.0);
         long.support1 = Some(101.0);
-        let plans = generate_trade_plans(&[long], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[long], 25000.0, 1.0);
         assert!(plans[0].stop_loss < plans[0].entry);
 
         let mut short = make_signal(80.0, Confidence::High, 2.0);
         short.direction = Direction::Short;
         short.resistance1 = Some(99.0);
-        let plans = generate_trade_plans(&[short], 25000.0, 2.0, 1.0);
+        let plans = generate_trade_plans(&[short], 25000.0, 1.0);
         assert!(plans[0].stop_loss > plans[0].entry);
     }
 
@@ -1315,8 +1779,9 @@ mod tests {
             max_risk_pct: 50.0,
             max_position_pct: 10.0,
             max_positions: 5,
+            track_record: None,
         };
-        let plans = generate_trade_plans_with(&[signal], 25000.0, 2.0, limits);
+        let plans = generate_trade_plans_with(&[signal], 25000.0, limits);
         assert_eq!(plans.len(), 1);
         assert!(plans[0].capital_required <= 2500.0);
     }
