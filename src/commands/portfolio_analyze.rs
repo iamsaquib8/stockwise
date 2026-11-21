@@ -33,6 +33,10 @@ pub struct AnalyzeReport {
 #[derive(Debug, Serialize)]
 pub struct TaxIfSold {
     pub country: &'static str,
+    /// The country of residence was guessed from the market, not set with
+    /// `[profile] residence`.
+    #[serde(default)]
+    pub residence_assumed: bool,
     pub currency: String,
     pub short_term_tax: f64,
     pub long_term_tax: f64,
@@ -327,19 +331,35 @@ fn currency_country(currency: Option<&str>) -> Option<Country> {
 /// configured default market (`market = "in"` in the config), else the
 /// command's market.
 pub(crate) fn residence(market: Market) -> Option<Country> {
+    residence_of(market).0
+}
+
+/// The investor's tax residence and whether it is assumed: `[profile]
+/// residence` when set (known); else guessed from the configured market,
+/// then the command's (assumed, and said so in the output).
+pub(crate) fn residence_of(market: Market) -> (Option<Country>, bool) {
+    if let Some(c) = crate::config::get()
+        .profile
+        .residence
+        .as_deref()
+        .and_then(Country::parse)
+    {
+        return (Some(c), false);
+    }
     if let Some(c) = crate::config::get()
         .market
         .as_deref()
         .and_then(Country::parse)
     {
-        return Some(c);
+        return (Some(c), true);
     }
-    match market {
+    let guess = match market {
         Market::In => Some(Country::India),
         Market::Us => Some(Country::Us),
         Market::Global(market::Exchange::Uk) => Some(Country::Uk),
         _ => None,
-    }
+    };
+    (guess, true)
 }
 
 /// Whose rules and which holding period apply to `symbol` for a resident
@@ -486,6 +506,8 @@ pub(crate) struct Gathered {
     pub(crate) pending: crate::corp_actions::PendingSplits,
     /// The investor's country of residence (whose tax rules apply).
     pub(crate) residence: Option<Country>,
+    /// The residence was guessed from the market (no `[profile] residence`).
+    pub(crate) residence_assumed: bool,
 }
 
 /// Gather everything and analyse the active portfolio. `quick` skips the
@@ -533,7 +555,7 @@ pub(crate) async fn gather_inputs(
         val.load_history(&portfolio).await;
     }
     let profile = crate::config::effective_profile();
-    let home = residence(market);
+    let (home, residence_assumed) = residence_of(market);
 
     // A year of daily closes per holding (off-market funds have none).
     let charted: Vec<String> = symbols
@@ -723,6 +745,7 @@ pub(crate) async fn gather_inputs(
         ctx,
         pending,
         residence: home,
+        residence_assumed,
     })
 }
 
@@ -785,16 +808,21 @@ pub(crate) fn benchmark_regions(
     regions.retain(|r| total > 0.0 && r.weight / total >= 0.05);
     regions.sort_by(|a, b| b.weight.total_cmp(&a.weight));
     if regions.is_empty() {
-        let (symbol, name) = match market {
-            Market::In => ("^NSEI", "NIFTY 50"),
-            Market::Us => ("^GSPC", "S&P 500"),
-            Market::Global(x) => x.info().benchmark(),
-            _ => ("^GSPC", "S&P 500"),
+        // The index, its name and the currency it is quoted in, together: a
+        // commodity or crypto market falls back to the S&P 500, in dollars.
+        let (symbol, name, currency) = match market {
+            Market::In => ("^NSEI", "NIFTY 50", "INR"),
+            Market::Us => ("^GSPC", "S&P 500", "USD"),
+            Market::Global(x) => {
+                let (s, n) = x.info().benchmark();
+                (s, n, x.info().currency)
+            }
+            _ => ("^GSPC", "S&P 500", "USD"),
         };
         regions.push(Region {
             symbol,
             name,
-            currency: market_currency(market),
+            currency,
             weight: 1.0,
         });
     }
@@ -829,6 +857,7 @@ pub(crate) fn analysis_report(g: &Gathered, _market: Market) -> AnalyzeReport {
         let e = tax::estimate(country, report.unrealized);
         let foreign = foreign_rows(country, portfolio, &g.inputs, val, today);
         TaxIfSold {
+            residence_assumed: g.residence_assumed,
             country: match country {
                 Country::India => "India",
                 Country::Us => "United States",
@@ -975,6 +1004,16 @@ fn foreign_gains(
 
 /// The holdings "tax if sold" does not count, each kind in its own list.
 fn print_tax_left_out(tx: &TaxIfSold) {
+    if tx.residence_assumed {
+        println!(
+            "  {}",
+            format!(
+                "Tax residence assumed to be {} from the market; set it with `residence = \"in\"` (or \"us\", \"uk\") under [profile] in the config.",
+                tx.country
+            )
+            .dimmed()
+        );
+    }
     if !tx.foreign.is_empty() {
         println!(
             "  {}",
@@ -1636,6 +1675,14 @@ mod tests {
         );
         assert_eq!(only_in.len(), 1);
         assert_eq!(only_in[0].symbol, "^NSEI");
+        // A commodity market falls back to the S&P 500, quoted in dollars.
+        let empty = Portfolio::default();
+        let fallback = benchmark_regions(
+            &empty,
+            &Valuation::new(Vec::new(), &[], Market::Commodity, Some("INR")),
+            Market::Commodity,
+        );
+        assert_eq!((fallback[0].symbol, fallback[0].currency), ("^GSPC", "USD"));
     }
 
     #[test]

@@ -629,6 +629,7 @@ mod tests {
             analysis,
             tax_if_sold_today: Some(TaxIfSold {
                 country: "India",
+                residence_assumed: false,
                 currency: "INR".into(),
                 short_term_tax: 540.0,
                 long_term_tax: 0.0,

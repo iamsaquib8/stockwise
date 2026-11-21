@@ -1433,6 +1433,34 @@ pub(crate) fn holding_xirr(
     pf::xirr(&val.flows_base(portfolio, &h.symbol)?, value_base, today)
 }
 
+/// Purchase charges recorded on the open lots of the holdings in `totals`,
+/// in the base currency at each purchase's rate.
+pub(crate) fn open_lot_charges_base(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    totals: &Totals,
+) -> f64 {
+    let left_out: Vec<&String> = totals.unpriced.iter().chain(&totals.unconverted).collect();
+    portfolio
+        .holdings
+        .iter()
+        .filter(|h| !left_out.contains(&&h.symbol))
+        .flat_map(|h| h.lots.iter().map(move |l| (h, l)))
+        .filter_map(|(h, l)| {
+            let c = l.charges.filter(|c| *c > 0.0)?;
+            // The lot's own rate: its cost in the base over its cost.
+            let (cost_base, _) = val.lot_cost_base(&h.symbol, l)?;
+            let rate = if l.cost() > 0.0 {
+                cost_base / l.cost()
+            } else {
+                let d = pf::parse_date(&l.date).ok()?;
+                val.rate_on(&h.symbol, d)?.0
+            };
+            Some(c * rate)
+        })
+        .sum()
+}
+
 /// The first day of the financial year holding `today`: 1 April in India
 /// (an INR base), else 1 January.
 pub(crate) fn fy_start(today: chrono::NaiveDate, base: &str) -> chrono::NaiveDate {
@@ -1600,9 +1628,21 @@ async fn print_total_return(
         );
         print_kv("Dividends, all time", &format_price(inc.dividends, base));
     }
+    // Unrealized P&L is before the open lots' purchase charges; the total
+    // takes them off, as a sale would.
+    let open_charges = open_lot_charges_base(portfolio, val, totals);
+    if open_charges > 0.0 {
+        print_kv(
+            "Charges on open lots",
+            &format!("-{}", format_price(open_charges, base)),
+        );
+    }
     print_kv(
         "Total, all time",
-        &signed_money(unrealized + inc.realized + inc.dividends, base),
+        &signed_money(
+            unrealized + inc.realized + inc.dividends - open_charges,
+            base,
+        ),
     );
 
     // Past closes of the holdings priced by Yahoo (funds and SGBs have none).
@@ -4201,6 +4241,18 @@ mod tests {
         let t = v.totals(&p);
         assert!((t.value - 100.0).abs() < 1e-9);
         assert!((t.cost - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn open_lot_charges_count_at_the_purchase_rate() {
+        let mut p = Portfolio::default();
+        let mut lot = pf::Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        lot.charges = Some(25.0);
+        p.add_lot("AAPL", lot);
+        let v = usd_valuation(&p);
+        let t = v.totals(&p);
+        // $25 at ₹75.
+        assert!((open_lot_charges_base(&p, &v, &t) - 1875.0).abs() < 1e-6);
     }
 
     #[test]

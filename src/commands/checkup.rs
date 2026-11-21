@@ -515,17 +515,8 @@ pub(crate) async fn run_checkup(
         .iter()
         .any(|s| s.closes.len() > ck::MIN_CORRELATION_OBS)
         .then(|| ck::correlated_pairs(&series));
-    // The drawdown is measured on the holdings with a year of closes.
-    let drawdown_coverage_pct = (total > 0.0).then(|| {
-        let covered: f64 = g
-            .inputs
-            .iter()
-            .filter(|i| i.closes.len() >= pa::MIN_CLOSES)
-            .filter_map(|i| holdings.iter().find(|h| h.symbol == i.symbol))
-            .map(|h| h.value)
-            .sum();
-        (covered / total * 100.0).clamp(0.0, 100.0)
-    });
+    // The drawdown's coverage: the same base-currency series that feed it.
+    let drawdown_coverage_pct = (total > 0.0).then(|| analysis.risk.coverage_pct.clamp(0.0, 100.0));
 
     // Amounts reported in the tax, fund or goal currency are ranked in the
     // base currency: fetch those rates too.
@@ -985,7 +976,10 @@ pub(crate) async fn wrap_report(
     };
     // Only the splits today's prices already reflect.
     pending.align_to_quotes(|s| val.priced_on(s));
-    pending.print();
+    // On stderr: `wrap --json` keeps stdout one JSON document.
+    for w in pending.warnings() {
+        eprintln!("  {} {}", "!".yellow(), w);
+    }
     let portfolio = pending.adjusted(&recorded);
     let period = period.unwrap_or_else(|| Period::default_for(val.base(), today));
     if period.start > today {
@@ -1022,8 +1016,20 @@ pub(crate) async fn wrap_report(
         };
         // Each amount at its own day's exchange rate (today's when no
         // history was found).
-        let fx = |d: chrono::NaiveDate| val.rate_on(sym, d).map(|r| r.0);
-        let y = wrap::symbol_year_in(&portfolio, sym, &period, as_of, start, end, &fx);
+        let fx = |d: chrono::NaiveDate, cur: Option<&str>| match cur {
+            Some(c) => val.currency_rate_on(c, d).map(|r| r.0),
+            None => val.rate_on(sym, d).map(|r| r.0),
+        };
+        let y = wrap::symbol_year_in(
+            &portfolio,
+            sym,
+            &period,
+            as_of,
+            start,
+            end,
+            Some(val.base()),
+            &fx,
+        );
         years.push(y);
     }
     let t = wrap::totals(&years, &period, as_of, 3);
