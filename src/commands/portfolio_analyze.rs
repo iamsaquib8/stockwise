@@ -545,10 +545,15 @@ pub(crate) async fn gather_inputs(
                 closes_base,
                 currency,
                 cap_tier: Some(val.cap_tier(sym)),
-                sector: sector_of
-                    .get(sym)
-                    .cloned()
-                    .or_else(|| offmarket::is_fund(sym).then(|| "Mutual fund".to_string())),
+                sector: sector_of.get(sym).cloned().or_else(|| {
+                    offmarket::is_fund(sym).then(|| {
+                        crate::xray::fund_sector_label(
+                            sym,
+                            val.name(sym).as_deref(),
+                            val.mark(sym).and_then(|m| m.category.as_deref()),
+                        )
+                    })
+                }),
                 shares: h.shares,
                 cost: h.cost_basis(),
                 value,
