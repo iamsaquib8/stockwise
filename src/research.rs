@@ -2061,6 +2061,7 @@ pub async fn fetch(
     warnings.extend(holdings.note);
     let holdings = holdings.holdings;
     let pit = soft(pit, "NSE insider trades", &mut warnings);
+    let pit_found = !pit.is_empty();
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
     // Statements may be reported in another currency than the share trades in.
@@ -2132,6 +2133,30 @@ pub async fn fetch(
     };
     if crate::market::AssetClass::of(&symbol) != crate::market::AssetClass::Stock {
         checks = crate::provenance::quote_field_checks(&quote);
+    }
+    // Indian stocks: what NSE supplied beyond the fundamentals, and the
+    // exchange's surveillance flags, which an investor must see.
+    if nse.is_some() && crate::market::AssetClass::of(&symbol) == crate::market::AssetClass::Stock {
+        if needs.ownership {
+            checks.push((crate::provenance::F_SHAREHOLDING, !holdings.is_empty()));
+        }
+        for (found, source) in [
+            (!holdings.is_empty(), "NSE shareholding"),
+            (pit_found, "NSE insider trades"),
+            (!filings.is_empty(), "NSE filings"),
+            (!corp_actions.is_empty(), "NSE corporate actions"),
+        ] {
+            if found {
+                meta.add_source(source);
+            }
+        }
+        if (needs.ownership || needs.statements)
+            && let Ok(Some(info)) = client.nse_equity_info(&symbol).await
+        {
+            for f in info.flags {
+                meta.warn(f);
+            }
+        }
     }
     if needs.prices {
         checks.push((crate::provenance::F_HISTORY, !prices.is_empty()));

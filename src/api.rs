@@ -87,6 +87,19 @@ pub async fn connect_redis() -> Option<redis::aio::MultiplexedConnection> {
         .ok()
 }
 
+/// The same company's other Indian listing on Yahoo: `RELIANCE.NS` ↔
+/// `RELIANCE.BO`. `None` for a numeric BSE code (its NSE symbol is unknown
+/// here) and anything that is not an Indian stock.
+pub fn twin_listing(symbol: &str) -> Option<String> {
+    let upper = symbol.trim().to_ascii_uppercase();
+    if let Some(base) = upper.strip_suffix(".NS") {
+        return (!base.is_empty() && !base.contains('.')).then(|| format!("{base}.BO"));
+    }
+    let base = upper.strip_suffix(".BO")?;
+    (!base.is_empty() && !base.contains('.') && !base.chars().all(|c| c.is_ascii_digit()))
+        .then(|| format!("{base}.NS"))
+}
+
 /// Whether a configured provider's daily bars come unadjusted for splits
 /// (the exchanges' own history and Alpha Vantage's free daily series).
 fn provider_bars_unadjusted(kind: providers::ProviderKind) -> bool {
@@ -1541,6 +1554,44 @@ impl YahooClient {
         {
             return have;
         }
+        // Yahoo's other listing first: it answers when the exchanges' sites
+        // refuse automated requests.
+        let twins: Vec<(String, &str)> = missing
+            .iter()
+            .filter_map(|s| twin_listing(s).map(|t| (t, *s)))
+            .collect();
+        let mut missing = missing;
+        if !twins.is_empty() {
+            let ask: Vec<&str> = twins.iter().map(|(t, _)| t.as_str()).collect();
+            if let Ok(got) = self.yahoo_quote(&ask).await {
+                for mut q in got.into_iter().filter(Quote::is_usable) {
+                    let Some((twin, original)) = twins.iter().find(|(t, _)| {
+                        q.symbol
+                            .as_deref()
+                            .is_some_and(|x| x.eq_ignore_ascii_case(t))
+                    }) else {
+                        continue;
+                    };
+                    q.symbol = Some(original.to_string());
+                    let meta = q.meta.get_or_insert_with(QuoteMeta::default);
+                    meta.add_source(&format!("{} ({twin})", crate::provenance::YAHOO));
+                    meta.warn(format!(
+                        "Yahoo Finance had no quote for {original}; priced from the {twin} listing."
+                    ));
+                    have.retain(|h| {
+                        !(h.symbol
+                            .as_deref()
+                            .is_some_and(|x| x.eq_ignore_ascii_case(original))
+                            && !h.is_usable())
+                    });
+                    missing.retain(|m| !m.eq_ignore_ascii_case(original));
+                    have.push(q);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return have;
+        }
         if self
             .provider
             .as_ref()
@@ -1793,6 +1844,20 @@ impl YahooClient {
             Ok(chart) => return Ok(chart),
             Err(e) => e,
         };
+        // An Indian stock trades on both exchanges at almost the same price:
+        // Yahoo's other listing is the most reliable stand-in.
+        if self.exchange_backup_on()
+            && let Some(twin) = twin_listing(symbol)
+            && let Ok(mut chart) = self.yahoo_chart(&twin, range, interval).await
+        {
+            let meta = chart.meta.get_or_insert_with(ChartMeta::default);
+            meta.data_source = Some(format!("{} ({twin})", crate::provenance::YAHOO));
+            meta.warnings.push(format!(
+                "Yahoo Finance has no price history for {symbol}; using the {twin} listing."
+            ));
+            meta.symbol = Some(symbol.to_string());
+            return Ok(chart);
+        }
         if let Some(chart) = self.router.chart(symbol, range, interval).await {
             return Ok(chart);
         }
@@ -3696,6 +3761,56 @@ mod fallback_tests {
             meta.warnings
                 .iter()
                 .any(|w| w.contains("using NSE daily history"))
+        );
+    }
+
+    #[test]
+    fn indian_listings_pair_up() {
+        assert_eq!(twin_listing("reliance.ns").as_deref(), Some("RELIANCE.BO"));
+        assert_eq!(twin_listing("M&M.BO").as_deref(), Some("M&M.NS"));
+        assert_eq!(twin_listing("500325.BO"), None);
+        assert_eq!(twin_listing("AAPL"), None);
+        assert_eq!(twin_listing("^NSEI"), None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_nse_listing_is_served_from_the_bse_one_on_yahoo() {
+        let chart = r#"{"chart":{"result":[{"meta":{"symbol":"RELIANCE.BO","currency":"INR"},
+            "timestamp":[100000,200000],
+            "indicators":{"quote":[{"close":[1500.0,1510.0]}]}}],"error":null}}"#;
+        let quote = r#"{"quoteResponse":{"result":[{"symbol":"RELIANCE.BO","quoteType":"EQUITY",
+            "regularMarketPrice":1510.0,"currency":"INR"}]}}"#;
+        let server = crate::testutil::MockServer::start_routed(vec![
+            ("/v8/finance/chart/RELIANCE.BO", chart.to_string()),
+            ("symbols=RELIANCE.BO", quote.to_string()),
+        ])
+        .await;
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.exchange_backup = true;
+        client.set_test_exchanges(&server.url);
+
+        let c = client.get_chart("RELIANCE.NS", "1mo", "1d").await.unwrap();
+        assert_eq!(closes(&c), vec![1500.0, 1510.0]);
+        let m = c.meta.as_ref().unwrap();
+        assert_eq!(
+            m.data_source.as_deref(),
+            Some("Yahoo Finance (RELIANCE.BO)")
+        );
+        assert_eq!(m.symbol.as_deref(), Some("RELIANCE.NS"));
+        assert!(m.warnings[0].contains("using the RELIANCE.BO listing"));
+
+        let q = client.get_quote(&["RELIANCE.NS"]).await.unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].symbol.as_deref(), Some("RELIANCE.NS"));
+        assert_eq!(q[0].regular_market_price, Some(1510.0));
+        let qm = q[0].meta.as_ref().unwrap();
+        assert!(
+            qm.sources
+                .contains(&"Yahoo Finance (RELIANCE.BO)".to_string())
         );
     }
 

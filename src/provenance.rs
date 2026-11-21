@@ -191,7 +191,7 @@ pub const F_HISTORY: &str = "price history";
 /// that is not missing data.
 pub fn stock_field_checks(q: &Quote) -> Vec<(&'static str, bool)> {
     let ok = |v: Option<f64>| v.is_some_and(f64::is_finite);
-    vec![
+    let mut checks = vec![
         (F_MARKET_CAP, ok(q.market_cap)),
         (
             F_PE,
@@ -205,8 +205,41 @@ pub fn stock_field_checks(q: &Quote) -> Vec<(&'static str, bool)> {
         (F_GROWTH, ok(q.revenue_growth)),
         (F_BETA, ok(q.beta)),
         (F_SECTOR, q.sector.as_deref().is_some_and(|s| !s.is_empty())),
-    ]
+    ];
+    // A bank's or insurer's borrowings are its raw material: Yahoo, EDGAR
+    // and the exchanges give no debt/equity for them, and none is missing.
+    if is_financial(q) && q.debt_to_equity.is_none() {
+        checks.retain(|(f, _)| *f != F_DE);
+    }
+    checks
 }
+
+/// Banks, NBFCs, insurers, brokers and exchanges, by Yahoo's sector or the
+/// industry any source named (NSE's `Private Sector Bank`, `NBFC`, ...).
+pub fn is_financial(q: &Quote) -> bool {
+    let text = format!(
+        "{} {}",
+        q.sector.as_deref().unwrap_or_default(),
+        q.industry.as_deref().unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    [
+        "financial",
+        "bank",
+        "insurance",
+        "nbfc",
+        "finance",
+        "capital markets",
+        "credit services",
+        "asset management",
+    ]
+    .iter()
+    .any(|k| text.contains(k))
+}
+
+/// Field name for an Indian stock's shareholding pattern (promoter, FII,
+/// DII, pledge), which NSE files quarterly.
+pub const F_SHAREHOLDING: &str = "shareholding";
 
 /// The fields `stockwise quote` shows for any instrument.
 pub fn quote_field_checks(q: &Quote) -> Vec<(&'static str, bool)> {
@@ -416,6 +449,23 @@ mod tests {
         m.add_missing(F_HISTORY, 4);
         assert_eq!(m.missing, vec![F_HISTORY]);
         assert_eq!(m.coverage, 75.0);
+    }
+
+    #[test]
+    fn a_bank_has_no_debt_to_equity_to_miss() {
+        let bank = Quote {
+            sector: Some("Financial Services".into()),
+            industry: Some("Banks - Regional".into()),
+            ..Default::default()
+        };
+        assert!(is_financial(&bank));
+        assert!(!stock_field_checks(&bank).iter().any(|(f, _)| *f == F_DE));
+        let refiner = Quote {
+            sector: Some("Energy".into()),
+            ..Default::default()
+        };
+        assert!(!is_financial(&refiner));
+        assert!(stock_field_checks(&refiner).iter().any(|(f, _)| *f == F_DE));
     }
 
     #[test]

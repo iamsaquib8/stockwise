@@ -266,6 +266,29 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             metas.push(crate::provenance::for_quote(q));
         }
     }
+    // One Indian stock: NSE's sector P/E to compare with, and its
+    // surveillance flags (ASM/GSM, suspension).
+    if quotes.len() == 1
+        && let Some(sym) = quotes[0].symbol.clone()
+        && sym.ends_with(".NS")
+        && market::AssetClass::of(&sym) == market::AssetClass::Stock
+        && let Ok(Some(info)) = client.nse_equity_info(&sym).await
+    {
+        if quotes[0].sector_pe.is_none() {
+            quotes[0].sector_pe = info.sector_pe;
+        }
+        if quotes[0].trailing_pe.is_none() && info.pe.is_some() {
+            quotes[0].trailing_pe = info.pe;
+            metas[0].record(crate::provenance::F_PE, crate::provenance::NSE);
+        }
+        for f in info.flags {
+            metas[0].warn(f);
+        }
+        if info.sector_pe.is_some() {
+            metas[0].add_source(crate::provenance::NSE);
+        }
+        metas[0].set_fields(&crate::provenance::quote_field_checks(&quotes[0]));
+    }
 
     if !fmt.is_table() {
         if fmt == Format::Json {
@@ -368,6 +391,9 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             },
         );
         print_kv(t(Msg::PeTtm), &format_optional_f64(q.trailing_pe, ""));
+        if let Some(spe) = q.sector_pe {
+            print_kv("Sector P/E (NSE)", &format!("{spe:.2}"));
+        }
         print_kv(
             t(Msg::EpsTtm),
             &format_optional_f64(q.eps_trailing_twelve_months, ""),

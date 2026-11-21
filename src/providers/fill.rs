@@ -146,6 +146,9 @@ async fn fill_india(client: &YahooClient, symbol: &str, q: &mut Quote, meta: &mu
                 if q.industry.is_none() {
                     q.industry = info.industry;
                 }
+                for f in info.flags {
+                    meta.warn(f);
+                }
             }
             Ok(None) => {}
             Err(e) => meta.warn(format!("{NSE} company data unavailable ({e:#})")),

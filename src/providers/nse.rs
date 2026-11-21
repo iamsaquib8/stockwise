@@ -202,6 +202,9 @@ pub struct EquityInfo {
     pub price: Option<f64>,
     /// `metadata.lastUpdateTime` (`24-Oct-2025 16:00:00`, IST).
     pub updated: Option<NaiveDate>,
+    /// Exchange flags an investor should see: surveillance (ASM/GSM stage),
+    /// suspension, delisting.
+    pub flags: Vec<String>,
 }
 
 impl EquityInfo {
@@ -233,7 +236,31 @@ pub fn parse_equity_info(json: &Value) -> Option<EquityInfo> {
         issued_shares: pos(&json["securityInfo"]["issuedSize"]),
         price: pos(&json["priceInfo"]["lastPrice"]),
         updated: meta["lastUpdateTime"].as_str().and_then(parse_date),
+        flags: equity_flags(json),
     })
+}
+
+/// Surveillance and trading-status flags from `quote-equity`.
+fn equity_flags(json: &Value) -> Vec<String> {
+    let mut flags = Vec::new();
+    let surv = &json["securityInfo"]["surveillance"];
+    match (text_of(&surv["surv"]), text_of(&surv["desc"])) {
+        (Some(s), Some(d)) => flags.push(format!("NSE surveillance: {s} ({d})")),
+        (Some(s), None) | (None, Some(s)) => flags.push(format!("NSE surveillance: {s}")),
+        (None, None) => {}
+    }
+    if json["info"]["isSuspended"].as_bool() == Some(true) {
+        flags.push("Trading suspended on NSE".into());
+    }
+    if json["info"]["isDelisted"].as_bool() == Some(true) {
+        flags.push("Delisted from NSE".into());
+    }
+    if let Some(status) = text_of(&json["securityInfo"]["tradingStatus"])
+        && !status.eq_ignore_ascii_case("active")
+    {
+        flags.push(format!("NSE trading status: {status}"));
+    }
+    flags
 }
 
 /// One quarter from NSE's financial results comparison.
@@ -1213,6 +1240,19 @@ mod tests {
         assert_eq!(
             parse_equity_info(&serde_json::json!({"msg": "no data"})),
             None
+        );
+        assert!(info.flags.is_empty());
+        let mut flagged = fixture("quote");
+        flagged["securityInfo"]["surveillance"] =
+            serde_json::json!({"surv": "ASM", "desc": "Long Term ASM Stage 1"});
+        flagged["info"]["isSuspended"] = serde_json::json!(true);
+        let info = parse_equity_info(&flagged).unwrap();
+        assert_eq!(
+            info.flags,
+            vec![
+                "NSE surveillance: ASM (Long Term ASM Stage 1)".to_string(),
+                "Trading suspended on NSE".to_string()
+            ]
         );
     }
 
