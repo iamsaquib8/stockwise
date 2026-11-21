@@ -1783,9 +1783,24 @@ impl GoalStore {
 
     /// The saved goal other than `except` that `holding` already counts towards.
     pub fn linked_elsewhere(&self, holding: &str, except: &str) -> Option<&SavedGoal> {
-        let key = holding_key(holding);
+        self.linked_elsewhere_by(holding, except, default_resolve)
+    }
+
+    /// [`GoalStore::linked_elsewhere`], with `resolve` naming the portfolio
+    /// holdings a link selects (`TCS.NS` and `TCS.BO` are two holdings when
+    /// both are held; `VOD` and `VOD.L` one).
+    pub fn linked_elsewhere_by(
+        &self,
+        holding: &str,
+        except: &str,
+        resolve: impl Fn(&str) -> Vec<String>,
+    ) -> Option<&SavedGoal> {
+        let want = resolve(holding);
         self.goals.iter().find(|g| {
-            !g.name.eq_ignore_ascii_case(except) && g.holdings.iter().any(|h| holding_key(h) == key)
+            !g.name.eq_ignore_ascii_case(except)
+                && g.holdings
+                    .iter()
+                    .any(|h| resolve(h).iter().any(|k| want.contains(k)))
         })
     }
 
@@ -1794,6 +1809,15 @@ impl GoalStore {
     /// so its value is never counted twice. Per goal, in order: the
     /// holdings it keeps, and the (holding, earlier goal) pairs it gives up.
     pub fn allocate(&self) -> Vec<(Vec<String>, Vec<(String, String)>)> {
+        self.allocate_by(default_resolve)
+    }
+
+    /// [`GoalStore::allocate`] with links resolved by `resolve` (see
+    /// [`GoalStore::linked_elsewhere_by`]).
+    pub fn allocate_by(
+        &self,
+        resolve: impl Fn(&str) -> Vec<String>,
+    ) -> Vec<(Vec<String>, Vec<(String, String)>)> {
         let mut owner: Vec<(String, String)> = Vec::new();
         self.goals
             .iter()
@@ -1801,14 +1825,18 @@ impl GoalStore {
                 let mut kept = Vec::new();
                 let mut dropped = Vec::new();
                 for h in &g.holdings {
-                    let key = holding_key(h);
-                    match owner.iter().find(|(k, _)| *k == key) {
-                        Some((_, first)) if !first.eq_ignore_ascii_case(&g.name) => {
-                            dropped.push((h.clone(), first.clone()));
-                        }
-                        Some(_) => {}
+                    let keys = resolve(h);
+                    match owner
+                        .iter()
+                        .find(|(k, first)| keys.contains(k) && !first.eq_ignore_ascii_case(&g.name))
+                    {
+                        Some((_, first)) => dropped.push((h.clone(), first.clone())),
                         None => {
-                            owner.push((key, g.name.clone()));
+                            for k in keys {
+                                if !owner.iter().any(|(o, _)| *o == k) {
+                                    owner.push((k, g.name.clone()));
+                                }
+                            }
                             kept.push(h.clone());
                         }
                     }
@@ -1819,9 +1847,14 @@ impl GoalStore {
     }
 }
 
+/// Without a portfolio to look in: a link is its [`holding_key`].
+fn default_resolve(name: &str) -> Vec<String> {
+    vec![holding_key(name)]
+}
+
 /// A holding name compared across goals: upper case, without an Indian
 /// exchange suffix (`niftybees` and `NIFTYBEES.NS` are one holding).
-fn holding_key(name: &str) -> String {
+pub(crate) fn holding_key(name: &str) -> String {
     let up = name.trim().to_uppercase();
     up.strip_suffix(".NS")
         .or_else(|| up.strip_suffix(".BO"))

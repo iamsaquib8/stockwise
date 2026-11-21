@@ -25,6 +25,10 @@ pub struct PendingSplits {
     pub by_symbol: Vec<(String, Vec<Split>)>,
     /// Symbols whose corporate actions could not be fetched.
     pub unchecked: Vec<String>,
+    /// Splits dated after the symbol's latest price: that price is still in
+    /// the old share count, so the lots are valued as they are.
+    #[doc(hidden)]
+    pub not_in_price: Vec<(String, Vec<Split>)>,
     /// Demergers not yet applied to a parent lot held on the record date:
     /// (held parent symbol, demerger). Found from the lots, no network.
     pub demergers: Vec<(String, &'static Demerger)>,
@@ -86,6 +90,26 @@ impl PendingSplits {
         p
     }
 
+    /// Keep only the splits the latest prices already reflect: a split
+    /// dated after the day `priced_on` gives for its symbol (a quote from
+    /// before the ex-date) is moved to `not_in_price`, so a pre-split price
+    /// is never multiplied by the post-split share count.
+    pub fn align_to_quotes(&mut self, priced_on: impl Fn(&str) -> Option<chrono::NaiveDate>) {
+        for (sym, splits) in &mut self.by_symbol {
+            let Some(day) = priced_on(sym) else {
+                continue;
+            };
+            let (later, kept): (Vec<Split>, Vec<Split>) = splits
+                .drain(..)
+                .partition(|s| crate::portfolio::parse_date(&s.date).is_ok_and(|d| d > day));
+            *splits = kept;
+            if !later.is_empty() {
+                self.not_in_price.push((sym.clone(), later));
+            }
+        }
+        self.by_symbol.retain(|(_, v)| !v.is_empty());
+    }
+
     /// One line per symbol: "split pending: run `portfolio actions --apply`",
     /// then one per pending demerger.
     pub fn warnings(&self) -> Vec<String> {
@@ -106,7 +130,24 @@ impl PendingSplits {
                 d.child_symbol(sym)
             )
         });
-        splits.chain(demergers).collect()
+        let not_priced = self.not_in_price.iter().map(|(sym, splits)| {
+            format!(
+                "{} split coming ({}): the latest price is from before it, so the recorded share count is used. Run `stockwise portfolio actions {} --apply` once it takes effect.",
+                sym,
+                describe(splits),
+                sym
+            )
+        });
+        let mut out: Vec<String> = splits.chain(demergers).chain(not_priced).collect();
+        // A failed check is not a clean one: a post-split price on an
+        // unadjusted share count would show as a loss.
+        if !self.unchecked.is_empty() {
+            out.push(format!(
+                "Could not check {} for splits or bonuses: their share counts are not verified.",
+                self.unchecked.join(", ")
+            ));
+        }
+        out
     }
 
     /// Print [`PendingSplits::warnings`] in yellow.
@@ -211,13 +252,74 @@ pub async fn pending_splits_live(portfolio: &Portfolio) -> PendingSplits {
     }
     match YahooClient::new().await {
         Ok(client) => pending_splits(&client, portfolio).await,
-        Err(_) => PendingSplits::offline(portfolio),
+        // No client is no check, not a clean result.
+        Err(_) => PendingSplits {
+            unchecked: checkable(portfolio),
+            ..PendingSplits::offline(portfolio)
+        },
     }
+}
+
+/// The holdings Yahoo reports splits for (not funds or SGBs).
+fn checkable(portfolio: &Portfolio) -> Vec<String> {
+    portfolio
+        .holdings
+        .iter()
+        .filter(|h| !crate::market::is_namespaced(&h.symbol))
+        .filter(|h| !crate::offmarket::is_off_market(&h.symbol))
+        .map(|h| h.symbol.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quote_from_before_the_split_keeps_the_old_share_count() {
+        let p = portfolio_with("RELIANCE.NS", 10.0, 2800.0, "2024-01-10");
+        let mut pending = PendingSplits {
+            by_symbol: vec![(
+                "RELIANCE.NS".into(),
+                vec![Split::new("2024-10-28", 2.0, 1.0)],
+            )],
+            ..Default::default()
+        };
+        // Priced the trading day before the ex-date: still pre-split.
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 10, 25).unwrap();
+        pending.align_to_quotes(|_| Some(day));
+        assert!(pending.is_empty());
+        assert_eq!(
+            pending.adjusted(&p).holding("RELIANCE.NS").unwrap().shares,
+            10.0
+        );
+        assert!(pending.warnings()[0].contains("split coming"));
+        // Priced on the ex-date: post-split.
+        let mut pending = PendingSplits {
+            by_symbol: vec![(
+                "RELIANCE.NS".into(),
+                vec![Split::new("2024-10-28", 2.0, 1.0)],
+            )],
+            ..Default::default()
+        };
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 10, 28).unwrap();
+        pending.align_to_quotes(|_| Some(day));
+        assert_eq!(
+            pending.adjusted(&p).holding("RELIANCE.NS").unwrap().shares,
+            20.0
+        );
+    }
+
+    #[test]
+    fn an_unchecked_symbol_is_warned_about() {
+        let p = PendingSplits {
+            unchecked: vec!["INFY.NS".into()],
+            ..Default::default()
+        };
+        let w = p.warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("INFY.NS") && w[0].contains("not verified"));
+    }
 
     fn portfolio_with(sym: &str, qty: f64, price: f64, date: &str) -> Portfolio {
         let mut p = Portfolio::default();
@@ -236,6 +338,7 @@ mod tests {
                 pending_of(h, vec![split.clone(), Split::new("2023-01-01", 5.0, 1.0)]),
             )],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
         };
         // The split before the purchase is not pending.
@@ -262,6 +365,7 @@ mod tests {
         let pending = PendingSplits {
             by_symbol: vec![("TCS.NS".into(), vec![bonus])],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
         };
         assert_eq!(pending.adjusted(&p).holding("TCS.NS").unwrap().shares, 20.0);

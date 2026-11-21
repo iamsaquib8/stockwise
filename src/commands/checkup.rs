@@ -306,37 +306,42 @@ async fn harvest(
     ))
 }
 
-/// Count the shares of `pending` splits and bonuses in `inputs` (lots and
-/// totals), for holdings whose inputs still carry the unadjusted share count
-/// of `portfolio`. Cost is unchanged; value follows the price.
+/// Apply `pending` splits and bonuses (found here, not by `gather_inputs`)
+/// to `portfolio` and to their holdings' `inputs`, lot by lot. Cost is
+/// unchanged; value follows the price.
 fn adjust_for_pending_splits(
     inputs: &mut [pa::PositionInput],
-    portfolio: &Portfolio,
+    portfolio: &mut Portfolio,
     pending: &crate::corp_actions::PendingSplits,
 ) {
-    for (sym, _) in &pending.by_symbol {
-        let Some(h) = portfolio.holding(sym) else {
-            continue;
-        };
-        let Some(i) = inputs.iter_mut().find(|i| &i.symbol == sym) else {
-            continue;
-        };
-        let adjusted = pending.adjusted_shares(h);
-        // Already counted (or not this holding's share count): leave it.
-        if (i.shares - h.shares).abs() > 1e-9 || h.shares <= 0.0 {
-            continue;
-        }
-        let ratio = adjusted / h.shares;
-        if !ratio.is_finite() || ratio <= 0.0 || (ratio - 1.0).abs() < 1e-12 {
-            continue;
-        }
-        i.shares = adjusted;
-        i.value = i.price.map(|p| p * adjusted);
-        for l in &mut i.lots {
-            l.qty *= ratio;
-            l.price /= ratio;
-        }
+    if pending.is_empty() {
+        return;
     }
+    // Each split applies only to the lots bought before it that have not
+    // taken it (the rule of `PendingSplits::adjusted_shares`).
+    let adjusted = pending.adjusted(portfolio);
+    for (sym, _) in &pending.by_symbol {
+        let (Some(h), Some(i)) = (
+            adjusted.holding(sym),
+            inputs.iter_mut().find(|i| &i.symbol == sym),
+        ) else {
+            continue;
+        };
+        i.shares = h.shares;
+        i.value = i.price.map(|p| p * h.shares);
+        i.lots = h
+            .lots
+            .iter()
+            .map(|l| pa::LotInput {
+                qty: l.qty,
+                price: l.price,
+                date: chrono::NaiveDate::parse_from_str(&l.date, "%Y-%m-%d").ok(),
+                estimated: l.date_estimated,
+            })
+            .collect();
+    }
+    // The harvest and tax figures use the same share counts.
+    *portfolio = adjusted;
 }
 
 /// Gather and evaluate. `fundamentals` reads statements (network) for the
@@ -364,7 +369,7 @@ pub(crate) async fn run_checkup(
         Some(c) => crate::corp_actions::pending_splits(c, &g.portfolio).await,
         None => crate::corp_actions::PendingSplits::offline(&g.portfolio),
     };
-    adjust_for_pending_splits(&mut g.inputs, &g.portfolio, &pending);
+    adjust_for_pending_splits(&mut g.inputs, &mut g.portfolio, &pending);
     skipped.extend(pending.warnings());
     let analysis = pa::analyze(&g.inputs, &g.ctx);
     let today = g.ctx.today;
@@ -510,17 +515,8 @@ pub(crate) async fn run_checkup(
         .iter()
         .any(|s| s.closes.len() > ck::MIN_CORRELATION_OBS)
         .then(|| ck::correlated_pairs(&series));
-    // The drawdown is measured on the holdings with a year of closes.
-    let drawdown_coverage_pct = (total > 0.0).then(|| {
-        let covered: f64 = g
-            .inputs
-            .iter()
-            .filter(|i| i.closes.len() >= pa::MIN_CLOSES)
-            .filter_map(|i| holdings.iter().find(|h| h.symbol == i.symbol))
-            .map(|h| h.value)
-            .sum();
-        (covered / total * 100.0).clamp(0.0, 100.0)
-    });
+    // The drawdown's coverage: the same base-currency series that feed it.
+    let drawdown_coverage_pct = (total > 0.0).then(|| analysis.risk.coverage_pct.clamp(0.0, 100.0));
 
     // Amounts reported in the tax, fund or goal currency are ranked in the
     // base currency: fetch those rates too.
@@ -951,13 +947,13 @@ pub(crate) async fn wrap_report(
     }
     // A split Yahoo reports but the lots have not taken yet: value a copy
     // with it applied (closes are in today's share count).
-    let pending = if offline {
+    let mut pending = if offline {
         crate::corp_actions::PendingSplits::offline(&portfolio)
     } else {
         crate::corp_actions::pending_splits_live(&portfolio).await
     };
-    pending.print();
-    let portfolio = pending.adjusted(&portfolio);
+    let recorded = portfolio;
+    let portfolio = pending.adjusted(&recorded);
     // The checkup describes what is held now; a portfolio sold out during
     // the year still gets its review, without that part.
     let run = if portfolio.holdings.is_empty() {
@@ -978,6 +974,13 @@ pub(crate) async fn wrap_report(
     } else {
         value_holdings(src, &held, market, base).await?
     };
+    // Only the splits today's prices already reflect.
+    pending.align_to_quotes(|s| val.priced_on(s));
+    // On stderr: `wrap --json` keeps stdout one JSON document.
+    for w in pending.warnings() {
+        eprintln!("  {} {}", "!".yellow(), w);
+    }
+    let portfolio = pending.adjusted(&recorded);
     let period = period.unwrap_or_else(|| Period::default_for(val.base(), today));
     if period.start > today {
         bail!("{} has not started yet", period.label);
@@ -1013,8 +1016,20 @@ pub(crate) async fn wrap_report(
         };
         // Each amount at its own day's exchange rate (today's when no
         // history was found).
-        let fx = |d: chrono::NaiveDate| val.rate_on(sym, d).map(|r| r.0);
-        let y = wrap::symbol_year_in(&portfolio, sym, &period, as_of, start, end, &fx);
+        let fx = |d: chrono::NaiveDate, cur: Option<&str>| match cur {
+            Some(c) => val.currency_rate_on(c, d).map(|r| r.0),
+            None => val.rate_on(sym, d).map(|r| r.0),
+        };
+        let y = wrap::symbol_year_in(
+            &portfolio,
+            sym,
+            &period,
+            as_of,
+            start,
+            end,
+            Some(val.base()),
+            &fx,
+        );
         years.push(y);
     }
     let t = wrap::totals(&years, &period, as_of, 3);
@@ -1059,6 +1074,22 @@ pub(crate) async fn wrap_report(
             .await
             .map(|c| closes_of(&c))
             .unwrap_or_default();
+    }
+    // The index is in its market's currency; the portfolio's return is in
+    // the base: convert each close at its own day's rate, so a currency move
+    // is not counted as alpha.
+    let bench_currency = market_currency(market);
+    if !bench_currency.eq_ignore_ascii_case(val.base()) && !bench.is_empty() {
+        let fx = if offline {
+            crate::fx_history::FxHistory::new(val.base())
+        } else {
+            crate::fx_history::FxHistory::load(
+                val.base(),
+                &[(bench_currency.to_string(), period.opening())],
+            )
+            .await
+        };
+        bench = super::portfolio_analyze::in_base(&bench, bench_currency, &fx);
     }
     let benchmark_return_pct = wrap::benchmark_return(&bench, &period, as_of);
     let compared = if bench_total_return {

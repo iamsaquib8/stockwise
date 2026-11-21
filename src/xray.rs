@@ -401,7 +401,10 @@ pub fn classify_fund_market_cap(
 ) -> Option<(f64, f64, f64)> {
     let text = format!("{} {}", category.unwrap_or(""), name.unwrap_or("")).to_ascii_lowercase();
 
-    if text.contains("large & mid") || text.contains("large and mid") {
+    // The NEXT 50 (ranks 51-100) is all large cap, even under a "Large &
+    // Mid" category label.
+    let next_50 = text.contains("next 50") || text.contains("next50") || text.contains("junior");
+    if !next_50 && (text.contains("large & mid") || text.contains("large and mid")) {
         Some((0.50, 0.50, 0.0))
     } else if text.contains("flexi cap")
         || text.contains("multi cap")
@@ -779,13 +782,34 @@ pub fn compute_xray_with_threshold(
             let given = fund_profiles
                 .get(&h.symbol)
                 .or_else(|| fund_profiles.get(&canonical_ticker(&h.symbol)));
-            let shipped = given.is_none().then(|| {
-                let name = h.name.as_deref().or_else(|| default_etf_name(&h.symbol));
-                crate::index_weights::for_fund(&h.symbol, name).map(|t| {
-                    t.fund_profile(&h.symbol, name.map(str::to_string), h.currency.clone())
+            // A provider profile with no holdings keeps its metadata and
+            // takes the constituents from the shipped weights.
+            let shipped = given
+                .is_none_or(|g| g.holdings.is_empty())
+                .then(|| {
+                    let name = h
+                        .name
+                        .as_deref()
+                        .or_else(|| given.and_then(|g| g.name.as_deref()))
+                        .or_else(|| default_etf_name(&h.symbol));
+                    crate::index_weights::for_fund(&h.symbol, name).map(|t| {
+                        t.fund_profile(&h.symbol, name.map(str::to_string), h.currency.clone())
+                    })
                 })
-            });
-            let profile_opt = given.or(shipped.as_ref().and_then(Option::as_ref));
+                .flatten();
+            let merged = match (given, shipped) {
+                (Some(g), Some(sh)) => {
+                    let mut m = g.clone();
+                    m.holdings = sh.holdings;
+                    if m.sectors.is_empty() {
+                        m.sectors = sh.sectors;
+                    }
+                    Some(m)
+                }
+                (None, sh) => sh,
+                (Some(_), None) => None,
+            };
+            let profile_opt = merged.as_ref().or(given);
 
             let look_through_available = profile_opt.is_some_and(|p| !p.holdings.is_empty());
             let (holdings_count, coverage_pct) = if let Some(p) = profile_opt {
@@ -1047,6 +1071,16 @@ pub fn compute_xray_with_threshold(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn juniorbees_default_category_is_large_cap() {
+        let cat = default_etf_category("JUNIORBEES");
+        assert_eq!(classify_fund_market_cap(cat, None), Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            classify_fund_market_cap(Some("Equity Scheme - Large & Mid Cap Fund"), None),
+            Some((0.5, 0.5, 0.0))
+        );
+    }
     use crate::funds::Holding as FundConstituent;
 
     #[test]
@@ -1682,6 +1716,45 @@ mod tests {
             .find(|s| s.sector == "Technology")
             .unwrap();
         assert!((tech.value - (25000.0 + 25000.0 * 0.105)).abs() < 0.01);
+    }
+
+    #[test]
+    fn an_empty_provider_profile_still_gets_the_shipped_constituents() {
+        let holdings = vec![XrayInputHolding {
+            symbol: "BANKBEES.NS".to_string(),
+            name: None,
+            shares: 100.0,
+            price: 500.0,
+            value: 50000.0,
+            sector: None,
+            market_cap: None,
+            currency: Some("INR".to_string()),
+            is_fund: true,
+            is_sgb: false,
+            fund_category: None,
+        }];
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "BANKBEES.NS".to_string(),
+            FundProfile {
+                symbol: "BANKBEES.NS".into(),
+                name: Some("Nippon India ETF Nifty Bank BeES".into()),
+                family: Some("Nippon India".into()),
+                category: None,
+                expense_ratio: Some(0.0019),
+                currency: Some("INR".into()),
+                holdings: Vec::new(),
+                sectors: Vec::new(),
+            },
+        );
+        let report = compute_xray("bank_test", "INR", &holdings, &profiles);
+        let flagged: Vec<&str> = report
+            .concentrations_above_10pct
+            .iter()
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(flagged, vec!["HDFCBANK.NS", "ICICIBANK.NS"]);
+        assert!(report.funds_analyzed[0].look_through_available);
     }
 
     #[test]
