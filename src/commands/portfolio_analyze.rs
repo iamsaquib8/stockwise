@@ -6,7 +6,7 @@
 use super::*;
 use crate::offmarket;
 use crate::portfolio as pf;
-use crate::portfolio_analysis::{self as pa, Analysis, Level, LotInput, PositionInput};
+use crate::portfolio_analysis::{self as pa, Analysis, Level, LotInput, PositionInput, TermRule};
 use crate::tax::{self, Country};
 use futures_util::StreamExt;
 
@@ -22,6 +22,9 @@ pub struct AnalyzeReport {
     #[serde(flatten)]
     pub analysis: Analysis,
     pub tax_if_sold_today: Option<TaxIfSold>,
+    /// Splits or bonus issues not yet applied to the lots (the analysis
+    /// counts the adjusted shares), and costs converted at today's rate.
+    pub warnings: Vec<String>,
     pub disclaimer: &'static str,
 }
 
@@ -36,6 +39,34 @@ pub struct TaxIfSold {
     pub cess: f64,
     pub total: f64,
     pub exemption_used: f64,
+    /// Holdings in another currency than the tax currency, taxed under the
+    /// residence's rules for foreign assets: not in the totals above.
+    pub foreign: Vec<ForeignTaxRow>,
+    /// Holdings taxed under other rules (debt funds, SGBs, gold ETFs,
+    /// crypto, funds of unknown category): not in the totals above.
+    pub other_rules: Vec<OtherRuleRow>,
+    /// Holdings without a live price: not in the totals above.
+    pub unpriced: Vec<String>,
+}
+
+/// A foreign holding in "tax if sold": its gain in the tax currency (cost
+/// at the purchase dates' exchange rates), when the analysis is in that
+/// currency, and a rough tax at the foreign-asset rates.
+#[derive(Debug, Serialize)]
+pub struct ForeignTaxRow {
+    pub symbol: String,
+    pub currency: Option<String>,
+    /// Months to turn long-term under the residence's rules.
+    pub long_term_months: Option<u32>,
+    pub short_term_gain: Option<f64>,
+    pub long_term_gain: Option<f64>,
+    pub estimated_tax: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OtherRuleRow {
+    pub symbol: String,
+    pub reason: String,
 }
 
 /// One holding in `portfolio analyze --csv`, flat; amounts in the holding's
@@ -208,8 +239,9 @@ pub(crate) fn csv_rows(a: &Analysis) -> Vec<PositionCsv> {
     rows
 }
 
-/// Whose holding-period rules apply to a symbol, from its currency.
-fn tax_country(currency: Option<&str>) -> Option<Country> {
+/// The country a currency's own market belongs to (used when no country
+/// of residence is known).
+fn currency_country(currency: Option<&str>) -> Option<Country> {
     match currency? {
         "INR" => Some(Country::India),
         "USD" => Some(Country::Us),
@@ -218,13 +250,58 @@ fn tax_country(currency: Option<&str>) -> Option<Country> {
     }
 }
 
-/// The country whose rules value the whole portfolio's tax: the market's.
-fn home_country(market: Market) -> Option<Country> {
+/// The investor's country of residence, whose rules tax every holding: the
+/// configured default market (`market = "in"` in the config), else the
+/// command's market.
+pub(crate) fn residence(market: Market) -> Option<Country> {
+    if let Some(c) = crate::config::get()
+        .market
+        .as_deref()
+        .and_then(Country::parse)
+    {
+        return Some(c);
+    }
     match market {
         Market::In => Some(Country::India),
         Market::Us => Some(Country::Us),
         Market::Global(market::Exchange::Uk) => Some(Country::Uk),
         _ => None,
+    }
+}
+
+/// Whose rules and which holding period apply to `symbol` for a resident
+/// of `residence`. An Indian resident: listed shares and equity funds
+/// 12 months; foreign shares 24 months (Sec. 112, unlisted/foreign);
+/// debt funds bought from 1 April 2023 never long-term (Sec. 50AA), older
+/// units 24 months; crypto never long-term. A US resident pays US tax on
+/// everything, 12 months. Without a residence, the currency's market rules.
+pub(crate) fn term_rule(
+    residence: Option<Country>,
+    symbol: &str,
+    currency: Option<&str>,
+    mark: Option<&crate::offmarket::Mark>,
+) -> (Option<Country>, TermRule) {
+    let Some(home) = residence else {
+        return (currency_country(currency), TermRule::CountryDefault);
+    };
+    let local = home.currency_scale(currency.unwrap_or("")).is_some();
+    match home {
+        Country::India if !local => (Some(home), TermRule::Months(24)),
+        Country::India => {
+            use crate::offmarket::IndiaClass;
+            let rule = match crate::offmarket::india_class(symbol, mark) {
+                IndiaClass::Vda => TermRule::NoLongTerm,
+                IndiaClass::Other(_)
+                    if offmarket::is_fund(symbol)
+                        && mark.and_then(|m| m.category.as_deref()).is_some() =>
+                {
+                    TermRule::DebtFund
+                }
+                _ => TermRule::CountryDefault,
+            };
+            (Some(home), rule)
+        }
+        _ => (Some(home), TermRule::CountryDefault),
     }
 }
 
@@ -294,6 +371,10 @@ pub(crate) struct Gathered {
     pub(crate) val: Valuation,
     pub(crate) inputs: Vec<PositionInput>,
     pub(crate) ctx: pa::Context,
+    /// Splits not yet applied to the file's lots (`portfolio` has them applied).
+    pub(crate) pending: crate::corp_actions::PendingSplits,
+    /// The investor's country of residence (whose tax rules apply).
+    pub(crate) residence: Option<Country>,
 }
 
 /// Gather everything and analyse the active portfolio. `quick` skips the
@@ -318,15 +399,26 @@ pub(crate) async fn gather_inputs(
     base: Option<&str>,
     quick: bool,
 ) -> Result<Gathered> {
-    let portfolio = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    let loaded = src.portfolio().map_err(|e| e.context(views::LocalData))?;
+    // A split or bonus not yet applied to the lots would show as a fake
+    // loss: analyse a copy with it applied, and say so.
+    let pending = match client {
+        Some(c) if !cfg!(test) => pending_splits(c, &loaded).await,
+        _ => crate::corp_actions::PendingSplits::default(),
+    };
+    let portfolio = pending.adjusted(&loaded);
     let today = chrono::Local::now().date_naive();
     let symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let val = value_holdings(src, &symbols, market, base).await?;
+    let mut val = value_holdings(src, &symbols, market, base).await?;
+    if client.is_some() {
+        val.load_history(&portfolio).await;
+    }
     let profile = crate::config::effective_profile();
+    let home = residence(market);
 
     // A year of daily closes per holding (off-market funds have none).
     let charted: Vec<String> = symbols
@@ -349,19 +441,63 @@ pub(crate) async fn gather_inputs(
         .await
         .into_iter()
         .collect();
-    let (bench_symbol, bench_name) = match market {
-        Market::In => ("^NSEI", "NIFTY 50"),
-        Market::Us => ("^GSPC", "S&P 500"),
-        Market::Global(x) => x.info().benchmark(),
-        _ => ("^GSPC", "S&P 500"),
-    };
-    let benchmark_closes = if quick {
-        Vec::new()
+    // Daily rates for a year of closes in other currencies than the base,
+    // so risk is measured in the base currency.
+    let base_cur = val.base().to_string();
+    let year_ago = today - chrono::Duration::days(400);
+    let mut fx_needs: Vec<(String, chrono::NaiveDate)> = symbols
+        .iter()
+        .filter(|s| closes.contains_key(*s))
+        .filter_map(|s| val.currency(s))
+        .map(|c| (c, year_ago))
+        .collect();
+    let regions = benchmark_regions(&portfolio, &val, market);
+    fx_needs.extend(regions.iter().map(|r| (r.currency.to_string(), year_ago)));
+    let daily_fx = if quick || client.is_none() {
+        crate::fx_history::FxHistory::new(&base_cur)
     } else {
-        src.chart(bench_symbol, "1y", "1d")
-            .await
-            .map(|c| closes_of(&c))
-            .unwrap_or_default()
+        crate::fx_history::FxHistory::load(&base_cur, &fx_needs).await
+    };
+    let (benchmark_closes, bench_name) = if quick {
+        (
+            Vec::new(),
+            regions
+                .first()
+                .map_or(String::new(), |r| r.name.to_string()),
+        )
+    } else {
+        let mut parts = Vec::new();
+        for r in &regions {
+            let c = src
+                .chart(r.symbol, "1y", "1d")
+                .await
+                .map(|c| closes_of(&c))
+                .unwrap_or_default();
+            let c = in_base(&c, r.currency, &daily_fx);
+            if !c.is_empty() {
+                parts.push((r, c));
+            }
+        }
+        match parts.as_slice() {
+            [] => (
+                Vec::new(),
+                regions
+                    .first()
+                    .map_or(String::new(), |r| r.name.to_string()),
+            ),
+            [(r, c)] => (c.clone(), r.name.to_string()),
+            _ => {
+                let total: f64 = parts.iter().map(|(r, _)| r.weight).sum();
+                let name = parts
+                    .iter()
+                    .map(|(r, _)| format!("{:.0}% {}", r.weight / total * 100.0, r.name))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                let blend: Vec<(Vec<(chrono::NaiveDate, f64)>, f64)> =
+                    parts.into_iter().map(|(r, c)| (c, r.weight)).collect();
+                (pa::blend_benchmarks(&blend), name)
+            }
+        }
     };
     let sector_of = if quick {
         crate::db::with_db(|d| d.snapshot_sectors(&symbols))
@@ -382,6 +518,11 @@ pub(crate) async fn gather_inputs(
             let value = price.map(|p| h.shares * p);
             let currency = val.currency(sym);
             let hist = closes.get(sym).cloned().unwrap_or_default();
+            let closes_base = match currency.as_deref() {
+                Some(c) if !c.eq_ignore_ascii_case(&base_cur) => in_base(&hist, c, &daily_fx),
+                _ => Vec::new(),
+            };
+            let (tax_country, term_rule) = term_rule(home, sym, currency.as_deref(), val.mark(sym));
             let plain: Vec<f64> = hist.iter().map(|(_, c)| *c).collect();
             let score = q.map(|q| {
                 crate::longterm::score_for_longterm(
@@ -398,7 +539,10 @@ pub(crate) async fn gather_inputs(
                 symbol: sym.clone(),
                 name: val.name(sym),
                 market: market_label,
-                tax_country: tax_country(currency.as_deref()),
+                tax_country,
+                term_rule,
+                cost_base: val.holding_cost_base(h).map(|(c, _)| c),
+                closes_base,
                 currency,
                 cap_tier: Some(val.cap_tier(sym)),
                 sector: sector_of
@@ -415,8 +559,12 @@ pub(crate) async fn gather_inputs(
                 two_hundred_day_average: q.and_then(|q| q.two_hundred_day_average),
                 fifty_two_week_low: q.and_then(|q| q.fifty_two_week_low),
                 fifty_two_week_high: q.and_then(|q| q.fifty_two_week_high),
+                // In the base currency, each flow at its own day's rate. Not
+                // shown when a purchase date is a guess.
                 xirr_pct: value
-                    .and_then(|v| pf::xirr(&portfolio.cash_flows(sym), v, today))
+                    .and_then(|v| val.to_base(sym, v))
+                    .filter(|_| !h.has_estimated_dates())
+                    .and_then(|v| pf::xirr(&val.flows_base(&portfolio, sym)?, v, today))
                     .map(|r| r * 100.0),
                 lots: h
                     .lots
@@ -443,24 +591,155 @@ pub(crate) async fn gather_inputs(
         max_stock_weight: Some(profile.max_stock_weight),
         max_smallcap_weight: Some(profile.max_smallcap_weight),
         benchmark_closes,
-        benchmark_name: bench_name.to_string(),
+        benchmark_name: bench_name,
     };
     Ok(Gathered {
         portfolio,
         val,
         inputs,
         ctx,
+        pending,
+        residence: home,
     })
+}
+
+/// [`crate::corp_actions::pending_splits`] over owned holdings, so the
+/// future is `Send` for any lifetime (the TUI and MCP server spawn it).
+async fn pending_splits(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+) -> crate::corp_actions::PendingSplits {
+    let jobs: Vec<(pf::Holding, String)> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| !market::is_namespaced(&h.symbol) && !offmarket::is_off_market(&h.symbol))
+        .filter_map(|h| {
+            let since = h.lots.iter().map(|l| l.units_date()).min()?.to_string();
+            Some((h.clone(), since))
+        })
+        .collect();
+    let results: Vec<(String, Option<Vec<pf::Split>>)> =
+        futures_util::stream::iter(jobs.into_iter().map(|(h, since)| async move {
+            let found = super::portfolio::fetch_actions(client, &h.symbol, &since)
+                .await
+                .ok()
+                .map(|(splits, _, _)| crate::corp_actions::pending_of(&h, splits));
+            (h.symbol, found)
+        }))
+        .buffered(6)
+        .collect()
+        .await;
+    let mut out = crate::corp_actions::PendingSplits::default();
+    for (sym, found) in results {
+        match found {
+            Some(v) if !v.is_empty() => out.by_symbol.push((sym, v)),
+            Some(_) => {}
+            None => out.unchecked.push(sym),
+        }
+    }
+    out
+}
+
+/// One index of a (possibly blended) benchmark.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Region {
+    pub(crate) symbol: &'static str,
+    pub(crate) name: &'static str,
+    /// The currency the index is quoted in.
+    pub(crate) currency: &'static str,
+    /// Base-currency value of the holdings it stands for.
+    pub(crate) weight: f64,
+}
+
+/// The index for holdings in `currency`, else `None`.
+fn index_for(currency: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match currency {
+        "INR" => Some(("^NSEI", "NIFTY 50", "INR")),
+        "USD" => Some(("^GSPC", "S&P 500", "USD")),
+        "GBP" | "GBp" => Some(("^FTSE", "FTSE 100", "GBP")),
+        _ => None,
+    }
+}
+
+/// The benchmark indices for the portfolio, largest first: one per market
+/// its holdings trade in, weighted by their value in the base currency
+/// (markets under 5% of the value fold into the others). A single market,
+/// or none priced, gives the market's own index.
+pub(crate) fn benchmark_regions(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    market: Market,
+) -> Vec<Region> {
+    let mut regions: Vec<Region> = Vec::new();
+    let mut total = 0.0;
+    for h in &portfolio.holdings {
+        let Some(v) = val
+            .price(&h.symbol)
+            .and_then(|p| val.to_base(&h.symbol, h.shares * p))
+        else {
+            continue;
+        };
+        let Some((symbol, name, currency)) = val.currency(&h.symbol).as_deref().and_then(index_for)
+        else {
+            continue;
+        };
+        total += v;
+        match regions.iter_mut().find(|r| r.symbol == symbol) {
+            Some(r) => r.weight += v,
+            None => regions.push(Region {
+                symbol,
+                name,
+                currency,
+                weight: v,
+            }),
+        }
+    }
+    regions.retain(|r| total > 0.0 && r.weight / total >= 0.05);
+    regions.sort_by(|a, b| b.weight.total_cmp(&a.weight));
+    if regions.is_empty() {
+        let (symbol, name) = match market {
+            Market::In => ("^NSEI", "NIFTY 50"),
+            Market::Us => ("^GSPC", "S&P 500"),
+            Market::Global(x) => x.info().benchmark(),
+            _ => ("^GSPC", "S&P 500"),
+        };
+        regions.push(Region {
+            symbol,
+            name,
+            currency: market_currency(market),
+            weight: 1.0,
+        });
+    }
+    regions
+}
+
+/// `closes` in `currency` converted to `fx`'s base at each day's rate;
+/// days without a rate are dropped, and the whole series when over a tenth
+/// of them have none.
+pub(crate) fn in_base(
+    closes: &[(chrono::NaiveDate, f64)],
+    currency: &str,
+    fx: &crate::fx_history::FxHistory,
+) -> Vec<(chrono::NaiveDate, f64)> {
+    let out: Vec<(chrono::NaiveDate, f64)> = closes
+        .iter()
+        .filter_map(|(d, c)| fx.convert_on(*c, currency, *d).map(|v| (*d, v)))
+        .collect();
+    if (out.len() as f64) < closes.len() as f64 * 0.9 {
+        return Vec::new();
+    }
+    out
 }
 
 /// The dashboard for gathered inputs, with the tax a sale of everything
 /// today would bring.
-pub(crate) fn analysis_report(g: &Gathered, market: Market) -> AnalyzeReport {
+pub(crate) fn analysis_report(g: &Gathered, _market: Market) -> AnalyzeReport {
     let (portfolio, val, today) = (&g.portfolio, &g.val, g.ctx.today);
     let analysis = pa::analyze(&g.inputs, &g.ctx);
-    let tax_if_sold_today = home_country(market).map(|country| {
+    let tax_if_sold_today = g.residence.map(|country| {
         let report = super::holdings::tax_report(country, portfolio, val, today);
         let e = tax::estimate(country, report.unrealized);
+        let foreign = foreign_rows(country, portfolio, &g.inputs, val, today);
         TaxIfSold {
             country: match country {
                 Country::India => "India",
@@ -475,16 +754,166 @@ pub(crate) fn analysis_report(g: &Gathered, market: Market) -> AnalyzeReport {
             cess: e.cess,
             total: e.st_tax + e.lt_tax + e.cess,
             exemption_used: e.exemption_used,
+            foreign,
+            other_rules: report
+                .other_rules
+                .into_iter()
+                .filter(|o| portfolio.holding(&o.symbol).is_some())
+                .map(|o| OtherRuleRow {
+                    symbol: o.symbol,
+                    reason: o.reason,
+                })
+                .collect(),
+            unpriced: report.unpriced,
         }
     });
+    let mut warnings = g.pending.warnings();
+    let totals = val.totals(portfolio);
+    if !totals.cost_at_today_fx.is_empty() {
+        warnings.push(format!(
+            "No exchange rate for the purchase dates of {}: their cost is converted at today's rate.",
+            totals.cost_at_today_fx.join(", ")
+        ));
+    }
     AnalyzeReport {
         analysis,
         tax_if_sold_today,
+        warnings,
         disclaimer: crate::verdict::DISCLAIMER,
     }
 }
 
+/// The holdings "tax if sold" leaves out because they are in another
+/// currency: their gains split by the residence's holding period (an
+/// Indian resident's foreign shares turn long-term after 24 months), in
+/// the tax currency when the analysis is in it, with a rough tax: India
+/// 12.5% long-term and the profile's slab rate short-term; elsewhere the
+/// country's own rates.
+fn foreign_rows(
+    country: Country,
+    portfolio: &Portfolio,
+    inputs: &[PositionInput],
+    val: &Valuation,
+    today: chrono::NaiveDate,
+) -> Vec<ForeignTaxRow> {
+    let in_tax_currency = val.base().eq_ignore_ascii_case(country.tax_currency());
+    let slab = crate::config::effective_profile().tax_slab;
+    let (st_rate, lt_rate) = match country {
+        Country::India => (slab, 12.5),
+        c => (c.st_rate(), c.lt_rate()),
+    };
+    inputs
+        .iter()
+        .filter(|i| {
+            country
+                .currency_scale(i.currency.as_deref().unwrap_or(""))
+                .is_none()
+        })
+        .map(|i| {
+            let months = i
+                .term_rule
+                .months_for(country.long_term_months(), today)
+                .or(country.long_term_months());
+            let gains = foreign_gains(portfolio.holding(&i.symbol), i.price, months, val, today)
+                .filter(|_| in_tax_currency);
+            ForeignTaxRow {
+                symbol: i.symbol.clone(),
+                currency: i.currency.clone(),
+                long_term_months: months,
+                short_term_gain: gains.map(|(st, _)| round(st, 2)),
+                long_term_gain: gains.map(|(_, lt)| round(lt, 2)),
+                estimated_tax: gains.map(|(st, lt)| {
+                    round((st.max(0.0) * st_rate + lt.max(0.0) * lt_rate) / 100.0, 2)
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Short- and long-term gain of a holding's lots in the base currency:
+/// value at today's rate less each lot's cost at its purchase day's rate
+/// (or what was paid in the base). `None` without a price, a rate or a
+/// purchase date.
+fn foreign_gains(
+    h: Option<&pf::Holding>,
+    price: Option<f64>,
+    months: Option<u32>,
+    val: &Valuation,
+    today: chrono::NaiveDate,
+) -> Option<(f64, f64)> {
+    let (h, price) = (h?, price?);
+    let (mut st, mut lt) = (0.0, 0.0);
+    for l in &h.lots {
+        let bought = pf::parse_date(&l.date).ok()?;
+        let value = val.to_base(&h.symbol, l.qty * price)?;
+        let (cost, _) = val.lot_cost_base(&h.symbol, l)?;
+        if months.is_some_and(|m| tax::is_long_term(bought, today, m)) {
+            lt += value - cost;
+        } else {
+            st += value - cost;
+        }
+    }
+    Some((st, lt))
+}
+
 // ── Terminal dashboard ──
+
+/// The holdings "tax if sold" does not count, each kind in its own list.
+fn print_tax_left_out(tx: &TaxIfSold) {
+    if !tx.foreign.is_empty() {
+        println!(
+            "  {}",
+            format!(
+                "Foreign holdings ({} rules for foreign assets), not in the figure above:",
+                tx.country
+            )
+            .dimmed()
+        );
+        for f in &tx.foreign {
+            let term = f
+                .long_term_months
+                .map_or("no long-term term".to_string(), |m| {
+                    format!("long-term after {m} months")
+                });
+            match (f.short_term_gain, f.long_term_gain, f.estimated_tax) {
+                (Some(st), Some(lt), Some(est)) => println!(
+                    "    {} short-term {}, long-term {}, tax about {} ({})",
+                    pad_end(&f.symbol, 14).cyan(),
+                    format_price(st, Some(&tx.currency)),
+                    format_price(lt, Some(&tx.currency)),
+                    format_price(est, Some(&tx.currency)),
+                    term
+                ),
+                _ => println!(
+                    "    {} {} (run with --base {} for the gain)",
+                    pad_end(&f.symbol, 14).cyan(),
+                    term,
+                    tx.currency
+                ),
+            }
+        }
+    }
+    if !tx.other_rules.is_empty() {
+        println!(
+            "  {}",
+            "Taxed under other rules, not in the figure above:".dimmed()
+        );
+        for o in &tx.other_rules {
+            println!(
+                "    {} {}",
+                pad_end(&o.symbol, 14).cyan(),
+                o.reason.dimmed()
+            );
+        }
+    }
+    if !tx.unpriced.is_empty() {
+        println!(
+            "  {} {}",
+            "No live price, not in the figure above:".dimmed(),
+            tx.unpriced.join(", ")
+        );
+    }
+}
 
 /// A bar of `width` cells for `pct` of 100.
 fn bar(pct: f64, width: usize) -> String {
@@ -589,6 +1018,9 @@ pub(crate) fn print_analysis(report: &AnalyzeReport) {
         "{} — Analysis",
         portfolio_title(t(Msg::YourPortfolio))
     ));
+    for w in &report.warnings {
+        println!("  {} {}", "!".yellow(), w);
+    }
 
     // Summary.
     println!(
@@ -752,6 +1184,7 @@ pub(crate) fn print_analysis(report: &AnalyzeReport) {
             "Standard rates, before this year's other gains and losses; an estimate, not a tax figure."
                 .dimmed()
         );
+        print_tax_left_out(tx);
     }
 
     // Risk and concentration.
@@ -854,4 +1287,138 @@ pub async fn cmd_portfolio_analyze(
     }
     print_analysis(&report);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Quote;
+
+    fn quote(symbol: &str, price: f64, currency: &str) -> Quote {
+        Quote {
+            symbol: Some(symbol.into()),
+            regular_market_price: Some(price),
+            currency: Some(currency.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn residence_decides_the_holding_period() {
+        // An Indian resident: US shares 24 months, Indian shares the default.
+        assert_eq!(
+            term_rule(Some(Country::India), "AAPL", Some("USD"), None),
+            (Some(Country::India), TermRule::Months(24))
+        );
+        assert_eq!(
+            term_rule(Some(Country::India), "TCS.NS", Some("INR"), None),
+            (Some(Country::India), TermRule::CountryDefault)
+        );
+        assert_eq!(
+            term_rule(Some(Country::India), "BTC-INR", Some("INR"), None).1,
+            TermRule::NoLongTerm
+        );
+        // A US resident's Indian shares follow US rules.
+        assert_eq!(
+            term_rule(Some(Country::Us), "TCS.NS", Some("INR"), None),
+            (Some(Country::Us), TermRule::CountryDefault)
+        );
+        // No residence: the currency's market, as before.
+        assert_eq!(
+            term_rule(None, "AAPL", Some("USD"), None),
+            (Some(Country::Us), TermRule::CountryDefault)
+        );
+    }
+
+    #[test]
+    fn a_debt_fund_with_a_category_gets_the_debt_fund_rule() {
+        let mark = crate::offmarket::Mark {
+            symbol: "MF:119551".into(),
+            name: Some("Some Liquid Fund - Direct Plan".into()),
+            source: crate::offmarket::PriceSource::AmfiNav,
+            as_of: None,
+            category: Some("Debt Scheme - Liquid Fund".into()),
+        };
+        assert_eq!(
+            term_rule(Some(Country::India), "MF:119551", Some("INR"), Some(&mark)).1,
+            TermRule::DebtFund
+        );
+    }
+
+    #[test]
+    fn mixed_portfolios_get_a_blended_benchmark() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 3000.0, "2024-01-10", "manual"));
+        p.add_lot("AAPL", pf::Lot::new(10.0, 150.0, "2024-01-10", "manual"));
+        let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+        let mut val = Valuation::new(
+            vec![quote("TCS.NS", 3000.0, "INR"), quote("AAPL", 150.0, "USD")],
+            &symbols,
+            Market::In,
+            Some("INR"),
+        );
+        val.fx.set_rate("USD", 80.0);
+        let r = benchmark_regions(&p, &val, Market::In);
+        assert_eq!(r.len(), 2);
+        // ₹30,000 of TCS and ₹1,20,000 of AAPL.
+        assert_eq!((r[0].symbol, r[1].symbol), ("^GSPC", "^NSEI"));
+        assert!((r[0].weight - 120_000.0).abs() < 1e-6);
+        // One market only: its own index.
+        let only_in = benchmark_regions(
+            &p,
+            &Valuation::new(
+                vec![quote("TCS.NS", 3000.0, "INR")],
+                &symbols,
+                Market::In,
+                Some("INR"),
+            ),
+            Market::In,
+        );
+        assert_eq!(only_in.len(), 1);
+        assert_eq!(only_in[0].symbol, "^NSEI");
+    }
+
+    #[test]
+    fn closes_convert_at_each_days_rate() {
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let mut fx = crate::fx_history::FxHistory::new("INR");
+        fx.insert(
+            "USD",
+            vec![(d("2025-01-02"), 80.0), (d("2025-01-03"), 82.0)],
+        );
+        let closes = vec![(d("2025-01-02"), 10.0), (d("2025-01-03"), 10.0)];
+        assert_eq!(
+            in_base(&closes, "USD", &fx),
+            vec![(d("2025-01-02"), 800.0), (d("2025-01-03"), 820.0)]
+        );
+        // Too few rates: nothing rather than a gappy series.
+        assert!(in_base(&closes, "EUR", &fx).is_empty());
+    }
+
+    #[test]
+    fn foreign_gains_use_the_purchase_day_rate() {
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2025-05-15", "manual"));
+        let symbols = vec!["AAPL".to_string()];
+        let mut val = Valuation::new(
+            vec![quote("AAPL", 100.0, "USD")],
+            &symbols,
+            Market::In,
+            Some("INR"),
+        );
+        val.fx.set_rate("USD", 84.0);
+        val.hist.insert("USD", vec![(d("2025-05-15"), 75.0)]);
+        // 18 months later, 24-month rule: all short-term, ₹9,000 from the rupee.
+        let (st, lt) = foreign_gains(
+            p.holding("AAPL"),
+            Some(100.0),
+            Some(24),
+            &val,
+            d("2026-11-15"),
+        )
+        .unwrap();
+        assert!((st - 9000.0).abs() < 1e-6);
+        assert_eq!(lt, 0.0);
+    }
 }
