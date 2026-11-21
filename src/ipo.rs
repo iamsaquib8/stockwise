@@ -3397,10 +3397,8 @@ mod tests {
     /// `activeCat`, `Total` row without a serial number, no application counts.
     #[test]
     fn live_nse_ipo_detail_fixture_parses() {
-        let detail: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/nse_ipo_detail_blspoly.json"
-        ))
-        .unwrap();
+        let detail: Value =
+            serde_json::from_str(include_str!("fixtures/nse_ipo_detail_blspoly.json")).unwrap();
         let sub = parse_subscription(&detail);
         assert_eq!(sub.source_note, "Consolidated NSE + BSE live bid book");
         assert_eq!(sub.qib_x, Some(200.25));
