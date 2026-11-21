@@ -87,6 +87,59 @@ pub async fn connect_redis() -> Option<redis::aio::MultiplexedConnection> {
         .ok()
 }
 
+/// The same company's other Indian listing on Yahoo: `RELIANCE.NS` ↔
+/// `RELIANCE.BO`. `None` for a numeric BSE code (its NSE symbol is unknown
+/// here) and anything that is not an Indian stock.
+pub fn twin_listing(symbol: &str) -> Option<String> {
+    let upper = symbol.trim().to_ascii_uppercase();
+    if let Some(base) = upper.strip_suffix(".NS") {
+        return (!base.is_empty() && !base.contains('.')).then(|| format!("{base}.BO"));
+    }
+    let base = upper.strip_suffix(".BO")?;
+    (!base.is_empty() && !base.contains('.') && !base.chars().all(|c| c.is_ascii_digit()))
+        .then(|| format!("{base}.NS"))
+}
+
+/// Whether a configured provider's daily bars come unadjusted for splits
+/// (the exchanges' own history and Alpha Vantage's free daily series).
+fn provider_bars_unadjusted(kind: providers::ProviderKind) -> bool {
+    use providers::ProviderKind::*;
+    matches!(kind, Nse | Bse | Exchange | AlphaVantage)
+}
+
+/// Daily, weekly or monthly bars (the intervals splits are adjusted on and
+/// the exchanges serve).
+fn is_daily_or_longer(interval: &str) -> bool {
+    matches!(interval, "1d" | "5d" | "1wk" | "1mo" | "3mo")
+}
+
+/// A Yahoo-shaped chart from bars kept in `cache.db`.
+fn chart_from_bars(symbol: &str, bars: &[crate::db::Bar]) -> ChartData {
+    ChartData {
+        meta: Some(ChartMeta {
+            symbol: Some(symbol.to_string()),
+            regular_market_price: bars.last().map(|b| b.close),
+            ..Default::default()
+        }),
+        timestamp: Some(bars.iter().map(|b| b.ts).collect()),
+        indicators: Indicators {
+            quote: vec![QuoteIndicator {
+                open: Some(bars.iter().map(|b| Some(b.open)).collect()),
+                high: Some(bars.iter().map(|b| Some(b.high)).collect()),
+                low: Some(bars.iter().map(|b| Some(b.low)).collect()),
+                close: Some(bars.iter().map(|b| Some(b.close)).collect()),
+                volume: Some(
+                    bars.iter()
+                        .map(|b| (b.volume >= 0.0).then_some(b.volume as u64))
+                        .collect(),
+                ),
+            }],
+            adjclose: None,
+        },
+        events: None,
+    }
+}
+
 /// The complete OHLCV bars of a chart (a bar missing any field is dropped).
 fn bars_of(chart: &ChartData) -> Vec<crate::db::Bar> {
     let (Some(ts), Some(q)) = (chart.timestamp.as_ref(), chart.indicators.quote.first()) else {
@@ -178,6 +231,12 @@ impl std::fmt::Display for HttpStatusError {
 }
 
 impl std::error::Error for HttpStatusError {}
+
+impl HttpStatusError {
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.status
+    }
+}
 
 /// True when `err` is (or wraps) an HTTP 404 from [`YahooClient`], such as a
 /// symbol Yahoo has no chart for.
@@ -562,6 +621,10 @@ pub struct Quote {
     pub beta: Option<f64>,
     #[serde(rename = "dividendYield")]
     pub dividend_yield: Option<f64>,
+    /// The P/E of the stock's NSE sector index (NSE `quote-equity`), for
+    /// comparing the stock's own; omitted from JSON when unknown.
+    #[serde(rename = "sectorPe", skip_serializing_if = "Option::is_none")]
+    pub sector_pe: Option<f64>,
     /// Which provider supplied the price when it wasn't Yahoo
     /// (`STOCKWISE_DATA_PROVIDER`); omitted from JSON otherwise.
     #[serde(rename = "dataSource", skip_serializing_if = "Option::is_none")]
@@ -584,12 +647,9 @@ pub struct Quote {
 }
 
 /// Provenance of a merged quote: every source that supplied a field, in the
-/// order they answered (`["Yahoo Finance", "Finnhub"]`).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct QuoteMeta {
-    pub sources: Vec<String>,
-}
+/// order they answered (`["Yahoo Finance", "Finnhub"]`), plus the missing
+/// fields, warnings and coverage once a command has checked them.
+pub use crate::provenance::Meta as QuoteMeta;
 
 /// Unix seconds as a number or Yahoo's `{raw, fmt}`; anything else is None
 /// rather than a failed quote.
@@ -686,6 +746,51 @@ impl ChartData {
         bars.pop()
     }
 
+    /// One close per bar for return and volatility maths: Yahoo's
+    /// split- and dividend-adjusted `adjclose` when the chart carries a full
+    /// series of it, else `close` (split-adjusted by Yahoo, and by
+    /// [`YahooClient::get_chart`] for the other sources). `None` where a bar
+    /// has no value. Price levels (targets, stops, charts) keep using `close`.
+    pub fn return_close_series(&self) -> Vec<Option<f64>> {
+        let close = self
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_deref())
+            .unwrap_or_default();
+        match self
+            .indicators
+            .adjclose
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.adjclose.as_deref())
+        {
+            Some(adj) if adj.len() == close.len() && adj.iter().any(Option::is_some) => {
+                adj.to_vec()
+            }
+            _ => close.to_vec(),
+        }
+    }
+
+    /// [`Self::return_close_series`] without the bars that have no value.
+    pub fn return_closes(&self) -> Vec<f64> {
+        self.return_close_series()
+            .into_iter()
+            .flatten()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect()
+    }
+
+    /// Whether the closes include dividends (Yahoo's `adjclose`).
+    pub fn has_adjclose(&self) -> bool {
+        self.indicators
+            .adjclose
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.adjclose.as_ref())
+            .is_some_and(|v| v.iter().any(Option::is_some))
+    }
+
     /// Closing prices with the session date of each bar, dated in the
     /// exchange's time zone (`gmtoffset`; see [`bar_date`] for the slack). Bars without a close are skipped.
     pub fn dated_closes(&self) -> Vec<(chrono::NaiveDate, f64)> {
@@ -735,7 +840,7 @@ pub struct SplitEvent {
     pub denominator: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ChartMeta {
     #[serde(rename = "regularMarketPrice")]
     pub regular_market_price: Option<f64>,
@@ -766,14 +871,28 @@ pub struct ChartMeta {
     /// (`providers::router`); `None` for Yahoo and a configured provider.
     #[serde(skip)]
     pub data_source: Option<String>,
+    /// What the reader should know about these bars: they came from a
+    /// fallback, were adjusted here, or are stale (`get_chart`).
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Indicators {
     pub quote: Vec<QuoteIndicator>,
+    /// Closes adjusted for splits *and* dividends (Yahoo daily and longer
+    /// bars). `close` is adjusted for splits only. Read it through
+    /// [`ChartData::return_closes`].
+    #[serde(default)]
+    pub adjclose: Option<Vec<AdjCloseIndicator>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+pub struct AdjCloseIndicator {
+    pub adjclose: Option<Vec<Option<f64>>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct QuoteIndicator {
     pub open: Option<Vec<Option<f64>>>,
     pub high: Option<Vec<Option<f64>>>,
@@ -968,12 +1087,17 @@ pub struct YahooClient {
     provider: Option<providers::Provider>,
     /// NSE, for index members when the provider isn't NSE-backed.
     nse: std::sync::OnceLock<providers::nse::Nse>,
+    /// BSE, for `.BO` history when Yahoo fails and the provider isn't BSE.
+    bse: std::sync::OnceLock<providers::bse::Bse>,
     /// Keyed providers (Finnhub, FMP) and the keyless backups (Frankfurter,
     /// CoinGecko) that answer when Yahoo fails or leaves holes, one per
     /// capability (`providers::router`).
     router: providers::router::Router,
     #[cfg(test)]
     pub(crate) url_rewrite: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>,
+    /// Tests reach NSE and BSE only when they point them at a mock.
+    #[cfg(test)]
+    pub(crate) exchange_backup: bool,
 }
 
 impl YahooClient {
@@ -1019,9 +1143,12 @@ impl YahooClient {
             cache,
             provider,
             nse: std::sync::OnceLock::new(),
+            bse: std::sync::OnceLock::new(),
             router,
             #[cfg(test)]
             url_rewrite: None,
+            #[cfg(test)]
+            exchange_backup: false,
         })
     }
 
@@ -1123,8 +1250,10 @@ impl YahooClient {
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
+            bse: std::sync::OnceLock::new(),
             router: providers::router::Router::default(),
             url_rewrite: None,
+            exchange_backup: false,
         }
     }
 
@@ -1147,9 +1276,31 @@ impl YahooClient {
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider,
             nse: std::sync::OnceLock::new(),
+            bse: std::sync::OnceLock::new(),
             router: providers::router::Router::default(),
             url_rewrite: Some(std::sync::Arc::new(rewrite)),
+            exchange_backup: false,
         }
+    }
+
+    /// Point NSE and BSE at a mock server (`base`), with no disk cache.
+    #[cfg(test)]
+    pub(crate) fn set_test_exchanges(&self, base: &str) {
+        use providers::session::{DiskCache, Session};
+        let mut nse_site = providers::nse::site(base);
+        nse_site.home = None;
+        let _ = self
+            .nse
+            .set(providers::nse::Nse::new(Arc::new(Session::for_tests(
+                nse_site,
+                DiskCache::Off,
+            ))));
+        let _ = self
+            .bse
+            .set(providers::bse::Bse::new(Arc::new(Session::for_tests(
+                providers::bse::site(base),
+                DiskCache::Off,
+            ))));
     }
 
     /// Back the client with router members, as `FINNHUB_API_KEY` /
@@ -1178,8 +1329,10 @@ impl YahooClient {
             cache: Arc::new(tokio::sync::Mutex::new(HybridCache::in_memory())),
             provider: None,
             nse: std::sync::OnceLock::new(),
+            bse: std::sync::OnceLock::new(),
             router: providers::router::Router::default(),
             url_rewrite: Some(std::sync::Arc::new(rewrite)),
+            exchange_backup: false,
         }
     }
 
@@ -1358,18 +1511,129 @@ impl YahooClient {
     /// fill a missing market cap, merging field by field with the sources
     /// named in `meta.sources`.
     pub async fn get_quote(&self, symbols: &[&str]) -> Result<Vec<Quote>> {
-        if self.router.is_empty() {
-            return self.primary_quote(symbols).await;
-        }
         let (have, error) = match self.primary_quote(symbols).await {
             Ok(q) => (q, None),
             Err(e) => (Vec::new(), Some(e)),
         };
-        let out = self.router.complete(symbols, have, "Yahoo Finance").await;
+        let out = if self.router.is_empty() {
+            have
+        } else {
+            self.router.complete(symbols, have, "Yahoo Finance").await
+        };
+        let out = self.exchange_quotes(symbols, out).await;
         match error {
             Some(e) if out.is_empty() => Err(e),
             _ => Ok(out),
         }
+    }
+
+    /// Indian stocks that still have no usable quote (Yahoo failed or left
+    /// them out) from NSE (`.NS`) or BSE (`.BO`), for short requests only:
+    /// the exchanges answer one symbol per request, slowly.
+    async fn exchange_quotes(&self, symbols: &[&str], mut have: Vec<Quote>) -> Vec<Quote> {
+        let quoted = |have: &[Quote], s: &str| {
+            have.iter().any(|q| {
+                q.is_usable()
+                    && q.symbol
+                        .as_deref()
+                        .is_some_and(|x| x.eq_ignore_ascii_case(s))
+            })
+        };
+        let missing: Vec<&str> = symbols
+            .iter()
+            .copied()
+            .filter(|s| !quoted(&have, s))
+            .filter(|s| {
+                crate::market::AssetClass::of(s) == crate::market::AssetClass::Stock
+                    && (s.ends_with(".NS") || s.ends_with(".BO"))
+            })
+            .collect();
+        if missing.is_empty()
+            || missing.len() > providers::router::FILL_MAX
+            || !self.exchange_backup_on()
+        {
+            return have;
+        }
+        // Yahoo's other listing first: it answers when the exchanges' sites
+        // refuse automated requests.
+        let twins: Vec<(String, &str)> = missing
+            .iter()
+            .filter_map(|s| twin_listing(s).map(|t| (t, *s)))
+            .collect();
+        let mut missing = missing;
+        if !twins.is_empty() {
+            let ask: Vec<&str> = twins.iter().map(|(t, _)| t.as_str()).collect();
+            if let Ok(got) = self.yahoo_quote(&ask).await {
+                for mut q in got.into_iter().filter(Quote::is_usable) {
+                    let Some((twin, original)) = twins.iter().find(|(t, _)| {
+                        q.symbol
+                            .as_deref()
+                            .is_some_and(|x| x.eq_ignore_ascii_case(t))
+                    }) else {
+                        continue;
+                    };
+                    q.symbol = Some(original.to_string());
+                    let meta = q.meta.get_or_insert_with(QuoteMeta::default);
+                    meta.add_source(&format!("{} ({twin})", crate::provenance::YAHOO));
+                    meta.warn(format!(
+                        "Yahoo Finance had no quote for {original}; priced from the {twin} listing."
+                    ));
+                    have.retain(|h| {
+                        !(h.symbol
+                            .as_deref()
+                            .is_some_and(|x| x.eq_ignore_ascii_case(original))
+                            && !h.is_usable())
+                    });
+                    missing.retain(|m| !m.eq_ignore_ascii_case(original));
+                    have.push(q);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return have;
+        }
+        if self
+            .provider
+            .as_ref()
+            .is_some_and(|p| p.nse().is_some() || p.bse().is_some())
+        {
+            // The configured exchange provider was asked already.
+            return have;
+        }
+        let ns: Vec<&str> = missing
+            .iter()
+            .copied()
+            .filter(|s| s.ends_with(".NS"))
+            .collect();
+        let bo: Vec<&str> = missing
+            .iter()
+            .copied()
+            .filter(|s| s.ends_with(".BO"))
+            .collect();
+        let mut got = Vec::new();
+        if !ns.is_empty()
+            && let Ok(q) = self.nse_client().quotes(&ns).await
+        {
+            got.extend(q);
+        }
+        if !bo.is_empty()
+            && let Ok(q) = self.bse_client().quotes(&bo).await
+        {
+            got.extend(q);
+        }
+        for mut q in got.into_iter().filter(Quote::is_usable) {
+            let source = q
+                .data_source
+                .clone()
+                .unwrap_or_else(|| crate::provenance::NSE.to_string());
+            let meta = q.meta.get_or_insert_with(QuoteMeta::default);
+            meta.add_source(&source);
+            meta.warn(format!("Yahoo Finance had no quote; price from {source}."));
+            // Drop the unusable row Yahoo may have sent for the symbol.
+            have.retain(|h| !(h.symbol.is_some() && h.symbol == q.symbol && !h.is_usable()));
+            have.push(q);
+        }
+        have
     }
 
     /// Quotes from the configured primary provider merged into Yahoo's, or
@@ -1421,6 +1685,49 @@ impl YahooClient {
         query: &providers::router::ScreenQuery,
     ) -> Result<(Vec<Quote>, &'static str)> {
         self.router.screener(query).await
+    }
+
+    /// Ratios (ROE, margin, leverage, growth, beta) from the keyed
+    /// providers, merged; the second value names the sources.
+    pub async fn provider_ratios(
+        &self,
+        symbol: &str,
+    ) -> Result<(providers::router::Ratios, Vec<&'static str>)> {
+        self.router.ratios(symbol).await
+    }
+
+    /// NSE's company facts (P/E, sector P/E, industry, shares issued) for an
+    /// `.NS` stock. `Ok(None)` for other symbols or when the exchanges are
+    /// turned off (`STOCKWISE_KEYLESS_BACKUPS=off`).
+    pub async fn nse_equity_info(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<providers::nse::EquityInfo>> {
+        if !self.exchange_backup_on() {
+            return Ok(None);
+        }
+        self.nse_client().equity_info(symbol).await
+    }
+
+    /// NSE's latest quarterly results for an Indian stock, oldest first.
+    pub async fn nse_results(&self, symbol: &str) -> Result<Vec<providers::nse::ResultRow>> {
+        if !self.exchange_backup_on() {
+            return Ok(Vec::new());
+        }
+        self.nse_client().results(symbol).await
+    }
+
+    /// BSE's P/E, EPS, ROE and P/B for an Indian stock (an `.NS` symbol is
+    /// looked up by the same id on BSE).
+    pub async fn bse_ratios(&self, symbol: &str) -> Result<Option<providers::bse::BseRatios>> {
+        if !self.exchange_backup_on() {
+            return Ok(None);
+        }
+        let bo = match symbol.strip_suffix(".NS") {
+            Some(base) => format!("{base}.BO"),
+            None => symbol.to_string(),
+        };
+        self.bse_client().ratios(&bo).await
     }
 
     /// Whether any keyed provider (`FINNHUB_API_KEY`, `FMP_API_KEY`) backs
@@ -1504,25 +1811,230 @@ impl YahooClient {
 
     /// Price history. A configured data provider serves daily, weekly and
     /// monthly bars when its plan covers the whole range; otherwise (and for
-    /// intraday bars) Yahoo does.
+    /// intraday bars) Yahoo does. Bars from NSE, BSE and Alpha Vantage arrive
+    /// unadjusted and are adjusted for splits and bonuses here.
     ///
-    /// When Yahoo fails too, a keyless backup that covers the symbol (ECB
-    /// rates for FX, CoinGecko for the large coins) serves daily bars, named
-    /// in `meta.data_source`. If none covers it, Yahoo's error stands.
+    /// When Yahoo fails too:
+    /// 1. a keyless backup that covers the symbol (ECB rates for FX,
+    ///    CoinGecko for the large coins) serves daily bars;
+    /// 2. for Indian stocks and NSE indices, NSE's (or BSE's) daily history,
+    ///    adjusted for splits and bonuses from the exchange's corporate
+    ///    actions;
+    /// 3. the bars kept in `cache.db` (`ohlcv_bars`), with a staleness
+    ///    warning.
+    ///
+    /// The source is named in `meta.data_source` and what the reader should
+    /// know in `meta.warnings`. If nothing covers the symbol, Yahoo's error
+    /// stands.
     pub async fn get_chart(&self, symbol: &str, range: &str, interval: &str) -> Result<ChartData> {
         if let Some(provider) = &self.provider
             && provider.supports(symbol)
-            && let Ok(chart) = provider.chart(symbol, range, interval).await
+            && let Ok(mut chart) = provider.chart(symbol, range, interval).await
+        {
+            if provider_bars_unadjusted(provider.kind())
+                && is_daily_or_longer(interval)
+                && crate::market::AssetClass::of(symbol) == crate::market::AssetClass::Stock
+            {
+                self.adjust_for_splits(symbol, &mut chart, Some(provider))
+                    .await;
+            }
+            return Ok(chart);
+        }
+        let yahoo_err = match self.yahoo_chart(symbol, range, interval).await {
+            Ok(chart) => return Ok(chart),
+            Err(e) => e,
+        };
+        // An Indian stock trades on both exchanges at almost the same price:
+        // Yahoo's other listing is the most reliable stand-in.
+        if self.exchange_backup_on()
+            && let Some(twin) = twin_listing(symbol)
+            && let Ok(mut chart) = self.yahoo_chart(&twin, range, interval).await
+        {
+            let meta = chart.meta.get_or_insert_with(ChartMeta::default);
+            meta.data_source = Some(format!("{} ({twin})", crate::provenance::YAHOO));
+            meta.warnings.push(format!(
+                "Yahoo Finance has no price history for {symbol}; using the {twin} listing."
+            ));
+            meta.symbol = Some(symbol.to_string());
+            return Ok(chart);
+        }
+        if let Some(chart) = self.router.chart(symbol, range, interval).await {
+            return Ok(chart);
+        }
+        if is_daily_or_longer(interval)
+            && let Some(chart) = self.exchange_history(symbol, range, interval).await
         {
             return Ok(chart);
         }
-        match self.yahoo_chart(symbol, range, interval).await {
-            Ok(chart) => Ok(chart),
-            Err(e) => match self.router.chart(symbol, range, interval).await {
-                Some(chart) => Ok(chart),
-                None => Err(e),
-            },
+        if let Some(chart) = self.cached_history(symbol, range, interval).await {
+            return Ok(chart);
         }
+        Err(yahoo_err)
+    }
+
+    /// Whether NSE and BSE may stand in for Yahoo (quotes, history, split
+    /// data). `STOCKWISE_KEYLESS_BACKUPS=off` turns them off with the other
+    /// keyless backups.
+    fn exchange_backup_on(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.exchange_backup
+        }
+        #[cfg(not(test))]
+        {
+            !std::env::var("STOCKWISE_KEYLESS_BACKUPS").is_ok_and(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "0" | "off" | "false" | "no"
+                )
+            })
+        }
+    }
+
+    /// Indian stock or NSE index history from the exchange, for when Yahoo
+    /// failed: NSE for `.NS` and indices, BSE for `.BO`. Stocks are adjusted
+    /// for splits and bonuses.
+    async fn exchange_history(
+        &self,
+        symbol: &str,
+        range: &str,
+        interval: &str,
+    ) -> Option<ChartData> {
+        if !self.exchange_backup_on() {
+            return None;
+        }
+        let (mut chart, source) = if providers::nse::target(symbol).is_some() {
+            (
+                self.nse_client()
+                    .chart(symbol, range, interval)
+                    .await
+                    .ok()?,
+                crate::provenance::NSE,
+            )
+        } else if providers::bse::target(symbol).is_some() {
+            (
+                self.bse_client()
+                    .chart(symbol, range, interval)
+                    .await
+                    .ok()?,
+                crate::provenance::BSE,
+            )
+        } else {
+            return None;
+        };
+        let meta = chart.meta.get_or_insert_with(ChartMeta::default);
+        meta.data_source = Some(source.to_string());
+        meta.symbol.get_or_insert_with(|| symbol.to_string());
+        meta.warnings.push(format!(
+            "Yahoo Finance price history unavailable; using {source} daily history."
+        ));
+        if crate::market::AssetClass::of(symbol) == crate::market::AssetClass::Stock {
+            self.adjust_for_splits(symbol, &mut chart, None).await;
+        }
+        Some(chart)
+    }
+
+    /// The bars kept in `cache.db` for `symbol` over `range`, with a warning
+    /// that names how old the newest one is.
+    async fn cached_history(&self, symbol: &str, range: &str, interval: &str) -> Option<ChartData> {
+        let l2 = self.cache.lock().await.l2()?;
+        let today = chrono::Utc::now().date_naive();
+        let from = providers::range_start(range, today)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|t| t.and_utc().timestamp())
+            .unwrap_or(0);
+        let to = chrono::Utc::now().timestamp() + 86_400;
+        let bars = l2.lock().ok()?.get_bars(symbol, interval, from, to).ok()?;
+        let last = bars.last()?;
+        let last_day = chrono::DateTime::from_timestamp(last.ts, 0)?.date_naive();
+        let age = (today - last_day).num_days();
+        let mut chart = chart_from_bars(symbol, &bars);
+        let meta = chart.meta.get_or_insert_with(ChartMeta::default);
+        meta.data_source = Some(crate::provenance::CACHE.to_string());
+        meta.warnings.push(format!(
+            "Live price history unavailable; using {} cached bars up to {} ({} day{} old).",
+            bars.len(),
+            last_day,
+            age,
+            if age == 1 { "" } else { "s" }
+        ));
+        Some(chart)
+    }
+
+    /// Divide the bars before each split or bonus by its factor. The events
+    /// come from Yahoo's chart events, else NSE's corporate actions (Indian
+    /// stocks), else the configured provider (Alpha Vantage). When none can
+    /// be read, the chart says it is unadjusted.
+    async fn adjust_for_splits(
+        &self,
+        symbol: &str,
+        chart: &mut ChartData,
+        provider: Option<&providers::Provider>,
+    ) {
+        let since = chrono::Utc::now().timestamp() - 20 * 365 * 86_400;
+        let events = match self.get_corporate_actions(symbol, since).await {
+            Ok(ev) => Some(providers::adjust::from_yahoo(&ev)),
+            Err(_) => match self.nse_split_events(symbol).await {
+                Some(ev) => Some(ev),
+                None => match provider {
+                    Some(p) => p.splits(symbol).await.ok(),
+                    None => None,
+                },
+            },
+        };
+        match events {
+            Some(ev) => {
+                let n = providers::adjust::adjust_chart(chart, &ev);
+                if n > 0 {
+                    let m = chart.meta.get_or_insert_with(ChartMeta::default);
+                    m.warnings.push(format!(
+                        "Adjusted for {n} split{} or bonus issue{}.",
+                        if n == 1 { "" } else { "s" },
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+            }
+            None => chart
+                .meta
+                .get_or_insert_with(ChartMeta::default)
+                .warnings
+                .push("Not adjusted for splits: no corporate-action data could be read.".into()),
+        }
+    }
+
+    /// Splits and bonuses of an Indian stock from NSE's corporate actions
+    /// (`RELIANCE.NS` and `RELIANCE.BO` both read NSE's `RELIANCE`). `None`
+    /// for a numeric BSE code or when NSE does not answer.
+    async fn nse_split_events(&self, symbol: &str) -> Option<Vec<providers::adjust::SplitEvent>> {
+        if !self.exchange_backup_on() {
+            return None;
+        }
+        let base = symbol
+            .strip_suffix(".NS")
+            .or_else(|| symbol.strip_suffix(".BO"))?;
+        if base.is_empty() || base.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let url = format!(
+            "https://www.nseindia.com/api/corporates-corporateActions?index=equities&symbol={}",
+            crate::research::url_encode(base)
+        );
+        let v = self
+            .nse_get_json(&url, Duration::from_secs(6 * 3600))
+            .await
+            .ok()?;
+        let mut out: Vec<providers::adjust::SplitEvent> =
+            crate::research::parse_nse_corp_actions(&v)
+                .into_iter()
+                .filter_map(|a| {
+                    Some(providers::adjust::SplitEvent {
+                        ex_date: a.ex_date,
+                        factor: providers::adjust::nse_action_factor(&a.subject)?,
+                    })
+                })
+                .collect();
+        out.sort_by_key(|e| e.ex_date);
+        Some(out)
     }
 
     /// Price history straight from Yahoo Finance.
@@ -1887,6 +2399,17 @@ impl YahooClient {
     /// prices 500 stocks at once). No Yahoo call; errors are not announced.
     pub async fn index_snapshot(&self, index: &str) -> Result<providers::nse::IndexSnapshot> {
         self.nse_client().index_snapshot(index).await
+    }
+
+    fn bse_client(&self) -> &providers::bse::Bse {
+        match self.provider.as_ref().and_then(|p| p.bse()) {
+            Some(bse) => bse,
+            None => self.bse.get_or_init(|| {
+                let bse = providers::bse::Bse::new(providers::bse::shared_session());
+                bse.session().set_cache(self.cache.clone());
+                bse
+            }),
+        }
     }
 
     fn nse_client(&self) -> &providers::nse::Nse {
@@ -3111,5 +3634,219 @@ mod tests {
             day(3),
             "22:30Z is 04:00 IST next day"
         );
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    fn to_server(server_url: &str) -> impl Fn(&str) -> String + Send + Sync + 'static + use<> {
+        let base = server_url.to_string();
+        move |url: &str| {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            match parsed.query() {
+                Some(q) => format!("{}{}?{}", base, parsed.path(), q),
+                None => format!("{}{}", base, parsed.path()),
+            }
+        }
+    }
+
+    fn nse_at(url: &str) -> providers::nse::Nse {
+        let mut s = providers::nse::site(url);
+        s.home = None;
+        providers::nse::Nse::new(Arc::new(providers::session::Session::for_tests(
+            s,
+            providers::session::DiskCache::Off,
+        )))
+    }
+
+    fn closes(c: &ChartData) -> Vec<f64> {
+        c.indicators.quote[0]
+            .close
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// NSE daily history over the last five weeks with a 1:1 bonus ten days
+    /// ago: ₹3000 before, ₹1500 from the ex-date.
+    fn nse_history_with_bonus(today: chrono::NaiveDate, ex: chrono::NaiveDate) -> String {
+        let rows: Vec<serde_json::Value> = (0..36)
+            .map(|i| today - chrono::Duration::days(35 - i))
+            .map(|d| {
+                let px = if d < ex { 3000.0 } else { 1500.0 };
+                serde_json::json!({
+                    "CH_SERIES": "EQ",
+                    "CH_TIMESTAMP": d.format("%Y-%m-%d").to_string(),
+                    "CH_OPENING_PRICE": px, "CH_TRADE_HIGH_PRICE": px,
+                    "CH_TRADE_LOW_PRICE": px, "CH_CLOSING_PRICE": px,
+                    "CH_TOT_TRADED_QTY": 1000
+                })
+            })
+            .collect();
+        serde_json::json!({ "data": rows }).to_string()
+    }
+
+    #[tokio::test]
+    async fn adjclose_is_parsed_and_preferred_for_returns() {
+        let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100,200,300],
+            "indicators":{"quote":[{"open":[1,1,1],"high":[1,1,1],"low":[1,1,1],
+            "close":[100.0,101.0,null],"volume":[1,1,1]}],
+            "adjclose":[{"adjclose":[98.0,100.0,null]}]}}],"error":null}}"#;
+        let resp: ChartResponse = serde_json::from_str(body).unwrap();
+        let chart = resp.chart.result.unwrap().remove(0);
+        assert!(chart.has_adjclose());
+        assert_eq!(chart.return_closes(), vec![98.0, 100.0]);
+        assert_eq!(
+            chart.return_close_series(),
+            vec![Some(98.0), Some(100.0), None]
+        );
+        // Intraday charts carry no adjclose: close stands.
+        let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100000,200000],
+            "indicators":{"quote":[{"close":[100.0,101.0]}]}}],"error":null}}"#;
+        let resp: ChartResponse = serde_json::from_str(body).unwrap();
+        let chart = resp.chart.result.unwrap().remove(0);
+        assert!(!chart.has_adjclose());
+        assert_eq!(chart.return_closes(), vec![100.0, 101.0]);
+        let s = crate::research::Series::from_chart(&chart);
+        assert_eq!(s.return_closes(), &[100.0, 101.0]);
+    }
+
+    #[tokio::test]
+    async fn history_falls_back_to_nse_adjusted_for_a_bonus() {
+        let today = chrono::Utc::now()
+            .with_timezone(&chrono::FixedOffset::east_opt(19_800).unwrap())
+            .date_naive();
+        let ex = today - chrono::Duration::days(10);
+        let actions = serde_json::json!([
+            {"exDate": ex.format("%d-%b-%Y").to_string(), "subject": "Bonus 1:1"},
+            {"exDate": "01-Aug-2025", "subject": "Dividend - Rs 5.50 Per Share"}
+        ])
+        .to_string();
+        let server = crate::testutil::MockServer::start_routed(vec![
+            (
+                "/api/historical/cm/equity",
+                nse_history_with_bonus(today, ex),
+            ),
+            ("/api/corporates-corporateActions", actions),
+        ])
+        .await;
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.exchange_backup = true;
+        let _ = client.nse.set(nse_at(&server.url));
+        let chart = client.get_chart("RELIANCE.NS", "1mo", "1d").await.unwrap();
+        let meta = chart.meta.as_ref().unwrap();
+        assert_eq!(meta.data_source.as_deref(), Some("NSE"));
+        assert!(
+            closes(&chart).iter().all(|c| (*c - 1500.0).abs() < 1e-9),
+            "{:?}",
+            closes(&chart)
+        );
+        assert!(
+            meta.warnings
+                .iter()
+                .any(|w| w.contains("Adjusted for 1 split or bonus issue")),
+            "{:?}",
+            meta.warnings
+        );
+        assert!(
+            meta.warnings
+                .iter()
+                .any(|w| w.contains("using NSE daily history"))
+        );
+    }
+
+    #[test]
+    fn indian_listings_pair_up() {
+        assert_eq!(twin_listing("reliance.ns").as_deref(), Some("RELIANCE.BO"));
+        assert_eq!(twin_listing("M&M.BO").as_deref(), Some("M&M.NS"));
+        assert_eq!(twin_listing("500325.BO"), None);
+        assert_eq!(twin_listing("AAPL"), None);
+        assert_eq!(twin_listing("^NSEI"), None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_nse_listing_is_served_from_the_bse_one_on_yahoo() {
+        let chart = r#"{"chart":{"result":[{"meta":{"symbol":"RELIANCE.BO","currency":"INR"},
+            "timestamp":[100000,200000],
+            "indicators":{"quote":[{"close":[1500.0,1510.0]}]}}],"error":null}}"#;
+        let quote = r#"{"quoteResponse":{"result":[{"symbol":"RELIANCE.BO","quoteType":"EQUITY",
+            "regularMarketPrice":1510.0,"currency":"INR"}]}}"#;
+        let server = crate::testutil::MockServer::start_routed(vec![
+            ("/v8/finance/chart/RELIANCE.BO", chart.to_string()),
+            ("symbols=RELIANCE.BO", quote.to_string()),
+        ])
+        .await;
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.exchange_backup = true;
+        client.set_test_exchanges(&server.url);
+
+        let c = client.get_chart("RELIANCE.NS", "1mo", "1d").await.unwrap();
+        assert_eq!(closes(&c), vec![1500.0, 1510.0]);
+        let m = c.meta.as_ref().unwrap();
+        assert_eq!(
+            m.data_source.as_deref(),
+            Some("Yahoo Finance (RELIANCE.BO)")
+        );
+        assert_eq!(m.symbol.as_deref(), Some("RELIANCE.NS"));
+        assert!(m.warnings[0].contains("using the RELIANCE.BO listing"));
+
+        let q = client.get_quote(&["RELIANCE.NS"]).await.unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].symbol.as_deref(), Some("RELIANCE.NS"));
+        assert_eq!(q[0].regular_market_price, Some(1510.0));
+        let qm = q[0].meta.as_ref().unwrap();
+        assert!(
+            qm.sources
+                .contains(&"Yahoo Finance (RELIANCE.BO)".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn history_falls_back_to_cache_db_with_a_staleness_warning() {
+        let server = crate::testutil::MockServer::start_routed(vec![]).await;
+        let db: crate::db::L2 = Box::leak(Box::new(Mutex::new(
+            crate::db::CacheDb::open_in_memory().unwrap(),
+        )));
+        let day = 86_400;
+        let now = chrono::Utc::now().timestamp() / day * day;
+        let bars: Vec<crate::db::Bar> = (0..5)
+            .map(|i| crate::db::Bar {
+                ts: now - (8 - i) * day,
+                open: 10.0,
+                high: 11.0,
+                low: 9.0,
+                close: 10.0 + i as f64,
+                volume: 100.0,
+            })
+            .collect();
+        db.lock().unwrap().put_bars("AAPL", "1d", &bars).unwrap();
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.cache = Arc::new(tokio::sync::Mutex::new(HybridCache::with_l2(db)));
+        let chart = client.get_chart("AAPL", "1mo", "1d").await.unwrap();
+        assert_eq!(closes(&chart), vec![10.0, 11.0, 12.0, 13.0, 14.0]);
+        let meta = chart.meta.as_ref().unwrap();
+        assert_eq!(meta.data_source.as_deref(), Some(crate::provenance::CACHE));
+        let w = meta.warnings.join(" ");
+        assert!(w.contains("5 cached bars"), "{w}");
+        assert!(w.contains("4 days old"), "{w}");
+        // Nothing cached and nothing else covers it: Yahoo's error stands.
+        assert!(client.get_chart("MSFT", "1mo", "1d").await.is_err());
     }
 }

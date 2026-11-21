@@ -78,9 +78,12 @@ pub struct LongTermScore {
     pub sip_monthly_10l_10y: f64, // SIP to reach SIP_TARGET (₹10L / $1M) in 10 years
     pub drip_multiplier_10y: f64, // dividend reinvestment multiplier over 10 years
     // Monte Carlo
-    pub monte_carlo_median: f64, // median 5Y return from simulation
-    pub monte_carlo_p10: f64,    // 10th percentile (bad case)
-    pub monte_carlo_p90: f64,    // 90th percentile (good case)
+    /// Simulated 5Y returns (median, 10th and 90th percentile). `None` when
+    /// there was no price history to measure volatility from: no volatility
+    /// is assumed.
+    pub monte_carlo_median: Option<f64>,
+    pub monte_carlo_p10: Option<f64>,
+    pub monte_carlo_p90: Option<f64>,
 }
 
 /// The analysts' mean rating as a number and its scale, never as a call.
@@ -672,12 +675,9 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // MONTE CARLO SIMULATION (simplified)
     // ══════════════════════════════════════════
 
-    let (mc_median, mc_p10, mc_p90) = if let Some(closes) = hist_closes {
-        monte_carlo_5y(closes, est_annual)
-    } else {
-        let vol = 0.25; // assume 25% if no data
-        simple_monte_carlo(est_annual, vol)
-    };
+    // Volatility is measured or missing, never assumed.
+    let mc = hist_closes.and_then(|closes| monte_carlo_5y(closes, est_annual));
+    let (mc_median, mc_p10, mc_p90) = (mc.map(|m| m.0), mc.map(|m| m.1), mc.map(|m| m.2));
 
     LongTermScore {
         symbol: q.symbol.clone().unwrap_or_default(),
@@ -901,9 +901,10 @@ pub fn render_report(scores: &[LongTermScore], monthly: f64, csym: &str) -> Stri
             format!("\n  {}", "Simulated 5Y range (1000 paths)".bold().yellow()),
         );
         line(&mut o, format!("  {}", "─".repeat(40).dimmed()));
-        kv(&mut o, "90th percentile", &percentile(s.monte_carlo_p90));
-        kv(&mut o, "Median", &percentile(s.monte_carlo_median));
-        kv(&mut o, "10th percentile", &percentile(s.monte_carlo_p10));
+        let sim = |v: Option<f64>| v.map_or("missing (no price history)".to_string(), percentile);
+        kv(&mut o, "90th percentile", &sim(s.monte_carlo_p90));
+        kv(&mut o, "Median", &sim(s.monte_carlo_median));
+        kv(&mut o, "10th percentile", &sim(s.monte_carlo_p10));
 
         // SIP calculator: every instalment grows for its own time in the market.
         let inv_5y = monthly * 60.0;
@@ -957,9 +958,9 @@ pub fn render_report(scores: &[LongTermScore], monthly: f64, csym: &str) -> Stri
 }
 
 /// Simplified Monte Carlo: 1000 simulations of 5-year returns
-fn monte_carlo_5y(closes: &[f64], est_annual: f64) -> (f64, f64, f64) {
-    let vol = technical::annualized_volatility(closes).unwrap_or(0.25);
-    simple_monte_carlo(est_annual, vol)
+fn monte_carlo_5y(closes: &[f64], est_annual: f64) -> Option<(f64, f64, f64)> {
+    let vol = technical::annualized_volatility(closes)?;
+    Some(simple_monte_carlo(est_annual, vol))
 }
 
 fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
@@ -1111,10 +1112,13 @@ mod tests {
             .collect();
         let score = score_for_longterm(&q, Some(&closes));
         assert!(
-            score.monte_carlo_p90 > score.monte_carlo_p10,
+            score.monte_carlo_p90.unwrap() > score.monte_carlo_p10.unwrap(),
             "P90 should be > P10"
         );
-        assert!(score.monte_carlo_median > score.monte_carlo_p10);
+        assert!(score.monte_carlo_median.unwrap() > score.monte_carlo_p10.unwrap());
+        // No price history: no volatility is assumed, the simulation is missing.
+        let bare = score_for_longterm(&q, None);
+        assert_eq!(bare.monte_carlo_median, None);
     }
 
     #[test]
@@ -1319,12 +1323,17 @@ mod tests {
     #[test]
     fn the_monte_carlo_median_matches_the_projection() {
         let q = mock_quote(15.0, 13.0, 0.2, 0.2, 0.01);
-        let s = score_for_longterm(&q, None);
-        let gap = (s.monte_carlo_median - s.projected_5y_return).abs();
+        // A year of gently swinging closes: volatility is measured, not assumed.
+        let closes: Vec<f64> = (0..252)
+            .map(|i| 100.0 + (i as f64 * 0.05).sin() * 10.0)
+            .collect();
+        let s = score_for_longterm(&q, Some(&closes));
+        let median = s.monte_carlo_median.expect("measured volatility");
+        let gap = (median - s.projected_5y_return).abs();
         assert!(
             gap < 0.25 * s.projected_5y_return.abs().max(10.0),
             "median {} vs projection {}",
-            s.monte_carlo_median,
+            median,
             s.projected_5y_return
         );
     }

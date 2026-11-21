@@ -358,3 +358,66 @@ fn the_user_agent_names_the_tool_and_carries_no_address() {
     assert!(USER_AGENT.starts_with("stockwise/"));
     assert!(!USER_AGENT.contains('@'));
 }
+
+fn instant(end: &str, val: f64, form: &str, filed: &str) -> Value {
+    json!({"end": end, "val": val, "accn": "0000000000-00-000000",
+           "fy": 2025, "fp": "Q3", "form": form, "filed": filed})
+}
+
+/// The calendar filer with a balance sheet: equity 450 and debt 90 + 10 on
+/// 2025-09-30; commercial paper only on an older date.
+pub(crate) fn calendar_filer_with_balance_sheet() -> String {
+    let mut v: Value = serde_json::from_str(&calendar_filer()).unwrap();
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    let concept = |facts: Vec<Value>| json!({"units": {"USD": facts}});
+    gaap.insert(
+        "StockholdersEquity".into(),
+        concept(vec![
+            instant("2024-12-31", 400.0, "10-K", "2025-02-01"),
+            instant("2025-09-30", 440.0, "10-Q", "2025-10-30"),
+            // Restated in a later filing: the latest filing wins.
+            instant("2025-09-30", 450.0, "10-Q", "2025-11-15"),
+        ]),
+    );
+    gaap.insert(
+        "LongTermDebtNoncurrent".into(),
+        concept(vec![instant("2025-09-30", 90.0, "10-Q", "2025-10-30")]),
+    );
+    gaap.insert(
+        "LongTermDebtCurrent".into(),
+        concept(vec![instant("2025-09-30", 10.0, "10-Q", "2025-10-30")]),
+    );
+    gaap.insert(
+        "CommercialPaper".into(),
+        concept(vec![instant("2024-12-31", 35.0, "10-K", "2025-02-01")]),
+    );
+    v.to_string()
+}
+
+#[test]
+fn ratios_come_from_trailing_quarters_and_the_latest_balance_sheet() {
+    let st = parse_company_facts(&calendar_filer_with_balance_sheet()).unwrap();
+    assert_eq!(st.equity, Some((d("2025-09-30"), 450.0)));
+    assert_eq!(st.debt, Some(100.0));
+    let r = st.ratios();
+    // Last four quarters: revenue 210 + 220 + 230 + 240, net income a tenth.
+    let close = |a: Option<f64>, b: f64| assert!((a.unwrap() - b).abs() < 1e-9, "{a:?} vs {b}");
+    close(r.profit_margin, 0.1);
+    close(r.operating_margin, 0.1);
+    close(r.roe, 90.0 / 450.0);
+    close(r.debt_to_equity, 100.0 / 450.0 * 100.0);
+    // Q3 2025 revenue 240 against Q3 2024's 200.
+    close(r.revenue_growth, 0.2);
+    close(r.eps_ttm, 9.0);
+    assert_eq!(r.as_of, Some(d("2025-09-30")));
+}
+
+#[test]
+fn no_balance_sheet_means_no_roe_or_leverage() {
+    let st = parse_company_facts(&calendar_filer()).unwrap();
+    assert_eq!(st.equity, None);
+    let r = st.ratios();
+    assert_eq!(r.roe, None);
+    assert_eq!(r.debt_to_equity, None);
+    assert!(r.profit_margin.is_some());
+}

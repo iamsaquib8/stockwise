@@ -633,6 +633,9 @@ pub struct Run {
     pub floors: Option<Floors>,
     pub horizon: Horizon,
     pub methodology: &'static str,
+    /// Sources, missing fields, warnings and coverage of the finalists'
+    /// data (`provenance::for_scan`).
+    pub meta: crate::provenance::Meta,
 }
 
 /// Scan `market`'s universe (and cap tier), score it in two stages and
@@ -676,6 +679,10 @@ pub async fn run(
         .collect();
     let history = enrich_finalists(client, &mut kept, &leaders).await;
     // Second stage: the whole scan again, with the leaders' fuller data.
+    let meta = crate::provenance::for_scan(
+        kept.iter()
+            .filter(|q| q.symbol.as_ref().is_some_and(|s| leaders.contains(s))),
+    );
     let (picks, flagged, thin_data) = select(score(&kept, &history, horizon), top);
     Ok(Run {
         picks,
@@ -688,6 +695,7 @@ pub async fn run(
         floors: Some(floors),
         horizon,
         methodology: METHODOLOGY,
+        meta,
     })
 }
 
@@ -714,7 +722,10 @@ pub async fn enrich_finalists(
         .collect();
     let done: Vec<(Quote, History)> =
         futures_util::stream::iter(todo.into_iter().map(|mut q| async move {
-            crate::research::enrich_quote(client, &mut q, false).await;
+            // A failed lookup is kept on the quote, so `meta` reports it.
+            for w in crate::research::enrich_quote(client, &mut q, false).await {
+                q.meta.get_or_insert_with(Default::default).warn(w);
+            }
             let sym = q.symbol.clone().unwrap_or_default();
             let history = match client.get_chart(&sym, "1y", "1d").await {
                 Ok(chart) => {

@@ -69,7 +69,8 @@ async fn fetch_bars(
         )
     })?;
     let currency = chart.meta.as_ref().and_then(|m| m.currency.clone());
-    let bars = Bars::from_chart(&chart);
+    // Dividends count: prices are scaled by Yahoo's adjclose when it is there.
+    let bars = Bars::from_chart_total_return(&chart);
     if bars.is_empty() {
         bail!(
             "No price history for {}{}",

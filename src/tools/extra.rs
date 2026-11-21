@@ -93,6 +93,7 @@ pub(super) async fn run<D: DataSource>(
                 "thin_data": run.thin_data,
                 "flagged_check_data": run.flagged.iter().map(|p| json!({"symbol": p.symbol, "flags": p.flags})).collect::<Vec<_>>(),
                 "picks": run.picks,
+                "meta": run.meta,
                 "methodology": run.methodology,
                 "horizon": horizon,
                 "method": "Percentile ranks among the stocks that clear the size and liquidity floors: value 25%, quality 25%, growth 15%, trend 20%, risk 15%. Losses and negative book value rank last; implausible figures are left out to check; at most 3 per sector; a pillar without data pulls the score toward 50.",

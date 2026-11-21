@@ -35,11 +35,13 @@
 //! The exchange providers read the JSON endpoints behind nseindia.com and
 //! bseindia.com through one polite session per site (`session.rs`).
 
+pub mod adjust;
 pub mod alphavantage;
 pub mod bse;
 pub mod bse_bhav;
 pub mod coingecko;
 pub mod edgar;
+pub mod fill;
 pub mod finnhub;
 pub mod fmp;
 pub mod frankfurter;
@@ -515,6 +517,34 @@ impl Provider {
             Provider::Nse(p) => Some(p),
             Provider::Exchange(p) => Some(&p.nse),
             _ => None,
+        }
+    }
+
+    /// The BSE client when the provider is BSE-backed.
+    pub fn bse(&self) -> Option<&bse::Bse> {
+        match self {
+            Provider::Bse(p) => Some(p),
+            Provider::Exchange(p) => Some(&p.bse),
+            _ => None,
+        }
+    }
+
+    /// Valuation and quality ratios from a keyed provider (Finnhub, FMP).
+    pub async fn ratios(&self, symbol: &str) -> Result<Option<router::Ratios>> {
+        match self {
+            Provider::Finnhub(p) => p.ratios(symbol).await,
+            Provider::Fmp(p) => p.ratios(symbol).await,
+            _ => Ok(None),
+        }
+    }
+
+    /// Splits of `symbol` from the provider itself, for adjusting its own
+    /// unadjusted daily bars when Yahoo's events can't be read. Alpha
+    /// Vantage only (one request of its daily allowance).
+    pub async fn splits(&self, symbol: &str) -> Result<Vec<adjust::SplitEvent>> {
+        match self {
+            Provider::AlphaVantage(p) => p.splits(symbol).await,
+            _ => bail!("{} has no split data", self.name()),
         }
     }
 }
@@ -1309,6 +1339,7 @@ impl Series {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(self.bars.iter().map(|b| noon(b.date)).collect()),
             indicators: Indicators {
@@ -1319,6 +1350,7 @@ impl Series {
                     close: Some(self.bars.iter().map(|b| b.close).collect()),
                     volume: Some(self.bars.iter().map(|b| b.volume).collect()),
                 }],
+                adjclose: None,
             },
             // Dividends/splits come from Yahoo (`get_corporate_actions`).
             events: None,
@@ -1356,6 +1388,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
             exchange_name: None,
             gmtoffset: None,
             data_source: None,
+            warnings: Vec::new(),
         }),
         timestamp: Some(bars.iter().map(|b| b.ts).collect()),
         indicators: Indicators {
@@ -1366,6 +1399,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
                 close: Some(bars.iter().map(|b| Some(b.close)).collect()),
                 volume: Some(bars.iter().map(|b| b.volume).collect()),
             }],
+            adjclose: None,
         },
         events: None,
     }

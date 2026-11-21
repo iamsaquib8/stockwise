@@ -65,6 +65,7 @@ mod pme;
 mod portfolio;
 mod portfolio_analysis;
 mod practice;
+mod provenance;
 mod providers;
 mod pta_export;
 mod rebalance;
@@ -776,6 +777,9 @@ stockwise options TCS                     expected moves (same as `options moves
         /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Print the scores and data provenance as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Background worker: intraday paper-trading loop or daily long-term scan
@@ -4888,9 +4892,11 @@ async fn dispatch(
             target,
             strategy,
         } => commands::cmd_intraday(amount, target, strategy.as_deref(), m).await,
-        Commands::Longterm { amount, universe } => {
-            commands::cmd_longterm(amount, m, universe).await
-        }
+        Commands::Longterm {
+            amount,
+            universe,
+            json,
+        } => commands::cmd_longterm(amount, m, universe, json).await,
         Commands::Daemon { mode, amount, once } => {
             commands::cmd_daemon(&value_name(mode), amount, m, once).await
         }

@@ -1796,6 +1796,7 @@ pub async fn cmd_picks(
                 .italic()
         );
     }
+    println!("  {}", run.meta.footer().dimmed());
     println!();
     Ok(())
 }

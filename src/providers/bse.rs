@@ -185,6 +185,45 @@ pub fn parse_header(json: &Value) -> Result<Option<Quote>, &'static str> {
 /// `StockReachGraph` (flag 0) → `(unix seconds, price)` points of today's
 /// session. `Data` is a JSON list sent as a string (sometimes as a list);
 /// times (`Fri Oct 24 2025 09:15:00`) are IST.
+/// P/E, EPS, ROE and P/B from BSE's scrip header. ROE comes in percent
+/// and is returned as a fraction, like Yahoo's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BseRatios {
+    pub pe: Option<f64>,
+    pub eps: Option<f64>,
+    pub roe: Option<f64>,
+    pub pb: Option<f64>,
+    pub industry: Option<String>,
+}
+
+/// A field by any of `keys`, ignoring case.
+fn field<'a>(json: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    let obj = json.as_object()?;
+    keys.iter().find_map(|k| {
+        obj.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v)
+            .filter(|v| !v.is_null())
+    })
+}
+
+/// `ComHeadernew` → ratios; `None` when it carries none of them.
+pub fn parse_com_header(json: &Value) -> Option<BseRatios> {
+    let n = |keys: &[&str]| field(json, keys).and_then(signed).filter(|v| *v != 0.0);
+    let r = BseRatios {
+        pe: n(&["PE", "PERatio"]).filter(|v| *v > 0.0),
+        eps: n(&["EPS"]),
+        roe: n(&["ROE"]).map(|v| v / 100.0),
+        pb: n(&["PB", "PBRatio"]).filter(|v| *v > 0.0),
+        industry: field(json, &["Industry", "IndustryNew", "Sector"])
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "-")
+            .map(str::to_string),
+    };
+    (r.pe.is_some() || r.eps.is_some() || r.roe.is_some() || r.pb.is_some()).then_some(r)
+}
+
 pub fn parse_graph(json: &Value) -> Result<Vec<(i64, f64)>, &'static str> {
     let data = json.get("Data").ok_or("intraday: no Data")?;
     let parsed: Value;
@@ -505,6 +544,24 @@ impl Bse {
         }
     }
 
+    /// The ratios BSE shows on a scrip's page (`ComHeadernew`): P/E, EPS,
+    /// ROE and P/B. Read by field name, since the endpoint is undocumented.
+    pub async fn ratios(&self, symbol: &str) -> Result<Option<BseRatios>> {
+        let Some(code) = self.code(symbol).await? else {
+            return Ok(None);
+        };
+        let json = self
+            .session
+            .get_json(
+                "/ComHeadernew/w",
+                &[("quotetype", "EQ"), ("scripcode", &code), ("seriesid", "")],
+                Duration::from_secs(6 * 3600),
+            )
+            .await
+            .map_err(|e| self.fail(e))?;
+        Ok(parse_com_header(&json))
+    }
+
     async fn quote(&self, symbol: &str) -> Result<Option<Quote>> {
         let Some(code) = self.code(symbol).await? else {
             return Ok(None);
@@ -666,6 +723,23 @@ mod tests {
         );
         assert_eq!(parse_scrip_list(&wrapped).unwrap()[0].code, "532540");
         assert!(parse_scrip_list(&json(r#"{"rows":[]}"#)).is_err());
+    }
+
+    #[test]
+    fn com_header_gives_ratios_with_roe_as_a_fraction() {
+        let r = parse_com_header(&json(
+            r#"{"PE":"24.50","EPS":"60.68","ROE":"8.40","PB":"2.10","Industry":"Refineries & Marketing","FaceVal":"10"}"#,
+        ))
+        .unwrap();
+        assert_eq!(r.pe, Some(24.5));
+        assert_eq!(r.eps, Some(60.68));
+        assert!((r.roe.unwrap() - 0.084).abs() < 1e-12);
+        assert_eq!(r.pb, Some(2.1));
+        assert_eq!(r.industry.as_deref(), Some("Refineries & Marketing"));
+        assert_eq!(
+            parse_com_header(&json(r#"{"FaceVal":"10","PE":"-"}"#)),
+            None
+        );
     }
 
     #[test]
