@@ -1158,11 +1158,11 @@ async fn returns_and_correlation_run_on_charts() {
         .call("correlate", &json!({"symbols": ["TCS", "INFY", "NOPE"]}))
         .await
         .unwrap();
-    assert_eq!(v["data"]["symbols"], json!(["TCS.NS", "INFY.NS"]));
     assert_eq!(v["data"]["missing"], json!(["NOPE.NS"]));
-    let m = v["data"]["matrix"].as_array().unwrap();
-    assert_eq!(m.len(), 2);
-    assert!((m[0][0].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    let m = &v["data"]["correlations"];
+    assert_eq!(m.as_object().unwrap().len(), 2, "{v}");
+    assert!((m["TCS.NS"]["TCS.NS"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(m["TCS.NS"]["INFY.NS"], m["INFY.NS"]["TCS.NS"]);
 
     assert!(
         c.call("correlate", &json!({"symbols": ["TCS"]}))
@@ -1217,4 +1217,24 @@ fn india_extras_are_read_only_and_open_world() {
         assert!(h.open_world, "{name}");
     }
     assert!(tool("portfolio_wrap").personal);
+}
+
+#[tokio::test]
+async fn batch_tools_research_each_symbol_once() {
+    // Non-adjacent repeats too: TCS twice, apart.
+    let v = call("correlate", json!({"symbols": ["TCS", "INFY", "tcs"]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        v["data"]["correlations"].as_object().unwrap().len(),
+        2,
+        "{v}"
+    );
+}
+
+#[test]
+fn picks_is_not_read_only_because_it_logs_its_list() {
+    let h = hints(tool("picks"));
+    assert!(!h.read_only && !h.destructive && h.idempotent && h.open_world);
+    assert!(hints(tool("quote")).read_only);
 }
