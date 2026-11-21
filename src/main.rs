@@ -60,6 +60,7 @@ mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod monitor;
+mod netlog;
 mod news;
 mod nifty500;
 mod notes;
@@ -140,7 +141,7 @@ stockwise backtest INFY -s macd       test a strategy on history\n  \
 stockwise quote AAPL -m us --json     machine-readable output\n  \
 stockwise portfolio --csv > p.csv     spreadsheet-ready CSV\n\n\
 Run `stockwise doctor` to check your setup, `stockwise config init` to set your own \
-defaults, `stockwise <command> --help` for details."
+defaults, `stockwise <command> --help` for details, `stockwise --help-all` for every command."
 )]
 struct Cli {
     /// Market for bare tickers: `in` (India, adds .NS), `us`, `crypto`, `fx`, `commodity`, or an exchange: `uk`, `de`, `jp`, `hk`, `sg`, `ca`, `au`
@@ -208,6 +209,10 @@ struct Cli {
     )]
     profile: Option<config::ProfileSpec>,
 
+    /// Network diagnostics on stderr: each request's source, host, status and time (STOCKWISE_LOG=debug adds cache hits)
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -267,8 +272,11 @@ enum Commands {
         out: TableOutput,
     },
 
-    /// Check your setup: data directory, network, cache, AI, broker
-    Doctor,
+    /// Check your setup: data, network, providers, cache, AI, notifications, worker, MCP apps, profile
+    Doctor {
+        #[command(flatten)]
+        out: JsonOutput,
+    },
 
     /// Background worker: live quotes, queued tasks, alerts, post-close sync
     Worker {
@@ -381,6 +389,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         action: Option<FundamentalCmd>,
         /// Symbol to score (when no subcommand is specified, e.g. `stockwise score TCS`)
         symbol: Option<String>,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
         /// Explain how to interpret the Piotroski 9-point F-Score and Altman Z-Score
@@ -1156,9 +1165,6 @@ notes and profile (undo with `stockwise undo`). Nothing is ever ordered. Not fin
         /// Token budget across all requests (input + output); past it the model must answer
         #[arg(long, default_value_t = 100_000, value_parser = clap::value_parser!(u64).range(1_000..=2_000_000))]
         max_tokens: u64,
-        /// Show each tool call and the size of its result on stderr
-        #[arg(short, long)]
-        verbose: bool,
         #[command(flatten)]
         out: JsonOutput,
     },
@@ -1394,21 +1400,29 @@ STOCKWISE_PORTFOLIO are carried over when set.")]
 enum TasksAction {
     /// List recent tasks (the default)
     List {
+        /// How many tasks to show, newest first
         #[arg(long, default_value_t = 30)]
         limit: usize,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
     /// Show one task with its result
     Show {
+        /// Task id, from `stockwise tasks list`
         id: i64,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
     /// Cancel a queued or running task
-    Cancel { id: i64 },
+    Cancel {
+        /// Task id, from `stockwise tasks list`
+        id: i64,
+    },
     /// Queue a task for the worker
     Add {
+        /// What the worker should do
         #[arg(value_enum, ignore_case = true)]
         kind: worker::TaskKind,
         /// For `run`: the stockwise command, after `--`
@@ -1432,12 +1446,16 @@ enum CacheAction {
         /// Market-cap bucket
         #[arg(long, value_enum, ignore_case = true)]
         cap: Option<CapArg>,
+        /// Only this sector, as stored (e.g. "Technology")
         #[arg(long)]
         sector: Option<String>,
+        /// Minimum trailing P/E
         #[arg(long)]
         min_pe: Option<f64>,
+        /// Maximum trailing P/E
         #[arg(long)]
         max_pe: Option<f64>,
+        /// Minimum return on equity, percent
         #[arg(long)]
         min_roe: Option<f64>,
         /// Minimum dividend yield, percent
@@ -1452,8 +1470,10 @@ enum CacheAction {
         /// Smallest first
         #[arg(long)]
         asc: bool,
+        /// How many rows to show
         #[arg(long, default_value_t = 25)]
         limit: usize,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
@@ -2299,6 +2319,10 @@ fn goal_duration(s: &str) -> Result<u32, String> {
     goals::parse_duration(s)
 }
 
+fn residence_arg(s: &str) -> Result<tax::Country, String> {
+    tax::Country::parse(s).ok_or_else(|| format!("expected in, us or uk, got `{s}`"))
+}
+
 fn slab_pct(s: &str) -> Result<f64, String> {
     percent_between(s, 0.0, 50.0)
 }
@@ -2753,6 +2777,9 @@ enum ProfileCmd {
         /// Maximum risk per trade as a percentage of capital (0.0 < risk <= 100.0)
         #[arg(long = "risk-per-trade", value_name = "PCT", value_parser = risk_pct_arg)]
         risk_per_trade: Option<f64>,
+        /// Country of tax residence (in, us, uk): decides holding periods and tax rules
+        #[arg(long, value_name = "COUNTRY", value_parser = residence_arg)]
+        residence: Option<tax::Country>,
         #[command(flatten)]
         out: JsonOutput,
     },
@@ -3859,6 +3886,45 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The short `stockwise --help`: the commands most people need, including
+/// the 0.9 workflows (`today`, `hot`, `portfolio review`, `picks review`,
+/// `tax reconcile`). `--help-all` shows every command (`GROUPS`). Entries
+/// with a space name a subcommand. Titles reuse `GROUPS` titles, so they are
+/// translated.
+const CORE_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Start here",
+        &[
+            "init", "quote", "deep", "today", "hot", "markets", "search", "doctor",
+        ],
+    ),
+    (
+        "Portfolio",
+        &[
+            "portfolio",
+            "portfolio review",
+            "watch",
+            "alert",
+            "rebalance",
+            "tax",
+            "tax reconcile",
+        ],
+    ),
+    ("Market", &["picks", "picks review", "screen", "news"]),
+    ("Analysis", &["verdict", "analyze", "backtest"]),
+    ("AI assistants", &["ask", "connect", "mcp"]),
+    ("Interfaces", &["tui", "serve"]),
+];
+
+/// A command's one-line description by path (`portfolio review`).
+fn command_about(cmd: &clap::Command, path: &str) -> Option<String> {
+    let mut c = cmd;
+    for part in path.split_whitespace() {
+        c = c.find_subcommand(part)?;
+    }
+    c.get_about().map(|a| a.to_string())
+}
+
 /// The catalog entry for a help group title. Titles without one (e.g. a
 /// newly added group) show in English.
 fn group_msg(english: &str) -> Option<i18n::Msg> {
@@ -3914,13 +3980,23 @@ fn localized_about(name: &str) -> Option<&'static str> {
 
 /// Top-level help with commands grouped by purpose (clap would otherwise list
 /// 60 commands flat). Descriptions come from the doc comments above.
-fn grouped_help_template(cmd: &clap::Command) -> String {
+/// `all` lists every command; otherwise only the core ones, with a pointer
+/// to `--help-all`.
+fn grouped_help_template(cmd: &clap::Command, all: bool) -> String {
     use colored::Colorize;
     let mut out = format!(
         "{{before-help}}{{about-with-newline}}\n{} {{usage}}\n",
         i18n::t(i18n::Msg::HelpUsage).bold().underline()
     );
-    for (group, names) in GROUPS {
+    let groups = if all { GROUPS } else { CORE_GROUPS };
+    let width = groups
+        .iter()
+        .flat_map(|(_, names)| names.iter())
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(12)
+        .max(12);
+    for (group, names) in groups {
         out.push_str(&format!(
             "\n{}\n",
             format!("{}:", group_title(group)).bold().underline()
@@ -3928,15 +4004,26 @@ fn grouped_help_template(cmd: &clap::Command) -> String {
         for name in *names {
             let about = localized_about(name)
                 .map(str::to_string)
-                .or_else(|| {
-                    cmd.find_subcommand(name)
-                        .and_then(|c| c.get_about())
-                        .map(|a| a.to_string())
-                })
+                .or_else(|| command_about(cmd, name))
                 .unwrap_or_else(|| i18n::t(i18n::Msg::HelpPrintHelp).into());
             // Pad before styling so ANSI codes don't break the alignment.
-            out.push_str(&format!("  {} {}\n", format!("{:<12}", name).bold(), about));
+            out.push_str(&format!(
+                "  {} {}\n",
+                format!("{:<width$}", name).bold(),
+                about
+            ));
         }
+    }
+    if !all {
+        let total = cmd.get_subcommands().filter(|c| !c.is_hide_set()).count();
+        out.push_str(&format!(
+            "\n  {}\n",
+            format!(
+                "Showing the core commands. Run `stockwise --help-all` for all {total}, \
+                 or `stockwise <command> --help` for one."
+            )
+            .dimmed()
+        ));
     }
     out.push_str(&format!(
         "\n{}\n{{options}}{{after-help}}",
@@ -3946,8 +4033,13 @@ fn grouped_help_template(cmd: &clap::Command) -> String {
 }
 
 fn build_cli() -> clap::Command {
+    build_cli_with(false)
+}
+
+/// The CLI with the short (core) or full (`--help-all`) top-level help.
+fn build_cli_with(all: bool) -> clap::Command {
     let cmd = Cli::command();
-    let template = grouped_help_template(&cmd);
+    let template = grouped_help_template(&cmd, all);
     cmd.help_template(template)
 }
 
@@ -4598,6 +4690,63 @@ fn exit_quietly_on_broken_pipe() {
     }));
 }
 
+/// Whether the command line asks for JSON output (`--json`, or `--format json`
+/// where a command has it), so errors come out as JSON too.
+fn wants_json(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|a| *a != "--")
+        .enumerate()
+        .any(|(i, a)| {
+            a == "--json"
+                || a == "--format=json"
+                || (a == "--format" && args.get(i + 2).is_some_and(|v| v == "json"))
+        })
+}
+
+/// An error as `{"error":{"message":…,"exit_code":…}}`.
+fn error_json(message: &str, exit_code: i32) -> String {
+    serde_json::json!({ "error": { "message": message.trim(), "exit_code": exit_code } })
+        .to_string()
+}
+
+/// Print an error and exit: JSON on stderr under `--json`, else the usual
+/// red "Error:" line.
+fn fail(args: &[String], message: &str, exit_code: i32) -> ! {
+    if wants_json(args) {
+        eprintln!("{}", error_json(message, exit_code));
+    } else {
+        eprintln!(
+            "\n  {} {}\n",
+            colored::Colorize::red(i18n::t(i18n::Msg::ErrorPrefix)),
+            message
+        );
+    }
+    std::process::exit(exit_code);
+}
+
+/// A clap error: JSON under `--json` (help and version still print as text).
+fn clap_fail(args: &[String], e: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+    let informational = matches!(
+        e.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    if wants_json(args) && !informational {
+        let text = e.render().to_string();
+        let first = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("invalid arguments")
+            .trim_start_matches("error: ");
+        eprintln!("{}", error_json(first, e.exit_code()));
+        std::process::exit(e.exit_code());
+    }
+    e.exit()
+}
+
 /// Windows defaults the main thread to a 1 MiB stack (Linux/macOS use 8 MiB).
 /// Building the full CLI tree and driving the command dispatch state machine
 /// exceeds 1 MiB in unoptimized builds, so run on an explicit 8 MiB stack.
@@ -4622,6 +4771,13 @@ fn main() {
 
 async fn async_main() {
     exit_quietly_on_broken_pipe();
+    // Before parsing, so the bare-symbol path (`stockwise TCS -v`) logs too.
+    netlog::init(
+        std::env::args_os()
+            .skip(1)
+            .take_while(|a| a != "--")
+            .any(|a| a == "--verbose" || a == "-v"),
+    );
     // The language is needed before parsing: the help text is built from it.
     // args_os: a non-UTF-8 argument is clap's to report, not a panic here.
     let mut args: Vec<String> = std::env::args_os()
@@ -4649,7 +4805,8 @@ async fn async_main() {
         return;
     }
     if args.iter().any(|a| a == "--help-all") {
-        let _ = cmd.print_long_help();
+        let mut all = with_config_defaults(build_cli_with(true), config::get());
+        let _ = all.print_long_help();
         println!();
         return;
     }
@@ -4681,8 +4838,7 @@ async fn async_main() {
                 && let Some((sym, m, fmt)) = parse_bare_symbol_invocation(&args, default_market)
             {
                 if let Err(e) = portfolio::select(portfolio.as_deref()) {
-                    eprintln!("\n  {} {:#}\n", colored::Colorize::red("Error:"), e);
-                    std::process::exit(2);
+                    fail(&args, &format!("{e:#}"), 2);
                 }
                 let market_flag = args
                     .iter()
@@ -4697,20 +4853,15 @@ async fn async_main() {
                     (r.symbol, r.market)
                 };
                 if let Err(err) = commands::cmd_smart_overview(&sym, m, fmt).await {
-                    eprintln!(
-                        "\n  {} {:#}\n",
-                        colored::Colorize::red(i18n::t(i18n::Msg::ErrorPrefix)),
-                        err
-                    );
-                    std::process::exit(1);
+                    fail(&args, &format!("{err:#}"), 1);
                 }
                 return;
             }
-            e.exit();
+            clap_fail(&args, e);
         }
     };
     let mut matches = matches;
-    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| clap_fail(&args, e));
 
     // A broken config file stops everything except the commands that help fix it.
     if let config::Status::Invalid(msg) = &cfg_state.status
@@ -4720,14 +4871,13 @@ async fn async_main() {
                 | Commands::Config { .. }
                 | Commands::Init { .. }
                 | Commands::Use { .. }
-                | Commands::Doctor
+                | Commands::Doctor { .. }
                 | Commands::Backup { .. }
                 | Commands::Update { .. }
                 | Commands::Completions { .. }
         )
     {
-        eprintln!("\n  {} {}\n", colored::Colorize::red("Error:"), msg);
-        std::process::exit(1);
+        fail(&args, msg, 1);
     }
     // `backup` runs with a broken config file (a restore can replace it), but
     // the file's `home` setting is unreadable then: insist on STOCKWISE_HOME
@@ -4809,8 +4959,8 @@ async fn async_main() {
             if rewrote {
                 matches = with_config_defaults(build_cli(), config::get())
                     .try_get_matches_from(&args)
-                    .unwrap_or_else(|e| e.exit());
-                cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+                    .unwrap_or_else(|e| clap_fail(&args, e));
+                cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| clap_fail(&args, e));
             }
             m = picked;
         }
@@ -4818,8 +4968,7 @@ async fn async_main() {
     ai::set_auto_ai(cli.ai && !cli.no_ai);
     market::set_quote_currency(&cli.quote_currency);
     if let Err(e) = portfolio::select(cli.portfolio.as_deref()) {
-        eprintln!("\n  {} {:#}\n", colored::Colorize::red("Error:"), e);
-        std::process::exit(2);
+        fail(&args, &format!("{e:#}"), 2);
     }
 
     let cli_profile = cli.profile;
@@ -4834,12 +4983,7 @@ async fn async_main() {
     .await;
 
     if let Err(e) = result {
-        eprintln!(
-            "\n  {} {:#}\n",
-            colored::Colorize::red(i18n::t(i18n::Msg::ErrorPrefix)),
-            e
-        );
-        std::process::exit(1);
+        fail(&args, &format!("{e:#}"), 1);
     }
 }
 
@@ -4866,7 +5010,7 @@ async fn dispatch(
         } => commands::cmd_markets(m, out.into(), crypto, fx, global).await,
         Commands::Dashboard => commands::cmd_dashboard(m).await,
         Commands::Search { query, out } => commands::cmd_search(&query, out.into()).await,
-        Commands::Doctor => commands::cmd_doctor(m, sources).await,
+        Commands::Doctor { out } => commands::cmd_doctor(m, sources, out.json).await,
         Commands::Cache { action } => match action {
             CacheAction::Status => commands::cmd_cache(false),
             CacheAction::Clear { what } => commands::cmd_cache_clear(what).await,
@@ -5986,7 +6130,6 @@ async fn dispatch(
             auto,
             max_steps,
             max_tokens,
-            verbose,
             out,
         } => {
             if sessions {
@@ -5995,7 +6138,8 @@ async fn dispatch(
             let opts = ask::AskOptions {
                 max_steps: max_steps as usize,
                 token_budget: max_tokens,
-                verbose,
+                // The global --verbose also shows each tool call.
+                verbose: netlog::verbose_flag(),
                 ..Default::default()
             };
             let req = commands::AskRequest {
@@ -6069,6 +6213,7 @@ async fn dispatch(
                 max_stock_weight,
                 max_smallcap_weight,
                 risk_per_trade,
+                residence,
                 out: set_out,
             }) => {
                 let fmt = Format::from_flags(args.out.json || set_out.json, false);
@@ -6082,6 +6227,7 @@ async fn dispatch(
                     max_stock_weight,
                     max_smallcap_weight,
                     risk_per_trade,
+                    residence,
                 };
                 commands::cmd_profile_set(spec_str.as_deref(), update, fmt)
             }
@@ -6614,8 +6760,61 @@ mod tests {
     }
 
     #[test]
+    fn json_mode_errors_are_json() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(wants_json(&v(&["stockwise", "quote", "TCS", "--json"])));
+        assert!(wants_json(&v(&[
+            "stockwise",
+            "quote",
+            "TCS",
+            "--format",
+            "json"
+        ])));
+        assert!(wants_json(&v(&[
+            "stockwise",
+            "quote",
+            "--format=json",
+            "TCS"
+        ])));
+        assert!(!wants_json(&v(&["stockwise", "quote", "TCS"])));
+        assert!(!wants_json(&v(&["stockwise", "ask", "--", "--json"])));
+        let out: serde_json::Value =
+            serde_json::from_str(&error_json("No quote for ZZZ.NS\n", 1)).unwrap();
+        assert_eq!(out["error"]["message"], "No quote for ZZZ.NS");
+        assert_eq!(out["error"]["exit_code"], 1);
+    }
+
+    #[test]
+    fn core_help_lists_existing_commands_and_points_to_help_all() {
+        let cmd = Cli::command();
+        for (group, names) in CORE_GROUPS {
+            assert!(group_msg(group).is_some(), "`{group}` has no translation");
+            for name in *names {
+                assert!(
+                    command_about(&cmd, name).is_some(),
+                    "core help names `{name}`, which is not a command"
+                );
+            }
+        }
+        let core = grouped_help_template(&cmd, false);
+        for name in [
+            "today",
+            "hot",
+            "portfolio review",
+            "picks review",
+            "tax reconcile",
+        ] {
+            assert!(core.contains(name), "core help misses `{name}`");
+        }
+        assert!(core.contains("--help-all"));
+        assert!(!core.contains("fibs"), "core help lists a niche command");
+        let all = grouped_help_template(&cmd, true);
+        assert!(all.contains("fibs") && !all.contains("Showing the core commands"));
+    }
+
+    #[test]
     fn help_template_translates_group_titles() {
-        let template = grouped_help_template(&Cli::command());
+        let template = grouped_help_template(&Cli::command(), true);
         // English unless set: tests never call i18n::set_lang.
         assert!(template.contains("Start here"));
         for (group, _) in GROUPS {
@@ -6761,12 +6960,69 @@ mod tests {
                 "docs/guide-alerts.md",
                 "docs/guide-practice.md",
                 "docs/guide-scripting.md",
+                "docs/guide-actions.md",
+                "docs/guide-daily.md",
+                "docs/guide-picks.md",
             ] {
                 checked += check_doc_blocks(file);
             }
             assert!(
                 checked == 0 || checked > 100,
                 "only {checked} commands found in the guides"
+            );
+        });
+    }
+
+    /// Whether `needle` appears in `doc` as a whole word or flag (not inside
+    /// a longer name: `--limit` does not count for `--lim`).
+    fn mentions(doc: &str, needle: &str) -> bool {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        doc.match_indices(needle).any(|(i, _)| {
+            let before = doc[..i].chars().next_back();
+            let after = doc[i + needle.len()..].chars().next();
+            !before.is_some_and(word) && !after.is_some_and(word)
+        })
+    }
+
+    #[test]
+    fn commands_reference_covers_every_command_and_flag() {
+        run_on_large_stack(|| {
+            let doc = std::fs::read_to_string("docs/commands.md").expect("docs/commands.md");
+            let mut missing = Vec::new();
+            fn walk(cmd: &clap::Command, path: &str, doc: &str, missing: &mut Vec<String>) {
+                for arg in cmd.get_arguments() {
+                    if arg.is_hide_set() {
+                        continue;
+                    }
+                    if let Some(long) = arg.get_long()
+                        && !matches!(long, "help" | "version")
+                        && !mentions(doc, &format!("--{long}"))
+                    {
+                        missing.push(format!("--{long} (stockwise {path})"));
+                    }
+                }
+                for sub in cmd.get_subcommands() {
+                    if sub.is_hide_set() || sub.get_name() == "help" {
+                        continue;
+                    }
+                    let p = if path.is_empty() {
+                        sub.get_name().to_string()
+                    } else {
+                        format!("{path} {}", sub.get_name())
+                    };
+                    if !mentions(doc, &p) {
+                        missing.push(format!("command `{p}`"));
+                    }
+                    walk(sub, &p, doc, missing);
+                }
+            }
+            walk(&build_cli(), "", &doc, &mut missing);
+            missing.sort();
+            missing.dedup();
+            assert!(
+                missing.is_empty(),
+                "docs/commands.md does not mention:\n  {}",
+                missing.join("\n  ")
             );
         });
     }

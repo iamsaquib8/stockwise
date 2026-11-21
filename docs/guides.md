@@ -12,9 +12,12 @@ minutes.
 | I want to | Read | Main commands |
 |---|---|---|
 | See my real returns across brokers and mutual funds | [Import your trades and see true returns](guide-portfolio.md) | `import`, `portfolio`, `portfolio lots` |
-| Estimate my capital-gains tax and fill my ITR | [File your Indian capital-gains tax](guide-tax.md) | `tax in`, `harvest`, `tax advance`, `tax export in` |
+| Know what the rules say about each of my holdings | [Review your holdings with rule-based actions](guide-actions.md) | `portfolio review`, `verdict` |
+| See what moved today and what's hot | [See what's hot and what changed today](guide-daily.md) | `today`, `hot`, `digest`, `worker` |
+| Find candidates and check how past lists did | [Find candidates with picks](guide-picks.md) | `picks --horizon short --cap small`, `picks review` |
+| Estimate my capital-gains tax, check it against my broker and fill my ITR | [File your Indian capital-gains tax](guide-tax.md) | `tax in`, `harvest`, `tax advance`, `tax reconcile`, `tax export in` |
 | Check a stock or fund quickly | [Check a stock or fund fast](guide-research.md) | `quote`, `deep`, `score`, `events`, `mf` |
-| Put new money where I am underweight | [Rebalance to target weights](guide-rebalance.md) | `portfolio target`, `rebalance --inflow` |
+| Put new money where I am underweight, or raise cash at the lowest tax | [Rebalance to target weights](guide-rebalance.md) | `portfolio target`, `rebalance --inflow`, `rebalance --raise` |
 | Ask Claude or Cursor about my portfolio | [Use StockWise from Claude, Gemini, Codex or Cursor](guide-mcp.md) | `mcp` |
 | Get a message when a price or RSI level is reached | [Set up alerts and the daemon](guide-alerts.md) | `alert`, `notify`, `daemon` |
 | Test an idea on past data, or practise with paper money | [Backtest and practise on past markets](guide-practice.md) | `backtest`, `sim replay` |
@@ -24,12 +27,16 @@ minutes.
 
 StockWise does four jobs. The guides follow them.
 
-1. **One portfolio with true returns.** Start with
+1. **What to do with my holdings.** Start with
    [Import your trades](guide-portfolio.md), then
+   [Review your holdings with rule-based actions](guide-actions.md),
+   [See what's hot and what changed today](guide-daily.md) and
    [Rebalance](guide-rebalance.md).
 2. **Indian capital-gains tax.** Read [File your Indian capital-gains
    tax](guide-tax.md). It needs the portfolio from job 1.
-3. **Quick lookups.** [Check a stock or fund fast](guide-research.md) and
+3. **Find candidates and look things up.**
+   [Find candidates with picks](guide-picks.md),
+   [Check a stock or fund fast](guide-research.md) and
    [Set up alerts](guide-alerts.md).
 4. **AI access with local data.** [Use StockWise from Claude or
    Cursor](guide-mcp.md). [Script it](guide-scripting.md) covers the same data
@@ -46,5 +53,6 @@ prices and paper money, never your portfolio.
 - Live orders through a broker are in [Brokers](brokers.md). They move real
   money, so they have no guide here.
 
-StockWise is for education and information. It is not financial advice. See the
-[disclaimer](disclaimer.md).
+StockWise is for education and information. Its actions are rule-based
+educational signals, not financial advice; StockWise is not a SEBI-registered
+investment adviser or research analyst. See the [disclaimer](disclaimer.md).

@@ -275,6 +275,28 @@ pub struct AiClient {
     redis: Option<redis::aio::MultiplexedConnection>,
 }
 
+/// Retries after a rate limit or overload, on top of the first request.
+const AI_RETRIES: u32 = 3;
+/// The longest a `Retry-After` header may make a command wait.
+const AI_RETRY_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Rate limited (429), unavailable (503) or overloaded (529, Anthropic).
+fn is_retryable_ai_status(status: u16) -> bool {
+    matches!(status, 429 | 503 | 529)
+}
+
+/// How long to wait before retry `attempt` (0-based): `Retry-After` seconds
+/// when given (capped), else 2, 4, 8 seconds.
+fn ai_retry_wait(attempt: u32, retry_after: Option<&str>) -> std::time::Duration {
+    let backoff = std::time::Duration::from_secs(2u64 << attempt.min(4));
+    retry_after
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(std::time::Duration::from_secs_f64)
+        .unwrap_or(backoff)
+        .min(AI_RETRY_MAX_WAIT)
+}
+
 impl AiClient {
     /// Client for optional AI sections. With a cloud provider it only
     /// generates when `--ai` is on (see `is_available`).
@@ -570,45 +592,83 @@ impl AiClient {
     /// POST a JSON body to a cloud API and return the parsed reply, turning
     /// an HTTP error into the provider's own error message. The key travels
     /// only in `headers`, never in the URL, so it can't leak into errors.
+    ///
+    /// A rate limit or overload (HTTP 429, 503, 529) is retried up to
+    /// `AI_RETRIES` times, waiting as long as `Retry-After` asks (at most
+    /// `AI_RETRY_MAX_WAIT`) or 2, 4, 8 seconds.
     async fn post_json(
         &self,
         url: &str,
         headers: &[(&str, &str)],
         body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let mut req = self.client.post(url).json(body);
-        for (name, value) in headers {
-            req = req.header(*name, *value);
-        }
-        let resp = req.send().await.map_err(|e| {
-            anyhow::anyhow!(
-                "Could not reach {}: {}",
+        let mut attempt = 0;
+        loop {
+            let mut req = self.client.post(url).json(body);
+            for (name, value) in headers {
+                req = req.header(*name, *value);
+            }
+            let started = std::time::Instant::now();
+            let sent = req.send().await;
+            crate::netlog::request(
                 self.provider.name(),
-                e.without_url()
-            )
-        })?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .with_context(|| format!("Failed to read the {} response", self.provider.name()))?;
-        let json: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-        if !status.is_success() {
-            bail!(
-                "{} returned HTTP {}: {}",
-                self.provider.name(),
-                status.as_u16(),
-                cloud_error_message(&json).unwrap_or("no error details")
+                url,
+                sent.as_ref().ok().map(|r| r.status().as_u16()),
+                started.elapsed(),
             );
+            let resp = sent.map_err(|e| {
+                anyhow::anyhow!(
+                    "Could not reach {}: {}",
+                    self.provider.name(),
+                    e.without_url()
+                )
+            })?;
+            let status = resp.status();
+            if is_retryable_ai_status(status.as_u16()) && attempt < AI_RETRIES {
+                let wait = ai_retry_wait(
+                    attempt,
+                    resp.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                );
+                eprintln!(
+                    "  {} is busy (HTTP {}); retrying in {}s…",
+                    self.provider.name(),
+                    status.as_u16(),
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+                continue;
+            }
+            let text = resp
+                .text()
+                .await
+                .with_context(|| format!("Failed to read the {} response", self.provider.name()))?;
+            let json: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            if !status.is_success() {
+                let hint = if is_retryable_ai_status(status.as_u16()) {
+                    " (still rate limited after retries; wait a minute and try again)"
+                } else {
+                    ""
+                };
+                bail!(
+                    "{} returned HTTP {}: {}{}",
+                    self.provider.name(),
+                    status.as_u16(),
+                    cloud_error_message(&json).unwrap_or("no error details"),
+                    hint
+                );
+            }
+            if json.is_null() {
+                bail!(
+                    "{} returned a response that is not JSON",
+                    self.provider.name()
+                );
+            }
+            return Ok(json);
         }
-        if json.is_null() {
-            bail!(
-                "{} returned a response that is not JSON",
-                self.provider.name()
-            );
-        }
-        Ok(json)
     }
 
     async fn generate_openai(&self, key: &str, prompt: &str) -> Result<String> {
@@ -1584,6 +1644,35 @@ mod tests {
         // Models without server-side fallback get neither the field nor the beta.
         assert_eq!(reqs[1].header("anthropic-beta"), None);
         assert!(reqs[1].json().get("fallbacks").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_is_retried_after_retry_after() {
+        let ok = r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}"#;
+        let server = crate::testutil::MockServer::start_with_headers(vec![
+            (
+                429,
+                vec![("Retry-After".into(), "0".into())],
+                r#"{"error":{"message":"rate limited"}}"#.into(),
+            ),
+            (200, Vec::new(), ok.into()),
+        ])
+        .await;
+        let mut ai = cloud_client(AiProvider::OpenAi, "gpt-test", &server.url);
+        assert_eq!(ai.generate("p").await.unwrap(), "done");
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn ai_retry_waits_follow_retry_after_with_a_cap() {
+        use std::time::Duration;
+        assert_eq!(ai_retry_wait(0, None), Duration::from_secs(2));
+        assert_eq!(ai_retry_wait(2, None), Duration::from_secs(8));
+        assert_eq!(ai_retry_wait(0, Some("5")), Duration::from_secs(5));
+        assert_eq!(ai_retry_wait(0, Some("3600")), AI_RETRY_MAX_WAIT);
+        assert_eq!(ai_retry_wait(1, Some("soon")), Duration::from_secs(4));
+        assert!(is_retryable_ai_status(429) && is_retryable_ai_status(529));
+        assert!(!is_retryable_ai_status(400) && !is_retryable_ai_status(401));
     }
 
     #[tokio::test]

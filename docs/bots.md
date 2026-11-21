@@ -21,7 +21,7 @@ paper trades with a capital, use [`sim`](#paper-trading-simulator) or the
 |---|----------|--------|---------|
 | 1 | Dip | Long | One vote for any oversold reading: RSI <40 (<30 strongly), price at the lower Bollinger Band, price >3% below the 20-day average, or OBV rising while price is flat or down |
 | 2 | Overextended | Short | One vote for RSI >70 or price at the upper Bollinger Band |
-| 3 | VWAP Reclaim / Rejection | Long/Short | Price within 0.5% above (or below) today's session VWAP |
+| 3 | VWAP Reclaim / Rejection | Long/Short | Price crosses today's session VWAP: the previous bar closed at or below it (above it for a rejection) and this bar closes within 0.5% above (below) it |
 | 4 | BB Squeeze | Long | Tight Bollinger bands + price above middle |
 | 5 | MACD Cross | Long/Short | Histogram sign change (fresh crossover) |
 | 6 | Volume Breakout | Long | Today's volume 2x+ the usual pace for this time of day, with positive price action |

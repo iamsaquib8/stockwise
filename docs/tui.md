@@ -48,6 +48,8 @@ the portfolio. With both empty it shows the first index.
 | `↑` `↓` / `j` `k` | Move the selection (the chart follows) |
 | `g` `G` / `Home` `End` | First / last row |
 | `Tab` | Switch between watchlist and portfolio |
+| `d` / `Enter` | Inspect the selected symbol: live price, day volume, your position and its weight, active alerts (`Esc`, `d` or `Enter` closes it) |
+| `s` | Cycle the sort order of the watchlist and portfolio: file order, symbol A–Z, change % (day change for the watchlist, P&L for holdings), value (price for the watchlist, value in the base currency for holdings). The pane titles show the active sort. The selection stays on the same symbol when the rows move |
 | `p` | Open or close the portfolio analysis screen (`Esc` also closes it) |
 | `1`-`6` / `[` `]` | Chart period: `1d` `5d` `1mo` `6mo` `1y` `5y` |
 | `/` or `a` | Search a company or ticker and add it to the watchlist (`Enter` searches, `↑` `↓` choose, `Enter` adds, `Esc` cancels). Listings on your market's exchanges (NSE/BSE for India) are listed first |

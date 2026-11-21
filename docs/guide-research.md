@@ -7,8 +7,11 @@ what a fund's past SIP returned.
 You need nothing but StockWise. No account or API key is required. Data comes
 from Yahoo Finance, NSE and AMFI, so quotes can be delayed.
 
-None of these commands tells you what to buy or sell. They show facts and
-simple scores. The decision stays with you.
+These commands show facts and scores. `verdict`, `deep` and a bare
+`stockwise TCS` also start with a rule-based action; [Review your holdings
+with rule-based actions](guide-actions.md) explains how to read it. Actions
+are educational signals from fixed rules, not advice. The decision stays with
+you.
 
 ## 1. Find the ticker
 
@@ -130,6 +133,8 @@ Add `--explain` to `options oi` for plain-English notes.
 
 ## Next steps
 
+- Want a ranked list of candidates across a market? See
+  [Find candidates with picks](guide-picks.md).
 - Want a message when a price or RSI level is hit? See
   [Set up alerts and the daemon](guide-alerts.md).
 - Want to test a rule on past prices? See

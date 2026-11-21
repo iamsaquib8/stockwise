@@ -193,6 +193,27 @@ pub(crate) async fn enriched_quotes(
                 .is_none_or(|t| t.eq_ignore_ascii_case("EQUITY"))
         })
         .collect();
+    enrich_quotes(client, todo).await
+}
+
+/// Complete listed stocks' quotes (`quoteSummary`, then the exchange and
+/// keyed fallbacks) so the action rules can read fundamentals. By symbol;
+/// funds, ETFs and indices are left out.
+pub(crate) async fn enrich_quotes(
+    client: &YahooClient,
+    quotes: Vec<Quote>,
+) -> std::collections::HashMap<String, Quote> {
+    if cfg!(test) {
+        return Default::default();
+    }
+    let todo: Vec<Quote> = quotes
+        .into_iter()
+        .filter(|q| {
+            q.quote_type
+                .as_deref()
+                .is_none_or(|t| t.eq_ignore_ascii_case("EQUITY"))
+        })
+        .collect();
     futures_util::stream::iter(todo.into_iter().map(|mut q| async move {
         let mut meta = crate::provenance::Meta::default();
         crate::research::enrich_quote_with(client, &mut q, false, &mut meta).await;

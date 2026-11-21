@@ -14,7 +14,7 @@ pub fn group_number(text: &str, indian: bool) -> String {
 
 /// Group the integer digits of an already-formatted number: `125000.5` →
 /// `1,25,000.5` (Indian lakhs) or `125,000.5` (thousands).
-fn grouped_decimal(text: &str, indian: bool) -> String {
+pub(crate) fn grouped_decimal(text: &str, indian: bool) -> String {
     let (sign, rest) = match text.strip_prefix('-') {
         Some(rest) => ("-", rest),
         None => ("", text),

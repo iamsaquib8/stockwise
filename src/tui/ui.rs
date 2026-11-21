@@ -1,7 +1,7 @@
 //! Drawing the TUI. Pure functions of [`App`]: nothing here fetches data or
 //! changes state, so a frame can be rendered into a test buffer.
 
-use super::app::{App, CHART_PERIODS, Focus, Mode, Screen, Series};
+use super::app::{App, CHART_PERIODS, Focus, Mode, Screen, Series, SortBy};
 use crate::alerts::{Alert, AlertCondition};
 use crate::display::format_price;
 use crate::views::{AlertCheckRow, IndexRow};
@@ -268,7 +268,11 @@ pub(super) fn placeholder(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) 
 fn render_watchlist(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let focused = app.focus == Focus::Watchlist;
     let rows = app.snapshot.as_ref().map(|s| &s.watchlist);
-    let title = format!(" Watchlist ({}) ", rows.map_or(0, |r| r.len()));
+    let title = format!(
+        " Watchlist ({}) {}",
+        rows.map_or(0, |r| r.len()),
+        sort_note(app, Focus::Watchlist)
+    );
     let block = pane(title, focused, theme);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -322,10 +326,22 @@ fn render_watchlist(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_stateful_widget(table, inner, &mut state);
 }
 
+/// The active sort for a pane title, empty in file order.
+fn sort_note(app: &App, pane: Focus) -> String {
+    if app.sort == SortBy::Default {
+        String::new()
+    } else {
+        format!("· by {} ", app.sort.label(pane))
+    }
+}
+
 fn render_portfolio(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let focused = app.focus == Focus::Portfolio;
     let view = app.snapshot.as_ref().map(|s| &s.portfolio);
-    let mut title = vec![Span::raw(" Portfolio ")];
+    let mut title = vec![Span::raw(format!(
+        " Portfolio {}",
+        sort_note(app, Focus::Portfolio)
+    ))];
     if let Some(n) = view.map(|v| v.unpriced.len()).filter(|n| *n > 0) {
         title.push(Span::styled(format!("· {} unpriced ", n), theme.warn));
     }
@@ -680,7 +696,7 @@ fn render_chart(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme, full: bool) {
     if let Some(status) = &app.status {
-        let style = if status.error {
+        let style = if status.is_error() {
             theme.down.add_modifier(Modifier::BOLD)
         } else {
             theme.accent
@@ -752,7 +768,7 @@ const HELP: &[(&str, &str)] = &[
         "d  Enter",
         "inspect selected symbol (position, range, alerts)",
     ),
-    ("s", "cycle sort order (symbol, change%, value, P&L%)"),
+    ("s", "sort: file order, symbol, change %, value"),
     ("1-6  [ ]", "chart period: 1d 5d 1mo 6mo 1y 5y"),
     ("/  a", "search a company and add it to the watchlist"),
     ("x  Del", "remove the selected watchlist symbol"),
@@ -1124,6 +1140,21 @@ mod tests {
         assert!(screen.contains("NIFTY 50 24800 ▲0.50%"), "{screen}");
         assert!(screen.contains("Avg"));
         assert!(screen.contains("+₹6,000.00"), "TCS P&L column\n{screen}");
+    }
+
+    #[test]
+    fn pane_titles_show_the_active_sort() {
+        let mut app = loaded();
+        let screen = text(&draw(&app, 140, 40, Theme::new(true)));
+        assert!(!screen.contains("· by"), "{screen}");
+        app.update(key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('s')));
+        let screen = text(&draw(&app, 140, 40, Theme::new(true)));
+        assert!(
+            screen.contains("Watchlist (2) · by day change %"),
+            "{screen}"
+        );
+        assert!(screen.contains("Portfolio · by P&L %"), "{screen}");
     }
 
     #[test]

@@ -604,11 +604,15 @@ pub fn resolve_index_alias(upper: &str, market: Market) -> Option<&'static str> 
         "SP500" | "S&P500" | "SPX" => Some("^GSPC"),
         "NASDAQ" | "IXIC" => Some("^IXIC"),
         "NASDAQ100" | "NDX" => Some("^NDX"),
-        "DOW" | "DJIA" | "DOWJONES" => Some("^DJI"),
+        "DJIA" | "DOWJONES" => Some("^DJI"),
+        // In the US market DOW is Dow Inc. and DAX the Global X DAX ETF: the
+        // bare names mean the indices only elsewhere (DJIA, ^DJI and ^GDAXI
+        // always work).
+        "DOW" if market != Market::Us => Some("^DJI"),
         "RUSSELL2000" | "RUT" => Some("^RUT"),
         "FTSE" | "FTSE100" => Some("^FTSE"),
         "NIKKEI" | "NIKKEI225" | "N225" => Some("^N225"),
-        "DAX" => Some("^GDAXI"),
+        "DAX" if market != Market::Us => Some("^GDAXI"),
         "HANGSENG" | "HSI" => Some("^HSI"),
         "VIX" if market == Market::In => Some("^INDIAVIX"),
         "VIX" if market == Market::Us => Some("^VIX"),
@@ -2470,7 +2474,12 @@ mod tests {
         assert_eq!(resolve_symbol("INDIAVIX", Market::In), "^INDIAVIX");
         assert_eq!(resolve_symbol("SP500", Market::Us), "^GSPC");
         assert_eq!(resolve_symbol("NASDAQ", Market::Us), "^IXIC");
-        assert_eq!(resolve_symbol("DOW", Market::Us), "^DJI");
+        assert_eq!(resolve_symbol("DJIA", Market::Us), "^DJI");
+        // Dow Inc. and the DAX ETF trade under these tickers in the US.
+        assert_eq!(resolve_symbol("DOW", Market::Us), "DOW");
+        assert_eq!(resolve_symbol("DAX", Market::Us), "DAX");
+        assert_eq!(resolve_symbol("DOW", Market::In), "^DJI");
+        assert_eq!(resolve_symbol("DAX", Market::In), "^GDAXI");
         assert_eq!(resolve_symbol("VIX", Market::Us), "^VIX");
 
         // Colloquial Indian tickers and renames/demergers

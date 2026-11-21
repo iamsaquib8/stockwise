@@ -69,6 +69,7 @@ mod casbridge;
 mod checkup;
 mod commodities;
 mod context;
+mod doctor;
 mod fno;
 mod fundamentals;
 mod funds;
@@ -105,7 +106,9 @@ mod worker;
 mod output_tests;
 
 pub use actions::cmd_portfolio_review;
-pub(crate) use actions::{action_line, apply_holding, load_notes, portfolio_review_report};
+pub(crate) use actions::{
+    action_line, apply_holding, enrich_quotes, enriched_quotes, load_notes, portfolio_review_report,
+};
 pub use alerting::*;
 pub use assistant::*;
 pub use background::*;
@@ -119,6 +122,7 @@ pub use casbridge::*;
 pub use checkup::*;
 pub use commodities::*;
 pub use context::*;
+pub use doctor::cmd_doctor;
 pub use fno::*;
 pub use fundamentals::*;
 pub use funds::*;

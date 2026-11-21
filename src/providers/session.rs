@@ -210,6 +210,8 @@ pub struct Session {
     cache: OnceLock<SharedCache>,
     disk: DiskCache,
     blocked_until: Mutex<Option<Instant>>,
+    /// Whether a refusal remembered on disk was looked for yet.
+    refusal_checked: std::sync::atomic::AtomicBool,
     noticed: Mutex<HashSet<String>>,
     retry_base: Duration,
     renew_after: Duration,
@@ -231,6 +233,7 @@ impl Session {
             cache: OnceLock::new(),
             disk: DiskCache::DataDir,
             blocked_until: Mutex::new(None),
+            refusal_checked: std::sync::atomic::AtomicBool::new(false),
             noticed: Mutex::new(HashSet::new()),
             retry_base: Duration::from_millis(500),
             renew_after: RENEW_AFTER,
@@ -256,8 +259,11 @@ impl Session {
         let _ = self.cache.set(cache);
     }
 
-    /// Whether the site refused us (or was unreachable) recently.
+    /// Whether the site refused us (or was unreachable) recently. A refusal
+    /// is remembered on disk for `BLOCK_FOR`, so the next run does not spend
+    /// a request (and the user's time) asking again.
     pub fn is_blocked(&self) -> bool {
+        self.load_refusal();
         self.blocked_until
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -267,6 +273,46 @@ impl Session {
     fn block(&self) {
         *self.blocked_until.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Instant::now() + BLOCK_FOR);
+    }
+
+    /// The file that remembers a refusal across runs.
+    fn refusal_file(&self) -> Option<PathBuf> {
+        // Unit tests share one data directory: only a test's own folder.
+        #[cfg(test)]
+        if matches!(self.disk, DiskCache::DataDir) {
+            return None;
+        }
+        self.disk_path(&format!(
+            "{}-refused.txt",
+            self.site.name.to_ascii_lowercase()
+        ))
+    }
+
+    /// Remember a refusal (not an outage: a network that comes back should
+    /// be used at once) for the next runs.
+    fn remember_refusal(&self) {
+        if let Some(path) = self.refusal_file() {
+            let _ = std::fs::write(path, crate::selfupdate::now_secs().to_string());
+        }
+    }
+
+    /// Once per process: pick up a refusal an earlier run remembered.
+    fn load_refusal(&self) {
+        if self.refusal_checked.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(at) = self
+            .refusal_file()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| t.trim().parse::<u64>().ok())
+        else {
+            return;
+        };
+        let age = Duration::from_secs(crate::selfupdate::now_secs().saturating_sub(at));
+        if age < BLOCK_FOR {
+            *self.blocked_until.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(Instant::now() + (BLOCK_FOR - age));
+        }
     }
 
     /// Say once per process and problem, on stderr, why the site isn't
@@ -334,20 +380,27 @@ impl Session {
         }
         self.limiter.wait().await;
         STATS.requests.fetch_add(1, Ordering::Relaxed);
-        let resp = self
+        let started = Instant::now();
+        let sent = self
             .client
             .get(home)
             .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
             .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
             .send()
-            .await
-            .map_err(|e| {
-                FetchError::Unavailable(format!(
-                    "{} is unreachable ({})",
-                    self.site.name,
-                    e.without_url()
-                ))
-            })?;
+            .await;
+        crate::netlog::request(
+            self.site.name,
+            home,
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+            started.elapsed(),
+        );
+        let resp = sent.map_err(|e| {
+            FetchError::Unavailable(format!(
+                "{} is unreachable ({})",
+                self.site.name,
+                e.without_url()
+            ))
+        })?;
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
         if status == 403 || looks_blocked(&body) {
@@ -387,6 +440,7 @@ impl Session {
             && let Some(cache) = self.cache.get()
             && let Some(body) = cache.lock().await.get(&cache_key).await
         {
+            crate::netlog::cache_hit(self.site.name, url.as_str());
             return Ok(body);
         }
         let result = self.fetch(url).await;
@@ -397,10 +451,13 @@ impl Session {
                 }
             }
             Ok(_) => {}
-            Err(FetchError::Blocked(_) | FetchError::Unavailable(_)) => {
+            Err(e @ (FetchError::Blocked(_) | FetchError::Unavailable(_))) => {
                 STATS.errors.fetch_add(1, Ordering::Relaxed);
                 if !self.is_blocked() {
                     self.block();
+                    if matches!(e, FetchError::Blocked(_)) {
+                        self.remember_refusal();
+                    }
                 }
             }
             Err(_) => {
@@ -437,7 +494,15 @@ impl Session {
                 req = req.header(reqwest::header::ORIGIN, origin);
             }
             let last = attempt + 1 >= MAX_ATTEMPTS;
-            let resp = match req.send().await {
+            let started = Instant::now();
+            let sent = req.send().await;
+            crate::netlog::request(
+                name,
+                url.as_str(),
+                sent.as_ref().ok().map(|r| r.status().as_u16()),
+                started.elapsed(),
+            );
+            let resp = match sent {
                 Ok(resp) => resp,
                 Err(_) if !last => {
                     tokio::time::sleep(backoff(attempt, self.retry_base, None)).await;
@@ -569,6 +634,31 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refusal_is_remembered_by_the_next_session_but_an_outage_is_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "sw-refusal-{}-{}",
+            std::process::id(),
+            crate::selfupdate::now_secs()
+        ));
+        let site = || super::super::nse::site("http://127.0.0.1:9");
+        let first = Session::for_tests(site(), DiskCache::Dir(dir.clone()));
+        assert!(!first.is_blocked());
+        first.block();
+        first.remember_refusal();
+        let next = Session::for_tests(site(), DiskCache::Dir(dir.clone()));
+        assert!(next.is_blocked(), "the refusal carries over");
+        // An old refusal has run out.
+        std::fs::write(
+            next.refusal_file().unwrap(),
+            (crate::selfupdate::now_secs() - BLOCK_FOR.as_secs() - 5).to_string(),
+        )
+        .unwrap();
+        let later = Session::for_tests(site(), DiskCache::Dir(dir.clone()));
+        assert!(!later.is_blocked());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     use super::*;
     use crate::testutil::MockServer;
     use std::sync::Arc;

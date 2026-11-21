@@ -330,6 +330,17 @@ pub fn print_effective_profile(p: &config::EffectiveProfile) {
         ),
         ("auto_explain", p.auto_explain.to_string(), p.mode_source),
         ("screen_presets", p.screen_presets.join(", "), p.mode_source),
+        (
+            "residence",
+            p.residence
+                .clone()
+                .unwrap_or_else(|| "not set (follows the market)".into()),
+            if p.residence.is_some() {
+                config::Source::File
+            } else {
+                config::Source::Default
+            },
+        ),
     ];
     for (k, v, s) in rows {
         println!("  {:<28} {:<32} {}", k, v, fmt_src(s));

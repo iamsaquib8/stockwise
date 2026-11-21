@@ -264,11 +264,13 @@ pub fn parse_expiry(s: &str) -> Option<NaiveDate> {
 }
 
 /// When an expiry stops trading, in UTC: 15:30 IST on NSE and BSE, 16:00
-/// New York (taken as 20:00 UTC) for US listings.
+/// New York for US listings (20:00 UTC in daylight-saving time, 21:00 UTC
+/// in winter).
 pub fn expiry_close(expiry: NaiveDate, source: ChainSource) -> DateTime<Utc> {
     let hour = match source {
         ChainSource::Nse | ChainSource::Bse => 10,
-        ChainSource::Yahoo => 20,
+        ChainSource::Yahoo if crate::clock::us_dst_on(expiry) => 20,
+        ChainSource::Yahoo => 21,
     };
     expiry
         .and_hms_opt(hour, 0, 0)
@@ -1365,6 +1367,26 @@ pub async fn fetch_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn us_expiry_close_follows_daylight_saving() {
+        let d = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        // 16:00 New York: EDT in July, EST in December.
+        assert_eq!(
+            expiry_close(d(2026, 7, 17), ChainSource::Yahoo).to_rfc3339(),
+            "2026-07-17T20:00:00+00:00"
+        );
+        assert_eq!(
+            expiry_close(d(2026, 12, 18), ChainSource::Yahoo).to_rfc3339(),
+            "2026-12-18T21:00:00+00:00"
+        );
+        // 15:30 IST all year.
+        assert_eq!(
+            expiry_close(d(2026, 12, 29), ChainSource::Nse).to_rfc3339(),
+            "2026-12-29T10:00:00+00:00"
+        );
+    }
+
     use serde_json::json;
 
     fn row(strike: f64, call_oi: u64, put_oi: u64) -> ChainRow {

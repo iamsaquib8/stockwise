@@ -350,6 +350,16 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
     if !totals.unpriced.is_empty() {
         warnings.push(format!("No price for {}", totals.unpriced.join(", ")));
     }
+    // The bulk quote has no ROE, margins or debt: complete the holdings'
+    // quotes first, or every holding's action would be NO CALL (coverage),
+    // unlike `portfolio review`.
+    let mut enriched = crate::commands::enriched_quotes(client, &portfolio, &val).await;
+    let watched: Vec<Quote> = symbols
+        .iter()
+        .filter(|s| !held.contains(*s) && !crate::offmarket::is_off_market(s))
+        .filter_map(|s| val.quote(s).cloned())
+        .collect();
+    enriched.extend(crate::commands::enrich_quotes(client, watched).await);
 
     // Benchmarks and backdrop.
     let mut markets: Vec<Market> = symbols
@@ -535,7 +545,7 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             why,
             news,
             events: events.iter().filter(|e| &e.symbol == s).cloned().collect(),
-            action: q.map(|q| {
+            action: enriched.get(s).or(q).map(|q| {
                 crate::commands::action_line(
                     q,
                     h,

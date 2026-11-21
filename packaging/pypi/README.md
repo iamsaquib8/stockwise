@@ -44,7 +44,7 @@ Your portfolio stays in local files and StockWise sends no telemetry.
 
 `stockwise mcp` is a Model Context Protocol server: Claude Desktop, Claude
 Code, Cursor and other assistants can use quotes, fund NAVs, option chains,
-backtests, your portfolio and its tax estimate through 52 tools that read (and, with
+backtests, your portfolio and its tax estimate through 71 tools that read (and, with
 `--allow-writes`, tools that update your watchlist, alerts, goals and profile, each undoable).
 `stockwise connect` adds it to Claude, Codex, Gemini, Antigravity, Cursor and other apps. It never places orders. With
 `uvx` there is nothing to install first:
