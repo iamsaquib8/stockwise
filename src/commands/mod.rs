@@ -106,7 +106,9 @@ mod worker;
 mod output_tests;
 
 pub use actions::cmd_portfolio_review;
-pub(crate) use actions::{action_line, apply_holding, load_notes, portfolio_review_report};
+pub(crate) use actions::{
+    action_line, apply_holding, enrich_quotes, enriched_quotes, load_notes, portfolio_review_report,
+};
 pub use alerting::*;
 pub use assistant::*;
 pub use background::*;

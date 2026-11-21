@@ -389,6 +389,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         action: Option<FundamentalCmd>,
         /// Symbol to score (when no subcommand is specified, e.g. `stockwise score TCS`)
         symbol: Option<String>,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
         /// Explain how to interpret the Piotroski 9-point F-Score and Altman Z-Score
@@ -1399,21 +1400,29 @@ STOCKWISE_PORTFOLIO are carried over when set.")]
 enum TasksAction {
     /// List recent tasks (the default)
     List {
+        /// How many tasks to show, newest first
         #[arg(long, default_value_t = 30)]
         limit: usize,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
     /// Show one task with its result
     Show {
+        /// Task id, from `stockwise tasks list`
         id: i64,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
     /// Cancel a queued or running task
-    Cancel { id: i64 },
+    Cancel {
+        /// Task id, from `stockwise tasks list`
+        id: i64,
+    },
     /// Queue a task for the worker
     Add {
+        /// What the worker should do
         #[arg(value_enum, ignore_case = true)]
         kind: worker::TaskKind,
         /// For `run`: the stockwise command, after `--`
@@ -1437,12 +1446,16 @@ enum CacheAction {
         /// Market-cap bucket
         #[arg(long, value_enum, ignore_case = true)]
         cap: Option<CapArg>,
+        /// Only this sector, as stored (e.g. "Technology")
         #[arg(long)]
         sector: Option<String>,
+        /// Minimum trailing P/E
         #[arg(long)]
         min_pe: Option<f64>,
+        /// Maximum trailing P/E
         #[arg(long)]
         max_pe: Option<f64>,
+        /// Minimum return on equity, percent
         #[arg(long)]
         min_roe: Option<f64>,
         /// Minimum dividend yield, percent
@@ -1457,8 +1470,10 @@ enum CacheAction {
         /// Smallest first
         #[arg(long)]
         asc: bool,
+        /// How many rows to show
         #[arg(long, default_value_t = 25)]
         limit: usize,
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },

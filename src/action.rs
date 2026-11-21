@@ -294,18 +294,28 @@ impl Action {
 }
 
 fn size_text(a: &Action, s: &SizeHint) -> String {
+    // "1 share", "2 shares": by the rounded number that is printed.
+    let shares = |n: f64| {
+        let n = format!("{n:.0}");
+        let word = if n == "1" { "share" } else { "shares" };
+        format!("{n} {word}")
+    };
     match (a.kind, s.shares) {
         (Kind::Trim, Some(n)) => format!(
-            "Size: sell about {n:.0} shares to get back to {:.1}% of the portfolio ({})",
-            s.max_weight_pct, s.limited_by
+            "Size: sell about {} to get back to {:.1}% of the portfolio ({})",
+            shares(n),
+            s.max_weight_pct,
+            s.limited_by
         ),
         (Kind::Trim, None) => format!(
             "Size: bring the position back to {:.1}% of the portfolio ({})",
             s.max_weight_pct, s.limited_by
         ),
         (_, Some(n)) => format!(
-            "Size: at most {:.1}% of the portfolio, about {n:.0} shares ({})",
-            s.max_weight_pct, s.limited_by
+            "Size: at most {:.1}% of the portfolio, about {} ({})",
+            s.max_weight_pct,
+            shares(n),
+            s.limited_by
         ),
         (_, None) => format!(
             "Size: at most {:.1}% of the portfolio ({})",

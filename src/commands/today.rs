@@ -16,10 +16,10 @@ fn pct_colored(v: Option<f64>) -> String {
 fn money_colored(v: Option<f64>, base: &str) -> String {
     let sym = market::currency_symbol(Some(base));
     match v {
-        Some(p) if p >= 0.0 => format!("+{sym}{}", crate::digest::group(p))
+        Some(p) if p >= 0.0 => format!("+{sym}{}", crate::digest::group_in(p, base))
             .green()
             .to_string(),
-        Some(p) => format!("-{sym}{}", crate::digest::group(p.abs()))
+        Some(p) => format!("-{sym}{}", crate::digest::group_in(p.abs(), base))
             .red()
             .to_string(),
         None => "—".dimmed().to_string(),
@@ -220,7 +220,7 @@ pub async fn cmd_today(
                 .map(|v| format!(
                     "{}{}",
                     market::currency_symbol(Some(&base)),
-                    crate::digest::group(v)
+                    crate::digest::group_in(v, &base)
                 ))
                 .unwrap_or_else(|| "—".into())
                 .bold(),
@@ -313,8 +313,12 @@ pub async fn cmd_today(
         println!("  {} {}", "!".yellow(), w.dimmed());
     }
     println!(
-        "\n  {} Moves are explained by the most important fresh headline or filing; \"unexplained\" means an unusual move (2.5σ or more against the benchmark) with none found.\n",
+        "\n  {} Moves are explained by the most important fresh headline or filing; \"unexplained\" means an unusual move (2.5σ or more against the benchmark) with none found.",
         "→".dimmed()
     );
+    if pulse.rows.iter().any(|r| r.action.is_some()) {
+        println!("  {}", crate::action::DISCLAIMER.dimmed());
+    }
+    println!();
     Ok(())
 }

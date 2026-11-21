@@ -475,6 +475,10 @@ pub(crate) fn plain_hot(r: &HotReport, n: usize) -> String {
                 .join(", ")
         ));
     }
+    if r.yours.iter().any(|h| h.action.is_some()) {
+        out.push(String::new());
+        out.push(crate::action::DISCLAIMER.to_string());
+    }
     out.join("\n")
 }
 
@@ -611,8 +615,12 @@ pub async fn cmd_hot(
         println!("  {} {}", "!".yellow(), w.dimmed());
     }
     println!(
-        "\n  {} Heat = |excess move| in σ + volume surge + fresh news/filing importance + a date within 3 days, scaled by portfolio weight. Lists describe today's data; none is a recommendation.\n",
+        "\n  {} Heat = |excess move| in σ + volume surge + fresh news/filing importance + a date within 3 days, scaled by portfolio weight. Lists describe today's data; none is a recommendation.",
         "→".dimmed()
     );
+    if r.yours.iter().any(|h| h.action.is_some()) {
+        println!("  {}", crate::action::DISCLAIMER.dimmed());
+    }
+    println!();
     Ok(())
 }
