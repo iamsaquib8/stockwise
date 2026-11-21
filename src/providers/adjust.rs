@@ -117,8 +117,9 @@ fn shows_jump(
     let after = (0..dates.len())
         .find(|&i| dates[i].is_some_and(|d| d >= ex) && closes.get(i).copied().flatten().is_some());
     let (Some(b), Some(a)) = (before, after) else {
-        // Nothing on one side: no bar to adjust, or nothing to compare with.
-        return before.is_some();
+        // No bar on one side: nothing to adjust, or an action that has not
+        // taken effect in these bars yet. Neither is applied.
+        return false;
     };
     let (Some(pb), Some(pa)) = (closes[b], closes[a]) else {
         return false;
@@ -264,6 +265,20 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(closes(&c), vec![1500.0, 1505.0, 1510.0]);
         assert_eq!(c.indicators.quote[0].volume.as_ref().unwrap()[0], Some(200));
+    }
+
+    #[test]
+    fn an_announced_action_after_the_last_bar_is_not_applied() {
+        let mut c = chart(&["2024-10-25", "2024-10-28"], &[3000.0, 3010.0]);
+        let n = adjust_chart(
+            &mut c,
+            &[SplitEvent {
+                ex_date: d("2024-11-15"),
+                factor: 2.0,
+            }],
+        );
+        assert_eq!(n, 0);
+        assert_eq!(closes(&c), vec![3000.0, 3010.0]);
     }
 
     #[test]

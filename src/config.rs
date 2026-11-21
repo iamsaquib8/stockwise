@@ -196,6 +196,10 @@ pub struct ProfileConfig {
     pub max_smallcap_weight: Option<f64>,
     /// Portfolio capital risked per trade in `stoploss`, in percent (`0.05..=20`).
     pub risk_per_trade: Option<f64>,
+    /// Country of tax residence: `in`, `us` or `uk`. Decides holding
+    /// periods and rules in `portfolio analyze`; the ticker market does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residence: Option<String>,
 }
 
 impl ProfileConfig {
@@ -208,6 +212,7 @@ impl ProfileConfig {
             && self.max_stock_weight.is_none()
             && self.max_smallcap_weight.is_none()
             && self.risk_per_trade.is_none()
+            && self.residence.is_none()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -221,6 +226,11 @@ impl ProfileConfig {
             && (!s.is_finite() || !(0.0..=50.0).contains(&s))
         {
             bail!("`profile.tax_slab` = {s} must be between 0 and 50");
+        }
+        if let Some(r) = &self.residence
+            && crate::tax::Country::parse(r).is_none()
+        {
+            anyhow::bail!("`profile.residence`: expected `in`, `us` or `uk`, got `{r}`");
         }
         if let Some(tr) = &self.tax_regime {
             TaxRegime::parse(tr).map_err(|e| anyhow::anyhow!("`profile.tax_regime`: {e}"))?;
@@ -586,6 +596,7 @@ static EMPTY: Config = Config {
         max_stock_weight: None,
         max_smallcap_weight: None,
         risk_per_trade: None,
+        residence: None,
     },
     periods: BTreeMap::new(),
     notify: BTreeMap::new(),
@@ -1119,6 +1130,9 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # risk = "med"
 # tax_slab = 30
 # tax_regime = "new"
+# Country of tax residence for holding periods and tax rules in
+# `portfolio analyze`: "in", "us" or "uk". Without it the market is assumed.
+# residence = "in"
 # horizon_years = 10
 # max_stock_weight = 12.0
 # max_smallcap_weight = 25.0
@@ -1158,6 +1172,7 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
         max_stock_weight: update.max_stock_weight,
         max_smallcap_weight: update.max_smallcap_weight,
         risk_per_trade: update.risk_per_trade,
+        residence: None,
     };
     probe.validate()?;
 
@@ -1941,6 +1956,7 @@ mod tests {
             max_stock_weight: None,
             max_smallcap_weight: None,
             risk_per_trade: None,
+            residence: None,
         };
         let eff_file = EffectiveProfile::from_parts(None, None, &file_cfg);
         assert_eq!(eff_file.mode, ProfileMode::Active);

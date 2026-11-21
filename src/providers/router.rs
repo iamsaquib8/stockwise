@@ -236,7 +236,7 @@ impl Ratios {
         filled
     }
 
-    fn merge(&mut self, other: &Ratios) {
+    pub(crate) fn merge(&mut self, other: &Ratios) {
         macro_rules! keep {
             ($($f:ident),*) => { $( if self.$f.is_none() { self.$f = other.$f; } )* };
         }
@@ -630,7 +630,9 @@ impl Router {
         let mut sources = Vec::new();
         let mut last = None;
         for p in self.serving(Capability::Fundamentals, 1) {
-            if !p.supports(symbol) || p.remaining() == 0 {
+            // No allowance check: `Http::get_json` serves a cached answer
+            // and refuses an uncached one when the allowance is used up.
+            if !p.supports(symbol) {
                 continue;
             }
             match p.ratios(symbol).await {

@@ -244,22 +244,30 @@ pub fn index_of_fund(symbol: &str, name: Option<&str>) -> Option<&'static str> {
     }
     let n = name?.to_ascii_lowercase();
     let indexed = n.contains("index") || n.contains("etf") || n.contains("bees");
-    if !indexed {
+    // An equal-weight fund holds the same names in other proportions: the
+    // cap-weighted tables would misstate it.
+    if !indexed || n.contains("equal weight") || n.contains("equal-weight") {
         return None;
     }
     if n.contains("next 50") || n.contains("next50") {
         Some("NIFTY NEXT 50")
     } else if n.contains("nifty bank") || n.contains("bank nifty") {
         Some("NIFTY BANK")
-    } else if n.contains("nifty 50") || n.contains("nifty50") {
+    } else if has_token(&n, "nifty 50") || has_token(&n, "nifty50") {
         Some("NIFTY 50")
-    } else if n.contains("s&p 500") || n.contains("s&p500") {
+    } else if has_token(&n, "s&p 500") || has_token(&n, "s&p500") {
         Some("S&P 500")
     } else if n.contains("nasdaq 100") || n.contains("nasdaq-100") || n.contains("nasdaq100") {
         Some("NASDAQ 100")
     } else {
         None
     }
+}
+
+/// `pat` occurs in `hay` not followed by a digit ("nifty 50", not "nifty 500").
+fn has_token(hay: &str, pat: &str) -> bool {
+    hay.match_indices(pat)
+        .any(|(i, _)| !hay[i + pat.len()..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// The shipped weights for the index `symbol`/`name` tracks, if any.
@@ -270,6 +278,22 @@ pub fn for_fund(symbol: &str, name: Option<&str>) -> Option<&'static IndexWeight
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nifty_500_and_equal_weight_funds_get_no_nifty_50_table() {
+        assert_eq!(
+            index_of_fund("MF:3", Some("Motilal Oswal Nifty 500 Index Fund")),
+            None
+        );
+        assert_eq!(
+            index_of_fund("MF:4", Some("DSP Nifty 50 Equal Weight Index Fund")),
+            None
+        );
+        assert_eq!(
+            index_of_fund("MF:5", Some("UTI Nifty 50 Index Fund - Direct")),
+            Some("NIFTY 50")
+        );
+    }
 
     #[test]
     fn tables_add_up() {

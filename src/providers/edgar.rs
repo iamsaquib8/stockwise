@@ -83,7 +83,6 @@ const EQUITY: &[&str] = &[
     "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
 ];
 const DEBT_NONCURRENT: &[&str] = &["LongTermDebtNoncurrent"];
-const DEBT_CURRENT: &[&str] = &["LongTermDebtCurrent", "DebtCurrent"];
 const DEBT_TOTAL: &[&str] = &["LongTermDebt"];
 const SHORT_BORROWINGS: &[&str] = &["ShortTermBorrowings"];
 const COMMERCIAL_PAPER: &[&str] = &["CommercialPaper"];
@@ -168,10 +167,24 @@ impl Statements {
         self.annual.last().and_then(pick)
     }
 
+    /// `pick` over revenue for one reporting window: the last four quarters
+    /// when both are complete there, else the latest fiscal year when both
+    /// are there. Never a quarterly numerator over an annual revenue.
+    fn margin(&self, pick: fn(&Period) -> Option<f64>) -> Option<f64> {
+        let ratio = |rows: &[Period]| -> Option<f64> {
+            let num = rows.iter().map(pick).sum::<Option<f64>>()?;
+            let rev = rows.iter().map(|p| p.revenue).sum::<Option<f64>>()?;
+            (rev > 0.0).then(|| num / rev)
+        };
+        self.last_four().and_then(ratio).or_else(|| {
+            self.annual
+                .last()
+                .and_then(|y| ratio(std::slice::from_ref(y)))
+        })
+    }
+
     pub fn ratios(&self) -> Ratios {
-        let revenue = self.ttm(|p| p.revenue).filter(|r| *r > 0.0);
         let net = self.ttm(|p| p.net_income);
-        let operating = self.ttm(|p| p.operating_income);
         let equity = self.equity.map(|(_, e)| e).filter(|e| *e > 0.0);
         let revenue_growth = self.quarterly.last().and_then(|last| {
             let now = last.revenue?;
@@ -199,8 +212,8 @@ impl Statements {
         Ratios {
             roe: net.zip(equity).map(|(n, e)| n / e),
             debt_to_equity: self.debt.zip(equity).map(|(d, e)| d / e * 100.0),
-            profit_margin: net.zip(revenue).map(|(n, r)| n / r),
-            operating_margin: operating.zip(revenue).map(|(o, r)| o / r),
+            profit_margin: self.margin(|p| p.net_income),
+            operating_margin: self.margin(|p| p.operating_income),
             revenue_growth,
             eps_ttm,
             as_of: latest,
@@ -341,13 +354,32 @@ fn balance_sheet(gaap: &HashMap<String, Concept>) -> (Option<(NaiveDate, f64)>, 
         return (None, None);
     };
     let at = |names: &[&str]| instants(gaap, names).get(&date).copied();
-    let short = [at(SHORT_BORROWINGS), at(COMMERCIAL_PAPER)];
-    let long = match (at(DEBT_NONCURRENT), at(DEBT_CURRENT)) {
-        (None, None) => [at(DEBT_TOTAL), None],
-        (a, b) => [a, b],
+    // Each amount once. `DebtCurrent` is a total that already holds the
+    // current portion of long-term debt, short-term borrowings and
+    // commercial paper; `ShortTermBorrowings` already holds commercial
+    // paper, which counts on its own only when reported alone.
+    let ltd_current = at(&["LongTermDebtCurrent"]);
+    let current = match at(&["DebtCurrent"]) {
+        Some(total) => Some(total),
+        None => {
+            let short = at(SHORT_BORROWINGS).or(at(COMMERCIAL_PAPER));
+            match (ltd_current, short) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+            }
+        }
     };
-    let parts: Vec<f64> = long.into_iter().chain(short).flatten().collect();
-    let debt = (!parts.is_empty()).then(|| parts.iter().sum());
+    // `LongTermDebt` includes its current portion, which `current` holds.
+    let noncurrent = at(DEBT_NONCURRENT).or_else(|| {
+        at(DEBT_TOTAL).map(|total| match current {
+            Some(_) => total - ltd_current.unwrap_or(0.0),
+            None => total,
+        })
+    });
+    let debt = match (noncurrent, current) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    };
     (Some((date, equity)), debt)
 }
 

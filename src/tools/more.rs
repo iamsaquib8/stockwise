@@ -240,7 +240,10 @@ async fn correlate<D: DataSource>(src: &D, a: &Args, m: Market) -> Result<Value>
         .iter()
         .map(|s| market::resolve_symbol(s.trim(), m))
         .collect();
-    syms.dedup();
+    // Each symbol once, in the order given (dedup alone keeps
+    // non-adjacent repeats).
+    let mut seen = std::collections::HashSet::new();
+    syms.retain(|s| seen.insert(s.clone()));
     if syms.len() < 2 {
         bail!("Give at least 2 different symbols to correlate");
     }
@@ -261,11 +264,25 @@ async fn correlate<D: DataSource>(src: &D, a: &Args, m: Market) -> Result<Value>
     }
     let matrix = crate::commands::correlation_matrix(&series);
     let names: Vec<&str> = series.iter().map(|(s, _)| s.as_str()).collect();
+    // Keyed by symbol on both axes, so each value carries its own labels:
+    // shortening long lists to fit a small context never cuts arrays here
+    // and cannot leave labels and values out of step.
+    let correlations: serde_json::Map<String, Value> = names
+        .iter()
+        .zip(&matrix)
+        .map(|(row_sym, row)| {
+            let cells: serde_json::Map<String, Value> = names
+                .iter()
+                .zip(row)
+                .map(|(col_sym, v)| (col_sym.to_string(), json!(v)))
+                .collect();
+            (row_sym.to_string(), Value::Object(cells))
+        })
+        .collect();
     Ok(json!({
         "period": "1y",
         "interval": "1d",
-        "symbols": names,
-        "matrix": matrix,
+        "correlations": correlations,
         "missing": missing,
     }))
 }

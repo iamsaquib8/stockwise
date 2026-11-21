@@ -700,14 +700,17 @@ async fn tick(
             let signals = intraday::scan_intraday(client, market).await?;
             // Kelly sizing only once the paper record has 30+ closed trades;
             // a fixed 0.5% risk per trade before that.
+            // A missing file is an empty record; an unreadable one is an
+            // error, retried before anything is entered.
             let track_record = SimHistory::load()
-                .ok()
-                .and_then(|h| h.track_record(market.id()));
+                .context("Could not read the simulator history for sizing")?
+                .track_record(market.id());
             let limits = intraday::PlanLimits {
                 max_risk_pct: 1.0,
                 max_position_pct: state.risk.max_position_pct,
                 max_positions: state.risk.max_positions,
                 track_record,
+                costs: Some(state.costs()),
             };
             let plans = intraday::generate_trade_plans_with(&signals, state.capital, limits);
             if plans.is_empty() {
@@ -717,8 +720,18 @@ async fn tick(
                 );
                 return Ok(Tick::wait(60));
             }
+            // The scan takes a while: enter only if the entry window is
+            // still open, at the time of entry.
+            let entered_at = Utc::now();
+            if !entry_window_open(state, market, entered_at) {
+                println!(
+                    "  {} The entry window closed during the scan: no positions today.",
+                    "→".yellow()
+                );
+                return Ok(Tick::wait(15));
+            }
             Ok(Tick {
-                events: state.enter(&plans, now),
+                events: state.enter(&plans, entered_at),
                 wait: Duration::from_secs(15),
                 done: false,
             })
@@ -748,6 +761,12 @@ async fn tick(
             })
         }
     }
+}
+
+/// Entries are only made in the opening phase of the state's own session.
+fn entry_window_open(state: &DaemonState, market: Market, at: DateTime<Utc>) -> bool {
+    clock::session_date(market, at) == state.date
+        && clock::market_phase(market, at) == Phase::Opening
 }
 
 /// Mark open positions to live prices (after the entries, through the
@@ -1067,7 +1086,9 @@ async fn run_intraday(amount: Option<f64>, market: Market, once: bool) -> Result
 }
 
 async fn eod_ai_report(state: &DaemonState, market: Market) {
-    if !state.entered {
+    // Positions handed to `sim settle` have no exit yet: their result is
+    // unknown, so there is nothing to report on.
+    if !state.entered || state.open_count() > 0 {
         return;
     }
     let csym = currency(market);
@@ -1256,6 +1277,7 @@ mod tests {
             entered_at: None,
             initial_stop: None,
             trail_distance: None,
+            charges: None,
         });
         state
     }

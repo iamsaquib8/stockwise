@@ -298,10 +298,12 @@ pub struct PmeSummary {
     pub benchmark_kind: String,
     pub dividends_included: bool,
     /// The benchmark's first close, and how many flows are dated more than a
-    /// week before it (priced at that first close).
+    /// week before it (priced at that first close; a flow a few days before
+    /// is a weekend or holiday gap, not missing history).
     pub index_start_date: String,
     pub flows_before_index: usize,
-    /// Sales or dividends larger than the twin's holding at the time.
+    /// Distributions (sales or dividends) larger than the twin's holding at
+    /// the time.
     pub twin_capped_sales: usize,
 }
 

@@ -331,9 +331,33 @@ pub fn data_schema(tool: &str) -> Option<Value> {
             ],
             &[("unconverted", strings()), ("notes", strings())],
         ),
+        // `AnalyzeReport` flattens its `Analysis` into the top level.
         "portfolio_analyze" => obj(
-            &[("analysis", object()), ("disclaimer", string())],
-            &[("tax_if_sold_today", nullable("object"))],
+            &[
+                ("base_currency", string()),
+                ("value", num()),
+                ("cost", num()),
+                ("pnl", num()),
+                ("positions", arr(object())),
+                ("disclaimer", string()),
+            ],
+            &[
+                ("pnl_pct", num()),
+                ("day_change", num()),
+                ("day_change_pct", num()),
+                ("by_market", arr(object())),
+                ("by_currency", arr(object())),
+                ("by_cap_tier", arr(object())),
+                ("by_sector", arr(object())),
+                ("terms", object()),
+                ("concentration", object()),
+                ("risk", object()),
+                ("observations", arr(object())),
+                ("left_out", strings()),
+                ("valuation", object()),
+                ("tax_if_sold_today", nullable("object")),
+                ("warnings", strings()),
+            ],
         ),
         "portfolio_checkup" => obj(
             &[
