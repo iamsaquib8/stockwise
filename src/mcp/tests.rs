@@ -507,8 +507,10 @@ async fn every_tool_has_annotations_and_the_main_ones_an_output_schema() {
         ] {
             assert!(a[hint].is_boolean(), "{} lacks {hint}: {a}", t["name"]);
         }
-        let write = crate::tools::access(t["name"].as_str().unwrap()) != crate::tools::Access::Read;
-        assert_eq!(a["readOnlyHint"], !write, "{}", t["name"]);
+        let name = t["name"].as_str().unwrap();
+        let write = crate::tools::access(name) != crate::tools::Access::Read;
+        let logs = crate::tools::LOGGING_READS.contains(&name);
+        assert_eq!(a["readOnlyHint"], !write && !logs, "{name}");
         if write {
             assert_eq!(a["openWorldHint"], false, "{}", t["name"]);
         } else {
@@ -572,6 +574,7 @@ async fn structured_results_follow_their_output_schemas() {
         ("quote", json!({"symbols": ["TCS", "INFY", "NOPE"]})),
         ("history", json!({"symbol": "TCS", "period": "1mo"})),
         ("portfolio_summary", json!({})),
+        ("portfolio_analyze", json!({"quick": true})),
         ("tax_estimate", json!({})),
     ] {
         let r = c
