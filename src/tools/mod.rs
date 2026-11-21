@@ -175,7 +175,7 @@ pub fn default_timeout(name: &str) -> std::time::Duration {
         "picks" | "picks_review" | "market_conditions" | "portfolio_analyze"
         | "portfolio_checkup" | "portfolio_pme" | "backtest" | "screen" | "verdicts" | "movers"
         | "ipo_analyze" | "mf_bleed" | "income_calendar" | "compare" | "returns" | "correlate"
-        | "portfolio_wrap" => 180,
+        | "portfolio_wrap" | "portfolio_review" => 180,
         _ => 60,
     };
     std::time::Duration::from_secs(secs)
@@ -416,10 +416,58 @@ pub const TOOLS: &[Tool] = &[
                       or no data) and the facts behind it, a weighted composite (0-100) and the \
                       share of the model's inputs that had data. Pillars without data are marked \
                       \"no data\" and left out of the composite; crypto, FX and indices get only \
-                      the technical pillar. It describes the data and is not a recommendation: \
-                      do not present it as advice or as a call on the stock.",
+                      the technical pillar. The scores themselves are not a recommendation; \
+                      the `action` object is StockWise's rule-based call (see `stock_action`), \
+                      to be quoted as returned, never changed.",
         params: &[SYMBOL, MARKET],
         personal: false,
+    },
+    Tool {
+        name: "stock_action",
+        title: "Rule-based action for a stock",
+        description: "StockWise's deterministic, rule-based action for one stock: BUY, WATCH or \
+                      AVOID when not held; ADD, HOLD, TRIM or EXIT when the local portfolio holds \
+                      it; NO CALL when data coverage is below 60% (with the missing fields). \
+                      Returns the kind, confidence, up to three reasons, the invalidation price (a \
+                      daily close below it invalidates the action), review date, position-size \
+                      hint, tax note, methodology version and disclaimer, plus the composite \
+                      score and coverage behind it. Present the action exactly as returned; never \
+                      change it or add price levels. Educational signal, not personalised advice.",
+        params: &[
+            SYMBOL,
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "long (years, default) or short (weeks to months: tighter invalidation, 10-session review)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "portfolio_review",
+        title: "Rule-based review of holdings",
+        description: "The rule-based action for every holding of the local portfolio, sorted EXIT, \
+                      TRIM, ADD, HOLD, then NO CALL: each with confidence, reasons, invalidation \
+                      price, review date, weight, P&L, the shares a TRIM sells to get back under \
+                      the profile's max_stock_weight (look-through via funds included) and a tax \
+                      note when waiting a few days for long-term rates saves tax. Quote every \
+                      action as returned; never change one. Educational signal, not personalised \
+                      advice.",
+        params: &[
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "long (years, default) or short (weeks to months)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
     },
     Tool {
         name: "scorecard",

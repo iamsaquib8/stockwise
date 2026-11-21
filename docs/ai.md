@@ -68,7 +68,7 @@ hold, ADD, HOLD, TRIM or EXIT for one you do, and NO CALL when less than 60% of
 the data is there. The actions are deterministic and come only from the rules
 in `src/action.rs`, written out in
 [methodology.md](methodology.md#actions-methodology-1). Each carries up to
-three reasons, a confidence level, an invalidation price, a review date and
+three reasons, a confidence level, an invalidation price (BUY, ADD, HOLD, TRIM), a review date and
 the disclaimer.
 
 The AI explains; it never decides. Every prompt starts with the same rules:

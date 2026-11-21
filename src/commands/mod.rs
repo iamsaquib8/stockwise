@@ -98,6 +98,7 @@ mod worker;
 mod output_tests;
 
 pub use actions::cmd_portfolio_review;
+pub(crate) use actions::{apply_holding, portfolio_review_report};
 pub use alerting::*;
 pub use assistant::*;
 pub use background::*;

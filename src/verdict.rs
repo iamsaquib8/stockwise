@@ -1019,8 +1019,8 @@ pub fn explain_lines(v: &DecisionVerdict) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::action::testing::assert_action_well_formed;
     use super::*;
+    use crate::action::testing::assert_action_well_formed;
     use crate::insights::generate_rich_insights;
     use crate::research::{Holding, InsiderTxn, Research};
 

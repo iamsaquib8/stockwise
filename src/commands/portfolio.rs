@@ -3280,7 +3280,7 @@ pub(crate) async fn build_xray(
         if is_fund || is_etf || (!offmarket::is_sgb(&h.symbol) && quote_type.is_none()) {
             if let Some(fp) = funds::load_fund_disclosure(&h.symbol) {
                 fund_profiles.insert(h.symbol.clone(), fp);
-            } else if let Ok(fp) = funds::fetch_fund_profile(&client, &h.symbol, market).await
+            } else if let Ok(fp) = funds::fetch_fund_profile(client, &h.symbol, market).await
                 && (!fp.holdings.is_empty()
                     || (!fp.sectors.is_empty()
                         && crate::index_weights::for_fund(&h.symbol, fp.name.as_deref()).is_none()))

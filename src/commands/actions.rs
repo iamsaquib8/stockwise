@@ -209,6 +209,17 @@ pub(crate) struct Review {
     pub(crate) disclaimer: &'static str,
 }
 
+/// [`review`] for the MCP tool.
+pub(crate) async fn portfolio_review_report(
+    src: &impl views::DataSource,
+    client: Option<&YahooClient>,
+    market: Market,
+    base: Option<&str>,
+    horizon: Horizon,
+) -> Result<Review> {
+    review(src, client, market, base, horizon).await
+}
+
 /// Review every holding of the active portfolio with the full rules: a
 /// year of daily bars, the long-term score, weight, look-through weight
 /// (with a client), notes, targets and the next long-term date.
@@ -378,7 +389,11 @@ pub(crate) fn render_review(r: &Review) -> String {
             .pnl_pct
             .map_or(String::new(), |p| format!("  P&L {p:+.1}%"));
         let name = row.name.as_deref().unwrap_or_default();
-        o.push_str(&format!("  {}  {}{weight}{pnl}\n", row.symbol.bold(), name.dimmed()));
+        o.push_str(&format!(
+            "  {}  {}{weight}{pnl}\n",
+            row.symbol.bold(),
+            name.dimmed()
+        ));
         let block = crate::verdict::render_action(&row.action);
         for line in block.lines() {
             // The disclaimer is printed once, at the end.
@@ -528,24 +543,27 @@ mod tests {
         };
         let rows = review_csv(&r);
         let (missing, extra) = crate::output::missing_columns(&rows[0]);
-        assert!(missing.is_empty() && extra.is_empty(), "{missing:?} {extra:?}");
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "{missing:?} {extra:?}"
+        );
         assert_action_well_formed(&serde_json::to_string(&r).unwrap());
         assert_action_well_formed(&render_review(&r));
     }
 
     #[test]
     fn next_long_term_finds_the_earliest_future_lot() {
-        let mut h = pf::Holding {
-            symbol: "TCS.NS".into(),
-            ..Default::default()
-        };
-        h.lots = vec![
-            pf::Lot::new(10.0, 100.0, "2025-12-01", "manual"),
-            pf::Lot::new(5.0, 120.0, "2026-01-10", "manual"),
-            pf::Lot::new(5.0, 90.0, "2024-01-10", "manual"),
-        ];
+        let mut p = Portfolio::default();
+        for (q, price, date) in [
+            (10.0, 100.0, "2025-12-01"),
+            (5.0, 120.0, "2026-01-10"),
+            (5.0, 90.0, "2024-01-10"),
+        ] {
+            p.add_lot("TCS.NS", pf::Lot::new(q, price, date, "manual"));
+        }
+        let h = p.holding("TCS.NS").unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
-        let (days, on, saves) = next_long_term(&h, 150.0, Some("INR"), Market::In, today).unwrap();
+        let (days, on, saves) = next_long_term(h, 150.0, Some("INR"), Market::In, today).unwrap();
         assert_eq!(on, NaiveDate::from_ymd_opt(2026, 12, 2).unwrap());
         assert_eq!(days, 11);
         // 10 x 50 gain x (20% - 12.5%).

@@ -57,6 +57,48 @@ pub(super) async fn run<D: DataSource>(
             };
             Ok(serde_json::to_value(report)?)
         }
+        "stock_action" => {
+            let resolved = market::resolve_symbol(a.need_str("symbol")?, m);
+            let horizon = horizon_arg(a)?;
+            let r = crate::research::fetch(
+                src.yahoo().await?,
+                &resolved,
+                m,
+                60,
+                crate::research::Needs::VERDICT,
+            )
+            .await?;
+            let cards = crate::insights::generate_rich_insights(&r);
+            let profile = crate::config::effective_profile();
+            let mut v = crate::verdict::generate_verdict_for(&r, &cards, &profile, horizon);
+            crate::commands::apply_holding(&mut v, &r, m);
+            Ok(serde_json::json!({
+                "symbol": v.symbol,
+                "name": v.name,
+                "price": v.price,
+                "currency": v.currency,
+                "action": v.action,
+                "composite_score": v.overall_score,
+                "data_coverage": v.data_coverage,
+                "pillars": v.pillars.iter().map(|p| serde_json::json!({
+                    "name": p.name, "score": p.score, "band": p.band,
+                })).collect::<Vec<_>>(),
+                "meta": v.meta,
+            }))
+        }
+        "portfolio_review" => {
+            let base = a.str("base").map(str::to_ascii_uppercase);
+            let client = src.yahoo().await.ok();
+            let review = crate::commands::portfolio_review_report(
+                src,
+                client,
+                m,
+                base.as_deref(),
+                horizon_arg(a)?,
+            )
+            .await?;
+            Ok(serde_json::to_value(review)?)
+        }
         "market_conditions" => {
             let client = src.yahoo().await?;
             let report = crate::commands::conditions_report(client, m, universe(a, m)?).await?;
@@ -436,4 +478,15 @@ async fn fit_check<D: DataSource>(ctx: &ToolContext<D>, a: &Args, m: Market) -> 
         "note": note,
         "about": "Measured against the user's own profile limits and notes; it is not a recommendation and says nothing about future prices.",
     }))
+}
+
+/// The `horizon` argument of the action tools (long by default).
+fn horizon_arg(a: &Args) -> Result<crate::action::Horizon> {
+    Ok(
+        match a.str("horizon").map(str::to_ascii_lowercase).as_deref() {
+            None | Some("long") => crate::action::Horizon::Long,
+            Some("short") => crate::action::Horizon::Short,
+            Some(other) => anyhow::bail!("Unknown horizon '{other}' (long or short)"),
+        },
+    )
 }

@@ -132,6 +132,10 @@ pub struct Pick {
     /// the pick under its exchange session date.
     #[serde(skip)]
     pub quoted_at: Option<i64>,
+    /// The rule-based action (`crate::action`) for a stock not held, set for
+    /// the finalists (the stocks whose fundamentals and prices were fetched).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<crate::action::Action>,
 }
 
 impl CsvRow for Pick {
@@ -151,6 +155,7 @@ impl CsvRow for Pick {
         "risk",
         "coverage",
         "flags",
+        "action",
     ];
 }
 
@@ -586,6 +591,7 @@ pub fn score(quotes: &[Quote], history: &HashMap<String, History>, horizon: Hori
                 coverage,
                 flags: data_flags(q),
                 quoted_at: q.regular_market_time,
+                action: None,
             }
         })
         .collect();
@@ -723,13 +729,25 @@ pub async fn run(
         .take(n)
         .map(|p| p.symbol.clone())
         .collect();
-    let history = enrich_finalists(client, &mut kept, &leaders).await;
+    let (history, bars) = enrich_finalists_with_bars(client, &mut kept, &leaders).await;
     // Second stage: the whole scan again, with the leaders' fuller data.
     let meta = crate::provenance::for_scan(
         kept.iter()
             .filter(|q| q.symbol.as_ref().is_some_and(|s| leaders.contains(s))),
     );
-    let (picks, flagged, thin_data) = select(score(&kept, &history, horizon), top);
+    let (mut picks, flagged, thin_data) = select(score(&kept, &history, horizon), top);
+    let today = chrono::Local::now().date_naive();
+    let profile = crate::config::effective_profile();
+    for p in picks.iter_mut() {
+        let (Some(q), Some(series)) = (
+            kept.iter()
+                .find(|q| q.symbol.as_deref() == Some(p.symbol.as_str())),
+            bars.get(&p.symbol),
+        ) else {
+            continue;
+        };
+        p.action = Some(action_for(q, series, horizon, today, &profile));
+    }
     Ok(Run {
         picks,
         universe: universe_len,
@@ -745,6 +763,22 @@ pub async fn run(
     })
 }
 
+/// The rule action for a finalist, from its enriched quote, a year of daily
+/// bars and its long-term score.
+pub fn action_for(
+    q: &Quote,
+    series: &crate::research::Series,
+    horizon: Horizon,
+    today: chrono::NaiveDate,
+    profile: &crate::config::EffectiveProfile,
+) -> crate::action::Action {
+    let closes = (!series.close.is_empty()).then_some(series.close.as_slice());
+    let score = crate::longterm::score_for_longterm(q, closes);
+    let i = crate::action::inputs_from_quote(q, series, &score, horizon.into(), today)
+        .with_profile(profile);
+    crate::action::decide(&i)
+}
+
 /// Fetch fundamentals (`quoteSummary`) and a year of daily closes for the
 /// stocks in `leaders`, filling their quotes in place. Returns the price
 /// measures by symbol. A failed request leaves that part missing; the
@@ -754,8 +788,20 @@ pub async fn enrich_finalists(
     quotes: &mut [Quote],
     leaders: &HashSet<String>,
 ) -> HashMap<String, History> {
+    enrich_finalists_with_bars(client, quotes, leaders).await.0
+}
+
+/// [`enrich_finalists`], also returning each finalist's daily bars.
+pub async fn enrich_finalists_with_bars(
+    client: &YahooClient,
+    quotes: &mut [Quote],
+    leaders: &HashSet<String>,
+) -> (
+    HashMap<String, History>,
+    HashMap<String, crate::research::Series>,
+) {
     if leaders.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), HashMap::new());
     }
     eprintln!(
         "  \u{24d8} Fetching fundamentals and a year of prices for the {} highest first-pass scores…",
@@ -766,15 +812,17 @@ pub async fn enrich_finalists(
         .filter(|q| q.symbol.as_ref().is_some_and(|s| leaders.contains(s)))
         .cloned()
         .collect();
-    let done: Vec<(Quote, History)> =
+    let done: Vec<(Quote, History, crate::research::Series)> =
         futures_util::stream::iter(todo.into_iter().map(|mut q| async move {
             // A failed lookup is kept on the quote, so `meta` reports it.
             for w in crate::research::enrich_quote(client, &mut q, false).await {
                 q.meta.get_or_insert_with(Default::default).warn(w);
             }
             let sym = q.symbol.clone().unwrap_or_default();
+            let mut series = crate::research::Series::default();
             let history = match client.get_chart(&sym, "1y", "1d").await {
                 Ok(chart) => {
+                    series = crate::research::Series::from_chart(&chart);
                     let closes: Vec<f64> =
                         chart.dated_closes().into_iter().map(|(_, c)| c).collect();
                     let volumes: Vec<u64> = chart
@@ -788,26 +836,28 @@ pub async fn enrich_finalists(
                 }
                 Err(_) => History::default(),
             };
-            (q, history)
+            (q, history, series)
         }))
         .buffer_unordered(CONCURRENCY)
         .collect()
         .await;
-    let mut by_symbol: HashMap<String, (Quote, History)> = done
+    let mut by_symbol: HashMap<String, (Quote, History, crate::research::Series)> = done
         .into_iter()
-        .filter_map(|(q, h)| Some((q.symbol.clone()?, (q, h))))
+        .filter_map(|(q, h, b)| Some((q.symbol.clone()?, (q, h, b))))
         .collect();
     let mut history = HashMap::new();
+    let mut bars = HashMap::new();
     for q in quotes.iter_mut() {
         let Some(sym) = q.symbol.clone() else {
             continue;
         };
-        if let Some((full, h)) = by_symbol.remove(&sym) {
+        if let Some((full, h, b)) = by_symbol.remove(&sym) {
             *q = full;
-            history.insert(sym, h);
+            history.insert(sym.clone(), h);
+            bars.insert(sym, b);
         }
     }
-    history
+    (history, bars)
 }
 
 /// The benchmark `picks review` compares with, and how it is described.

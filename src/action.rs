@@ -100,17 +100,19 @@ impl Kind {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        Some(match s.trim().to_ascii_uppercase().replace('_', " ").as_str() {
-            "BUY" => Kind::Buy,
-            "WATCH" => Kind::Watch,
-            "AVOID" => Kind::Avoid,
-            "ADD" => Kind::Add,
-            "HOLD" => Kind::Hold,
-            "TRIM" => Kind::Trim,
-            "EXIT" => Kind::Exit,
-            "NO CALL" | "NOCALL" => Kind::NoCall,
-            _ => return None,
-        })
+        Some(
+            match s.trim().to_ascii_uppercase().replace('_', " ").as_str() {
+                "BUY" => Kind::Buy,
+                "WATCH" => Kind::Watch,
+                "AVOID" => Kind::Avoid,
+                "ADD" => Kind::Add,
+                "HOLD" => Kind::Hold,
+                "TRIM" => Kind::Trim,
+                "EXIT" => Kind::Exit,
+                "NO CALL" | "NOCALL" => Kind::NoCall,
+                _ => return None,
+            },
+        )
     }
 
     /// Positive (+1), negative (-1) or neutral (0), for pillar agreement.
@@ -389,7 +391,10 @@ impl Technicals {
             low20: prior_lows.map(|it| it.fold(f64::INFINITY, f64::min)),
             high_close20: (n >= 20)
                 .then(|| close[n - 20..].iter().copied().fold(f64::MIN, f64::max)),
-            volume_ratio: vol20.zip(vol60).filter(|(_, b)| *b > 0.0).map(|(a, b)| a / b),
+            volume_ratio: vol20
+                .zip(vol60)
+                .filter(|(_, b)| *b > 0.0)
+                .map(|(a, b)| a / b),
             avg_traded_value: traded,
             circuit_hits: None,
         }
@@ -406,8 +411,8 @@ impl Technicals {
                         return false;
                     }
                     let mv = (c[i] / prev - 1.0).abs();
-                    let at_edge = (h[i] - c[i]).abs() <= c[i] * 0.001
-                        || (c[i] - l[i]).abs() <= c[i] * 0.001;
+                    let at_edge =
+                        (h[i] - c[i]).abs() <= c[i] * 0.001 || (c[i] - l[i]).abs() <= c[i] * 0.001;
                     mv >= 0.0495 && at_edge
                 })
                 .count();
@@ -582,12 +587,12 @@ pub fn hard_gates(i: &Inputs) -> Vec<String> {
             "Promoter pledge {p:.0}% (above {MAX_PLEDGE_PCT:.0}%)"
         ));
     }
-    if let Some(c) = i.composite.filter(|c| *c < AVOID_COMPOSITE) {
-        if i.holding.is_none() {
-            g.push(format!(
-                "Composite score {c:.0} (below {AVOID_COMPOSITE:.0})"
-            ));
-        }
+    if let Some(c) = i.composite.filter(|c| *c < AVOID_COMPOSITE)
+        && i.holding.is_none()
+    {
+        g.push(format!(
+            "Composite score {c:.0} (below {AVOID_COMPOSITE:.0})"
+        ));
     }
     g
 }
@@ -938,12 +943,12 @@ fn decide_new(i: &Inputs) -> Action {
         None => unmet.push("Too little price history for a 200-day average".to_string()),
     }
     match (i.pe.filter(|p| *p > 0.0), i.pe_reference()) {
-        (Some(pe), Some((r, what))) if pe <= PE_STRETCH_BUY * r => met.push(format!(
-            "P/E {pe:.1} within 1.2x {what} ({r:.1})"
-        )),
-        (Some(pe), Some((r, what))) => unmet.push(format!(
-            "P/E {pe:.1} is more than 1.2x {what} ({r:.1})"
-        )),
+        (Some(pe), Some((r, what))) if pe <= PE_STRETCH_BUY * r => {
+            met.push(format!("P/E {pe:.1} within 1.2x {what} ({r:.1})"))
+        }
+        (Some(pe), Some((r, what))) => {
+            unmet.push(format!("P/E {pe:.1} is more than 1.2x {what} ({r:.1})"))
+        }
         (None, _) => unmet.push("No positive P/E to check valuation against".to_string()),
         (Some(_), None) => {
             unmet.push("No P/E history or sector P/E to check valuation against".to_string())
@@ -1082,7 +1087,9 @@ fn decide_held(i: &Inputs, h: &HoldingContext) -> Action {
             "Trend up: price above a rising average".to_string(),
         ];
         if let Some(w) = h.weight_pct {
-            r.push(format!("Weight {w:.1}% leaves room under the {cap:.1}% cap"));
+            r.push(format!(
+                "Weight {w:.1}% leaves room under the {cap:.1}% cap"
+            ));
         }
         if let Some(days) = earnings_soon(i) {
             r.insert(
@@ -1101,7 +1108,24 @@ fn decide_held(i: &Inputs, h: &HoldingContext) -> Action {
     let mut r = vec![format!(
         "Composite score {composite:.0}: no exit, trim or add rule triggered"
     )];
-    if let Some(level) = inv {
+    if composite >= BUY_COMPOSITE && !trend_up {
+        r.push(match i.horizon {
+            Horizon::Long => {
+                "Trend not up (price and 50-day average not both above the 200-day), so no add"
+                    .to_string()
+            }
+            Horizon::Short => {
+                "Price not above its 50-day average on rising volume, so no add".to_string()
+            }
+        });
+    } else if composite >= BUY_COMPOSITE && !room && h.weight_pct.is_some() {
+        r.push("No room left under the weight cap or your target, so no add".to_string());
+    }
+    if h.weight_pct.is_none() {
+        r.push(
+            "Portfolio weight unknown: run `stockwise portfolio review` for weight checks".into(),
+        );
+    } else if let Some(level) = inv {
         r.push(format!(
             "Price {}{} is above the invalidation level {}{}",
             i.csym(),
@@ -1109,11 +1133,6 @@ fn decide_held(i: &Inputs, h: &HoldingContext) -> Action {
             i.csym(),
             money(level)
         ));
-    }
-    if h.weight_pct.is_none() {
-        r.push("Portfolio weight unknown: run `stockwise portfolio review` for weight checks".into());
-    } else if !trend_up && composite >= BUY_COMPOSITE {
-        r.push("Trend not up, so no add".to_string());
     }
     finish(i, Kind::Hold, r, false)
 }
@@ -1166,7 +1185,12 @@ pub fn inputs_from_research(
             .collect();
     }
     i.composite = v.overall_score;
-    let pillar = |name: &str| v.pillars.iter().find(|p| p.name == name).and_then(|p| p.score);
+    let pillar = |name: &str| {
+        v.pillars
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.score)
+    };
     i.safety = pillar("Balance Sheet");
     i.valuation = pillar("Valuation");
     i.pillars = v.pillars.iter().filter_map(|p| p.score).collect();
@@ -1287,9 +1311,13 @@ pub fn own_median_pe(r: &crate::research::Research) -> Option<f64> {
     if q.len() < 4 || r.prices.dates.is_empty() {
         return None;
     }
+    // Reported EPS, else net income over today's share count (buybacks make
+    // older quarters' EPS a little low, so their P/E a little high).
+    let shares = r.fin.shares.filter(|s| *s > 0.0);
+    let eps_of = |p: &crate::research::Period| p.eps.or_else(|| Some(p.net_income? / shares?));
     let mut pes = Vec::new();
     for k in 3..q.len() {
-        let eps: Option<f64> = q[k - 3..=k].iter().map(|p| p.eps).sum();
+        let eps: Option<f64> = q[k - 3..=k].iter().map(eps_of).sum();
         let Some(eps) = eps.filter(|e| *e > 0.0) else {
             continue;
         };
@@ -1350,7 +1378,8 @@ pub fn auditor_flag<'a>(titles: impl IntoIterator<Item = &'a str>) -> Option<Str
             || l.contains("adverse opinion")
             || l.contains("disclaimer of opinion")
             || l.contains("modified opinion");
-        if (auditor && l.contains("resign")) || (bad && !l.contains("unmodified") && auditor)
+        if (auditor && l.contains("resign"))
+            || (bad && !l.contains("unmodified") && auditor)
             || l.contains("qualified opinion") && !l.contains("unqualified")
         {
             return Some(t.trim().to_string());
@@ -1436,7 +1465,10 @@ pub(crate) mod testing {
             "{} given at {coverage}% coverage",
             kind.label()
         );
-        assert!(a["review_by"].is_string(), "action without review date: {a}");
+        assert!(
+            a["review_by"].is_string(),
+            "action without review date: {a}"
+        );
         if matches!(kind, Kind::Buy | Kind::Add) {
             assert!(
                 a["invalidation_price"].is_number(),
@@ -1471,8 +1503,26 @@ pub(crate) mod testing {
                 );
                 continue;
             }
-            // Outside action lines: no free-standing calls.
-            for call in ["BUY", "SELL", "STRONG BUY", "STRONG SELL", "EXIT NOW", "ACCUMULATE"] {
+            // Outside action lines: no free-standing calls. A line that names
+            // two or more kinds lists the engine's vocabulary (help text,
+            // docs), it does not make a call.
+            let named = [
+                "BUY", "WATCH", "AVOID", "ADD", "HOLD", "TRIM", "EXIT", "NO CALL",
+            ]
+            .iter()
+            .filter(|k| line.contains(*k))
+            .count();
+            if named >= 2 {
+                continue;
+            }
+            for call in [
+                "BUY",
+                "SELL",
+                "STRONG BUY",
+                "STRONG SELL",
+                "EXIT NOW",
+                "ACCUMULATE",
+            ] {
                 let mut from = 0;
                 while let Some(i) = line[from..].find(call) {
                     let s = from + i;
@@ -1578,7 +1628,13 @@ mod tests {
         assert_eq!(a.invalidation_price, Some(950.0));
         assert_eq!(a.confidence, Confidence::High);
         assert_eq!(a.review_by.as_deref(), Some("2027-02-18"));
-        assert!(a.headline().starts_with("ACTION: BUY · high confidence · invalid below ₹950.00 · review by 18 Feb 2027"), "{}", a.headline());
+        assert!(
+            a.headline().starts_with(
+                "ACTION: BUY · high confidence · invalid below ₹950.00 · review by 18 Feb 2027"
+            ),
+            "{}",
+            a.headline()
+        );
         // 1% risk / (50 / 1000) = 20% > 10% cap.
         let s = a.size_hint.unwrap();
         assert_eq!((s.max_weight_pct, s.limited_by), (10.0, "max_stock_weight"));
@@ -1628,7 +1684,10 @@ mod tests {
     fn every_hard_gate_gives_avoid() {
         let cases: Vec<(&str, Box<dyn Fn(&mut Inputs)>)> = vec![
             ("Altman", Box::new(|i| i.altman_distress = true)),
-            ("Negative shareholders", Box::new(|i| i.book_value = Some(-5.0))),
+            (
+                "Negative shareholders",
+                Box::new(|i| i.book_value = Some(-5.0)),
+            ),
             (
                 "Loss-making",
                 Box::new(|i| {
@@ -1747,7 +1806,11 @@ mod tests {
         j.tech.volume_ratio = Some(1.1);
         let a = decide(&j);
         assert_eq!(a.kind, Kind::Watch);
-        assert!(a.reasons.iter().any(|r| r.contains("Volume not picking up")));
+        assert!(
+            a.reasons
+                .iter()
+                .any(|r| r.contains("Volume not picking up"))
+        );
 
         let mut j = i.clone();
         j.tech.sma50 = Some(1001.0);
@@ -1776,7 +1839,10 @@ mod tests {
                 "below the",
                 Box::new(|i| i.tech.avg_traded_value = Some(5.0e6)),
             ),
-            ("price band 3 times", Box::new(|i| i.tech.circuit_hits = Some(3))),
+            (
+                "price band 3 times",
+                Box::new(|i| i.tech.circuit_hits = Some(3)),
+            ),
             (
                 "auditor",
                 Box::new(|i| i.auditor_flag = Some("Resignation of Statutory Auditor".into())),
@@ -1808,7 +1874,10 @@ mod tests {
         let mut i = good();
         i.market_cap = Some(4.0e10);
         let s = decide(&i).size_hint.unwrap();
-        assert_eq!((s.max_weight_pct, s.limited_by), (5.0, "small_cap_half_cap"));
+        assert_eq!(
+            (s.max_weight_pct, s.limited_by),
+            (5.0, "small_cap_half_cap")
+        );
         // US: $1.5B is small, $3B is not.
         let mut us = good();
         us.currency = "USD".into();
@@ -1856,7 +1925,11 @@ mod tests {
         i.price = Some(890.0);
         let a = decide(&i);
         assert_eq!(a.kind, Kind::Exit);
-        assert!(a.reasons[0].contains("below the invalidation level"), "{:?}", a.reasons);
+        assert!(
+            a.reasons[0].contains("below the invalidation level"),
+            "{:?}",
+            a.reasons
+        );
         check(&a);
 
         // A hard gate appears.
@@ -1868,7 +1941,8 @@ mod tests {
 
         // Thesis limit.
         let mut i = held(good(), 4.0, 900.0);
-        i.holding.as_mut().unwrap().thesis_breaches = vec!["P/E 20.0 above your limit of 18.0".into()];
+        i.holding.as_mut().unwrap().thesis_breaches =
+            vec!["P/E 20.0 above your limit of 18.0".into()];
         let a = decide(&i);
         assert_eq!(a.kind, Kind::Exit);
         assert!(a.reasons[0].contains("thesis"));
@@ -1920,23 +1994,22 @@ mod tests {
     #[test]
     fn tax_note_when_long_term_is_near() {
         let mut i = held(good(), 15.0, 900.0);
-        i.holding.as_mut().unwrap().next_long_term =
-            Some((12, day("2026-12-02"), Some(1875.0)));
+        i.holding.as_mut().unwrap().next_long_term = Some((12, day("2026-12-02"), Some(1875.0)));
         let a = decide(&i);
         assert_eq!(a.kind, Kind::Trim);
         assert_eq!(
             a.tax_note.as_deref(),
-            Some("a lot turns long-term on 02 Dec 2026 — waiting 12 days saves about ₹1,875.00 in tax")
+            Some(
+                "a lot turns long-term on 02 Dec 2026 — waiting 12 days saves about ₹1,875.00 in tax"
+            )
         );
         // Beyond 30 days: no note.
-        i.holding.as_mut().unwrap().next_long_term =
-            Some((31, day("2026-12-21"), Some(1875.0)));
+        i.holding.as_mut().unwrap().next_long_term = Some((31, day("2026-12-21"), Some(1875.0)));
         assert!(decide(&i).tax_note.is_none());
         // No tax note on a hard-gate exit.
         let mut i = held(good(), 4.0, 900.0);
         i.book_value = Some(-1.0);
-        i.holding.as_mut().unwrap().next_long_term =
-            Some((5, day("2026-11-25"), Some(100.0)));
+        i.holding.as_mut().unwrap().next_long_term = Some((5, day("2026-11-25"), Some(100.0)));
         assert!(decide(&i).tax_note.is_none());
     }
 
@@ -2006,7 +2079,7 @@ mod tests {
         assert!(auditor_flag(["Audit report with qualified opinion"]).is_some());
         assert!(auditor_flag(["Unmodified opinion on financial results"]).is_none());
         assert!(auditor_flag(["Board meeting outcome", "Unqualified opinion"]).is_none());
-        let w = vec!["NSE surveillance: ASM (Long Term ASM Stage 1)".to_string()];
+        let w = ["NSE surveillance: ASM (Long Term ASM Stage 1)".to_string()];
         assert!(surveillance(w.iter()).is_some());
         assert!(surveillance(["Yahoo failed".to_string()].iter()).is_none());
     }
@@ -2037,12 +2110,22 @@ mod tests {
             assert!(caught, "{bad:?} should be flagged");
         }
         let missing_reasons = serde_json::json!({"action": {"kind": "BUY", "reasons": [], "disclaimer": DISCLAIMER, "methodology": METHODOLOGY, "confidence": "high", "coverage": 90.0, "review_by": "2027-01-01", "invalidation_price": 1.0}});
-        assert!(std::panic::catch_unwind(|| assert_action_well_formed(&missing_reasons.to_string())).is_err());
+        assert!(
+            std::panic::catch_unwind(|| assert_action_well_formed(&missing_reasons.to_string()))
+                .is_err()
+        );
         let low_coverage = serde_json::json!({"action": {"kind": "BUY", "reasons": ["x"], "disclaimer": DISCLAIMER, "methodology": METHODOLOGY, "confidence": "low", "coverage": 50.0, "review_by": "2027-01-01", "invalidation_price": 1.0}});
-        assert!(std::panic::catch_unwind(|| assert_action_well_formed(&low_coverage.to_string())).is_err());
+        assert!(
+            std::panic::catch_unwind(|| assert_action_well_formed(&low_coverage.to_string()))
+                .is_err()
+        );
         let no_level = serde_json::json!({"action": {"kind": "BUY", "reasons": ["x"], "disclaimer": DISCLAIMER, "methodology": METHODOLOGY, "confidence": "low", "coverage": 90.0, "review_by": "2027-01-01"}});
-        assert!(std::panic::catch_unwind(|| assert_action_well_formed(&no_level.to_string())).is_err());
+        assert!(
+            std::panic::catch_unwind(|| assert_action_well_formed(&no_level.to_string())).is_err()
+        );
         // Plain descriptions of flows and the sell preview are fine.
-        assert_action_well_formed("Recent insider open-market buying; FII selling; `portfolio sell` preview");
+        assert_action_well_formed(
+            "Recent insider open-market buying; FII selling; `portfolio sell` preview",
+        );
     }
 }

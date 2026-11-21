@@ -118,10 +118,12 @@ fn portfolio_totals_skip_holdings_without_a_price() {
             "cap_tier",
             "cost_basis_base",
             "value_base",
-            "fx_effect"
+            "fx_effect",
+            "action"
         ]
     );
     assert_eq!(row["price_source"], "quote");
+    crate::action::testing::assert_action_well_formed(&row.to_string());
     assert!(serde_json::to_value(&rows[1]).unwrap()["price_source"].is_null());
     assert_eq!(
         keys(&serde_json::to_value(totals).unwrap()),
@@ -155,7 +157,7 @@ fn portfolio_csv_leaves_missing_prices_empty() {
     let report = portfolio_report(&p, &valued(&p, Vec::new()), day("2026-01-02"));
     assert_eq!(
         to_csv(&report.holdings).unwrap().lines().nth(1),
-        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown,500.0,,0.0")
+        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown,500.0,,0.0,")
     );
 }
 

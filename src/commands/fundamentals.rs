@@ -1278,7 +1278,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     let mut ai = crate::ai::AiClient::connect().await;
     if ai.auto_available().await {
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
-        let stock_data = crate::ai::StockData::from_quote(q);
+        let mut stock_data = crate::ai::StockData::from_quote(q);
+        if let Some(v) = &deep_verdict {
+            stock_data = stock_data.with_action(&v.action);
+        }
         match ai.analyze_stock(&stock_data).await {
             Ok(analysis) => print_ai_answer(&analysis),
             Err(_) => {

@@ -40,8 +40,9 @@ cargo +stable build --release
 
 ## Recommendations policy
 - Actions are rule-based and deterministic, computed only by `src/action.rs`.
-- Every action carries its reasons (at most 3), a confidence level, an
-  invalidation price, a review date and the disclaimer.
+- Every action carries its reasons (at most 3), a confidence level, a review
+  date and the disclaimer; BUY, ADD, HOLD and TRIM also carry the invalidation
+  price (a daily close below it invalidates the action).
 - NO CALL when data coverage is below 60%; never guess.
 - The rules live in `docs/methodology.md` ("Actions"). Any rule or threshold
   change bumps `METHODOLOGY` in `src/action.rs`.

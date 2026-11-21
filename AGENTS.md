@@ -39,7 +39,7 @@ The codebase includes:
 StockWise ships rule-based actions by default: BUY / WATCH / AVOID for a stock not held, ADD / HOLD / TRIM / EXIT for a holding, and NO CALL when the data is too thin.
 
 - **One source**: Actions are rule-based and deterministic, computed only by `src/action.rs`. No other module, prompt or tool decides an action.
-- **Always complete**: Every action carries its reasons (at most 3), a confidence level, an invalidation price, a review date and the disclaimer.
+- **Always complete**: Every action carries its reasons (at most 3), a confidence level, an invalidation price (BUY, ADD, HOLD, TRIM), a review date and the disclaimer.
 - **No guessing**: NO CALL when data coverage is below 60%.
 - **Published rules**: The rules live in `docs/methodology.md` ("Actions"). Any rule or threshold change bumps `METHODOLOGY` in `src/action.rs`.
 - **AI explains, never decides**: The `ask`/`ai` layer, MCP hosts and coding agents explain the computed action. They never invent, upgrade or change one, and never invent price levels (entry, stop, target, invalidation).

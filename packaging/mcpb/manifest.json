@@ -51,6 +51,14 @@
       "description": "6-pillar scorecard. Quantitative 6-pillar scores for one ticker (valuation, growth, balance sheet, ownership, analysts, technical trend) with a 0-100 composite, data coverage and the facts behind each score. Not a recommendation."
     },
     {
+      "name": "stock_action",
+      "description": "Rule-based action for a stock. StockWise's deterministic call for one stock: BUY, WATCH or AVOID when not held, ADD, HOLD, TRIM or EXIT when held, NO CALL below 60% data coverage; with confidence, reasons, invalidation price, review date, size hint, tax note and disclaimer."
+    },
+    {
+      "name": "portfolio_review",
+      "description": "Rule-based review of holdings. The action for every holding, sorted EXIT, TRIM, ADD, HOLD, with reasons, invalidation price, review date, shares to trim and tax notes."
+    },
+    {
       "name": "scorecard",
       "description": "Piotroski F-Score & Altman Z-Score. Audit-grade accounting scorecards for one ticker with every criterion's formula and pass/fail."
     },
