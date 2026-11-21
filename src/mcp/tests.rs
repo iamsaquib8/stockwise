@@ -643,11 +643,10 @@ async fn structured_results_follow_their_output_schemas() {
         score: 71.0,
         price: 3500.0,
         currency: Some("INR".into()),
-        benchmark_price: None,
+        benchmark_price: Some(100.0),
         methodology: crate::picks::METHODOLOGY.into(),
     };
     let prices = std::collections::HashMap::from([("TCS.NS".to_string(), 4100.0)]);
-    let closes = [(day("2026-08-30"), 100.0), (day("2026-11-20"), 104.0)];
     let review = crate::picks_log::review(
         &[entry],
         "in",
@@ -658,8 +657,7 @@ async fn structured_results_follow_their_output_schemas() {
         &std::collections::HashMap::new(),
         Some(crate::picks_log::Benchmark {
             name: "NIFTY 50",
-            closes: &closes,
-            now: None,
+            now: Some(104.0),
         }),
     );
     let mut rv = serde_json::to_value(&review).unwrap();

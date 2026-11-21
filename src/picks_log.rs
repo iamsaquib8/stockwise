@@ -149,15 +149,6 @@ pub struct Review {
     pub methodologies: Vec<String>,
 }
 
-/// The benchmark close on or before `date`.
-fn close_on(series: &[(NaiveDate, f64)], date: NaiveDate) -> Option<f64> {
-    series
-        .iter()
-        .take_while(|(d, _)| *d <= date)
-        .last()
-        .map(|(_, c)| *c)
-}
-
 fn mean(v: &[f64]) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
@@ -176,12 +167,10 @@ fn median(v: &[f64]) -> Option<f64> {
     })
 }
 
-/// What a review compares with: the benchmark's name, its daily closes
-/// (oldest first) and its level now.
+/// What a review compares with: the benchmark's name and its level now.
 #[derive(Debug, Clone, Copy)]
 pub struct Benchmark<'a> {
     pub name: &'a str,
-    pub closes: &'a [(NaiveDate, f64)],
     pub now: Option<f64>,
 }
 
@@ -191,10 +180,10 @@ pub struct Benchmark<'a> {
 /// after a 2-for-1 split; `None` when that could not be checked; a symbol
 /// without an entry has had none).
 ///
-/// Each leg compares matching observations: a list logged with the
-/// benchmark's level at that moment is measured against its level now;
-/// an older one against the closes of its listing date and of the last
-/// session.
+/// Each leg compares matching observations: the benchmark's live level
+/// logged with the list against its live level now, next to the pick's
+/// live prices. A pick without a logged level, or a review without a live
+/// level now, has no benchmark comparison rather than a mismatched one.
 pub fn review(
     entries: &[Entry],
     market: &str,
@@ -215,7 +204,6 @@ pub fn review(
             None => first.push(e),
         }
     }
-    let last_close = benchmark.and_then(|b| b.closes.last().map(|(_, c)| *c));
     let mut rows = Vec::new();
     let mut unpriced = Vec::new();
     let mut unverified = Vec::new();
@@ -244,11 +232,9 @@ pub fn review(
         };
         let ret = price * factor / e.price - 1.0;
         let bench = benchmark.and_then(|b| {
-            let (then, now) = match e.benchmark_price.filter(|p| *p > 0.0) {
-                Some(then) => (then, b.now.or(last_close)?),
-                None => (close_on(b.closes, e.date)?, last_close?),
-            };
-            (then > 0.0).then(|| now / then - 1.0)
+            let then = e.benchmark_price.filter(|p| *p > 0.0)?;
+            let now = b.now.filter(|p| *p > 0.0)?;
+            Some(now / then - 1.0)
         });
         rows.push(Row {
             symbol: e.symbol.clone(),
@@ -358,11 +344,14 @@ mod tests {
             ("B.NS".to_string(), 45.0),
             ("OLD.NS".to_string(), 20.0),
         ]);
-        let bench = vec![
-            (d("2026-01-02"), 20_000.0),
-            (d("2026-01-05"), 20_000.0),
-            (d("2026-03-02"), 21_000.0),
-        ];
+        // Each list was logged with the index at 20,000; it is 21,000 now.
+        let log: Vec<Entry> = log
+            .into_iter()
+            .map(|mut e| {
+                e.benchmark_price = Some(20_000.0);
+                e
+            })
+            .collect();
         let r = review(
             &log,
             "in",
@@ -373,8 +362,7 @@ mod tests {
             &HashMap::new(),
             Some(Benchmark {
                 name: "NIFTY 50",
-                closes: &bench,
-                now: None,
+                now: Some(21_000.0),
             }),
         );
         assert_eq!(r.rows.len(), 2);
@@ -429,7 +417,6 @@ mod tests {
         let prices = HashMap::from([("A.NS".to_string(), 101.0)]);
         // Same day: the daily close would compare with itself (0%); the
         // levels logged and now show the index's own move.
-        let closes = vec![(d("2026-03-02"), 20_100.0)];
         let r = review(
             &[e],
             "in",
@@ -440,12 +427,32 @@ mod tests {
             &HashMap::new(),
             Some(Benchmark {
                 name: "NIFTY 50",
-                closes: &closes,
                 now: Some(20_200.0),
             }),
         );
         assert!((r.rows[0].benchmark_pct.unwrap() - 0.01).abs() < 1e-9);
         assert!(r.rows[0].excess_pct.unwrap().abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_benchmark_comparison_without_matched_levels() {
+        // Logged without the index level: no mismatched comparison.
+        let prices = HashMap::from([("A.NS".to_string(), 110.0)]);
+        let r = review(
+            &[entry("2026-01-05", "A.NS", 100.0)],
+            "in",
+            "long",
+            d("2026-01-01"),
+            d("2026-03-02"),
+            &prices,
+            &HashMap::new(),
+            Some(Benchmark {
+                name: "NIFTY 50",
+                now: Some(21_000.0),
+            }),
+        );
+        assert_eq!(r.rows[0].benchmark_pct, None);
+        assert!((r.rows[0].return_pct - 0.10).abs() < 1e-9);
     }
 
     #[test]
