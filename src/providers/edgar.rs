@@ -77,6 +77,17 @@ const CAPEX: &[&str] = &[
     "PaymentsToAcquireProductiveAssets",
 ];
 
+// Balance-sheet concepts (instants: no `start`).
+const EQUITY: &[&str] = &[
+    "StockholdersEquity",
+    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+];
+const DEBT_NONCURRENT: &[&str] = &["LongTermDebtNoncurrent"];
+const DEBT_CURRENT: &[&str] = &["LongTermDebtCurrent", "DebtCurrent"];
+const DEBT_TOTAL: &[&str] = &["LongTermDebt"];
+const SHORT_BORROWINGS: &[&str] = &["ShortTermBorrowings"];
+const COMMERCIAL_PAPER: &[&str] = &["CommercialPaper"];
+
 /// The EDGAR ticker of a Yahoo symbol (`AAPL`, `BRK-B`); none for anything
 /// that is not a plain US stock (exchange suffixes, indices, crypto, FX).
 pub fn ticker(symbol: &str) -> Option<String> {
@@ -104,13 +115,94 @@ pub struct Period {
     pub capex: Option<f64>,
 }
 
-/// Quarters and fiscal years of one filer, oldest first.
+/// Quarters and fiscal years of one filer, oldest first, and the latest
+/// balance sheet.
 #[derive(Debug, Default, PartialEq)]
 pub struct Statements {
     pub company: String,
     pub cik: u64,
     pub quarterly: Vec<Period>,
     pub annual: Vec<Period>,
+    /// Shareholders' equity on the latest balance-sheet date.
+    pub equity: Option<(NaiveDate, f64)>,
+    /// Borrowings (long-term, its current portion, short-term and commercial
+    /// paper) on the same date; `None` when the filer tagged none.
+    pub debt: Option<f64>,
+}
+
+/// The ratios Yahoo's `financialData` carries, rebuilt from the filings, in
+/// Yahoo's units: fractions, except debt/equity in percent.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Ratios {
+    /// Trailing-twelve-month net income over equity.
+    pub roe: Option<f64>,
+    pub debt_to_equity: Option<f64>,
+    pub profit_margin: Option<f64>,
+    pub operating_margin: Option<f64>,
+    /// Latest quarter's revenue against the same quarter a year earlier.
+    pub revenue_growth: Option<f64>,
+    /// Sum of the last four quarters' diluted EPS.
+    pub eps_ttm: Option<f64>,
+    /// End of the latest period the ratios use.
+    pub as_of: Option<NaiveDate>,
+}
+
+impl Statements {
+    /// The last four quarters when they are consecutive (about a year from
+    /// the first start to the last end).
+    fn last_four(&self) -> Option<&[Period]> {
+        let n = self.quarterly.len();
+        let q = self.quarterly.get(n.checked_sub(4)?..)?;
+        let span = (q[3].end - q[0].end).num_days();
+        (240..=300).contains(&span).then_some(q)
+    }
+
+    /// Trailing twelve months of one metric: four quarters, else the latest
+    /// fiscal year.
+    fn ttm(&self, pick: fn(&Period) -> Option<f64>) -> Option<f64> {
+        if let Some(q) = self.last_four()
+            && let Some(sum) = q.iter().map(pick).sum::<Option<f64>>()
+        {
+            return Some(sum);
+        }
+        self.annual.last().and_then(pick)
+    }
+
+    pub fn ratios(&self) -> Ratios {
+        let revenue = self.ttm(|p| p.revenue).filter(|r| *r > 0.0);
+        let net = self.ttm(|p| p.net_income);
+        let operating = self.ttm(|p| p.operating_income);
+        let equity = self.equity.map(|(_, e)| e).filter(|e| *e > 0.0);
+        let revenue_growth = self.quarterly.last().and_then(|last| {
+            let now = last.revenue?;
+            let before = self.quarterly.iter().rev().skip(1).find(|p| {
+                (340..=390).contains(&(last.end - p.end).num_days())
+            })?;
+            let then = before.revenue.filter(|r| *r > 0.0)?;
+            Some(now / then - 1.0)
+        });
+        let eps_ttm = self
+            .last_four()
+            .and_then(|q| q.iter().map(|p| p.diluted_eps).sum::<Option<f64>>())
+            .or_else(|| self.annual.last().and_then(|p| p.diluted_eps));
+        let latest = [
+            self.quarterly.last().map(|p| p.end),
+            self.annual.last().map(|p| p.end),
+            self.equity.map(|(d, _)| d),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        Ratios {
+            roe: net.zip(equity).map(|(n, e)| n / e),
+            debt_to_equity: self.debt.zip(equity).map(|(d, e)| d / e * 100.0),
+            profit_margin: net.zip(revenue).map(|(n, r)| n / r),
+            operating_margin: operating.zip(revenue).map(|(o, r)| o / r),
+            revenue_growth,
+            eps_ttm,
+            as_of: latest,
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -213,6 +305,47 @@ fn flows(gaap: &HashMap<String, Concept>, names: &[&str], unit: &str) -> Vec<Flo
         }
     }
     chosen.into_values().collect()
+}
+
+/// The value of an instant (balance-sheet) fact per date, the latest filing
+/// winning; of several concepts the first in `names` that has the date wins.
+fn instants(gaap: &HashMap<String, Concept>, names: &[&str]) -> BTreeMap<NaiveDate, f64> {
+    let mut chosen: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    for name in names {
+        let Some(facts) = gaap.get(*name).and_then(|c| c.units.get("USD")) else {
+            continue;
+        };
+        let mut latest: BTreeMap<NaiveDate, (NaiveDate, f64)> = BTreeMap::new();
+        for f in facts {
+            if f.start.is_some() || !is_periodic(&f.form) || !f.val.is_finite() {
+                continue;
+            }
+            let slot = latest.entry(f.end).or_insert((f.filed, f.val));
+            if f.filed >= slot.0 {
+                *slot = (f.filed, f.val);
+            }
+        }
+        for (end, (_, val)) in latest {
+            chosen.entry(end).or_insert(val);
+        }
+    }
+    chosen
+}
+
+/// Equity on the latest balance-sheet date and the borrowings on that date.
+fn balance_sheet(gaap: &HashMap<String, Concept>) -> (Option<(NaiveDate, f64)>, Option<f64>) {
+    let Some((&date, &equity)) = instants(gaap, EQUITY).iter().next_back() else {
+        return (None, None);
+    };
+    let at = |names: &[&str]| instants(gaap, names).get(&date).copied();
+    let short = [at(SHORT_BORROWINGS), at(COMMERCIAL_PAPER)];
+    let long = match (at(DEBT_NONCURRENT), at(DEBT_CURRENT)) {
+        (None, None) => [at(DEBT_TOTAL), None],
+        (a, b) => [a, b],
+    };
+    let parts: Vec<f64> = long.into_iter().chain(short).flatten().collect();
+    let debt = (!parts.is_empty()).then(|| parts.iter().sum());
+    (Some((date, equity)), debt)
 }
 
 /// Quarter and fiscal-year values of one metric, keyed by period end.
@@ -351,11 +484,14 @@ pub fn parse_company_facts(json: &str) -> Result<Statements> {
     let mut annual = build(|s| &s.years);
     quarterly.drain(..quarterly.len().saturating_sub(QUARTERS_KEPT));
     annual.drain(..annual.len().saturating_sub(YEARS_KEPT));
+    let (equity, debt) = balance_sheet(gaap);
     Ok(Statements {
         company: doc.entity_name,
         cik: doc.cik,
         quarterly,
         annual,
+        equity,
+        debt,
     })
 }
 
@@ -385,7 +521,7 @@ pub async fn fetch(client: &YahooClient, symbol: &str) -> Result<Option<Statemen
         .await
         .context("EDGAR company facts unavailable")?;
     let st = parse_company_facts(&body)?;
-    Ok((!st.quarterly.is_empty() || !st.annual.is_empty()).then_some(st))
+    Ok((!st.quarterly.is_empty() || !st.annual.is_empty() || st.equity.is_some()).then_some(st))
 }
 
 #[cfg(test)]

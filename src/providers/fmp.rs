@@ -108,6 +108,21 @@ impl Fmp {
         Ok(parse_profile(&json))
     }
 
+    /// Trailing ratios (`/ratios-ttm`, `/key-metrics-ttm`): margin,
+    /// debt/equity, P/E, P/B and ROE. Two requests.
+    pub async fn ratios(&self, symbol: &str) -> Result<Option<super::router::Ratios>> {
+        let Some(t) = ticker(symbol) else {
+            return Ok(None);
+        };
+        let ttl = Duration::from_secs(6 * 3600);
+        let ratios = self.get("/ratios-ttm", &[("symbol", &t)], ttl).await?;
+        let metrics = self
+            .get("/key-metrics-ttm", &[("symbol", &t)], ttl)
+            .await
+            .unwrap_or(Value::Null);
+        Ok(parse_ratios(&ratios, &metrics))
+    }
+
     /// Quarterly and annual statements: income, balance sheet and cash flow
     /// for each, six requests.
     pub async fn statements(&self, symbol: &str) -> Result<Statements> {
@@ -225,6 +240,25 @@ pub fn parse_profile(json: &Value) -> Option<Profile> {
 
 /// `/company-screener`: rows with `symbol`, `companyName`, `marketCap`,
 /// `sector`, `industry`, `price`, `volume`, `exchange`, `isActivelyTrading`.
+/// `/ratios-ttm` and `/key-metrics-ttm` (one-row arrays): fractions, and
+/// debt/equity as a ratio, converted to Yahoo's percent.
+pub fn parse_ratios(ratios: &Value, metrics: &Value) -> Option<super::router::Ratios> {
+    let first = |v: &Value| v.as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+    let (r, m) = (first(ratios), first(metrics));
+    let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
+    let out = super::router::Ratios {
+        roe: n(&m, "returnOnEquityTTM"),
+        debt_to_equity: n(&r, "debtToEquityRatioTTM").map(|v| v * 100.0),
+        profit_margin: n(&r, "netProfitMarginTTM"),
+        revenue_growth: None,
+        beta: None,
+        eps_ttm: None,
+        pe: n(&r, "priceToEarningsRatioTTM").filter(|v| *v > 0.0),
+        pb: n(&r, "priceToBookRatioTTM").filter(|v| *v > 0.0),
+    };
+    (out != super::router::Ratios::default()).then_some(out)
+}
+
 pub fn parse_screener(json: &Value) -> Vec<Quote> {
     json.as_array()
         .into_iter()
@@ -315,6 +349,21 @@ mod tests {
     const CASH: &str = r#"[{"date":"2025-09-27","period":"Q4","operatingCashFlow":29728000000,"capitalExpenditure":-3242000000,"freeCashFlow":26486000000}]"#;
     const PROFILE: &str = r#"[{"symbol":"AAPL","companyName":"Apple Inc.","marketCap":3900000000000,"currency":"USD","exchange":"NASDAQ","sector":"Technology","industry":"Consumer Electronics","country":"US"}]"#;
     const SCREEN: &str = r#"[{"symbol":"MSFT","companyName":"Microsoft Corporation","marketCap":3500000000000,"sector":"Technology","industry":"Software - Infrastructure","price":470.1,"volume":20000000,"exchange":"NASDAQ Global Select","exchangeShortName":"NASDAQ","isActivelyTrading":true},{"companyName":"No symbol"}]"#;
+
+    #[test]
+    fn ttm_ratios_map_to_yahoo_units() {
+        let ratios: Value = serde_json::from_str(
+            r#"[{"symbol":"AAPL","netProfitMarginTTM":0.24,"debtToEquityRatioTTM":1.5,"priceToEarningsRatioTTM":38.0,"priceToBookRatioTTM":44.0}]"#,
+        )
+        .unwrap();
+        let metrics: Value =
+            serde_json::from_str(r#"[{"symbol":"AAPL","returnOnEquityTTM":1.5}]"#).unwrap();
+        let r = parse_ratios(&ratios, &metrics).unwrap();
+        assert_eq!(r.profit_margin, Some(0.24));
+        assert_eq!(r.debt_to_equity, Some(150.0));
+        assert_eq!(r.roe, Some(1.5));
+        assert!(parse_ratios(&Value::Null, &Value::Null).is_none());
+    }
 
     #[test]
     fn maps_stock_symbols_only() {

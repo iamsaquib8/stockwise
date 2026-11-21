@@ -41,6 +41,7 @@ pub mod bse;
 pub mod bse_bhav;
 pub mod coingecko;
 pub mod edgar;
+pub mod fill;
 pub mod finnhub;
 pub mod fmp;
 pub mod frankfurter;
@@ -525,6 +526,15 @@ impl Provider {
             Provider::Bse(p) => Some(p),
             Provider::Exchange(p) => Some(&p.bse),
             _ => None,
+        }
+    }
+
+    /// Valuation and quality ratios from a keyed provider (Finnhub, FMP).
+    pub async fn ratios(&self, symbol: &str) -> Result<Option<router::Ratios>> {
+        match self {
+            Provider::Finnhub(p) => p.ratios(symbol).await,
+            Provider::Fmp(p) => p.ratios(symbol).await,
+            _ => Ok(None),
         }
     }
 

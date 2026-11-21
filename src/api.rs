@@ -598,6 +598,10 @@ pub struct Quote {
     pub beta: Option<f64>,
     #[serde(rename = "dividendYield")]
     pub dividend_yield: Option<f64>,
+    /// The P/E of the stock's NSE sector index (NSE `quote-equity`), for
+    /// comparing the stock's own; omitted from JSON when unknown.
+    #[serde(rename = "sectorPe", skip_serializing_if = "Option::is_none")]
+    pub sector_pe: Option<f64>,
     /// Which provider supplied the price when it wasn't Yahoo
     /// (`STOCKWISE_DATA_PROVIDER`); omitted from JSON otherwise.
     #[serde(rename = "dataSource", skip_serializing_if = "Option::is_none")]
@@ -1256,6 +1260,22 @@ impl YahooClient {
         }
     }
 
+    /// Point NSE and BSE at a mock server (`base`), with no disk cache.
+    #[cfg(test)]
+    pub(crate) fn set_test_exchanges(&self, base: &str) {
+        use providers::session::{DiskCache, Session};
+        let mut nse_site = providers::nse::site(base);
+        nse_site.home = None;
+        let _ = self.nse.set(providers::nse::Nse::new(Arc::new(Session::for_tests(
+            nse_site,
+            DiskCache::Off,
+        ))));
+        let _ = self.bse.set(providers::bse::Bse::new(Arc::new(Session::for_tests(
+            providers::bse::site(base),
+            DiskCache::Off,
+        ))));
+    }
+
     /// Back the client with router members, as `FINNHUB_API_KEY` /
     /// `FMP_API_KEY` and the keyless backups would.
     #[cfg(test)]
@@ -1596,6 +1616,49 @@ impl YahooClient {
         query: &providers::router::ScreenQuery,
     ) -> Result<(Vec<Quote>, &'static str)> {
         self.router.screener(query).await
+    }
+
+    /// Ratios (ROE, margin, leverage, growth, beta) from the keyed
+    /// providers, merged; the second value names the sources.
+    pub async fn provider_ratios(
+        &self,
+        symbol: &str,
+    ) -> Result<(providers::router::Ratios, Vec<&'static str>)> {
+        self.router.ratios(symbol).await
+    }
+
+    /// NSE's company facts (P/E, sector P/E, industry, shares issued) for an
+    /// `.NS` stock. `Ok(None)` for other symbols or when the exchanges are
+    /// turned off (`STOCKWISE_KEYLESS_BACKUPS=off`).
+    pub async fn nse_equity_info(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<providers::nse::EquityInfo>> {
+        if !self.exchange_backup_on() {
+            return Ok(None);
+        }
+        self.nse_client().equity_info(symbol).await
+    }
+
+    /// NSE's latest quarterly results for an Indian stock, oldest first.
+    pub async fn nse_results(&self, symbol: &str) -> Result<Vec<providers::nse::ResultRow>> {
+        if !self.exchange_backup_on() {
+            return Ok(Vec::new());
+        }
+        self.nse_client().results(symbol).await
+    }
+
+    /// BSE's P/E, EPS, ROE and P/B for an Indian stock (an `.NS` symbol is
+    /// looked up by the same id on BSE).
+    pub async fn bse_ratios(&self, symbol: &str) -> Result<Option<providers::bse::BseRatios>> {
+        if !self.exchange_backup_on() {
+            return Ok(None);
+        }
+        let bo = match symbol.strip_suffix(".NS") {
+            Some(base) => format!("{base}.BO"),
+            None => symbol.to_string(),
+        };
+        self.bse_client().ratios(&bo).await
     }
 
     /// Whether any keyed provider (`FINNHUB_API_KEY`, `FMP_API_KEY`) backs
