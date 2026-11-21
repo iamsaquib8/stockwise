@@ -635,7 +635,11 @@ mod tests {
                 cess: 21.6,
                 total: 561.6,
                 exemption_used: 2000.0,
+                foreign: Vec::new(),
+                other_rules: Vec::new(),
+                unpriced: Vec::new(),
             }),
+            warnings: Vec::new(),
             disclaimer: crate::verdict::DISCLAIMER,
         })
     }
