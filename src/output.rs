@@ -80,6 +80,10 @@ pub fn csv_cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
+        // A rule action (`crate::action::Action`) prints as its label.
+        Value::Object(m) if m.contains_key("kind") && m.get("label").is_some_and(Value::is_string) => {
+            m["label"].as_str().unwrap_or_default().to_string()
+        }
         other => other.to_string(),
     }
 }

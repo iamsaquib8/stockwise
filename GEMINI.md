@@ -7,12 +7,12 @@
 
 ## Key Rules
 1. **Financial Strictness**: Currency calculations must use integer minor units (`i64`) or `rust_decimal::Decimal`. Never let floating-point inaccuracies cause penny drift in balances or taxes.
-2. **Compliance**: Under no circumstances should the agent emit stock picks, price targets, or personalized investment advice.
+2. **Recommendations policy**: Actions (BUY/WATCH/AVOID, ADD/HOLD/TRIM/EXIT, NO CALL) are rule-based and deterministic, computed only by `src/action.rs`. Every action carries at most 3 reasons, a confidence level, an invalidation price, a review date and the disclaimer; NO CALL below 60% data coverage. The rules live in `docs/methodology.md` ("Actions"), and any rule or threshold change bumps `METHODOLOGY`. The agent explains the computed action and never invents, upgrades or changes one, and never invents price levels. StockWise is not a SEBI-registered investment adviser or research analyst (`DISCLAIMER.md`).
 3. **Clean Open-Source Hygiene**: Maintain clean open-source repository boundaries. Zero raw exchange data, zero hardcoded secrets.
 
 ## Commands
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo +stable fmt --all -- --check
+cargo +stable clippy --all-targets --all-features -- -D warnings
+cargo +stable test
 ```

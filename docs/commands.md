@@ -79,8 +79,8 @@ network, invalid config file), `2` invalid arguments.
 
 > **Guide:** [Quickstart: five minutes](quickstart.md) walks through the first commands.
 
-`stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise`
-prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
+`stockwise SYMBOL` with no command prints a one-screen overview that starts with the
+stock's [action](#actions), and bare `stockwise` prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
 `c` (compare), `p` (portfolio), `w` (watch), `ev` (events). The aliases are lowercase: a capital
 single letter is a ticker, so `stockwise C -m us` (Citigroup), `T`, `D`, `A` and `W` work as bare
 symbols, and `stockwise c TCS INFY` still compares. A longer ticker that spells a command, such as
@@ -94,7 +94,7 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | Command | Description |
 |---------|-------------|
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
-| `deep <SYMBOL> [-p PERIOD]` | Everything about one stock: fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights. Default `3mo` |
+| `deep <SYMBOL> [-p PERIOD]` | Everything about one stock, starting with its [action](#actions): fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights. Default `3mo` |
 | `markets [--crypto] [--fx] [--global] [--json\|--csv]` | US + India indices (S&P 500, Dow, NASDAQ, Russell, VIX, NIFTY 50, SENSEX, Bank NIFTY, NIFTY IT) and the India 10-year G-sec yield (CCIL, RBI fallback; left out when neither answers); `--crypto` adds the largest coins, `--fx` major pairs (USD/INR, EUR/USD, ...), `--global` one row per exchange's main index (NIFTY 50, S&P 500, FTSE 100, DAX, Nikkei 225, Hang Seng, Straits Times, S&P/TSX, S&P/ASX 200) with whether it is open and its local time. With `-m crypto`, `-m fx`, `-m commodity` or a global exchange that section comes first. `--json` rows carry `region`: `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Japan`, ...) or `Global` |
 | `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
@@ -112,7 +112,7 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `results --holdings` / `--universe nifty50` `[--sort date\|pat\|margin\|surprise]` | Earnings-season scoreboard: how many companies reported the active quarter, aggregate revenue, operating profit and PAT growth YoY, beat / in-line / miss counts, and the reporters table |
 | `events <SYMBOL> [--days N] [--ai]` (`ev`) | Unified timeline of material corporate events, exchange filings, earnings results, and excess market reaction vs NIFTY/S&P 500 |
 | `insights <SYMBOL>` | Positive, negative and neutral findings (Growth, Valuation, Margins, Ownership, etc.) with quantified metrics and XBRL shareholding patterns |
-| `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. Size cut-offs (cash, insider trades; market cap in `longterm`) are written in US dollars and amounts in other currencies are converted at rough fixed rates, so the same size scores the same in rupees and dollars. A description of the data, not a recommendation; `--explain` lists the weights and rules |
+| `verdict <SYMBOL> [--horizon short\|long] [--explain] [--json]` | Starts with the stock's [action](#actions) for the horizon (default `long`), then the 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. Size cut-offs (cash, insider trades; market cap in `longterm`) are written in US dollars and amounts in other currencies are converted at rough fixed rates, so the same size scores the same in rupees and dollars. `--explain` lists the weights and rules |
 | `score <SYMBOL> [--json] [--explain]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards. **Piotroski F-Score** (2000): nine yes/no signals, most of them this year against last year. A signal whose data is missing shows `n/a`, earns no point and is not counted, so the score reads like `5/7 evaluated`; it is rated only when all nine ran. Net income is estimated from trailing EPS × shares, or margin × revenue, only when no period reports it, and is marked `(est.)`. **Altman Z** (1968): needs all five ratios; with any missing it shows `n/a` and names them, with no zone, and no input is guessed. **Altman Z''** (1995, non-manufacturers) uses book equity over liabilities and is shown with its own factor table whenever X1–X4 exist. In `--json`: `piotroski.evaluated` and `criteria[].evaluated` (`piotroski.rating` is null when not rated), `altman.missing_factors`, `altman.z_double_prime_components` and `altman.z_double_prime_formula_str` |
 | `technical <SYMBOL> [-p] [--json] [--explain]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
@@ -131,6 +131,38 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `forecast <SYMBOL> [-d DAYS] [-p]` | Linear trend projection with 95% bands — a projection, not a prediction |
 
 `--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners.
+
+### Actions
+
+`verdict`, `deep` and a bare `stockwise SYMBOL` start with one line from the
+rule-based action engine, followed by its reasons:
+
+```text
+ACTION: BUY · medium confidence · invalid below ₹2,410.50 · review by 21 Feb 2027
+  • Composite score 71 (65 or more)
+  • Price above its 200-day average (₹2,388.10)
+  • P/E 24.3 within 1.2x the sector P/E (22.0)
+  • Size: at most 6.2% of the portfolio, about 25 shares (risk_per_trade)
+  Methodology 1 (long horizon). Rule-based educational signal from StockWise's published methodology, ...
+```
+
+A stock you don't hold gets BUY, WATCH or AVOID; one you hold gets ADD, HOLD,
+TRIM or EXIT. Below 60% data coverage the line is
+`ACTION: NO CALL — missing: ROE, D/E` and nothing is guessed. A daily close
+below the invalidation price invalidates the action; look again by the review
+date. `--horizon short` (on `verdict`, `portfolio review` and `picks`) sets
+the invalidation at the higher of close − 1.5 × ATR and the 20-day low,
+reviews in 10 sessions, and also asks for a price above the 50-day average and
+rising volume before a BUY. Small caps (below ₹5,000 crore or $2 billion) face
+extra gates: promoter pledge above 10%, thin trading, more than 2 price-band
+hits in 20 sessions (NSE/BSE), an auditor red flag, or exchange surveillance
+make them AVOID. The same action appears in the Action columns of
+`portfolio`, `portfolio checkup` and `picks`, in [`portfolio
+review`](#portfolio-review), as an `action` object in `--json`, and in the MCP
+tools `stock_action` and `portfolio_review`. Every rule and threshold is in
+[methodology.md](methodology.md#actions-methodology-1). Actions are rule-based
+educational signals; StockWise is not a SEBI-registered investment adviser or
+research analyst, and losses are possible ([DISCLAIMER.md](../DISCLAIMER.md)).
 
 ## Market
 
@@ -152,7 +184,7 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `earnings` | Earnings growth for portfolio and watchlist |
 | `surprise [--universe INDEX]` | Forward EPS against trailing EPS, by expected growth; stocks without a forward EPS are left out, and a large scan shows the 25 fastest and the 25 steepest falls |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
-| `picks [--universe INDEX] [--cap TIER] [--horizon long\|short] [--top N] [--min-mcap N] [--min-adv N] [--json\|--csv]` | Scores the stocks of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) that clear a size and liquidity floor (India ₹500 crore and ₹2 crore traded a day; US $1 billion and $5 million; lower floors for `--cap small` and `--cap micro`), from 0 to 100, and lists the highest. Five pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity, profit margin, low debt), **growth** (forward against trailing EPS with 3+ analysts, revenue growth), **trend** and **risk** (low volatility, drawdown and beta). The leaders of a first pass get their fundamentals and a year of prices before the final ranking. `--horizon long` (default) weights value and quality; `--horizon short` gives trend 45% (3-month momentum per unit of volatility, the 50-day average, the 52-week range, rising volume) and risk 20%. Losses and negative book value rank last; figures too good to be true (P/E below 3, ROE above 80%, yield above 15%) are listed apart to check; stocks with less than 60% of their data stay out; with a positive `--top`, at most 3 per known sector (`--top 0` has no limit). Every list is logged for `picks review`. Method: [methodology.md](methodology.md) |
+| `picks [--universe INDEX] [--cap TIER] [--horizon long\|short] [--top N] [--min-mcap N] [--min-adv N] [--json\|--csv]` | Scores the stocks of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) that clear a size and liquidity floor (India ₹500 crore and ₹2 crore traded a day; US $1 billion and $5 million; lower floors for `--cap small` and `--cap micro`), from 0 to 100, and lists the highest. Five pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity, profit margin, low debt), **growth** (forward against trailing EPS with 3+ analysts, revenue growth), **trend** and **risk** (low volatility, drawdown and beta). The leaders of a first pass get their fundamentals and a year of prices before the final ranking. `--horizon long` (default) weights value and quality; `--horizon short` gives trend 45% (3-month momentum per unit of volatility, the 50-day average, the 52-week range, rising volume) and risk 20%. Losses and negative book value rank last; figures too good to be true (P/E below 3, ROE above 80%, yield above 15%) are listed apart to check; stocks with less than 60% of their data stay out; with a positive `--top`, at most 3 per known sector (`--top 0` has no limit). Every list is logged for `picks review`. The finalists get an Action column with their [action](#actions) (also with `--cap small --horizon short`). Method: [methodology.md](methodology.md) |
 | `picks review [--since 90d] [--horizon long\|short] [--json\|--csv]` | The track record: every logged pick from the day it was first listed, with its return, the benchmark's return over the same days (NIFTY 50 for India, S&P 500 total return for the US) and the difference, plus the share that rose, the share that beat the benchmark, and mean and median returns. Price returns adjusted for splits since listing (a pick whose splits can't be checked is left out); dividends not included. Lists logged with the benchmark's level compare both at the same moment. `--since` takes up to 10 years |
 | `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr). The table shows the first 50 matches; `--json` and `--csv` carry them all |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
@@ -438,7 +470,7 @@ Data lives in the directory shown by `stockwise doctor`.
 
 | Command | Description |
 |---------|-------------|
-| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
+| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency). An Action column shows each stock's [action](#actions) (`HOLD (med)`, `NO CALL`) |
 | `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N [--date YYYY-MM-DD] [--qty Q] [--price P] \| --delete] [--undo-sale N]` | Lots, sales, dividends and XIRR of one holding, each numbered. `--lot N` corrects a lot's date, quantity or price, or `--delete`s it without recording a sale; `--undo-sale N` drops sale N from the realised gains and puts its shares back as the lot they came from |
@@ -450,7 +482,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL> [--yes]` | Remove a holding and its lots without recording a sale; asks first when it has more than one lot |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
-| `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it (see [below](#portfolio-checkup)) |
+| `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it, with an Action column per holding (see [below](#portfolio-checkup)) |
+| `portfolio review [--horizon short\|long] [--json]` | Each holding's [action](#actions), sorted EXIT, TRIM, ADD, HOLD, then NO CALL, with its reasons, invalidation price, review date, size hint and tax note (see [below](#portfolio-review)) |
 | `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
@@ -801,8 +834,9 @@ education; check it against your broker's statements.
   or low, a weak long-term score, an estimated purchase date, money in other
   currencies, and holdings left out of the totals.
 
-These are readings of the data, not recommendations: nothing says to buy,
-sell or keep a holding. `--json` prints every figure. The TUI shows the same
+These are readings of the data. The dashboard gives no action; for each
+holding's action, run [`portfolio review`](#portfolio-review). `--json` prints
+every figure. The TUI shows the same
 analysis on its own screen (key `p`).
 
 ### Portfolio checkup
@@ -854,8 +888,31 @@ source without a rate is listed under "Not checked". A check only counts as
 run when its data was there: unknown cap tiers, funds without disclosed
 holdings or a missing revenue trend leave the check out of the count.
 
-These are observations, not advice: nothing says to buy, sell or keep a
-holding.
+The findings are observations. The Action column next to each holding comes
+from the action engine, as in [`portfolio review`](#portfolio-review); each
+JSON holding carries its `action` object.
+
+### Portfolio review
+
+`stockwise portfolio review [--horizon short|long] [--json]` gives each
+holding its [action](#actions) and sorts them by what needs doing first:
+EXIT, TRIM, ADD, HOLD, then NO CALL. Each holding shows:
+
+- the action line: action, confidence, invalidation price and review date;
+- up to three reasons;
+- a size hint. For TRIM it gives the shares to sell to get back under your
+  profile's `max_stock_weight` (half of it for a small cap); for ADD, the most
+  the rules allow;
+- a tax note when a lot turns long-term within 30 days, such as "waiting 23
+  days saves about ₹4,120 in tax".
+
+For a holding, the invalidation level trails: it is measured from the highest
+close of the last 20 sessions. A close below it is an EXIT. The review works
+from quotes, so it uses the long-term score as the composite and, without a
+results date, reviews in 90 days on the long horizon. Funds, ETFs and SGBs
+get NO CALL. `--json` prints one entry per holding, each with its `action`
+object. The MCP tool `portfolio_review` returns
+the same. Rules: [methodology.md](methodology.md#actions-methodology-1).
 
 ### Portfolio wrap
 
@@ -1067,14 +1124,17 @@ last year. Returns are assumptions, not promises.
 Both use the same tools (quotes, history, technicals, risk, scorecards,
 insights, events, mutual funds, option chains, IPOs, screens, picks, market
 conditions, backtests, your portfolio dashboard, lots, tax estimate, advance
-tax, harvest and rebalance plans, calendar, goals, watchlist, alerts and
-`fit_check` against your own rules). They read, unless you turn on the
-workspace tools; `undo` reverses what those change. See [ai.md](ai.md).
+tax, harvest and rebalance plans, calendar, goals, watchlist, alerts,
+`fit_check` against your own rules, and the rule-based [actions](#actions)
+from `stock_action` and `portfolio_review`). They read, unless you turn on the
+workspace tools; `undo` reverses what those change. The model explains the
+action the rules computed; it never invents or changes one, and never makes up
+a price level. See [ai.md](ai.md).
 
 | Command | Description |
 |---------|-------------|
 | `ask [QUESTION] [-i] [-c \| --resume ID] [--sessions] [--playbook checkup\|tax-season\|earnings] [--auto] [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers, knowing your investor profile. Needs a model with tool calling. `-i` keeps asking until `exit`; `-c` carries on the newest saved conversation, `--resume ID` a given one, `--sessions` lists them (the newest 50, in `cache.db`). `--playbook` runs a prepared task. `--auto` lets the model change your watchlist, alerts, goals, targets, notes and profile (undo with `undo`). `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage, conversation id). The last request runs without tools, so the model must answer. Educational, not financial advice |
-| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--allow-writes] [--allow-portfolio] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude, Codex, Gemini, Antigravity, Cursor, VS Code and other assistants: 52 tools that read, the portfolio, watchlist and alerts as resources, and four prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-writes` adds 11 workspace tools (watchlist, alerts, goals, targets, notes, profile and profile onboarding); `--allow-portfolio` also adds `portfolio_add` and `portfolio_sell`, which record lots. Each change is journalled for `undo`; neither works with `--allow-remote`. `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
+| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--allow-writes] [--allow-portfolio] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude, Codex, Gemini, Antigravity, Cursor, VS Code and other assistants: 54 tools that read, the portfolio, watchlist and alerts as resources, and four prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-writes` adds 11 workspace tools (watchlist, alerts, goals, targets, notes, profile and profile onboarding); `--allow-portfolio` also adds `portfolio_add` and `portfolio_sell`, which record lots. Each change is journalled for `undo`; neither works with `--allow-remote`. `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
 | `connect [APP...] [--all] [--list] [--remove] [--allow-writes] [--allow-portfolio] [--no-skill] [--dry-run] [--json]` | Add the MCP server to AI apps: Claude Desktop and Code, Cursor, Windsurf, VS Code, Cline, Gemini CLI, Antigravity, Codex, Zed, LM Studio and opencode (Goose and Continue get lines to paste). With no app named, every app found on this computer. Only the `stockwise` entry changes and each config is backed up to `<file>.stockwise.bak`; the agent skill is installed for Claude Code and Antigravity. `--remove` takes it out again |
 | `undo [ID] [--list] [--force] [--json]` | Reverse a change an assistant made (`mcp --allow-writes`, `ask --auto`): the newest by default, or change `ID`. `--list` shows the journal. It refuses when a later change or your own edit touched the same file; `--force` undoes anyway |
 
@@ -1255,6 +1315,14 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
   quoted, quotes doubled), starts with a header row, and ends lines with `\n`.
   CSV columns are the same names as the JSON row keys.
 - The `--ai` section is never part of JSON or CSV output.
+- Every `--json` output that has a stock call carries an `action` object
+  (`verdict`, `deep`, `portfolio`, `portfolio checkup`, `portfolio review`,
+  `picks`): `{kind, label, confidence, reasons, invalidation_price, review_by,
+  size_hint: {max_weight_pct, shares, limited_by}, tax_note, horizon, held,
+  coverage, missing, currency, methodology, disclaimer}`. `kind` is `BUY`,
+  `WATCH`, `AVOID`, `ADD`, `HOLD`, `TRIM`, `EXIT` or `NO_CALL`.
+  `size_hint.shares` and `missing` are left out when empty; other missing
+  values are `null`.
 - `mf` and `options` have their own `--json` (no `--csv`); fractions there are
   decimals (`0.1234` = 12.34%), and missing values are `null`, never 0.
 - `options payoff --json` is `{symbol, source, underlying, currency, as_of, expiry,

@@ -18,7 +18,13 @@ fn altman_summary(a: &scorecard::AltmanScorecard) -> Option<String> {
     })
 }
 
-fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &crate::api::Quote) {
+/// `shown`: the verdict whose action the view already printed at the top
+/// (only the score block is repeated here).
+fn print_unified_research_footer(
+    r_opt: Option<&crate::research::Research>,
+    q: &crate::api::Quote,
+    shown: Option<&crate::verdict::DecisionVerdict>,
+) {
     if let Some(r) = r_opt {
         let sc = scorecard::generate_scorecard_report(r);
         print_section("Accounting Scorecards (Piotroski & Altman)");
@@ -56,10 +62,15 @@ fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &
             }
         }
 
-        let v = crate::verdict::generate_verdict(r, &cards);
         println!();
         println!("{}", "─".repeat(60).dimmed());
-        crate::verdict::print_snapshot(&v, &r.symbol);
+        match shown {
+            Some(v) => crate::verdict::print_snapshot_body(v, &r.symbol),
+            None => {
+                let v = crate::verdict::generate_verdict(r, &cards);
+                crate::verdict::print_snapshot(&v, &r.symbol);
+            }
+        }
         println!("{}", "─".repeat(60).dimmed());
     } else {
         print_section("Insights");
@@ -92,12 +103,15 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
             .as_ref()
             .map(insights::generate_rich_insights)
             .unwrap_or_default();
-        let verdict = r_opt
-            .as_ref()
-            .map(|r| crate::verdict::generate_verdict(r, &cards));
+        let verdict = r_opt.as_ref().map(|r| {
+            let mut v = crate::verdict::generate_verdict(r, &cards);
+            super::actions::apply_holding(&mut v, r, market);
+            v
+        });
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
+            "action": verdict.as_ref().map(|v| &v.action),
             "quote": market::quote_json(q),
             "verdict": verdict,
             "scorecard": scorecard,
@@ -229,7 +243,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_kv("Volatility", &risk);
     }
 
-    print_unified_research_footer(r_opt.as_ref(), q);
+    print_unified_research_footer(r_opt.as_ref(), q, None);
 
     // AI-powered analysis (with --ai, if the provider is available)
     let mut ai = crate::ai::AiClient::connect().await;
@@ -910,12 +924,15 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
             .as_ref()
             .map(insights::generate_rich_insights)
             .unwrap_or_default();
-        let verdict = r_opt
-            .as_ref()
-            .map(|r| crate::verdict::generate_verdict(r, &cards));
+        let verdict = r_opt.as_ref().map(|r| {
+            let mut v = crate::verdict::generate_verdict(r, &cards);
+            super::actions::apply_holding(&mut v, r, market);
+            v
+        });
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
+            "action": verdict.as_ref().map(|v| &v.action),
             "period": period,
             "quote": market::quote_json(q),
             "verdict": verdict,
@@ -937,6 +954,17 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     let change = q.regular_market_change.unwrap_or(0.0);
     let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
 
+    // The rule-based action is the first thing printed.
+    let deep_verdict = r_opt.as_ref().map(|r| {
+        let cards = insights::generate_rich_insights(r);
+        let mut v = crate::verdict::generate_verdict(r, &cards);
+        super::actions::apply_holding(&mut v, r, market);
+        v
+    });
+    if let Some(v) = &deep_verdict {
+        println!();
+        print!("{}", crate::verdict::render_action(&v.action));
+    }
     print_header(&format!("DEEP DIVE: {} — {}", resolved, name));
     println!(
         "  {}  {}\n",
@@ -1244,7 +1272,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     }
 
     // ── 3. Unified Scorecards, Rich Insights & 6-Pillar Verdict ──
-    print_unified_research_footer(r_opt.as_ref(), q);
+    print_unified_research_footer(r_opt.as_ref(), q, deep_verdict.as_ref());
 
     // ── 4. AI Analysis ──
     let mut ai = crate::ai::AiClient::connect().await;

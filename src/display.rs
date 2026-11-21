@@ -416,7 +416,7 @@ mod tests {
             "mean rating 1.8/5 (1 = most positive)"
         );
         for x in [1.0, 2.0, 3.0, 4.0, 5.0] {
-            crate::verdict::testing::assert_neutral(&mean_rating_text(x));
+            crate::action::testing::assert_action_well_formed(&mean_rating_text(x));
         }
     }
 

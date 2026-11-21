@@ -1065,12 +1065,12 @@ mod tests {
     #[test]
     fn rsi_and_macd_signals_are_neutral_wording() {
         for rsi in [0.0, 10.0, 25.0, 35.0, 50.0, 65.0, 75.0, 85.0, 100.0] {
-            crate::verdict::testing::assert_neutral(rsi_signal(rsi));
+            crate::action::testing::assert_action_well_formed(rsi_signal(rsi));
         }
         assert_eq!(rsi_signal(75.0), "RSI above 70 (overbought zone)");
         assert_eq!(rsi_signal(25.0), "RSI below 30 (oversold zone)");
-        crate::verdict::testing::assert_neutral(macd_signal(1.0));
-        crate::verdict::testing::assert_neutral(macd_signal(-1.0));
+        crate::action::testing::assert_action_well_formed(macd_signal(1.0));
+        crate::action::testing::assert_action_well_formed(macd_signal(-1.0));
     }
 
     #[test]

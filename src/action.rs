@@ -214,6 +214,16 @@ pub struct Action {
 }
 
 impl Action {
+    /// A NO CALL for a value that has not been decided yet (replaced by the
+    /// engine's answer before anything prints it).
+    pub fn undecided(currency: &str) -> Self {
+        let i = Inputs {
+            currency: currency.to_string(),
+            ..Default::default()
+        };
+        no_call(&i, "Not evaluated".to_string())
+    }
+
     /// `ACTION: BUY · medium confidence · invalid below ₹2,410.50 · review by 21 Feb 2027`,
     /// or `ACTION: NO CALL — missing: ROE, D/E`.
     pub fn headline(&self) -> String {
@@ -503,6 +513,13 @@ impl Inputs {
             risk_per_trade: p.risk_per_trade,
             ..Default::default()
         }
+    }
+
+    /// Take the position limits from `p`.
+    pub fn with_profile(mut self, p: &crate::config::EffectiveProfile) -> Self {
+        self.max_stock_weight = p.max_stock_weight;
+        self.risk_per_trade = p.risk_per_trade;
+        self
     }
 
     /// Whether the small-cap gates apply: market cap below ₹5,000 crore or
@@ -1104,6 +1121,21 @@ fn decide_held(i: &Inputs, h: &HoldingContext) -> Action {
 // ---------------------------------------------------------------------------
 // Builders: from a research bundle (single stock) and from a plain quote
 // (portfolio, picks).
+
+/// The action for a researched stock you don't hold (or, with `holding`,
+/// one you do).
+pub fn for_research(
+    r: &crate::research::Research,
+    v: &crate::verdict::DecisionVerdict,
+    profile: &crate::config::EffectiveProfile,
+    horizon: Horizon,
+    holding: Option<HoldingContext>,
+) -> Action {
+    let today = chrono::Local::now().date_naive();
+    let mut i = inputs_from_research(r, v, horizon, today).with_profile(profile);
+    i.holding = holding;
+    decide(&i)
+}
 
 /// Inputs from a full research bundle and its 6-pillar score.
 pub fn inputs_from_research(

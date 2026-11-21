@@ -774,6 +774,9 @@ pub(crate) struct HoldingRow {
     /// What exchange-rate moves since the purchases added, in the base
     /// currency (0 for a holding in the base currency).
     pub(crate) fx_effect: Option<f64>,
+    /// The quote-based rule action (`crate::action`); `portfolio review`
+    /// gives the full one. Null without a quote (funds, SGBs, no price).
+    pub(crate) action: Option<crate::action::Action>,
 }
 
 impl CsvRow for HoldingRow {
@@ -796,6 +799,7 @@ impl CsvRow for HoldingRow {
         "cost_basis_base",
         "value_base",
         "fx_effect",
+        "action",
     ];
 }
 
@@ -843,6 +847,7 @@ pub(crate) fn portfolio_report(
     today: chrono::NaiveDate,
 ) -> PortfolioReport {
     let totals = val.totals(portfolio);
+    let mut actions = super::actions::quick_actions(portfolio, val);
     let holdings = portfolio
         .holdings
         .iter()
@@ -880,6 +885,7 @@ pub(crate) fn portfolio_report(
                 cost_basis_base: round_opt(cost_base, 2),
                 value_base: round_opt(value_base, 2),
                 fx_effect,
+                action: actions.remove(&h.symbol),
             }
         })
         .collect();
@@ -1116,7 +1122,8 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .unwrap_or(0)
         .max(12);
     let fx_w = if any_foreign { 12 } else { 0 };
-    let rule = "─".repeat(81 + sw + fx_w);
+    let rule = "─".repeat(81 + 13 + sw + fx_w);
+    let actions = super::actions::quick_actions(&portfolio, &val);
     let fx_head = if any_foreign {
         format!(" {}", pad_start("FX effect", 11).bold())
     } else {
@@ -1124,7 +1131,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     };
     // Width-aware padding: translated labels (e.g. Hindi) aren't one column per char.
     println!(
-        "  {} {} {} {} {} {} {}{} {} {}",
+        "  {} {} {} {} {} {} {}{} {} {} {}",
         pad_end(t(Msg::Symbol), sw).bold(),
         pad_start(t(Msg::Shares), 8).bold(),
         pad_start(t(Msg::AvgCost), 10).bold(),
@@ -1135,6 +1142,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         fx_head,
         pad_start("XIRR", 8).bold(),
         pad_start("Cap", 6).bold(),
+        pad_end("Action", 12).bold(),
     );
     println!("  {}", rule.dimmed());
 
@@ -1199,7 +1207,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             }
         };
         println!(
-            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6}",
+            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6} {}",
             label.cyan(),
             h.shares,
             format_price(h.avg_cost, cur),
@@ -1210,6 +1218,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             fx_cell,
             xirr_cell(xirr),
             val.cap_tier(&h.symbol).badge().dimmed(),
+            action_cell(actions.get(&h.symbol)),
         );
     }
 
@@ -1237,6 +1246,13 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         "",
     );
     print_kv("Cost basis", &format_price(totals.cost, base));
+    if !actions.is_empty() {
+        println!(
+            "  {}",
+            "Action: quote-based rules (methodology 1). `stockwise portfolio review` adds price history, look-through and tax notes."
+                .dimmed()
+        );
+    }
     if let Some(note) = val.fx_note() {
         println!("  {}", note.dimmed());
     }
@@ -3232,43 +3248,20 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// `portfolio xray` — look-through overlap across stocks, ETFs, and funds,
-/// plus asset-class, market-cap, and sector concentration.
-pub async fn cmd_portfolio_xray(
-    portfolio_name: Option<&str>,
+/// The look-through X-Ray of `portfolio` (splits already applied), valued
+/// by `val`: what `portfolio xray` prints and `portfolio review` reads for
+/// each company's combined weight.
+pub(crate) async fn build_xray(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    val: &Valuation,
     market: Market,
-    base: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    let active_name = portfolio_name.or(pf::active());
-    let portfolio = Portfolio::load_named(active_name)?;
-    if portfolio.holdings.is_empty() {
-        if json {
-            let report = xray::compute_xray(
-                active_name.unwrap_or("default"),
-                market_currency(market),
-                &[],
-                &std::collections::HashMap::new(),
-            );
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            return Ok(());
-        }
-        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
-        return Ok(());
-    }
-
-    let client = YahooClient::new().await?;
-    // A split or bonus not yet applied to the lots: value the share count
-    // after it, so the look-through is not halved.
-    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
-    let portfolio = pending.adjusted(&portfolio);
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    let val = value_holdings(&client, &symbols, market, base).await?;
-
+    active_name: Option<&str>,
+) -> (
+    xray::PortfolioXrayReport,
+    Vec<XrayInputHolding>,
+    std::collections::HashMap<String, funds::FundProfile>,
+) {
     let mut fund_profiles = std::collections::HashMap::new();
     for h in &portfolio.holdings {
         let is_fund = offmarket::is_fund(&h.symbol);
@@ -3412,6 +3405,65 @@ pub async fn cmd_portfolio_xray(
         prof.max_stock_weight,
     );
     report.excluded = excluded;
+    (report, input_holdings, fund_profiles)
+}
+
+/// A coloured Action cell: `HOLD (med)`, `EXIT (high)`, `NO CALL`.
+pub(crate) fn action_cell(a: Option<&crate::action::Action>) -> String {
+    use crate::action::Kind;
+    let Some(a) = a else {
+        return "—".dimmed().to_string();
+    };
+    let cell = format!("{:<12}", a.cell());
+    match a.kind {
+        Kind::Exit | Kind::Avoid => cell.red().bold().to_string(),
+        Kind::Trim | Kind::Watch => cell.yellow().to_string(),
+        Kind::Add | Kind::Buy => cell.green().to_string(),
+        Kind::Hold => cell.cyan().to_string(),
+        Kind::NoCall => cell.dimmed().to_string(),
+    }
+}
+
+/// `portfolio xray` — look-through overlap across stocks, ETFs, and funds,
+/// plus asset-class, market-cap, and sector concentration.
+pub async fn cmd_portfolio_xray(
+    portfolio_name: Option<&str>,
+    market: Market,
+    base: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let active_name = portfolio_name.or(pf::active());
+    let portfolio = Portfolio::load_named(active_name)?;
+    if portfolio.holdings.is_empty() {
+        if json {
+            let report = xray::compute_xray(
+                active_name.unwrap_or("default"),
+                market_currency(market),
+                &[],
+                &std::collections::HashMap::new(),
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
+        return Ok(());
+    }
+
+    let client = YahooClient::new().await?;
+    // A split or bonus not yet applied to the lots: value the share count
+    // after it, so the look-through is not halved.
+    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    let portfolio = pending.adjusted(&portfolio);
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    let val = value_holdings(&client, &symbols, market, base).await?;
+
+    let (report, input_holdings, fund_profiles) =
+        build_xray(&client, &portfolio, &val, market, active_name).await;
+    let prof = crate::config::effective_profile();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

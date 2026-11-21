@@ -3555,7 +3555,7 @@ mod tests {
         assert_eq!(b.negative_headlines, 1);
         let shown: Vec<&str> = b.headlines.iter().map(|h| h.title.as_str()).collect();
         assert_eq!(shown, ["Acme IPO subscribed 4.7x on day two"]);
-        crate::verdict::testing::assert_neutral(&serde_json::to_string(&b).unwrap());
+        crate::action::testing::assert_action_well_formed(&serde_json::to_string(&b).unwrap());
         // The board list drops them too.
         let board = parse_rss_headlines(rss, 6);
         assert_eq!(board.len(), 1);
@@ -3655,7 +3655,7 @@ mod tests {
         ] {
             assert!(!text.contains(banned), "{banned:?} found in IPO output");
         }
-        crate::verdict::testing::assert_neutral(&text);
+        crate::action::testing::assert_action_well_formed(&text);
     }
 
     #[test]

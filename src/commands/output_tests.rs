@@ -544,7 +544,7 @@ fn technical_json_has_the_documented_keys() {
     assert_eq!(keys(&v["bias"]), ["verdict", "bullish", "bearish"]);
     assert!(v["sma_200"].is_number());
     // Every string in the output describes data; none reads as advice.
-    crate::verdict::testing::assert_neutral(&v.to_string());
+    crate::action::testing::assert_action_well_formed(&v.to_string());
 
     // A steep rise and a steep fall give both extreme RSI readings.
     let up: Vec<f64> = (0..250).map(|i| 100.0 + i as f64).collect();
@@ -552,7 +552,7 @@ fn technical_json_has_the_documented_keys() {
     for c in [&up, &down] {
         let v = technical_json("X", None, "1y", "1d", c, c, c, &[1000; 250]);
         assert!(v["rsi_signal"].is_string());
-        crate::verdict::testing::assert_neutral(&v.to_string());
+        crate::action::testing::assert_action_well_formed(&v.to_string());
     }
 
     // Too few bars for the long averages: null, not 0.

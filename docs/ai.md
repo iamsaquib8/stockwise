@@ -61,23 +61,29 @@ stockwise compare TCS INFY --ai
 | `screen` | Notes on the screened names, value-trap warnings |
 | `deep` | Summary of the full report |
 
-## Educational, not advice
+## Recommendations policy
 
-Every prompt starts with the same rules: explain what the data shows — signals,
-trends, valuation context, risks and what to watch — in neutral, conditional
-language, and never tell the reader to buy, sell, hold, accumulate or avoid
-anything, never pick a winner, and give no price targets, entry or exit levels,
-position sizes or allocations. This follows SEBI's rules for investment advisers
-and research analysts (and its guidance on finfluencers): StockWise is neither.
-Every AI section ends with a one-line disclaimer:
+StockWise shows rule-based actions: BUY, WATCH or AVOID for a stock you don't
+hold, ADD, HOLD, TRIM or EXIT for one you do, and NO CALL when less than 60% of
+the data is there. The actions are deterministic and come only from the rules
+in `src/action.rs`, written out in
+[methodology.md](methodology.md#actions-methodology-1). Each carries up to
+three reasons, a confidence level, an invalidation price, a review date and
+the disclaimer.
 
-> AI-generated educational analysis, not investment advice or a recommendation
-> to buy, sell or hold. StockWise is not a SEBI-registered investment adviser or
-> research analyst.
+The AI explains; it never decides. Every prompt starts with the same rules:
+explain what the data shows — signals, trends, valuation context, risks and
+what to watch — and, when the command computed an action, explain that action
+from its reasons. The model never invents an action, never upgrades or changes
+the one computed, and never invents a price level (entry, stop, target or
+invalidation). When the engine says NO CALL, the answer says there is not
+enough data for a call. Every AI section ends with a one-line disclaimer:
+AI-generated educational analysis; StockWise is not a SEBI-registered
+investment adviser or research analyst.
 
-A model can still ignore its instructions; treat its output as commentary. The
-prompts live in `src/ai.rs` (`ai::prompts`), and a test checks that none of
-them asks for a verdict or a call. When the prompts change, `PROMPT_VERSION` is
+A model can still ignore its instructions; trust the action line StockWise
+printed over anything the model says. The prompts live in `src/ai.rs`
+(`ai::prompts`), and a test checks that they carry these rules. When the prompts change, `PROMPT_VERSION` is
 bumped: it is part of the cache key, so an answer cached under older wording is
 never shown again.
 
@@ -168,8 +174,10 @@ must answer once the conversation fills most of its 16k-token context.
   calling). Running `ask` is the opt-in, as with `report`; `--ai` is not
   needed.
 
-Answers are educational, not financial advice: the model is told to describe
-what the data shows and its risks, not to tell you to buy or sell. **The tools
+Answers are educational, not personalised advice: the model describes what the
+data shows and its risks, and for an action it calls `stock_action` or
+`portfolio_review` and explains what they return. It never makes up an action
+or a price level. **The tools
 cannot place orders.**
 
 **Privacy.** With a cloud provider, the question and every tool result go to
@@ -283,7 +291,7 @@ the data directory. Add them to `args` or the client's `env`.
 
 ### Tools
 
-There are 52 tools that read, and 13 more that change your files when you
+There are 54 tools that read, and 13 more that change your files when you
 turn them on ([below](#changes-the-assistant-can-make)). Each result is JSON
 with the data, a short "not financial advice" `note`, and `truncated` when long
 lists were shortened.
@@ -296,7 +304,9 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `history` | OHLCV bars (most recent `limit`, default 60) with the period's change, high and low | `history --json` |
 | `technical` | SMAs, EMAs, RSI, MACD, Bollinger Bands, ATR, VWAP and a signal tally | `technical --json` |
 | `risk` | Volatility, Sharpe, Sortino, Calmar, max drawdown, value at risk | `risk --json` |
-| `verdict` | The 6-pillar scorecard: each pillar's 0–100 score, band and the facts behind it, the composite, and the data coverage. Pillars without data are marked as such. No rating, entry, stop or target, and the description tells the model it is not a recommendation | `verdict --json` |
+| `verdict` | The 6-pillar scorecard: each pillar's 0–100 score, band and the facts behind it, the composite, and the data coverage. Pillars without data are marked as such. For the action, the model calls `stock_action` | `verdict --json` |
+| `stock_action` | The rule-based action for one stock (`symbol`, optional `horizon`: `long` or `short`): kind, confidence, up to three reasons, invalidation price, review date, size hint, tax note, coverage and the disclaimer. NO CALL below 60% coverage | `verdict --json` (`action`) |
+| `portfolio_review` | Each holding's action (optional `horizon`), sorted EXIT, TRIM, ADD, HOLD, then NO CALL, with reasons, invalidation, review date, size hint and tax notes | `portfolio review --json` |
 | `scorecard` | Piotroski F-score and Altman Z-score with every criterion and its formula | `score --json` |
 | `insights` | Positive, negative and neutral findings plus the shareholding split for one ticker | `insights --json` |
 | `events` | Recent and upcoming corporate events with the price reaction around each | `events --json` |
@@ -328,11 +338,11 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `portfolio_analyze` | The portfolio dashboard: by market, currency, cap tier and sector, tax terms, risk and observations | `portfolio analyze --json` |
 | `portfolio_checkup` | Findings in six lenses (concentration, forensic flags, valuation, downside, fees and tax, goals) ranked by the money at stake, each with the command to inspect it | `portfolio checkup --json` |
 | `market_conditions` | Trend, volatility, breadth and valuation with their history (readings, not a timing signal) | `conditions --json` |
-| `picks` | Stocks ranked on value, quality, growth and trend among those scanned (the default universe, or `universe`, `cap`) | `picks --json` |
+| `picks` | Stocks ranked on value, quality, growth and trend among those scanned (the default universe, or `universe`, `cap`); finalists carry their rule-based `action` | `picks --json` |
 | `movers` | Top gainers and losers today | `movers --json` |
 | `dividends` | Dividend yield and income projection for one ticker | `dividends --json` |
 | `goal_emergency` | Emergency reserve size against your liquid money, and the build-up plan | `goal emergency --json` |
-| `fit_check` | Whether a stock fits **your own** rules: `yes`, `no` or `unclear`, with each rule passed, failed or unknown (weight of one stock and small caps against your profile, risk tier against your risk level, P/E and ROE limits from your note). Not a recommendation | — |
+| `fit_check` | Whether a stock fits **your own** rules: `yes`, `no` or `unclear`, with each rule passed, failed or unknown (weight of one stock and small caps against your profile, risk tier against your risk level, P/E and ROE limits from your note). It checks your rules; the action comes from `stock_action` | — |
 | `changes_list` | The changes assistants made, newest first, with their undo command | `undo --list` |
 
 Hosts see each tool's read-only and open-world hints; the portfolio tools are
@@ -382,7 +392,7 @@ stockwise connect --allow-writes   # write the flag into every app's config
 
 | Prompt | What it asks for |
 |--------|------------------|
-| `review_portfolio` (optional `focus`) | Value, P&L, concentration and risk of your holdings, without buy/sell calls |
+| `review_portfolio` (optional `focus`) | Value, P&L, concentration and risk of your holdings |
 | `tax_harvest_check` | Unrealized gains and losses by lot before 31 March, the LTCG exemption left and the set-off rules |
 | `onboard_profile` | Asks the onboarding questions one at a time and saves the profile (needs `--allow-writes`) |
 | `explain_option_chain` (`symbol`, optional `expiry`) | OI, PCR, max pain, IV and greeks in plain English |
@@ -533,4 +543,4 @@ error, not as an empty answer.
 | `phi4:14b` | ~9 GB | Good with financial metrics |
 | `llama3.1:8b` | ~5 GB | Lighter and faster |
 
-Model output is commentary, not advice. See [DISCLAIMER.md](../DISCLAIMER.md).
+Model output is commentary on the data and on the rule-based action; it never makes the call. See [DISCLAIMER.md](../DISCLAIMER.md).

@@ -1456,7 +1456,7 @@ mod tests {
             assert!(kinds.contains(&k), "{k} missing from {kinds:?}");
         }
         for o in &a.observations {
-            crate::verdict::testing::assert_neutral(&o.text);
+            crate::action::testing::assert_action_well_formed(&o.text);
         }
     }
 }
