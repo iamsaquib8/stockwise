@@ -1,0 +1,28 @@
+{
+  "cik": "123456",
+  "entityType": "operating",
+  "name": "SAMPLE CORP",
+  "tickers": ["SMPL"],
+  "exchanges": ["Nasdaq"],
+  "filings": {
+    "recent": {
+      "accessionNumber": [
+        "0000123456-26-000123",
+        "0000123456-26-000120",
+        "0000123456-26-000118",
+        "0000123456-26-000110",
+        "0000123456-26-000101"
+      ],
+      "filingDate": ["2026-11-18", "2026-11-10", "2026-11-05", "2026-10-30", "2026-08-01"],
+      "form": ["4", "8-K", "4", "4/A", "10-Q"],
+      "primaryDocument": [
+        "xslF345X05/form4.xml",
+        "smpl-20261110.htm",
+        "xslF345X05/wk-form4_1762300000.xml",
+        "xslF345X05/form4a.xml",
+        "smpl-20260630.htm"
+      ]
+    },
+    "files": []
+  }
+}

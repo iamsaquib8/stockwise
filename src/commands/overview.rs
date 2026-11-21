@@ -983,6 +983,34 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
                 .to_string()
         };
         print_kv(t(Msg::PnL), &pnl_str);
+        // Today's move: each holding against its previous close, at today's
+        // share count and exchange rate. Funds and SGBs have no previous
+        // close and are left out ([n/m] says how many count).
+        let day = super::portfolio::period_change("1 day", &portfolio, &val, |s| {
+            val.quote(s).and_then(|q| q.regular_market_previous_close)
+        });
+        let day_str = match &day {
+            Some(c) => {
+                let pct = format!("({:+.2}%)", c.pct);
+                let cover = if c.covered < c.of {
+                    format!(" [{}/{}]", c.covered, c.of).dimmed().to_string()
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} {}{}",
+                    super::portfolio::signed_money(c.change, cur),
+                    if c.change >= 0.0 {
+                        pct.green().to_string()
+                    } else {
+                        pct.red().to_string()
+                    },
+                    cover
+                )
+            }
+            None => "—".to_string(),
+        };
+        print_kv(t(Msg::DayChange), &day_str);
         if let Some(note) = val.fx_note() {
             println!("  {}", note.dimmed());
         }

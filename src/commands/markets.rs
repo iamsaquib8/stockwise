@@ -621,6 +621,35 @@ pub(crate) fn cap_scope(scope: &str, cap: Option<market::CapFilter>) -> String {
     }
 }
 
+/// When the movers' prices are from: the local time now, the session the
+/// latest trade belongs to (exchange-local) and whether the market is open.
+pub(crate) fn movers_as_of(
+    market: Market,
+    now: chrono::DateTime<chrono::Utc>,
+    last_trade: Option<i64>,
+) -> String {
+    use crate::clock;
+    let mut parts = vec![format!("As of {}", clock::format_local(market, now))];
+    match last_trade.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)) {
+        Some(t) => parts.push(format!(
+            "session {} (last trade {} {})",
+            clock::session_date(market, t).format("%a %d %b %Y"),
+            clock::local(market, t).format("%H:%M"),
+            clock::tz_label(market)
+        )),
+        None => parts.push(format!(
+            "session {}",
+            clock::session_date(market, now).format("%a %d %b %Y")
+        )),
+    }
+    parts.push(if clock::is_open(market, now) {
+        "market open".to_string()
+    } else {
+        format!("market closed ({})", clock::closed_reason(market, now))
+    });
+    parts.join(" · ")
+}
+
 pub async fn cmd_movers(
     market: Market,
     universe: Option<market::Universe>,
@@ -647,6 +676,11 @@ pub async fn cmd_movers(
         Format::Table => {}
     }
 
+    let last_trade = quotes.iter().filter_map(|q| q.regular_market_time).max();
+    println!(
+        "\n  {}",
+        movers_as_of(market, chrono::Utc::now(), last_trade).dimmed()
+    );
     for (title, rows, empty) in [
         ("Top Gainers", &gainers, "No stocks rose today"),
         ("Top Losers", &losers, "No stocks fell today"),
@@ -1282,129 +1316,174 @@ pub async fn cmd_news(symbol: &str, market: Market) -> Result<()> {
 
 // ── Risk Analysis ──
 
-pub async fn cmd_sentiment() -> Result<()> {
-    let client = YahooClient::new().await?;
-    // Fetch VIX, S&P500, and some breadth proxies
-    let quotes = client
-        .get_quote(&["^VIX", "^GSPC", "^IXIC", "^DJI", "SPY", "QQQ"])
-        .await?;
+/// What the sentiment gauge reads for one market.
+struct SentimentSpec {
+    /// The volatility index and its name.
+    vix: (&'static str, &'static str),
+    /// Upper bounds of the extreme-greed, greed, neutral and fear bands of
+    /// the volatility index; above the last is extreme fear.
+    vix_bands: [f64; 4],
+    /// The broad index the momentum and trend readings use.
+    index: (&'static str, &'static str),
+    /// A smaller-company index, compared with `index` for breadth.
+    breadth: (&'static str, &'static str),
+    /// Other indices shown with their day change.
+    others: &'static [(&'static str, &'static str)],
+    /// News searches for the headline count.
+    yahoo_query: &'static str,
+    google_query: &'static str,
+}
 
-    let vix = quotes
-        .iter()
-        .find(|q| q.symbol.as_deref() == Some("^VIX"))
-        .and_then(|q| q.regular_market_price);
-    let sp_chg = quotes
-        .iter()
-        .find(|q| q.symbol.as_deref() == Some("^GSPC"))
-        .and_then(|q| q.regular_market_change_percent);
+/// The gauge's inputs for `market`: India VIX, Nifty 50, Bank Nifty and
+/// Nifty Midcap 50 for India; VIX, S&P 500, Nasdaq and Russell 2000 for
+/// the US.
+fn sentiment_spec(market: Market) -> Result<SentimentSpec> {
+    match market {
+        // India VIX sits higher than the US VIX for the same mood: its
+        // median since 2010 is in the mid-to-high teens and stress pushes it
+        // past 30 (above 80 in March 2020).
+        Market::In => Ok(SentimentSpec {
+            vix: ("^INDIAVIX", "India VIX"),
+            vix_bands: [14.0, 18.0, 24.0, 32.0],
+            index: ("^NSEI", "NIFTY 50"),
+            breadth: ("^NSEMDCP50", "NIFTY MIDCAP 50"),
+            others: &[("^NSEBANK", "BANK NIFTY")],
+            yahoo_query: "Nifty Sensex today",
+            google_query: "Indian stock market today Nifty Sensex",
+        }),
+        Market::Us => Ok(SentimentSpec {
+            vix: ("^VIX", "VIX"),
+            vix_bands: [15.0, 20.0, 25.0, 35.0],
+            index: ("^GSPC", "S&P 500"),
+            breadth: ("^RUT", "Russell 2000"),
+            others: &[("^IXIC", "Nasdaq")],
+            yahoo_query: "stock market today",
+            google_query: "US stock market today",
+        }),
+        _ => bail!(
+            "sentiment reads India VIX or the VIX: use -m in or -m us, not {}",
+            market.label()
+        ),
+    }
+}
+
+/// The volatility index on the 0 (extreme fear) … 100 (extreme greed)
+/// scale, by `bands` (see [`SentimentSpec::vix_bands`]).
+fn vix_score(v: f64, bands: [f64; 4]) -> f64 {
+    match v {
+        x if x < bands[0] => 90.0,
+        x if x < bands[1] => 70.0,
+        x if x < bands[2] => 50.0,
+        x if x < bands[3] => 30.0,
+        _ => 10.0,
+    }
+}
+
+/// The gauge's label for a 0 … 100 reading.
+fn mood(score: f64) -> &'static str {
+    match score {
+        s if s > 60.0 => "Greed",
+        s if s < 40.0 => "Fear",
+        _ => "Neutral",
+    }
+}
+
+/// Headlines whose wording reads positive and negative (the shared
+/// lexicon of `events`, whole words with negation).
+fn headline_tally<'a>(titles: impl IntoIterator<Item = &'a str>) -> (usize, usize) {
+    titles
+        .into_iter()
+        .map(crate::events::lexicon_sentiment)
+        .fold((0, 0), |(p, n), s| {
+            if s > 0.1 {
+                (p + 1, n)
+            } else if s < -0.1 {
+                (p, n + 1)
+            } else {
+                (p, n)
+            }
+        })
+}
+
+pub async fn cmd_sentiment(market: Market) -> Result<()> {
+    let spec = sentiment_spec(market)?;
+    let client = YahooClient::new().await?;
+    let mut syms: Vec<&str> = vec![spec.vix.0, spec.index.0, spec.breadth.0];
+    syms.extend(spec.others.iter().map(|(s, _)| *s));
+    let quotes = client.get_quote(&syms).await?;
+    // Match by symbol: Yahoo may reorder or drop symbols.
+    let quote = |sym: &str| {
+        quotes.iter().find(|q| {
+            q.symbol
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(sym))
+        })
+    };
+    let day_change = |sym: &str| quote(sym).and_then(|q| q.regular_market_change_percent);
 
     let mut score = 50.0_f64;
     let mut factors = Vec::new();
 
-    // VIX: <15 extreme greed, 15-20 greed, 20-25 neutral, 25-35 fear, >35 extreme fear
-    if let Some(v) = vix {
-        let vix_score = match v {
-            x if x < 15.0 => 90.0,
-            x if x < 20.0 => 70.0,
-            x if x < 25.0 => 50.0,
-            x if x < 35.0 => 30.0,
-            _ => 10.0,
-        };
-        score = (score + vix_score) / 2.0;
+    if let Some(v) = quote(spec.vix.0).and_then(|q| q.regular_market_price) {
+        let vs = vix_score(v, spec.vix_bands);
+        score = (score + vs) / 2.0;
+        factors.push(format!("{}: {:.1} → {}", spec.vix.1, v, mood(vs)));
+    } else {
+        factors.push(format!("{}: — (no quote)", spec.vix.1));
+    }
+
+    // Today's move of the broad index
+    if let Some(chg) = day_change(spec.index.0) {
+        let mom_score = (50.0 + chg * 10.0).clamp(0.0, 100.0);
+        score = (score + mom_score) / 2.0;
+        factors.push(format!("{}: {:+.2}% today", spec.index.1, chg));
+    }
+
+    // Breadth: smaller companies against the broad index today
+    if let (Some(small), Some(broad)) = (day_change(spec.breadth.0), day_change(spec.index.0)) {
+        let gap = small - broad;
+        let breadth_score = (50.0 + gap * 10.0).clamp(0.0, 100.0);
+        score = score * 0.8 + breadth_score * 0.2;
         factors.push(format!(
-            "VIX: {:.1} → {}",
-            v,
-            if vix_score > 60.0 {
-                "Greed"
-            } else if vix_score < 40.0 {
-                "Fear"
-            } else {
-                "Neutral"
-            }
+            "{} vs {}: {:+.2} pp today",
+            spec.breadth.1, spec.index.1, gap
         ));
     }
 
-    // Market momentum
-    if let Some(chg) = sp_chg {
-        let mom_score = (50.0 + chg * 10.0).clamp(0.0, 100.0);
-        score = (score + mom_score) / 2.0;
-        factors.push(format!("S&P 500: {:+.2}% today", chg));
-    }
-
-    // Get broader market momentum (20-day)
-    let chart = client.get_chart("^GSPC", "1mo", "1d").await;
-    if let Ok(c) = chart {
-        let closes: Vec<f64> = c
-            .indicators
-            .quote
-            .first()
-            .and_then(|q| q.close.as_ref())
-            .map(|c| c.iter().filter_map(|v| *v).collect())
-            .unwrap_or_default();
-        if closes.len() > 5 {
-            let monthly_ret = technical::percent_change(closes[0], *closes.last().unwrap());
+    // One-month trend of the broad index
+    if let Ok(c) = client.get_chart(spec.index.0, "1mo", "1d").await {
+        let closes = chart_closes(&c);
+        if let (true, Some(first), Some(last)) = (closes.len() > 5, closes.first(), closes.last()) {
+            let monthly_ret = technical::percent_change(*first, *last);
             let trend_score = (50.0 + monthly_ret * 5.0).clamp(0.0, 100.0);
             score = (score + trend_score) / 2.0;
-            factors.push(format!("1M trend: {:+.2}%", monthly_ret));
+            factors.push(format!("{} 1M trend: {:+.2}%", spec.index.1, monthly_ret));
         }
     }
 
-    // News sentiment from multiple sources
+    // Headline wording from two news sources
     let (yahoo_news, google_news) = tokio::join!(
-        fetch_yahoo_json_news(&client, "stock market today", 10),
-        fetch_google_news_rss(&client, "US India stock market today"),
+        fetch_yahoo_json_news(&client, spec.yahoo_query, 10),
+        fetch_google_news_rss(&client, spec.google_query),
     );
-    let all_news: Vec<NewsItem> = [yahoo_news, google_news].concat();
-    let collated_news = collate_news(all_news);
-
-    // Simple keyword-based sentiment scoring
-    let bullish_words = [
-        "rally", "surge", "gain", "rise", "high", "bull", "growth", "record", "up", "buy",
-        "strong", "positive",
-    ];
-    let bearish_words = [
-        "fall",
-        "drop",
-        "crash",
-        "decline",
-        "fear",
-        "bear",
-        "loss",
-        "low",
-        "sell",
-        "weak",
-        "negative",
-        "recession",
-    ];
-    let mut news_bull = 0i32;
-    let mut news_bear = 0i32;
-    for item in &collated_news {
-        let t = item.title.to_lowercase();
-        for w in &bullish_words {
-            if t.contains(w) {
-                news_bull += 1;
-            }
-        }
-        for w in &bearish_words {
-            if t.contains(w) {
-                news_bear += 1;
-            }
-        }
-    }
-    if news_bull + news_bear > 0 {
-        let news_score =
-            ((news_bull as f64 / (news_bull + news_bear) as f64) * 100.0).clamp(0.0, 100.0);
+    let collated_news = collate_news([yahoo_news, google_news].concat());
+    let (news_pos, news_neg) = headline_tally(collated_news.iter().map(|n| n.title.as_str()));
+    if news_pos + news_neg > 0 {
+        let news_score = (news_pos as f64 / (news_pos + news_neg) as f64) * 100.0;
         score = (score * 0.7 + news_score * 0.3).clamp(0.0, 100.0);
         let label = if news_score > 55.0 {
-            "bullish"
+            "mostly positive"
         } else if news_score < 45.0 {
-            "bearish"
+            "mostly negative"
         } else {
-            "neutral"
+            "mixed"
         };
         factors.push(format!(
-            "News sentiment: {} ({} positive / {} negative headlines)",
-            label, news_bull, news_bear
+            "Headline wording: {} ({} positive / {} negative of {})",
+            label,
+            news_pos,
+            news_neg,
+            collated_news.len()
         ));
     }
 
@@ -1416,7 +1495,10 @@ pub async fn cmd_sentiment() -> Result<()> {
         _ => ("EXTREME FEAR", "red"),
     };
 
-    print_header("Market Sentiment — Fear & Greed");
+    print_header(&format!(
+        "{} Market Sentiment — Fear & Greed",
+        market.label()
+    ));
 
     // Gauge
     let gauge_width = 50;
@@ -1446,15 +1528,57 @@ pub async fn cmd_sentiment() -> Result<()> {
     };
     println!("  {:>28} {} {}", "", score_display, label.bold());
 
+    print_section("Indices");
+    let mut shown: Vec<(&str, &str)> = vec![spec.vix, spec.index, spec.breadth];
+    shown.extend(spec.others.iter().copied());
+    for (sym, name) in shown {
+        let q = quote(sym);
+        let price = q
+            .and_then(|q| q.regular_market_price)
+            .map_or("—".to_string(), |p| format!("{p:.2}"));
+        let chg = q.and_then(|q| q.regular_market_change_percent).map_or(
+            "—".dimmed().to_string(),
+            |c| {
+                let s = format!("{c:+.2}%");
+                if c >= 0.0 {
+                    s.green().to_string()
+                } else {
+                    s.red().to_string()
+                }
+            },
+        );
+        println!("  {:<18} {:>12} {:>10}", name, price, chg);
+    }
+
     print_section("Contributing Factors");
     for f in &factors {
         println!("  {} {}", "→".cyan(), f);
     }
+    println!(
+        "  {}",
+        format!(
+            "{} bands: below {} extreme greed, {}–{} greed, {}–{} neutral, {}–{} fear, above {} extreme fear.",
+            spec.vix.1,
+            spec.vix_bands[0],
+            spec.vix_bands[0],
+            spec.vix_bands[1],
+            spec.vix_bands[1],
+            spec.vix_bands[2],
+            spec.vix_bands[2],
+            spec.vix_bands[3],
+            spec.vix_bands[3]
+        )
+        .dimmed()
+    );
 
     if !collated_news.is_empty() {
         print_section("Top Market Headlines");
         print_news_items(&collated_news, 5);
     }
+    println!(
+        "\n  {}",
+        "A reading of market mood from public data, not a signal to trade.".dimmed()
+    );
     println!();
     Ok(())
 }
@@ -2063,19 +2187,74 @@ pub async fn cmd_picks_review(
 
 // ── Sentiment / Fear & Greed ──
 
+/// One stock of `earnings`: its next results date, if any source lists one.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EarningsRow {
+    pub(crate) symbol: String,
+    pub(crate) date: Option<chrono::NaiveDate>,
+    pub(crate) days_until: Option<i64>,
+    /// The source marks the date as an estimate (or gives a window).
+    pub(crate) estimate: bool,
+    pub(crate) source: Option<crate::calendar::Source>,
+}
+
+/// The next results date of each symbol on or after its exchange's today
+/// (NSE's filed date first, else Yahoo's; see
+/// [`crate::calendar::next_results_in`]), soonest first; symbols without a
+/// date last, by symbol.
+pub(crate) fn earnings_rows(
+    events: &[(String, Vec<crate::calendar::Event>)],
+    today_for: impl Fn(&str) -> chrono::NaiveDate,
+) -> Vec<EarningsRow> {
+    use crate::calendar::EventKind;
+    let mut rows: Vec<EarningsRow> = events
+        .iter()
+        .map(|(symbol, evs)| {
+            let today = today_for(symbol);
+            let date = crate::calendar::next_results_in(evs, today);
+            let event = date.and_then(|d| {
+                let mut on_day: Vec<&crate::calendar::Event> = evs
+                    .iter()
+                    .filter(|e| e.kind == EventKind::Results && e.date == d)
+                    .collect();
+                // NSE's filing wins over Yahoo's estimate for the same day.
+                on_day.sort_by_key(|e| e.source != crate::calendar::Source::Nse);
+                on_day.first().copied()
+            });
+            EarningsRow {
+                symbol: symbol.clone(),
+                date,
+                days_until: date.map(|d| (d - today).num_days()),
+                estimate: event.is_some_and(|e| e.estimate),
+                source: event.map(|e| e.source),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| match (a.date, b.date) {
+        (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.symbol.cmp(&b.symbol)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.symbol.cmp(&b.symbol),
+    });
+    rows
+}
+
 pub async fn cmd_earnings(_market: Market) -> Result<()> {
+    use crate::calendar::Calendar;
     let client = YahooClient::new().await?;
 
-    // Check portfolio + watchlist stocks
+    // Stocks in the portfolio and the watchlist (funds, indices and coins
+    // have no results).
     let portfolio = Portfolio::load()?;
     let wl = Watchlist::load()?;
-    let mut all_symbols: Vec<String> = portfolio
+    let mut all_symbols: Vec<String> = Vec::new();
+    for s in portfolio
         .holdings
         .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    for s in &wl.symbols {
-        if !all_symbols.contains(s) {
+        .map(|h| &h.symbol)
+        .chain(wl.symbols.iter())
+    {
+        if market::AssetClass::of(s) == market::AssetClass::Stock && !all_symbols.contains(s) {
             all_symbols.push(s.clone());
         }
     }
@@ -2088,128 +2267,324 @@ pub async fn cmd_earnings(_market: Market) -> Result<()> {
         return Ok(());
     }
 
-    let sym_refs: Vec<&str> = all_symbols.iter().map(|s| s.as_str()).collect();
-    let quotes = client.get_quote(&sym_refs).await?;
+    let mut cal = Calendar::new(&client);
+    let pending = cal.nse_to_fetch(&all_symbols);
+    if pending >= 3 {
+        eprintln!(
+            "  {} Reading NSE filings for {} stocks (about {} s; cached for a day)…",
+            "→".dimmed(),
+            pending,
+            pending * 2
+        );
+    }
+    let mut events = Vec::new();
+    for s in &all_symbols {
+        events.push((s.clone(), cal.events_for(s).await));
+    }
+    cal.save();
 
-    print_header("Earnings Overview");
+    let now = chrono::Utc::now();
+    let rows = earnings_rows(&events, |s| crate::calendar::exchange_today(s, now));
+    // EPS figures alongside; a failed quote only leaves them blank.
+    let sym_refs: Vec<&str> = all_symbols.iter().map(|s| s.as_str()).collect();
+    let quotes = client.get_quote(&sym_refs).await.unwrap_or_default();
+    let quote = |sym: &str| quotes.iter().find(|q| q.symbol.as_deref() == Some(sym));
+
+    print_header("Upcoming Results");
     println!(
-        "  {:<14} {:>10} {:>10} {:>10} {:>10}",
+        "  {:<14} {:>12} {:>9} {:>10} {:>10}  {}",
         "Symbol".bold(),
-        "Price".bold(),
+        "Next results".bold(),
+        "In".bold(),
         "EPS TTM".bold(),
         "EPS Fwd".bold(),
-        "P/E Fwd".bold()
+        "Source".bold()
     );
-    println!("  {}", "─".repeat(58).dimmed());
-
-    let mut growing = 0;
-    let mut declining = 0;
-    for q in &quotes {
-        let sym = q.symbol.as_deref().unwrap_or("???");
-        let cur = q.currency.as_deref();
-        let eps_ttm = q.eps_trailing_twelve_months;
-        let eps_fwd = q.eps_forward;
-        let fwd_pe = q.forward_pe;
-
-        let growth_indicator = match (eps_ttm, eps_fwd) {
-            (Some(t), Some(f)) if f > t && t > 0.0 => {
-                growing += 1;
-                "▲".green().to_string()
-            }
-            (Some(t), Some(f)) if f < t && t > 0.0 => {
-                declining += 1;
-                "▼".red().to_string()
-            }
-            _ => "—".dimmed().to_string(),
+    println!("  {}", "─".repeat(70).dimmed());
+    for r in &rows {
+        let q = quote(&r.symbol);
+        let date = match r.date {
+            Some(d) if r.estimate => format!("~{}", d.format("%d %b %Y")),
+            Some(d) => d.format("%d %b %Y").to_string(),
+            None => "—".to_string(),
         };
-
+        let days = match r.days_until {
+            Some(0) => "today".to_string(),
+            Some(1) => "tomorrow".to_string(),
+            Some(n) => format!("{n} days"),
+            None => "—".to_string(),
+        };
+        let eps = |v: Option<f64>| v.map_or("—".to_string(), |v| format!("{:.2}", v));
         println!(
-            "  {:<14} {:>10} {:>10} {:>10} {:>10} {}",
-            sym.cyan(),
-            format_price(q.regular_market_price.unwrap_or(0.0), cur),
-            eps_ttm.map_or("—".to_string(), |v| format!("{:.2}", v)),
-            eps_fwd.map_or("—".to_string(), |v| format!("{:.2}", v)),
-            fwd_pe.map_or("—".to_string(), |v| format!("{:.1}", v)),
-            growth_indicator,
+            "  {:<14} {:>12} {:>9} {:>10} {:>10}  {}",
+            r.symbol.cyan(),
+            date,
+            days,
+            eps(q.and_then(|q| q.eps_trailing_twelve_months)),
+            eps(q.and_then(|q| q.eps_forward)),
+            r.source.map_or("—".to_string(), |s| s.to_string()).dimmed()
         );
     }
 
-    print_section("Summary");
-    println!("  {} {} stocks with growing earnings", "▲".green(), growing);
+    let dated = rows.iter().filter(|r| r.date.is_some()).count();
     println!(
-        "  {} {} stocks with declining earnings",
-        "▼".red(),
-        declining
+        "\n  {} {} of {} stocks have a results date listed. ~ marks an estimated date.",
+        "→".cyan(),
+        dated,
+        rows.len()
     );
+    if let Some(why) = cal.nse_note()
+        && crate::calendar::has_indian(&all_symbols)
+    {
+        println!("  {} {}", "!".yellow(), why.dimmed());
+    }
+    if !cal.yahoo_missing.is_empty() {
+        println!(
+            "  {} {}",
+            "!".yellow(),
+            format!(
+                "Yahoo Finance had no calendar for {}",
+                cal.yahoo_missing.join(", ")
+            )
+            .dimmed()
+        );
+    }
     println!();
     Ok(())
 }
 
 // ── Long-Term Wealth Bot ──
 
+/// Look-back windows of the relative-strength columns, in months.
+const RS_MONTHS: [u32; 3] = [1, 3, 6];
+
+/// Each `(symbol, name)` with the quote whose symbol matches, `None` when
+/// Yahoo returned none. Never by position: Yahoo may drop or reorder
+/// symbols, and pairing by index would put one sector's numbers under
+/// another's name.
+pub(crate) fn pair_by_symbol<'a, 'q>(
+    names: &[(&'a str, &'a str)],
+    quotes: &'q [crate::api::Quote],
+) -> Vec<(&'a str, &'a str, Option<&'q crate::api::Quote>)> {
+    names
+        .iter()
+        .map(|&(sym, name)| {
+            let q = quotes.iter().find(|q| {
+                q.symbol
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(sym))
+            });
+            (sym, name, q)
+        })
+        .collect()
+}
+
+/// The index sectors are measured against.
+fn sector_benchmark(market: Market) -> Option<(&'static str, &'static str)> {
+    match market {
+        Market::In => Some(("^NSEI", "NIFTY 50")),
+        Market::Us => Some(("^GSPC", "S&P 500")),
+        Market::Global(x) => Some(x.info().benchmark()),
+        _ => None,
+    }
+}
+
+/// Percent change from the close on or before `months` before the last
+/// close to the last close (closes oldest first). `None` when the history
+/// does not reach back that far.
+pub(crate) fn period_return(closes: &[(chrono::NaiveDate, f64)], months: u32) -> Option<f64> {
+    let &(last_date, last) = closes.last()?;
+    let start = last_date.checked_sub_months(chrono::Months::new(months))?;
+    let idx = closes.partition_point(|(d, _)| *d <= start);
+    let (_, base) = closes.get(idx.checked_sub(1)?)?;
+    (*base > 0.0 && last.is_finite()).then(|| (last / base - 1.0) * 100.0)
+}
+
+/// How much better (positive) or worse a sector did than the benchmark,
+/// percent: `(1 + sector) / (1 + benchmark) - 1`.
+pub(crate) fn relative_strength(sector: Option<f64>, bench: Option<f64>) -> Option<f64> {
+    let (s, b) = (sector?, bench?);
+    let denom = 1.0 + b / 100.0;
+    (denom > 0.0).then(|| ((1.0 + s / 100.0) / denom - 1.0) * 100.0)
+}
+
+/// One sector of `rotation` / `sectorcmp`, matched to its own quote and
+/// history by symbol.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SectorReading {
+    pub(crate) name: String,
+    pub(crate) symbol: String,
+    pub(crate) price: Option<f64>,
+    pub(crate) day: Option<f64>,
+    pub(crate) currency: Option<String>,
+    /// The sector's own return over [`RS_MONTHS`].
+    pub(crate) returns: [Option<f64>; 3],
+    /// Relative strength against the benchmark over [`RS_MONTHS`].
+    pub(crate) rs: [Option<f64>; 3],
+}
+
+impl SectorReading {
+    /// "Leading" when ahead of the benchmark over both one and three
+    /// months, "Lagging" when behind over both, "Mixed" otherwise.
+    fn trend(&self) -> Option<&'static str> {
+        match (self.rs[0]?, self.rs[1]?) {
+            (a, b) if a > 0.0 && b > 0.0 => Some("Leading"),
+            (a, b) if a < 0.0 && b < 0.0 => Some("Lagging"),
+            _ => Some("Mixed"),
+        }
+    }
+}
+
+/// Readings for `names`: each quote and chart is found by its symbol, so a
+/// dropped quote or chart leaves only that sector's cells empty.
+/// `histories` holds daily closes by symbol; `bench` the benchmark's.
+pub(crate) fn sector_readings(
+    names: &[(&str, &str)],
+    quotes: &[crate::api::Quote],
+    histories: &[(String, Vec<(chrono::NaiveDate, f64)>)],
+    bench: &[(chrono::NaiveDate, f64)],
+) -> Vec<SectorReading> {
+    let bench_ret = RS_MONTHS.map(|m| period_return(bench, m));
+    pair_by_symbol(names, quotes)
+        .into_iter()
+        .map(|(sym, name, q)| {
+            let closes = histories
+                .iter()
+                .find(|(s, _)| s.eq_ignore_ascii_case(sym))
+                .map(|(_, c)| c.as_slice())
+                .unwrap_or_default();
+            let returns = RS_MONTHS.map(|m| period_return(closes, m));
+            let mut rs = [None; 3];
+            for i in 0..3 {
+                rs[i] = relative_strength(returns[i], bench_ret[i]);
+            }
+            SectorReading {
+                name: name.to_string(),
+                symbol: sym.to_string(),
+                price: q.and_then(|q| q.regular_market_price),
+                day: q.and_then(|q| q.regular_market_change_percent),
+                currency: q.and_then(|q| q.currency.clone()),
+                returns,
+                rs,
+            }
+        })
+        .collect()
+}
+
+/// Daily closes of `symbols` over the past year, by symbol; a failed chart
+/// is left out.
+async fn yearly_closes(
+    client: &YahooClient,
+    symbols: Vec<String>,
+) -> Vec<(String, Vec<(chrono::NaiveDate, f64)>)> {
+    use futures_util::StreamExt;
+    futures_util::stream::iter(symbols)
+        .map(|sym| async move {
+            let closes = client
+                .get_chart(&sym, "1y", "1d")
+                .await
+                .map(|c| c.dated_closes())
+                .unwrap_or_default();
+            (sym, closes)
+        })
+        .buffer_unordered(6)
+        .filter(|(_, c)| std::future::ready(!c.is_empty()))
+        .collect()
+        .await
+}
+
+/// A signed percentage, green or red; "—" when missing.
+fn pct_cell(v: Option<f64>, decimals: usize) -> String {
+    match v.filter(|v| v.is_finite()) {
+        Some(v) => {
+            let s = format!("{:+.*}%", decimals, v);
+            if v >= 0.0 {
+                s.green().to_string()
+            } else {
+                s.red().to_string()
+            }
+        }
+        None => "—".dimmed().to_string(),
+    }
+}
+
+/// Fetch every sector's quote and a year of daily closes, plus the
+/// benchmark's.
+async fn fetch_sector_readings(
+    client: &YahooClient,
+    names: &[(&str, &str)],
+    bench: &str,
+) -> Result<Vec<SectorReading>> {
+    let syms: Vec<&str> = names.iter().map(|(s, _)| *s).collect();
+    let mut chart_syms: Vec<String> = syms.iter().map(|s| s.to_string()).collect();
+    chart_syms.push(bench.to_string());
+    let (quotes, histories) =
+        tokio::join!(client.get_quote(&syms), yearly_closes(client, chart_syms));
+    let quotes = quotes?;
+    let bench_closes = histories
+        .iter()
+        .find(|(s, _)| s == bench)
+        .map(|(_, c)| c.clone())
+        .unwrap_or_default();
+    Ok(sector_readings(names, &quotes, &histories, &bench_closes))
+}
+
 pub async fn cmd_rotation(market: Market) -> Result<()> {
     market.require_sectors("rotation")?;
+    let (bench, bench_name) = sector_benchmark(market)
+        .with_context(|| format!("rotation has no benchmark for {}", market.label()))?;
     let client = YahooClient::new().await?;
-    let sectors = market.sectors();
-    let title = format!("{} Sector Rotation", market.label());
-    let syms: Vec<&str> = sectors.iter().map(|(s, _)| *s).collect();
-    let quotes = client.get_quote(&syms).await?;
+    let mut rows = fetch_sector_readings(&client, market.sectors(), bench).await?;
+    // Strongest over three months first; missing figures last.
+    rows.sort_by(|a, b| match (a.rs[1], b.rs[1]) {
+        (Some(x), Some(y)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
 
-    print_header(&title);
+    print_header(&format!("{} Sector Rotation", market.label()));
     println!(
-        "  {:<16} {:>10} {:>10} {:>10} {:>10}",
+        "  {:<16} {:>12} {:>9} {:>9} {:>9} {:>9}  {}",
         "Sector".bold(),
         "Price".bold(),
-        "Change%".bold(),
-        "vs 50MA".bold(),
-        "Signal".bold()
+        "Day".bold(),
+        "RS 1M".bold(),
+        "RS 3M".bold(),
+        "RS 6M".bold(),
+        "Trend".bold()
     );
-    println!("  {}", "─".repeat(60).dimmed());
-
-    for (i, q) in quotes.iter().enumerate() {
-        let name = sectors.get(i).map(|(_, n)| *n).unwrap_or("???");
-        let cur = q.currency.as_deref();
-        let price = q.regular_market_price.unwrap_or(0.0);
-        let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        let ma50 = q.fifty_day_average.unwrap_or(price);
-        let vs_ma = if ma50.abs() > f64::EPSILON {
-            ((price - ma50) / ma50) * 100.0
-        } else {
-            0.0
-        };
-        let signal = if vs_ma > 3.0 && pct > 0.0 {
-            "OVERWEIGHT".green().bold().to_string()
-        } else if vs_ma < -3.0 {
-            "UNDERWEIGHT".red().to_string()
-        } else {
-            "NEUTRAL".yellow().to_string()
-        };
-        let pct_str = if pct >= 0.0 {
-            format!("{:+.2}%", pct).green().to_string()
-        } else {
-            format!("{:+.2}%", pct).red().to_string()
-        };
-        let ma_str = if vs_ma >= 0.0 {
-            format!("{:+.1}%", vs_ma).green().to_string()
-        } else {
-            format!("{:+.1}%", vs_ma).red().to_string()
+    println!("  {}", "─".repeat(78).dimmed());
+    for r in &rows {
+        let price = r.price.map_or("—".to_string(), |p| {
+            format_price(p, r.currency.as_deref())
+        });
+        let trend = match r.trend() {
+            Some("Leading") => "Leading".green().to_string(),
+            Some("Lagging") => "Lagging".red().to_string(),
+            Some(t) => t.yellow().to_string(),
+            None => "—".dimmed().to_string(),
         };
         println!(
-            "  {:<16} {:>10} {:>10} {:>10} {:>10}",
-            name.bold(),
-            format_price(price, cur),
-            pct_str,
-            ma_str,
-            signal
+            "  {:<16} {:>12} {:>9} {:>9} {:>9} {:>9}  {}",
+            r.name.bold(),
+            price,
+            pct_cell(r.day, 2),
+            pct_cell(r.rs[0], 1),
+            pct_cell(r.rs[1], 1),
+            pct_cell(r.rs[2], 1),
+            trend
         );
     }
     println!(
-        "\n  {} Overweight sectors above 50-day MA with positive momentum.",
-        "→".cyan()
+        "\n  {} RS: the sector's return relative to the {} over 1, 3 and 6 months of daily closes.",
+        "→".cyan(),
+        bench_name
     );
     println!(
-        "  {} Underweight sectors below 50-day MA trending down.",
-        "→".cyan()
+        "  {} Leading: ahead of the {} over both 1 and 3 months; Lagging: behind over both. Past performance only.",
+        "→".cyan(),
+        bench_name
     );
     println!();
     Ok(())
@@ -2288,94 +2663,156 @@ pub async fn cmd_matrix(market: Market, universe: Option<market::Universe>) -> R
 
 // ── Earnings Surprise ──
 
-/// Rows `surprise` shows from each end (fastest growth, steepest fall)
-/// when more stocks than both together have the figures.
-const SURPRISE_EDGE: usize = 25;
+/// Most stocks `surprise` asks Yahoo about (one request each): the largest
+/// by market cap when the scan holds more.
+const SURPRISE_MAX: usize = 50;
 
-pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) -> Result<()> {
-    market.require_stocks("surprise")?;
-    let client = YahooClient::new().await?;
-    let quotes = universe_quotes(&client, market, universe).await?;
+/// Within this many percent of the estimate counts as in line.
+const SURPRISE_IN_LINE_PCT: f64 = 1.0;
 
-    print_header("Earnings Momentum");
-    println!(
-        "  {:<14} {:>10} {:>10} {:>10} {:>8} {:>10}",
-        "Symbol".bold(),
-        "EPS TTM".bold(),
-        "EPS Fwd".bold(),
-        "Growth%".bold(),
-        "P/E".bold(),
-        "Signal".bold()
-    );
-    println!("  {}", "─".repeat(66).dimmed());
+/// The latest reported quarter of one stock, if Yahoo has it.
+#[derive(Debug, Clone)]
+pub(crate) struct SurpriseRow {
+    pub(crate) symbol: String,
+    pub(crate) latest: Option<crate::research::Surprise>,
+}
 
-    let mut accelerating = Vec::new();
-    let mut decelerating = Vec::new();
+impl SurpriseRow {
+    /// Surprise in percent (Yahoo gives a fraction).
+    fn pct(&self) -> Option<f64> {
+        self.latest
+            .as_ref()
+            .map(|s| s.surprise_pct * 100.0)
+            .filter(|v| v.is_finite())
+    }
+}
 
-    // Stocks with both figures (a missing forward EPS is not a fall to
-    // zero), by expected growth. A whole-market scan shows both ends.
-    let mut rows: Vec<(&crate::api::Quote, f64, f64, f64)> = quotes
-        .iter()
-        .filter_map(|q| {
-            let ttm = q.eps_trailing_twelve_months.filter(|e| *e > 0.0)?;
-            let fwd = q.eps_forward?;
-            Some((q, ttm, fwd, (fwd / ttm - 1.0) * 100.0))
+/// The latest quarter of each stock from its `earningsHistory`, largest
+/// surprise first; stocks without one last, by symbol.
+pub(crate) fn surprise_rows(
+    histories: Vec<(String, Vec<crate::research::Surprise>)>,
+) -> Vec<SurpriseRow> {
+    let mut rows: Vec<SurpriseRow> = histories
+        .into_iter()
+        .map(|(symbol, mut h)| {
+            h.sort_by_key(|s| s.quarter);
+            SurpriseRow {
+                symbol,
+                latest: h.pop(),
+            }
         })
         .collect();
-    rows.sort_by(|a, b| b.3.total_cmp(&a.3));
-    let total = rows.len();
-    let cut = total > 2 * SURPRISE_EDGE;
-    for (i, (q, eps_ttm, eps_fwd, growth)) in rows.into_iter().enumerate() {
-        let (eps_ttm, eps_fwd, growth) = (eps_ttm, eps_fwd, growth);
-        let sym = q.symbol.as_deref().unwrap_or("???");
-        let pe = q.trailing_pe.unwrap_or(0.0);
-        let shown = !cut || i < SURPRISE_EDGE || i >= total - SURPRISE_EDGE;
-        if cut && i == SURPRISE_EDGE {
-            println!(
-                "  {}",
-                format!("... {} more in between ...", total - 2 * SURPRISE_EDGE).dimmed()
-            );
+    rows.sort_by(|a, b| match (a.pct(), b.pct()) {
+        (Some(x), Some(y)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.symbol.cmp(&b.symbol),
+    });
+    rows
+}
+
+pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) -> Result<()> {
+    use futures_util::StreamExt;
+    market.require_stocks("surprise")?;
+    let client = YahooClient::new().await?;
+    let mut quotes = universe_quotes(&client, market, universe).await?;
+    let scanned = quotes.len();
+    // One quoteSummary request per stock: the largest when there are many.
+    quotes.sort_by(|a, b| {
+        b.market_cap
+            .unwrap_or(0.0)
+            .total_cmp(&a.market_cap.unwrap_or(0.0))
+    });
+    quotes.truncate(SURPRISE_MAX);
+    let symbols: Vec<String> = quotes.iter().filter_map(|q| q.symbol.clone()).collect();
+    let client_ref = &client;
+    let histories: Vec<(String, Vec<crate::research::Surprise>)> =
+        futures_util::stream::iter(symbols)
+            .map(|sym| async move {
+                let h = client_ref
+                    .quote_summary(&sym, &["earningsHistory"])
+                    .await
+                    .map(|v| crate::research::parse_surprises(&v))
+                    .unwrap_or_default();
+                (sym, h)
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+    let rows = surprise_rows(histories);
+
+    print_header("Earnings Surprise — latest quarter");
+    println!(
+        "  {:<14} {:>12} {:>11} {:>11} {:>11}",
+        "Symbol".bold(),
+        "Quarter".bold(),
+        "EPS actual".bold(),
+        "EPS est.".bold(),
+        "Surprise".bold()
+    );
+    println!("  {}", "─".repeat(63).dimmed());
+    let (mut above, mut below, mut in_line) = (0, 0, 0);
+    for r in &rows {
+        let pct = r.pct();
+        match pct {
+            Some(p) if p.abs() < SURPRISE_IN_LINE_PCT => in_line += 1,
+            Some(p) if p > 0.0 => above += 1,
+            Some(_) => below += 1,
+            None => {}
         }
-        let signal = if growth > 15.0 {
-            accelerating.push(sym.to_string());
-            "ACCELERATING".green().bold().to_string()
-        } else if growth > 0.0 {
-            "Growing".green().to_string()
-        } else if growth > -10.0 {
-            "Slowing".yellow().to_string()
-        } else {
-            decelerating.push(sym.to_string());
-            "DECELERATING".red().bold().to_string()
+        let (quarter, actual, est) = match &r.latest {
+            Some(s) => (
+                s.quarter.format("%b %Y").to_string(),
+                format!("{:.2}", s.actual),
+                format!("{:.2}", s.estimate),
+            ),
+            None => ("—".into(), "—".into(), "—".into()),
         };
-        let g_str = if growth >= 0.0 {
-            format!("+{:.1}%", growth).green().to_string()
-        } else {
-            format!("{:.1}%", growth).red().to_string()
-        };
-        if !shown {
-            continue;
-        }
         println!(
-            "  {:<14} {:>10.2} {:>10.2} {:>10} {:>8.1} {:>10}",
-            sym.cyan(),
-            eps_ttm,
-            eps_fwd,
-            g_str,
-            pe,
-            signal
+            "  {:<14} {:>12} {:>11} {:>11} {:>11}",
+            r.symbol.cyan(),
+            quarter,
+            actual,
+            est,
+            pct_cell(pct, 1)
         );
     }
 
     print_section("Summary");
     println!(
-        "  {} {} stocks with accelerating earnings",
-        "▲".green(),
-        accelerating.len()
+        "  {} {} above the estimate, {} below, {} within {:.0}%",
+        "→".cyan(),
+        above,
+        below,
+        in_line,
+        SURPRISE_IN_LINE_PCT
     );
+    let missing = rows.iter().filter(|r| r.latest.is_none()).count();
+    if missing > 0 {
+        println!(
+            "  {} {}",
+            "·".dimmed(),
+            format!(
+                "{missing} without an estimate on Yahoo Finance (common for smaller Indian stocks)."
+            )
+            .dimmed()
+        );
+    }
+    if scanned > SURPRISE_MAX {
+        println!(
+            "  {} {}",
+            "·".dimmed(),
+            format!(
+                "The {SURPRISE_MAX} largest of {scanned} stocks by market cap; --universe narrows the scan."
+            )
+            .dimmed()
+        );
+    }
     println!(
-        "  {} {} stocks with decelerating earnings",
-        "▼".red(),
-        decelerating.len()
+        "  {} {}",
+        "·".dimmed(),
+        "Source: Yahoo Finance earningsHistory (reported EPS against the analyst consensus)."
+            .dimmed()
     );
     println!();
     Ok(())
@@ -2687,6 +3124,80 @@ pub async fn cmd_conditions(
 /// the scan is larger than both together.
 const HEATMAP_EDGE: usize = 30;
 
+/// A quote's day change when it is a real number.
+fn finite_change(q: &crate::api::Quote) -> Option<f64> {
+    q.regular_market_change_percent.filter(|v| v.is_finite())
+}
+
+/// Sort by day change, largest first, with quotes that have no change (or
+/// a NaN one) last. Never panics: `total_cmp` orders every float.
+pub(crate) fn sort_by_change(quotes: &mut [crate::api::Quote]) {
+    quotes.sort_by(|a, b| match (finite_change(a), finite_change(b)) {
+        (Some(x), Some(y)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// One heatmap row: the symbol without its exchange suffix, a bar as long
+/// as the move and the change; "—" and no bar when there is no change.
+pub(crate) fn heatmap_line(symbol: &str, pct: Option<f64>) -> String {
+    let short = symbol.split('.').next().unwrap_or(symbol);
+    match pct.filter(|v| v.is_finite()) {
+        Some(pct) => {
+            let blocks = "█".repeat((pct.abs() * 3.0).clamp(1.0, 15.0) as usize);
+            let text = format!("{:+.2}%", pct);
+            if pct >= 0.0 {
+                format!("  {:<12} {} {}", short, blocks.green(), text.green())
+            } else {
+                format!("  {:<12} {} {}", short, blocks.red(), text.red())
+            }
+        }
+        None => format!("  {:<12} {}", short, "—".dimmed()),
+    }
+}
+
+/// The heatmap's lines: both ends of a long scan with the count left out in
+/// between, then the quotes without a change.
+pub(crate) fn heatmap_lines(quotes: &mut [crate::api::Quote]) -> Vec<String> {
+    sort_by_change(quotes);
+    let ranked = quotes.iter().filter(|q| finite_change(q).is_some()).count();
+    let mut lines = Vec::new();
+    for (i, q) in quotes[..ranked].iter().enumerate() {
+        if ranked > 2 * HEATMAP_EDGE {
+            if i == HEATMAP_EDGE {
+                lines.push(format!(
+                    "  {}",
+                    format!("... {} more in between ...", ranked - 2 * HEATMAP_EDGE).dimmed()
+                ));
+            }
+            if (HEATMAP_EDGE..ranked - HEATMAP_EDGE).contains(&i) {
+                continue;
+            }
+        }
+        lines.push(heatmap_line(
+            q.symbol.as_deref().unwrap_or("???"),
+            finite_change(q),
+        ));
+    }
+    let missing = &quotes[ranked..];
+    for q in missing.iter().take(HEATMAP_EDGE) {
+        lines.push(heatmap_line(q.symbol.as_deref().unwrap_or("???"), None));
+    }
+    if missing.len() > HEATMAP_EDGE {
+        lines.push(format!(
+            "  {}",
+            format!(
+                "... {} more without a change ...",
+                missing.len() - HEATMAP_EDGE
+            )
+            .dimmed()
+        ));
+    }
+    lines
+}
+
 pub async fn cmd_heatmap(
     market: Market,
     universe: Option<market::Universe>,
@@ -2697,45 +3208,11 @@ pub async fn cmd_heatmap(
     let scan = scan_symbols(&client, market, universe).await?;
     let mut quotes = scan_quotes(&client, market, &scan, cap, true).await?;
     let scope = cap_scope(&scan.scope, cap);
-    quotes.sort_by(|a, b| {
-        b.regular_market_change_percent
-            .unwrap_or(0.0)
-            .partial_cmp(&a.regular_market_change_percent.unwrap_or(0.0))
-            .unwrap()
-    });
 
     print_header(&format!("{} Market Heatmap", scope));
     println!();
-
-    // A whole-market scan is thousands of rows: show both ends.
-    let total = quotes.len();
-    if total > 2 * HEATMAP_EDGE {
-        quotes.drain(HEATMAP_EDGE..total - HEATMAP_EDGE);
-    }
-    for (i, q) in quotes.iter().enumerate() {
-        if total > 2 * HEATMAP_EDGE && i == HEATMAP_EDGE {
-            println!(
-                "  {}",
-                format!("... {} more in between ...", total - 2 * HEATMAP_EDGE).dimmed()
-            );
-        }
-        let sym = q.symbol.as_deref().unwrap_or("???");
-        let short = sym.split('.').next().unwrap_or(sym);
-        let pct = q.regular_market_change_percent.unwrap_or(0.0);
-        let block_count = (pct.abs() * 3.0).clamp(1.0, 15.0) as usize;
-        let blocks = "█".repeat(block_count);
-        let (colored_blocks, pct_str) = if pct >= 0.0 {
-            (
-                blocks.green().to_string(),
-                format!("{:+.2}%", pct).green().to_string(),
-            )
-        } else {
-            (
-                blocks.red().to_string(),
-                format!("{:+.2}%", pct).red().to_string(),
-            )
-        };
-        println!("  {:<12} {} {}", short, colored_blocks, pct_str);
+    for line in heatmap_lines(&mut quotes) {
+        println!("{line}");
     }
     println!();
     Ok(())
@@ -2745,84 +3222,121 @@ pub async fn cmd_heatmap(
 
 pub async fn cmd_sectorcmp(sector1: &str, sector2: &str, market: Market) -> Result<()> {
     market.require_sectors("sectorcmp")?;
-    let client = YahooClient::new().await?;
+    let (bench, bench_name) = sector_benchmark(market)
+        .with_context(|| format!("sectorcmp has no benchmark for {}", market.label()))?;
     let sectors = market.sectors();
-    let find = |name: &str| -> Option<&str> {
+    let find = |name: &str| -> Option<(&'static str, &'static str)> {
+        let lower = name.to_lowercase();
         sectors
             .iter()
-            .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()))
-            .map(|(s, _)| *s)
+            .find(|(_, n)| n.eq_ignore_ascii_case(name))
+            .or_else(|| {
+                sectors
+                    .iter()
+                    .find(|(_, n)| n.to_lowercase().contains(&lower))
+            })
+            .copied()
     };
-    let sym1 = find(sector1).context(format!("Sector '{}' not found", sector1))?;
-    let sym2 = find(sector2).context(format!("Sector '{}' not found", sector2))?;
-    let quotes = client.get_quote(&[sym1, sym2]).await?;
-    if quotes.len() < 2 {
-        bail!("Could not fetch both sectors");
+    let s1 = find(sector1).context(format!("Sector '{}' not found", sector1))?;
+    let s2 = find(sector2).context(format!("Sector '{}' not found", sector2))?;
+    let client = YahooClient::new().await?;
+    let pair = [s1, s2];
+    let quotes = client.get_quote(&[s1.0, s2.0]).await?;
+    // Each sector's own quote, matched by symbol.
+    let matched = pair_by_symbol(&pair, &quotes);
+    if matched.iter().all(|(_, _, q)| q.is_none()) {
+        bail!("Could not fetch either sector");
     }
+    let chart_syms = vec![s1.0.to_string(), s2.0.to_string(), bench.to_string()];
+    let histories = yearly_closes(&client, chart_syms).await;
+    let bench_closes = histories
+        .iter()
+        .find(|(s, _)| s == bench)
+        .map(|(_, c)| c.clone())
+        .unwrap_or_default();
+    let readings = sector_readings(&pair, &quotes, &histories, &bench_closes);
+    let (a, b) = (&readings[0], &readings[1]);
+    let (qa, qb) = (matched[0].2, matched[1].2);
 
-    print_header(&format!("{} vs {}", sector1, sector2));
+    print_header(&format!("{} vs {}", a.name, b.name));
     println!(
         "  {:<20} {:>14} {:>14}",
         "Metric".bold(),
-        sector1.bold().cyan(),
-        sector2.bold().cyan()
+        a.name.bold().cyan(),
+        b.name.bold().cyan()
     );
     println!("  {}", "─".repeat(50).dimmed());
 
-    let rows: Vec<(&str, Box<dyn Fn(&crate::api::Quote) -> String>)> = vec![
+    let money = |q: Option<&crate::api::Quote>, f: fn(&crate::api::Quote) -> Option<f64>| {
+        q.and_then(|q| f(q).map(|v| format_price(v, q.currency.as_deref())))
+            .unwrap_or_else(|| "—".to_string())
+    };
+    let mut rows: Vec<(String, String, String)> = vec![
         (
-            "Price",
-            Box::new(|q: &crate::api::Quote| {
-                format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref())
-            }),
+            "Price".into(),
+            money(qa, |q| q.regular_market_price),
+            money(qb, |q| q.regular_market_price),
         ),
-        (
-            "Change %",
-            Box::new(|q| {
-                let v = q.regular_market_change_percent.unwrap_or(0.0);
-                if v >= 0.0 {
-                    format!("{:+.2}%", v).green().to_string()
-                } else {
-                    format!("{:+.2}%", v).red().to_string()
-                }
-            }),
-        ),
-        (
-            "P/E",
-            Box::new(|q| q.trailing_pe.map_or("—".into(), |v| format!("{:.1}", v))),
-        ),
-        (
-            "50-Day MA",
-            Box::new(|q| format_optional_price(q.fifty_day_average, q.currency.as_deref())),
-        ),
-        (
-            "52W High",
-            Box::new(|q| format_optional_price(q.fifty_two_week_high, q.currency.as_deref())),
-        ),
-        (
-            "52W Low",
-            Box::new(|q| format_optional_price(q.fifty_two_week_low, q.currency.as_deref())),
-        ),
+        ("Day change".into(), pct_cell(a.day, 2), pct_cell(b.day, 2)),
     ];
+    for (i, m) in RS_MONTHS.iter().enumerate() {
+        rows.push((
+            format!("Return {m}M"),
+            pct_cell(a.returns[i], 1),
+            pct_cell(b.returns[i], 1),
+        ));
+    }
+    for (i, m) in RS_MONTHS.iter().enumerate() {
+        rows.push((
+            format!("RS {m}M vs {bench_name}"),
+            pct_cell(a.rs[i], 1),
+            pct_cell(b.rs[i], 1),
+        ));
+    }
+    let pe = |q: Option<&crate::api::Quote>| {
+        q.and_then(|q| q.trailing_pe)
+            .map_or("—".into(), |v| format!("{:.1}", v))
+    };
+    rows.push(("P/E".into(), pe(qa), pe(qb)));
+    rows.push((
+        "50-Day MA".into(),
+        money(qa, |q| q.fifty_day_average),
+        money(qb, |q| q.fifty_day_average),
+    ));
+    rows.push((
+        "52W High".into(),
+        money(qa, |q| q.fifty_two_week_high),
+        money(qb, |q| q.fifty_two_week_high),
+    ));
+    rows.push((
+        "52W Low".into(),
+        money(qa, |q| q.fifty_two_week_low),
+        money(qb, |q| q.fifty_two_week_low),
+    ));
 
-    for (label, func) in &rows {
-        println!(
-            "  {:<20} {:>14} {:>14}",
-            (*label).dimmed(),
-            func(&quotes[0]),
-            func(&quotes[1])
-        );
+    for (label, x, y) in &rows {
+        println!("  {:<20} {:>14} {:>14}", label.dimmed(), x, y);
     }
 
-    // Verdict
-    let pct1 = quotes[0].regular_market_change_percent.unwrap_or(0.0);
-    let pct2 = quotes[1].regular_market_change_percent.unwrap_or(0.0);
-    let winner = if pct1 > pct2 { sector1 } else { sector2 };
-    println!(
-        "\n  {} {} is outperforming today.",
-        "→".cyan(),
-        winner.green().bold()
-    );
+    // What the numbers say, without a call to act.
+    match (a.returns[1], b.returns[1]) {
+        (Some(x), Some(y)) => {
+            let (lead, lag) = if x >= y { (a, b) } else { (b, a) };
+            println!(
+                "\n  {} Over 3 months {} returned {:+.1}% and {} {:+.1}%.",
+                "→".cyan(),
+                lead.name.bold(),
+                x.max(y),
+                lag.name.bold(),
+                x.min(y)
+            );
+        }
+        _ => println!(
+            "\n  {} {}",
+            "→".cyan(),
+            "Not enough history to compare the 3-month returns.".dimmed()
+        ),
+    }
     println!();
     Ok(())
 }
@@ -2865,5 +3379,256 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("-m in"), "{err}");
+    }
+
+    fn q(sym: &str, price: f64, pct: Option<f64>) -> crate::api::Quote {
+        crate::api::Quote {
+            symbol: Some(sym.into()),
+            regular_market_price: Some(price),
+            regular_market_change_percent: pct,
+            ..Default::default()
+        }
+    }
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// Daily closes from `start` rising by `step` a day for `n` days.
+    fn ramp(start: &str, first: f64, step: f64, n: i64) -> Vec<(chrono::NaiveDate, f64)> {
+        (0..n)
+            .map(|i| {
+                (
+                    day(start) + chrono::Duration::days(i),
+                    first + step * i as f64,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rotation_pairs_quotes_by_symbol_when_one_is_dropped() {
+        let names = [
+            ("^CNXIT", "IT"),
+            ("^NSEBANK", "Bank"),
+            ("^CNXPHARMA", "Pharma"),
+        ];
+        // Yahoo dropped Bank and returned the rest out of order.
+        let quotes = vec![
+            q("^CNXPHARMA", 300.0, Some(-1.0)),
+            q("^cnxit", 100.0, Some(2.0)),
+        ];
+        let paired = pair_by_symbol(&names, &quotes);
+        assert_eq!(paired.len(), 3);
+        assert_eq!(paired[0].1, "IT");
+        assert_eq!(
+            paired[0].2.and_then(|q| q.regular_market_price),
+            Some(100.0)
+        );
+        assert_eq!(paired[1].1, "Bank");
+        assert!(paired[1].2.is_none());
+        assert_eq!(paired[2].1, "Pharma");
+        assert_eq!(
+            paired[2].2.and_then(|q| q.regular_market_price),
+            Some(300.0)
+        );
+
+        // Readings keep each sector's own quote and history, and leave the
+        // dropped one empty ("—" when printed).
+        let histories = vec![
+            (
+                "^CNXPHARMA".to_string(),
+                ramp("2026-01-01", 100.0, 1.0, 200),
+            ),
+            ("^CNXIT".to_string(), ramp("2026-01-01", 100.0, 0.5, 200)),
+        ];
+        let bench = ramp("2026-01-01", 100.0, 0.0, 200);
+        let r = sector_readings(&names, &quotes, &histories, &bench);
+        assert_eq!(r[0].name, "IT");
+        assert_eq!(r[0].day, Some(2.0));
+        assert_eq!(r[1].name, "Bank");
+        assert_eq!((r[1].price, r[1].day, r[1].rs), (None, None, [None; 3]));
+        assert_eq!(r[2].name, "Pharma");
+        assert_eq!(r[2].price, Some(300.0));
+        // Pharma rose faster than IT against a flat benchmark.
+        assert!(r[2].rs[0].unwrap() > r[0].rs[0].unwrap());
+        assert!(r[0].rs[2].unwrap() > 0.0);
+        assert_eq!(r[1].trend(), None);
+        assert_eq!(r[2].trend(), Some("Leading"));
+        assert_eq!(pct_cell(r[1].rs[0], 1), "—".dimmed().to_string());
+    }
+
+    #[test]
+    fn period_return_and_relative_strength() {
+        let closes = vec![
+            (day("2026-01-30"), 100.0),
+            (day("2026-02-27"), 110.0),
+            (day("2026-03-31"), 121.0),
+        ];
+        // One month before 31 Mar is 28 Feb: the close on or before it.
+        assert!((period_return(&closes, 1).unwrap() - 10.0).abs() < 1e-9);
+        assert!((period_return(&closes, 2).unwrap() - 21.0).abs() < 1e-9);
+        // Not enough history.
+        assert_eq!(period_return(&closes, 6), None);
+        assert_eq!(period_return(&[], 1), None);
+        // +10% against +5%: 4.76% better.
+        let rs = relative_strength(Some(10.0), Some(5.0)).unwrap();
+        assert!((rs - (1.10 / 1.05 - 1.0) * 100.0).abs() < 1e-9);
+        assert_eq!(relative_strength(None, Some(5.0)), None);
+        assert_eq!(relative_strength(Some(1.0), None), None);
+    }
+
+    #[test]
+    fn heatmap_with_nan_does_not_panic_and_sorts_it_last() {
+        let mut quotes = vec![
+            q("A.NS", 1.0, Some(1.0)),
+            q("NAN.NS", 1.0, Some(f64::NAN)),
+            q("B.NS", 1.0, Some(-2.0)),
+            q("NONE.NS", 1.0, None),
+            q("C.NS", 1.0, Some(3.0)),
+        ];
+        let lines = heatmap_lines(&mut quotes);
+        let order: Vec<&str> = quotes.iter().filter_map(|q| q.symbol.as_deref()).collect();
+        assert_eq!(&order[..3], ["C.NS", "A.NS", "B.NS"]);
+        assert!(order[3..].contains(&"NAN.NS") && order[3..].contains(&"NONE.NS"));
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].contains("+3.00%"));
+        assert!(lines[2].contains("-2.00%"));
+        for line in &lines[3..] {
+            assert!(line.contains('—'), "{line}");
+            assert!(!line.contains("NaN") && !line.contains('█'), "{line}");
+        }
+        assert!(heatmap_line("X.NS", Some(f64::INFINITY)).contains('—'));
+    }
+
+    #[test]
+    fn heatmap_keeps_both_ends_of_a_long_scan() {
+        let mut quotes: Vec<crate::api::Quote> = (0..100)
+            .map(|i| q(&format!("S{i}"), 1.0, Some(i as f64 - 50.0)))
+            .collect();
+        quotes.push(q("NAN", 1.0, Some(f64::NAN)));
+        let lines = heatmap_lines(&mut quotes);
+        // 30 + gap line + 30 + the one without a change
+        assert_eq!(lines.len(), 2 * HEATMAP_EDGE + 2);
+        assert!(lines[HEATMAP_EDGE].contains("40 more in between"));
+        assert!(lines.last().unwrap().contains('—'));
+    }
+
+    #[test]
+    fn earnings_rows_sort_by_next_date() {
+        use crate::calendar::{Event, EventKind, Source};
+        let ev = |sym: &str, date: &str, source, estimate| Event {
+            symbol: sym.into(),
+            date: day(date),
+            kind: EventKind::Results,
+            detail: String::new(),
+            source,
+            estimate,
+        };
+        let events = vec![
+            (
+                "TCS.NS".to_string(),
+                vec![
+                    ev("TCS.NS", "2026-10-09", Source::Yahoo, false), // past
+                    ev("TCS.NS", "2027-01-12", Source::Yahoo, true),
+                    ev("TCS.NS", "2027-01-10", Source::Nse, false),
+                ],
+            ),
+            (
+                "AAPL".to_string(),
+                vec![ev("AAPL", "2026-12-01", Source::Yahoo, true)],
+            ),
+            ("ZZZ".to_string(), vec![]),
+        ];
+        let rows = earnings_rows(&events, |_| day("2026-11-21"));
+        let syms: Vec<&str> = rows.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(syms, ["AAPL", "TCS.NS", "ZZZ"]);
+        assert_eq!(rows[0].days_until, Some(10));
+        assert!(rows[0].estimate);
+        // NSE's filed date wins over Yahoo's later estimate.
+        assert_eq!(rows[1].date, Some(day("2027-01-10")));
+        assert_eq!(rows[1].source, Some(Source::Nse));
+        assert!(!rows[1].estimate);
+        assert_eq!((rows[2].date, rows[2].days_until), (None, None));
+    }
+
+    #[test]
+    fn surprise_rows_use_the_latest_quarter() {
+        use crate::research::Surprise;
+        let s = |q: &str, actual, estimate, pct| Surprise {
+            quarter: day(q),
+            actual,
+            estimate,
+            surprise_pct: pct,
+        };
+        let rows = surprise_rows(vec![
+            (
+                "AAA".into(),
+                vec![
+                    s("2026-09-30", 1.1, 1.0, 0.10),
+                    s("2026-06-30", 0.5, 1.0, -0.5),
+                ],
+            ),
+            ("BBB".into(), vec![]),
+            ("CCC".into(), vec![s("2026-09-30", 2.0, 1.6, 0.25)]),
+            ("DDD".into(), vec![s("2026-09-30", 0.9, 1.0, f64::NAN)]),
+        ]);
+        let syms: Vec<&str> = rows.iter().map(|r| r.symbol.as_str()).collect();
+        assert_eq!(syms, ["CCC", "AAA", "BBB", "DDD"]);
+        let aaa = &rows[1];
+        assert_eq!(aaa.latest.as_ref().unwrap().quarter, day("2026-09-30"));
+        assert!((aaa.pct().unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(rows[3].pct(), None);
+    }
+
+    #[test]
+    fn movers_label_says_when_and_whether_open() {
+        // Saturday 21 Nov 2026, 10:00 IST
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-21T04:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Last trade Friday 20 Nov 15:29 IST
+        let last = chrono::DateTime::parse_from_rfc3339("2026-11-20T09:59:00Z")
+            .unwrap()
+            .timestamp();
+        let label = movers_as_of(Market::In, now, Some(last));
+        assert!(label.starts_with("As of Sat 21 Nov 10:00 IST"), "{label}");
+        assert!(
+            label.contains("session Fri 20 Nov 2026 (last trade 15:29 IST)"),
+            "{label}"
+        );
+        assert!(label.contains("market closed (weekend)"), "{label}");
+        let none = movers_as_of(Market::In, now, None);
+        assert!(none.contains("session Sat 21 Nov 2026"), "{none}");
+    }
+
+    #[test]
+    fn vix_bands_per_market() {
+        let india = sentiment_spec(Market::In).unwrap();
+        let us = sentiment_spec(Market::Us).unwrap();
+        assert_eq!(india.vix.0, "^INDIAVIX");
+        assert_eq!(india.index.0, "^NSEI");
+        assert_eq!(us.vix.0, "^VIX");
+        // India VIX's bands sit higher: 33 is fear on the VIX but extreme
+        // fear only on India VIX past 32.
+        assert_eq!(vix_score(13.0, india.vix_bands), 90.0);
+        assert_eq!(vix_score(16.0, india.vix_bands), 70.0);
+        assert_eq!(vix_score(22.0, india.vix_bands), 50.0);
+        assert_eq!(vix_score(26.0, us.vix_bands), 30.0);
+        assert_eq!(vix_score(26.0, india.vix_bands), 30.0);
+        assert_eq!(vix_score(33.0, india.vix_bands), 10.0);
+        assert_eq!(vix_score(33.0, us.vix_bands), 30.0);
+        assert!(sentiment_spec(Market::Crypto).is_err());
+    }
+
+    #[test]
+    fn headline_tally_uses_the_shared_lexicon() {
+        let (p, n) = headline_tally([
+            "Plant commissioned ahead of schedule",
+            "Windfall tax announced",
+            "Shares plunge after downgrade",
+            "No growth in exports",
+        ]);
+        assert_eq!((p, n), (1, 2));
     }
 }

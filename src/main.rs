@@ -48,6 +48,7 @@ mod gsec;
 mod i18n;
 mod income;
 mod index_weights;
+mod insider;
 mod insights;
 mod intraday;
 mod ipo;
@@ -541,7 +542,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[arg(long, value_enum, ignore_case = true)]
         cap: Option<market::CapFilter>,
     },
-    /// Fear & Greed style sentiment gauge
+    /// Fear & Greed style sentiment gauge: India VIX, Nifty 50 and midcaps with -m in;
+    /// VIX, S&P 500 and small caps with -m us
     Sentiment,
     /// Trend, volatility, breadth and valuation of the market (readings, not a signal)
     Conditions {
@@ -4615,7 +4617,7 @@ async fn dispatch(
             commands::cmd_sectors(m, name, cap, out.into()).await
         }
         Commands::Heatmap { universe, cap } => commands::cmd_heatmap(m, universe, cap).await,
-        Commands::Sentiment => commands::cmd_sentiment().await,
+        Commands::Sentiment => commands::cmd_sentiment(m).await,
         Commands::Conditions { universe, out } => {
             commands::cmd_conditions(m, universe, out.json).await
         }
