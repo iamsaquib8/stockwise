@@ -53,7 +53,9 @@ pub fn site(base: &str) -> Site {
     Site {
         name: "NSE",
         base: base.trim_end_matches('/').to_string(),
-        home: Some(format!("{}/", base.trim_end_matches('/'))),
+        // The cookie page. NSE refuses scripts on its home page (HTTP 403)
+        // but serves the option-chain page, which sets the same cookies.
+        home: Some(format!("{}/option-chain", base.trim_end_matches('/'))),
         referer: format!("{}/", base.trim_end_matches('/')),
         origin: None,
     }

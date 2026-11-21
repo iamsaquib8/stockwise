@@ -95,7 +95,9 @@ done
 - **Names are stable.** Keys are `snake_case`. The exceptions are `quote` and
   `search`, which pass Yahoo's own camelCase fields through.
 - **Percent fields.** A field ending in `_percent` is a percentage: `12.5` means
-  12.5%. A `dividend_yield` is a fraction: `0.012` means 1.2%.
+  12.5%. Older `_pct` keys also appear with a `_percent` twin; read the
+  `_percent` one, as the `_pct` names go in 1.0. A `dividend_yield` is a
+  fraction: `0.012` means 1.2%.
 - **Dates** are `YYYY-MM-DD`. `history` bar times are RFC 3339 in UTC.
 - **No AI text.** The `--ai` section is never part of JSON or CSV output.
 

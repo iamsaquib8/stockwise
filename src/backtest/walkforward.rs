@@ -199,6 +199,12 @@ fn test_window(
     );
     let (from, to) = (test.start - train.start, test.end - train.start);
     let (first, last) = (date(bars.time[test.start]), date(bars.time[test.end - 1]));
+    let ref_close = bars.close[test.start - 1];
+    let exit_bar = |exit: &str| {
+        (test.start..test.end.min(bars.len()))
+            .find(|&i| date(bars.time[i]) == exit)
+            .unwrap_or(test.start)
+    };
     TestWindow {
         base: r.equity[from - 1],
         times: r.times[from..to].to_vec(),
@@ -208,8 +214,45 @@ fn test_window(
             .trades
             .into_iter()
             .filter(|t| t.exit_date >= first && t.exit_date <= last)
+            .map(|t| {
+                if t.entry_date < first {
+                    let bars_held = exit_bar(&t.exit_date) + 1 - test.start;
+                    rebase_carried(t, ref_close, &first, bars_held)
+                } else {
+                    t
+                }
+            })
             .collect(),
     }
+}
+
+/// A trade opened before the test window (in the train window) and closed
+/// inside it, counted from the window's start: entry at the close before
+/// the window, P&L from there, and only the exit leg's costs. So the
+/// out-of-sample trade statistics hold no in-sample gain or cost.
+fn rebase_carried(mut t: Trade, ref_close: f64, first: &str, bars_held: usize) -> Trade {
+    if !ref_close.is_finite() || ref_close <= 0.0 || t.qty <= 0.0 {
+        return t;
+    }
+    // A short gains when the price falls: its gross P&L and the price move
+    // have opposite signs.
+    let short = t.gross_pnl * (t.exit_price - t.entry_price) < 0.0;
+    let sign = if short { -1.0 } else { 1.0 };
+    let entry_value = t.qty * t.entry_price;
+    let exit_value = t.qty * t.exit_price;
+    let exit_costs = if entry_value + exit_value > 0.0 {
+        t.costs * exit_value / (entry_value + exit_value)
+    } else {
+        t.costs
+    };
+    t.entry_date = first.to_string();
+    t.entry_price = ref_close;
+    t.gross_pnl = sign * t.qty * (t.exit_price - ref_close);
+    t.costs = exit_costs;
+    t.net_pnl = t.gross_pnl - t.costs;
+    t.return_pct = t.net_pnl / (t.qty * ref_close) * 100.0;
+    t.bars_held = bars_held;
+    t
 }
 
 /// Train windows rank parameters by Sharpe; those that never trade rank last.
@@ -341,7 +384,15 @@ pub fn run(
                 trades: m.trades,
             },
         });
-        trades.extend(net.trades);
+        // Money in each window's trades scales with its capital, as its
+        // equity does, so trade totals reconcile with the stitched return.
+        trades.extend(net.trades.into_iter().map(|mut t| {
+            t.gross_pnl *= scale;
+            t.costs *= scale;
+            t.net_pnl *= scale;
+            t.tax *= scale;
+            t
+        }));
     }
 
     let ppy = cfg.periods_per_year;
@@ -566,6 +617,47 @@ mod tests {
         let held = (499.0 / 199.0 - 1.0) * 100.0;
         assert!(wf.out_of_sample_gross_return_pct > held * 0.99);
         assert!(wf.out_of_sample_gross_return_pct < held * 1.01);
+    }
+
+    #[test]
+    fn a_carried_trade_counts_from_the_window_start() {
+        // Bought at 100 in the train window, 150 the day before the test
+        // window, sold at 160 inside it: out of sample that is +6.7%.
+        let t = Trade {
+            symbol: "SYN".into(),
+            entry_date: "2025-01-02".into(),
+            exit_date: "2025-06-10".into(),
+            qty: 10.0,
+            entry_price: 100.0,
+            exit_price: 160.0,
+            gross_pnl: 600.0,
+            costs: 0.0,
+            net_pnl: 600.0,
+            return_pct: 60.0,
+            bars_held: 100,
+            exit_reason: engine::ExitReason::Signal,
+            tax: 0.0,
+        };
+        let r = rebase_carried(t.clone(), 150.0, "2025-06-01", 7);
+        assert_eq!(r.entry_date, "2025-06-01");
+        assert_eq!(r.entry_price, 150.0);
+        assert!((r.gross_pnl - 100.0).abs() < 1e-9);
+        assert!((r.return_pct - 100.0 / 1500.0 * 100.0).abs() < 1e-9);
+        assert_eq!(r.bars_held, 7);
+        // Only the exit leg's share of the costs stays.
+        let mut c = t.clone();
+        c.costs = 26.0;
+        c.net_pnl = 574.0;
+        let r = rebase_carried(c, 150.0, "2025-06-01", 7);
+        assert!((r.costs - 26.0 * 1600.0 / 2600.0).abs() < 1e-9);
+        assert!((r.net_pnl - (100.0 - r.costs)).abs() < 1e-9);
+        // A short: sold at 160 in train, 150 before the window, covered at 100.
+        let mut sh = t;
+        sh.entry_price = 160.0;
+        sh.exit_price = 100.0;
+        sh.gross_pnl = 600.0;
+        let r = rebase_carried(sh, 150.0, "2025-06-01", 7);
+        assert!((r.gross_pnl - 500.0).abs() < 1e-9);
     }
 
     #[test]

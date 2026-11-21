@@ -3,9 +3,10 @@
 //! ratio, max pain, open-interest walls — plus per-contract IV and greeks
 //! from `greeks.rs`.
 //!
-//! NSE's option-chain API serves browser sessions: `NseClient` loads the
-//! public option-chain page once for cookies, then makes at most two API
-//! calls, spaced out, and gives up with a clear error instead of retrying.
+//! NSE's option-chain API serves browser sessions: `NseClient` goes through
+//! the shared NSE session (`providers::nse::shared_session`), which loads
+//! the option-chain page once for cookies, spaces requests and stops asking
+//! after a refusal.
 //! BSE's derivatives API (behind bseindia.com's option-chain page) is
 //! called the same way by `BseClient`: one session, calls spaced out,
 //! answers cached for a minute, a clear error when BSE refuses.
@@ -1073,49 +1074,32 @@ fn nse_refused(status: reqwest::StatusCode) -> anyhow::Error {
     )
 }
 
-/// Minimal NSE session: one page load for cookies, then JSON API calls
-/// spaced 500 ms apart. No retry loops.
+/// NSE's option-chain API through the process-wide NSE session: one cookie
+/// handshake, one rate limit and one refusal state shared with every other
+/// NSE request (quotes, research, calendar).
 pub struct NseClient {
-    client: reqwest::Client,
+    session: std::sync::Arc<crate::providers::session::Session>,
 }
 
 impl NseClient {
     pub async fn new() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(NSE_UA)
-            .cookie_store(true)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .context("Failed to build HTTP client")?;
-        let resp = client
-            .get(format!("{NSE_BASE}/option-chain"))
-            .header(reqwest::header::ACCEPT, "text/html")
-            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-            .send()
-            .await
-            .context("Cannot reach nseindia.com. Check your internet connection")?;
-        if !resp.status().is_success() {
-            return Err(nse_refused(resp.status()));
-        }
-        Ok(Self { client })
+        Ok(Self {
+            session: crate::providers::nse::shared_session(),
+        })
     }
 
-    async fn get_json(&self, url: &str) -> Result<Value> {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let resp = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::REFERER, format!("{NSE_BASE}/option-chain"))
-            .send()
+    async fn get_json(&self, url: &str, ttl: Duration) -> Result<Value> {
+        use crate::providers::session::FetchError;
+        self.session
+            .get_json(url, &[], ttl)
             .await
-            .context("Request to nseindia.com failed")?;
-        if !resp.status().is_success() {
-            return Err(nse_refused(resp.status()));
-        }
-        let body = resp.text().await.context("Failed to read NSE response")?;
-        serde_json::from_str(&body).map_err(|_| nse_refused(reqwest::StatusCode::OK))
+            .map_err(|e| match e {
+                FetchError::Blocked(_) => nse_refused(reqwest::StatusCode::FORBIDDEN),
+                FetchError::Format(_) => nse_refused(reqwest::StatusCode::OK),
+                other => anyhow::anyhow!(
+                    "Cannot reach nseindia.com ({other}). Check your internet connection"
+                ),
+            })
     }
 
     pub async fn expiries(&self, symbol: &str) -> Result<Vec<NaiveDate>> {
@@ -1124,7 +1108,9 @@ impl NseClient {
             None,
             &[("symbol", symbol)],
         );
-        Ok(parse_nse_expiries(&self.get_json(&url).await?))
+        Ok(parse_nse_expiries(
+            &self.get_json(&url, Duration::from_secs(900)).await?,
+        ))
     }
 
     pub async fn chain(&self, symbol: &str, index: bool, expiry: NaiveDate) -> Result<Value> {
@@ -1138,7 +1124,7 @@ impl NseClient {
                 ("expiry", &expiry),
             ],
         );
-        self.get_json(&url).await
+        self.get_json(&url, Duration::from_secs(60)).await
     }
 }
 
