@@ -2500,14 +2500,23 @@ pub(crate) async fn goal_rows(
     let store: goals::GoalStore = store::load(GOALS_FILE)?;
     let today = chrono::Local::now().date_naive();
     let mut rows = Vec::new();
-    for g in &store.goals {
+    // One goal per holding: a holding linked to several goals counts
+    // towards the first only.
+    let allocation = store.allocate();
+    for (g, (holdings, dropped)) in store.goals.iter().zip(allocation) {
+        for (h, first) in &dropped {
+            eprintln!(
+                "  ! {h} is linked to goals `{first}` and `{}`: it counts towards `{first}` only.",
+                g.name
+            );
+        }
         let months_left = goal_due(today, &g.by)
             .and_then(|d| goals::months_between(today, d))
             .unwrap_or(0);
-        let (linked, valued_at) = if g.holdings.is_empty() {
+        let (linked, valued_at) = if holdings.is_empty() {
             (0.0, "none")
         } else {
-            let l = linked_value(src, &g.holdings, market, false).await?;
+            let l = linked_value(src, &holdings, market, false).await?;
             (l.value, if l.live { "market" } else { "cost" })
         };
         let infl = g.inflation_pct.unwrap_or(0.0);
@@ -2534,7 +2543,7 @@ pub(crate) async fn goal_rows(
             target_future,
             by: g.by.clone(),
             months_left,
-            holdings: g.holdings.clone(),
+            holdings,
             linked_value: linked,
             valued_at,
             funded_pct: if target_future > 0.0 {
@@ -2576,6 +2585,16 @@ pub fn cmd_goal_add(a: GoalAdd) -> Result<()> {
     store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
         if s.find(&saved.name).is_some() {
             bail!("A goal named `{}` exists: remove it first", saved.name);
+        }
+        // One goal per holding, so no holding's value is counted twice.
+        for h in &saved.holdings {
+            if let Some(other) = s.linked_elsewhere(h, &saved.name) {
+                bail!(
+                    "{} already counts towards goal `{}`: a holding can be linked to one goal only",
+                    h,
+                    other.name
+                );
+            }
         }
         s.goals.push(saved.clone());
         Ok(())

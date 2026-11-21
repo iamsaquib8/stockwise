@@ -454,7 +454,8 @@ async fn goals_are_pure_and_rounded() {
     assert_eq!(sip["goal"], "sip");
     assert_eq!(sip["currency"], "INR");
     let monthly = sip["monthly_sip"].as_f64().unwrap();
-    assert!((19_000.0..21_000.0).contains(&monthly), "{monthly}");
+    // ₹1 Cr in 15 years at 12% (effective monthly rate): ₹21,011.
+    assert!((20_000.0..22_000.0).contains(&monthly), "{monthly}");
     assert_eq!(sip["schedule"].as_array().unwrap().len(), 15);
 
     let r = data(
