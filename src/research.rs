@@ -363,7 +363,9 @@ impl Series {
             .and_then(|a| a.first())
             .and_then(|a| a.adjclose.clone())
             .filter(|a| a.len() == ts.len());
-        let mut adj_ok = adj.is_some();
+        // One adjusted value per retained row (kept aligned through the
+        // duplicate replacement below); used only if every row has one.
+        let mut adj_rows: Vec<Option<f64>> = Vec::new();
         for (i, &t) in ts.iter().enumerate() {
             let Some(close) = get(&q.close, i).filter(|c| *c > 0.0) else {
                 continue;
@@ -379,14 +381,11 @@ impl Series {
                 s.low.pop();
                 s.close.pop();
                 s.volume.pop();
-                s.adj_close.pop();
+                adj_rows.pop();
             }
             s.dates.push(date);
             s.close.push(close);
-            match adj.as_ref().and_then(|a| a[i]).filter(|v| *v > 0.0) {
-                Some(v) if adj_ok => s.adj_close.push(v),
-                _ => adj_ok = false,
-            }
+            adj_rows.push(adj.as_ref().and_then(|a| a[i]).filter(|v| *v > 0.0));
             s.open.push(get(&q.open, i).unwrap_or(close));
             s.high.push(get(&q.high, i).unwrap_or(close));
             s.low.push(get(&q.low, i).unwrap_or(close));
@@ -397,8 +396,11 @@ impl Series {
                     .unwrap_or(0) as f64,
             );
         }
-        if !adj_ok {
-            s.adj_close.clear();
+        if adj.is_some() {
+            s.adj_close = adj_rows
+                .into_iter()
+                .collect::<Option<Vec<f64>>>()
+                .unwrap_or_default();
         }
         s
     }

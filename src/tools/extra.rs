@@ -217,7 +217,10 @@ async fn verdicts<D: DataSource>(src: &D, a: &Args, m: Market) -> Result<Value> 
         .iter()
         .map(|s| market::resolve_symbol(s.trim(), m))
         .collect();
-    syms.dedup();
+    // Each symbol once, in the order given (dedup alone keeps
+    // non-adjacent repeats).
+    let mut seen = std::collections::HashSet::new();
+    syms.retain(|s| seen.insert(s.clone()));
     let results: Vec<(String, Result<crate::verdict::DecisionVerdict>)> =
         futures_util::stream::iter(syms.into_iter().map(|sym| async move {
             let r = async {
