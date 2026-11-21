@@ -349,6 +349,10 @@ pub struct EffectiveProfile {
     pub default_drift_pct: f64,
     pub auto_explain: bool,
     pub screen_presets: &'static [&'static str],
+    /// `[profile] residence` (`in`, `us`, `uk`) when set; tax rules otherwise
+    /// follow the market.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residence: Option<String>,
 }
 
 impl Default for EffectiveProfile {
@@ -488,6 +492,11 @@ impl EffectiveProfile {
             default_drift_pct,
             auto_explain: mode == ProfileMode::Passive,
             screen_presets,
+            residence: file_cfg
+                .residence
+                .as_deref()
+                .and_then(crate::tax::Country::parse)
+                .map(residence_code),
         }
     }
 }
@@ -1158,6 +1167,18 @@ pub struct ProfileUpdate {
     pub max_stock_weight: Option<f64>,
     pub max_smallcap_weight: Option<f64>,
     pub risk_per_trade: Option<f64>,
+    /// Country of tax residence: `in`, `us` or `uk`.
+    pub residence: Option<crate::tax::Country>,
+}
+
+/// The config-file code for a residence.
+pub fn residence_code(c: crate::tax::Country) -> String {
+    match c {
+        crate::tax::Country::India => "in",
+        crate::tax::Country::Us => "us",
+        crate::tax::Country::Uk => "uk",
+    }
+    .to_string()
 }
 
 /// Update `[profile]` settings in the config file at `path`, creating it from
@@ -1172,7 +1193,7 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
         max_stock_weight: update.max_stock_weight,
         max_smallcap_weight: update.max_smallcap_weight,
         risk_per_trade: update.risk_per_trade,
-        residence: None,
+        residence: update.residence.map(residence_code),
     };
     probe.validate()?;
 
@@ -1211,6 +1232,9 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
     }
     if let Some(r) = update.risk_per_trade {
         pairs.push(("risk_per_trade", format!("{r}")));
+    }
+    if let Some(c) = update.residence {
+        pairs.push(("residence", format!("\"{}\"", residence_code(c))));
     }
 
     let is_key = |l: &str, prefix: &str| {
@@ -1983,6 +2007,31 @@ mod tests {
         assert_eq!(eff_flag.max_stock_weight, 20.0);
         assert_eq!(eff_flag.max_smallcap_weight, 50.0);
         assert_eq!(eff_flag.risk_per_trade, 2.0);
+    }
+
+    #[test]
+    fn set_profile_writes_the_residence_code() {
+        let dir = std::env::temp_dir().join(format!(
+            "stockwise-residence-{}-{}",
+            std::process::id(),
+            crate::selfupdate::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        set_profile(
+            &path,
+            &ProfileUpdate {
+                residence: crate::tax::Country::parse("India"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("residence = \"in\""), "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        let eff = EffectiveProfile::from_parts(None, None, &cfg.profile);
+        assert_eq!(eff.residence.as_deref(), Some("in"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

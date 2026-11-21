@@ -1574,7 +1574,7 @@ untested against a live account.
 | Command | Description |
 |---------|-------------|
 | `profile` / `profile show [--json]` | Show active investor profile mode (`passive`, `active:low\|med\|high`, `ultra`), effective tax parameters and personal guardrails |
-| `profile set [MODE[:RISK]] [--risk low\|med\|high] [--tax-slab PCT] [--tax-regime new\|old] [--horizon-years N] [--max-stock-weight PCT] [--max-smallcap-weight PCT] [--risk-per-trade PCT] [--json]` | Save investor profile mode and personal guardrails to `config.toml` |
+| `profile set [MODE[:RISK]] [--risk low\|med\|high] [--tax-slab PCT] [--tax-regime new\|old] [--horizon-years N] [--max-stock-weight PCT] [--max-smallcap-weight PCT] [--risk-per-trade PCT] [--residence in\|us\|uk] [--json]` | Save investor profile mode, personal guardrails and tax residence (holding periods and tax rules follow it) to `config.toml` |
 | `profile reset` | Reset profile mode and guardrails in `config.toml` to defaults (`active:med`) |
 | `config [show] [--json]` | Effective settings and where each comes from (flag, env, config file, default), plus the config file's status |
 | `config path` | Print the config file path (it may not exist yet) |

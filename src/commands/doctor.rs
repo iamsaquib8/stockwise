@@ -556,10 +556,7 @@ fn profile_checks(d: &mut Report, market: Market) {
                     .dimmed()
                     .to_string(),
             );
-            d.fix(
-                "set `residence = \"in\"` (or us, uk) under [profile] in the config file \
-                 (`stockwise config path` shows where it is)",
-            );
+            d.fix("stockwise profile set --residence in   (or us, uk)");
         }
     }
 }

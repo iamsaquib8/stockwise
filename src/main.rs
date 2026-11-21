@@ -2319,6 +2319,10 @@ fn goal_duration(s: &str) -> Result<u32, String> {
     goals::parse_duration(s)
 }
 
+fn residence_arg(s: &str) -> Result<tax::Country, String> {
+    tax::Country::parse(s).ok_or_else(|| format!("expected in, us or uk, got `{s}`"))
+}
+
 fn slab_pct(s: &str) -> Result<f64, String> {
     percent_between(s, 0.0, 50.0)
 }
@@ -2773,6 +2777,9 @@ enum ProfileCmd {
         /// Maximum risk per trade as a percentage of capital (0.0 < risk <= 100.0)
         #[arg(long = "risk-per-trade", value_name = "PCT", value_parser = risk_pct_arg)]
         risk_per_trade: Option<f64>,
+        /// Country of tax residence (in, us, uk): decides holding periods and tax rules
+        #[arg(long, value_name = "COUNTRY", value_parser = residence_arg)]
+        residence: Option<tax::Country>,
         #[command(flatten)]
         out: JsonOutput,
     },
@@ -6206,6 +6213,7 @@ async fn dispatch(
                 max_stock_weight,
                 max_smallcap_weight,
                 risk_per_trade,
+                residence,
                 out: set_out,
             }) => {
                 let fmt = Format::from_flags(args.out.json || set_out.json, false);
@@ -6219,6 +6227,7 @@ async fn dispatch(
                     max_stock_weight,
                     max_smallcap_weight,
                     risk_per_trade,
+                    residence,
                 };
                 commands::cmd_profile_set(spec_str.as_deref(), update, fmt)
             }
