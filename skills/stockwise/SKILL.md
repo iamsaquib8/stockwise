@@ -57,8 +57,13 @@ tools, show the user `stockwise profile set --help` instead.
 
 **"How is my portfolio doing?"** `portfolio_analyze` (or `stockwise portfolio analyze --json`)
 gives value, P&L, XIRR, split by market, currency, cap tier and sector, tax
-terms, risk and observations. Add `portfolio_summary` for live P&L, and
-`tax_estimate` or `harvest` for tax questions.
+terms, risk and observations. Add `portfolio_summary` for live P&L,
+`portfolio_checkup` (`stockwise portfolio checkup --json`) for six-lens
+observations, `portfolio_pme` for index-twin comparison, `holdings_lots`
+(`stockwise portfolio lots TCS --json`) for lot holding periods, and
+`tax_estimate` or `harvest` for tax questions. For target-weight drift, call
+`rebalance` and then `portfolio_sell_preview` for each proposed trim's tax
+(report unavailable estimates explicitly and never sum independent previews).
 
 **"Should I buy X?" or "Is X good for me?"** Call `stock_action` with the
 symbol (add `horizon: short` for weeks to months), or run
@@ -96,8 +101,25 @@ picks whose `coverage` is under 0.6. Finalists carry their rule-based
 `action`; quote it as returned. Every list is logged, and `picks_review`
 shows how earlier lists did against the index: cite it, misses included.
 `verdicts` scores up to 25 tickers in one call, and `quote` prices up to 25.
-`screen`, `movers` and `ipo_board` help too. Each is a starting list for
-research; only the `action` objects are calls.
+`picks` scans the full default universe unless `universe` is narrowed;
+`screen` covers only the market's popular stocks. `movers` and `ipo_board` help
+too. Each is a starting list for research; only the `action` objects are calls.
+
+**Indian IPOs.** `ipo_board` (`stockwise ipo --json`) lists open, upcoming and
+recently listed issues; `ipo_analyze` (`stockwise ipo BCSSL --json`) gives one
+issue's full analysis, and `stockwise ipo review --json` shows past verdict
+performance. Present the engine's `verdict` exactly as returned (`APPLY`,
+`APPLY – SELL ON LISTING`, `WAIT` with its QIB trigger, `AVOID`, `NO CALL` or
+`LISTED`) with its reasons, confidence and review date. GMP is unofficial
+chatter and only ever a red flag. Data comes from NSE with BSE filling gaps;
+cite `meta.field_sources`, `missing` and `coverage`. `NO CALL` means not enough
+data for a call.
+
+**Daily check-in.** `whats_hot` (`stockwise hot --json`), `stockwise today --json`,
+`digest` (`stockwise digest --json`), `news_feed` (`stockwise news TCS --json`)
+and `monitor_status` (`stockwise monitor status --json`) surface portfolio
+heat, day movers, after-close digests, merged filings/headlines and holding
+monitor signals. These are data and triggers, not calls.
 
 **Watchlist and alerts upkeep.** `watchlist` and `alerts_list` read;
 `watchlist_add`, `alert_add` (price levels or conditions such as RSI below 30)
@@ -108,8 +130,10 @@ and their `_remove` pairs change them.
 `goal_list` shows each saved goal's funded share.
 
 **Tax season (India).** `tax_estimate` for capital gains, `tax_advance` for
-the advance-tax schedule, `harvest` for loss and 112A harvesting. With the CLI,
-`stockwise tax export in --fy 2025-26 --json` gives Schedule CG rows.
+the advance-tax schedule, `harvest` for loss and 112A harvesting. The profile's
+tax residence (`--residence`) decides the long-term holding period for foreign
+shares. With the CLI, `stockwise tax export in --fy 2025-26 --json` gives
+Schedule CG rows.
 
 **Indian fixed income, gold and currency.** `bonds_yields` (G-sec curve),
 `bonds_list` and `bonds_calc` (price, yield, duration of a G-sec or T-bill),
@@ -154,13 +178,17 @@ that follows their `outputSchema`.
 | Piotroski and Altman | `stockwise scorecard TCS --json` |
 | Ranked ideas | `stockwise picks --json` · `stockwise picks --cap small --horizon short --json` |
 | Track record of picks | `stockwise picks review --json` |
+| Indian IPOs | `stockwise ipo --json` · `stockwise ipo BCSSL --json` · `stockwise ipo review --json` |
+| Daily portfolio & heat | `stockwise today --json` · `stockwise hot --json` · `stockwise digest --json` |
+| News, filings & monitor | `stockwise news TCS --json` · `stockwise monitor status --json` |
 | Gainers and losers | `stockwise movers --json` |
 | Preset screen | `stockwise screen growth --json` |
 | Backtest | `stockwise backtest INFY -s macd -p 2y --json` |
 | Mutual funds | `stockwise mf search parag flexi direct --json` · `stockwise mf sip 122639 5000 -p 5y --json` |
 | Options | `stockwise options chain NIFTY --json` · `stockwise options pcr NIFTY --json` |
-| Portfolio dashboard | `stockwise portfolio analyze --json` |
-| Holdings | `stockwise portfolio --json` · `stockwise portfolio xray --json` |
+| Portfolio dashboard | `stockwise portfolio analyze --json` · `stockwise portfolio checkup --json` |
+| Holdings & lots | `stockwise portfolio --json` · `stockwise portfolio lots TCS --json` · `stockwise portfolio xray --json` |
+| PME & rebalance | `stockwise portfolio pme --json` · `stockwise portfolio rebalance --json` |
 | Against an index | `stockwise portfolio benchmark NIFTY -p 1y --json` |
 | Capital gains | `stockwise tax in --json` · `stockwise harvest --json` |
 | Goals | `stockwise goal sip --target 1cr --years 15 --json` · `stockwise goal list --json` |
@@ -193,7 +221,10 @@ to a cloud model.
   tax P&L before filing.
 - **Missing data stays missing.** Holdings without a price are listed in
   `unpriced` and unknown quotes in `missing`; report them, never treat them
-  as zero. Report `unknown` rules from `fit_check` as unknown.
+  as zero. Report `unknown` rules from `fit_check` as unknown. When a `meta`
+  object is present, report its sources, as-of time, `coverage`, `missing` and
+  `warnings` without filling gaps. In `--json` outputs, `_pct` keys now have
+  `_percent` twins (`_pct` is deprecated).
 - **The CLI changes files directly.** `portfolio add/sell/remove`, `import`,
   `watch add/remove`, `alert add/remove`, `goal add/remove`, `profile set`
   are not journalled for undo. Run them only when the user asked for that
