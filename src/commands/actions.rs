@@ -678,7 +678,8 @@ mod tests {
         let mut p2 = Portfolio::default();
         p2.add_lot("TCS.NS", pf::Lot::new(10.0, 100.15, "2025-12-01", "manual"));
         let h2 = p2.holding("TCS.NS").unwrap();
-        let (_, _, drift_free) = next_long_term(h2, 100.25, Some("INR"), Market::In, today).unwrap();
+        let (_, _, drift_free) =
+            next_long_term(h2, 100.25, Some("INR"), Market::In, today).unwrap();
         assert_eq!(drift_free, Some(0.08));
     }
 }

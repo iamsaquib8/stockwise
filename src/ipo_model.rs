@@ -906,10 +906,7 @@ mod tests {
             .collect();
         hist.push((today - chrono::Duration::days(REGIME_WINDOW_DAYS), 8.0));
         // `regime_asof(today + 1)` misses the 180-day listing; `regime_through` includes it.
-        assert_eq!(
-            regime_asof(&hist, today + chrono::Duration::days(1)),
-            None
-        );
+        assert_eq!(regime_asof(&hist, today + chrono::Duration::days(1)), None);
         assert!(regime_through(&hist, today).is_some());
 
         let m = testing::model();

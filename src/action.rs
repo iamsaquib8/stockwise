@@ -1375,10 +1375,8 @@ pub fn own_median_pe(r: &crate::research::Research) -> Option<f64> {
         if r.prices.dates[0] > end {
             continue;
         }
-        let (close_major, _) = crate::market::to_major(
-            r.prices.close[idx - 1],
-            r.currency.as_deref().unwrap_or(""),
-        );
+        let (close_major, _) =
+            crate::market::to_major(r.prices.close[idx - 1], r.currency.as_deref().unwrap_or(""));
         pes.push(close_major / eps);
     }
     median(&mut pes).filter(|_| pes.len() >= 3)
