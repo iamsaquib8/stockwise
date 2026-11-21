@@ -901,12 +901,15 @@ fn fund_by_name(symbol: &str, q: &crate::api::Quote) -> bool {
 /// The action for `i`. Deterministic: no clock, no network, no randomness.
 pub fn decide(i: &Inputs) -> Action {
     if !i.is_stock {
-        return no_call(
+        let mut a = no_call(
             i,
-            "Actions cover listed company stocks only; ETFs, funds, indices, FX and crypto \
-             have no company data to judge"
+            "Not a listed company stock: ETFs, funds, indices, FX and crypto have no \
+             company data to judge"
                 .to_string(),
         );
+        // Company fields are not "missing" for an ETF: they never apply.
+        a.missing.clear();
+        return a;
     }
     if i.price.or(i.tech.close).is_none() {
         let mut a = no_call(i, "No price".to_string());
@@ -1660,6 +1663,21 @@ mod tests {
             "BEETEL.NS",
             &q("BEETEL.NS", "Beetel Teletech Limited")
         ));
+        // Its NO CALL says why, without a list of company fields.
+        let mut i = Inputs::new(
+            "NIFTYBEES.NS",
+            "INR",
+            NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+        );
+        i.is_stock = false;
+        i.missing = vec!["ROE".into(), "D/E".into()];
+        let a = decide(&i);
+        assert!(a.missing.is_empty());
+        assert!(
+            a.headline().contains("Not a listed company stock"),
+            "{}",
+            a.headline()
+        );
     }
 
     fn day(s: &str) -> NaiveDate {

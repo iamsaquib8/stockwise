@@ -2107,10 +2107,22 @@ pub(crate) async fn picks_review_report(
         );
     }
     let refs: Vec<&str> = first.keys().map(String::as_str).collect();
-    let prices: std::collections::HashMap<String, f64> = client
+    let quotes = client
         .get_quote(&refs)
         .await
-        .context("Could not fetch current prices for the logged picks")?
+        .context("Could not fetch current prices for the logged picks")?;
+    // Picks are dated by the session of their quote, so days held count to
+    // the session of today's prices: a list made on Saturday from Friday's
+    // closes is 0 days old, not 1.
+    let today = quotes
+        .iter()
+        .filter_map(|q| q.regular_market_time)
+        .max()
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|at| crate::clock::session_date(market, at))
+        .filter(|d| *d <= today)
+        .unwrap_or(today);
+    let prices: std::collections::HashMap<String, f64> = quotes
         .into_iter()
         .filter_map(|q| Some((q.symbol.clone()?, q.regular_market_price?)))
         .collect();
