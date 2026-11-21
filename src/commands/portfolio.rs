@@ -2055,6 +2055,7 @@ pub async fn cmd_portfolio_sell(
     price: Option<f64>,
     date: Option<&str>,
     charges: Option<crate::trade_charges::ChargesArg>,
+    lots: &[usize],
     market: Market,
 ) -> Result<()> {
     use crate::trade_charges::{self as tc, ChargesArg};
@@ -2067,6 +2068,15 @@ pub async fn cmd_portfolio_sell(
     let resolved = held_symbol(&portfolio, symbol, market);
     if portfolio.holding(&resolved).is_none() {
         bail!("{} is not in your portfolio", resolved);
+    }
+    if !lots.is_empty()
+        && (offmarket::is_off_market(&resolved) || pf::symbol_currency(&resolved) == Some("INR"))
+    {
+        bail!(
+            "Indian shares and funds are sold first-in, first-out (demat and AMC rules); \
+             --lots is for US and UK shares. Drop --lots to sell {} oldest first.",
+            resolved
+        );
     }
     let today = pf::today();
     let date = match date {
@@ -2172,7 +2182,11 @@ pub async fn cmd_portfolio_sell(
     // longer fits is refused).
     let sales = Portfolio::update(|p| {
         let n = p.realized.len();
-        let mut sales = p.sell_fifo(&resolved, shares, price, &date, "manual")?;
+        let mut sales = if lots.is_empty() {
+            p.sell_fifo(&resolved, shares, price, &date, "manual")?
+        } else {
+            p.sell_specific(&resolved, shares, price, &date, "manual", lots)?
+        };
         // The sale's own charges, shared by the lots it sold from.
         // Whole paise (cents, pence) per lot, adding up to the fee exactly.
         if let Some(c) = charges.filter(|c| *c > 0.0) {
@@ -2187,13 +2201,26 @@ pub async fn cmd_portfolio_sell(
     })?;
 
     let cur = cur.as_deref();
+    let which = if lots.is_empty() {
+        "oldest lots first".to_string()
+    } else {
+        format!(
+            "from lot{} {}",
+            if lots.len() == 1 { "" } else { "s" },
+            lots.iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     println!(
-        "  {} Sold {} {} at {} on {} (oldest lots first)",
+        "  {} Sold {} {} at {} on {} ({})",
         "✓".green(),
         shares,
         resolved.cyan(),
         format_price(price, cur),
-        date
+        date,
+        which
     );
     let sold = pf::parse_date(&date)?;
     let mut total = 0.0;
@@ -3572,12 +3599,13 @@ pub fn cmd_portfolio_list() -> Result<()> {
 
 // ── Target Allocations & Rebalance ──
 
-/// Set a target weight for a symbol or sector.
 /// The key a target weight is saved under:
 /// 1. a held symbol (exact, or its bare ticker) → that holding's symbol;
-/// 2. a key with `.` or `:` (TCS.NS, MF:122639) → as given, upper-cased;
-/// 3. a short upper-case ticker → resolved for `market`;
-/// 4. anything else ("Technology", "Financial Services") → a sector key.
+/// 2. an asset class (`equity`, `debt`, `gold`, `international`, `cash`) →
+///    its lower-case name;
+/// 3. a key with `.` or `:` (TCS.NS, MF:122639) → as given, upper-cased;
+/// 4. a short upper-case ticker → resolved for `market`;
+/// 5. anything else ("Technology", "Financial Services") → a sector key.
 pub(crate) fn resolve_target_key(p: &Portfolio, key: &str, market: Market) -> String {
     if let Some(h) = p.holdings.iter().find(|h| {
         h.symbol.eq_ignore_ascii_case(key)
@@ -3586,17 +3614,25 @@ pub(crate) fn resolve_target_key(p: &Portfolio, key: &str, market: Market) -> St
                 .is_some_and(|(bare, _)| bare.eq_ignore_ascii_case(key))
     }) {
         h.symbol.clone()
+    } else if let Some(class) = crate::rebalance::AssetClass::parse(key) {
+        class.label().to_string()
     } else if key.contains('.') || key.contains(':') {
         key.trim().to_uppercase()
-    } else if key
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
-        && key.len() <= 10
-    {
+    } else if symbol_like(key) {
         market::resolve_symbol(key, market)
     } else {
         key.trim().to_string()
     }
+}
+
+/// A short upper-case ticker (`TCS`, `M&M`, `BAJAJ-AUTO`): a target key for a
+/// symbol rather than a sector.
+fn symbol_like(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 12
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '-' | '&'))
 }
 
 pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> Result<()> {
@@ -3616,10 +3652,20 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
     })?;
 
     let total: f64 = p.targets.values().sum();
+    let kind = if crate::rebalance::AssetClass::parse(&resolved_key).is_some() {
+        " (asset class)"
+    } else if p.holding(&resolved_key).is_some() {
+        ""
+    } else if resolved_key.contains('.') || resolved_key.contains(':') {
+        " (not held yet: rebalance will buy it)"
+    } else {
+        " (sector)"
+    };
     println!(
-        "\n  {} Target for {} set to {:.1}%",
+        "\n  {} Target for {}{} set to {:.1}%",
         "✓".green(),
         resolved_key.cyan(),
+        kind.dimmed(),
         percentage
     );
     println!(
@@ -3628,34 +3674,53 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
         p.targets.len(),
         if p.targets.len() == 1 { "" } else { "s" }
     );
-    if total > 100.0 + 1e-6 {
+    if kind.contains("sector") || kind.contains("asset class") {
         println!(
             "  {}",
-            format!(
-                "Note: Targets sum to {:.1}% (exceeds 100%). Weights will be normalized during rebalancing.",
-                total
-            )
-            .yellow()
+            "Symbol targets inside it are carved out of it, so nested targets don't add up twice."
+                .dimmed()
         );
-    } else if total < 100.0 - 1e-6 {
-        let remaining = 100.0 - total;
+    }
+    if total < 100.0 - 1e-6 {
         println!(
             "  {}",
             format!(
                 "Note: Remaining {:.1}% will be distributed among untargeted holdings during rebalancing.",
-                remaining
+                100.0 - total
             )
             .dimmed()
+        );
+    }
+    if total > 100.0 + 1e-6 {
+        println!(
+            "  {}",
+            format!(
+                "Note: Targets sum to {:.1}%. Weights will be normalized during rebalancing.",
+                total
+            )
+            .yellow()
         );
     }
     println!();
     Ok(())
 }
 
+/// The drift band `rebalance` uses and where it comes from.
+fn drift_band(p: &Portfolio) -> (f64, &'static str) {
+    match p.drift_tolerance {
+        Some(d) => (d, "set with `portfolio target drift`"),
+        None => (
+            crate::config::effective_profile().default_drift_pct,
+            "profile default",
+        ),
+    }
+}
+
 /// Show saved target allocations and drift tolerance.
 pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
     let p = Portfolio::load()?;
     let _ = market;
+    let (band, band_source) = drift_band(&p);
     if json {
         let targets_list: Vec<serde_json::Value> = p
             .targets
@@ -3671,7 +3736,8 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
         let out = serde_json::json!({
             "targets": targets_list,
             "total_target_pct": total,
-            "drift_tolerance_pct": p.drift_tolerance,
+            "drift_tolerance_pct": band,
+            "drift_tolerance_source": if p.drift_tolerance.is_some() { "portfolio" } else { "profile" },
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -3685,9 +3751,10 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
                 .dimmed()
         );
         println!(
-            "\n  {} Set a target with: stockwise portfolio target set <SYMBOL|SECTOR> <PERCENT>",
+            "\n  {} Set a target with: stockwise portfolio target set <SYMBOL|SECTOR|equity|debt|gold|international|cash> <PERCENT>",
             "Tip:".yellow()
         );
+        println!("  Drift Tolerance: ±{:.1}% ({})", band, band_source);
         println!();
         return Ok(());
     }
@@ -3710,25 +3777,40 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
     let total: f64 = p.targets.values().sum();
     println!("  {:<kw$} {:>9.1}%", "Total".bold(), total);
     println!();
-
-    if let Some(drift) = p.drift_tolerance {
-        println!(
-            "  Drift Tolerance: ±{:.1}% (rebalancing ignores drifts within this band)",
-            drift
-        );
-    } else {
-        println!("  Drift Tolerance: Not set (default: 0.0%)");
-    }
+    println!(
+        "  Drift Tolerance: ±{:.1}% ({}; rebalancing ignores drifts within this band)",
+        band, band_source
+    );
+    println!(
+        "  {}",
+        "See where each target stands: stockwise portfolio target drift".dimmed()
+    );
     println!();
     Ok(())
 }
 
-/// Remove a target weight by symbol or sector.
-pub fn cmd_portfolio_target_remove(key: &str) -> Result<()> {
-    if Portfolio::update(|p| Ok(p.remove_target(key)))? {
-        println!("\n  {} Removed target for {}\n", "✓".green(), key.cyan());
-    } else {
-        println!("\n  {} No target found matching '{}'\n", "✗".red(), key);
+/// Remove a target weight by symbol or sector (resolved like `target set`).
+pub fn cmd_portfolio_target_remove(key: &str, market: Market) -> Result<()> {
+    let p = Portfolio::load()?;
+    let resolved = resolve_target_key(&p, key, market);
+    let removed = Portfolio::update(|p| {
+        Ok(if p.remove_target(&resolved) {
+            Some(resolved.clone())
+        } else if p.remove_target(key) {
+            Some(key.to_string())
+        } else {
+            // A bare ticker saved before resolution: TCS for TCS.NS.
+            let k = p
+                .targets
+                .keys()
+                .find(|k| crate::rebalance::matches_symbol(k, &resolved))
+                .cloned();
+            k.filter(|k| p.remove_target(k))
+        })
+    })?;
+    match removed {
+        Some(k) => println!("\n  {} Removed target for {}\n", "✓".green(), k.cyan()),
+        None => println!("\n  {} No target found matching '{}'\n", "✗".red(), key),
     }
     Ok(())
 }
@@ -3766,90 +3848,294 @@ pub fn cmd_portfolio_target_drift(percentage: f64) -> Result<()> {
     Ok(())
 }
 
-/// Compute a rebalance plan using `src` (either live Yahoo or test fixtures).
-pub(crate) async fn rebalance_plan(
+/// Options of `rebalance` beyond the targets.
+#[derive(Debug, Clone, Default)]
+pub struct RebalanceArgs {
+    /// One-off targets (else the saved ones).
+    pub targets: Vec<(String, f64)>,
+    pub inflow: Option<f64>,
+    pub with_sells: bool,
+    pub raise: Option<f64>,
+    pub cash_buffer: Option<f64>,
+    pub drift: Option<f64>,
+    pub min_trade: Option<f64>,
+    pub brokerage: Option<f64>,
+    pub fx_spread: Option<f64>,
+}
+
+/// FX spread assumed on a trade in another currency, in percent.
+pub const DEFAULT_FX_SPREAD_PCT: f64 = 0.5;
+
+/// The smallest order worth placing by default, in the base currency.
+fn default_min_trade(base: &str) -> f64 {
+    match base {
+        "INR" => 1_000.0,
+        "USD" | "GBP" | "EUR" => 20.0,
+        _ => 0.0,
+    }
+}
+
+/// The planner's inputs: every held holding with a price, plus target
+/// symbols not held yet, with lots, tax treatment and fees. Returns the
+/// valuation and the holdings left out (with why).
+pub(crate) async fn plan_inputs(
     src: &impl views::DataSource,
     portfolio: &Portfolio,
-    targets: &[(String, f64)],
-    inflow: Option<f64>,
-    drift: Option<f64>,
+    configured: &std::collections::BTreeMap<String, f64>,
     market: Market,
-) -> Result<(crate::rebalance::RebalancePlan, Valuation)> {
-    let symbols: Vec<String> = portfolio
+    today: chrono::NaiveDate,
+    sector_client: Option<&YahooClient>,
+) -> Result<(Vec<HoldingInput>, Valuation, Vec<String>)> {
+    use crate::rebalance::{AssetClass, Fees, LotInput, classify, matches_symbol};
+    let mut symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let val = value_holdings(src, &symbols, market, None).await?;
-
-    let mut holding_inputs = Vec::with_capacity(portfolio.holdings.len());
-    for h in &portfolio.holdings {
-        let Some(price) = val.price(&h.symbol) else {
-            let why = val
-                .off
-                .notes
+    // Funds sold this year keep their mark, so `tax_report` counts them.
+    for s in &portfolio.realized {
+        if offmarket::is_fund(&s.symbol) && !symbols.contains(&s.symbol) {
+            symbols.push(s.symbol.clone());
+        }
+    }
+    // Symbol targets not held yet.
+    let mut unheld: Vec<String> = Vec::new();
+    for key in configured.keys() {
+        if AssetClass::parse(key).is_some()
+            || portfolio
+                .holdings
                 .iter()
-                .find(|n| n.symbols.contains(&h.symbol))
-                .map(|n| format!(" ({})", n.text))
-                .unwrap_or_default();
-            bail!(
-                "No live price for {} — fix or remove it before rebalancing{}",
-                h.symbol,
-                why
-            );
+                .any(|h| matches_symbol(key, &h.symbol))
+        {
+            continue;
+        }
+        if key.contains('.') || key.contains(':') || symbol_like(key) {
+            let sym = resolve_target_key(portfolio, key, market);
+            if !symbols.contains(&sym) {
+                symbols.push(sym.clone());
+                unheld.push(sym);
+            }
+        }
+    }
+    let val = value_holdings(src, &symbols, market, None).await?;
+    let base = val.base().to_string();
+    let home = super::portfolio_analyze::residence(market);
+    // Sector targets need sectors: stored snapshots, then a lookup each.
+    let wants_sectors = configured.keys().any(|k| {
+        AssetClass::parse(k).is_none()
+            && !portfolio
+                .holdings
+                .iter()
+                .any(|h| matches_symbol(k, &h.symbol))
+            && !unheld.iter().any(|u| matches_symbol(k, u))
+    });
+    let looked_up = if wants_sectors {
+        super::portfolio_analyze::sectors(sector_client, &symbols).await
+    } else {
+        Default::default()
+    };
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+
+    let mut inputs = Vec::new();
+    let mut excluded = Vec::new();
+    let held = portfolio
+        .holdings
+        .iter()
+        .map(|h| (h.symbol.as_str(), Some(h)))
+        .chain(unheld.iter().map(|s| (s.as_str(), None)));
+    for (sym, holding) in held {
+        let Some(price) = val.price(sym) else {
+            if holding.is_some() {
+                let why = val
+                    .off
+                    .notes
+                    .iter()
+                    .find(|n| n.symbols.iter().any(|s| s == sym))
+                    .map(|n| format!(": {}", n.text))
+                    .unwrap_or_default();
+                excluded.push(format!("{sym} (no price{why})"));
+            }
+            continue;
         };
-        let Some(price_base) = val.to_base(&h.symbol, price) else {
-            bail!(
-                "No exchange rate for {} — can't weigh it against your other holdings",
-                h.symbol
-            );
+        let Some(price_base) = val.to_base(sym, price).filter(|p| *p > 0.0) else {
+            if holding.is_some() {
+                excluded.push(format!("{sym} (no exchange rate)"));
+            }
+            continue;
         };
-        let value = h.shares * price_base;
-        let sector = val.quote(&h.symbol).and_then(|q| q.sector.clone());
-        let is_fund = crate::offmarket::is_fund(&h.symbol);
-        holding_inputs.push(HoldingInput {
-            symbol: h.symbol.clone(),
-            shares: h.shares,
-            value,
+        let currency = val.currency(sym);
+        let foreign = currency
+            .as_deref()
+            .is_some_and(|c| !c.eq_ignore_ascii_case(&base));
+        let mark = val.mark(sym);
+        let category = mark
+            .and_then(|m| m.category.as_deref())
+            .or_else(|| xray::default_etf_category(sym));
+        let is_fund = offmarket::is_fund(sym);
+        let quote = val.quote(sym);
+        let is_etf = !is_fund
+            && (xray::is_known_etf(sym)
+                || offmarket::non_equity_etf(sym).is_some()
+                || quote
+                    .and_then(|q| q.quote_type.as_deref())
+                    .is_some_and(|t| t.eq_ignore_ascii_case("ETF")));
+        let (tax_country, rule) =
+            super::portfolio_analyze::term_rule(home, sym, currency.as_deref(), mark);
+        let listed = match home {
+            Some(tax::Country::India) => matches!(
+                offmarket::india_class(sym, mark),
+                offmarket::IndiaClass::Listed | offmarket::IndiaClass::EquityFund
+            ),
+            _ => !offmarket::is_off_market(sym),
+        };
+        let taxed = home.is_some_and(|c| {
+            c.tax_currency() == base
+                && tax_country == Some(c)
+                && currency
+                    .as_deref()
+                    .is_some_and(|cur| c.currency_scale(cur).is_some())
+                && rule == crate::portfolio_analysis::TermRule::CountryDefault
+                && listed
+        });
+        let months_default = tax_country.and_then(|c| c.long_term_months());
+        let fmv = (home == Some(tax::Country::India))
+            .then(|| val.fmv_2018(sym))
+            .flatten();
+        let scale = price_base / price;
+        let lots: Vec<LotInput> = holding
+            .map(|h| {
+                h.lots
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        let bought = parse(&l.date);
+                        let months = bought.and_then(|b| rule.months_for(months_default, b));
+                        let long = match (bought, months) {
+                            (Some(b), Some(m)) => tax::is_long_term(b, today, m),
+                            _ => false,
+                        };
+                        let long_term_on = if long {
+                            None
+                        } else {
+                            bought
+                                .zip(months)
+                                .and_then(|(b, m)| crate::sellpreview::long_term_from(b, m))
+                        };
+                        let mut unit =
+                            crate::tax_export::lot_unit_cost(&l.date, long, l.price, price, fmv)
+                                * scale;
+                        if foreign
+                            && l.qty > 0.0
+                            && let Some((cost, _)) = val.lot_cost_base(sym, l)
+                        {
+                            unit = cost / l.qty;
+                        }
+                        if l.qty > 0.0 {
+                            unit += l.charges.unwrap_or(0.0) / l.qty * scale;
+                        }
+                        LotInput {
+                            lot_no: i + 1,
+                            qty: l.qty,
+                            date: l.date.clone(),
+                            date_estimated: l.date_estimated,
+                            unit_cost: unit,
+                            long_term: long,
+                            long_term_on,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shares = holding.map_or(0.0, |h| h.shares);
+        let fees = if crate::trade_charges::auto_applies(sym) {
+            Fees::IndiaDelivery
+        } else if is_fund {
+            Fees::IndiaFund
+        } else {
+            Fees::None
+        };
+        inputs.push(HoldingInput {
+            symbol: sym.to_string(),
+            shares,
+            value: shares * price_base,
             price: price_base,
-            sector,
+            sector: quote
+                .and_then(|q| q.sector.clone())
+                .or_else(|| looked_up.get(sym).cloned()),
             is_fund,
+            is_etf,
+            asset_class: classify(sym, is_fund, category, foreign),
+            lots,
+            // Indian demat accounts and mutual funds sell first-in, first-out.
+            fifo_only: currency.as_deref() == Some("INR") || is_fund,
+            taxed,
+            fees,
+            foreign,
+            local_per_base: 1.0 / scale,
         });
     }
-
-    let mut configured_targets = std::collections::BTreeMap::new();
-    if !targets.is_empty() {
-        for (k, pct) in targets {
-            configured_targets.insert(k.clone(), *pct);
+    for sym in &unheld {
+        if val.price(sym).is_none() {
+            excluded.push(format!("{sym} (target not held; no price found)"));
         }
-    } else {
-        configured_targets = portfolio.targets.clone();
     }
+    Ok((inputs, val, excluded))
+}
+
+/// Compute a rebalance plan using `src` (either live Yahoo or test fixtures).
+pub(crate) async fn rebalance_plan(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    args: &RebalanceArgs,
+    market: Market,
+    sector_client: Option<&YahooClient>,
+) -> Result<(crate::rebalance::RebalancePlan, Valuation)> {
+    let configured: std::collections::BTreeMap<String, f64> = if args.targets.is_empty() {
+        portfolio.targets.clone()
+    } else {
+        args.targets.iter().cloned().collect()
+    };
+    let today = chrono::Local::now().date_naive();
+    let (inputs, val, excluded) =
+        plan_inputs(src, portfolio, &configured, market, today, sector_client).await?;
 
     let prof = crate::config::effective_profile();
-    let drift_tolerance = drift
+    let base = val.base().to_string();
+    let mut o = crate::rebalance::PlanOptions::new(today);
+    o.inflow = args.inflow;
+    o.with_sells = args.with_sells;
+    o.raise = args.raise;
+    o.cash_buffer = args.cash_buffer.unwrap_or(0.0);
+    o.drift_tolerance = args
+        .drift
         .or(portfolio.drift_tolerance)
         .unwrap_or(prof.default_drift_pct);
-    let mut plan = crate::rebalance::compute_rebalance_plan(
-        &holding_inputs,
-        &configured_targets,
-        inflow,
-        drift_tolerance,
-        val.base(),
-    )?;
-    for it in &plan.items {
-        let is_fund = holding_inputs
-            .iter()
-            .find(|h| h.symbol == it.symbol)
-            .is_some_and(|h| h.is_fund);
-        if !is_fund
-            && (it.target_pct > prof.max_stock_weight + 1e-6
-                || it.projected_pct > prof.max_stock_weight + 1e-6)
-        {
-            plan.warnings.push(format!(
-                "Profile guardrail ({}): {} target/projected weight ({:.1}% / {:.1}%) exceeds configured max_stock_weight ({:.1}%).",
-                prof.spec, it.symbol, it.target_pct, it.projected_pct, prof.max_stock_weight
-            ));
+    o.max_stock_weight = Some(prof.max_stock_weight);
+    o.min_trade = args.min_trade.unwrap_or_else(|| default_min_trade(&base));
+    o.brokerage = args.brokerage.unwrap_or(0.0);
+    o.fx_spread_pct = args.fx_spread.unwrap_or(DEFAULT_FX_SPREAD_PCT);
+    if let Some(country) = super::portfolio_analyze::residence(market)
+        && country.tax_currency() == base
+    {
+        o.tax = Some(crate::rebalance::TaxSetup {
+            country,
+            realized: super::holdings::tax_report(country, portfolio, &val, today).realized,
+        });
+    }
+    let mut plan = crate::rebalance::plan(&inputs, &configured, &o, &base)?;
+    if !excluded.is_empty() {
+        plan.warnings.insert(
+            0,
+            format!(
+                "Left out of the plan (weights are of the other holdings): {}",
+                excluded.join(", ")
+            ),
+        );
+        for e in &excluded {
+            let sym = e.split(' ').next().unwrap_or(e).to_string();
+            if !plan.excluded.contains(&sym) {
+                plan.excluded.push(sym);
+            }
         }
     }
     Ok((plan, val))
@@ -3859,16 +4145,12 @@ pub(crate) async fn rebalance_plan(
 ///
 /// Supports:
 /// - Target weights saved in portfolio or passed on CLI (`targets`)
-/// - Inflow-only mode (`--inflow <cash>`) to invest fresh capital without selling
+/// - Buy-only investing of new cash (`--inflow`), or a full rebalance that
+///   adds it (`--inflow X --with-sells`)
+/// - Sell-only raising of cash at the lowest tax (`--raise`)
 /// - Drift tolerance band (`--drift <pct>`) to suppress minor churn
 /// - Machine-readable JSON output (`--json`)
-pub async fn cmd_rebalance(
-    targets: &[(String, f64)],
-    inflow: Option<f64>,
-    drift: Option<f64>,
-    json: bool,
-    market: Market,
-) -> Result<()> {
+pub async fn cmd_rebalance(args: &RebalanceArgs, json: bool, market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.is_empty() {
         if json {
@@ -3881,36 +4163,41 @@ pub async fn cmd_rebalance(
     }
 
     let client = YahooClient::new().await?;
-    let (plan, val) = rebalance_plan(&client, &portfolio, targets, inflow, drift, market).await?;
-    let drift_tolerance = plan.drift_tolerance;
-
+    let (plan, val) = rebalance_plan(&client, &portfolio, args, market, Some(&client)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         return Ok(());
     }
-
-    let cur = Some(val.base());
-    let csym = market::currency_symbol(cur);
-
-    if let Some(cash) = inflow {
-        print_header(&format!(
-            "Portfolio Rebalance (Inflow: {}{:.2})",
-            csym, cash
-        ));
-        print_kv("Current Value", &format!("{}{:.2}", csym, plan.total_value));
-        print_kv(
-            "Projected Value",
-            &format!("{}{:.2}", csym, plan.projected_value),
-        );
-    } else {
-        print_header("Portfolio Rebalance");
-        print_kv("Total Value", &format!("{}{:.2}", csym, plan.total_value));
+    print_rebalance(&plan);
+    val.print_price_notes();
+    if !val.off.marks.is_empty() {
+        println!();
     }
+    Ok(())
+}
 
-    if drift_tolerance > 0.0 {
-        print_kv("Drift Tolerance", &format!("±{:.1}%", drift_tolerance));
+fn print_rebalance(plan: &crate::rebalance::RebalancePlan) {
+    use crate::rebalance::PlanMode;
+    let cur = Some(plan.currency.as_str());
+    let money = |v: f64| format_price(v, cur);
+    match plan.mode {
+        PlanMode::BuyOnly => print_header(&format!(
+            "Portfolio Rebalance (new cash {}, buy only)",
+            money(plan.inflow.unwrap_or(0.0))
+        )),
+        PlanMode::Raise => print_header(&format!(
+            "Raise {} (sell only, lowest tax first)",
+            money(plan.raise.unwrap_or(0.0))
+        )),
+        PlanMode::Rebalance => match plan.inflow {
+            Some(c) => print_header(&format!("Portfolio Rebalance (with new cash {})", money(c))),
+            None => print_header("Portfolio Rebalance"),
+        },
     }
-
+    print_kv("Total Value", &money(plan.total_value));
+    if plan.drift_tolerance > 0.0 && plan.mode == PlanMode::Rebalance {
+        print_kv("Drift Tolerance", &format!("±{:.1}%", plan.drift_tolerance));
+    }
     for warning in &plan.warnings {
         println!("  {} {}", "ℹ".cyan(), warning.dimmed());
     }
@@ -3922,71 +4209,300 @@ pub async fn cmd_rebalance(
         .max()
         .unwrap_or(12)
         .max(12);
-
     println!();
-    if inflow.is_some() {
+    println!(
+        "  {:<sw$} {:>12} {:>7} {:>7} {:>7} {:>18} {:>12} {:>9} {:>8}",
+        "Symbol".bold(),
+        "Current".bold(),
+        "Now%".bold(),
+        "Target%".bold(),
+        "After%".bold(),
+        "Action".bold(),
+        "Value".bold(),
+        "Tax".bold(),
+        "Costs".bold(),
+    );
+    println!("  {}", "─".repeat(90 + sw).dimmed());
+    for it in &plan.items {
+        let action_styled = match it.action_type {
+            RebalanceActionType::Buy => it.action_display.green().to_string(),
+            RebalanceActionType::Sell => it.action_display.red().to_string(),
+            RebalanceActionType::Ok => it.action_display.dimmed().to_string(),
+        };
+        let tax_cell = match (it.action_type, it.tax) {
+            (RebalanceActionType::Sell, Some(t)) => money(t),
+            (RebalanceActionType::Sell, None) => "n/a".to_string(),
+            _ => String::new(),
+        };
+        let costs_cell = if it.costs.total > 0.0 {
+            money(it.costs.total)
+        } else {
+            String::new()
+        };
+        let value_cell = if it.diff_value.abs() > 0.0 {
+            money(it.diff_value.abs())
+        } else {
+            String::new()
+        };
+        let sym = if it.held {
+            it.symbol.cyan().to_string()
+        } else {
+            format!("{}*", it.symbol).cyan().to_string()
+        };
         println!(
-            "  {:<sw$} {:>10} {:>7} {:>7} {:>10} {:>12} {:>16}",
-            "Symbol".bold(),
-            "Current".bold(),
-            "Now%".bold(),
-            "Target%".bold(),
-            "Projected%".bold(),
-            "Allocation".bold(),
-            "Action".bold()
+            "  {:<sw$} {:>12} {:>6.1}% {:>6.1}% {:>6.1}% {:>18} {:>12} {:>9} {:>8}",
+            sym,
+            money(it.current_value),
+            it.current_pct,
+            it.target_pct,
+            it.projected_pct,
+            action_styled,
+            value_cell,
+            tax_cell,
+            costs_cell,
         );
-        println!("  {}", "─".repeat(68 + sw).dimmed());
-
-        for it in &plan.items {
-            let action_styled = match it.action_type {
-                RebalanceActionType::Buy => it.action_display.green().to_string(),
-                RebalanceActionType::Sell => it.action_display.red().to_string(),
-                RebalanceActionType::Ok => it.action_display.dimmed().to_string(),
-            };
+        for l in &it.lots {
             println!(
-                "  {:<sw$} {:>10} {:>6.1}% {:>6.1}% {:>9.1}% {:>12} {:>16}",
-                it.symbol.cyan(),
-                format!("{}{:.2}", csym, it.current_value),
-                it.current_pct,
-                it.target_pct,
-                it.projected_pct,
-                format!("{}{:.2}", csym, it.diff_value),
-                action_styled
+                "  {:<sw$}   {}",
+                "",
+                format!(
+                    "lot {} ({}): {} × {} cost, {} {}",
+                    l.lot_no,
+                    l.bought,
+                    l.qty,
+                    money(l.unit_cost),
+                    signed_money(l.gain, cur),
+                    if l.long_term {
+                        "long-term"
+                    } else {
+                        "short-term"
+                    }
+                )
+                .dimmed()
             );
         }
-    } else {
-        println!(
-            "  {:<sw$} {:>10} {:>8} {:>8} {:>16}",
-            "Symbol".bold(),
-            "Current".bold(),
-            "Now%".bold(),
-            "Target%".bold(),
-            "Action".bold()
-        );
-        println!("  {}", "─".repeat(48 + sw).dimmed());
+        for n in &it.notes {
+            println!("  {:<sw$}   {} {}", "", "!".yellow(), n.dimmed());
+        }
+    }
+    println!("  {}", "─".repeat(90 + sw).dimmed());
+    if plan.items.iter().any(|i| !i.held) {
+        println!("  {}", "* not held yet".dimmed());
+    }
 
-        for it in &plan.items {
-            let action_styled = match it.action_type {
-                RebalanceActionType::Buy => it.action_display.green().to_string(),
-                RebalanceActionType::Sell => it.action_display.red().to_string(),
-                RebalanceActionType::Ok => it.action_display.green().to_string(),
-            };
-            println!(
-                "  {:<sw$} {:>10} {:>7.1}% {:>7.1}% {:>16}",
-                it.symbol.cyan(),
-                format!("{}{:.2}", csym, it.current_value),
-                it.current_pct,
-                it.target_pct,
-                action_styled
+    println!();
+    print_kv("Sells", &money(plan.sell_proceeds));
+    print_kv("Buys", &money(plan.buy_cost));
+    if plan.costs > 0.0 {
+        print_kv(
+            "Costs",
+            &format!(
+                "{} (STT, stamp duty, exchange fees, DP, brokerage, FX spread as they apply)",
+                money(plan.costs)
+            ),
+        );
+    }
+    let net = if plan.net_cash >= 0.0 {
+        format!("frees {}", money(plan.net_cash))
+    } else {
+        format!("needs {}", money(-plan.net_cash))
+    };
+    print_kv("Net cash", &net);
+    if plan.mode != PlanMode::Raise || plan.cash_left > 0.005 {
+        print_kv("Cash left", &money(plan.cash_left));
+    }
+    if let Some(tx) = &plan.tax {
+        if tx.st_gain.abs() > 0.0 || tx.lt_gain.abs() > 0.0 || tx.tax.abs() > 0.0 {
+            print_kv(
+                "Tax on sells",
+                &format!(
+                    "{} (STCG {}, LTCG {}; incl. cess, after this year's gains and exemption)",
+                    money(tx.tax),
+                    signed_money(tx.st_gain, cur),
+                    signed_money(tx.lt_gain, cur)
+                ),
+            );
+        }
+        if let Some(fifo) = tx.fifo_tax
+            && tx.saved_vs_fifo > 0.0
+        {
+            print_kv(
+                "Lot choice saves",
+                &format!(
+                    "{} (first-in, first-out would cost {})",
+                    money(tx.saved_vs_fifo).green(),
+                    money(fifo)
+                ),
+            );
+        }
+        if tx.untaxed_gain.abs() > 0.0 {
+            print_kv(
+                "Not estimated",
+                &format!(
+                    "{} of gains taxed under other rules (slab rate, foreign shares, debt funds)",
+                    signed_money(tx.untaxed_gain, cur)
+                ),
             );
         }
     }
+    if plan.mode == PlanMode::Raise {
+        let tax = plan.tax.map_or(0.0, |t| t.tax);
+        print_kv(
+            "Raised",
+            &format!(
+                "{} after costs; {} after the tax on it",
+                money(plan.net_cash),
+                money(plan.net_cash - tax)
+            ),
+        );
+    }
+    let records: Vec<&str> = plan
+        .items
+        .iter()
+        .filter_map(|i| i.record.as_deref().filter(|r| r.contains("--lots")))
+        .collect();
+    if !records.is_empty() {
+        println!(
+            "\n  {}",
+            "Record these sells with the lots above (specific identification):".dimmed()
+        );
+        for r in records {
+            println!("    {}", r);
+        }
+    }
+    println!(
+        "\n  {}",
+        "Estimates from your targets and this year's gains; check your broker's contract note."
+            .dimmed()
+            .italic()
+    );
+    println!();
+}
 
+/// `portfolio target drift` (no percentage): where each target stands.
+pub(crate) async fn drift_report_for(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    market: Market,
+    sector_client: Option<&YahooClient>,
+) -> Result<(crate::rebalance::DriftReport, Valuation)> {
+    let today = chrono::Local::now().date_naive();
+    let (inputs, val, excluded) = plan_inputs(
+        src,
+        portfolio,
+        &portfolio.targets,
+        market,
+        today,
+        sector_client,
+    )
+    .await?;
+    let (band, _) = drift_band(portfolio);
+    let band = if band > 0.0 {
+        band
+    } else {
+        crate::rebalance::ABSOLUTE_BAND_PCT
+    };
+    let mut report = crate::rebalance::drift_report(&inputs, &portfolio.targets, band, val.base());
+    if !excluded.is_empty() {
+        report.warnings.insert(
+            0,
+            format!(
+                "Left out (weights are of the other holdings): {}",
+                excluded.join(", ")
+            ),
+        );
+    }
+    Ok((report, val))
+}
+
+/// For the scheduled drift check: a one-line notice when a target is
+/// outside its band, else `None` (also `None` without targets).
+pub async fn drift_notice_today(market: Market) -> Result<Option<String>> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.targets.is_empty() || portfolio.holdings.is_empty() {
+        return Ok(None);
+    }
+    let client = YahooClient::new().await?;
+    let (report, _) = drift_report_for(&client, &portfolio, market, Some(&client)).await?;
+    Ok(report.notice())
+}
+
+pub async fn cmd_portfolio_target_drift_report(market: Market, json: bool) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.targets.is_empty() {
+        if json {
+            println!("{}", serde_json::json!({ "rows": [] }));
+        } else {
+            println!(
+                "\n  {} No targets saved: `stockwise portfolio target set <KEY> <PERCENT>`.\n",
+                "ℹ".cyan()
+            );
+        }
+        return Ok(());
+    }
+    let client = YahooClient::new().await?;
+    let (report, val) = drift_report_for(&client, &portfolio, market, Some(&client)).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    print_header("Target Drift");
+    print_kv(
+        "Bands",
+        &format!(
+            "±{:.1} points or {:.0}% of the target, whichever is smaller (5/25 rule)",
+            report.absolute_band_pct, report.relative_band_pct
+        ),
+    );
+    for w in &report.warnings {
+        println!("  {} {}", "ℹ".cyan(), w.dimmed());
+    }
+    let kw = report
+        .rows
+        .iter()
+        .map(|r| r.key.len())
+        .max()
+        .unwrap_or(12)
+        .max(14);
+    println!();
+    println!(
+        "  {:<kw$} {:>8} {:>8} {:>9} {:>8} {:>8}",
+        "Target".bold(),
+        "Now%".bold(),
+        "Target%".bold(),
+        "Drift".bold(),
+        "Band".bold(),
+        "Status".bold()
+    );
+    println!("  {}", "─".repeat(kw + 46).dimmed());
+    for r in &report.rows {
+        let status = match r.status.as_str() {
+            "over" => "OVER".red().to_string(),
+            "under" => "UNDER".yellow().to_string(),
+            _ => "ok".green().to_string(),
+        };
+        let key = if r.kind == "untargeted" {
+            r.key.dimmed().to_string()
+        } else {
+            r.key.cyan().to_string()
+        };
+        println!(
+            "  {:<kw$} {:>7.1}% {:>7.1}% {:>+8.1}p {:>7.1}p {:>8}",
+            key, r.current_pct, r.target_pct, r.drift_pct, r.band_pct, status
+        );
+    }
+    println!();
+    if report.breaches().next().is_some() {
+        println!(
+            "  {}",
+            "Outside the band: `stockwise portfolio rebalance` shows the trades (or --inflow to use new cash)."
+                .dimmed()
+        );
+    } else {
+        println!("  {} Every target is inside its band.", "✓".green());
+    }
     println!();
     val.print_price_notes();
-    if !val.off.marks.is_empty() {
-        println!();
-    }
     Ok(())
 }
 

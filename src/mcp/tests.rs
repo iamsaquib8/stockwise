@@ -682,6 +682,8 @@ async fn structured_results_follow_their_output_schemas() {
         action_display: "Sell 2".into(),
         is_fund: false,
         sector: Some("Technology".into()),
+        held: true,
+        ..Default::default()
     });
     assert_follows_schema("rebalance", &wrapped(serde_json::to_value(&plan).unwrap()));
 

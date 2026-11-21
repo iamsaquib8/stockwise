@@ -490,6 +490,9 @@ struct WorkerState {
     /// Where the next sync resumes over already-seen symbols for filing checks.
     #[serde(default)]
     filing_cursor: usize,
+    /// Unix time of the last intraday monitor pass.
+    #[serde(default)]
+    last_monitor_pass: Option<i64>,
 }
 
 /// After the close: refresh tracked snapshots, append today's NAV for held
@@ -635,33 +638,54 @@ fn trim_notified(notified: &mut Vec<String>) {
 
 /// Notices for lots about to turn long-term (within [`LTCG_HEADS_UP_DAYS`])
 /// and for lots that have turned since a heads-up, skipping what `notified`
-/// already holds (`SYMBOL#lot:bought:long_term_on:kind`). The countdown skips
-/// a lot once it is long-term, so the "now" notice comes from a remembered
-/// heads-up. Pure: the caller records each notice's keys after delivery.
-/// Facts and dates only; what to do about them is the holder's call.
-fn ltcg_notices(
+/// already holds (`SYMBOL#bought:qty:long_term_on:kind`). A lot is named by
+/// its purchase date and quantity, not its position: a FIFO sale of an older
+/// lot renumbers the rest, and the notice must still find its lot. The
+/// countdown skips a lot once it is long-term, so the "now" notice comes from
+/// a remembered heads-up. Only symbols `include` accepts are looked at (the
+/// caller runs this once per tax country held). Pure: the caller records each
+/// notice's keys after delivery. Facts and dates only.
+fn ltcg_notices_for(
     portfolio: &Portfolio,
     country: crate::tax::Country,
     today: chrono::NaiveDate,
     notified: &[String],
+    include: impl Fn(&str) -> bool,
 ) -> Vec<Pending> {
     let mut out = Vec::new();
-    for c in crate::sellpreview::ltcg_countdown(portfolio, country, today, LTCG_HEADS_UP_DAYS) {
+    let countdown = crate::sellpreview::ltcg_countdown_with(
+        portfolio,
+        country,
+        today,
+        LTCG_HEADS_UP_DAYS,
+        |s| include(s) && crate::sellpreview::counts_for_countdown(country, s),
+    );
+    for c in countdown {
         let key = format!(
+            "{}#{}:{}:{}:soon",
+            c.symbol, c.bought, c.qty, c.long_term_on
+        );
+        // A heads-up sent under the old position-based key counts too.
+        let legacy = format!(
             "{}#{}:{}:{}:soon",
             c.symbol, c.lot_no, c.bought, c.long_term_on
         );
-        if notified.contains(&key) {
+        if notified.contains(&key) || notified.contains(&legacy) {
             continue;
         }
         out.push(Pending {
             msg: crate::notify::Message::new(
                 format!("Lot turns long-term soon: {}", c.symbol),
                 format!(
-                    "Lot #{} of {} ({} units, bought {}, held {} days) turns long-term on {} (in {} days). \
+                    "The {} lot of {} ({} units, held {} days) turns long-term on {} (in {} days). \
                      `stockwise portfolio sell {} <QTY> --preview` shows the tax on a sale.",
-                    c.lot_no, c.symbol, c.qty, c.bought, c.days_held, c.long_term_on,
-                    c.days_to_long_term, c.symbol
+                    c.bought,
+                    c.symbol,
+                    c.qty,
+                    c.days_held,
+                    c.long_term_on,
+                    c.days_to_long_term,
+                    c.symbol
                 ),
             ),
             ltcg_keys: vec![key],
@@ -674,14 +698,20 @@ fn ltcg_notices(
         let Some((head, rest)) = key.split_once('#') else {
             continue;
         };
+        if !include(head) {
+            continue;
+        }
         let parts: Vec<&str> = rest.trim_end_matches(":soon").split(':').collect();
-        let [lot_no, bought, on] = parts[..] else {
+        let [first, second, on] = parts[..] else {
             continue;
         };
-        let (Ok(lot_no), Ok(on_date)) = (
-            lot_no.parse::<usize>(),
-            chrono::NaiveDate::parse_from_str(on, "%Y-%m-%d"),
-        ) else {
+        // New keys: bought:qty:on. Old keys: lot_no:bought:on.
+        let (bought, qty) = if chrono::NaiveDate::parse_from_str(first, "%Y-%m-%d").is_ok() {
+            (first, second.parse::<f64>().ok())
+        } else {
+            (second, None)
+        };
+        let Ok(on_date) = chrono::NaiveDate::parse_from_str(on, "%Y-%m-%d") else {
             continue;
         };
         if on_date > today {
@@ -691,17 +721,22 @@ fn ltcg_notices(
         if notified.contains(&done) {
             continue;
         }
-        // Only if that very lot is still held.
-        let still_held = portfolio
+        // Only if a lot bought that day is still held: the same quantity
+        // first, else one partly sold since.
+        let lots = portfolio
             .holding(head)
-            .and_then(|h| h.lots.get(lot_no - 1))
-            .filter(|l| l.date == bought);
+            .map(|h| h.lots.as_slice())
+            .unwrap_or_default();
+        let still_held = lots
+            .iter()
+            .find(|l| l.date == bought && qty.is_some_and(|q| (l.qty - q).abs() < 1e-9))
+            .or_else(|| lots.iter().find(|l| l.date == bought));
         match still_held {
             Some(l) => out.push(Pending {
                 msg: crate::notify::Message::new(
                     format!("Lot is now long-term: {head}"),
                     format!(
-                        "Lot #{lot_no} of {head} ({} units, bought {bought}) is long-term from {on}. \
+                        "The {bought} lot of {head} ({} units) is long-term from {on}. \
                          `stockwise portfolio sell {head} <QTY> --preview` shows the tax on a sale.",
                         l.qty
                     ),
@@ -718,6 +753,54 @@ fn ltcg_notices(
                 filings: None,
             }),
         }
+    }
+    out
+}
+
+/// [`ltcg_notices_for`] over every symbol.
+#[cfg(test)]
+fn ltcg_notices(
+    portfolio: &Portfolio,
+    country: crate::tax::Country,
+    today: chrono::NaiveDate,
+    notified: &[String],
+) -> Vec<Pending> {
+    ltcg_notices_for(portfolio, country, today, notified, |_| true)
+}
+
+/// The exchange market whose tax rule applies to a held symbol (funds and
+/// Indian off-market holdings count as India).
+fn symbol_tax_market(symbol: &str) -> Option<Market> {
+    crate::alerts::alert_market(symbol).or_else(|| {
+        crate::portfolio::symbol_currency(symbol)
+            .filter(|c| c.eq_ignore_ascii_case("INR"))
+            .map(|_| Market::In)
+    })
+}
+
+/// LTCG notices for every market the portfolio holds, each on its own
+/// exchange's date.
+fn ltcg_notices_all(
+    portfolio: &Portfolio,
+    now: chrono::DateTime<Utc>,
+    notified: &[String],
+) -> Vec<Pending> {
+    let mut markets: Vec<Market> = portfolio
+        .holdings
+        .iter()
+        .filter_map(|h| symbol_tax_market(&h.symbol))
+        .collect();
+    markets.sort_by_key(|m| m.id());
+    markets.dedup();
+    let mut out = Vec::new();
+    for m in markets {
+        let Some(country) = tax_country(m) else {
+            continue;
+        };
+        let today = clock::session_date(m, now);
+        out.extend(ltcg_notices_for(portfolio, country, today, notified, |s| {
+            symbol_tax_market(s) == Some(m)
+        }));
     }
     out
 }
@@ -939,15 +1022,12 @@ async fn notify_after_close(
     let mut state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
     let mut pending: Vec<Pending> = Vec::new();
 
-    if let Some(country) = tax_country(market) {
-        let today = clock::session_date(market, Utc::now());
-        pending.extend(ltcg_notices(
-            &portfolio,
-            country,
-            today,
-            &state.ltcg_notified,
-        ));
-    }
+    let _ = market;
+    pending.extend(ltcg_notices_all(
+        &portfolio,
+        Utc::now(),
+        &state.ltcg_notified,
+    ));
 
     let store = crate::results::default_store();
     let mut held: Vec<String> = tracked_symbols()
@@ -973,7 +1053,11 @@ async fn notify_after_close(
     let mut held: Vec<String> = portfolio
         .holdings
         .iter()
-        .filter(|h| h.symbol.ends_with(".NS"))
+        .filter(|h| {
+            h.symbol.ends_with(".NS")
+                || h.symbol.ends_with(".BO")
+                || crate::alerts::alert_market(&h.symbol) == Some(Market::Us)
+        })
         .map(|h| h.symbol.clone())
         .collect();
     held.sort();
@@ -990,11 +1074,11 @@ async fn notify_after_close(
         if !keep_going() {
             bail!("cancelled");
         }
-        let base = symbol.trim_end_matches(".NS");
-        // A failed fetch records nothing, so the next sync tries again.
+        // NSE for `.NS`, BSE for `.BO`, SEC EDGAR for US tickers. A failed
+        // fetch records nothing, so the next sync tries again.
         let fetched = tokio::time::timeout(
             Duration::from_secs(10),
-            crate::research::fetch_nse_filings(client, base, FILING_LOOKBACK_DAYS),
+            crate::news::filings(client, &symbol, FILING_LOOKBACK_DAYS),
         )
         .await;
         if let Ok(Ok(list)) = fetched {
@@ -1006,25 +1090,30 @@ async fn notify_after_close(
     if !keep_going() {
         bail!("cancelled");
     }
-    let mut sent = 0;
-    let mut filings = 0;
-    for p in pending {
-        // Silent records (first sight, a lot sold before it turned) carry no
-        // message: remember them straight away.
-        let silent = p.msg.title.is_empty();
-        let delivered = silent || notifier.send_logged(&p.msg).await;
-        if !silent {
-            sent += 1;
-            filings += usize::from(p.filings.is_some());
+    // Silent records (first sight, a lot sold before it turned) carry no
+    // message: remember them straight away. Everything else goes out as one
+    // message — the digest when it is on, else a batch.
+    let (silent, loud): (Vec<Pending>, Vec<Pending>) =
+        pending.into_iter().partition(|p| p.msg.title.is_empty());
+    let sent = loud.len();
+    let filings = loud.iter().filter(|p| p.filings.is_some()).count();
+    let notices: Vec<crate::notify::Message> = loud.iter().map(|p| p.msg.clone()).collect();
+    let delivered = deliver_after_close(client, market, &notifier, notices).await;
+    let mut record = |p: Pending| {
+        state.ltcg_notified.extend(p.ltcg_keys);
+        if let Some((symbol, end)) = p.result {
+            state.last_results.insert(symbol, end);
         }
-        if delivered {
-            state.ltcg_notified.extend(p.ltcg_keys);
-            if let Some((symbol, end)) = p.result {
-                state.last_results.insert(symbol, end);
-            }
-            if let Some((symbol, ids)) = p.filings {
-                record_filings(&mut state.filings_seen, symbol, ids);
-            }
+        if let Some((symbol, ids)) = p.filings {
+            record_filings(&mut state.filings_seen, symbol, ids);
+        }
+    };
+    for p in silent {
+        record(p);
+    }
+    if delivered {
+        for p in loud {
+            record(p);
         }
     }
     trim_notified(&mut state.ltcg_notified);
@@ -1043,13 +1132,103 @@ async fn notify_after_close(
     })
 }
 
-/// The session date whose post-close sync is due, if any: the market closed
-/// today and the sync has not run for this date yet.
+/// Send the after-close notices as one message: inside the digest (day
+/// P&L, contributors, monitor signals, alerts, dates) when it is on, else
+/// batched. Returns whether it was delivered (true with no channels, so
+/// nothing queues up forever).
+async fn deliver_after_close(
+    client: &YahooClient,
+    market: Market,
+    notifier: &crate::notify::Notifier,
+    notices: Vec<crate::notify::Message>,
+) -> bool {
+    if !notifier.is_enabled() {
+        return true;
+    }
+    let t = crate::monitor::Thresholds::from_config();
+    if t.enabled && t.digest {
+        let mut mst: crate::monitor::MonitorState =
+            crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+        if let Ok((digest, signals)) =
+            crate::commands::build_digest(client, market, notices.clone(), &mut mst).await
+        {
+            if digest.is_empty() {
+                return true;
+            }
+            let delivered = notifier.send_logged(&crate::digest::render(&digest)).await;
+            if delivered {
+                let cursor = mst.cursor;
+                let _ = crate::store::update::<crate::monitor::MonitorState, ()>(
+                    crate::monitor::STATE_FILE,
+                    |st| {
+                        st.record(&signals);
+                        st.cursor = cursor;
+                        st.last_digest = Some(digest.date.clone());
+                        st.last_pass = Some(Utc::now().timestamp());
+                        Ok(())
+                    },
+                );
+            }
+            return delivered;
+        }
+    }
+    match notices.as_slice() {
+        [] => true,
+        [one] => notifier.send_logged(one).await,
+        many => {
+            notifier
+                .send_logged(&crate::notify::batch(
+                    &format!("StockWise: {} notices after the close", many.len()),
+                    many,
+                ))
+                .await
+        }
+    }
+}
+
+/// How often the worker runs the intraday monitor pass.
+const MONITOR_EVERY: i64 = 15 * 60;
+
+/// Whether any held symbol's market is open at `now`.
+fn held_market_open(now: chrono::DateTime<Utc>) -> bool {
+    Portfolio::load()
+        .map(|p| {
+            p.holdings
+                .iter()
+                .filter_map(|h| crate::alerts::alert_market(&h.symbol))
+                .any(|m| clock::is_open(m, now))
+        })
+        .unwrap_or(false)
+}
+
+/// The latest session whose close has passed at `now`: today after the
+/// close, else (on a weekend or holiday) the last trading day before it.
+/// `None` during today's session and before it.
+pub(crate) fn last_closed_session(
+    market: Market,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::NaiveDate> {
+    let today = clock::session_date(market, now);
+    if let Some(close) = clock::close_at(market, today) {
+        return (now >= close).then_some(today);
+    }
+    let mut d = today;
+    for _ in 0..10 {
+        d = d.pred_opt()?;
+        if clock::close_at(market, d).is_some() {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// The session date whose post-close sync is due, if any: the latest closed
+/// session (today after the close, or the last trading day on a weekend or
+/// holiday, so a worker started on Saturday still does Friday's) whose sync
+/// has not run yet.
 fn eod_due(market: Market, now: chrono::DateTime<Utc>, state: &WorkerState) -> Option<String> {
-    let date = clock::session_date(market, now);
-    let close = clock::close_at(market, date)?;
-    let key = date.to_string();
-    (now >= close && state.last_eod.as_deref() != Some(&key)).then_some(key)
+    let key = last_closed_session(market, now)?.to_string();
+    (state.last_eod.as_deref() != Some(&key)).then_some(key)
 }
 
 // ── Service: ownership lock, pid file, run loop, status ──
@@ -1319,6 +1498,70 @@ async fn stop_requested() {
     }
 }
 
+/// One worker pass and exit, for cron: alert checks, the intraday holding
+/// monitor while a held market is open, notices held for quiet hours, and
+/// the post-close sync with its digest when it is due. Refuses to run next to
+/// a running worker (it would double-send).
+pub async fn run_once(market: Market) -> Result<()> {
+    let Some(_owner) = try_own()? else {
+        bail!("The background worker is running; it already does this every few seconds");
+    };
+    let now = Utc::now();
+    let mut state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
+    let notifier = crate::notify::Notifier::from_env();
+    let channels: Vec<String> = notifier
+        .config()
+        .channels()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    println!(
+        "worker pass, market {}, notifications: {}",
+        market.label(),
+        if channels.is_empty() {
+            "none configured".to_string()
+        } else {
+            channels.join(", ")
+        }
+    );
+    match crate::commands::AlertWatcher::load() {
+        Ok(mut w) => match w.pass(market).await {
+            Ok(n) => println!("  alerts: {n} new trigger(s)"),
+            Err(e) => println!("  alerts: check failed: {e:#}"),
+        },
+        Err(e) => println!("  alerts: not loaded: {e:#}"),
+    }
+    state.last_alert_pass = Some(now.timestamp());
+    let client = YahooClient::new().await?;
+    if held_market_open(now) {
+        match crate::commands::intraday_pass(&client, &notifier).await {
+            Ok(n) => println!("  monitor: {n} new signal(s)"),
+            Err(e) => println!("  monitor: failed: {e:#}"),
+        }
+        state.last_monitor_pass = Some(now.timestamp());
+    } else {
+        println!("  monitor: no held market is open (price signals run during the session)");
+    }
+    notifier.flush_held().await;
+    crate::store::save(STATE_FILE, &state, false)?;
+    match eod_due(market, now, &state) {
+        Some(date) => {
+            println!("  post-close sync for {date}…");
+            let summary = eod_sync(&client, market, |_| true).await?;
+            println!("  post-close sync: {summary}");
+            let mut latest: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
+            latest.last_eod = Some(date);
+            latest.last_alert_pass = state.last_alert_pass;
+            latest.last_monitor_pass = state.last_monitor_pass;
+            crate::store::save(STATE_FILE, &latest, false)?;
+        }
+        None => println!(
+            "  post-close sync: not due (already done for this session, or the market has not closed)"
+        ),
+    }
+    Ok(())
+}
+
 /// The foreground worker: ticker, task executor, alert checks, post-close
 /// sync. Runs until Ctrl+C or SIGTERM.
 pub async fn run_worker(market: Market) -> Result<()> {
@@ -1382,6 +1625,23 @@ pub async fn run_worker(market: Market) -> Result<()> {
             }
             state.last_alert_pass = Some(now.timestamp());
         }
+        // Holding monitor: price signals while a held market is open.
+        let monitor_due = state
+            .last_monitor_pass
+            .is_none_or(|t| now.timestamp() - t >= MONITOR_EVERY);
+        if monitor_due && held_market_open(now) {
+            state.last_monitor_pass = Some(now.timestamp());
+            if let Ok(client) = YahooClient::new().await {
+                let notifier = crate::notify::Notifier::from_env();
+                if let Err(e) = crate::commands::intraday_pass(&client, &notifier).await {
+                    eprintln!("monitor pass failed: {e:#}");
+                }
+            }
+        }
+        // Notices held for quiet hours go out once they end.
+        if now.timestamp() % 300 < 5 {
+            crate::notify::Notifier::from_env().flush_held().await;
+        }
         if let Some(date) = eod_due(market, now, &state) {
             let has_work = Portfolio::load().is_ok_and(|p| !p.holdings.is_empty())
                 || !tracked_symbols().is_empty();
@@ -1391,8 +1651,10 @@ pub async fn run_worker(market: Market) -> Result<()> {
             // The sync saved its notification state: reload it, then record
             // the date, so neither write erases the other.
             let alert_pass = state.last_alert_pass;
+            let monitor_pass = state.last_monitor_pass;
             state = crate::store::load(STATE_FILE).unwrap_or_default();
             state.last_alert_pass = alert_pass;
+            state.last_monitor_pass = monitor_pass;
             state.last_eod = Some(date);
             let _ = crate::store::save(STATE_FILE, &state, false);
         }
@@ -1555,6 +1817,30 @@ mod tests {
     }
 
     #[test]
+    fn a_weekend_start_still_runs_the_last_sessions_sync() {
+        // Saturday 21 Nov 2026, noon IST: Friday's sync is due once.
+        let sat = chrono::NaiveDate::from_ymd_opt(2026, 11, 21)
+            .unwrap()
+            .and_hms_opt(6, 30, 0)
+            .unwrap()
+            .and_utc();
+        let mut state = WorkerState::default();
+        assert_eq!(
+            eod_due(Market::In, sat, &state).as_deref(),
+            Some("2026-11-20")
+        );
+        state.last_eod = Some("2026-11-20".into());
+        assert_eq!(eod_due(Market::In, sat, &state), None);
+        // During Monday's session: nothing (Friday's done, Monday's not closed).
+        let mon = chrono::NaiveDate::from_ymd_opt(2026, 11, 23)
+            .unwrap()
+            .and_hms_opt(6, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert_eq!(eod_due(Market::In, mon, &state), None);
+    }
+
+    #[test]
     fn tick_is_faster_while_open() {
         use chrono::TimeZone;
         let open = Utc.with_ymd_and_hms(2026, 3, 4, 6, 0, 0).unwrap();
@@ -1678,6 +1964,61 @@ mod tests {
             .is_empty()
         );
         assert!(seen.iter().any(|k| k.ends_with(":now")));
+    }
+
+    #[test]
+    fn the_ltcg_notice_survives_a_fifo_sale() {
+        let india = crate::tax::Country::India;
+        // Two lots; the newer one (bought 2025-12-20) turns on 2026-12-21.
+        let mut p = held("TCS.NS", "2024-01-10");
+        p.add_lot(
+            "TCS.NS",
+            crate::portfolio::Lot::new(5.0, 120.0, "2025-12-20", "manual"),
+        );
+        let mut seen = Vec::new();
+        let soon = deliver(ltcg_notices(&p, india, day("2026-12-15"), &seen), &mut seen);
+        assert_eq!(soon.len(), 1);
+        assert!(soon[0].body.contains("2025-12-20"), "{}", soon[0].body);
+        // A FIFO sale of the older lot: the 2025 lot is now lot #1.
+        let mut after = Portfolio::default();
+        after.add_lot(
+            "TCS.NS",
+            crate::portfolio::Lot::new(5.0, 120.0, "2025-12-20", "manual"),
+        );
+        // No second heads-up for the renumbered lot...
+        assert!(
+            deliver(
+                ltcg_notices(&after, india, day("2026-12-16"), &seen),
+                &mut seen
+            )
+            .is_empty()
+        );
+        // ...and the "now long-term" notice still finds it.
+        let now = deliver(
+            ltcg_notices(&after, india, day("2026-12-21"), &seen),
+            &mut seen,
+        );
+        assert_eq!(now.len(), 1, "{now:?}");
+        assert!(now[0].body.contains("5 units"), "{}", now[0].body);
+    }
+
+    #[test]
+    fn ltcg_notices_cover_every_market_held() {
+        let mut p = held("TCS.NS", "2025-12-20");
+        // US: long-term after a year; bought 2025-12-18 turns on 2026-12-19.
+        p.add_lot(
+            "AAPL",
+            crate::portfolio::Lot::new(3.0, 200.0, "2025-12-18", "manual"),
+        );
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 12, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        let notices = ltcg_notices_all(&p, now, &[]);
+        let titles: Vec<&str> = notices.iter().map(|n| n.msg.title.as_str()).collect();
+        assert!(titles.iter().any(|t| t.ends_with("TCS.NS")), "{titles:?}");
+        assert!(titles.iter().any(|t| t.ends_with("AAPL")), "{titles:?}");
     }
 
     #[test]

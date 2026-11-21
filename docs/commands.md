@@ -96,10 +96,46 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
 | `deep <SYMBOL> [-p PERIOD]` | Everything about one stock, starting with its [action](#actions): fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights. Default `3mo` |
 | `markets [--crypto] [--fx] [--global] [--json\|--csv]` | US + India indices (S&P 500, Dow, NASDAQ, Russell, VIX, NIFTY 50, SENSEX, Bank NIFTY, NIFTY IT) and the India 10-year G-sec yield (CCIL, RBI fallback; left out when neither answers); `--crypto` adds the largest coins, `--fx` major pairs (USD/INR, EUR/USD, ...), `--global` one row per exchange's main index (NIFTY 50, S&P 500, FTSE 100, DAX, Nikkei 225, Hang Seng, Straits Times, S&P/TSX, S&P/ASX 200) with whether it is open and its local time. With `-m crypto`, `-m fx`, `-m commodity` or a global exchange that section comes first. `--json` rows carry `region`: `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Japan`, ...) or `Global` |
-| `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
+| `dashboard` (`d`) | Indices + portfolio value, P&L and day change (value and %, against each holding's previous close) + watchlist + triggered alerts; first-run hints when empty |
+| `today [--days N] [--no-news] [--limit N] [--json]` | What changed in your portfolio today: each holding's day move and P&L with why it moved (the most important fresh headline or exchange/SEC filing, "with the market", or "unexplained" for a move of 2.5σ or more against the benchmark with no news found), σ and volume multiple, dates in the next 3 days; the watchlist; the market backdrop; and one news feed for holdings and watchlist ranked by portfolio weight × importance (`--days`, default 2). See [What's hot and today](#whats-hot-and-today) |
+| `hot [--cap TIER] [--universe INDEX] [--limit N] [--json]` | What's hot: your holdings and watchlist ranked by heat, then the market (biggest moves, unusual volume, gaps, 52-week highs/lows, most-mentioned in news, sectors, theme baskets, FII/DII flows, bulk/block deals, F&O ban list, OI build-up, cross-market movers). India and US. See [What's hot and today](#whats-hot-and-today) |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
 | `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Exits 1 if market data is unreachable or the config file is invalid |
 | `use [MARKET\|PORTFOLIO]... [--bind\|--unbind] [--json]` | Show the market and portfolio in use, or switch them: `use us`, `use long-term`, `use us-tech us --bind`. See [Market and portfolio context](#market-and-portfolio-context) |
+
+### Background worker
+
+`stockwise worker start` runs the background worker (live quotes while the
+market is open, queued tasks, alerts, the post-close sync) detached until
+`worker stop` or a reboot. To have it start at every login instead:
+
+| Command | Description |
+|---------|-------------|
+| `worker start` / `stop` / `status` / `run` | Start it detached / stop it / show whether it runs and what is queued / run it in this terminal |
+| `worker install [--dry-run] [--interval MIN]` | Run the worker at login as a per-user service: a launchd agent on macOS (`~/Library/LaunchAgents/com.stockwise.worker.plist`, output in `worker.log` in the data directory), a systemd user service on Linux (`~/.config/systemd/user/stockwise-worker.service`, output in `journalctl --user -u stockwise-worker`). It runs this executable as `stockwise -m MARKET worker run` and is restarted `--interval` minutes (default 1) after it exits with an error, never after a clean `worker stop`. Reinstalling replaces the unit and restarts it. `--dry-run` prints the unit file and the commands and changes nothing. Other systems get an error: start the worker yourself at login |
+| `worker uninstall [--dry-run]` | Stop the service and remove its unit file |
+| `worker service-status` | Whether the unit file exists, whether launchd / systemd has it loaded, and whether a worker is running |
+
+Only user-level locations are written; nothing needs `sudo`. `STOCKWISE_HOME`,
+`STOCKWISE_CONFIG` and `STOCKWISE_PORTFOLIO` are copied into the unit when set,
+so the service uses the same data directory, config file and portfolio. Other
+variables, notification secrets in particular, are not: the unit is a
+plain-text file, so keep those in the config file. The commands it runs:
+
+```text
+# macOS
+launchctl bootout gui/$UID/com.stockwise.worker        # if loaded; errors ignored
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.stockwise.worker.plist
+                                                       # or `launchctl load -w` on old macOS
+# Linux
+systemctl --user daemon-reload
+systemctl --user enable --now stockwise-worker.service
+```
+
+A systemd user service stops when you log out unless lingering is on
+(`loginctl enable-linger`). If a worker started with `worker start` is
+already running, stop it first: the service's worker cannot take the lock
+while it runs and retries after `--interval`.
 
 ## Analysis
 
@@ -170,19 +206,19 @@ research analyst, and losses are possible ([DISCLAIMER.md](../DISCLAIMER.md)).
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe (see below), with a cap-tier column |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe (see below), with a cap-tier column. The table opens with an "As of" line: the local time, the session date of the latest trade and whether the market is open |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls |
-| `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls. Stocks without a day change are listed last with "—" |
+| `sentiment [-m in\|us]` | Fear & Greed style gauge for the market (`-m`, default the global market): India VIX, NIFTY 50 day move and 1-month trend, NIFTY MIDCAP 50 against NIFTY 50, with BANK NIFTY shown, for India; VIX, S&P 500, Russell 2000 and Nasdaq for the US; plus the wording of market headlines (whole words, negation-aware). India VIX bands sit higher than the VIX's: below 14 extreme greed, 14–18 greed, 18–24 neutral, 24–32 fear, above 32 extreme fear (US: 15 / 20 / 25 / 35). A reading of mood, not a signal |
 | `conditions [--universe INDEX] [--json]` | Where the market stands, as readings: **trend** (the main index against its 200- and 50-day averages, distance from its 52-week and 10-year highs, and the share of days in 10 years when it sat lower against the 200-day), **volatility** (India VIX or VIX against 5 years; India and US), **breadth** (share of the scanned stocks above their 200- and 50-day averages, near 52-week highs and lows, up on the day) and **valuation** (aggregate and median P/E, earnings yield against the 10-year government yield for India and the US, median dividend yield). Breadth and valuation cover the same stocks as `picks`. They have no price history to look back over, so each run (and each daily `daemon longterm` run) saves the session's figures in `cache.db` (one per session, market and `--universe`; `cache clear` leaves them) and, once 20 earlier sessions are on record, shows the share of them that were lower, plus the change since the session before. Readings of the data: not a forecast and not a signal to invest or to wait |
-| `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
-| `rotation` | Sector rotation vs 50-day average |
-| `sectorcmp <SECTOR1> <SECTOR2>` | Two sectors head to head |
+| `news <SYMBOL> [--days N] [--limit N] [--json]` | Headlines from Yahoo Finance and Google News (searched by company name in the stock's locale, last `--days`, default 3) plus exchange filings (NSE for `.NS`, BSE for `.BO`, SEC EDGAR for US tickers), de-duplicated, newest first, with links and local times; the header counts the sources that answered |
+| `rotation` | Sector indices (India) or sector ETFs (US) with the day change and relative strength against NIFTY 50 / S&P 500 over 1, 3 and 6 months of daily closes, strongest over 3 months first. Leading: ahead of the benchmark over both 1 and 3 months; Lagging: behind over both; "—" where a quote or history is missing |
+| `sectorcmp <SECTOR1> <SECTOR2>` | Two sectors head to head: price, day change, 1/3/6-month returns and relative strength against the benchmark, P/E, 50-day average and 52-week range ("—" when missing) |
 | `peers <SYMBOL>` | Same-sector peers on P/E, P/B, market cap |
-| `insider <SYMBOL>` | Analyst consensus + insider-related news |
+| `insider <SYMBOL>` | Insider trades from the regulator's filings — NSE PIT disclosures for Indian stocks, SEC EDGAR Form 4 for US stocks (set `STOCKWISE_SEC_USER_AGENT` if SEC answers 403) — falling back to Yahoo Finance `insiderTransactions` (labelled) when those fail or list nothing; open-market acquisitions and disposals are totalled. Then analyst consensus and insider-related news |
 | `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a demand label such as "STRONG DEMAND" or "BOOK BUILDING") and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (with `--capital`, the odds at that amount, including for several separate applications), unofficial GMP and broker calls from press headlines, and a 6-pillar score with a **listing demand** label and a **long-term profile** label. In `--json`: `listing_demand`, `long_term_profile` and `timeline` replace `listing_verdict`, `long_term_verdict` and `timing_guidance`; `capital_odds` and `allotment_rules` replace `capital_plan` and `golden_rules`. Not a recommendation |
-| `earnings` | Earnings growth for portfolio and watchlist |
-| `surprise [--universe INDEX]` | Forward EPS against trailing EPS, by expected growth; stocks without a forward EPS are left out, and a large scan shows the 25 fastest and the 25 steepest falls |
+| `earnings` | Next results date of each stock in the portfolio and watchlist (NSE board meetings for Indian stocks, else Yahoo's `calendarEvents`; `~` marks an estimate), soonest first, with trailing and forward EPS |
+| `surprise [--universe INDEX]` | Latest reported quarter of each stock: actual EPS against the analyst estimate and the surprise %, largest first (Yahoo `earningsHistory`; one request per stock, so a scan of more than 50 stocks covers the 50 largest by market cap) |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
 | `picks [--universe INDEX] [--cap TIER] [--horizon long\|short] [--top N] [--min-mcap N] [--min-adv N] [--json\|--csv]` | Scores the stocks of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) that clear a size and liquidity floor (India ₹500 crore and ₹2 crore traded a day; US $1 billion and $5 million; lower floors for `--cap small` and `--cap micro`), from 0 to 100, and lists the highest. Five pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity, profit margin, low debt), **growth** (forward against trailing EPS with 3+ analysts, revenue growth), **trend** and **risk** (low volatility, drawdown and beta). The leaders of a first pass get their fundamentals and a year of prices before the final ranking. `--horizon long` (default) weights value and quality; `--horizon short` gives trend 45% (3-month momentum per unit of volatility, the 50-day average, the 52-week range, rising volume) and risk 20%. Losses and negative book value rank last; figures too good to be true (P/E below 3, ROE above 80%, yield above 15%) are listed apart to check; stocks with less than 60% of their data stay out; with a positive `--top`, at most 3 per known sector (`--top 0` has no limit). Every list is logged for `picks review`. The finalists get an Action column with their [action](#actions) (also with `--cap small --horizon short`). Method: [methodology.md](methodology.md) |
 | `picks review [--since 90d] [--horizon long\|short] [--json\|--csv]` | The track record: every logged pick from the day it was first listed, with its return, the benchmark's return over the same days (NIFTY 50 for India, S&P 500 total return for the US) and the difference, plus the share that rose, the share that beat the benchmark, and mean and median returns. Price returns adjusted for splits since listing (a pick whose splits can't be checked is left out); dividends not included. The benchmark is measured from the level logged with each list to its level now (both live), so both legs compare the same moments; without those levels no benchmark figure is shown. `--since` takes up to 10 years |
@@ -472,7 +508,7 @@ Data lives in the directory shown by `stockwise doctor`.
 |---------|-------------|
 | `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency). An Action column shows each stock's [action](#actions) (`HOLD (med)`, `NO CALL`) |
 | `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
-| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
+| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD] [--lots N,N]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots. `--lots 3,1` sells from those lots (numbers from `portfolio lots`) in that order — specific identification for US and UK shares; Indian shares and funds always sell oldest first |
 | `portfolio lots <SYMBOL> [--lot N [--date YYYY-MM-DD] [--qty Q] [--price P] \| --delete] [--undo-sale N]` | Lots, sales, dividends and XIRR of one holding, each numbered. `--lot N` corrects a lot's date, quantity or price, or `--delete`s it without recording a sale; `--undo-sale N` drops sale N from the realised gains and puts its shares back as the lot they came from |
 | `portfolio restore [N]` | Lists the last five saved versions of the portfolio (`portfolio.json.1` is the newest), or brings version N back. The version it replaces becomes backup 1, so a restore can be undone |
 | `portfolio actions [SYMBOL] [--apply] [--undo] [--journal]` | Splits, reverse splits, bonuses, demergers and spin-offs (built-in table: Indian demergers, US spin-offs from Form 8937), cash for fractional merger shares, rights issues (reported only) and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares, adds lots of a demerged company at the official share of cost, records the cash for a merger fraction as a sale, records dividends, and is safe to repeat. Every `--apply` is journalled: `--journal` lists the entries, `--undo` takes back the newest |
@@ -484,21 +520,21 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio benchmark [NIFTY\|SENSEX\|SP500\|...] [-p 1y] [--base inr\|usd] [--json\|--csv]` | Time-weighted return against an index over the period, from the lots held each day: alpha, beta, tracking error, and attribution by holding and sector (see [below](#benchmark-and-attribution)) |
 | `portfolio pme [NIFTY\|SPY\|VOO\|VWCE\|NIFTYBEES\|...] [--base inr\|usd] [--json\|--csv]` | Public Market Equivalent (Index Twin): mirror exact tradebook cash flows into a passive benchmark; computes Kaplan-Schoar PME, Direct Alpha, twin value, and net currency value added vs the index (see [below](#public-market-equivalent-index-twin)) |
 | `portfolio remove <SYMBOL> [--yes]` | Remove a holding and its lots without recording a sale; asks first when it has more than one lot |
-| `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
+| `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift [<PCT>] [--json]` | Target weights by symbol (held or not yet held), sector, or asset class (`equity`, `debt`, `gold`, `international`, `cash`). A symbol target is carved out of its sector and asset-class targets, so nested targets never count twice; keys that match nothing are reported. `target drift` with no percentage shows current vs target per key with the 5/25 band (5 points or 25% of the target, whichever is smaller); with one, saves the drift tolerance band (the default is the profile's `default_drift_pct`, which `target show` prints) |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
 | `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it, with an Action column per holding (see [below](#portfolio-checkup)) |
 | `portfolio review [--horizon short\|long] [--json]` | Each holding's [action](#actions), sorted EXIT, TRIM, ADD, HOLD, then NO CALL, with its reasons, invalidation price, review date, size hint and tax note (see [below](#portfolio-review)) |
 | `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
-| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
+| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--on-close] [--cross] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
 | `calendar [SYMBOLS...] [--days 30] [--holdings\|--watchlist] [--json\|--csv]` | Upcoming results, ex-dividend and dividend payment dates, splits and bonus issues for your holdings and watchlist (or the named symbols), sorted by date, with today and the next 7 days marked. See [the calendar](#results-and-corporate-calendar) |
 | `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
-| `rebalance [--inflow N] [--drift N] [--json]` (or `portfolio rebalance`) | Trades to rebalance to targets (or equal weight); `--inflow` buys underweight assets with new cash without selling; `--drift` ignores minor deviations |
-| `harvest [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale (see [below](#harvest)) |
+| `rebalance [--inflow N [--with-sells]] [--raise N] [--cash-buffer N] [--drift N] [--min-trade N] [--brokerage N] [--fx-spread PCT] [--json]` (or `portfolio rebalance`) | Whole-share trades back to targets (or equal weight) whose cash balances: sells pay for buys, and what is left goes to the holdings furthest below target. `--inflow` invests new cash without selling (`--with-sells` adds it to a full rebalance); `--raise` sells only, to raise that much cash at the lowest tax; `--cash-buffer` keeps cash uninvested. Each sell shows its lots, STCG/LTCG and tax; each trade its costs (see [below](#rebalance)) |
+| `harvest [--carry-st N] [--carry-lt N] [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale in India and by lot in the US (see [below](#harvest)) |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
 | `tax export in [--schedule cg\|os\|fa\|form67] [--slab 30] [--withholding PCT] [--fy 2025-26] [--out FILE] [--json]` | India: Schedule OS (dividends and interest with TDS), Schedule FA Table A3 (foreign assets, calendar year) or Form 67 (foreign tax credit) instead of Schedule CG (see [below](#dividend-and-interest-income-schedule-os) and [Schedule FA](#foreign-assets-schedule-fa-and-form-67)) |
@@ -670,6 +706,18 @@ holding is not offered as a loss; `fifo_blocked` (and a note on screen) says how
 many shares you would sell and what the sale books. For the US you can choose lots,
 so only the losing lots are offered.
 
+For the US the row's `lots` names the lots sold, and the screen prints the
+command that records the sale exactly (`portfolio sell AAPL 8 --lots 2`), so the
+ledger books the same loss as the broker. For India a note says to buy back on
+the next trading day: a same-day sell and buy nets out as an intraday trade.
+
+The LTCG step-up row is the exact share count, oldest lots first and long-term
+lots only, whose gain fits in what is left of the exemption (`tax_free_gain_room`:
+the exemption plus any losses that would set off against the gain first), and
+`estimated_tax_saved` is that gain at 13% (12.5% plus 4% cess). `--carry-st` and
+`--carry-lt` add capital losses brought forward from earlier years; they set off
+like this year's losses and are echoed in `carried_forward`.
+
 For the US, `harvest -m us` also checks the 30-day wash-sale rule (IRS
 Publication 550): a loss is disallowed when the same shares are bought within 30
 days before or after the sale. A loss candidate with a purchase in the last 30
@@ -686,6 +734,41 @@ remaining exemption is shared: each winner takes its part of it, biggest first,
 and the saving counts only that part. Holdings in another currency (US shares for
 `in`) are listed under `other_currency` and not counted; holdings taxed under
 other rules (crypto, debt funds, SGBs, gold and similar ETFs) under `other_rules`.
+
+### Rebalance
+
+> **Guide:** [Rebalance to target weights](guide-rebalance.md).
+
+`rebalance` turns targets into whole-share orders (fund units to three decimals).
+Holdings without a price or exchange rate are left out with a warning, and the
+weights are of the rest. A target for a symbol not held yet gives a buy line
+(`held: false`).
+
+- **Cash balances.** Sells come first; buys are paid from them plus any
+  `--inflow`, less `--cash-buffer`. Short of cash, holdings over target inside the
+  drift band are trimmed, then the lowest-priority buys; cash left over buys more
+  of the holdings furthest below target while a share brings one closer.
+  `net_cash` is what the trades free (positive) or need (negative) after costs;
+  `cash_left` is what stays uninvested. `--inflow` alone never sells, and splits
+  the cash the way that minimizes the squared deviation from target.
+- **Projected weights** (`projected_pct`) come from the rounded orders, of the
+  holdings plus the cash left. The profile's `max_stock_weight` is a hard limit
+  for single stocks (not ETFs, funds or gold bonds): a target above it is capped
+  and the excess goes to the other holdings.
+- **Lots and tax.** Indian shares and funds sell oldest first. Elsewhere a sell
+  takes losing lots first, then the lots with the lowest tax, and leaves lots that
+  turn long-term within 45 days for last; `record` gives the `portfolio sell
+  --lots` command. Each sell has its `st_gain`, `lt_gain` and `tax` (added to this
+  tax year's estimate, cess included); `tax.saved_vs_fifo` is what the lot choice
+  saves. Gains taxed under other rules (an Indian resident's foreign shares, debt
+  funds) are shown but not taxed (`untaxed_gain`).
+- **Costs.** NSE/BSE trades: STT, stamp duty, exchange and SEBI fees with GST,
+  and the DP charge on sells; Indian fund purchases: stamp duty; trades in
+  another currency: an FX spread (`--fx-spread`, 0.5% by default); `--brokerage`
+  per share order. Orders under `--min-trade` (₹1,000 / $20 by default) are left
+  out.
+- **`--raise N`** sells only, lowest tax first (losses, then gains inside the
+  exemption, then long-term, then short-term), most overweight first among equals.
 
 ### Tax export
 
@@ -1280,7 +1363,8 @@ at two brokers is two sets of lots in one holding (`portfolio lots` shows the
 account). Lots entered by hand or saved by an older version, with no account of
 their own, count as the account of their `source`, or — for manual lots — join
 the first broker that syncs the symbol. Totals and tax span all accounts.
-`portfolio sell` works on the whole holding, oldest lot first.
+`portfolio sell` works on the whole holding, oldest lot first (or the lots
+`--lots` names, for US and UK shares).
 
 **Groww, Upstox, CAS.** Groww and Upstox exports are snapshots (quantity
 sync, like Kite). A CAS whose transactions cover a fund's whole balance
@@ -1368,6 +1452,86 @@ with `--no-default-features` (cargo features `tui` and `server`).
 |---------|-------------|
 | `tui [-i SECONDS]` | Full-screen live dashboard: indices, watchlist, portfolio P&L, alerts and a chart of the selected symbol. Refreshes every 30s by default (10-3600). `?` shows the keys. See [tui.md](tui.md) |
 | `serve [--bind ADDR] [--allow-remote] [--open]` | Web dashboard at `/` (`--open` opens it in your browser), JSON API (`/api/quote`, `/api/history/{symbol}`, `/api/markets`, `/api/search`, `/api/portfolio`, `/api/watchlist`, `/api/alerts`), `/healthz` and Prometheus `/metrics`. Listens on `127.0.0.1:8787`; other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`. See [server.md](server.md) |
+| `statusbar [--format tmux\|waybar\|sketchybar\|starship\|json] [--symbols A,B] [--max N] [--refresh SECS]` | One compact line for a status bar: the portfolio's day change, then its largest holdings and watchlist symbols (or `--symbols`). Answers from a local cache and fetches at most once a minute. See [Status bars](#status-bars) |
+
+### Status bars
+
+`stockwise statusbar` prints one line such as
+`▲ ₹+12.3k (+0.8%) · RELIANCE +1.2% · TCS −0.4%`: the portfolio's day change
+in its base currency (the same one `dashboard` totals in), then its largest
+holdings by value, then watchlist symbols, up to `--max` (default 3).
+`--symbols RELIANCE,TCS` shows those symbols instead of the portfolio.
+
+Status bars run it every few seconds, so it is built to be quick and never
+hang:
+
+- It answers from `statusbar_cache.json` in the data directory. It goes to the
+  network at most once per `--refresh` seconds (default 60, at least 5), and the
+  whole refresh (quotes and exchange rates) must finish within 3 seconds.
+- When a refresh fails or times out, the cached line is shown with
+  `(as of HH:MM)` and the waybar class `stale`. A failed attempt also waits out
+  `--refresh` before the next one, so a dead network costs one try a minute.
+- With every market of the shown symbols closed, it fetches once after the
+  close (for the first 15 minutes, while closing prices settle) and then stays
+  offline until the next open.
+- It always exits 0. With no holdings it says so; offline with no cache it
+  prints `stockwise: offline (no data)`.
+
+| `--format` | Output |
+|---|---|
+| `tmux` (default) | `#[fg=green]…#[default]` / `#[fg=red]` colour codes |
+| `waybar` | One JSON object `{"text","tooltip","class"}`; `class` is `up`, `down`, `flat` or `stale`, the tooltip lists the value, each price and the time. `&`, `<`, `>` are Pango-escaped |
+| `sketchybar` | `label='…' label.color=0xAARRGGBB`, shell-quoted, to `eval` after `sketchybar --set "$NAME"` |
+| `starship` | Plain text, no colour codes |
+| `json` | `{"text","as_of","stale","market_open","class","error","portfolio":{"currency","value","day_change","day_change_pct"},"rows":[{"symbol","price","change_pct","currency"}]}`; `portfolio` is `null` with `--symbols` or no holdings |
+
+**tmux** (`~/.tmux.conf`; tmux re-runs it every `status-interval` seconds):
+
+```tmux
+set -g status-interval 10
+set -g status-right '#(stockwise statusbar) '
+set -g status-right-length 80
+```
+
+**waybar** (`~/.config/waybar/config`, then add `"custom/stockwise"` to a
+`modules-*` list; style `#custom-stockwise.up`, `.down`, `.stale` in
+`style.css`):
+
+```json
+"custom/stockwise": {
+    "exec": "stockwise statusbar --format waybar",
+    "return-type": "json",
+    "interval": 15
+}
+```
+
+**sketchybar** (`~/.config/sketchybar/sketchybarrc`):
+
+```sh
+sketchybar --add item stockwise right \
+           --set stockwise update_freq=15 script="$PLUGIN_DIR/stockwise.sh"
+```
+
+and `$PLUGIN_DIR/stockwise.sh` (executable):
+
+```sh
+#!/bin/sh
+eval "sketchybar --set \"\$NAME\" $(stockwise statusbar --format sketchybar)"
+```
+
+**starship** (`~/.config/starship.toml`):
+
+```toml
+[custom.stockwise]
+command = "stockwise statusbar --format starship"
+when = true
+shell = ["sh"]
+format = "[$output]($style) "
+style = "dimmed"
+```
+
+The prompt waits for the command, but a cached line returns in milliseconds; a
+refresh is bounded by the 3 second budget.
 
 ## Live trading
 
@@ -1401,7 +1565,10 @@ untested against a live account.
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |
 | `backup export [PATH.swbak] [--passphrase-fd N]` | Write your data to one passphrase-encrypted file (default `stockwise-YYYY-MM-DD.swbak`). See [Backups](#backups) |
 | `backup restore <PATH.swbak> [--dry-run] [--passphrase-fd N]` | Check a backup, list the files it would add or replace, copy each replaced file to `<file>.bak`, then write each file atomically |
-| `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, desktop) / send a test message. See [notifications](bots.md#notifications) |
+| `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, ntfy, Pushover, desktop), their routes and quiet hours / send a test message. See [notifications](bots.md#notifications) |
+| `monitor [status\|run] [--notify] [--json]` | The automatic holding monitor: thresholds, worker state, recent signals; `run` does one pass now (`--notify` sends what is new). See [Holding monitor and digest](#holding-monitor-and-digest) |
+| `digest [--send] [--json]` | Today's after-close digest: day P&L, top contributors and detractors with reasons, monitor signals, triggered alerts, notices, dates coming up. `--send` sends it now |
+| `telegram [--once]` | Two-way Telegram bot: answers `/today`, `/hot`, `/review` and `/digest` from `STOCKWISE_TELEGRAM_CHAT_ID` only, and sends the digest every trading day at `STOCKWISE_DIGEST_TIME` (local `HH:MM`) unless the worker already has |
 | `update [--check]` (`self-update`) | Check GitHub Releases for a newer version. A binary from install.sh or a release archive is replaced in place: the archive for this platform and its `.sha256` are downloaded, the checksum must match (a missing or wrong checksum stops the update and changes nothing), then the binary is swapped atomically (on Windows the old one is kept as `stockwise.exe.old`). Installs from Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv, pip, `.deb`/`.rpm` or Docker are never changed; the command prints that package manager's upgrade command instead. `--check` only reports the installed version, the latest release and the install channel |
 | `completions <bash\|zsh\|fish\|powershell\|elvish>` | Print a completion script, e.g. `stockwise completions zsh > ~/.zfunc/_stockwise` |
 | `man [--dir <DIR>]` | Print the `stockwise.1` man page, or write it plus one `stockwise-<command>.1` page per command into `DIR`, e.g. `stockwise man --dir ~/.local/share/man/man1` |
@@ -1582,8 +1749,9 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `portfolio pme` | `{summary: {benchmark_symbol, benchmark_name, base_currency, start_date, end_date, total_invested, total_distributed, actual_value, twin_value, value_added, kaplan_schoar_pme, direct_alpha_percent, portfolio_xirr_percent, twin_xirr_percent, twin_shares, benchmark_end_price}, holdings: [{symbol, actual_value, twin_value, value_added, pme_ratio, direct_alpha_percent, actual_xirr_percent, twin_xirr_percent, cashflows_count}]}` — Public Market Equivalent (Index Twin) analysis; `kaplan_schoar_pme` is the KS-PME ratio (> 1.0 indicates outperformance); `direct_alpha_percent` is the annualized excess return rate (%) | holding row |
 | `portfolio xray` | `{portfolio_name, base_currency, total_value, effective_holdings: [{symbol, name, direct_value, direct_weight_pct, fund_value, fund_weight_pct, total_value, effective_weight_pct, is_concentrated, via_funds: [{fund_symbol, value, weight_in_fund_pct, effective_weight_pct}]}], concentrations_above_10pct: [effective_holding], market_cap_breakdown: {large_cap_value, large_cap_pct, mid_cap_value, mid_cap_pct, small_cap_value, small_cap_pct, unclassified_value, unclassified_pct}, sector_allocation: [{sector, value, weight_pct}], asset_class_split: {equity_value, equity_pct, debt_value, debt_pct, commodity_value, commodity_pct, cash_value, cash_pct}, funds_analyzed: [{symbol, name, look_through_available, holdings_count, coverage_pct}]}` | effective holding |
 | `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], intraday_sales, intraday_gain, other_rules: [symbol], notes: [text]}` (`virtual_digital_assets`, `intraday_sales`, `intraday_gain` and `other_rules` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, actual_cost, fmv_31_jan_2018, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, taxable_stcg_before_23_jul_2024, taxable_ltcg_before_23_jul_2024, stcg_tax, ltcg_tax, cess, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, code, adjustment, gain_or_loss, date_acquired_estimated, holding_days_added}` (`code` is `W` for a wash sale, `adjustment` the disallowed loss, `holding_days_added` the days carried over from washed shares), summary = `{short_term_proceeds, short_term_cost, short_term_adjustment, short_term_gain, long_term_proceeds, long_term_cost, long_term_adjustment, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}`, and after `summary` the US adds `wash_sales: [{sale, part, symbol, sell_date, qty, loss, replacement_qty, disallowed, replacements: [{date, date_estimated, qty, basis_added, days_added, sale}]}]` (`sale` is the index in the portfolio's realized sales and `part` the row of that sale; a replacement's `sale` is null while it is still held) | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
-| `harvest` | `{country, currency, total_st_loss_harvestable, total_lt_loss_harvestable, estimated_loss_tax_saved, ltcg_exemption_limit, ltcg_exemption_remaining, loss_candidates: [row], gain_harvest_candidates: [row], fifo_blocked: [{symbol, shares_to_sell, net_result, lot_loss}], unpriced: [symbol], other_rules: [{symbol, reason}], other_currency: [symbol]}`, row = `{symbol, shares, avg_cost, price, pnl, pnl_pct, st_pnl, lt_pnl, estimated_tax_saved, harvest_type, recent_buy, wash_sale_window_end}` — `harvest_type` is `tax_loss` or `ltcg_exemption_step_up`; `recent_buy` and `wash_sale_window_end` are set for US loss candidates only (see [harvest](#harvest)); for India `shares`, `st_pnl` and `lt_pnl` describe the whole FIFO sale that reaches the losing lot; `fifo_blocked` holdings would book a net gain (`net_result` > 0) if sold up to the losing lot, so they are not offered as losses; `other_currency` and `other_rules` holdings are left out | row |
-| `rebalance` | `{total_value, projected_value, currency, inflow, drift_tolerance, items: [{symbol, current_value, current_pct, target_pct, projected_value, projected_pct, price, diff_value, diff_shares, action_type, action_display, is_fund}]}` — `action_type` is `buy`, `sell` or `ok`; with `--inflow` nothing is sold | item |
+| `harvest` | `{country, currency, total_st_loss_harvestable, total_lt_loss_harvestable, estimated_loss_tax_saved, ltcg_exemption_limit, ltcg_exemption_remaining, loss_candidates: [row], gain_harvest_candidates: [row], fifo_blocked: [{symbol, shares_to_sell, net_result, lot_loss}], unpriced: [symbol], other_rules: [{symbol, reason}], other_currency: [symbol], carried_forward: {short_term, long_term}, tax_free_gain_room, notes: [string]}`, row = `{symbol, shares, avg_cost, price, pnl, pnl_pct, st_pnl, lt_pnl, estimated_tax_saved, harvest_type, recent_buy, wash_sale_window_end, lots}` — `harvest_type` is `tax_loss` or `ltcg_exemption_step_up`; `recent_buy` and `wash_sale_window_end` are set for US loss candidates only (see [harvest](#harvest)); for India `shares`, `st_pnl` and `lt_pnl` describe the whole FIFO sale that reaches the losing lot; `fifo_blocked` holdings would book a net gain (`net_result` > 0) if sold up to the losing lot, so they are not offered as losses; `lots` is set when a US loss sells other lots than the oldest (record it with `portfolio sell --lots`); a step-up row's `shares` is the exact count whose gain fits `tax_free_gain_room`; `other_currency` and `other_rules` holdings are left out | row |
+| `rebalance` | `{total_value, projected_value, currency, inflow, drift_tolerance, mode, raise, cash_buffer, sell_proceeds, buy_cost, costs, net_cash, cash_left, tax: {st_gain, lt_gain, tax, fifo_tax, saved_vs_fifo, untaxed_gain}, excluded: [symbol], max_stock_weight, warnings: [string], items: [{symbol, current_value, current_pct, target_pct, projected_value, projected_pct, price, diff_value, diff_shares, action_type, action_display, is_fund, is_etf, held, asset_class, sector, lots: [{lot_no, qty, bought, unit_cost, gain, long_term, long_term_on}], st_gain, lt_gain, tax, costs: {stt, stamp, exchange, brokerage, dp, fx_spread, total}, record, notes}]}` — `mode` is `rebalance`, `buy_only` or `raise`; `action_type` is `buy`, `sell` or `ok`; `diff_value` is negative for sells; with `--inflow` alone nothing is sold; empty and zero fields are left out | item |
+| `portfolio target drift` | `{currency, total_value, absolute_band_pct, relative_band_pct, rows: [{key, kind, current_pct, target_pct, drift_pct, relative_drift_pct, band_pct, status}], warnings, excluded}` — `kind` is `symbol`, `sector`, `asset_class` or `untargeted`; `status` is `ok`, `over` or `under` | — |
 | `verdict` | `{symbol, name, price, currency, overall_score, data_coverage, pillar_bands: {strong, moderate, weak, no_data}, pillars: [{name, score, weight, band, inputs_present, inputs_possible, summary}], note, bull_points: [text], bear_points: [text], next_catalyst, warnings: [text], disclaimer}` — `score` and `overall_score` are 0–100 and `null` when there is no data (then `band` is `no_data` and the pillar is left out of the composite); `band` is `strong` (65+), `moderate` (45–64), `weak` or `no_data`; `weight` is a share of 1; `data_coverage` is the share of input data present, in percent; `note` says why there is no composite | — |
 | `score` / `scorecard` | `{symbol, name, currency, price, market_cap, sector, industry, piotroski: {score, max_score, evaluated, rating, rating_label, profitability_score, leverage_score, efficiency_score, criteria: [{id, category, name, formula, formatted_value, passed, points, explanation, evaluated}]}, altman: {z_score, zone, zone_label, formula_str, is_financial, note, missing_factors, components, z_double_prime, z_double_prime_zone, z_double_prime_components, z_double_prime_formula_str}, evaluation_date}` — `evaluated` counts the signals that had data (`score` out of `evaluated`, not always out of 9); `rating` is `null` unless all nine ran; `z_score` is `null` with the missing ratios in `missing_factors` | — |
 | `options oi` | `{symbol, source, underlying, currency, expiry, expiries, lot_size, pcr: {call_oi, put_oi, call_volume, put_volume, oi_ratio, volume_ratio}, pcr_sentiment, max_pain, top_calls: [wall], top_puts: [wall], breakdown: {calls: {long_buildup_oi, short_covering_oi, short_buildup_oi, long_unwinding_oi, neutral_oi, long_buildup_count, ...}, puts: {...}}, calls_sentiment, puts_sentiment}`, wall = `{strike, open_interest, share_pct, oi_change, price_change, last_price, buildup}` — `buildup` is `long_buildup`, `short_covering`, `short_buildup`, `long_unwinding` or `null` (on screen `LB`, `SC`, `SB`, `LU`); `calls_sentiment` and `puts_sentiment` read each side for the underlying (put buying is bearish, put writing bullish); `pcr_sentiment`, `calls_sentiment` and `puts_sentiment` are words such as `Bullish` | — |
@@ -1645,6 +1813,104 @@ stockwise alert add TCS results-in 7
 ```
 
 Alerts saved by earlier versions keep working unchanged.
+
+Options of `alert add`:
+
+- `--on-close` (crosses and breakouts): judge completed sessions only, so an
+  intraday poke through the average that closes back does not notify.
+- `--cross` (price levels): notify only when the price crosses the level; an
+  alert added while the price is already beyond it waits for it to come back
+  and cross. Without it, a level alert notifies while the level holds (once a
+  day) and re-arms once it stops holding.
+- An alert identical to an existing one (same symbol, condition, number,
+  period and options) is refused.
+
+`alert watch` and the worker check price levels only on fresh quotes (traded
+within 30 minutes) while the symbol's market is open; crosses on sessions
+completed while nothing was running are caught up once (up to 10 sessions).
+Each alert has a stable id in `alerts.json`; the notified state is kept per
+id, so removing or editing one alert never re-sends another.
+
+## What's hot and today
+
+`stockwise today` answers "what changed in my portfolio today, and why?".
+For every holding: the day move, the day P&L in the portfolio's base
+currency, the move in excess of the benchmark (NIFTY 50 or the S&P 500) in
+units of the stock's own excess-return volatility (σ), the volume against its
+20-day average, and a one-line reason:
+
+- the most important fresh headline or filing (NSE/BSE announcements, SEC
+  EDGAR 8-K and the like are preferred over news);
+- "with the market" for an ordinary move in line with the benchmark;
+- "unexplained" for an unusual move — 2.5σ or more (and at least 3%) against
+  the benchmark, or 1.5% on 3× volume, the same test `events` uses — with no
+  news or filing found.
+
+The news feed merges headlines and filings for holdings and the watchlist,
+removes duplicates, and ranks them by portfolio weight × importance
+(category, filing or not, and recency halving every 24 hours).
+
+`stockwise hot` ranks holdings and watchlist names by **heat** = |excess
+move| in σ (capped at 6) + volume surge (multiple − 1, capped at 4) + the
+importance of fresh news (up to 4) + 1.5 for a date within three days,
+multiplied by 1 + 5 × portfolio weight. Names with no heat are left out. Each
+row shows the move, the why and, once the rule-based actions engine is
+available, the action.
+
+The market part scans the universe's quotes (India: the liquid NIFTY 500
+stocks or `--universe`; US: the S&P 1500) with a liquidity floor: biggest
+moves, unusual volume (RVOL against the 3-month average, paced for the time
+of day while the session is open, at least 2×), gaps of 3% or more (4% with
+`--cap small`), 52-week highs and lows, the stocks most mentioned in today's
+business headlines, sector indices or ETFs, theme baskets (AI,
+semiconductors, defence, battery and EV, minerals and metals; equal-weight),
+cross-market movers among Indian and US large caps, and for India the
+FII/DII flows, NSE bulk and block deals, the F&O ban list and open-interest
+build-up. A source that fails is named at the end; the rest still show.
+
+```bash
+stockwise today
+stockwise today --days 3 --json
+stockwise hot
+stockwise hot --cap small
+stockwise hot -m us --json
+```
+
+## Holding monitor and digest
+
+The background worker (`stockwise worker start`, or `worker install` for a
+login service) watches every holding with no setup:
+
+| Signal | Default | When |
+|--------|---------|------|
+| Day drop | 5% or 2σ (and ≥ 1.5%) | during the session (every 15 minutes) |
+| New 52-week low | below the year's low | during the session |
+| Gap at the open | 3% either way | during the session |
+| Below cost | 20%, then every further 10% | after the close |
+| Off the 52-week high | 25%, then every further 10% | after the close |
+| Dates tomorrow | results, ex-dividend, record date, split, bonus | after the close |
+| Promoter pledge / shareholding | a new pledge; promoter ±1 point; FII+DII ±2 points | after the close (a few holdings per day) |
+| Analyst rating | upgrade or downgrade in the last 3 days | after the close |
+| Insider trade | NSE PIT / Form 4 in the last 3 days | after the close |
+
+Each signal is sent once. Signals during the session go out at once, several
+together as one message; after the close everything — signals, the LTCG,
+results and filing notices, alerts that triggered today — goes out as **one
+digest** with the day's P&L, the top contributors and detractors with the
+news or filing behind each move (or "unexplained") and the dates coming up.
+`daemon longterm` sends the same digest with its findings in it.
+
+Thresholds (`[monitor]` in the config file, or `STOCKWISE_MONITOR_<KEY>`):
+`enabled`, `day_drop_pct`, `day_drop_sigma`, `from_cost_pct`,
+`from_peak_pct`, `gap_pct`, `digest`.
+
+Notifications have a priority (low, normal, high). `STOCKWISE_NOTIFY_ROUTES`
+sends a channel only some of them (`desktop=high,telegram=low`), and
+`STOCKWISE_QUIET_HOURS` (`22:00-07:00`, local time) holds everything below
+high priority until the quiet hours end, then sends it as one message.
+Channels: Telegram, Slack, Discord, email, ntfy (`STOCKWISE_NTFY_TOPIC`,
+`STOCKWISE_NTFY_SERVER`, `STOCKWISE_NTFY_TOKEN`), Pushover
+(`STOCKWISE_PUSHOVER_TOKEN`, `STOCKWISE_PUSHOVER_USER`) and desktop.
 
 ## Results and corporate calendar
 

@@ -93,6 +93,9 @@ pub(super) async fn run<D: DataSource>(
         | "correlate" | "compare" | "portfolio_wrap" => {
             super::more::run(src, name, a, m, budget).await
         }
+        "whats_hot" | "today" | "news_feed" | "monitor_status" | "digest" => {
+            super::pulse::run(src, name, a, m).await
+        }
         "order_preview" => order_preview(src, a).await,
         other => bail!("Tool '{}' has no handler", other),
     }
@@ -693,8 +696,15 @@ async fn rebalance(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> 
         let plan = crate::rebalance::RebalancePlan::empty(commands::market_currency(m));
         return Ok(serde_json::to_value(plan)?);
     }
-    let (plan, _) =
-        commands::rebalance_plan(src, &p, &[], a.f64("inflow"), a.f64("drift"), m).await?;
+    let args = commands::RebalanceArgs {
+        inflow: a.f64("inflow"),
+        with_sells: a.bool("with_sells"),
+        raise: a.f64("raise"),
+        cash_buffer: a.f64("cash_buffer"),
+        drift: a.f64("drift"),
+        ..Default::default()
+    };
+    let (plan, _) = commands::rebalance_plan(src, &p, &args, m, None).await?;
     Ok(serde_json::to_value(plan)?)
 }
 

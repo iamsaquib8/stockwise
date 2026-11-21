@@ -170,9 +170,10 @@ pub async fn cmd_alert_add(
     condition: &str,
     target: f64,
     period: Option<usize>,
-    force: bool,
+    opts: crate::alerts::AddOptions,
     market: Market,
 ) -> Result<()> {
+    let force = opts.force;
     let resolved = market::resolve_symbol(symbol, market);
     let Some(cond) = AlertCondition::parse(condition) else {
         bail!(
@@ -182,9 +183,30 @@ pub async fn cmd_alert_add(
         );
     };
     let (target, period) = crate::alerts::validate(cond, target, period)?;
-    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    if opts.on_close && !cond.is_cross() {
+        bail!(
+            "--on-close applies to moving-average crosses and breakouts (cross-above-sma, ..., breakout-high, breakdown-low)"
+        );
+    }
+    if opts.cross && !cond.is_level() {
+        bail!("--cross applies to price levels (above, below)");
+    }
+    let mut alert = crate::alerts::Alert::new(&resolved, cond, target, period);
+    alert.on_close = opts.on_close;
+    if opts.cross {
+        alert.mode = crate::alerts::AlertMode::Cross;
+    }
     let mut store = AlertStore::load()?;
-    store.add_with_period(&resolved, cond, target, period);
+    if let Some((i, _)) = store.duplicate_of(&alert) {
+        bail!(
+            "Alert #{} already watches {} {} — nothing added",
+            i,
+            resolved,
+            alert.describe(crate::i18n::lang())
+        );
+    }
+    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    store.push(alert);
     store.save()?;
     let alert = store.alerts.last().expect("alert was just added");
     println!(
@@ -201,7 +223,17 @@ pub async fn cmd_alert_add(
         );
     } else if !cond.is_price() {
         println!(
-            "  {} Checked on daily bars by `stockwise alert check` and `alert watch`.",
+            "  {} Checked on daily bars by `stockwise alert check` and `alert watch`{}.",
+            "→".dimmed(),
+            if opts.on_close {
+                ", on completed sessions only"
+            } else {
+                ""
+            }
+        );
+    } else if opts.cross {
+        println!(
+            "  {} Notifies only when the price crosses the level, not while it stays beyond it.",
             "→".dimmed()
         );
     }
@@ -1341,6 +1373,13 @@ pub(crate) struct HarvestRow {
     /// shares were sold today (30 days on). A purchase of the same shares up
     /// to this day would make the loss a wash sale.
     pub(crate) wash_sale_window_end: Option<String>,
+    /// The lots the sale takes (numbers from `portfolio lots`), when they
+    /// are not simply the oldest: record it with `portfolio sell --lots`.
+    pub(crate) lots: Option<String>,
+    /// The command that records this sale (printed on screen; left out of
+    /// `--json` and `--csv`, which carry `lots` instead).
+    #[serde(skip)]
+    pub(crate) record: Option<String>,
 }
 
 impl CsvRow for HarvestRow {
@@ -1357,6 +1396,7 @@ impl CsvRow for HarvestRow {
         "harvest_type",
         "recent_buy",
         "wash_sale_window_end",
+        "lots",
     ];
 }
 
@@ -1395,6 +1435,31 @@ pub(crate) struct HarvestSummary {
     /// Holdings in a currency this country does not tax in (US shares for
     /// India), left out like `tax in` does.
     pub(crate) other_currency: Vec<String>,
+    /// Losses brought forward from earlier years, counted with this year's.
+    pub(crate) carried_forward: CarriedForward,
+    /// Long-term gain that can still be booked this year without tax: the
+    /// exemption left plus any losses that would absorb it first.
+    pub(crate) tax_free_gain_room: f64,
+    /// Rules to keep in mind when acting on the rows.
+    pub(crate) notes: Vec<String>,
+}
+
+/// Capital losses brought forward from earlier years (`harvest --carry-st
+/// / --carry-lt`), in the tax currency.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct CarriedForward {
+    pub short_term: f64,
+    pub long_term: f64,
+}
+
+impl CarriedForward {
+    fn buckets(self) -> tax::Buckets {
+        tax::Buckets {
+            st_loss: self.short_term.max(0.0),
+            lt_loss: self.long_term.max(0.0),
+            ..Default::default()
+        }
+    }
 }
 
 /// The sale that would harvest a holding's losses, in the tax currency.
@@ -1403,6 +1468,8 @@ struct HarvestSale {
     cost: f64,
     st: f64,
     lt: f64,
+    /// Lot numbers sold (1-based), in order.
+    lots: Vec<usize>,
 }
 
 /// `harvest` for `portfolio`: valued like `tax in`, so a fund sold in full
@@ -1415,8 +1482,19 @@ pub(crate) async fn harvest_summary(
     market: Market,
     today: chrono::NaiveDate,
 ) -> Result<(HarvestSummary, Valuation)> {
+    harvest_summary_with(src, portfolio, market, today, CarriedForward::default()).await
+}
+
+/// [`harvest_summary`] with losses brought forward from earlier years.
+pub(crate) async fn harvest_summary_with(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    market: Market,
+    today: chrono::NaiveDate,
+    carry: CarriedForward,
+) -> Result<(HarvestSummary, Valuation)> {
     let val = tax_valuation(src, portfolio, market).await?;
-    let summary = compute_harvest(portfolio, &val, market, today);
+    let summary = compute_harvest_with(portfolio, &val, market, today, carry);
     Ok((summary, val))
 }
 
@@ -1461,14 +1539,59 @@ pub(crate) fn compute_harvest(
     market: Market,
     today: chrono::NaiveDate,
 ) -> HarvestSummary {
+    compute_harvest_with(portfolio, val, market, today, CarriedForward::default())
+}
+
+/// The largest long-term gain that adds no tax on top of `realized`
+/// (the exemption left, plus losses that absorb it first).
+fn tax_free_room(country: Country, realized: tax::Buckets) -> f64 {
+    let base = tax::estimate(country, realized).total();
+    let adds = |g: f64| {
+        let mut b = realized;
+        b.add(g, true);
+        tax::estimate(country, b).total() - base > 1e-6
+    };
+    let mut hi = country.exemption() + realized.st_loss + realized.lt_loss + 1.0;
+    if !adds(hi) {
+        return hi;
+    }
+    let mut lo = 0.0;
+    if adds(lo + 0.01) {
+        return 0.0;
+    }
+    for _ in 0..80 {
+        let mid = (lo + hi) / 2.0;
+        if adds(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    (lo * 100.0).floor() / 100.0
+}
+
+/// [`compute_harvest`] with losses brought forward from earlier years.
+pub(crate) fn compute_harvest_with(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    market: Market,
+    today: chrono::NaiveDate,
+    carry: CarriedForward,
+) -> HarvestSummary {
     let country = match market {
         Market::Us => Country::Us,
         _ => Country::India,
     };
     let report = tax_report(country, portfolio, val, today);
-    let realized_est = tax::estimate(country, report.realized);
+    let realized = report.realized.plus(carry.buckets());
+    let realized_est = tax::estimate(country, realized);
     let exemption_limit = country.exemption();
-    let mut exemption_remaining = (exemption_limit - realized_est.exemption_used).max(0.0);
+    let mut gain_room = if exemption_limit > 0.0 {
+        tax_free_room(country, realized)
+    } else {
+        0.0
+    };
+    let tax_free_gain_room = gain_room;
     // Tax on a gain that the exemption covers, including India's cess.
     let gain_rate = country.lt_rate() / 100.0
         * if country == Country::India {
@@ -1534,7 +1657,7 @@ pub(crate) fn compute_harvest(
             let (mut shares, mut cost, mut st, mut lt) = (0.0, 0.0, 0.0, 0.0);
             let mut best: Option<HarvestSale> = None;
             let mut first_loss: Option<(f64, f64, f64)> = None;
-            for (qty, lot_cost, gain, long) in &lots {
+            for (n, (qty, lot_cost, gain, long)) in lots.iter().enumerate() {
                 shares += qty;
                 cost += lot_cost;
                 if *long {
@@ -1551,6 +1674,7 @@ pub(crate) fn compute_harvest(
                         cost,
                         st,
                         lt,
+                        lots: (1..=n + 1).collect(),
                     });
                 }
             }
@@ -1571,8 +1695,14 @@ pub(crate) fn compute_harvest(
                 cost: 0.0,
                 st: 0.0,
                 lt: 0.0,
+                lots: Vec::new(),
             };
-            for (qty, lot_cost, gain, long) in lots.iter().filter(|l| l.2 < 0.0) {
+            // Only the losing lots: specific identification, recorded with
+            // `portfolio sell --lots`.
+            for (n, (qty, lot_cost, gain, long)) in
+                lots.iter().enumerate().filter(|(_, l)| l.2 < 0.0)
+            {
+                sale.lots.push(n + 1);
                 sale.shares += qty;
                 sale.cost += lot_cost;
                 if *long {
@@ -1606,10 +1736,32 @@ pub(crate) fn compute_harvest(
                 harvest_type: "tax_loss",
                 recent_buy: None,
                 wash_sale_window_end: None,
+                lots: None,
+                record: Some(format!(
+                    "stockwise portfolio sell {} {}",
+                    h.symbol,
+                    round(sale.shares, 4)
+                )),
             };
             if country == Country::Us {
                 row.recent_buy = recent_buy(portfolio, h, &lots, today);
                 row.wash_sale_window_end = Some(tax::wash_sale_window_end(today).to_string());
+                let fifo_prefix = sale.lots.iter().enumerate().all(|(i, n)| *n == i + 1);
+                if !fifo_prefix {
+                    let list = sale
+                        .lots
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    row.record = Some(format!(
+                        "stockwise portfolio sell {} {} --lots {}",
+                        h.symbol,
+                        round(sale.shares, 4),
+                        list
+                    ));
+                    row.lots = Some(list);
+                }
             }
             losing.push((row, sale));
         } else if exemption_limit > 0.0 && lt_pnl > 0.0 {
@@ -1620,20 +1772,27 @@ pub(crate) fn compute_harvest(
             } else {
                 0.0
             };
-            gain_candidates.push(HarvestRow {
-                symbol: h.symbol.clone(),
-                shares: round(h.shares, 4),
-                avg_cost: round(h.avg_cost, 2),
-                price: round(price, 2),
-                pnl: round(pnl, 2),
-                pnl_pct: round(pnl_pct, 2),
-                st_pnl: round(st_pnl, 2),
-                lt_pnl: round(lt_pnl, 2),
-                estimated_tax_saved: 0.0,
-                harvest_type: "ltcg_exemption_step_up",
-                recent_buy: None,
-                wash_sale_window_end: None,
-            });
+            gain_candidates.push((
+                HarvestRow {
+                    symbol: h.symbol.clone(),
+                    shares: round(h.shares, 4),
+                    avg_cost: round(h.avg_cost, 2),
+                    price: round(price, 2),
+                    pnl: round(pnl, 2),
+                    pnl_pct: round(pnl_pct, 2),
+                    st_pnl: round(st_pnl, 2),
+                    lt_pnl: round(lt_pnl, 2),
+                    estimated_tax_saved: 0.0,
+                    harvest_type: "ltcg_exemption_step_up",
+                    recent_buy: None,
+                    wash_sale_window_end: None,
+                    lots: None,
+                    record: None,
+                },
+                lots.clone(),
+                scale,
+                crate::offmarket::is_fund(&h.symbol),
+            ));
         }
     }
 
@@ -1642,7 +1801,7 @@ pub(crate) fn compute_harvest(
     // respected. Biggest losses first; a loss with nothing to offset saves 0
     // and carries forward.
     losing.sort_by(|a, b| a.0.pnl.total_cmp(&b.0.pnl));
-    let mut running = report.realized;
+    let mut running = realized;
     let (mut total_st_loss, mut total_lt_loss, mut total_tax_saved) = (0.0, 0.0, 0.0);
     let mut loss_candidates = Vec::new();
     for (mut row, sale) in losing {
@@ -1657,17 +1816,72 @@ pub(crate) fn compute_harvest(
         loss_candidates.push(row);
     }
 
-    // The remaining exemption is shared: each candidate takes its part of it.
-    gain_candidates.sort_by(|a, b| b.lt_pnl.total_cmp(&a.lt_pnl));
+    // The tax-free room is shared: each candidate, largest long-term gain
+    // first, sells the exact share count (oldest lots first, long-term only)
+    // whose gain fits in what is left of it.
+    gain_candidates.sort_by(|a, b| b.0.lt_pnl.total_cmp(&a.0.lt_pnl));
     let mut gain_harvest_candidates = Vec::new();
-    for mut row in gain_candidates {
-        if exemption_remaining <= 0.0 {
+    for (mut row, lots, scale, fractional) in gain_candidates {
+        if gain_room <= 0.005 {
             break;
         }
-        let tax_free_gain = row.lt_pnl.min(exemption_remaining);
-        exemption_remaining -= tax_free_gain;
-        row.estimated_tax_saved = round(tax_free_gain * gain_rate, 2);
+        let (mut shares, mut cost, mut gain) = (0.0, 0.0, 0.0);
+        for (qty, lot_cost, lot_gain, long) in &lots {
+            if !long || *qty <= 0.0 {
+                break;
+            }
+            let per = lot_gain / qty;
+            let take = if per <= 0.0 || gain + lot_gain <= gain_room + 1e-9 {
+                *qty
+            } else {
+                let q = (gain_room - gain) / per;
+                if fractional {
+                    (q * 1000.0 + 1e-6).floor() / 1000.0
+                } else {
+                    (q + 1e-9).floor()
+                }
+            };
+            shares += take;
+            cost += lot_cost / qty * take;
+            gain += per * take;
+            if take < *qty {
+                break;
+            }
+        }
+        if shares <= 0.0 || gain <= 0.0 {
+            continue;
+        }
+        gain_room -= gain;
+        row.shares = round(shares, 4);
+        row.avg_cost = round(cost / shares / scale, 2);
+        row.pnl = round(gain, 2);
+        row.pnl_pct = round(if cost > 0.0 { gain / cost * 100.0 } else { 0.0 }, 2);
+        row.st_pnl = 0.0;
+        row.lt_pnl = round(gain, 2);
+        row.estimated_tax_saved = round(gain * gain_rate, 2);
+        row.record = Some(format!(
+            "stockwise portfolio sell {} {}",
+            row.symbol, row.shares
+        ));
         gain_harvest_candidates.push(row);
+    }
+    let mut notes = Vec::new();
+    if country == Country::India
+        && (!loss_candidates.is_empty() || !gain_harvest_candidates.is_empty())
+    {
+        notes.push(
+            "Repurchase on the next trading day, not the same day: a same-day sale and \
+             purchase of the same shares nets out as an intraday trade (speculative income), \
+             so no capital gain or loss is booked."
+                .to_string(),
+        );
+    }
+    if country == Country::Us && !loss_candidates.is_empty() {
+        notes.push(
+            "Losses are sold by lot (specific identification): record each sale with the \
+             `--lots` shown, so the ledger matches what the broker reports."
+                .to_string(),
+        );
     }
 
     HarvestSummary {
@@ -1689,6 +1903,9 @@ pub(crate) fn compute_harvest(
             (exemption_limit - realized_est.exemption_used).max(0.0),
             2,
         ),
+        carried_forward: carry,
+        tax_free_gain_room: round(tax_free_gain_room, 2),
+        notes,
         loss_candidates,
         gain_harvest_candidates,
         fifo_blocked,
@@ -1698,7 +1915,7 @@ pub(crate) fn compute_harvest(
     }
 }
 
-pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
+pub async fn cmd_harvest(market: Market, fmt: Format, carry: CarriedForward) -> Result<()> {
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.is_empty() {
         return match fmt {
@@ -1722,7 +1939,7 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
 
     let today = chrono::Local::now().date_naive();
     let (summary, val) =
-        harvest_summary(&views::LiveSource::new(), &portfolio, market, today).await?;
+        harvest_summary_with(&views::LiveSource::new(), &portfolio, market, today, carry).await?;
 
     match fmt {
         Format::Json => return output::print_json(&summary),
@@ -1842,23 +2059,63 @@ pub async fn cmd_harvest(market: Market, fmt: Format) -> Result<()> {
             .bold()
             .to_string(),
         );
-        if !summary.gain_harvest_candidates.is_empty() && summary.ltcg_exemption_remaining > 0.0 {
+        if (summary.tax_free_gain_room - summary.ltcg_exemption_remaining).abs() >= 1.0 {
+            print_kv(
+                "Tax-free LTCG room",
+                &format!(
+                    "{}{:.0} (the exemption plus losses that set off first)",
+                    csym, summary.tax_free_gain_room
+                ),
+            );
+        }
+        if !summary.gain_harvest_candidates.is_empty() && summary.tax_free_gain_room > 0.0 {
             println!(
                 "  {}",
-                "Long-term winners you can sell & re-buy to step up cost basis tax-free:".dimmed()
+                "Long-term winners you can sell & re-buy to step up cost basis tax-free (exact shares, oldest lots first):".dimmed()
             );
+            let rate = Country::India.lt_rate() * (1.0 + tax::INDIA_CESS_RATE);
             for r in &summary.gain_harvest_candidates {
                 println!(
-                    "  • {:<12} LTCG: {:>10} (saves up to {}{:.0} at 12.5%)",
+                    "  • {:<12} sell {:>8} → LTCG {:>10} (saves up to {}{:.0} at {:.0}% incl. cess)",
                     r.symbol.cyan().bold(),
+                    r.shares,
                     format!("+{}{:.0}", csym, r.lt_pnl).green(),
                     csym,
-                    r.estimated_tax_saved
+                    r.estimated_tax_saved,
+                    rate
                 );
             }
         }
     }
 
+    let cf = summary.carried_forward;
+    if cf.short_term > 0.0 || cf.long_term > 0.0 {
+        println!(
+            "\n  {} Counted losses brought forward: short-term {}{:.0}, long-term {}{:.0}",
+            "ℹ".cyan(),
+            csym,
+            cf.short_term,
+            csym,
+            cf.long_term
+        );
+    }
+    let lot_records: Vec<&str> = summary
+        .loss_candidates
+        .iter()
+        .filter_map(|r| r.record.as_deref().filter(|c| c.contains("--lots")))
+        .collect();
+    if !lot_records.is_empty() {
+        println!(
+            "\n  {}",
+            "Record each loss sale with its lots, so the ledger matches the broker:".dimmed()
+        );
+        for c in lot_records {
+            println!("    {c}");
+        }
+    }
+    for n in &summary.notes {
+        println!("\n  {} {}", "ℹ".cyan(), n.dimmed());
+    }
     println!(
         "\n  {}",
         "Consult a tax advisor. Brokerage charges apply."

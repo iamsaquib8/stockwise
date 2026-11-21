@@ -270,6 +270,7 @@ messages! {
     TotalInvested => "Total Invested", "कुल निवेश";
     PnL => "P&L", "लाभ/हानि";
     PnLPct => "P&L %", "लाभ/हानि %";
+    DayChange => "Day Change", "आज का बदलाव";
     TriggeredAlerts => "Triggered Alerts", "ट्रिगर हुए अलर्ट";
     GetStarted => "Get started", "शुरुआत करें";
     GetStartedTrack => "track a holding (symbol, shares, cost)", "होल्डिंग जोड़ें (सिंबल, शेयर, लागत)";

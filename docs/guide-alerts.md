@@ -120,7 +120,50 @@ If you would rather not keep a terminal open, run one pass on a schedule:
 
 `--once` checks every alert one time and exits. It remembers what it already
 sent, so the same trigger is not repeated. Cron uses the machine's clock, so
-check that your server is on IST or adjust the hours.
+check that your server is on IST or adjust the hours. Price levels are skipped
+while their market is closed or the quote is stale (more than 30 minutes old),
+so a pass at night never announces yesterday's close.
+
+### Only on the close, only on a cross
+
+```bash
+stockwise alert add RELIANCE cross-above-sma 200 --on-close   # completed sessions only
+stockwise alert add TCS above 4200 --cross                    # only when it crosses 4200
+```
+
+A moving-average alert normally fires on the live price; `--on-close` waits
+for the session's close. If the worker or `alert watch` was not running when a
+cross happened, the next check still announces it once (up to 10 sessions
+back). `--cross` makes a price level fire only on a crossing, never just
+because the price is already beyond it.
+
+## 4b. Let the worker watch every holding
+
+The background worker monitors every holding with no setup — big day drops,
+new 52-week lows, gaps, falls from cost or the peak, dates tomorrow, pledge,
+shareholding, rating and insider changes — and sends one digest after the
+close. See [Holding monitor and digest](commands.md#holding-monitor-and-digest).
+
+```bash
+stockwise worker start        # or `stockwise worker install` for a login service
+stockwise monitor             # thresholds, recent signals
+stockwise digest              # today's digest, printed
+stockwise today               # what moved and why, right now
+stockwise hot                 # your hottest names, then the market
+```
+
+Keep the night quiet and route by priority:
+
+```bash
+export STOCKWISE_QUIET_HOURS=22:00-07:00
+export STOCKWISE_NOTIFY_ROUTES=desktop=high,telegram=low
+```
+
+### A Telegram bot you can ask
+
+With the Telegram token and chat id set, `stockwise telegram` answers `/today`,
+`/hot`, `/review` and `/digest` from your chat (and ignores every other chat).
+`STOCKWISE_DIGEST_TIME=16:15` also sends the digest every trading day.
 
 ## 5. Run the paper-trading daemon (optional)
 
@@ -144,6 +187,9 @@ There is also a once-a-day research pass:
 ```bash
 stockwise daemon longterm   # scores NIFTY 500 / the S&P 1500 (final score for the 60 highest), snapshots wealth, checks alerts, lists holdings below cost
 ```
+
+With a notification channel configured, it sends its findings inside the
+day's digest.
 
 For how the bots decide and the risk limits, see [Bots and alerts](bots.md) and
 [Bot design](bot-design.md).
