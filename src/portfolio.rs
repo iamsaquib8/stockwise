@@ -2669,6 +2669,9 @@ mod tests {
             origin: None,
             bonuses: Vec::new(),
             bonus_shares: false,
+            charges: None,
+            fx_currency: None,
+            buy_fx_rate: None,
         });
         old.save_to(&path).unwrap();
 

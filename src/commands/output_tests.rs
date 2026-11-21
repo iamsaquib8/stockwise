@@ -981,6 +981,9 @@ fn goal_and_tax_export_json_shapes() {
         origin: None,
         bonuses: Vec::new(),
         bonus_shares: false,
+        charges: None,
+        fx_currency: None,
+        buy_fx_rate: None,
     };
     let india = serde_json::to_value(crate::tax_export::india_schedule(
         std::slice::from_ref(&sale),

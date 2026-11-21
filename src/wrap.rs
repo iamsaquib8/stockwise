@@ -845,6 +845,9 @@ mod tests {
             account: None,
             bonuses: Vec::new(),
             bonus_shares: false,
+            charges: None,
+            fx_currency: None,
+            buy_fx_rate: None,
             origin: None,
         });
         p.dividends.push(DividendReceived {
@@ -888,6 +891,9 @@ mod tests {
             account: None,
             bonuses: Vec::new(),
             bonus_shares: false,
+            charges: None,
+            fx_currency: None,
+            buy_fx_rate: None,
             origin: None,
         });
         assert_eq!(recorded_splits(&p, "AAA.NS").len(), 1);
@@ -943,6 +949,9 @@ mod tests {
             account: None,
             bonuses: vec!["bonus:2026-04-01:2:1".into()],
             bonus_shares: false,
+            charges: None,
+            fx_currency: None,
+            buy_fx_rate: None,
             origin: None,
         });
         assert_eq!(shares_at(&p, "AAA.NS", d("2026-03-31")), 200.0);
@@ -968,6 +977,9 @@ mod tests {
                 account: None,
                 bonuses,
                 bonus_shares,
+                charges: None,
+                fx_currency: None,
+                buy_fx_rate: None,
                 origin: None,
             };
         let mut p = Portfolio::default();
@@ -1018,6 +1030,9 @@ mod tests {
             account: None,
             bonuses: Vec::new(),
             bonus_shares: true,
+            charges: None,
+            fx_currency: None,
+            buy_fx_rate: None,
             origin: None,
         });
         assert_eq!(bonus_events(&p, "AAA.NS"), [d("2026-04-01")]);
