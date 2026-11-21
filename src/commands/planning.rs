@@ -39,7 +39,7 @@ const NSE_EQUITY_LIST: &str = "https://nsearchives.nseindia.com/content/equities
 /// ISINs of `symbols`: NSE's equity list for `.NS`/`.BO` shares, AMFI's NAV
 /// file for `MF:<code>` funds (both cached for 12 hours). Best effort — a
 /// failed download leaves those ISINs blank with a warning on stderr.
-async fn lookup_isins(symbols: &[String]) -> Vec<(String, String)> {
+pub(crate) async fn lookup_isins(symbols: &[String]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let shares: Vec<&String> = symbols
         .iter()
@@ -446,6 +446,19 @@ pub(crate) fn advance_tax_schedule(
     marks: &crate::offmarket::OffMarket,
     fmvs: &[(String, f64)],
 ) -> Result<tax::AdvanceTaxSchedule> {
+    advance_tax_schedule_with_income(portfolio, fy, payments, marks, fmvs, &[])
+}
+
+/// [`advance_tax_schedule`] with dividend and interest `income` added at
+/// the slab rate in the quarter it was received (`tax advance --slab`).
+pub(crate) fn advance_tax_schedule_with_income(
+    portfolio: &Portfolio,
+    fy: Option<&str>,
+    payments: &[tax::AdvancePayment],
+    marks: &crate::offmarket::OffMarket,
+    fmvs: &[(String, f64)],
+    income: &[tax::AdvanceIncome],
+) -> Result<tax::AdvanceTaxSchedule> {
     if payments.iter().any(|p| p.amount < 0.0) {
         bail!("Advance tax paid amount cannot be negative");
     }
@@ -505,35 +518,21 @@ pub(crate) fn advance_tax_schedule(
         advance_sales.push(tax::AdvanceTaxSale::new(sell_d, gain * scale, is_lt));
     }
 
-    Ok(tax::compute_advance_tax(
+    Ok(tax::compute_advance_tax_with_income(
         &advance_sales,
+        income,
         start,
         today,
         payments,
     ))
 }
 
-/// Advance tax quarterly instalment estimates under Section 208 and 211 with
-/// Section 234C(1) capital-gains proviso protections.
-pub async fn cmd_tax_advance(fy: Option<&str>, paid: &[String], json: bool) -> Result<()> {
-    let payments = paid
-        .iter()
-        .map(|p| tax::AdvancePayment::parse(p).map_err(|e| anyhow::anyhow!("--paid {p}: {e}")))
-        .collect::<Result<Vec<_>>>()?;
-    let portfolio = Portfolio::load()?;
-    let year_symbols: Vec<String> = portfolio
-        .realized
-        .iter()
-        .map(|s| s.symbol.clone())
-        .collect();
-    let marks = sale_marks(&views::LiveSource::new(), &year_symbols).await;
-    let fmvs = advance_fmvs(&portfolio).await;
-    let schedule = advance_tax_schedule(&portfolio, fy, &payments, &marks, &fmvs)?;
-
-    if json {
-        return output::print_json(&schedule);
-    }
-
+/// Print the advance tax schedule (`tax advance`): the four instalments,
+/// Sec. 208 and the Sec. 234B/C interest on the recorded `payments`.
+pub(crate) fn print_advance_tax(
+    schedule: &tax::AdvanceTaxSchedule,
+    payments: &[tax::AdvancePayment],
+) {
     let inr = |amount: f64| {
         if amount < 0.0 {
             format!("-₹{}", goals::indian_grouping(-amount))
@@ -681,9 +680,6 @@ pub async fn cmd_tax_advance(fy: Option<&str>, paid: &[String], json: bool) -> R
             "`--paid [DATE:]AMOUNT`".cyan()
         );
     }
-
-    println!("\n  {}\n", tax_export::DISCLAIMER.yellow().italic());
-    Ok(())
 }
 
 // ── Benchmark ──

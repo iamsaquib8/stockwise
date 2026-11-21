@@ -252,12 +252,13 @@ struct IntradayBar {
     high: f64,
     low: f64,
     close: f64,
-    volume: u64,
+    /// None when the feed left it out: never read as zero trades.
+    volume: Option<u64>,
 }
 
 /// Bars of an intraday chart, aligned by index: a bar missing its high, low
 /// or close is dropped as a whole (never shifted against the other columns);
-/// missing volume counts as zero.
+/// missing volume stays missing.
 fn intraday_bars(chart: &crate::api::ChartData) -> Vec<IntradayBar> {
     let Some(q) = chart.indicators.quote.first() else {
         return Vec::new();
@@ -279,11 +280,7 @@ fn intraday_bars(chart: &crate::api::ChartData) -> Vec<IntradayBar> {
                 high: at(&q.high, i)?,
                 low: at(&q.low, i)?,
                 close: at(&q.close, i)?,
-                volume: q
-                    .volume
-                    .as_ref()
-                    .and_then(|v| v.get(i).copied().flatten())
-                    .unwrap_or(0),
+                volume: q.volume.as_ref().and_then(|v| v.get(i).copied().flatten()),
             })
         })
         .collect()
@@ -311,29 +308,34 @@ fn session_stats(bars: &[IntradayBar], market: market::Market, today: NaiveDate)
     let Some(session) = days.get(&today).filter(|d| !d.is_empty()) else {
         return SessionStats::default();
     };
-    let traded: f64 = session.iter().map(|b| b.volume as f64).sum();
-    let vwap = (traded > 0.0).then(|| {
-        session
-            .iter()
-            .map(|b| (b.high + b.low + b.close) / 3.0 * b.volume as f64)
-            .sum::<f64>()
-            / traded
-    });
+    // Volume over a run of bars; None when any of them lacks it.
+    let volume_of = |bars: &mut dyn Iterator<Item = &&IntradayBar>| -> Option<f64> {
+        bars.map(|b| b.volume.map(|v| v as f64)).sum()
+    };
+    // VWAP over the bars whose volume is known.
+    let (tp_vol, known_vol) = session
+        .iter()
+        .filter_map(|b| {
+            b.volume
+                .map(|v| ((b.high + b.low + b.close) / 3.0, v as f64))
+        })
+        .fold((0.0, 0.0), |(a, n), (tp, v)| (a + tp * v, n + v));
+    let vwap = (known_vol > 0.0).then(|| tp_vol / known_vol);
 
     // Minutes into the session of today's latest bar, then each earlier
-    // session's volume up to the same minute.
+    // session's volume up to the same minute. A session (today's included)
+    // with a bar of unknown volume in that span is left out; a measured
+    // zero counts.
     let volume_pace = open_of(today).and_then(|open| {
+        let traded = volume_of(&mut session.iter())?;
         let elapsed = session.last()?.time - open;
         let expected: Vec<f64> = days
             .range(..today)
             .filter_map(|(date, bars)| {
                 let open = open_of(*date)?;
-                let v: f64 = bars
-                    .iter()
-                    .filter(|b| b.time - open <= elapsed)
-                    .map(|b| b.volume as f64)
-                    .sum();
-                (v > 0.0).then_some(v)
+                let mut covered = bars.iter().filter(|b| b.time - open <= elapsed).peekable();
+                covered.peek()?;
+                volume_of(&mut covered)
             })
             .collect();
         if expected.len() < MIN_PACE_SESSIONS {
@@ -406,14 +408,14 @@ fn compute_signal(
                 name: "VWAP Reclaim",
                 direction: Direction::Long,
                 strength: 75.0,
-                reason: "Price just reclaimed the session VWAP from below".into(),
+                reason: format!("Price {:.2}% above the session VWAP", dist_pct),
             });
         } else if dist_pct < 0.0 && dist_pct > -0.5 {
             strategies.push(StrategySignal {
                 name: "VWAP Rejection",
                 direction: Direction::Short,
                 strength: 65.0,
-                reason: "Price just lost the session VWAP".into(),
+                reason: format!("Price {:.2}% below the session VWAP", -dist_pct),
             });
         }
     }
@@ -446,10 +448,10 @@ fn compute_signal(
         }
     }
 
-    // ── Strategy: MACD Crossover (needs 36+ daily bars) ──
+    // ── Strategy: MACD Crossover (two consecutive histograms: 36+ bars) ──
     let macd = technical::macd(closes);
     let macd_histogram = macd.map(|(_, _, h)| h);
-    if closes.len() > 36 {
+    if closes.len() > 1 {
         let prev_macd = technical::macd(&closes[..closes.len() - 1]);
         if let (Some((_, _, hist)), Some((_, _, prev_hist))) = (macd, prev_macd) {
             if hist > 0.0 && prev_hist <= 0.0 {
@@ -717,7 +719,7 @@ pub const FIXED_RISK_PCT: f64 = 0.5;
 pub const NO_EDGE_RISK_PCT: f64 = 0.25;
 
 /// Sizing limits for [`generate_trade_plans_with`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanLimits {
     /// Most % of capital to lose on one trade if its exit level is hit.
     pub max_risk_pct: f64,
@@ -728,6 +730,10 @@ pub struct PlanLimits {
     /// Measured paper record (30+ closed trades) for Kelly sizing; None
     /// risks [`FIXED_RISK_PCT`] per trade.
     pub track_record: Option<crate::simulator::TrackRecord>,
+    /// Paper charges and slippage counted inside the risk budget: a fill at
+    /// the exact exit level loses no more than the budget, costs included.
+    /// None sizes on price risk alone.
+    pub costs: Option<crate::backtest::costs::CostModel>,
 }
 
 impl Default for PlanLimits {
@@ -737,8 +743,18 @@ impl Default for PlanLimits {
             max_position_pct: 30.0,
             max_positions: 5,
             track_record: None,
+            costs: None,
         }
     }
+}
+
+/// Whole shares in `x`, forgiving binary rounding: 99.99999999999 shares of
+/// budget is 100 shares, not 99.
+fn whole_shares(x: f64) -> u32 {
+    if !(x.is_finite() && x > 0.0) {
+        return 0;
+    }
+    (x + x.max(1.0) * 1e-9).floor().min(u32::MAX as f64) as u32
 }
 
 impl PlanLimits {
@@ -783,8 +799,10 @@ pub fn generate_trade_plans(
 ///
 /// - The exit level is at least 1 × ATR from the price: the prior session's
 ///   S1 (R1 for a short) is used only when it lies 1–2 ATR away.
-/// - Each trade risks [`PlanLimits::risk_pct`] of capital if its exit level
-///   is hit, and no position takes more than `max_position_pct`.
+/// - Each trade is sized so a fill at its exit level loses at most
+///   [`PlanLimits::risk_pct`] of capital (with `costs`, charges included);
+///   no position takes more than `max_position_pct`, which can leave the
+///   loss below that budget.
 /// - Walking down the ranking, a plan that doesn't fit in the capital left is
 ///   shrunk to what does (or dropped).
 ///
@@ -845,6 +863,14 @@ pub fn generate_trade_plans_with(
             Direction::Long => price - 1.5 * atr,
             Direction::Short => price + 1.5 * atr,
         };
+        // A level at or below zero (a huge ATR) could never be reached by a
+        // live price: no plan.
+        if ![stop_loss, trailing_stop, target1, target2]
+            .iter()
+            .all(|l| l.is_finite() && *l > 0.0)
+        {
+            continue;
+        }
 
         let risk_per_share = (price - stop_loss).abs();
         let profit_per_share = (target2 - price).abs();
@@ -853,18 +879,33 @@ pub fn generate_trade_plans_with(
         }
         let risk_reward = profit_per_share / risk_per_share;
 
-        // Size from the risk budget, capped per position.
-        let risk_capital = max_risk_per_trade / risk_per_share * price;
+        // Size from the risk budget, capped per position. The loss at the
+        // exact exit level includes the round trip's charges and slippage.
+        let long = signal.direction == Direction::Long;
+        let loss_at_exit = |qty: u32| {
+            qty as f64 * risk_per_share
+                + limits.costs.as_ref().map_or(0.0, |m| {
+                    crate::simulator::round_trip_cost(m, long, qty, price, &[(qty, stop_loss)])
+                })
+        };
         let max_capital = capital * (limits.max_position_pct / 100.0);
-        let position_capital = risk_capital.min(max_capital);
-
-        let qty = (position_capital / price).floor() as u32;
+        let cap_qty = whole_shares(max_capital / price);
+        let mut qty = whole_shares(max_risk_per_trade / risk_per_share).min(cap_qty);
+        if qty > 0 && limits.costs.is_some() {
+            // One proportional step for the costs, then share by share.
+            let per_share = loss_at_exit(qty) / qty as f64;
+            qty = qty.min(whole_shares(max_risk_per_trade / per_share));
+            let budget = max_risk_per_trade * (1.0 + 1e-9);
+            while qty > 0 && loss_at_exit(qty) > budget {
+                qty -= 1;
+            }
+        }
         if qty == 0 {
             continue;
         }
 
         let capital_required = qty as f64 * price;
-        let max_risk = qty as f64 * risk_per_share;
+        let max_risk = loss_at_exit(qty);
         let expected_profit = qty as f64 * profit_per_share;
         let position_pct = (capital_required / capital) * 100.0;
 
@@ -927,7 +968,7 @@ fn cap_total_allocation(
             break;
         }
         if plan.capital_required > remaining {
-            let qty = (remaining / plan.entry).floor() as u32;
+            let qty = whole_shares(remaining / plan.entry);
             if qty == 0 {
                 continue;
             }
@@ -1446,7 +1487,7 @@ mod tests {
         };
         let with = PlanLimits {
             track_record: Some(tr),
-            ..limits
+            ..limits.clone()
         };
         let (pct, kf) = with.risk_pct();
         assert!((kf - 0.125).abs() < 1e-9);
@@ -1639,7 +1680,7 @@ mod tests {
         assert_eq!(intraday.len(), 2);
         assert_eq!(
             (intraday[1].high, intraday[1].close, intraday[1].volume),
-            (31.0, 30.5, 300)
+            (31.0, 30.5, Some(300))
         );
     }
 
@@ -1661,9 +1702,101 @@ mod tests {
                 high: price + 1.0,
                 low: price - 1.0,
                 close: price,
-                volume: v,
+                volume: Some(v),
             })
             .collect()
+    }
+
+    #[test]
+    fn measured_zero_volume_counts_and_missing_volume_is_unknown() {
+        // Earlier sessions traded 0 and 200 by this minute; today 300: 3.0.
+        let mut bars = session_bars(26, 50.0, &[0, 0, 900]);
+        bars.extend(session_bars(27, 50.0, &[100, 100, 900]));
+        bars.extend(session_bars(28, 60.0, &[200, 100]));
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let s = session_stats(&bars, market::Market::In, today);
+        assert!((s.volume_pace.unwrap() - 3.0).abs() < 1e-9, "{s:?}");
+        // Today's opening bar without volume: the pace is unknown, not 0;
+        // the VWAP still uses the bars that have volume.
+        let n = bars.len();
+        bars[n - 2].volume = None;
+        let s = session_stats(&bars, market::Market::In, today);
+        assert_eq!(s.volume_pace, None);
+        assert!((s.vwap.unwrap() - 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn macd_votes_as_soon_as_two_histograms_exist() {
+        // 35 flat closes, then one up: the 35-bar histogram is 0 and the
+        // 36-bar one positive.
+        let mut closes = vec![100.0; 35];
+        closes.push(101.0);
+        let sig = compute_signal(
+            "T.NS",
+            &quote(),
+            101.0,
+            &crate::backtest::Bars::from_closes(&closes),
+            SessionStats::default(),
+            None,
+            None,
+        );
+        assert!(
+            strategy_names(&sig).contains(&"MACD Cross"),
+            "{:?}",
+            strategy_names(&sig)
+        );
+    }
+
+    #[test]
+    fn levels_at_or_below_zero_get_no_plan() {
+        // ATR of 110%: a 1-ATR exit level would be −10.
+        let signal = make_signal(80.0, Confidence::High, 110.0);
+        assert!(generate_trade_plans(&[signal], 25000.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn share_counts_survive_binary_rounding() {
+        // ₹240 budget (0.5% of ₹48,000) over a ₹2.40 stop is 100 shares;
+        // 100 − 97.6 is a hair over 2.4 in binary.
+        let mut signal = make_signal(80.0, Confidence::High, 2.0);
+        signal.support1 = Some(97.6);
+        let limits = PlanLimits {
+            max_position_pct: 100.0,
+            ..PlanLimits::default()
+        };
+        let plans = generate_trade_plans_with(&[signal], 48_000.0, limits);
+        assert_eq!(plans[0].qty, 100);
+    }
+
+    #[test]
+    fn the_risk_budget_includes_costs_at_the_exit_level() {
+        // $25,000, entry 100, exit level 98: 62 shares lose $124 on price
+        // alone but about $130 with slippage. With costs counted the loss at
+        // the exit level stays within the $125 budget.
+        let signal = make_signal(80.0, Confidence::High, 2.0);
+        let costs = crate::backtest::costs::CostModel::us();
+        let gross =
+            generate_trade_plans_with(&[signal.clone_signal()], 25_000.0, PlanLimits::default());
+        assert_eq!(gross[0].qty, 62);
+        let limits = PlanLimits {
+            costs: Some(costs.clone()),
+            ..PlanLimits::default()
+        };
+        let net = &generate_trade_plans_with(&[signal], 25_000.0, limits)[0];
+        let loss = net.qty as f64 * 2.0
+            + crate::simulator::round_trip_cost(&costs, true, net.qty, 100.0, &[(net.qty, 98.0)]);
+        assert!(loss <= 125.0 + 1e-9, "{loss}");
+        assert!((net.max_risk - loss).abs() < 1e-9);
+        // The largest such size: one more share would break the budget.
+        let more = (net.qty + 1) as f64 * 2.0
+            + crate::simulator::round_trip_cost(
+                &costs,
+                true,
+                net.qty + 1,
+                100.0,
+                &[(net.qty + 1, 98.0)],
+            );
+        assert!(more > 125.0);
     }
 
     #[test]
@@ -1746,6 +1879,7 @@ mod tests {
             max_position_pct: 30.0,
             max_positions: 10,
             track_record: None,
+            costs: None,
         };
         let plans = generate_trade_plans_with(&signals, 25000.0, limits);
         assert!(!plans.is_empty());
@@ -1780,6 +1914,7 @@ mod tests {
             max_position_pct: 10.0,
             max_positions: 5,
             track_record: None,
+            costs: None,
         };
         let plans = generate_trade_plans_with(&[signal], 25000.0, limits);
         assert_eq!(plans.len(), 1);

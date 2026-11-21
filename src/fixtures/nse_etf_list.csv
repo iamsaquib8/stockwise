@@ -1,0 +1,11 @@
+Symbol,Underlying,SecurityName,DateofListing,MarketLot,ISINNumber,FaceValue
+NIFTYBEES,Nifty 50 Index,Nippon India ETF Nifty 50 BeES,08-JAN-2002,1,INF204KB14I2,1
+ABCGLDX,Domestic Price of Gold,ABC Mutual Fund Gold Exchange Traded Fund,02-OCT-2026,1,INF000A01AA1,1
+SLVRX1,Domestic Price of Silver,XYZ Silver Exchange Traded Fund,02-OCT-2026,1,INF000A01AB9,1
+XYZNQ100,NASDAQ 100 Index,XYZ Nasdaq 100 ETF,05-NOV-2026,1,INF000A01AC7,1
+HSTECHX,Hang Seng TECH Index,PQR Hang Seng Tech ETF,05-NOV-2026,1,INF000A01AD5,1
+LMNT1D,Nifty 1D Rate Index,LMN Overnight ETF,05-NOV-2026,1,INF000A01AE3,1
+DEFG30,Nifty 10 yr Benchmark G-Sec Index,DEF 10Y Gilt ETF,05-NOV-2026,1,INF000A01AF0,1
+BHARAT31,Nifty BHARAT Bond Index - April 2031,Bharat Bond ETF April 2031,05-NOV-2026,1,INF000A01AG8,1
+PQRCPSE,Nifty CPSE Index,PQR CPSE ETF,05-NOV-2026,1,INF000A01AH6,1
+MIDQ50,Nifty Midcap150 Quality 50 Index,MNO Midcap Quality ETF,05-NOV-2026,1,INF000A01AI4,1

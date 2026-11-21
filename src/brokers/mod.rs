@@ -29,6 +29,9 @@ pub mod secrets;
 pub mod upstox;
 pub mod zerodha;
 
+/// CSV field splitting shared with the tax reconcile and ETF list readers.
+pub use http::csv_fields;
+
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
