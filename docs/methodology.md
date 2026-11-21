@@ -234,6 +234,159 @@ debt a stock had on a past date isn't available, only today's. So the actions
 can't be properly backtested without look-ahead bias, and no backtest is
 claimed.
 
+## IPO verdicts (methodology ipo-1)
+
+`stockwise ipo SYMBOL`, the Verdict column of the `stockwise ipo` board and
+the MCP tools `ipo_analyze` and `ipo_board` show the same verdict. It comes
+from one module, `src/ipo_verdict.rs`, on the listing-day model of
+`src/ipo_model.rs`; nothing else decides it. The rules are deterministic.
+When a rule or threshold below changes, `METHODOLOGY` in
+`src/ipo_verdict.rs` goes up.
+
+| Verdict | Meaning |
+|---|---|
+| APPLY | The listing case and the long-term case both pass |
+| APPLY – SELL ON LISTING | The listing case passes; valuation, the offer for sale or losses make the long-term case weak |
+| WAIT | The institutional book is not final yet; the trigger says which QIB multiple by 3 PM IST on the closing day would make it APPLY |
+| AVOID | A hard gate fired, or the final book gives a weak listing case |
+| NO CALL | Data coverage below 60%, no calibrated model, or an SME issue without red flags |
+| LISTED | The issue trades; the stock action engine ([Actions](#actions-methodology-1)) decides |
+
+Every verdict carries up to three reasons, a confidence level (high,
+medium, low), what would invalidate it (or the WAIT trigger), a review date
+(the listing date, or the closing day for WAIT), the data coverage and the
+fields missing, the methodology version and the disclaimer.
+
+### 1. Data coverage
+
+Missing data counts against coverage; nothing stands in at a neutral value.
+Mainboard fields: price band, lot size, the fresh/OFS split, QIB, NII and
+retail subscription and the retail application count (expected only once
+bidding opens), post-issue shares, profit after tax, P/E at the upper band,
+the peer median P/E, revenue growth, promoter holding after the issue, the
+OFS sellers (when there is an offer for sale) and the IPO market regime.
+Below 60% the verdict is NO CALL with the missing fields listed; any gate
+that already fired is shown with it.
+
+Valuation figures come from the RHP. StockWise does not parse the RHP: you
+save the figures from its "Capital Structure", "Basis for Offer Price" and
+"Restated Financial Information" sections in `ipo/<SYMBOL>.toml` in the data
+directory (`stockwise ipo SYMBOL --rhp-template` prints the file). The
+peers named in the RHP are quoted live (Yahoo).
+
+### 2. Valuation at the upper band
+
+- Post-issue shares = pre-issue shares + fresh shares (fresh issue amount ÷
+  upper band when the RHP count is not saved).
+- Market cap = post-issue shares × upper band.
+- P/E = market cap ÷ latest profit after tax.
+- P/B = market cap ÷ (latest net worth + fresh issue proceeds).
+- EV/Sales = (market cap + debt − cash − fresh proceeds) ÷ latest revenue.
+- ROE = profit ÷ net worth; D/E = debt ÷ net worth; revenue and profit
+  growth are compound annual rates over the years saved.
+- OFS share = offer for sale ÷ issue size; a seller of kind `pe` or `vc`
+  makes it a fund exit.
+- Peer median P/E, P/B and EV/Sales from live quotes of the peers.
+
+### 3. Hard gates (AVOID)
+
+| Gate | Threshold |
+|---|---|
+| P/E against the peer median | above 1.5× |
+| Offer for sale with a PE/VC fund selling | above 75% of the issue |
+| Loss-making | revenue growing less than 25% a year |
+| QIB subscription at close (mainboard) | below 1x |
+| Total subscription at close | below 1x |
+| Grey market premium | negative, read from two or more press headlines |
+| SME: no QIB portion | — |
+| SME: tiny float | issue under ₹10 crore |
+| SME: promoter holding after the issue | under 50% |
+
+GMP is unofficial press chatter read from headlines by pattern; it is never
+a model input, only this red flag, and only when two headlines agree.
+
+### 4. The listing-day model
+
+```text
+expected listing-day return % = b0 + b1·ln(1+QIB x) + b2·ln(1+NII x) + b3·ln(1+retail x) + b4·regime %
+```
+
+- Fitted by Huber robust regression (k = 1.345) on NSE mainboard issues:
+  final subscription from NSE's issue detail, listing-day close over the
+  issue price from Yahoo daily bars. SME issues are left out (they list
+  under a 90% pre-open price cap and trade in lots).
+- **Regime**: the recency-weighted median listing-day return of the
+  mainboard issues listed in the 180 days before (weights halve every 45
+  days), at least 8 of them. Fewer: the board says INSUFFICIENT DATA, the
+  model uses its training mean and the gap counts against coverage. Labels:
+  HOT ≥ +20%, CONSTRUCTIVE ≥ +8%, SELECTIVE ≥ 0%, COLD below 0%.
+- **P(loss)**, the probability of a listing-day close below the issue
+  price, is the share of the fit's residuals below −expected (21 stored
+  residual quantiles), not a normal curve. The 10th–90th percentile range
+  comes from the same quantiles.
+- `stockwise ipo calibrate` refits the model (on NSE data, or `--csv`),
+  prints n, R², residual sd and an in-sample check of P(loss), and with
+  `--save` keeps the fit as `ipo_model.json`, which then takes precedence.
+
+**Shipped fit.** None yet: NSE refused the machine the 0.9 fit was to be
+made on, so this release ships without built-in coefficients and mainboard
+issues get NO CALL until `stockwise ipo calibrate --save` has run. The fit
+date, n, R² and residual sd are printed with every verdict.
+
+### 5. Allotment odds and expected value
+
+- **Odds** of one minimum application = lots of that size available in the
+  category ÷ applications in it (NSE application counts). SEBI allots
+  retail one lot, and NII the minimum sNII application (just above ₹2
+  lakh), per applicant by lottery when a category is oversubscribed; a bNII
+  winner (above ₹10 lakh) receives that same sNII-sized packet. Without
+  application counts, 1 ÷ the share subscription is shown as a lower bound.
+  SME individual applications are at least two lots and above ₹2 lakh.
+- **Expected value** = odds × expected listing gain × allotted amount − the
+  return forgone on the blocked money (7% a year, for the days to the close
+  plus 4 days to allotment and refund or listing).
+
+### 6. The ladder
+
+1. Listed: LISTED. SME: AVOID on a red flag, else NO CALL.
+2. No model, or coverage below 60%: NO CALL.
+3. A hard gate: AVOID.
+4. Before 3 PM IST on the closing day: WAIT, with the trigger the smallest
+   QIB multiple (at least 1x, NII and retail held at their current levels)
+   at which the expected listing gain is positive, P(loss) is under 25% and
+   the expected value of a retail application is positive. If no multiple
+   up to 1,000x does it: AVOID.
+5. Final book: if the expected gain is not positive, P(loss) is 25% or more,
+   or the retail expected value is not positive: AVOID.
+6. Otherwise APPLY when P/E is at most 1.2× the peer median, the offer for
+   sale is at most 50% of the issue and the company is profitable; else
+   APPLY – SELL ON LISTING.
+
+**Confidence.** High: coverage 85%+, final book and P(loss) at most 10%.
+Medium: coverage 70%+ with a regime reading. Low otherwise. AVOID on a gate
+is high from 70% coverage.
+
+### 7. After the verdict
+
+- **Listing-day plan** (APPLY kinds): sell half the allotment at the
+  model's expected gain or better (all of it for APPLY – SELL ON LISTING),
+  exit the rest on a trade below the issue price, then the stock action
+  engine takes over.
+- **Anchor lock-in**: allotment is one working day after the close; half
+  the anchor shares unlock 30 days later and the rest 90 days later, shown
+  as supply overhang.
+- **Track record**: every verdict is logged to `ipo_signal_log.json` (one
+  per issue per day, the latest). `stockwise ipo review` takes each issue's
+  last verdict before close and reports, per verdict, the hit rate
+  (listing-day close above issue), mean and median listing-day return, the
+  return about three months (63 sessions) after listing and the excess over
+  NIFTY 50 over those months.
+
+**Honest limits.** The model sees the book, not the business: valuation
+enters only through the gates and the APPLY/SELL ON LISTING split. The fit
+is in-sample; `ipo review` is the out-of-sample evidence. Exchange holidays
+are not counted in the dates.
+
 ## Picks (methodology version 2)
 
 `stockwise picks` ranks the stocks of a market against each other and lists

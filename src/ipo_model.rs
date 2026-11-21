@@ -824,6 +824,6 @@ mod tests {
     fn const_round_trips_the_shape() {
         let c = as_const(&testing::model());
         assert!(c.starts_with("const BUILTIN: Option<Builtin> = Some(("));
-        assert_eq!(c.matches(", ").count() >= 24, true);
+        assert!(c.matches(", ").count() >= 24);
     }
 }

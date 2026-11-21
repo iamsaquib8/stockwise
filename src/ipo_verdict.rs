@@ -375,7 +375,7 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     }
     v.sort_by(f64::total_cmp);
     let m = v.len() / 2;
-    Some(if v.len() % 2 == 0 {
+    Some(if v.len().is_multiple_of(2) {
         (v[m - 1] + v[m]) / 2.0
     } else {
         v[m]
@@ -836,12 +836,12 @@ pub fn hard_gates(i: &Inputs) -> Vec<String> {
             None => "Loss-making, with no revenue growth on record to justify it".to_string(),
         });
     }
-    if i.book_final && i.board == BoardKind::Mainboard {
-        if let Some(q) = i.qib_x
-            && q < 1.0
-        {
-            g.push(format!("QIB portion only {q:.2}x subscribed at close"));
-        }
+    if i.book_final
+        && i.board == BoardKind::Mainboard
+        && let Some(q) = i.qib_x
+        && q < 1.0
+    {
+        g.push(format!("QIB portion only {q:.2}x subscribed at close"));
     }
     if i.book_final
         && let Some(t) = i.total_x
@@ -1093,7 +1093,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         Kind::ApplySellOnListing
     };
 
-    let threshold = model.qib_threshold(&features, |m, p| listing_ok(m, p));
+    let threshold = model.qib_threshold(&features, listing_ok);
     let valuation_reason = || match (v.pe, v.peer_median_pe, v.pe_vs_peers) {
         (Some(pe), Some(peer), Some(r)) => Some(format!(
             "P/E {pe:.1} at the upper band vs peer median {peer:.1} ({r:.2}×)"
