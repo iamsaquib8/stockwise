@@ -895,8 +895,9 @@ pub fn compute_advance_tax_with_income(
             .iter()
             .filter(|i| i.date >= fy_start && i.date <= fy_end)
             .map(|i| i.amount)
-            .sum(),
-        other_income_tax: income_tax_between(income, fy_start, fy_end),
+            .sum::<f64>()
+            + 0.0,
+        other_income_tax: income_tax_between(income, fy_start, fy_end) + 0.0,
         quarters,
     }
 }

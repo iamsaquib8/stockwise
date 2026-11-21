@@ -273,14 +273,20 @@ stockwise tax reconcile ~/Downloads/taxpnl-FY2026-27.xlsx
 
 ```text
   Tax Reconcile — StockWise vs Zerodha — FY 2026-27
-  3 matched (0 agree, 3 differ) · 1 only in StockWise · 1 only in Zerodha
+  3 matched (0 agree, 3 differ) · 3 only in StockWise · 1 only in Zerodha
 
-  ── Differences ──
+  Differences
   Symbol       Sold              Qty     StockWise       Zerodha        Diff  Likely reason
-  INFY         2026-05-12         10        ₹1,500     ₹1,468.80      ₹31.20  charges counted on one side only
+  INFY         2026-05-12         10        ₹1,500        ₹1,469         ₹31  charges counted on one side only
   TCS          2026-06-02          5        ₹2,000        ₹2,000          ₹0  buy date differs
                bought 2025-01-15 (StockWise) vs 2025-01-10 (Zerodha)
-  HDFCBANK     2026-07-20         10        ₹8,520        ₹8,520          ₹0  ...
+  HDFCBANK     2026-07-20         10       ₹11,000        ₹8,520      ₹2,480  grandfathering (31 Jan 2018 FMV) applied differently
+
+  Totals
+                  StockWise        Zerodha     Difference
+  STCG              ₹47,300         ₹1,869        ₹45,431
+  LTCG              ₹13,000        ₹10,520         ₹2,480
+  Intraday             ₹500             ₹0           ₹500
 ```
 
 Each difference gets a likely reason: a quantity gap (a missing buy, or a split

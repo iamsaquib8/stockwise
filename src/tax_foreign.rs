@@ -50,6 +50,17 @@ struct Piece {
     qty: f64,
     /// `None` while still held.
     sold: Option<(NaiveDate, f64)>,
+    /// Rupees actually paid per unit of the share's currency, when the lot
+    /// was bought with rupees and the rate was recorded.
+    paid_rate: Option<f64>,
+}
+
+/// The recorded rupee rate of a purchase: `fx_rate` when `fx_currency` is INR.
+fn inr_rate(currency: Option<&str>, rate: Option<f64>) -> Option<f64> {
+    currency
+        .filter(|c| c.eq_ignore_ascii_case("INR"))
+        .and(rate)
+        .filter(|r| r.is_finite() && *r > 0.0)
 }
 
 /// One row of Schedule FA Table A3.
@@ -123,6 +134,7 @@ fn acquisitions(portfolio: &Portfolio) -> Vec<(String, NaiveDate, f64, Vec<Piece
                     acquired,
                     qty: l.qty,
                     sold: None,
+                    paid_rate: inr_rate(l.fx_currency.as_deref(), l.fx_rate),
                 },
             );
         }
@@ -139,6 +151,7 @@ fn acquisitions(portfolio: &Portfolio) -> Vec<(String, NaiveDate, f64, Vec<Piece
                 acquired,
                 qty: s.qty,
                 sold: Some((sold, s.sell_price)),
+                paid_rate: inr_rate(s.fx_currency.as_deref(), s.buy_fx_rate),
             },
         );
     }
@@ -182,7 +195,8 @@ pub fn schedule_fa<'a>(
             .unwrap_or("USD")
             .to_string();
         let rate = |day: NaiveDate| fx(&currency, day);
-        let Some(initial_rate) = rate(acquired) else {
+        let recorded = pieces.iter().find_map(|p| p.paid_rate);
+        let Some(initial_rate) = recorded.or_else(|| rate(acquired)) else {
             fa.no_rate.push(symbol.clone());
             continue;
         };
@@ -518,6 +532,20 @@ mod tests {
         let csv = schedule_fa_csv(&fa);
         assert!(csv.starts_with("country,name_of_entity,nature_of_entity,date_of_acquiring,"));
         assert!(csv.contains("United States,AAPL,Company,2024-06-03,USD,10,"));
+    }
+
+    #[test]
+    fn the_initial_value_uses_the_rupee_rate_paid_when_recorded() {
+        let p = portfolio(serde_json::json!({
+            "holdings": [{"symbol": "MSFT", "shares": 2.0, "avg_cost": 400.0,
+                          "lots": [{"qty": 2.0, "price": 400.0, "date": "2025-03-03",
+                                    "source": "manual", "fx_currency": "INR",
+                                    "fx_rate": 87.5}]}],
+        }));
+        let closes = [(d("2025-06-02"), 450.0)];
+        let fa = schedule_fa(&p, 2025, |_| Some(&closes[..]), |_, _| Some(85.0));
+        assert_eq!(fa.rows[0].initial_value, 2.0 * 400.0 * 87.5);
+        assert_eq!(fa.rows[0].peak_value, 2.0 * 450.0 * 85.0);
     }
 
     #[test]

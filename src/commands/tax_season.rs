@@ -55,78 +55,30 @@ pub(crate) fn india_fy(fy: Option<&str>) -> Result<NaiveDate> {
 
 // ── Rupee rates ──
 
-/// Rupees per unit of other currencies, by day, from the ECB reference
-/// rates (Frankfurter). A day without a rate takes the nearest earlier one
-/// up to ten days back.
-///
-/// TODO(0.9 F): switch to `crate::fx_history::FxHistory` (cached in
-/// `cache.db`) once the portfolio-math stream is merged; this is the thin
-/// stand-in it asked for.
+/// Rupees per unit of other currencies, by day: the ECB reference rates
+/// of [`crate::fx_history`] (cached in `cache.db`). A day without a rate
+/// takes the nearest earlier one, up to ten days back.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RupeeRates {
-    series: Vec<(String, Vec<(NaiveDate, f64)>)>,
+    hist: crate::fx_history::FxHistory,
 }
 
 impl RupeeRates {
     /// Load the rates each `(currency, earliest day)` needs, up to today.
-    /// A currency the ECB does not publish, or a network failure, leaves it
-    /// without rates (callers name what they left out).
+    /// A currency the ECB does not publish, or a network failure with
+    /// nothing cached, leaves it without rates (callers name what they left
+    /// out).
     pub(crate) async fn load(needs: &[(String, NaiveDate)]) -> Self {
-        let mut wanted: Vec<(String, NaiveDate)> = Vec::new();
-        for (cur, from) in needs {
-            let (_, major) = crate::market::to_major(1.0, cur);
-            let major = major.to_uppercase();
-            if major == "INR" {
-                continue;
-            }
-            match wanted.iter_mut().find(|(c, _)| *c == major) {
-                Some((_, d)) => *d = (*d).min(*from),
-                None => wanted.push((major, *from)),
-            }
+        Self {
+            hist: crate::fx_history::FxHistory::load("INR", needs).await,
         }
-        let mut rates = Self::default();
-        if wanted.is_empty() {
-            return rates;
-        }
-        use crate::providers::{Provider, ProviderKind};
-        let Provider::Frankfurter(f) =
-            Provider::new(ProviderKind::Frankfurter, String::new(), None)
-        else {
-            return rates;
-        };
-        for (cur, from) in wanted {
-            let symbol = format!("{cur}INR=X");
-            match f
-                .daily(&symbol, Some(from - chrono::Duration::days(10)))
-                .await
-            {
-                Ok(series) => {
-                    let mut points: Vec<(NaiveDate, f64)> = series
-                        .bars
-                        .iter()
-                        .filter_map(|b| Some((b.date, b.close?)))
-                        .collect();
-                    points.sort_by_key(|p| p.0);
-                    rates.series.push((cur, points));
-                }
-                Err(e) => eprintln!("  Warning: no {cur}/INR rates ({e:#})"),
-            }
-        }
-        rates
     }
 
-    /// Rupees per unit of `currency` on `day` (pence and other minor units
-    /// are converted by the caller: this is the major currency's rate).
+    /// Rupees per unit of `currency`'s major unit on `day` (pence and other
+    /// minor units are scaled by the caller).
     pub(crate) fn rate(&self, currency: &str, day: NaiveDate) -> Option<f64> {
         let (_, major) = crate::market::to_major(1.0, currency);
-        let major = major.to_uppercase();
-        if major == "INR" {
-            return Some(1.0);
-        }
-        let points = &self.series.iter().find(|(c, _)| *c == major)?.1;
-        let idx = points.partition_point(|(d, _)| *d <= day);
-        let (d, r) = *points.get(idx.checked_sub(1)?)?;
-        ((day - d).num_days() <= 10 && r > 0.0).then_some(r)
+        self.hist.rate_on(&major, day)
     }
 }
 
@@ -146,6 +98,8 @@ async fn our_sales(
         .iter()
         .filter(|s| date_of(&s.sell_date).is_some_and(|d| d >= from && d <= to))
         .filter(|s| pf::symbol_currency(&s.symbol) == Some("INR"))
+        // Crypto is never in a stock broker's tax P&L (Schedule VDA).
+        .filter(|s| crate::market::AssetClass::of(&s.symbol) != crate::market::AssetClass::Crypto)
         .filter(|s| match (account, s.account_key()) {
             (Some(want), Some(have)) => want.eq_ignore_ascii_case(have),
             _ => true,
@@ -155,6 +109,7 @@ async fn our_sales(
     symbols.sort();
     symbols.dedup();
     let isins = super::planning::lookup_isins(&symbols).await;
+    let marks = super::planning::sale_marks(&views::LiveSource::new(), &symbols).await;
     let old = tax_export::grandfathered_symbols(&portfolio.realized, start);
     let fmvs = super::planning::fmv_31_jan_2018(&old).await;
     sales
@@ -162,7 +117,12 @@ async fn our_sales(
         .filter_map(|s| {
             let (b, d) = (date_of(&s.buy_date)?, date_of(&s.sell_date)?);
             let intraday = s.is_intraday();
-            let long = !intraday && Country::India.is_long_term(b, d);
+            // Debt funds, gold ETFs, SGBs: their own holding periods (Sec. 50AA, 112).
+            let long = !intraday
+                && match crate::offmarket::india_asset(&s.symbol, marks.mark(&s.symbol)) {
+                    Some(asset) => tax::india_rule(asset, b, d) == tax::IndiaRule::LongTerm112,
+                    None => Country::India.is_long_term(b, d),
+                };
             let fmv = fmvs.iter().find(|(f, _)| *f == s.symbol).map(|(_, v)| *v);
             let unit = tax_export::lot_unit_cost(&s.buy_date, long, s.buy_price, s.sell_price, fmv);
             Some(OurSale {
@@ -185,8 +145,7 @@ async fn our_sales(
                     Term::Short
                 },
                 grandfathered: unit != s.buy_price,
-                // TODO(0.9 F): the sale's recorded charges once `Sale` has them.
-                charges: 0.0,
+                charges: s.charges(),
             })
         })
         .collect()
@@ -997,7 +956,9 @@ pub(crate) fn other_gains(
             continue;
         };
         let rule = tax::india_rule(asset, b, d);
-        let gain = s.gain();
+        // Before charges, like the rest of `tax` (Sec. 115BBH allows no
+        // deduction but the cost anyway).
+        let gain = s.qty * (s.sell_price - s.buy_price);
         gains.push(tax::OtherGain {
             rule,
             gain,

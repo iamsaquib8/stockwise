@@ -276,7 +276,7 @@ pub fn income_report(
             let gross = units * per_unit;
             rows.push(IncomeRow {
                 date: day,
-                payer: format!("{} ({})", t.symbol, t.series),
+                payer: t.symbol.to_string(),
                 kind: IncomeKind::SgbInterest,
                 quarter: quarter_of(day),
                 currency: "INR".into(),

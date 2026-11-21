@@ -1275,12 +1275,16 @@ pub fn india_audit_rows(
         let actual_cost = s.qty * s.buy_price * scale;
         let cost_used = s.qty * unit_cost * scale;
         let sale_value = s.qty * s.sell_price * scale;
+        let raised = unit_cost != s.buy_price;
         let cost_rule = match fmv_unit {
-            Some(_) => "max(actual cost, min(31 Jan 2018 FMV, sale value)) — Sec. 55(2)(ac)".into(),
+            Some(_) if raised => {
+                "max(actual cost, min(31 Jan 2018 FMV, sale value)) — Sec. 55(2)(ac)".into()
+            }
+            Some(_) => "actual cost — not below the 31 Jan 2018 FMV (Sec. 55(2)(ac))".into(),
             None if old => "actual cost — the 31 Jan 2018 price could not be found".into(),
             None => "actual cost".to_string(),
         };
-        let (rule, term) = india_rule_of(s, long, fmv_unit.is_some(), marks);
+        let (rule, term) = india_rule_of(s, long, raised, marks);
         let n = i + 1;
         let sym = scrip(&s.symbol);
         let file_sym: String = sym
