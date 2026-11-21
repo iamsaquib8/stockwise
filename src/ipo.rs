@@ -391,6 +391,7 @@ pub async fn fetch_board(
         fetch_india_news_rss(yahoo, &news_query),
     );
 
+    notice_nse_ipo_failure(&session, [&curr_res, &up_res, &past_res]);
     let mut notes = Vec::new();
     let mut meta = Meta::default();
     let nse_board_failed = curr_res.is_err() || up_res.is_err();
@@ -605,6 +606,23 @@ pub fn board_coverage(meta: &mut Meta, ongoing: &[IpoSummaryRow], upcoming: &[Ip
     }
 }
 
+/// What the IPO commands fall back to when NSE's IPO pages fail.
+pub const IPO_FALLBACK: &str = "using BSE's public-issue pages instead";
+
+/// Announce the first failure of NSE's IPO pages on stderr, naming BSE as
+/// the stand-in. The session announces a refusal only once, so this also
+/// keeps the quote path's generic "using Yahoo Finance instead" from being
+/// printed for the same refusal. Returns whether a notice was printed.
+fn notice_nse_ipo_failure(
+    session: &crate::providers::session::Session,
+    results: [&Result<Value, FetchError>; 3],
+) -> bool {
+    results
+        .into_iter()
+        .find_map(|r| r.as_ref().err())
+        .is_some_and(|e| session.notice(e, IPO_FALLBACK))
+}
+
 /// Past issues read for the regime (the board shows fewer).
 const REGIME_PAST_ROWS: usize = 120;
 
@@ -779,6 +797,7 @@ pub async fn fetch_analysis(
         ),
         session.get_json("/api/public-past-issues", &[], PAST_TTL),
     );
+    notice_nse_ipo_failure(&session, [&curr_res, &up_res, &past_res]);
     let nse_note = match (&curr_res, &up_res, &past_res) {
         (Err(e), Err(_), Err(_)) => Some(format!("NSE's IPO pages are not answering ({e}).")),
         _ => None,
@@ -3438,6 +3457,33 @@ mod tests {
         );
         assert_eq!(opt.buckets[0].basis, "lower bound");
         assert!((opt.buckets[0].p_allot.unwrap() - 1.0 / 128.36).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn an_nse_ipo_refusal_names_bse_not_yahoo() {
+        use crate::providers::session::{DiskCache, Session};
+        let server =
+            crate::testutil::MockServer::start(vec![(403, "<HTML>Access Denied</HTML>".into())])
+                .await;
+        let session = Session::for_tests(nse::site(&server.url), DiskCache::Off);
+        let curr = session
+            .get_json("/api/ipo-current-issue", &[], Duration::ZERO)
+            .await;
+        let up = session
+            .get_json("/api/all-upcoming-issues", &[], Duration::ZERO)
+            .await;
+        let past = session
+            .get_json("/api/public-past-issues", &[], Duration::ZERO)
+            .await;
+        let err = curr.as_ref().unwrap_err().clone();
+        assert!(notice_nse_ipo_failure(&session, [&curr, &up, &past]));
+        // The quote path's generic notice for the same refusal stays quiet.
+        assert!(!session.notice(&err, "using Yahoo Finance instead"));
+        // Every feed answered: nothing to announce.
+        let fresh = Session::for_tests(nse::site(&server.url), DiskCache::Off);
+        let ok: Result<Value, FetchError> = Ok(Value::Array(vec![]));
+        assert!(!notice_nse_ipo_failure(&fresh, [&ok, &ok, &ok]));
+        assert!(IPO_FALLBACK.contains("BSE"));
     }
 
     #[test]

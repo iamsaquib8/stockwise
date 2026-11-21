@@ -389,19 +389,22 @@ impl Session {
     /// answering and what StockWise does instead. A refusal (or an
     /// unreachable site) is announced once; the requests skipped after it
     /// are not announced again.
-    pub fn notice(&self, err: &FetchError, fallback: &str) {
+    /// Returns whether the notice was printed (`false`: an earlier one
+    /// already covered this problem).
+    pub fn notice(&self, err: &FetchError, fallback: &str) -> bool {
         let key = match err {
             FetchError::Blocked(_) | FetchError::Unavailable(_) => "stopped".to_string(),
             _ => format!("{} — {}", err, fallback),
         };
-        if self
+        let first = self
             .noticed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key)
-        {
+            .insert(key);
+        if first {
             eprintln!("  \u{24d8} {} — {}", err, fallback);
         }
+        first
     }
 
     /// A format error for `what` (`"quote: no priceInfo"`).
