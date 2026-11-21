@@ -1,0 +1,55 @@
+{
+  "acqNameList": ["Asha Promoter Holdings LLP", "R. K. Director", "Sample Family Trust"],
+  "data": [
+    {
+      "symbol": "SAMPLE", "company": "Sample Industries Limited", "anex": "7(2)",
+      "acqName": "Asha Promoter Holdings LLP", "date": "16-Nov-2026 19:06",
+      "pid": "1001", "buyValue": "3750000", "sellValue": "-", "buyQuantity": "25000",
+      "sellquantity": "-", "secType": "Equity Shares", "secAcq": "25000",
+      "tdpTransactionType": "Buy", "xbrl": "-", "personCategory": "Promoter Group",
+      "befAcqSharesNo": "1000000", "befAcqSharesPer": "10.00", "secVal": "3750000",
+      "afterAcqSharesNo": "1025000", "afterAcqSharesPer": "10.25",
+      "acqfromDt": "13-Nov-2026", "acqtoDt": "14-Nov-2026", "intimDt": "15-Nov-2026",
+      "acqMode": "Market Purchase", "derivativeType": "-", "exchange": "NSE", "remarks": "-"
+    },
+    {
+      "symbol": "SAMPLE", "company": "Sample Industries Limited", "anex": "7(2)",
+      "acqName": "R. K. Director", "date": "12-Nov-2026 18:40",
+      "pid": "1002", "buyValue": "-", "sellValue": "1,200,000", "buyQuantity": "-",
+      "sellquantity": "8000", "secType": "Equity Shares", "secAcq": "8,000",
+      "tdpTransactionType": "Sell", "xbrl": "-", "personCategory": "Director",
+      "befAcqSharesNo": "50000", "befAcqSharesPer": "0.50", "secVal": "1,200,000",
+      "afterAcqSharesNo": "42000", "afterAcqSharesPer": "0.42",
+      "acqfromDt": "10-Nov-2026", "acqtoDt": "10-Nov-2026", "intimDt": "11-Nov-2026",
+      "acqMode": "Market Sale", "derivativeType": "-", "exchange": "NSE", "remarks": "-"
+    },
+    {
+      "symbol": "SAMPLE", "company": "Sample Industries Limited", "anex": "7(2)",
+      "acqName": "Asha Promoter Holdings LLP", "date": "06-Nov-2026 20:12",
+      "pid": "1003", "buyValue": "-", "sellValue": "-", "buyQuantity": "-",
+      "sellquantity": "-", "secType": "Equity Shares", "secAcq": "100000",
+      "tdpTransactionType": "Pledge Creation", "xbrl": "-", "personCategory": "Promoter Group",
+      "befAcqSharesNo": "1000000", "befAcqSharesPer": "10.00", "secVal": "-",
+      "afterAcqSharesNo": "1000000", "afterAcqSharesPer": "10.00",
+      "acqfromDt": "05-Nov-2026", "acqtoDt": "05-Nov-2026", "intimDt": "06-Nov-2026",
+      "acqMode": "Pledge Creation", "derivativeType": "-", "exchange": "NSE", "remarks": "-"
+    },
+    {
+      "symbol": "SAMPLE", "company": "Sample Industries Limited", "anex": "7(2)",
+      "acqName": "Sample Family Trust", "date": "03-Nov-2026 17:55",
+      "pid": "1004", "buyValue": "-", "sellValue": "-", "buyQuantity": "-",
+      "sellquantity": "40000", "secType": "Equity Shares", "secAcq": "40000",
+      "tdpTransactionType": "Sell", "xbrl": "-", "personCategory": "Promoters",
+      "befAcqSharesNo": "400000", "befAcqSharesPer": "4.00", "secVal": "0",
+      "afterAcqSharesNo": "360000", "afterAcqSharesPer": "3.60",
+      "acqfromDt": "01-Nov-2026", "acqtoDt": "01-Nov-2026", "intimDt": "02-Nov-2026",
+      "acqMode": "Off Market", "derivativeType": "-", "exchange": "NSE", "remarks": "Inter-se transfer"
+    },
+    {
+      "symbol": "SAMPLE", "company": "Sample Industries Limited", "anex": "7(2)",
+      "acqName": "Undated Row", "date": "-", "secAcq": "10",
+      "tdpTransactionType": "Buy", "personCategory": "Director",
+      "acqfromDt": "-", "acqtoDt": "-", "intimDt": "-", "acqMode": "Market Purchase"
+    }
+  ]
+}

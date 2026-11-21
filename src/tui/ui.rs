@@ -487,6 +487,7 @@ fn alert_label(a: &AlertCheckRow) -> String {
             target: a.target,
             period: a.period,
             created_at: String::new(),
+            ..Alert::new(&a.symbol, condition, a.target, a.period)
         }
         .short_label(),
     }

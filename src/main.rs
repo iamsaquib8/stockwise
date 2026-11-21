@@ -38,6 +38,7 @@ mod daemon;
 mod daemon_status;
 mod db;
 mod derivatives;
+mod digest;
 mod display;
 mod events;
 mod funds;
@@ -46,9 +47,11 @@ mod global_lists;
 mod goals;
 mod greeks;
 mod gsec;
+mod hot;
 mod i18n;
 mod income;
 mod index_weights;
+mod insider;
 mod insights;
 mod intraday;
 mod ipo;
@@ -56,6 +59,8 @@ mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod monitor;
+mod news;
 mod nifty500;
 mod notes;
 mod notify;
@@ -73,6 +78,7 @@ mod practice;
 mod provenance;
 mod providers;
 mod pta_export;
+mod pulse;
 mod rebalance;
 mod research;
 mod results;
@@ -517,6 +523,48 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         period: String,
     },
 
+    /// What changed in your portfolio today and why, the market backdrop and a news feed
+    #[command(after_help = "Examples:\n  \
+stockwise today                 holdings by day impact, watchlist, news feed\n  \
+stockwise today --days 3        news from the last three days\n  \
+stockwise today --json")]
+    Today {
+        /// News and filings from the last N days
+        #[arg(long, default_value = "2", value_parser = clap::value_parser!(u32).range(1..=14))]
+        days: u32,
+        /// Skip headlines and filings (faster)
+        #[arg(long)]
+        no_news: bool,
+        /// Most feed items to show
+        #[arg(long, default_value = "15")]
+        limit: usize,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+
+    /// What's hot: your hottest holdings and watchlist names, then the market
+    #[command(after_help = "Examples:\n  \
+stockwise hot                   your investments ranked by heat, then market lists\n  \
+stockwise hot --cap small       small caps only\n  \
+stockwise hot -m us --json\n\n\
+Heat = |excess move| in σ + volume surge + fresh news/filing importance + a date\n\
+within 3 days, scaled up by portfolio weight. Market lists: biggest moves, unusual\n\
+volume (RVOL), gaps, 52-week highs/lows, news mentions, sectors, themes, FII/DII\n\
+flows, bulk/block deals, F&O ban list, OI build-up and cross-market movers.")]
+    Hot {
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
+        /// India: an NSE index (nifty50 ... smallcap250) instead of the default list
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+        /// Rows per list
+        #[arg(long, default_value = "8")]
+        limit: usize,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+
     // ── Market ──
     /// Top gainers and losers today
     Movers {
@@ -550,7 +598,8 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[arg(long, value_enum, ignore_case = true)]
         cap: Option<market::CapFilter>,
     },
-    /// Fear & Greed style sentiment gauge
+    /// Fear & Greed style sentiment gauge: India VIX, Nifty 50 and midcaps with -m in;
+    /// VIX, S&P 500 and small caps with -m us
     Sentiment,
     /// Trend, volatility, breadth and valuation of the market (readings, not a signal)
     Conditions {
@@ -561,8 +610,18 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[command(flatten)]
         out: JsonOutput,
     },
-    /// Recent news headlines for a stock
-    News { symbol: String },
+    /// Recent news headlines and exchange/SEC filings for a stock
+    News {
+        symbol: String,
+        /// Only items from the last N days
+        #[arg(long, default_value = "3", value_parser = clap::value_parser!(u32).range(1..=30))]
+        days: u32,
+        /// Most items to show
+        #[arg(long, default_value = "15")]
+        limit: usize,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
     /// Sector rotation — which sectors lead and lag
     Rotation,
     /// Compare two sectors head to head (e.g. IT Bank)
@@ -1162,6 +1221,28 @@ that returns the `stockwise trade` command for you to run yourself.")]
         open: bool,
     },
 
+    /// One-line portfolio day change and quotes for tmux, waybar, sketchybar, starship
+    #[command(after_help = STATUSBAR_HELP)]
+    Statusbar {
+        /// Output dialect
+        #[arg(long, value_enum, default_value = "tmux", ignore_case = true)]
+        format: commands::StatusbarFormat,
+        /// Show these symbols instead of the portfolio, e.g. RELIANCE,TCS
+        #[arg(long, value_delimiter = ',', value_name = "A,B")]
+        symbols: Vec<String>,
+        /// At most this many symbols after the portfolio change
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(0..=20))]
+        max: u64,
+        /// Go to the network at most once per SECS (the line is cached in between)
+        #[arg(
+            long,
+            default_value_t = 60,
+            value_name = "SECS",
+            value_parser = clap::value_parser!(u64).range(5..=86400)
+        )]
+        refresh: u64,
+    },
+
     // ── Setup ──
     /// Encrypted, portable backup of your data: export to a .swbak file, restore from one
     #[command(after_help = "Examples:\n  \
@@ -1187,6 +1268,28 @@ STOCKWISE_BACKUP_PASSPHRASE. Broker tokens, caches and notification secrets are 
     Notify {
         #[command(subcommand)]
         action: Option<NotifyCmd>,
+    },
+
+    /// Automatic monitoring of every holding: big drops, 52-week lows, gaps, dates tomorrow, ...
+    Monitor {
+        #[command(subcommand)]
+        action: Option<MonitorCmd>,
+    },
+
+    /// The after-close digest: day P&L, contributors with reasons, alerts, dates coming up
+    Digest {
+        /// Send it to the notification channels too
+        #[arg(long)]
+        send: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+
+    /// Two-way Telegram bot: /hot, /today, /review, /digest, plus scheduled digests
+    Telegram {
+        /// Answer pending messages once and exit
+        #[arg(long)]
+        once: bool,
     },
 
     /// Check for a new release and update this binary (or print the package manager's command)
@@ -1251,7 +1354,36 @@ enum WorkerAction {
     /// Is it running, and what is queued
     Status,
     /// Run it in this terminal (what `start` launches)
-    Run,
+    Run {
+        /// One pass and exit (for cron): alerts, the holding monitor, held
+        /// notices, and the post-close digest when it is due
+        #[arg(long)]
+        once: bool,
+    },
+    /// Start it at login as a user launchd agent (macOS) or systemd user service (Linux)
+    #[command(after_help = "Examples:\n  \
+stockwise worker install --dry-run       show the unit file and commands, change nothing\n  \
+stockwise -m us worker install           the worker for the US market\n\n\
+Writes ~/Library/LaunchAgents/com.stockwise.worker.plist or\n\
+~/.config/systemd/user/stockwise-worker.service (never a system-wide location),\n\
+running this executable with `worker run`. STOCKWISE_HOME, STOCKWISE_CONFIG and\n\
+STOCKWISE_PORTFOLIO are carried over when set.")]
+    Install {
+        /// Print the unit file and the commands without writing or running anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Minutes to wait before restarting a worker that exited with an error
+        #[arg(long, default_value_t = 1, value_name = "MIN", value_parser = clap::value_parser!(u64).range(1..=1440))]
+        interval: u64,
+    },
+    /// Stop the login service and remove its unit file
+    Uninstall {
+        /// Print what would be run and removed, and do nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Is the login service installed and loaded
+    ServiceStatus,
 }
 
 #[derive(Subcommand)]
@@ -2258,6 +2390,12 @@ enum AlertCmd {
         /// Save even if Yahoo Finance does not know the ticker
         #[arg(long)]
         force: bool,
+        /// Crosses and breakouts: judge completed sessions only, not the intraday price
+        #[arg(long)]
+        on_close: bool,
+        /// Price levels: notify only when the price crosses the level (not while it stays beyond)
+        #[arg(long)]
+        cross: bool,
     },
     /// Remove an alert by its number from `alert list`
     #[command(alias = "rm")]
@@ -2631,6 +2769,29 @@ impl TableOutput {
 fn mf_period(s: &str) -> Result<String, String> {
     funds::parse_period(s).map(|_| s.trim().to_lowercase())
 }
+
+const STATUSBAR_HELP: &str = "\
+Prints one compact line such as `▲ ₹+12.3k (+0.8%) · RELIANCE +1.2% · TCS −0.4%`:
+the portfolio's day change, then its largest holdings and watchlist symbols.
+It answers from statusbar_cache.json in the data directory and fetches at most
+once per --refresh seconds, within 3 s; on failure the cached line is shown
+with `(as of HH:MM)`. With every market closed it fetches the close once.
+
+Formats:
+  tmux        #[fg=green]…#[default] colour codes
+  waybar      {\"text\",\"tooltip\",\"class\"}; class is up, down, flat or stale
+  sketchybar  label='…' label.color=0xAARRGGBB, for
+              eval \"sketchybar --set $NAME $(stockwise statusbar --format sketchybar)\"
+  starship    plain text, no colour codes
+  json        portfolio value and day change, rows, as_of, stale
+
+Examples:
+  set -g status-right '#(stockwise statusbar)'          in ~/.tmux.conf
+  stockwise statusbar --format waybar --max 2
+  stockwise statusbar --symbols RELIANCE,TCS --format starship
+  stockwise statusbar -m us --symbols AAPL,MSFT --refresh 120
+
+docs/commands.md has waybar, sketchybar and starship snippets.";
 
 const COMMODITY_HELP: &str = "\
 Spot is the COMEX front-month future (Yahoo GC=F / SI=F) converted at USD/INR:
@@ -3049,6 +3210,24 @@ impl From<StrategyArg> for payoff::Preset {
             StrategyArg::CoveredCall => payoff::Preset::CoveredCall,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum MonitorCmd {
+    /// Thresholds, the worker and recent signals
+    #[command(alias = "show")]
+    Status {
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// One pass over every holding now
+    Run {
+        /// Send new signals to the notification channels
+        #[arg(long)]
+        notify: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3521,6 +3700,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "deep",
             "markets",
             "dashboard",
+            "today",
+            "hot",
             "search",
             "doctor",
             "cache",
@@ -3592,6 +3773,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "portfolio",
             "watch",
             "alert",
+            "monitor",
+            "digest",
             "calendar",
             "export",
             "import",
@@ -3606,13 +3789,14 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Planning", &["goal"]),
     ("AI assistants", &["ask", "mcp", "connect", "undo"]),
-    ("Interfaces", &["tui", "serve"]),
+    ("Interfaces", &["tui", "serve", "statusbar"]),
     ("Live trading", &["trade"]),
     (
         "Setup",
         &[
             "profile",
             "notify",
+            "telegram",
             "config",
             "backup",
             "update",
@@ -4666,10 +4850,18 @@ async fn dispatch(
         },
         Commands::Worker { action } => {
             let name = match action {
+                WorkerAction::Install { dry_run, interval } => {
+                    return commands::cmd_worker_install(m, dry_run, interval);
+                }
+                WorkerAction::Uninstall { dry_run } => {
+                    return commands::cmd_worker_uninstall(dry_run);
+                }
+                WorkerAction::ServiceStatus => return commands::cmd_worker_service_status(),
                 WorkerAction::Start => "start",
                 WorkerAction::Stop => "stop",
                 WorkerAction::Status => "status",
-                WorkerAction::Run => "run",
+                WorkerAction::Run { once: false } => "run",
+                WorkerAction::Run { once: true } => "once",
             };
             commands::cmd_worker(name, m).await
         }
@@ -4790,11 +4982,16 @@ async fn dispatch(
             commands::cmd_sectors(m, name, cap, out.into()).await
         }
         Commands::Heatmap { universe, cap } => commands::cmd_heatmap(m, universe, cap).await,
-        Commands::Sentiment => commands::cmd_sentiment().await,
+        Commands::Sentiment => commands::cmd_sentiment(m).await,
         Commands::Conditions { universe, out } => {
             commands::cmd_conditions(m, universe, out.json).await
         }
-        Commands::News { symbol } => commands::cmd_news(&symbol, m).await,
+        Commands::News {
+            symbol,
+            days,
+            limit,
+            out: news_out,
+        } => commands::cmd_news(&symbol, m, days, limit, news_out.json).await,
         Commands::Rotation => commands::cmd_rotation(m).await,
         Commands::Sectorcmp { sector1, sector2 } => {
             commands::cmd_sectorcmp(&sector1, &sector2, m).await
@@ -5373,10 +5570,17 @@ async fn dispatch(
                 target,
                 period,
                 force,
+                on_close,
+                cross,
             }) => {
                 let condition = value_name(condition);
                 let period = period.map(|p| p as usize);
-                commands::cmd_alert_add(&symbol, &condition, target, period, force, m).await
+                let opts = crate::alerts::AddOptions {
+                    force,
+                    on_close,
+                    cross,
+                };
+                commands::cmd_alert_add(&symbol, &condition, target, period, opts, m).await
             }
             Some(AlertCmd::Remove { index }) => commands::cmd_alert_remove(index),
             Some(AlertCmd::Check { out: check }) => commands::cmd_alert_check(out.or(check)).await,
@@ -5665,6 +5869,12 @@ async fn dispatch(
             allow_remote,
             open,
         } => commands::cmd_serve(&bind, allow_remote, open, m).await,
+        Commands::Statusbar {
+            format,
+            symbols,
+            max,
+            refresh,
+        } => commands::cmd_statusbar(m, format, &symbols, max as usize, refresh).await,
         Commands::Ask {
             question,
             interactive,
@@ -5803,6 +6013,29 @@ async fn dispatch(
                 } => backup::cmd_restore(&path, dry_run, src(passphrase_fd)),
             }
         }
+        Commands::Today {
+            days,
+            no_news,
+            limit,
+            out,
+        } => commands::cmd_today(m, days, no_news, limit, out.json).await,
+        Commands::Hot {
+            cap,
+            universe,
+            limit,
+            out,
+        } => commands::cmd_hot(m, cap, universe, limit, out.json).await,
+        Commands::Monitor { action } => match action {
+            None => commands::cmd_monitor("status", false, false, m).await,
+            Some(MonitorCmd::Status { out }) => {
+                commands::cmd_monitor("status", false, out.json, m).await
+            }
+            Some(MonitorCmd::Run { notify, out }) => {
+                commands::cmd_monitor("run", notify, out.json, m).await
+            }
+        },
+        Commands::Digest { send, out } => commands::cmd_digest(send, out.json, m).await,
+        Commands::Telegram { once } => commands::cmd_telegram_bot(once, m).await,
         Commands::Notify { action } => match action {
             Some(NotifyCmd::Test) => commands::cmd_notify("test").await,
             Some(NotifyCmd::Status) | None => commands::cmd_notify("status").await,

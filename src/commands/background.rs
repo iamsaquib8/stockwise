@@ -176,6 +176,7 @@ pub async fn cmd_worker(action: &str, market: Market) -> Result<()> {
             }
         }
         "run" => worker::run_worker(market).await?,
+        "once" => worker::run_once(market).await?,
         _ => {
             let s = worker::status();
             print_header("Worker");

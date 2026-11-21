@@ -68,7 +68,6 @@ impl Kind {
     fn sentiment_prior(&self) -> f64 {
         match self {
             Kind::Orders => 0.4,
-            Kind::CorporateAction => 0.2,
             Kind::Deal | Kind::Product => 0.1,
             Kind::Regulatory => -0.4,
             _ => 0.0,
@@ -127,30 +126,130 @@ pub struct Digest {
 // Text analysis (pure)
 // ───────────────────────────────────────────────────────────────
 
-fn has_any(t: &str, words: &[&str]) -> bool {
+/// Lower-cased word tokens of `text`. Letters, digits and the in-word marks
+/// `-`, `'` and `&` make up a word ("52-week", "didn't", "l&t"); currency
+/// signs and `%` are tokens of their own; any other character separates.
+pub fn words(text: &str) -> Vec<String> {
+    fn flush(cur: &mut String, out: &mut Vec<String>) {
+        let w = cur.trim_matches(['-', '\'', '&']);
+        if !w.is_empty() {
+            out.push(w.to_string());
+        }
+        cur.clear();
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars() {
+        let c = if matches!(c, '\u{2019}' | '\u{2018}') {
+            '\''
+        } else {
+            c
+        };
+        if c.is_alphanumeric() || matches!(c, '-' | '\'' | '&') {
+            cur.extend(c.to_lowercase());
+        } else {
+            flush(&mut cur, &mut out);
+            if matches!(c, '₹' | '$' | '€' | '£' | '%') {
+                out.push(c.to_string());
+            }
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// Whether token `tok` is the word `word` or a regular inflection of it:
+/// -s, -es, -ed, -d, -ing, a final `e` dropped (rise → rising), a final
+/// consonant doubled (drop → dropped) or `y` → `ies`/`ied` (rally →
+/// rallies). A word ending in `*` matches any token starting with the
+/// rest ("collaborat*"). Whole words only: "commissioned" is not "miss"
+/// and "windfall" is not "fall".
+fn word_matches(tok: &str, word: &str) -> bool {
+    if let Some(stem) = word.strip_suffix('*') {
+        return tok.starts_with(stem);
+    }
+    if tok == word {
+        return true;
+    }
+    if let Some(rest) = tok.strip_prefix(word) {
+        let sibilant = ["s", "x", "z", "ch", "sh"]
+            .iter()
+            .any(|e| word.ends_with(e));
+        if matches!(rest, "s" | "ed" | "ing")
+            || (rest == "es" && sibilant)
+            || (rest == "d" && word.ends_with('e'))
+        {
+            return true;
+        }
+        // drop → dropped, cut → cutting
+        let mut chars = rest.chars();
+        let last = word.chars().last();
+        return last.is_some_and(|l| l.is_ascii_alphabetic() && !"aeiouy".contains(l))
+            && chars.next() == last
+            && matches!(chars.as_str(), "ed" | "ing");
+    }
+    if let Some(stem) = word.strip_suffix('e')
+        && tok.strip_prefix(stem) == Some("ing")
+    {
+        return true;
+    }
+    if let Some(stem) = word.strip_suffix('y')
+        && matches!(tok.strip_prefix(stem), Some("ies" | "ied"))
+    {
+        return true;
+    }
+    false
+}
+
+/// Whether the phrase `parts` (words, see [`word_matches`]) starts at
+/// token `i`.
+fn phrase_at(toks: &[String], i: usize, parts: &[String]) -> bool {
+    !parts.is_empty()
+        && parts
+            .iter()
+            .enumerate()
+            .all(|(k, p)| toks.get(i + k).is_some_and(|t| word_matches(t, p)))
+}
+
+/// Token positions where `phrase` (space-separated words) starts.
+fn phrase_starts<'a>(toks: &'a [String], phrase: &str) -> impl Iterator<Item = usize> + 'a {
+    let parts: Vec<String> = phrase.split_whitespace().map(str::to_string).collect();
+    (0..toks.len()).filter(move |&i| phrase_at(toks, i, &parts))
+}
+
+/// Whether any of `phrases` occurs in `toks` as whole words.
+fn has_any(toks: &[String], phrases: &[&str]) -> bool {
+    phrases
+        .iter()
+        .any(|p| phrase_starts(toks, p).next().is_some())
+}
+
+/// Plain substring test, for filing categories whose wording is fixed
+/// ("con. call", "reg. 74").
+fn contains_any(t: &str, words: &[&str]) -> bool {
     words.iter().any(|w| t.contains(w))
 }
 
 /// Classify a headline/filing into an event category.
 pub fn classify(text: &str) -> Kind {
-    let t = format!(" {} ", text.to_lowercase());
+    let t = words(text);
     if has_any(
         &t,
         &[
-            "insider",
-            "promoter buys",
-            "promoter sells",
+            "insider*",
+            "promoter buy",
+            "promoter sell",
             "promoters buy",
             "promoters sell",
             "block deal",
             "bulk deal",
             "pledge",
             "stake sale by promoter",
-            "offloads stake",
-            "sells stake",
-            "buys stake in",
-            "raises stake",
-            "ofs ",
+            "offload stake",
+            "sell stake",
+            "buy stake in",
+            "raise stake",
+            "ofs",
         ],
     ) {
         return Kind::Insider;
@@ -160,26 +259,26 @@ pub fn classify(text: &str) -> Kind {
         &[
             "sebi",
             "penalty",
-            " fine ",
-            " fined",
+            "penalties",
+            "fine",
             "probe",
-            " raid",
+            "raid",
             "lawsuit",
-            " court",
+            "court",
             "tax demand",
             "gst notice",
             "show cause",
             "show-cause",
-            "investigation",
+            "investigation*",
             "antitrust",
             "recall",
-            " ban ",
+            "ban",
             "litigation",
             "nclt",
-            " cbi ",
-            "fraud",
-            "violation",
-            "regulator",
+            "cbi",
+            "fraud*",
+            "violation*",
+            "regulator*",
             "warning letter",
             "usfda observation",
             "form 483",
@@ -194,21 +293,19 @@ pub fn classify(text: &str) -> Kind {
             "price target",
             "upgrade",
             "downgrade",
-            " rating",
+            "rating",
             "outperform",
             "underperform",
             "overweight",
             "underweight",
             "brokerage",
-            "initiates coverage",
             "initiate coverage",
             "buy call",
             "sell call",
             "reiterate",
             "target to",
             "target of",
-            "analysts ",
-            "analyst ",
+            "analyst",
             "motilal",
             "jefferies",
             "clsa",
@@ -226,34 +323,34 @@ pub fn classify(text: &str) -> Kind {
     let quarter = has_any(
         &t,
         &[
-            " q1", " q2", " q3", " q4", "quarter", " h1", " h2", "fy2", "fy3",
+            "q1*", "q2*", "q3*", "q4*", "quarter*", "h1*", "h2*", "fy2*", "fy3*",
         ],
     );
     if has_any(
         &t,
         &[
-            "financial result",
-            "quarterly result",
+            "financial result*",
+            "quarterly result*",
             "earnings call",
             "earnings beat",
             "earnings miss",
-            "beats estimates",
-            "misses estimates",
+            "beat estimates",
+            "miss estimates",
             "guidance",
         ],
     ) || (quarter
         && has_any(
             &t,
             &[
-                "result",
-                "profit",
-                "revenue",
+                "result*",
+                "profit*",
+                "revenue*",
                 "earnings",
-                " pat",
+                "pat",
                 "ebitda",
                 "net income",
-                " eps",
-                "margin",
+                "eps",
+                "margin*",
                 "sales",
             ],
         ))
@@ -263,11 +360,11 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            "dividend",
+            "dividend*",
             "bonus",
             "stock split",
             "share split",
-            "split ",
+            "split",
             "buyback",
             "buy-back",
             "buy back",
@@ -279,22 +376,22 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            " qip",
+            "qip",
             "fund raise",
-            "fundraise",
-            "raises rs",
-            "raises ₹",
-            "raises $",
-            " ncd",
-            "debenture",
-            " bonds",
+            "fundraise*",
+            "raise rs",
+            "raise ₹",
+            "raise $",
+            "ncd*",
+            "debenture*",
+            "bonds",
             "rights issue",
             "credit rating",
             "rating agency",
-            " crisil",
-            " icra",
+            "crisil",
+            "icra",
             "allotment",
-            " ipo",
+            "ipo",
         ],
     ) {
         return Kind::Capital;
@@ -302,16 +399,15 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            " order",
+            "order",
             "contract",
-            " bags ",
-            " wins ",
-            " win ",
+            "bag",
+            "win",
             "secures",
             "awarded",
             "letter of award",
-            " loa ",
-            "tender",
+            "loa",
+            "tender*",
             "notice to proceed",
             "mandate",
         ],
@@ -321,19 +417,19 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            "acquire",
-            "acquisition",
-            "merger",
+            "acquire*",
+            "acquisition*",
+            "merger*",
             "joint venture",
-            " jv ",
-            "partnership",
-            " mou",
-            "collaborat",
-            "alliance",
-            "divest",
+            "jv",
+            "partnership*",
+            "mou",
+            "collaborat*",
+            "alliance*",
+            "divest*",
             "demerger",
             "takeover",
-            " stake ",
+            "stake",
             "partners with",
             "tie-up",
             "tie up",
@@ -344,17 +440,17 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            " ceo",
-            " cfo",
-            " coo",
-            " md ",
+            "ceo",
+            "cfo",
+            "coo",
+            "md",
             "managing director",
             "chairman",
-            "appoint",
-            "resign",
-            "steps down",
+            "appoint*",
+            "resign*",
+            "step down",
             "board of directors",
-            "director",
+            "director*",
             "succession",
             "elevated",
             "re-appointment",
@@ -365,28 +461,28 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            "launch",
-            "unveil",
-            "commission",
-            "deliver",
-            "introduces",
-            " plant",
+            "launch*",
+            "unveil*",
+            "commission*",
+            "deliver*",
+            "introduce",
+            "plant*",
             "capacity",
             "expansion",
             "facility",
             "rollout",
             "roll out",
-            "inaugurat",
+            "inaugurat*",
         ],
     ) {
         return Kind::Product;
     }
-    if has_any(&t, &[" shares ", " stock ", "share price", " shares,"])
+    if has_any(&t, &["shares", "stock", "share price"])
         && has_any(
             &t,
             &[
-                " rise", " fall", " jump", "surge", "slump", "rally", "52-week", " gain",
-                "decline", "tumble", "soar", " drop", "plunge", "crash",
+                "rise", "rose", "fall", "fell", "jump", "surge", "slump", "rally", "52-week",
+                "gain", "decline", "tumble", "soar", "drop", "plunge", "crash",
             ],
         )
     {
@@ -395,36 +491,41 @@ pub fn classify(text: &str) -> Kind {
     Kind::Other
 }
 
-const POSITIVE: &[(&str, f64)] = &[
+/// Words and phrases that read as good news, with their weight. Base forms:
+/// inflections match too (see [`word_matches`]), so "beat" covers "beats"
+/// and "surge" covers "surged". `lexicon_sentiment` and the `sentiment`
+/// command's headline count both use this list.
+pub const POSITIVE: &[(&str, f64)] = &[
     ("record", 1.0),
     ("surge", 1.0),
     ("soar", 1.0),
     ("jump", 0.8),
     ("rally", 0.8),
+    ("rebound", 0.6),
+    ("climb", 0.5),
     ("beat", 1.0),
     ("outperform", 0.8),
     ("upgrade", 1.2),
-    ("raises target", 1.0),
-    ("target raised", 1.0),
+    ("raise target", 1.0),
+    ("target raise", 1.0),
     ("raised to", 0.6),
-    ("bags", 0.8),
-    ("wins", 0.8),
-    ("secures", 0.8),
-    ("bagged", 0.8),
+    ("bag", 0.8),
+    ("win", 0.8),
+    ("secure", 0.8),
     ("strong", 0.6),
     ("robust", 0.6),
     ("growth", 0.4),
     ("rise", 0.5),
-    ("rises", 0.5),
+    ("rose", 0.5),
     ("gain", 0.5),
-    ("up ", 0.2),
+    ("up", 0.2),
     ("profit up", 0.8),
     ("bullish", 0.8),
     ("buy rating", 0.8),
     ("overweight", 0.6),
     ("approval", 0.7),
-    ("approves", 0.5),
-    ("expands", 0.5),
+    ("approve", 0.5),
+    ("expand", 0.5),
     ("expansion", 0.4),
     ("highest", 0.6),
     ("all-time high", 0.8),
@@ -442,27 +543,32 @@ const POSITIVE: &[(&str, f64)] = &[
     ("major", 0.2),
     ("commissioned", 0.4),
     ("ahead of estimates", 1.0),
-    ("tops estimates", 1.0),
+    ("top estimates", 1.0),
     ("accumulate", 0.4),
     ("debt-free", 0.6),
 ];
 
-const NEGATIVE: &[(&str, f64)] = &[
+/// Words and phrases that read as bad news, with their weight (base forms,
+/// as in [`POSITIVE`]).
+pub const NEGATIVE: &[(&str, f64)] = &[
     ("fall", 0.6),
-    ("falls", 0.6),
+    ("fell", 0.6),
     ("drop", 0.6),
+    ("slide", 0.6),
+    ("slid", 0.6),
+    ("slip", 0.4),
+    ("sink", 0.7),
+    ("sank", 0.7),
     ("plunge", 1.0),
     ("slump", 1.0),
     ("crash", 1.2),
     ("tumble", 1.0),
     ("decline", 0.6),
     ("miss", 1.0),
-    ("misses", 1.0),
     ("downgrade", 1.2),
     ("underperform", 0.8),
     ("cut", 0.6),
-    ("cuts", 0.6),
-    ("lowers", 0.6),
+    ("lower", 0.5),
     ("loss", 0.8),
     ("weak", 0.7),
     ("probe", 0.8),
@@ -477,6 +583,8 @@ const NEGATIVE: &[(&str, f64)] = &[
     ("concern", 0.5),
     ("pressure", 0.5),
     ("slowdown", 0.7),
+    ("recession", 0.8),
+    ("fear", 0.5),
     ("delay", 0.6),
     ("put on hold", 0.6),
     ("erosion", 0.8),
@@ -487,34 +595,106 @@ const NEGATIVE: &[(&str, f64)] = &[
     ("bearish", 0.8),
     ("sell rating", 0.8),
     ("underweight", 0.6),
-    ("declined", 0.6),
-    ("challenges", 0.4),
+    ("challenge", 0.4),
     ("inflation", 0.3),
     ("below estimates", 1.0),
     ("disappoint", 0.9),
     ("subdued", 0.5),
     ("muted", 0.4),
     ("exit", 0.3),
-    ("lower", 0.3),
     ("negative", 0.5),
     ("downside", 0.5),
     ("sell-off", 0.8),
     ("selloff", 0.8),
     ("tax demand", 0.8),
     ("show cause", 0.8),
+    ("show-cause", 0.8),
 ];
 
-/// Lexicon sentiment in [-1, 1] (0 when no sentiment words found).
+/// Words that turn the sentiment word right after them around: "not a
+/// loss", "no growth", "fails to beat". Matched exactly, not inflected.
+pub const NEGATORS: &[&str] = &[
+    "not",
+    "no",
+    "never",
+    "without",
+    "nor",
+    "neither",
+    "hardly",
+    "barely",
+    "unable",
+    "cannot",
+    "can't",
+    "cant",
+    "didn't",
+    "didnt",
+    "doesn't",
+    "doesnt",
+    "don't",
+    "dont",
+    "isn't",
+    "isnt",
+    "wasn't",
+    "wasnt",
+    "aren't",
+    "weren't",
+    "won't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+    "couldn't",
+    "wouldn't",
+    "fails to",
+    "failed to",
+    "fail to",
+    "yet to",
+];
+
+/// How many tokens before a sentiment word a negator still reaches.
+const NEGATION_WINDOW: usize = 3;
+
+/// Whether a negator ends within [`NEGATION_WINDOW`] tokens before
+/// position `start`.
+fn negated(toks: &[String], start: usize) -> bool {
+    NEGATORS.iter().any(|n| {
+        let parts: Vec<&str> = n.split_whitespace().collect();
+        let len = parts.len();
+        (1..=NEGATION_WINDOW).any(|back| {
+            // The negator's last token sits `back` tokens before `start`.
+            let Some(end) = start.checked_sub(back) else {
+                return false;
+            };
+            let Some(first) = (end + 1).checked_sub(len) else {
+                return false;
+            };
+            parts.iter().enumerate().all(|(k, p)| toks[first + k] == *p)
+        })
+    })
+}
+
+/// Positive and negative evidence in `toks`: the summed weights of every
+/// lexicon match, a negated match counting for the other side.
+fn sentiment_evidence(toks: &[String]) -> (f64, f64) {
+    let (mut pos, mut neg) = (0.0, 0.0);
+    for (lex, positive) in [(POSITIVE, true), (NEGATIVE, false)] {
+        for (phrase, w) in lex {
+            for start in phrase_starts(toks, phrase) {
+                if positive != negated(toks, start) {
+                    pos += w;
+                } else {
+                    neg += w;
+                }
+            }
+        }
+    }
+    (pos, neg)
+}
+
+/// Lexicon sentiment in [-1, 1] (0 when no sentiment words found). Words
+/// match whole (see [`word_matches`]) and a negator up to three words
+/// before one flips it.
 pub fn lexicon_sentiment(text: &str) -> f64 {
-    let t = format!(" {} ", text.to_lowercase());
-    let score = |lex: &[(&str, f64)]| -> f64 {
-        lex.iter()
-            .filter(|(w, _)| t.contains(w))
-            .map(|(_, s)| s)
-            .sum()
-    };
-    let pos = score(POSITIVE);
-    let neg = score(NEGATIVE);
+    let (pos, neg) = sentiment_evidence(&words(text));
     if pos + neg == 0.0 {
         return 0.0;
     }
@@ -667,7 +847,7 @@ fn similarity(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 /// Exchange filings that carry no investable information
 pub fn is_routine_filing(h: &Headline) -> bool {
     let t = format!("{} {}", h.category.as_deref().unwrap_or(""), h.title).to_lowercase();
-    has_any(
+    contains_any(
         &t,
         &[
             "trading window",
@@ -1184,14 +1364,9 @@ fn insider_events(r: &Research, cutoff: i64) -> Vec<Event> {
         .collect()
 }
 
-/// Sessions with abnormal moves that no event explains.
-fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) -> Vec<Event> {
-    let p = &r.prices;
-    let b = &r.bench;
-    if p.len() < 60 {
-        return vec![];
-    }
-    // Excess-return volatility over the past year
+/// Daily returns of `p` in excess of the benchmark `b` on the same date
+/// (0 for the benchmark when it has no bar), as `(index into p, excess)`.
+pub fn excess_returns(p: &Series, b: &Series) -> Vec<(usize, f64)> {
     let mut excess: Vec<(usize, f64)> = Vec::new();
     for i in 1..p.len() {
         let s = p.close[i] / p.close[i - 1] - 1.0;
@@ -1202,10 +1377,43 @@ fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) 
             .unwrap_or(0.0);
         excess.push((i, s - bm));
     }
+    excess
+}
+
+/// The standard deviation of the last year of excess returns.
+pub fn excess_sd(excess: &[(usize, f64)]) -> Option<f64> {
     let tail = &excess[excess.len().saturating_sub(250)..];
+    if tail.len() < 20 {
+        return None;
+    }
     let mean = tail.iter().map(|(_, e)| e).sum::<f64>() / tail.len() as f64;
-    let sd = (tail.iter().map(|(_, e)| (e - mean).powi(2)).sum::<f64>() / tail.len() as f64).sqrt();
-    let threshold = (2.5 * sd).max(0.03);
+    Some((tail.iter().map(|(_, e)| (e - mean).powi(2)).sum::<f64>() / tail.len() as f64).sqrt())
+}
+
+/// The excess move that counts as abnormal: 2.5σ, and at least 3%.
+pub fn unusual_threshold(sd: f64) -> f64 {
+    (2.5 * sd).max(0.03)
+}
+
+/// Whether a session's excess move (with its volume multiple) is the kind
+/// `events` flags as an unusual move when no news explains it.
+pub fn is_unusual_move(excess: f64, sd: f64, volume_x: Option<f64>) -> bool {
+    excess.abs() >= unusual_threshold(sd)
+        || (volume_x.is_some_and(|v| v >= 3.0) && excess.abs() >= 0.015)
+}
+
+/// Sessions with abnormal moves that no event explains.
+fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) -> Vec<Event> {
+    let p = &r.prices;
+    let b = &r.bench;
+    if p.len() < 60 {
+        return vec![];
+    }
+    // Excess-return volatility over the past year
+    let excess = excess_returns(p, b);
+    let Some(sd) = excess_sd(&excess) else {
+        return vec![];
+    };
     let cutoff_date = DateTime::from_timestamp(cutoff, 0)
         .map(|d| d.date_naive())
         .unwrap_or_default();
@@ -1217,9 +1425,7 @@ fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) 
         } else {
             None
         };
-        let big_move = e.abs() >= threshold;
-        let big_volume = vol_x.is_some_and(|v| v >= 3.0) && e.abs() >= 0.015;
-        if !(big_move || big_volume) || explained.contains(&p.dates[i]) {
+        if !is_unusual_move(e, sd, vol_x) || explained.contains(&p.dates[i]) {
             continue;
         }
         let ts = p.dates[i]
@@ -1378,7 +1584,7 @@ pub fn build_events(r: &Research) -> Vec<Event> {
             events.push(Event {
                 ts,
                 kind: Kind::CorporateAction,
-                sentiment: lexicon_sentiment(&ca.subject).max(0.2),
+                sentiment: lexicon_sentiment(&ca.subject),
                 headline: format!("Ex-date: {}", ca.subject),
                 summary: None,
                 facts: vec![],
@@ -1775,6 +1981,62 @@ mod tests {
         assert!(lexicon_sentiment("Profit jumps on record order inflows, beats estimates") > 0.5);
         assert!(lexicon_sentiment("Shares plunge after downgrade and weak guidance") < -0.5);
         assert_eq!(lexicon_sentiment("Company to hold AGM on Friday"), 0.0);
+    }
+
+    #[test]
+    fn sentiment_matches_whole_words_only() {
+        // "commissioned" holds "miss", "windfall" holds "fall".
+        assert!(lexicon_sentiment("Plant commissioned") > 0.0);
+        assert!(lexicon_sentiment("New plant commissioned ahead of schedule") > 0.0);
+        assert_eq!(lexicon_sentiment("Windfall tax on crude producers"), 0.0);
+        assert_eq!(lexicon_sentiment("Mission accomplished"), 0.0);
+        assert_eq!(lexicon_sentiment("Strong winds hit the coast"), 0.6 / 1.5);
+        // Inflections still count.
+        assert!(lexicon_sentiment("Shares tumbled and dropped") < 0.0);
+        assert!(lexicon_sentiment("Revenue surged, profit rising") > 0.0);
+        assert!(lexicon_sentiment("Company misses estimates") < 0.0);
+        assert!(lexicon_sentiment("Sales rallied") > 0.0);
+        // Phrases are consecutive words.
+        assert!(lexicon_sentiment("Stock hits 52-week high") > 0.0);
+        assert_eq!(lexicon_sentiment("High of the week was 52"), 0.0);
+    }
+
+    #[test]
+    fn sentiment_negation_flips_the_sign() {
+        assert!(lexicon_sentiment("not a loss") > 0.0);
+        assert!(lexicon_sentiment("a loss") < 0.0);
+        assert!(lexicon_sentiment("no growth") < 0.0);
+        assert!(lexicon_sentiment("growth") > 0.0);
+        assert!(lexicon_sentiment("Company fails to beat estimates") < 0.0);
+        assert!(lexicon_sentiment("Results didn't disappoint") > 0.0);
+        assert!(lexicon_sentiment("Never seen such strong demand") < 0.0);
+        // Out of reach: more than three words before.
+        assert!(lexicon_sentiment("No one expected the quarter to be this strong") > 0.0);
+    }
+
+    #[test]
+    fn words_keep_in_word_marks() {
+        assert_eq!(
+            words("L&T's 52-week high: ₹5,202 (didn’t fall)"),
+            vec![
+                "l&t's", "52-week", "high", "₹", "5", "202", "didn't", "fall"
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_matches_whole_words() {
+        // "contraction" is not a contract, "border" not an order.
+        assert_eq!(classify("Manufacturing PMI shows contraction"), Kind::Other);
+        assert_eq!(classify("Trade at the border slows"), Kind::Other);
+        assert_eq!(classify("Infra firm wins contract"), Kind::Orders);
+        assert_eq!(classify("Company bagged two orders"), Kind::Orders);
+        assert_eq!(classify("Promoters sell stake via OFS"), Kind::Insider);
+        assert_eq!(classify("Brokerages upgraded the stock"), Kind::Analyst);
+        assert_eq!(classify("Q2FY27 net profit rises"), Kind::Results);
+        assert_eq!(classify("Company raises ₹500 crore via QIP"), Kind::Capital);
+        assert_eq!(classify("Shares fell 4% after the event"), Kind::PriceMove);
+        assert_eq!(classify("Firm fine-tunes its plans"), Kind::Other);
     }
 
     #[test]

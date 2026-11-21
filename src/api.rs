@@ -2441,6 +2441,16 @@ impl YahooClient {
         self.nse_client().index_snapshot(index).await
     }
 
+    /// BSE announcements of `symbol` (a `.BO` ticker or scrip code) over
+    /// the last `days` days.
+    pub async fn bse_announcements(
+        &self,
+        symbol: &str,
+        days: i64,
+    ) -> Result<Vec<providers::bse::Announcement>> {
+        self.bse_client().announcements(symbol, days, false).await
+    }
+
     fn bse_client(&self) -> &providers::bse::Bse {
         match self.provider.as_ref().and_then(|p| p.bse()) {
             Some(bse) => bse,

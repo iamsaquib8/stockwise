@@ -21,6 +21,8 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
             println!("  {} Running post-market analysis...\n", "⟳".yellow());
 
             let client = YahooClient::new().await?;
+            // What the run found, for the notification at the end (#118).
+            let mut summary: Vec<String> = Vec::new();
 
             // 1. Score all stocks
             println!("  [1/6] Scoring stocks...");
@@ -38,6 +40,7 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                 println!("    No stock had enough data for a score.");
             } else {
                 println!("    Highest scores: {}", highest.join(", "));
+                summary.push(format!("Highest long-term scores: {}", highest.join(", ")));
             }
 
             // 2. Check portfolio
@@ -72,6 +75,15 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                     pnl_str,
                     portfolio.holdings.len()
                 );
+                summary.push(format!(
+                    "Portfolio {}{:.0}, {}{}{:.0} over cost, {} holdings",
+                    csym,
+                    total_value,
+                    if pnl >= 0.0 { "+" } else { "-" },
+                    csym,
+                    pnl.abs(),
+                    portfolio.holdings.len()
+                ));
 
                 // Wealth snapshot — skipped when a price is missing, so the
                 // history never records a fake drop.
@@ -119,6 +131,12 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                         alert.describe(crate::i18n::Lang::En),
                         now
                     );
+                    summary.push(format!(
+                        "Alert: {} {}{}",
+                        alert.symbol,
+                        alert.describe(crate::i18n::Lang::En),
+                        now
+                    ));
                 }
                 if triggered == 0 {
                     println!("    No alerts triggered.");
@@ -141,6 +159,14 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                     .filter(|h| val.price(&h.symbol).is_some_and(|price| price < h.avg_cost))
                     .collect();
                 if !losers.is_empty() {
+                    summary.push(format!(
+                        "Priced below average cost: {}",
+                        losers
+                            .iter()
+                            .map(|h| h.symbol.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                     println!(
                         "    {} holdings priced below their average cost: {}",
                         losers.len(),
@@ -192,6 +218,36 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                 }
             } else {
                 println!("    Ollama not running. Skipping AI report.");
+            }
+
+            // 7. Notify: the day's digest with the run's findings in it.
+            let notifier = Notifier::from_env();
+            if notifier.is_enabled() {
+                let notice = Message::new("Long-term daily run", summary.join("\n"));
+                let mut st: crate::monitor::MonitorState =
+                    crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+                let msg = match super::monitoring::build_digest(
+                    &client,
+                    market,
+                    vec![notice.clone()],
+                    &mut st,
+                )
+                .await
+                {
+                    Ok((d, _)) => crate::digest::render(&d),
+                    Err(_) => Message::new("StockWise long-term daily run", summary.join("\n")),
+                };
+                if notifier.send_logged(&msg).await {
+                    println!(
+                        "  {} Summary sent to your notification channels.",
+                        "✓".green()
+                    );
+                }
+            } else {
+                println!(
+                    "  {} No notification channel configured — see `stockwise notify` to get this run's summary by message.",
+                    "→".dimmed()
+                );
             }
 
             println!("\n  {} Long-term daemon complete.", "✓".green().bold());

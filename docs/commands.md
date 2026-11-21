@@ -96,10 +96,46 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
 | `deep <SYMBOL> [-p PERIOD]` | Everything about one stock, starting with its [action](#actions): fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights. Default `3mo` |
 | `markets [--crypto] [--fx] [--global] [--json\|--csv]` | US + India indices (S&P 500, Dow, NASDAQ, Russell, VIX, NIFTY 50, SENSEX, Bank NIFTY, NIFTY IT) and the India 10-year G-sec yield (CCIL, RBI fallback; left out when neither answers); `--crypto` adds the largest coins, `--fx` major pairs (USD/INR, EUR/USD, ...), `--global` one row per exchange's main index (NIFTY 50, S&P 500, FTSE 100, DAX, Nikkei 225, Hang Seng, Straits Times, S&P/TSX, S&P/ASX 200) with whether it is open and its local time. With `-m crypto`, `-m fx`, `-m commodity` or a global exchange that section comes first. `--json` rows carry `region`: `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Japan`, ...) or `Global` |
-| `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
+| `dashboard` (`d`) | Indices + portfolio value, P&L and day change (value and %, against each holding's previous close) + watchlist + triggered alerts; first-run hints when empty |
+| `today [--days N] [--no-news] [--limit N] [--json]` | What changed in your portfolio today: each holding's day move and P&L with why it moved (the most important fresh headline or exchange/SEC filing, "with the market", or "unexplained" for a move of 2.5σ or more against the benchmark with no news found), σ and volume multiple, dates in the next 3 days; the watchlist; the market backdrop; and one news feed for holdings and watchlist ranked by portfolio weight × importance (`--days`, default 2). See [What's hot and today](#whats-hot-and-today) |
+| `hot [--cap TIER] [--universe INDEX] [--limit N] [--json]` | What's hot: your holdings and watchlist ranked by heat, then the market (biggest moves, unusual volume, gaps, 52-week highs/lows, most-mentioned in news, sectors, theme baskets, FII/DII flows, bulk/block deals, F&O ban list, OI build-up, cross-market movers). India and US. See [What's hot and today](#whats-hot-and-today) |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
 | `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Exits 1 if market data is unreachable or the config file is invalid |
 | `use [MARKET\|PORTFOLIO]... [--bind\|--unbind] [--json]` | Show the market and portfolio in use, or switch them: `use us`, `use long-term`, `use us-tech us --bind`. See [Market and portfolio context](#market-and-portfolio-context) |
+
+### Background worker
+
+`stockwise worker start` runs the background worker (live quotes while the
+market is open, queued tasks, alerts, the post-close sync) detached until
+`worker stop` or a reboot. To have it start at every login instead:
+
+| Command | Description |
+|---------|-------------|
+| `worker start` / `stop` / `status` / `run` | Start it detached / stop it / show whether it runs and what is queued / run it in this terminal |
+| `worker install [--dry-run] [--interval MIN]` | Run the worker at login as a per-user service: a launchd agent on macOS (`~/Library/LaunchAgents/com.stockwise.worker.plist`, output in `worker.log` in the data directory), a systemd user service on Linux (`~/.config/systemd/user/stockwise-worker.service`, output in `journalctl --user -u stockwise-worker`). It runs this executable as `stockwise -m MARKET worker run` and is restarted `--interval` minutes (default 1) after it exits with an error, never after a clean `worker stop`. Reinstalling replaces the unit and restarts it. `--dry-run` prints the unit file and the commands and changes nothing. Other systems get an error: start the worker yourself at login |
+| `worker uninstall [--dry-run]` | Stop the service and remove its unit file |
+| `worker service-status` | Whether the unit file exists, whether launchd / systemd has it loaded, and whether a worker is running |
+
+Only user-level locations are written; nothing needs `sudo`. `STOCKWISE_HOME`,
+`STOCKWISE_CONFIG` and `STOCKWISE_PORTFOLIO` are copied into the unit when set,
+so the service uses the same data directory, config file and portfolio. Other
+variables, notification secrets in particular, are not: the unit is a
+plain-text file, so keep those in the config file. The commands it runs:
+
+```text
+# macOS
+launchctl bootout gui/$UID/com.stockwise.worker        # if loaded; errors ignored
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.stockwise.worker.plist
+                                                       # or `launchctl load -w` on old macOS
+# Linux
+systemctl --user daemon-reload
+systemctl --user enable --now stockwise-worker.service
+```
+
+A systemd user service stops when you log out unless lingering is on
+(`loginctl enable-linger`). If a worker started with `worker start` is
+already running, stop it first: the service's worker cannot take the lock
+while it runs and retries after `--interval`.
 
 ## Analysis
 
@@ -170,19 +206,19 @@ research analyst, and losses are possible ([DISCLAIMER.md](../DISCLAIMER.md)).
 
 | Command | Description |
 |---------|-------------|
-| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe (see below), with a cap-tier column |
+| `movers [--universe INDEX] [--cap TIER] [--json\|--csv]` | Top gainers and losers across the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe (see below), with a cap-tier column. The table opens with an "As of" line: the local time, the session date of the latest trade and whether the market is open |
 | `sectors [--json\|--csv]` | Sector ETF/index performance with bars |
-| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls |
-| `sentiment` | Fear & Greed style gauge from VIX, momentum and trend |
+| `heatmap [--universe INDEX] [--cap TIER]` | Heatmap of the liquid stocks of BSE (India) or the S&P 1500 (US), or another universe; a scan of more than 60 stocks shows the 30 biggest gains and the 30 biggest falls. Stocks without a day change are listed last with "—" |
+| `sentiment [-m in\|us]` | Fear & Greed style gauge for the market (`-m`, default the global market): India VIX, NIFTY 50 day move and 1-month trend, NIFTY MIDCAP 50 against NIFTY 50, with BANK NIFTY shown, for India; VIX, S&P 500, Russell 2000 and Nasdaq for the US; plus the wording of market headlines (whole words, negation-aware). India VIX bands sit higher than the VIX's: below 14 extreme greed, 14–18 greed, 18–24 neutral, 24–32 fear, above 32 extreme fear (US: 15 / 20 / 25 / 35). A reading of mood, not a signal |
 | `conditions [--universe INDEX] [--json]` | Where the market stands, as readings: **trend** (the main index against its 200- and 50-day averages, distance from its 52-week and 10-year highs, and the share of days in 10 years when it sat lower against the 200-day), **volatility** (India VIX or VIX against 5 years; India and US), **breadth** (share of the scanned stocks above their 200- and 50-day averages, near 52-week highs and lows, up on the day) and **valuation** (aggregate and median P/E, earnings yield against the 10-year government yield for India and the US, median dividend yield). Breadth and valuation cover the same stocks as `picks`. They have no price history to look back over, so each run (and each daily `daemon longterm` run) saves the session's figures in `cache.db` (one per session, market and `--universe`; `cache clear` leaves them) and, once 20 earlier sessions are on record, shows the share of them that were lower, plus the change since the session before. Readings of the data: not a forecast and not a signal to invest or to wait |
-| `news <SYMBOL>` | Headlines collated from Yahoo Finance and Google News |
-| `rotation` | Sector rotation vs 50-day average |
-| `sectorcmp <SECTOR1> <SECTOR2>` | Two sectors head to head |
+| `news <SYMBOL> [--days N] [--limit N] [--json]` | Headlines from Yahoo Finance and Google News (searched by company name in the stock's locale, last `--days`, default 3) plus exchange filings (NSE for `.NS`, BSE for `.BO`, SEC EDGAR for US tickers), de-duplicated, newest first, with links and local times; the header counts the sources that answered |
+| `rotation` | Sector indices (India) or sector ETFs (US) with the day change and relative strength against NIFTY 50 / S&P 500 over 1, 3 and 6 months of daily closes, strongest over 3 months first. Leading: ahead of the benchmark over both 1 and 3 months; Lagging: behind over both; "—" where a quote or history is missing |
+| `sectorcmp <SECTOR1> <SECTOR2>` | Two sectors head to head: price, day change, 1/3/6-month returns and relative strength against the benchmark, P/E, 50-day average and 52-week range ("—" when missing) |
 | `peers <SYMBOL>` | Same-sector peers on P/E, P/B, market cap |
-| `insider <SYMBOL>` | Analyst consensus + insider-related news |
+| `insider <SYMBOL>` | Insider trades from the regulator's filings — NSE PIT disclosures for Indian stocks, SEC EDGAR Form 4 for US stocks (set `STOCKWISE_SEC_USER_AGENT` if SEC answers 403) — falling back to Yahoo Finance `insiderTransactions` (labelled) when those fail or list nothing; open-market acquisitions and disposals are totalled. Then analyst consensus and insider-related news |
 | `ipo [SYMBOL] [--board all\|mainboard\|sme] [--capital 2.5L] [--recent N] [--json]` | Indian IPOs from NSE. Without a symbol: the live board of issues open now, upcoming and recently listed (price band, lot, minimum application, QIB/NII/retail subscription, a demand label such as "STRONG DEMAND" or "BOOK BUILDING") and an IPO-market regime. With a symbol or company name: issue structure (fresh vs OFS, anchor, lead managers), subscription by category with the mutual-fund share of QIB demand, demand by price, SEBI allotment odds for retail, sNII and bNII (with `--capital`, the odds at that amount, including for several separate applications), unofficial GMP and broker calls from press headlines, and a 6-pillar score with a **listing demand** label and a **long-term profile** label. In `--json`: `listing_demand`, `long_term_profile` and `timeline` replace `listing_verdict`, `long_term_verdict` and `timing_guidance`; `capital_odds` and `allotment_rules` replace `capital_plan` and `golden_rules`. Not a recommendation |
-| `earnings` | Earnings growth for portfolio and watchlist |
-| `surprise [--universe INDEX]` | Forward EPS against trailing EPS, by expected growth; stocks without a forward EPS are left out, and a large scan shows the 25 fastest and the 25 steepest falls |
+| `earnings` | Next results date of each stock in the portfolio and watchlist (NSE board meetings for Indian stocks, else Yahoo's `calendarEvents`; `~` marks an estimate), soonest first, with trailing and forward EPS |
+| `surprise [--universe INDEX]` | Latest reported quarter of each stock: actual EPS against the analyst estimate and the surprise %, largest first (Yahoo `earningsHistory`; one request per stock, so a scan of more than 50 stocks covers the 50 largest by market cap) |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
 | `picks [--universe INDEX] [--cap TIER] [--horizon long\|short] [--top N] [--min-mcap N] [--min-adv N] [--json\|--csv]` | Scores the stocks of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) that clear a size and liquidity floor (India ₹500 crore and ₹2 crore traded a day; US $1 billion and $5 million; lower floors for `--cap small` and `--cap micro`), from 0 to 100, and lists the highest. Five pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity, profit margin, low debt), **growth** (forward against trailing EPS with 3+ analysts, revenue growth), **trend** and **risk** (low volatility, drawdown and beta). The leaders of a first pass get their fundamentals and a year of prices before the final ranking. `--horizon long` (default) weights value and quality; `--horizon short` gives trend 45% (3-month momentum per unit of volatility, the 50-day average, the 52-week range, rising volume) and risk 20%. Losses and negative book value rank last; figures too good to be true (P/E below 3, ROE above 80%, yield above 15%) are listed apart to check; stocks with less than 60% of their data stay out; with a positive `--top`, at most 3 per known sector (`--top 0` has no limit). Every list is logged for `picks review`. The finalists get an Action column with their [action](#actions) (also with `--cap small --horizon short`). Method: [methodology.md](methodology.md) |
 | `picks review [--since 90d] [--horizon long\|short] [--json\|--csv]` | The track record: every logged pick from the day it was first listed, with its return, the benchmark's return over the same days (NIFTY 50 for India, S&P 500 total return for the US) and the difference, plus the share that rose, the share that beat the benchmark, and mean and median returns. Price returns adjusted for splits since listing (a pick whose splits can't be checked is left out); dividends not included. The benchmark is measured from the level logged with each list to its level now (both live), so both legs compare the same moments; without those levels no benchmark figure is shown. `--since` takes up to 10 years |
@@ -487,7 +523,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
-| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
+| `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--on-close] [--cross] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
 | `calendar [SYMBOLS...] [--days 30] [--holdings\|--watchlist] [--json\|--csv]` | Upcoming results, ex-dividend and dividend payment dates, splits and bonus issues for your holdings and watchlist (or the named symbols), sorted by date, with today and the next 7 days marked. See [the calendar](#results-and-corporate-calendar) |
 | `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
@@ -1412,6 +1448,86 @@ with `--no-default-features` (cargo features `tui` and `server`).
 |---------|-------------|
 | `tui [-i SECONDS]` | Full-screen live dashboard: indices, watchlist, portfolio P&L, alerts and a chart of the selected symbol. Refreshes every 30s by default (10-3600). `?` shows the keys. See [tui.md](tui.md) |
 | `serve [--bind ADDR] [--allow-remote] [--open]` | Web dashboard at `/` (`--open` opens it in your browser), JSON API (`/api/quote`, `/api/history/{symbol}`, `/api/markets`, `/api/search`, `/api/portfolio`, `/api/watchlist`, `/api/alerts`), `/healthz` and Prometheus `/metrics`. Listens on `127.0.0.1:8787`; other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`. See [server.md](server.md) |
+| `statusbar [--format tmux\|waybar\|sketchybar\|starship\|json] [--symbols A,B] [--max N] [--refresh SECS]` | One compact line for a status bar: the portfolio's day change, then its largest holdings and watchlist symbols (or `--symbols`). Answers from a local cache and fetches at most once a minute. See [Status bars](#status-bars) |
+
+### Status bars
+
+`stockwise statusbar` prints one line such as
+`▲ ₹+12.3k (+0.8%) · RELIANCE +1.2% · TCS −0.4%`: the portfolio's day change
+in its base currency (the same one `dashboard` totals in), then its largest
+holdings by value, then watchlist symbols, up to `--max` (default 3).
+`--symbols RELIANCE,TCS` shows those symbols instead of the portfolio.
+
+Status bars run it every few seconds, so it is built to be quick and never
+hang:
+
+- It answers from `statusbar_cache.json` in the data directory. It goes to the
+  network at most once per `--refresh` seconds (default 60, at least 5), and the
+  whole refresh (quotes and exchange rates) must finish within 3 seconds.
+- When a refresh fails or times out, the cached line is shown with
+  `(as of HH:MM)` and the waybar class `stale`. A failed attempt also waits out
+  `--refresh` before the next one, so a dead network costs one try a minute.
+- With every market of the shown symbols closed, it fetches once after the
+  close (for the first 15 minutes, while closing prices settle) and then stays
+  offline until the next open.
+- It always exits 0. With no holdings it says so; offline with no cache it
+  prints `stockwise: offline (no data)`.
+
+| `--format` | Output |
+|---|---|
+| `tmux` (default) | `#[fg=green]…#[default]` / `#[fg=red]` colour codes |
+| `waybar` | One JSON object `{"text","tooltip","class"}`; `class` is `up`, `down`, `flat` or `stale`, the tooltip lists the value, each price and the time. `&`, `<`, `>` are Pango-escaped |
+| `sketchybar` | `label='…' label.color=0xAARRGGBB`, shell-quoted, to `eval` after `sketchybar --set "$NAME"` |
+| `starship` | Plain text, no colour codes |
+| `json` | `{"text","as_of","stale","market_open","class","error","portfolio":{"currency","value","day_change","day_change_pct"},"rows":[{"symbol","price","change_pct","currency"}]}`; `portfolio` is `null` with `--symbols` or no holdings |
+
+**tmux** (`~/.tmux.conf`; tmux re-runs it every `status-interval` seconds):
+
+```tmux
+set -g status-interval 10
+set -g status-right '#(stockwise statusbar) '
+set -g status-right-length 80
+```
+
+**waybar** (`~/.config/waybar/config`, then add `"custom/stockwise"` to a
+`modules-*` list; style `#custom-stockwise.up`, `.down`, `.stale` in
+`style.css`):
+
+```json
+"custom/stockwise": {
+    "exec": "stockwise statusbar --format waybar",
+    "return-type": "json",
+    "interval": 15
+}
+```
+
+**sketchybar** (`~/.config/sketchybar/sketchybarrc`):
+
+```sh
+sketchybar --add item stockwise right \
+           --set stockwise update_freq=15 script="$PLUGIN_DIR/stockwise.sh"
+```
+
+and `$PLUGIN_DIR/stockwise.sh` (executable):
+
+```sh
+#!/bin/sh
+eval "sketchybar --set \"\$NAME\" $(stockwise statusbar --format sketchybar)"
+```
+
+**starship** (`~/.config/starship.toml`):
+
+```toml
+[custom.stockwise]
+command = "stockwise statusbar --format starship"
+when = true
+shell = ["sh"]
+format = "[$output]($style) "
+style = "dimmed"
+```
+
+The prompt waits for the command, but a cached line returns in milliseconds; a
+refresh is bounded by the 3 second budget.
 
 ## Live trading
 
@@ -1445,7 +1561,10 @@ untested against a live account.
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |
 | `backup export [PATH.swbak] [--passphrase-fd N]` | Write your data to one passphrase-encrypted file (default `stockwise-YYYY-MM-DD.swbak`). See [Backups](#backups) |
 | `backup restore <PATH.swbak> [--dry-run] [--passphrase-fd N]` | Check a backup, list the files it would add or replace, copy each replaced file to `<file>.bak`, then write each file atomically |
-| `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, desktop) / send a test message. See [notifications](bots.md#notifications) |
+| `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, ntfy, Pushover, desktop), their routes and quiet hours / send a test message. See [notifications](bots.md#notifications) |
+| `monitor [status\|run] [--notify] [--json]` | The automatic holding monitor: thresholds, worker state, recent signals; `run` does one pass now (`--notify` sends what is new). See [Holding monitor and digest](#holding-monitor-and-digest) |
+| `digest [--send] [--json]` | Today's after-close digest: day P&L, top contributors and detractors with reasons, monitor signals, triggered alerts, notices, dates coming up. `--send` sends it now |
+| `telegram [--once]` | Two-way Telegram bot: answers `/today`, `/hot`, `/review` and `/digest` from `STOCKWISE_TELEGRAM_CHAT_ID` only, and sends the digest every trading day at `STOCKWISE_DIGEST_TIME` (local `HH:MM`) unless the worker already has |
 | `update [--check]` (`self-update`) | Check GitHub Releases for a newer version. A binary from install.sh or a release archive is replaced in place: the archive for this platform and its `.sha256` are downloaded, the checksum must match (a missing or wrong checksum stops the update and changes nothing), then the binary is swapped atomically (on Windows the old one is kept as `stockwise.exe.old`). Installs from Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv, pip, `.deb`/`.rpm` or Docker are never changed; the command prints that package manager's upgrade command instead. `--check` only reports the installed version, the latest release and the install channel |
 | `completions <bash\|zsh\|fish\|powershell\|elvish>` | Print a completion script, e.g. `stockwise completions zsh > ~/.zfunc/_stockwise` |
 | `man [--dir <DIR>]` | Print the `stockwise.1` man page, or write it plus one `stockwise-<command>.1` page per command into `DIR`, e.g. `stockwise man --dir ~/.local/share/man/man1` |
@@ -1690,6 +1809,104 @@ stockwise alert add TCS results-in 7
 ```
 
 Alerts saved by earlier versions keep working unchanged.
+
+Options of `alert add`:
+
+- `--on-close` (crosses and breakouts): judge completed sessions only, so an
+  intraday poke through the average that closes back does not notify.
+- `--cross` (price levels): notify only when the price crosses the level; an
+  alert added while the price is already beyond it waits for it to come back
+  and cross. Without it, a level alert notifies while the level holds (once a
+  day) and re-arms once it stops holding.
+- An alert identical to an existing one (same symbol, condition, number,
+  period and options) is refused.
+
+`alert watch` and the worker check price levels only on fresh quotes (traded
+within 30 minutes) while the symbol's market is open; crosses on sessions
+completed while nothing was running are caught up once (up to 10 sessions).
+Each alert has a stable id in `alerts.json`; the notified state is kept per
+id, so removing or editing one alert never re-sends another.
+
+## What's hot and today
+
+`stockwise today` answers "what changed in my portfolio today, and why?".
+For every holding: the day move, the day P&L in the portfolio's base
+currency, the move in excess of the benchmark (NIFTY 50 or the S&P 500) in
+units of the stock's own excess-return volatility (σ), the volume against its
+20-day average, and a one-line reason:
+
+- the most important fresh headline or filing (NSE/BSE announcements, SEC
+  EDGAR 8-K and the like are preferred over news);
+- "with the market" for an ordinary move in line with the benchmark;
+- "unexplained" for an unusual move — 2.5σ or more (and at least 3%) against
+  the benchmark, or 1.5% on 3× volume, the same test `events` uses — with no
+  news or filing found.
+
+The news feed merges headlines and filings for holdings and the watchlist,
+removes duplicates, and ranks them by portfolio weight × importance
+(category, filing or not, and recency halving every 24 hours).
+
+`stockwise hot` ranks holdings and watchlist names by **heat** = |excess
+move| in σ (capped at 6) + volume surge (multiple − 1, capped at 4) + the
+importance of fresh news (up to 4) + 1.5 for a date within three days,
+multiplied by 1 + 5 × portfolio weight. Names with no heat are left out. Each
+row shows the move, the why and, once the rule-based actions engine is
+available, the action.
+
+The market part scans the universe's quotes (India: the liquid NIFTY 500
+stocks or `--universe`; US: the S&P 1500) with a liquidity floor: biggest
+moves, unusual volume (RVOL against the 3-month average, paced for the time
+of day while the session is open, at least 2×), gaps of 3% or more (4% with
+`--cap small`), 52-week highs and lows, the stocks most mentioned in today's
+business headlines, sector indices or ETFs, theme baskets (AI,
+semiconductors, defence, battery and EV, minerals and metals; equal-weight),
+cross-market movers among Indian and US large caps, and for India the
+FII/DII flows, NSE bulk and block deals, the F&O ban list and open-interest
+build-up. A source that fails is named at the end; the rest still show.
+
+```bash
+stockwise today
+stockwise today --days 3 --json
+stockwise hot
+stockwise hot --cap small
+stockwise hot -m us --json
+```
+
+## Holding monitor and digest
+
+The background worker (`stockwise worker start`, or `worker install` for a
+login service) watches every holding with no setup:
+
+| Signal | Default | When |
+|--------|---------|------|
+| Day drop | 5% or 2σ (and ≥ 1.5%) | during the session (every 15 minutes) |
+| New 52-week low | below the year's low | during the session |
+| Gap at the open | 3% either way | during the session |
+| Below cost | 20%, then every further 10% | after the close |
+| Off the 52-week high | 25%, then every further 10% | after the close |
+| Dates tomorrow | results, ex-dividend, record date, split, bonus | after the close |
+| Promoter pledge / shareholding | a new pledge; promoter ±1 point; FII+DII ±2 points | after the close (a few holdings per day) |
+| Analyst rating | upgrade or downgrade in the last 3 days | after the close |
+| Insider trade | NSE PIT / Form 4 in the last 3 days | after the close |
+
+Each signal is sent once. Signals during the session go out at once, several
+together as one message; after the close everything — signals, the LTCG,
+results and filing notices, alerts that triggered today — goes out as **one
+digest** with the day's P&L, the top contributors and detractors with the
+news or filing behind each move (or "unexplained") and the dates coming up.
+`daemon longterm` sends the same digest with its findings in it.
+
+Thresholds (`[monitor]` in the config file, or `STOCKWISE_MONITOR_<KEY>`):
+`enabled`, `day_drop_pct`, `day_drop_sigma`, `from_cost_pct`,
+`from_peak_pct`, `gap_pct`, `digest`.
+
+Notifications have a priority (low, normal, high). `STOCKWISE_NOTIFY_ROUTES`
+sends a channel only some of them (`desktop=high,telegram=low`), and
+`STOCKWISE_QUIET_HOURS` (`22:00-07:00`, local time) holds everything below
+high priority until the quiet hours end, then sends it as one message.
+Channels: Telegram, Slack, Discord, email, ntfy (`STOCKWISE_NTFY_TOPIC`,
+`STOCKWISE_NTFY_SERVER`, `STOCKWISE_NTFY_TOKEN`), Pushover
+(`STOCKWISE_PUSHOVER_TOKEN`, `STOCKWISE_PUSHOVER_USER`) and desktop.
 
 ## Results and corporate calendar
 
