@@ -30,6 +30,19 @@ fn inr(amount: f64) -> String {
     }
 }
 
+/// Paise as `₹1,234.50`.
+fn rp(paise: i64) -> String {
+    inr(tax::paise::to_rupees(paise))
+}
+
+/// `--slab` and `--withholding` are percentages from 0 to 50.
+fn check_pct(flag: &str, pct: f64) -> Result<()> {
+    if !(0.0..=50.0).contains(&pct) {
+        bail!("{flag} is a rate in percent, 0 to 50");
+    }
+    Ok(())
+}
+
 fn date_of(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
@@ -123,7 +136,16 @@ async fn our_sales(
                     Some(asset) => tax::india_rule(asset, b, d) == tax::IndiaRule::LongTerm112,
                     None => Country::India.is_long_term(b, d),
                 };
-            let fmv = fmvs.iter().find(|(f, _)| *f == s.symbol).map(|(_, v)| *v);
+            // Sec. 112A grandfathering is for listed shares and
+            // equity-oriented funds only; other assets keep their cost.
+            let equity = matches!(
+                crate::offmarket::india_class(&s.symbol, marks.mark(&s.symbol)),
+                crate::offmarket::IndiaClass::Listed | crate::offmarket::IndiaClass::EquityFund
+            );
+            let fmv = fmvs
+                .iter()
+                .find(|(f, _)| equity && *f == s.symbol)
+                .map(|(_, v)| *v);
             let unit = tax_export::lot_unit_cost(&s.buy_date, long, s.buy_price, s.sell_price, fmv);
             Some(OurSale {
                 symbol: s.symbol.clone(),
@@ -158,32 +180,33 @@ pub async fn cmd_tax_reconcile(
     broker: Option<Broker>,
     fy: Option<&str>,
     all_accounts: bool,
-    json: bool,
+    fmt: Format,
 ) -> Result<()> {
     let bytes = std::fs::read(file).with_context(|| format!("Cannot read {}", file.display()))?;
     let name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (detected, rows) = tax_reconcile::parse_file(&bytes, &name)?;
-    let broker = broker.unwrap_or(detected);
-    // The year: as given, else the one most of the file's sales are in.
+    let parsed = tax_reconcile::parse_file(&bytes, &name)?;
+    let (rows, skipped) = (parsed.rows, parsed.skipped);
+    let broker = broker.unwrap_or(parsed.broker);
+    // The year: as given, else the one most of the file's sales are in (the
+    // earliest on a tie), counted in one pass.
     let start = match fy {
         Some(_) => india_fy(fy)?,
         None => {
-            let mut years: Vec<NaiveDate> = rows
-                .iter()
-                .map(|r| Country::India.tax_year(r.sell_date).0)
-                .collect();
-            years.sort();
-            let mut best = (years[0], 0);
-            for y in &years {
-                let n = years.iter().filter(|x| *x == y).count();
-                if n > best.1 {
-                    best = (*y, n);
-                }
+            let mut counts: std::collections::BTreeMap<NaiveDate, usize> = Default::default();
+            for r in &rows {
+                *counts
+                    .entry(Country::India.tax_year(r.sell_date).0)
+                    .or_default() += 1;
             }
-            best.0
+            let most = counts.values().copied().max().unwrap_or(0);
+            counts
+                .into_iter()
+                .find(|(_, n)| *n == most)
+                .map(|(y, _)| y)
+                .context("no sales in the file")?
         }
     };
     let (from, to) = Country::India.tax_year(start);
@@ -201,13 +224,21 @@ pub async fn cmd_tax_reconcile(
     let ours = our_sales(&portfolio, start, account).await;
     let r = tax_reconcile::reconcile(broker, &fy_label, &ours, &theirs);
 
-    if json {
-        let mut v = serde_json::to_value(&r)?;
-        v["agreeing"] = r.agreeing().into();
-        v["outside_year"] = outside.into();
-        v["account"] = account.into();
-        v["disclaimer"] = ESTIMATE_NOTE.into();
-        return output::print_json(&v);
+    match fmt {
+        Format::Json => {
+            let mut v = serde_json::to_value(&r)?;
+            v["agreeing"] = r.agreeing().into();
+            v["outside_year"] = outside.into();
+            v["skipped_rows"] = skipped.clone().into();
+            v["account"] = account.into();
+            v["disclaimer"] = ESTIMATE_NOTE.into();
+            return output::print_json(&v);
+        }
+        Format::Csv => {
+            print!("{}", reconcile_csv(&r));
+            return Ok(());
+        }
+        Format::Table => {}
     }
 
     print_header(&format!(
@@ -239,6 +270,9 @@ pub async fn cmd_tax_reconcile(
             format!("{outside} row(s) of the file are outside {fy_label} and were skipped.")
                 .dimmed()
         );
+    }
+    for line in &skipped {
+        println!("  {} Not compared — {line}", "!".yellow());
     }
 
     let differ: Vec<&tax_reconcile::Matched> = r.matched.iter().filter(|m| !m.agrees()).collect();
@@ -369,6 +403,81 @@ pub async fn cmd_tax_reconcile(
     Ok(())
 }
 
+/// `tax reconcile --csv`: one line per matched sale and per sale on one
+/// side only.
+fn reconcile_csv(r: &tax_reconcile::Reconciliation) -> String {
+    let m2 = |x: f64| format!("{:.2}", x + 0.0);
+    let date = |d: Option<NaiveDate>| d.map(|d| d.to_string()).unwrap_or_default();
+    let mut out = output::csv_line(&[
+        "status",
+        "symbol",
+        "sell_date",
+        "buy_date_stockwise",
+        "buy_date_broker",
+        "qty_stockwise",
+        "qty_broker",
+        "gain_stockwise",
+        "gain_broker",
+        "difference",
+        "term_stockwise",
+        "term_broker",
+        "reasons",
+    ]);
+    for m in &r.matched {
+        let reasons: Vec<&str> = m.reasons.iter().map(|x| x.label()).collect();
+        out.push_str(&output::csv_line(&[
+            if m.agrees() { "agrees" } else { "differs" }.to_string(),
+            m.symbol.clone(),
+            m.sell_date.to_string(),
+            date(m.buy_date_ours),
+            date(m.buy_date_theirs),
+            m.qty_ours.to_string(),
+            m.qty_theirs.to_string(),
+            m2(m.gain_ours),
+            m2(m.gain_theirs),
+            m2(m.difference),
+            m.term_ours.label().to_string(),
+            m.term_theirs.map(|t| t.label()).unwrap_or("").to_string(),
+            reasons.join("; "),
+        ]));
+    }
+    for o in &r.only_ours {
+        out.push_str(&output::csv_line(&[
+            "only_stockwise".to_string(),
+            tax_reconcile::bare_symbol(&o.symbol),
+            o.sell_date.to_string(),
+            o.buy_date.to_string(),
+            String::new(),
+            o.qty.to_string(),
+            String::new(),
+            m2(o.gain),
+            String::new(),
+            m2(o.gain),
+            o.term.label().to_string(),
+            String::new(),
+            String::new(),
+        ]));
+    }
+    for t in &r.only_theirs {
+        out.push_str(&output::csv_line(&[
+            "only_broker".to_string(),
+            t.symbol.clone(),
+            t.sell_date.to_string(),
+            String::new(),
+            date(t.buy_date),
+            String::new(),
+            t.qty.to_string(),
+            String::new(),
+            m2(t.gain()),
+            m2(-t.gain()),
+            String::new(),
+            t.term.map(|x| x.label()).unwrap_or("").to_string(),
+            String::new(),
+        ]));
+    }
+    out
+}
+
 // ── tax income ──
 
 /// The foreign currencies of the portfolio's dividends with the earliest
@@ -397,17 +506,54 @@ fn dividend_currencies(portfolio: &pf::Portfolio, from: NaiveDate) -> Vec<(Strin
     out
 }
 
-async fn income_for(portfolio: &pf::Portfolio, start: NaiveDate) -> tax_income::IncomeReport {
+async fn income_for(
+    portfolio: &pf::Portfolio,
+    start: NaiveDate,
+    withholding: Option<f64>,
+) -> tax_income::IncomeReport {
     let rates = RupeeRates::load(&dividend_currencies(portfolio, start)).await;
-    tax_income::income_report(portfolio, start, |c, d| rates.rate(c, d))
+    tax_income::income_report(portfolio, start, withholding, |c, d| rates.rate(c, d))
+}
+
+/// Say what the income figures leave out.
+fn print_income_omissions(r: &tax_income::IncomeReport) {
+    if !r.no_rate.is_empty() {
+        println!(
+            "  {} Left out (no rupee rate): {}. The totals are incomplete.",
+            "!".yellow(),
+            r.no_rate.join(", ")
+        );
+    }
+    if !r.unknown_sgbs.is_empty() {
+        println!(
+            "  {} SGB tranche not known, no interest counted: {}. The totals are incomplete.",
+            "!".yellow(),
+            r.unknown_sgbs.join(", ")
+        );
+    }
+    if !r.withholding_unknown.is_empty() {
+        println!(
+            "  {} Tax withheld abroad not known for {}: pass --withholding 25 (or the rate on your statement).",
+            "!".yellow(),
+            r.withholding_unknown.join(", ")
+        );
+    }
 }
 
 /// `tax income`: dividends and SGB interest of a financial year with TDS,
 /// by Sec. 234C period, for ITR Schedule OS.
-pub async fn cmd_tax_income(fy: Option<&str>, fmt: Format, out: Option<&Path>) -> Result<()> {
+pub async fn cmd_tax_income(
+    fy: Option<&str>,
+    fmt: Format,
+    out: Option<&Path>,
+    withholding: Option<f64>,
+) -> Result<()> {
+    if let Some(w) = withholding {
+        check_pct("--withholding", w)?;
+    }
     let start = india_fy(fy)?;
     let portfolio = pf::Portfolio::load()?;
-    let r = income_for(&portfolio, start).await;
+    let r = income_for(&portfolio, start, withholding.map(|w| w / 100.0)).await;
     if let Some(path) = out {
         std::fs::write(path, tax_income::schedule_os_csv(&r))
             .with_context(|| format!("Cannot write {}", path.display()))?;
@@ -442,10 +588,10 @@ pub async fn cmd_tax_income(fy: Option<&str>, fmt: Format, out: Option<&Path>) -
             "Net".bold()
         );
         for row in &r.rows {
-            let tds = if row.foreign_tax > 0.0 {
-                format!("{} WHT", inr(row.foreign_tax))
-            } else {
-                inr(row.tds)
+            let tds = match row.foreign_tax {
+                _ if row.kind != tax_income::IncomeKind::ForeignDividend => rp(row.tds),
+                Some(t) => format!("{} WHT", rp(t)),
+                None => "WHT ?".to_string(),
             };
             println!(
                 "  {:<11} {:<26} {:<17} {:<16} {:>12} {:>10} {:>12}",
@@ -453,66 +599,53 @@ pub async fn cmd_tax_income(fy: Option<&str>, fmt: Format, out: Option<&Path>) -
                 row.payer.cyan(),
                 row.kind.label(),
                 tax_income::QUARTER_LABELS[row.quarter],
-                inr(row.gross),
+                rp(row.gross),
                 tds,
-                inr(row.net)
+                rp(row.net)
             );
         }
         print_section("Totals");
-        print_kv("Dividends (Indian)", &inr(r.dividends));
-        if r.foreign_dividends > 0.0 {
-            print_kv("Dividends (foreign)", &inr(r.foreign_dividends));
+        print_kv("Dividends (Indian)", &rp(r.dividends));
+        if r.foreign_dividends > 0 {
+            print_kv("Dividends (foreign)", &rp(r.foreign_dividends));
         }
-        if r.interest > 0.0 {
-            print_kv("SGB interest", &inr(r.interest));
+        if r.interest > 0 {
+            print_kv("SGB interest", &rp(r.interest));
         }
-        print_kv("Gross income", &inr(r.gross));
-        print_kv("TDS deducted (estimate)", &inr(r.tds));
-        if r.foreign_tax > 0.0 {
-            print_kv("Tax withheld abroad", &inr(r.foreign_tax));
+        print_kv("Gross income", &rp(r.gross));
+        print_kv("TDS (estimate)", &rp(r.tds));
+        if r.foreign_tax > 0 {
+            print_kv("Tax withheld abroad", &rp(r.foreign_tax));
         }
-        print_kv("Net received", &inr(r.net));
+        print_kv("Net received", &rp(r.net));
 
         print_section("Quarterly breakup (Schedule OS, Sec. 234C periods)");
         for (i, label) in tax_income::QUARTER_LABELS.iter().enumerate() {
             println!(
                 "  {:<18} {:>12} dividends {:>12} all income",
                 label,
-                inr(r.dividend_by_quarter[i]),
-                inr(r.income_by_quarter[i])
+                rp(r.dividend_by_quarter[i]),
+                rp(r.income_by_quarter[i])
             );
         }
     }
     println!();
     println!(
-        "  {} Dividends are taxed at your slab rate. TDS is 10% once one company's or fund's dividends pass {} this year (Sec. 194/194K); SGB interest has no TDS.",
+        "  {} Dividends are taxed at your slab rate. TDS (estimate) is 10% of a company's or fund's dividends once they pass {} in the year (Sec. 194/194K; ₹5,000 up to FY 2024-25); SGB interest has no TDS.",
         "·".dimmed(),
         inr(r.tds_threshold)
     );
     println!(
-        "  {} Dated by ex-date; the payment usually follows within a month. Match TDS with Form 26AS / AIS.",
+        "  {} Dividends are dated by ex-date (the payment date is not recorded), so one paid after a period's end can sit in the earlier period: check the payment dates. Match TDS with Form 26AS / AIS.",
         "·".dimmed()
     );
-    if r.foreign_tax > 0.0 {
+    if r.foreign_dividends > 0 {
         println!(
             "  {} Foreign dividends: claim the tax withheld abroad with Form 67 — see `stockwise tax foreign`.",
             "→".cyan()
         );
     }
-    if !r.no_rate.is_empty() {
-        println!(
-            "  {} No rupee rate for: {} (left out).",
-            "!".yellow(),
-            r.no_rate.join(", ")
-        );
-    }
-    if !r.unknown_sgbs.is_empty() {
-        println!(
-            "  {} SGB tranche not known, no interest computed: {}.",
-            "!".yellow(),
-            r.unknown_sgbs.join(", ")
-        );
-    }
+    print_income_omissions(&r);
     if let Some(path) = out {
         println!(
             "\n  {}",
@@ -563,12 +696,14 @@ async fn year_closes(symbols: &[String], year: i32) -> Vec<(String, Vec<(NaiveDa
 }
 
 /// Schedule FA for calendar year `year` and Form 67 for the financial year
-/// starting `start`, with the prices and rates they need.
+/// starting `start`, with the prices and rates they need. `slab` and
+/// `withholding` are fractions.
 async fn foreign_reports(
     portfolio: &pf::Portfolio,
     year: i32,
     start: NaiveDate,
     slab: f64,
+    withholding: Option<f64>,
 ) -> (tax_foreign::ScheduleFa, tax_foreign::Form67) {
     let mut symbols: Vec<String> = portfolio
         .holdings
@@ -579,7 +714,7 @@ async fn foreign_reports(
         .collect();
     symbols.sort();
     symbols.dedup();
-    let year_start = NaiveDate::from_ymd_opt(year, 1, 1).expect("valid date");
+    let year_start = NaiveDate::from_ymd_opt(year, 1, 1).expect("year checked by the caller");
     let mut needs: Vec<(String, NaiveDate)> = Vec::new();
     for s in &symbols {
         let cur = pf::symbol_currency(s).unwrap_or("USD").to_string();
@@ -601,7 +736,7 @@ async fn foreign_reports(
             .min(year_start);
         needs.push((cur, earliest));
     }
-    needs.extend(dividend_currencies(portfolio, start));
+    needs.extend(dividend_currencies(portfolio, start.min(year_start)));
     let rates = RupeeRates::load(&needs).await;
     let closes = if symbols.is_empty() {
         Vec::new()
@@ -619,19 +754,34 @@ async fn foreign_reports(
         },
         |c, d| rates.rate(c, d),
     );
-    let f67 = tax_foreign::form67(portfolio, start, slab, |c, d| rates.rate(c, d));
+    let f67 = tax_foreign::form67(portfolio, start, slab, withholding, |c, d| rates.rate(c, d));
     (fa, f67)
 }
 
 /// The calendar year and financial year `tax foreign` reports: `--year`
 /// names the calendar year (Schedule FA), whose financial year starts in
 /// April of it; `--fy` names the financial year, whose Schedule FA covers
-/// the calendar year it starts in.
+/// the calendar year it starts in. A year whose financial year has not
+/// started is refused rather than paired with another one.
 fn foreign_years(fy: Option<&str>, year: Option<i32>) -> Result<(i32, NaiveDate)> {
     match year {
         Some(y) => {
+            let today = chrono::Local::now().date_naive();
+            if !(1999..=today.year()).contains(&y) {
+                bail!(
+                    "--year {y}: give a calendar year from 1999 to {}",
+                    today.year()
+                );
+            }
             let start = NaiveDate::from_ymd_opt(y, 4, 1).context("Invalid year")?;
-            let start = start.min(Country::India.tax_year(chrono::Local::now().date_naive()).0);
+            if start > today {
+                bail!(
+                    "FY {y}-{:02} (for Form 67) has not started yet: use --fy {}-{:02} for the current year",
+                    (y + 1) % 100,
+                    y - 1,
+                    y % 100
+                );
+            }
             Ok((y, start))
         }
         None => {
@@ -641,25 +791,45 @@ fn foreign_years(fy: Option<&str>, year: Option<i32>) -> Result<(i32, NaiveDate)
     }
 }
 
+/// Where Form 67 goes, in words (Rule 128(9)).
+const FORM67_DEADLINE: &str = "Form 67 for a return filed under Sec. 139(1) or 139(4) is due by the end of the assessment year \
+(Rule 128(9)); for an updated return (Sec. 139(8A)), by the day that return is filed. File it with or before the return \
+to avoid a mismatch. Rates: last day of the month before the tax was withheld (Rule 128).";
+
 /// `tax foreign`: Schedule FA (foreign assets, calendar year) and Form 67
-/// (foreign tax credit) inputs.
+/// (foreign tax credit) inputs. `slab` and `withholding` are percentages.
 pub async fn cmd_tax_foreign(
     fy: Option<&str>,
     year: Option<i32>,
     slab: f64,
+    withholding: Option<f64>,
     json: bool,
 ) -> Result<()> {
+    check_pct("--slab", slab)?;
+    if let Some(w) = withholding {
+        check_pct("--withholding", w)?;
+    }
     let (year, start) = foreign_years(fy, year)?;
     let portfolio = pf::Portfolio::load()?;
-    let (fa, f67) = foreign_reports(&portfolio, year, start, slab / 100.0).await;
+    let (fa, f67) = foreign_reports(
+        &portfolio,
+        year,
+        start,
+        slab / 100.0,
+        withholding.map(|w| w / 100.0),
+    )
+    .await;
     let today = chrono::Local::now().date_naive();
     let in_progress = today.year() <= year;
     if json {
         return output::print_json(&serde_json::json!({
             "schedule_fa": fa,
+            "schedule_fa_incomplete": fa.is_incomplete(),
             "form_67": f67,
+            "form_67_incomplete": f67.is_incomplete(),
             "calendar_year_in_progress": in_progress,
             "rate_source": "ECB reference rate (Frankfurter); the rules ask for the SBI TT buying rate",
+            "dates": "dividends are dated by ex-date (payment and withholding dates are not recorded)",
             "disclaimer": ESTIMATE_NOTE,
         }));
     }
@@ -691,23 +861,34 @@ pub async fn cmd_tax_foreign(
                 r.entity.cyan(),
                 r.acquired.format("%Y-%m-%d"),
                 r.quantity,
-                inr(r.initial_value),
-                inr(r.peak_value),
-                inr(r.closing_value),
-                inr(r.dividends),
-                inr(r.sale_proceeds)
+                rp(r.initial_value),
+                rp(r.peak_value),
+                rp(r.closing_value),
+                rp(r.dividends),
+                rp(r.sale_proceeds)
             );
+            if !r.missing_rates.is_empty() {
+                println!(
+                    "  {:<10} {}",
+                    "",
+                    format!(
+                        "no rupee rate for some days: {} incomplete",
+                        r.missing_rates.join(", ")
+                    )
+                    .yellow()
+                );
+            }
         }
         println!(
             "  {:<10} {:<11} {:>9} {:>13} {:>13} {:>13} {:>11} {:>13}",
             "Total".bold(),
             "",
             "",
-            inr(fa.initial_value),
-            inr(fa.peak_value),
-            inr(fa.closing_value),
-            inr(fa.dividends),
-            inr(fa.sale_proceeds)
+            rp(fa.initial_value),
+            rp(fa.peak_value),
+            rp(fa.closing_value),
+            rp(fa.dividends),
+            rp(fa.sale_proceeds)
         );
         if in_progress {
             println!(
@@ -721,7 +902,11 @@ pub async fn cmd_tax_foreign(
         ("no rupee rate", &fa.no_rate),
     ] {
         if !list.is_empty() {
-            println!("  {} Left out ({what}): {}", "!".yellow(), list.join(", "));
+            println!(
+                "  {} Left out ({what}): {}. The totals are incomplete.",
+                "!".yellow(),
+                list.join(", ")
+            );
         }
     }
 
@@ -729,43 +914,57 @@ pub async fn cmd_tax_foreign(
         "Form 67 — foreign tax credit, {} (slab {}%)",
         f67.fy_label, slab
     ));
-    if f67.rows.is_empty() {
+    if f67.rows.is_empty() && f67.no_rate.is_empty() {
         println!(
             "  {}",
             "No foreign dividends recorded for this year.".dimmed()
         );
     } else {
-        println!(
-            "  {:<11} {:<10} {:>10} {:>10} {:>12} {:>12} {:>12}",
-            "Date".bold(),
-            "Payer".bold(),
-            "Gross".bold(),
-            "Withheld".bold(),
-            "Gross ₹".bold(),
-            "Withheld ₹".bold(),
-            "Credit ₹".bold()
-        );
-        for r in &f67.rows {
+        if !f67.rows.is_empty() {
             println!(
-                "  {:<11} {:<10} {:>10} {:>10} {:>12} {:>12} {:>12}",
-                r.date.format("%Y-%m-%d"),
-                r.payer.cyan(),
-                format!("{:.2} {}", r.gross, r.currency),
-                format!("{:.2}", r.tax_withheld),
-                inr(r.gross_inr),
-                inr(r.tax_withheld_inr),
-                inr(r.credit_inr)
+                "  {:<11} {:<10} {:>12} {:>10} {:>12} {:>12} {:>12}",
+                "Ex-date".bold(),
+                "Payer".bold(),
+                "Gross".bold(),
+                "Withheld".bold(),
+                "Gross ₹".bold(),
+                "Withheld ₹".bold(),
+                "Credit ₹".bold()
+            );
+            let unknown = || "?".to_string();
+            for r in &f67.rows {
+                println!(
+                    "  {:<11} {:<10} {:>12} {:>10} {:>12} {:>12} {:>12}",
+                    r.date.format("%Y-%m-%d"),
+                    r.payer.cyan(),
+                    format!("{:.2} {}", tax::paise::to_rupees(r.gross), r.currency),
+                    r.tax_withheld
+                        .map(|t| format!("{:.2}", tax::paise::to_rupees(t)))
+                        .unwrap_or_else(unknown),
+                    rp(r.gross_inr),
+                    r.tax_withheld_inr.map(rp).unwrap_or_else(unknown),
+                    r.credit_inr.map(rp).unwrap_or_else(unknown)
+                );
+            }
+            print_kv("Foreign tax credit (estimate)", &rp(f67.credit_inr));
+        }
+        if !f67.no_rate.is_empty() {
+            println!(
+                "  {} Left out (no rupee rate for the Rule 128 date): {}. The form is incomplete.",
+                "!".yellow(),
+                f67.no_rate.join(", ")
             );
         }
-        print_kv("Foreign tax credit (estimate)", &inr(f67.credit_inr));
-        println!(
-            "  {}",
-            "File Form 67 before the ITR. Rates: last day of the month before the tax was withheld (Rule 128)."
-                .dimmed()
-        );
+        if f67.withholding_rate.is_none() && !f67.rows.is_empty() {
+            println!(
+                "  {} The tax withheld abroad is not recorded: pass --withholding 25 (or the rate on your broker's statement) for the credit.",
+                "!".yellow()
+            );
+        }
+        println!("  {}", FORM67_DEADLINE.dimmed());
     }
     println!(
-        "\n  {} Rupee values use the ECB reference rate for the day; the rules ask for the SBI TT buying rate, which differs slightly.",
+        "\n  {} Rupee values use the ECB reference rate for the day; the rules ask for the SBI TT buying rate, which differs slightly. Dividends are dated by ex-date.",
         "·".dimmed()
     );
     println!(
@@ -792,20 +991,26 @@ pub enum ExportSchedule {
 }
 
 /// `tax export in --schedule os|fa|form67`: the schedule as CSV (or JSON),
-/// on stdout or into `out`.
+/// on stdout or into `out`. `slab` and `withholding` are percentages.
 pub async fn cmd_tax_export_schedule(
     schedule: ExportSchedule,
     fy: Option<&str>,
     slab: f64,
+    withholding: Option<f64>,
     out: Option<&Path>,
     json: bool,
 ) -> Result<()> {
+    check_pct("--slab", slab)?;
+    if let Some(w) = withholding {
+        check_pct("--withholding", w)?;
+    }
+    let withholding = withholding.map(|w| w / 100.0);
     let start = india_fy(fy)?;
     let portfolio = pf::Portfolio::load()?;
-    let (body, what) = match schedule {
+    let (body, what, incomplete) = match schedule {
         ExportSchedule::Cg => bail!("Schedule CG is `tax export in` without --schedule"),
         ExportSchedule::Os => {
-            let r = income_for(&portfolio, start).await;
+            let r = income_for(&portfolio, start, withholding).await;
             let body = if json {
                 serde_json::to_string_pretty(&r)? + "\n"
             } else {
@@ -814,10 +1019,12 @@ pub async fn cmd_tax_export_schedule(
             (
                 body,
                 format!("Schedule OS {}: {} rows", r.fy_label, r.rows.len()),
+                r.is_incomplete(),
             )
         }
         ExportSchedule::Fa | ExportSchedule::Form67 => {
-            let (fa, f67) = foreign_reports(&portfolio, start.year(), start, slab / 100.0).await;
+            let (fa, f67) =
+                foreign_reports(&portfolio, start.year(), start, slab / 100.0, withholding).await;
             if schedule == ExportSchedule::Fa {
                 let body = if json {
                     serde_json::to_string_pretty(&fa)? + "\n"
@@ -827,6 +1034,7 @@ pub async fn cmd_tax_export_schedule(
                 (
                     body,
                     format!("Schedule FA {}: {} rows", fa.calendar_year, fa.rows.len()),
+                    fa.is_incomplete(),
                 )
             } else {
                 let body = if json {
@@ -837,10 +1045,17 @@ pub async fn cmd_tax_export_schedule(
                 (
                     body,
                     format!("Form 67 {}: {} rows", f67.fy_label, f67.rows.len()),
+                    f67.is_incomplete(),
                 )
             }
         }
     };
+    if incomplete {
+        eprintln!(
+            "  {} Incomplete: some income or holdings were left out or lack a rate (listed at the end of the file).",
+            "!".yellow()
+        );
+    }
     match out {
         Some(path) => {
             std::fs::write(path, &body)
@@ -880,24 +1095,18 @@ pub async fn cmd_tax_audit_pack(fy: Option<&str>, dir: &Path) -> Result<()> {
     let rows = tax_export::india_audit_rows(&portfolio.realized, start, isin, &marks, fmv);
     let year = Country::India.tax_year_label(start);
 
-    std::fs::create_dir_all(dir).with_context(|| format!("Cannot create {}", dir.display()))?;
-    for r in &rows {
-        let path = dir.join(&r.file);
-        std::fs::write(&path, r.workpaper_csv(&year))
-            .with_context(|| format!("Cannot write {}", path.display()))?;
-    }
-    std::fs::write(
-        dir.join("summary.csv"),
-        tax_export::audit_summary_csv(&rows, &year),
-    )
-    .with_context(|| format!("Cannot write {}", dir.join("summary.csv").display()))?;
     let schedule =
         tax_export::india_schedule_with_fmv(&portfolio.realized, start, isin, &marks, fmv);
-    std::fs::write(
-        dir.join("schedule-cg.csv"),
-        tax_export::india_csv(&schedule),
-    )
-    .with_context(|| format!("Cannot write {}", dir.join("schedule-cg.csv").display()))?;
+    let mut files: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| (r.file.clone(), r.workpaper_csv(&year)))
+        .collect();
+    files.push((
+        "summary.csv".into(),
+        tax_export::audit_summary_csv(&rows, &year),
+    ));
+    files.push(("schedule-cg.csv".into(), tax_export::india_csv(&schedule)));
+    publish_pack(dir, &files)?;
 
     print_header(&portfolio_title_tax(&format!("Audit Pack — {year}")));
     print_kv("Sales", &rows.len().to_string());
@@ -905,8 +1114,8 @@ pub async fn cmd_tax_audit_pack(fy: Option<&str>, dir: &Path) -> Result<()> {
     rules.sort();
     rules.dedup();
     for rule in rules {
-        let gain: f64 = rows.iter().filter(|r| r.rule == rule).map(|r| r.gain).sum();
-        println!("  {:<64} {:>14}", rule, inr(gain));
+        let gain: i64 = rows.iter().filter(|r| r.rule == rule).map(|r| r.gain).sum();
+        println!("  {:<64} {:>14}", rule, rp(gain));
     }
     println!(
         "\n  {}",
@@ -921,26 +1130,115 @@ pub async fn cmd_tax_audit_pack(fy: Option<&str>, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether `dir` holds only an earlier audit pack (its own file names and
+/// a `summary.csv` that says so), so a new run may replace it.
+fn is_audit_pack(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let ours = |n: &str| {
+        n == "summary.csv"
+            || n == "schedule-cg.csv"
+            || (n.starts_with("sale-") && n.ends_with(".csv"))
+    };
+    let mut names = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !ours(&name) || !e.path().is_file() {
+            return false;
+        }
+        names.push(name);
+    }
+    names.iter().any(|n| n == "summary.csv")
+        && std::fs::read_to_string(dir.join("summary.csv"))
+            .is_ok_and(|t| t.starts_with("StockWise audit pack"))
+}
+
+/// Write `files` as the audit pack `dir`, all or nothing: into a staging
+/// folder beside it first, then moved into place. An earlier pack in `dir`
+/// is replaced whole (no workpaper of a removed sale is left behind); a
+/// folder holding anything else is refused. A failed write leaves `dir` as
+/// it was and removes the staging folder.
+pub(crate) fn publish_pack(dir: &Path, files: &[(String, String)]) -> Result<()> {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .context("The audit pack needs a folder name")?;
+    let parent = match dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let exists = dir.exists();
+    let empty = exists && std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_none());
+    if exists && !empty && !is_audit_pack(dir) {
+        bail!(
+            "{} is not empty and is not an earlier audit pack: choose a new folder",
+            dir.display()
+        );
+    }
+    std::fs::create_dir_all(&parent)
+        .with_context(|| format!("Cannot create {}", parent.display()))?;
+    let pid = std::process::id();
+    let staging = parent.join(format!(".{name}.staging-{pid}"));
+    let _ = std::fs::remove_dir_all(&staging);
+    let written = (|| -> Result<()> {
+        std::fs::create_dir(&staging)
+            .with_context(|| format!("Cannot create {}", staging.display()))?;
+        for (file, body) in files {
+            let path = staging.join(file);
+            std::fs::write(&path, body)
+                .with_context(|| format!("Cannot write {}", path.display()))?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    let old = parent.join(format!(".{name}.previous-{pid}"));
+    if exists && let Err(e) = std::fs::rename(dir, &old) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e).with_context(|| format!("Cannot replace {}", dir.display()));
+    }
+    if let Err(e) = std::fs::rename(&staging, dir) {
+        // Put the earlier pack back.
+        if exists {
+            let _ = std::fs::rename(&old, dir);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e).with_context(|| format!("Cannot write {}", dir.display()));
+    }
+    if exists {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    Ok(())
+}
+
 // ── tax in: gains outside Sec. 111A/112A ──
 
-/// One sale under Sec. 50AA, 112 or 115BBH in `tax in`.
+/// One sale under Sec. 50AA, 112 or 115BBH in `tax in` (gain in paise,
+/// shown as rupees).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct OtherGainRow {
     pub(crate) symbol: String,
     pub(crate) sold: String,
-    pub(crate) gain: f64,
+    #[serde(serialize_with = "tax::paise::serialize")]
+    pub(crate) gain: i64,
     pub(crate) rule: tax::IndiaRule,
     pub(crate) rule_label: &'static str,
 }
 
 /// The year's sales `tax in` leaves out of Sec. 111A/112A that have a rule
 /// of their own (debt and other funds, gold and international ETFs, SGBs,
-/// market-linked debentures, crypto), with their totals.
+/// market-linked debentures, crypto), with their totals. A same-day crypto
+/// sale is here too: Sec. 115BBH applies to every crypto gain (`tax in`
+/// never counts crypto as intraday income).
 pub(crate) fn other_gains(
     portfolio: &pf::Portfolio,
     mark: impl Fn(&str) -> Option<Mark>,
     today: NaiveDate,
 ) -> (Vec<OtherGainRow>, tax::OtherGains) {
+    use tax::paise;
     let (from, to) = Country::India.tax_year(today);
     let mut rows = Vec::new();
     let mut gains = Vec::new();
@@ -948,29 +1246,33 @@ pub(crate) fn other_gains(
         let (Some(b), Some(d)) = (date_of(&s.buy_date), date_of(&s.sell_date)) else {
             continue;
         };
-        if d < from || d > to || pf::symbol_currency(&s.symbol) != Some("INR") || s.is_intraday() {
+        if d < from || d > to || pf::symbol_currency(&s.symbol) != Some("INR") {
             continue;
         }
         let m = mark(&s.symbol);
         let Some(asset) = crate::offmarket::india_asset(&s.symbol, m.as_ref()) else {
             continue;
         };
+        if s.is_intraday() && asset != tax::IndiaAsset::Vda {
+            continue;
+        }
         let rule = tax::india_rule(asset, b, d);
         // Before charges, like the rest of `tax` (Sec. 115BBH allows no
         // deduction but the cost anyway).
-        let gain = s.qty * (s.sell_price - s.buy_price);
+        let gain =
+            paise::from_rupees(s.qty * s.sell_price) - paise::from_rupees(s.qty * s.buy_price);
         gains.push(tax::OtherGain {
             rule,
             gain,
-            proceeds: s.qty * s.sell_price,
+            proceeds: paise::from_rupees(s.qty * s.sell_price),
             before_rate_change: d < tax::india_rate_change_date(),
         });
         rows.push(OtherGainRow {
             symbol: s.symbol.clone(),
             sold: s.sell_date.clone(),
-            gain: round(gain, 2),
+            gain,
             rule,
-            rule_label: rule.label(),
+            rule_label: rule.label_on(d),
         });
     }
     (rows, tax::india_other_gains(&gains))
@@ -987,72 +1289,150 @@ pub(crate) fn print_other_gains(rows: &[OtherGainRow], o: &tax::OtherGains) {
             "  {:<16} {:<11} {:>12}  {}",
             r.symbol.cyan(),
             r.sold,
-            inr(r.gain),
+            rp(r.gain),
             r.rule_label.dimmed()
         );
     }
-    if o.slab_income().abs() > 0.005 {
+    if o.slab_income() > 0 {
         println!(
             "  • Taxed at your slab rate (Sec. 50AA {} + other short-term {}): add {} to your income.",
-            inr(o.sec_50aa),
-            inr(o.short_term_slab),
-            inr(o.slab_income())
+            rp(o.sec_50aa),
+            rp(o.short_term_slab),
+            rp(o.slab_income())
         );
     }
-    if o.long_term_112.abs() > 0.005 {
+    if o.st_loss_for_set_off > 0 {
+        println!(
+            "  • Net short-term loss {} (Sec. 50AA and other short-term) is set off against the listed-share gains above.",
+            rp(o.st_loss_for_set_off)
+        );
+    }
+    if o.long_term_112 > 0 {
         println!(
             "  • Sec. 112 long-term (no ₹1.25 lakh exemption, no indexation): {} — tax {}",
-            inr(o.long_term_112),
-            inr(o.long_term_112_tax)
+            rp(o.long_term_112),
+            rp(o.long_term_112_tax)
         );
     }
-    if o.vda_gains > 0.0 || o.vda_losses_ignored > 0.0 {
+    if o.lt_loss_for_set_off > 0 {
+        println!(
+            "  • Net Sec. 112 loss {} is set off against the listed-share long-term gains above.",
+            rp(o.lt_loss_for_set_off)
+        );
+    }
+    if o.vda_gains > 0 || o.vda_losses_ignored > 0 {
         println!(
             "  • Crypto (Sec. 115BBH, 30% flat): gains {} — tax {}; losses {} cannot be set off or carried forward. TDS of 1% (Sec. 194S) on sales: about {}.",
-            inr(o.vda_gains),
-            inr(o.vda_tax),
-            inr(o.vda_losses_ignored),
-            inr(o.vda_tds)
+            rp(o.vda_gains),
+            rp(o.vda_tax),
+            rp(o.vda_losses_ignored),
+            rp(o.vda_tds)
         );
     }
-    if o.flat_tax() > 0.005 {
+    if o.flat_tax() > 0 {
         println!(
             "  • Sec. 112 + 115BBH tax with 4% cess: {}",
-            inr(o.flat_tax())
+            rp(o.flat_tax())
         );
     }
+    println!(
+        "  {}",
+        "Estimate limits: gains here are not set off against losses on listed shares, and positive Sec. 112 gains are not offset by Sec. 112A losses."
+            .dimmed()
+    );
 }
 
 // ── tax advance ──
 
-/// Advance-tax payments recorded with `tax advance --paid DATE:AMOUNT
-/// --record`, kept in the data directory so later runs (and the reminder)
-/// count them.
+/// One advance-tax payment recorded with `tax advance --paid DATE:AMOUNT
+/// --record`, for the financial year it was paid for.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, serde::Deserialize)]
+pub(crate) struct RecordedPayment {
+    #[serde(flatten)]
+    pub(crate) payment: tax::AdvancePayment,
+    /// The first calendar year of the financial year it is for (2026 = FY
+    /// 2026-27): `--fy` when recorded, else the year its date falls in.
+    /// Entries saved without one are assigned by their date.
+    #[serde(default)]
+    pub(crate) fy: Option<i32>,
+}
+
+impl RecordedPayment {
+    /// The financial year (its first calendar year) this payment counts for.
+    fn year(&self) -> Option<i32> {
+        self.fy.or_else(|| {
+            self.payment
+                .date
+                .map(|d| Country::India.tax_year(d).0.year())
+        })
+    }
+}
+
+/// Advance-tax payments recorded with `--record`, kept in the data
+/// directory so later runs (and the reminder) count them.
 #[derive(Debug, Default, Serialize, serde::Deserialize)]
 pub(crate) struct AdvanceLedger {
     #[serde(default)]
-    pub(crate) payments: Vec<tax::AdvancePayment>,
+    pub(crate) payments: Vec<RecordedPayment>,
+}
+
+impl AdvanceLedger {
+    /// The recorded payments for the financial year starting in `year`.
+    fn for_year(&self, year: i32) -> Vec<tax::AdvancePayment> {
+        self.payments
+            .iter()
+            .filter(|p| p.year() == Some(year))
+            .map(|p| p.payment)
+            .collect()
+    }
+
+    /// Add `payments` for the financial year starting in `year`, skipping
+    /// ones already recorded for it. Returns how many were new.
+    fn record(&mut self, payments: &[tax::AdvancePayment], year: i32) -> usize {
+        let mut added = 0;
+        for p in payments {
+            let entry = RecordedPayment {
+                payment: *p,
+                fy: Some(year),
+            };
+            if !self
+                .payments
+                .iter()
+                .any(|x| x.payment == *p && x.year() == Some(year))
+            {
+                self.payments.push(entry);
+                added += 1;
+            }
+        }
+        self.payments.sort_by_key(|p| (p.year(), p.payment.date));
+        added
+    }
 }
 
 const ADVANCE_LEDGER: &str = "advance_tax.json";
 
-fn load_ledger() -> AdvanceLedger {
-    crate::store::load(ADVANCE_LEDGER).unwrap_or_default()
+/// The ledger: empty when the file does not exist; an unreadable or
+/// corrupt file is an error, so it is never overwritten with less.
+fn load_ledger() -> Result<AdvanceLedger> {
+    crate::store::load(ADVANCE_LEDGER).with_context(|| {
+        format!("Cannot read {ADVANCE_LEDGER} in the data directory (left as it is)")
+    })
 }
 
-/// The recorded payments plus `extra`, without duplicates.
-fn with_recorded(extra: &[tax::AdvancePayment]) -> Vec<tax::AdvancePayment> {
-    let mut all = load_ledger().payments;
-    for p in extra {
-        if !all.contains(p) {
-            all.push(*p);
-        }
-    }
-    all
+/// Record `payments` for the financial year starting in `year`, holding the
+/// data-file lock across the read, merge and save (owner-only file).
+fn record_payments(payments: &[tax::AdvancePayment], year: i32) -> Result<usize> {
+    let path = crate::store::path(ADVANCE_LEDGER)?;
+    let _lock = crate::store::lock(&path)?;
+    let mut ledger: AdvanceLedger = crate::store::load_from(&path)
+        .with_context(|| format!("Cannot read {} (left as it is)", path.display()))?;
+    let added = ledger.record(payments, year);
+    crate::store::save_to(&path, &ledger, true)?;
+    Ok(added)
 }
 
 /// The schedule `tax advance` and the reminder work from: capital gains,
-/// plus dividends and interest at `slab` when given.
+/// plus dividends and interest at `slab` (a percentage) when given.
 async fn advance_schedule(
     portfolio: &pf::Portfolio,
     fy: Option<&str>,
@@ -1069,7 +1449,7 @@ async fn advance_schedule(
     let (income, report) = match slab {
         Some(pct) => {
             let start = india_fy(fy)?;
-            let r = income_for(portfolio, start).await;
+            let r = income_for(portfolio, start, None).await;
             (tax_income::advance_income(&r, pct / 100.0), Some(r))
         }
         None => (Vec::new(), None),
@@ -1082,23 +1462,30 @@ async fn advance_schedule(
 
 /// The advance-tax reminder due today, for the notifier: set within
 /// [`tax::ADVANCE_REMINDER_DAYS`] days of a due date with something still
-/// to pay, counting payments recorded with `tax advance --record`.
-/// Capital gains only (the slab rate for dividends is not known here).
+/// to pay, counting this year's payments recorded with `tax advance
+/// --record`. Capital gains only: dividends and SGB interest are left out
+/// (their slab rate is not known here), so a portfolio with income but no
+/// sales gets no reminder.
 pub async fn advance_tax_reminder_today() -> Option<tax::AdvanceReminder> {
     let portfolio = pf::Portfolio::load().ok()?;
     if portfolio.realized.is_empty() {
         return None;
     }
-    let payments = load_ledger().payments;
+    let today = chrono::Local::now().date_naive();
+    let year = Country::India.tax_year(today).0.year();
+    let payments = load_ledger().ok()?.for_year(year);
     let (s, _) = advance_schedule(&portfolio, None, &payments, None)
         .await
         .ok()?;
-    let today = chrono::Local::now().date_naive();
     tax::advance_tax_reminder(&s, today, tax::ADVANCE_REMINDER_DAYS)
 }
 
 /// `tax advance`: the year's instalments under Sec. 208/211 with Sec. 234C,
 /// the next instalment due and the interest if it is missed.
+///
+/// Payments: the ones recorded for this financial year with `--record`,
+/// plus the `--paid` ones of this run (which count for the year asked for,
+/// as given, and are saved only with `--record`).
 pub async fn cmd_tax_advance(
     fy: Option<&str>,
     paid: &[String],
@@ -1110,10 +1497,8 @@ pub async fn cmd_tax_advance(
         .iter()
         .map(|p| tax::AdvancePayment::parse(p).map_err(|e| anyhow::anyhow!("--paid {p}: {e}")))
         .collect::<Result<Vec<_>>>()?;
-    if let Some(pct) = slab
-        && !(0.0..=50.0).contains(&pct)
-    {
-        bail!("--slab is your marginal rate in percent, 0 to 50");
+    if let Some(pct) = slab {
+        check_pct("--slab", pct)?;
     }
     if record {
         if given.is_empty() {
@@ -1122,18 +1507,43 @@ pub async fn cmd_tax_advance(
         if given.iter().any(|p| p.date.is_none()) {
             bail!("--record needs dated payments: --paid DATE:AMOUNT (2026-12-10:25000)");
         }
-        let mut ledger = load_ledger();
-        for p in &given {
-            if !ledger.payments.contains(p) {
-                ledger.payments.push(*p);
-            }
-        }
-        ledger.payments.sort_by_key(|p| p.date);
-        crate::store::save(ADVANCE_LEDGER, &ledger, true)?;
     }
-    let payments = with_recorded(&given);
+    // Everything that can fail before saving: the year, the portfolio and
+    // the ledger itself.
+    let start = india_fy(fy)?;
+    let year = start.year();
     let portfolio = pf::Portfolio::load()?;
-    let (schedule, income) = advance_schedule(&portfolio, fy, &payments, slab).await?;
+    let ledger = load_ledger()?;
+    let added = if record {
+        let added = record_payments(&given, year)?;
+        eprintln!(
+            "  {}",
+            format!(
+                "Recorded {added} payment(s) for {} in {ADVANCE_LEDGER}.",
+                Country::India.tax_year_label(start)
+            )
+            .green()
+        );
+        Some(added)
+    } else {
+        None
+    };
+    let mut payments = ledger.for_year(year);
+    for p in &given {
+        if !payments.contains(p) {
+            payments.push(*p);
+        }
+    }
+    let (schedule, income) = advance_schedule(&portfolio, fy, &payments, slab)
+        .await
+        .with_context(|| {
+            if added.is_some() {
+                "the --paid payments were recorded; the schedule could not be worked out"
+                    .to_string()
+            } else {
+                "the schedule could not be worked out".to_string()
+            }
+        })?;
     let today = chrono::Local::now().date_naive();
     let next = tax::next_instalment(&schedule, today);
 
@@ -1141,6 +1551,13 @@ pub async fn cmd_tax_advance(
         let mut v = serde_json::to_value(&schedule)?;
         v["next_instalment"] = serde_json::to_value(&next)?;
         v["slab_rate_pct"] = slab.into();
+        if let Some(r) = &income {
+            v["income_incomplete"] = r.is_incomplete().into();
+            v["income_omitted"] = serde_json::json!({
+                "no_rupee_rate": r.no_rate,
+                "unknown_sgb_tranche": r.unknown_sgbs,
+            });
+        }
         v["disclaimer"] = ESTIMATE_NOTE.into();
         return output::print_json(&v);
     }
@@ -1148,26 +1565,18 @@ pub async fn cmd_tax_advance(
     super::planning::print_advance_tax(&schedule, &payments);
     if let Some(r) = &income {
         println!(
-            "  • Dividends and interest included at your {}% slab: {} income, {} tax with cess (each in the quarter received).",
+            "  • Dividends and interest included at your {}% slab: {} income, {} tax with cess (dividends in the quarter of their ex-date, interest in every quarter).",
             slab.unwrap_or(0.0),
-            inr(r.gross),
+            rp(r.gross),
             inr(schedule.other_income_tax)
         );
+        if r.is_incomplete() {
+            print_income_omissions(r);
+        }
     } else {
         println!(
             "  • {}",
-            "Dividends and interest are left out: pass --slab 30 (your rate) to add them in the quarter received."
-                .dimmed()
-        );
-    }
-    if record {
-        println!(
-            "  • {}",
-            format!(
-                "Recorded {} payment(s); later runs and the reminder count them.",
-                given.len()
-            )
-            .green()
+            "Dividends and interest are left out: pass --slab 30 (your rate) to add them.".dimmed()
         );
     }
 
@@ -1188,26 +1597,113 @@ pub async fn cmd_tax_advance(
             &inr(n.required_by_due),
         );
         print_kv("Paid so far", &inr(n.paid));
-        let due = if n.amount_due > 0.5 {
-            inr(n.amount_due).yellow().bold().to_string()
+        if schedule.sec_208_applicable {
+            let due = if n.amount_due > 0.5 {
+                inr(n.amount_due).yellow().bold().to_string()
+            } else {
+                "nothing — covered".green().to_string()
+            };
+            print_kv("To pay", &due);
+            if n.interest_if_missed > 0.0 {
+                print_kv(
+                    "Sec. 234C interest if missed",
+                    &inr(n.interest_if_missed).red().to_string(),
+                );
+            }
         } else {
-            "nothing — covered".green().to_string()
-        };
-        print_kv("To pay", &due);
-        if n.interest_if_missed > 0.0 {
-            print_kv(
-                "Sec. 234C interest if missed",
-                &inr(n.interest_if_missed).red().to_string(),
-            );
-        }
-        if !schedule.sec_208_applicable {
             println!(
                 "  {}",
-                "Tax this year is under ₹10,000 so far: advance tax is not required (Sec. 208)."
+                "Tax this year is under ₹10,000 so far: advance tax is not required (Sec. 208), so nothing is payable."
                     .dimmed()
             );
         }
     }
     println!("\n  {}\n", ESTIMATE_NOTE.yellow().italic());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn recorded_payments_count_only_for_their_financial_year() {
+        let pay = |date: &str, amount: f64| tax::AdvancePayment {
+            date: Some(d(date)),
+            amount,
+        };
+        let mut ledger = AdvanceLedger::default();
+        assert_eq!(ledger.record(&[pay("2026-06-14", 1_000.0)], 2026), 1);
+        // A late payment deliberately for FY 2025-26.
+        assert_eq!(ledger.record(&[pay("2026-04-10", 500.0)], 2025), 1);
+        // The same payment again: not added twice.
+        assert_eq!(ledger.record(&[pay("2026-06-14", 1_000.0)], 2026), 0);
+        assert_eq!(ledger.for_year(2026), vec![pay("2026-06-14", 1_000.0)]);
+        assert_eq!(ledger.for_year(2025), vec![pay("2026-04-10", 500.0)]);
+        // An entry saved without a year goes by its date.
+        let legacy: AdvanceLedger =
+            serde_json::from_str(r#"{"payments":[{"date":"2026-12-10","amount":300.0}]}"#).unwrap();
+        assert_eq!(legacy.for_year(2026).len(), 1);
+        assert!(legacy.for_year(2025).is_empty());
+        // Round trip keeps the year.
+        let text = serde_json::to_string(&ledger).unwrap();
+        let back: AdvanceLedger = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.for_year(2025), vec![pay("2026-04-10", 500.0)]);
+    }
+
+    #[test]
+    fn an_audit_pack_is_published_whole_and_replaces_only_an_earlier_pack() {
+        let base = std::env::temp_dir().join(format!("sw-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.join("pack");
+        let summary = (
+            "summary.csv".to_string(),
+            "StockWise audit pack,FY\n".to_string(),
+        );
+        let first = vec![
+            ("sale-001-A-2026-05-01.csv".to_string(), "a".to_string()),
+            ("sale-002-B-2026-06-01.csv".to_string(), "b".to_string()),
+            summary.clone(),
+        ];
+        publish_pack(&dir, &first).unwrap();
+        // A rerun with one sale fewer leaves no stale workpaper behind.
+        let second = vec![
+            ("sale-001-A-2026-05-01.csv".to_string(), "a".to_string()),
+            summary.clone(),
+        ];
+        publish_pack(&dir, &second).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["sale-001-A-2026-05-01.csv", "summary.csv"]);
+        // A folder with other files is refused and left alone.
+        let other = base.join("mine");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("notes.txt"), "keep").unwrap();
+        assert!(publish_pack(&other, &second).is_err());
+        assert_eq!(
+            std::fs::read_to_string(other.join("notes.txt")).unwrap(),
+            "keep"
+        );
+        // No staging folder is left over.
+        let leftovers = std::fs::read_dir(&base)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with('.')
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

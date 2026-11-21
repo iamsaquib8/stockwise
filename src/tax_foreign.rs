@@ -22,10 +22,6 @@ fn date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
-}
-
 /// Whether `symbol` is a foreign asset for Schedule FA: a share or fund
 /// quoted in a currency other than the rupee (crypto is reported in
 /// Schedule VDA, not here).
@@ -63,7 +59,8 @@ fn inr_rate(currency: Option<&str>, rate: Option<f64>) -> Option<f64> {
         .filter(|r| r.is_finite() && *r > 0.0)
 }
 
-/// One row of Schedule FA Table A3.
+/// One row of Schedule FA Table A3. Rupee amounts are in paise (shown and
+/// serialised as rupees).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FaRow {
     pub country: String,
@@ -72,17 +69,26 @@ pub struct FaRow {
     pub acquired: NaiveDate,
     pub currency: String,
     pub quantity: f64,
-    /// Cost on the purchase date, in rupees.
-    pub initial_value: f64,
+    /// Cost on the purchase date (at the rupee rate paid, when recorded).
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub initial_value: i64,
     /// Highest value of the units held on any trading day of the year.
-    pub peak_value: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub peak_value: i64,
     pub peak_date: Option<NaiveDate>,
     /// Value of the units held on 31 December (zero once all were sold).
-    pub closing_value: f64,
-    /// Dividends credited during the year (gross).
-    pub dividends: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub closing_value: i64,
+    /// Dividends credited during the year (gross), dated by ex-date.
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub dividends: i64,
     /// Proceeds of sales during the year.
-    pub sale_proceeds: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub sale_proceeds: i64,
+    /// Fields that lack a rupee rate for some day (`peak_value`,
+    /// `closing_value`, `dividends`, `sale_proceeds`): their amounts are
+    /// incomplete, not zero.
+    pub missing_rates: Vec<&'static str>,
 }
 
 /// Schedule FA Table A3 for a calendar year.
@@ -90,15 +96,29 @@ pub struct FaRow {
 pub struct ScheduleFa {
     pub calendar_year: i32,
     pub rows: Vec<FaRow>,
-    pub initial_value: f64,
-    pub peak_value: f64,
-    pub closing_value: f64,
-    pub dividends: f64,
-    pub sale_proceeds: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub initial_value: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub peak_value: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub closing_value: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub dividends: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub sale_proceeds: i64,
     /// Holdings left out: no price history for the year.
     pub no_prices: Vec<String>,
-    /// Holdings left out: no rupee rate for their currency.
+    /// Holdings left out: no rupee rate for their purchase date.
     pub no_rate: Vec<String>,
+}
+
+impl ScheduleFa {
+    /// Something is left out or missing a rate: the totals are incomplete.
+    pub fn is_incomplete(&self) -> bool {
+        !self.no_prices.is_empty()
+            || !self.no_rate.is_empty()
+            || self.rows.iter().any(|r| !r.missing_rates.is_empty())
+    }
 }
 
 /// Units of `pieces` held at the end of `day`.
@@ -160,24 +180,25 @@ fn acquisitions(portfolio: &Portfolio) -> Vec<(String, NaiveDate, f64, Vec<Piece
 }
 
 /// Schedule FA Table A3 for `year` (1 Jan – 31 Dec). `closes(symbol)` gives
-/// the daily closes of the year in the share's currency, oldest first;
-/// `fx(currency, day)` rupees per unit on a day.
+/// the daily closes of the year in the share's quote currency, oldest
+/// first; `fx(currency, day)` rupees per unit of a major currency on a day.
 pub fn schedule_fa<'a>(
     portfolio: &Portfolio,
     year: i32,
     closes: impl Fn(&str) -> Option<&'a [(NaiveDate, f64)]>,
     fx: impl Fn(&str, NaiveDate) -> Option<f64>,
 ) -> ScheduleFa {
+    use crate::tax::paise;
     let start = NaiveDate::from_ymd_opt(year, 1, 1).expect("valid date");
     let end = NaiveDate::from_ymd_opt(year, 12, 31).expect("valid date");
     let mut fa = ScheduleFa {
         calendar_year: year,
         rows: Vec::new(),
-        initial_value: 0.0,
-        peak_value: 0.0,
-        closing_value: 0.0,
-        dividends: 0.0,
-        sale_proceeds: 0.0,
+        initial_value: 0,
+        peak_value: 0,
+        closing_value: 0,
+        dividends: 0,
+        sale_proceeds: 0,
         no_prices: Vec::new(),
         no_rate: Vec::new(),
     };
@@ -191,77 +212,110 @@ pub fn schedule_fa<'a>(
         if !in_year {
             continue;
         }
-        let currency = crate::portfolio::symbol_currency(&symbol)
+        let quote = crate::portfolio::symbol_currency(&symbol)
             .unwrap_or("USD")
             .to_string();
-        let rate = |day: NaiveDate| fx(&currency, day);
-        let recorded = pieces.iter().find_map(|p| p.paid_rate);
-        let Some(initial_rate) = recorded.or_else(|| rate(acquired)) else {
+        // Prices in a minor unit (`GBp`) are scaled to the major one.
+        let (scale, major) = crate::market::to_major(1.0, &quote);
+        let rate = |day: NaiveDate| fx(&major, day);
+        // Each purchase at its own recorded rate, else the day's rate.
+        let mut initial = 0i64;
+        let mut no_initial = false;
+        for p in &pieces {
+            match p.paid_rate.or_else(|| rate(acquired)) {
+                Some(r) => initial += paise::from_rupees(p.qty * price * scale * r),
+                None => no_initial = true,
+            }
+        }
+        if no_initial {
             fa.no_rate.push(symbol.clone());
             continue;
-        };
+        }
         let Some(series) = closes(&symbol).filter(|s| !s.is_empty()) else {
             fa.no_prices.push(symbol.clone());
             continue;
         };
-        let (scale, _) = crate::market::to_major(1.0, &currency);
+        let mut missing: Vec<&'static str> = Vec::new();
+        let mut miss = |field: &'static str| {
+            if !missing.contains(&field) {
+                missing.push(field);
+            }
+        };
         let quantity: f64 = pieces.iter().map(|p| p.qty).sum();
-        let mut peak = (0.0, None);
+        let mut peak = (0i64, None);
         for (day, close) in series.iter().filter(|(d, _)| *d >= start && *d <= end) {
             let units = held_on(&pieces, *day);
             if units <= 1e-9 {
                 continue;
             }
-            let Some(r) = rate(*day) else { continue };
-            let value = units * close * scale * r;
+            let Some(r) = rate(*day) else {
+                miss("peak_value");
+                continue;
+            };
+            let value = paise::from_rupees(units * close * scale * r);
             if value > peak.0 {
                 peak = (value, Some(*day));
             }
         }
         let closing_units = held_on(&pieces, end);
         let closing_value = match series.iter().rev().find(|(d, _)| *d <= end) {
-            Some((d, close)) if closing_units > 1e-9 => {
-                closing_units * close * scale * rate(end).or_else(|| rate(*d)).unwrap_or(0.0)
-            }
-            _ => 0.0,
+            Some((d, close)) if closing_units > 1e-9 => match rate(end).or_else(|| rate(*d)) {
+                Some(r) => paise::from_rupees(closing_units * close * scale * r),
+                None => {
+                    miss("closing_value");
+                    0
+                }
+            },
+            _ => 0,
         };
-        let sale_proceeds: f64 = pieces
+        let mut sale_proceeds = 0i64;
+        for (qty, (d, px)) in pieces
             .iter()
             .filter_map(|p| Some((p.qty, p.sold?)))
             .filter(|(_, (d, _))| *d >= start && *d <= end)
-            .map(|(qty, (d, px))| qty * px * scale * rate(d).unwrap_or(0.0))
-            .sum();
+        {
+            match rate(d) {
+                Some(r) => sale_proceeds += paise::from_rupees(qty * px * scale * r),
+                None => miss("sale_proceeds"),
+            }
+        }
         // Dividends: this lot's share of each one, by the units it held on
-        // the ex-date.
-        let dividends: f64 = portfolio
+        // the ex-date, in the currency the dividend was paid in.
+        let mut dividends = 0i64;
+        for (d, day) in portfolio
             .dividends
             .iter()
             .filter(|d| d.symbol == symbol)
             .filter_map(|d| Some((d, date(&d.ex_date)?)))
             .filter(|(_, day)| *day >= start && *day <= end)
-            .map(|(d, day)| {
-                let mine = held_on(&pieces, day - chrono::Duration::days(1));
-                let share = if d.qty > 1e-9 {
-                    (mine / d.qty).min(1.0)
-                } else {
-                    0.0
-                };
-                d.amount * share * scale * rate(day).unwrap_or(0.0)
-            })
-            .sum();
+        {
+            let mine = held_on(&pieces, day - chrono::Duration::days(1));
+            let share = if d.qty > 1e-9 {
+                (mine / d.qty).min(1.0)
+            } else {
+                0.0
+            };
+            let paid_in = d.currency.clone().unwrap_or_else(|| quote.clone());
+            let (amount, cur) = crate::market::to_major(d.amount * share, &paid_in);
+            match fx(&cur, day) {
+                Some(r) => dividends += paise::from_rupees(amount * r),
+                None => miss("dividends"),
+            }
+        }
         let row = FaRow {
             country: country_of(&symbol),
             entity: symbol.clone(),
             nature: "Company",
             acquired,
-            currency: currency.clone(),
+            currency: major.to_uppercase(),
             quantity,
-            initial_value: round2(quantity * price * scale * initial_rate),
-            peak_value: round2(peak.0),
+            initial_value: initial,
+            peak_value: peak.0,
             peak_date: peak.1,
-            closing_value: round2(closing_value),
-            dividends: round2(dividends),
-            sale_proceeds: round2(sale_proceeds),
+            closing_value,
+            dividends,
+            sale_proceeds,
+            missing_rates: missing,
         };
         fa.initial_value += row.initial_value;
         fa.peak_value += row.peak_value;
@@ -270,15 +324,6 @@ pub fn schedule_fa<'a>(
         fa.sale_proceeds += row.sale_proceeds;
         fa.rows.push(row);
     }
-    for v in [
-        &mut fa.initial_value,
-        &mut fa.peak_value,
-        &mut fa.closing_value,
-        &mut fa.dividends,
-        &mut fa.sale_proceeds,
-    ] {
-        *v = round2(*v);
-    }
     fa.no_prices.sort();
     fa.no_prices.dedup();
     fa.no_rate.sort();
@@ -286,10 +331,14 @@ pub fn schedule_fa<'a>(
     fa
 }
 
-/// Schedule FA Table A3 as CSV.
+fn money(p: i64) -> String {
+    format!("{:.2}", crate::tax::paise::to_rupees(p) + 0.0)
+}
+
+/// Schedule FA Table A3 as CSV; holdings left out follow the rows, so an
+/// incomplete file says so.
 pub fn schedule_fa_csv(fa: &ScheduleFa) -> String {
     use crate::output::csv_line;
-    let money = |x: f64| format!("{x:.2}");
     let mut out = csv_line(&[
         "country",
         "name_of_entity",
@@ -303,6 +352,7 @@ pub fn schedule_fa_csv(fa: &ScheduleFa) -> String {
         "closing_balance_inr",
         "gross_amount_credited_inr",
         "gross_sale_proceeds_inr",
+        "missing_rates",
     ]);
     for r in &fa.rows {
         out.push_str(&csv_line(&[
@@ -320,7 +370,20 @@ pub fn schedule_fa_csv(fa: &ScheduleFa) -> String {
             money(r.closing_value),
             money(r.dividends),
             money(r.sale_proceeds),
+            r.missing_rates.join(" "),
         ]));
+    }
+    if !fa.no_prices.is_empty() || !fa.no_rate.is_empty() {
+        out.push('\n');
+        out.push_str(&csv_line(&["incomplete", "holdings"]));
+        for (label, v) in [
+            ("omitted_no_prices", &fa.no_prices),
+            ("omitted_no_rupee_rate", &fa.no_rate),
+        ] {
+            if !v.is_empty() {
+                out.push_str(&csv_line(&[label.to_string(), v.join(" ")]));
+            }
+        }
     }
     out
 }
@@ -332,23 +395,41 @@ pub fn form67_rate_date(day: NaiveDate) -> NaiveDate {
         - chrono::Duration::days(1)
 }
 
-/// One foreign dividend for Form 67.
+/// One foreign dividend for Form 67 (rupee amounts in paise, shown as
+/// rupees; foreign amounts in their minor units).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Form67Row {
+    /// The ex-date: the withholding date is not recorded, so it stands in
+    /// for it (`date_basis`).
     pub date: NaiveDate,
+    pub date_basis: &'static str,
     pub payer: String,
     pub country: String,
     pub currency: String,
-    pub gross: f64,
-    pub tax_withheld: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub gross: i64,
+    /// `None`: no withholding rate was given, so the credit is unknown.
+    #[serde(serialize_with = "opt_paise")]
+    pub tax_withheld: Option<i64>,
     pub rate_date: NaiveDate,
     pub fx_rate: f64,
-    pub gross_inr: f64,
-    pub tax_withheld_inr: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub gross_inr: i64,
+    #[serde(serialize_with = "opt_paise")]
+    pub tax_withheld_inr: Option<i64>,
     /// Indian tax on this income at the slab rate, with cess.
-    pub indian_tax_inr: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub indian_tax_inr: i64,
     /// The credit: the lower of the tax withheld and the Indian tax.
-    pub credit_inr: f64,
+    #[serde(serialize_with = "opt_paise")]
+    pub credit_inr: Option<i64>,
+}
+
+fn opt_paise<S: serde::Serializer>(v: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(p) => s.serialize_f64(crate::tax::paise::to_rupees(*p)),
+        None => s.serialize_none(),
+    }
 }
 
 /// Form 67 inputs for the financial year starting `fy_start`.
@@ -357,23 +438,38 @@ pub struct Form67 {
     pub fy_label: String,
     /// The slab rate the Indian tax was taken at (a fraction, before cess).
     pub slab_rate: f64,
+    /// The rate of tax withheld abroad, as given; `None` when unknown.
+    pub withholding_rate: Option<f64>,
     pub rows: Vec<Form67Row>,
-    pub gross_inr: f64,
-    pub tax_withheld_inr: f64,
-    pub credit_inr: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub gross_inr: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub tax_withheld_inr: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub credit_inr: i64,
+    /// Dividends left out: no rupee rate for the Rule 128 date.
     pub no_rate: Vec<String>,
 }
 
+impl Form67 {
+    pub fn is_incomplete(&self) -> bool {
+        !self.no_rate.is_empty() || self.withholding_rate.is_none() && !self.rows.is_empty()
+    }
+}
+
 /// Form 67 rows from the portfolio's foreign dividends received in the
-/// financial year starting `fy_start`. Withholding is the US 25% treaty
-/// rate for dollar dividends (30% without a W-8BEN on file), none known
-/// for other currencies.
+/// financial year starting `fy_start`. `withholding` is the rate of tax
+/// withheld abroad as your statement shows it (US 25% with a W-8BEN, 30%
+/// without); `None` leaves the tax and the credit unknown rather than
+/// assuming a treaty rate.
 pub fn form67(
     portfolio: &Portfolio,
     fy_start: NaiveDate,
     slab_rate: f64,
+    withholding: Option<f64>,
     fx: impl Fn(&str, NaiveDate) -> Option<f64>,
 ) -> Form67 {
+    use crate::tax::paise;
     let (from, to) = crate::tax::Country::India.tax_year(fy_start);
     let mut rows = Vec::new();
     let mut no_rate = Vec::new();
@@ -381,40 +477,43 @@ pub fn form67(
         let Some(day) = date(&d.ex_date).filter(|x| *x >= from && *x <= to) else {
             continue;
         };
-        let currency = d
+        let listed = d
             .currency
             .clone()
             .or_else(|| crate::portfolio::symbol_currency(&d.symbol).map(str::to_string))
             .unwrap_or_else(|| "INR".into());
-        if currency.eq_ignore_ascii_case("INR") {
+        let (amount, currency) = crate::market::to_major(d.amount, &listed);
+        let currency = currency.to_uppercase();
+        if currency == "INR" {
             continue;
         }
-        let wht = if currency.eq_ignore_ascii_case("USD") {
-            crate::income::DEFAULT_US_WHT_RATE
-        } else {
-            0.0
-        };
         let rate_date = form67_rate_date(day);
         let Some(rate) = fx(&currency, rate_date) else {
             no_rate.push(d.symbol.clone());
             continue;
         };
-        let gross_inr = d.amount * rate;
-        let tax_inr = gross_inr * wht;
-        let indian = gross_inr * slab_rate * (1.0 + crate::tax::INDIA_CESS_RATE);
+        let gross = paise::from_rupees(amount);
+        let gross_inr = paise::from_rupees(amount * rate);
+        let indian = paise::times(
+            paise::times(gross_inr, slab_rate),
+            1.0 + crate::tax::INDIA_CESS_RATE,
+        );
+        let withheld = withholding.map(|w| paise::times(gross, w));
+        let withheld_inr = withholding.map(|w| paise::times(gross_inr, w));
         rows.push(Form67Row {
             date: day,
+            date_basis: "ex_date",
             payer: d.symbol.clone(),
             country: country_of(&d.symbol),
-            currency: currency.to_uppercase(),
-            gross: round2(d.amount),
-            tax_withheld: round2(d.amount * wht),
+            currency,
+            gross,
+            tax_withheld: withheld,
             rate_date,
             fx_rate: rate,
-            gross_inr: round2(gross_inr),
-            tax_withheld_inr: round2(tax_inr),
-            indian_tax_inr: round2(indian),
-            credit_inr: round2(tax_inr.min(indian)),
+            gross_inr,
+            tax_withheld_inr: withheld_inr,
+            indian_tax_inr: indian,
+            credit_inr: withheld_inr.map(|t| t.min(indian)),
         });
     }
     rows.sort_by(|a, b| (a.date, &a.payer).cmp(&(b.date, &b.payer)));
@@ -423,20 +522,23 @@ pub fn form67(
     Form67 {
         fy_label: crate::tax::Country::India.tax_year_label(from),
         slab_rate,
-        gross_inr: round2(rows.iter().map(|r| r.gross_inr).sum()),
-        tax_withheld_inr: round2(rows.iter().map(|r| r.tax_withheld_inr).sum()),
-        credit_inr: round2(rows.iter().map(|r| r.credit_inr).sum()),
+        withholding_rate: withholding,
+        gross_inr: rows.iter().map(|r| r.gross_inr).sum(),
+        tax_withheld_inr: rows.iter().filter_map(|r| r.tax_withheld_inr).sum(),
+        credit_inr: rows.iter().filter_map(|r| r.credit_inr).sum(),
         rows,
         no_rate,
     }
 }
 
-/// Form 67 rows as CSV.
+/// Form 67 rows as CSV; dividends left out, and an unknown withholding,
+/// follow the rows.
 pub fn form67_csv(f: &Form67) -> String {
     use crate::output::csv_line;
-    let money = |x: f64| format!("{x:.2}");
+    let opt = |x: Option<i64>| x.map(money).unwrap_or_else(|| "unknown".into());
     let mut out = csv_line(&[
         "date",
+        "date_basis",
         "payer",
         "country",
         "currency",
@@ -452,23 +554,42 @@ pub fn form67_csv(f: &Form67) -> String {
     for r in &f.rows {
         out.push_str(&csv_line(&[
             r.date.format("%Y-%m-%d").to_string(),
+            r.date_basis.to_string(),
             r.payer.clone(),
             r.country.clone(),
             r.currency.clone(),
             money(r.gross),
-            money(r.tax_withheld),
+            opt(r.tax_withheld),
             r.rate_date.format("%Y-%m-%d").to_string(),
             format!("{:.4}", r.fx_rate),
             money(r.gross_inr),
-            money(r.tax_withheld_inr),
+            opt(r.tax_withheld_inr),
             money(r.indian_tax_inr),
-            money(r.credit_inr),
+            opt(r.credit_inr),
         ]));
+    }
+    if f.is_incomplete() {
+        out.push('\n');
+        out.push_str(&csv_line(&["incomplete", "detail"]));
+        if !f.no_rate.is_empty() {
+            out.push_str(&csv_line(&[
+                "omitted_no_rupee_rate".to_string(),
+                f.no_rate.join(" "),
+            ]));
+        }
+        if f.withholding_rate.is_none() && !f.rows.is_empty() {
+            out.push_str(&csv_line(&[
+                "withholding_unknown",
+                "give the rate withheld (--withholding 25) from your broker's statement",
+            ]));
+        }
     }
     out
 }
 
 #[cfg(test)]
+// Amounts in paise are written rupees_paise: 1_200_00 is ₹1,200.00.
+#[allow(clippy::inconsistent_digit_grouping)]
 mod tests {
     use super::*;
 
@@ -521,14 +642,15 @@ mod tests {
         assert_eq!(r.country, "United States");
         assert_eq!(r.acquired, d("2024-06-03"));
         assert_eq!(r.quantity, 10.0);
-        assert_eq!(r.initial_value, 10.0 * 190.0 * 83.0);
+        assert_eq!(r.initial_value, 10 * 190 * 83 * 100);
         // 1 Aug: 10 × 235 × 90 = 211,500 beats 1 Jul (10 × 240 × 85 = 204,000)
         // and October (6 units after the sale: 6 × 250 × 85 = 127,500).
-        assert_eq!(r.peak_value, 211_500.0);
+        assert_eq!(r.peak_value, 211_500_00);
         assert_eq!(r.peak_date, Some(d("2025-08-01")));
-        assert_eq!(r.closing_value, 6.0 * 245.0 * 85.0);
-        assert_eq!(r.sale_proceeds, 4.0 * 230.0 * 85.0);
-        assert_eq!(r.dividends, 10.0 * 85.0);
+        assert_eq!(r.closing_value, 6 * 245 * 85 * 100);
+        assert_eq!(r.sale_proceeds, 4 * 230 * 85 * 100);
+        assert_eq!(r.dividends, 10 * 85 * 100);
+        assert!(r.missing_rates.is_empty() && !fa.is_incomplete());
         let csv = schedule_fa_csv(&fa);
         assert!(csv.starts_with("country,name_of_entity,nature_of_entity,date_of_acquiring,"));
         assert!(csv.contains("United States,AAPL,Company,2024-06-03,USD,10,"));
@@ -544,8 +666,8 @@ mod tests {
         }));
         let closes = [(d("2025-06-02"), 450.0)];
         let fa = schedule_fa(&p, 2025, |_| Some(&closes[..]), |_, _| Some(85.0));
-        assert_eq!(fa.rows[0].initial_value, 2.0 * 400.0 * 87.5);
-        assert_eq!(fa.rows[0].peak_value, 2.0 * 450.0 * 85.0);
+        assert_eq!(fa.rows[0].initial_value, 70_000_00);
+        assert_eq!(fa.rows[0].peak_value, 2 * 450 * 85 * 100);
     }
 
     #[test]
@@ -571,16 +693,75 @@ mod tests {
         assert_eq!(form67_rate_date(d("2025-03-01")), d("2025-02-28"));
         let p = sample();
         let fx = |_: &str, day: NaiveDate| (day == d("2025-01-31")).then_some(86.0);
-        // FY 2024-25 holds the 10 Feb 2025 dividend.
-        let f = form67(&p, d("2024-04-01"), 0.30, fx);
+        // FY 2024-25 holds the 10 Feb 2025 dividend; 25% withheld per the statement.
+        let f = form67(&p, d("2024-04-01"), 0.30, Some(0.25), fx);
         assert_eq!(f.rows.len(), 1);
         let r = &f.rows[0];
-        assert_eq!(r.gross_inr, 860.0);
-        assert_eq!(r.tax_withheld_inr, 215.0);
+        assert_eq!(r.date_basis, "ex_date");
+        assert_eq!(r.gross_inr, 860_00);
+        assert_eq!(r.tax_withheld_inr, Some(215_00));
         // 30% + 4% cess = 268.32 > 215: the whole 215 is credited.
-        assert_eq!(r.credit_inr, 215.0);
+        assert_eq!(r.credit_inr, Some(215_00));
         // At a 5% slab the Indian tax (44.72) caps the credit.
-        let low = form67(&p, d("2024-04-01"), 0.05, fx);
-        assert_eq!(low.credit_inr, 44.72);
+        let low = form67(&p, d("2024-04-01"), 0.05, Some(0.25), fx);
+        assert_eq!(low.credit_inr, 44_72);
+        // No withholding rate given: the credit is unknown, not assumed.
+        let unknown = form67(&p, d("2024-04-01"), 0.30, None, fx);
+        assert_eq!(unknown.rows[0].credit_inr, None);
+        assert_eq!(unknown.credit_inr, 0);
+        assert!(unknown.is_incomplete());
+        assert!(form67_csv(&unknown).contains("withholding_unknown"));
+    }
+
+    #[test]
+    fn each_purchase_keeps_its_own_rupee_rate() {
+        let p = portfolio(serde_json::json!({
+            "holdings": [{"symbol": "MSFT", "shares": 2.0, "avg_cost": 100.0,
+                          "lots": [{"qty": 1.0, "price": 100.0, "date": "2025-03-03",
+                                    "source": "manual", "fx_currency": "INR", "fx_rate": 80.0},
+                                   {"qty": 1.0, "price": 100.0, "date": "2025-03-03",
+                                    "source": "manual", "fx_currency": "INR", "fx_rate": 90.0}]}],
+        }));
+        let closes = [(d("2025-06-02"), 110.0)];
+        let fa = schedule_fa(&p, 2025, |_| Some(&closes[..]), |_, _| Some(85.0));
+        assert_eq!(fa.rows[0].initial_value, 17_000_00);
+    }
+
+    #[test]
+    fn missing_rates_are_flagged_not_counted_as_zero() {
+        let p = sample();
+        let closes = [(d("2025-07-01"), 240.0), (d("2025-12-31"), 245.0)];
+        // A rate only for the purchase day and 1 July.
+        let fx = |_: &str, day: NaiveDate| {
+            (day == d("2024-06-03") || day == d("2025-07-01")).then_some(85.0)
+        };
+        let fa = schedule_fa(&p, 2025, |_| Some(&closes[..]), fx);
+        let r = &fa.rows[0];
+        assert_eq!(r.peak_value, 10 * 240 * 85 * 100);
+        for field in ["closing_value", "sale_proceeds", "dividends"] {
+            assert!(r.missing_rates.contains(&field), "{field}");
+        }
+        assert!(fa.is_incomplete());
+        assert!(schedule_fa_csv(&fa).contains("closing_value"));
+    }
+
+    #[test]
+    fn a_dividend_is_converted_in_the_currency_it_was_paid_in() {
+        // A London share quoted in pence with a dividend recorded in pounds.
+        let p = portfolio(serde_json::json!({
+            "holdings": [{"symbol": "ULVR.L", "shares": 10.0, "avg_cost": 4000.0,
+                          "lots": [{"qty": 10.0, "price": 4000.0, "date": "2024-01-02",
+                                    "source": "manual"}]}],
+            "dividends": [{"symbol": "ULVR.L", "ex_date": "2025-05-01", "per_share": 1.0,
+                           "qty": 10.0, "amount": 10.0, "currency": "GBP"}],
+        }));
+        let closes = [(d("2025-06-02"), 4500.0)];
+        let fa = schedule_fa(&p, 2025, |_| Some(&closes[..]), |_, _| Some(110.0));
+        let r = &fa.rows[0];
+        assert_eq!(r.currency, "GBP");
+        // £10 at ₹110, not 10 pence.
+        assert_eq!(r.dividends, 1_100_00);
+        // 10 × 4,000 pence = £400 at ₹110.
+        assert_eq!(r.initial_value, 44_000_00);
     }
 }
