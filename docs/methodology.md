@@ -354,7 +354,8 @@ date, n, R² and residual sd are printed with every verdict.
 4. Before 3 PM IST on the closing day: WAIT, with the trigger the smallest
    QIB multiple (at least 1x, NII and retail held at their current levels)
    at which the expected listing gain is positive, P(loss) is under 25% and
-   the expected value of a retail application is positive. If no multiple
+   the expected value of a retail application is positive (when the
+   allotment odds are known; before bidding opens they are not). If no multiple
    up to 1,000x does it: AVOID.
 5. Final book: if the expected gain is not positive, P(loss) is 25% or more,
    or the retail expected value is not positive: AVOID.

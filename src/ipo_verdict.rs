@@ -1058,7 +1058,8 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             .collect()
     };
     let evs = ev_at(mu);
-    let retail_ev_positive = |gain: f64| ev_at(gain).first().is_some_and(|e| e.ev_inr > 0.0);
+    // Before bidding opens the odds are unknown: the EV test waits for them.
+    let retail_ev_positive = |gain: f64| ev_at(gain).first().is_none_or(|e| e.ev_inr > 0.0);
 
     if !gates.is_empty() {
         return avoid(i, gates, coverage, missing, Some(outlook), evs);
@@ -1632,15 +1633,16 @@ mod tests {
         i.nii_x = None;
         i.retail_x = None;
         i.total_x = None;
-        i.odds.iter_mut().for_each(|o| {
-            o.applications = None;
-            o.p_allot = Some(0.05);
-            o.basis = "assumed".into();
-        });
+        // No book yet: no odds, so no expected value either.
+        let empty = CategoryBook::default();
+        i.odds = category_odds(BoardKind::Mainboard, 75, 200.0, &empty, &empty, &empty);
+        assert!(i.odds.iter().all(|o| o.p_allot.is_none()));
         let (cov, missing) = coverage(&i);
         assert_eq!(cov, 100.0, "{missing:?}");
         let v = decide(&i, Some(&model()));
         assert_eq!(v.kind, Kind::Wait, "{v:?}");
+        assert!(v.expected_value.is_empty());
+        assert!(v.trigger.as_deref().unwrap().starts_with("APPLY if QIB ≥ "));
     }
 
     #[test]
