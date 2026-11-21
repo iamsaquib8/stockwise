@@ -212,6 +212,9 @@ pub struct Session {
     blocked_until: Mutex<Option<Instant>>,
     /// Whether a refusal remembered on disk was looked for yet.
     refusal_checked: std::sync::atomic::AtomicBool,
+    /// Endpoints that refused us while the session itself works (NSE refuses `quote-equity` but serves the option chain): only
+    /// that path is left alone, until the time given.
+    blocked_paths: Mutex<std::collections::HashMap<String, Instant>>,
     noticed: Mutex<HashSet<String>>,
     retry_base: Duration,
     renew_after: Duration,
@@ -234,6 +237,7 @@ impl Session {
             disk: DiskCache::DataDir,
             blocked_until: Mutex::new(None),
             refusal_checked: std::sync::atomic::AtomicBool::new(false),
+            blocked_paths: Mutex::new(std::collections::HashMap::new()),
             noticed: Mutex::new(HashSet::new()),
             retry_base: Duration::from_millis(500),
             renew_after: RENEW_AFTER,
@@ -270,6 +274,71 @@ impl Session {
             .is_some_and(|until| Instant::now() < until)
     }
 
+    /// Whether `path` alone refused us recently (in this run or, through the
+    /// file on disk, an earlier one).
+    fn path_blocked(&self, path: &str) -> bool {
+        self.load_refusal();
+        self.blocked_paths
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .is_some_and(|until| Instant::now() < *until)
+    }
+
+    fn block_path(&self, path: &str) {
+        self.blocked_paths
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_string(), Instant::now() + BLOCK_FOR);
+        // Remember it for the next runs: `<unix seconds> <path>` per line.
+        if let Some(file) = self.refused_paths_file() {
+            let now = crate::selfupdate::now_secs();
+            let mut lines: Vec<String> = std::fs::read_to_string(&file)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| {
+                    l.split_once(' ').is_some_and(|(at, p)| {
+                        p != path
+                            && at
+                                .parse::<u64>()
+                                .is_ok_and(|at| now.saturating_sub(at) < BLOCK_FOR.as_secs())
+                    })
+                })
+                .map(str::to_string)
+                .collect();
+            lines.push(format!("{now} {path}"));
+            let _ = std::fs::write(file, lines.join("\n"));
+        }
+    }
+
+    fn refused_paths_file(&self) -> Option<PathBuf> {
+        self.refusal_file().map(|f| {
+            f.with_file_name(format!(
+                "{}-refused-paths.txt",
+                self.site.name.to_ascii_lowercase()
+            ))
+        })
+    }
+
+    /// The endpoint refusals an earlier run remembered.
+    fn load_path_refusals(&self) {
+        let Some(text) = self
+            .refused_paths_file()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+        else {
+            return;
+        };
+        let now = crate::selfupdate::now_secs();
+        let mut paths = self.blocked_paths.lock().unwrap_or_else(|e| e.into_inner());
+        for (at, path) in text.lines().filter_map(|l| l.split_once(' ')) {
+            let Ok(at) = at.parse::<u64>() else { continue };
+            let age = Duration::from_secs(now.saturating_sub(at));
+            if age < BLOCK_FOR {
+                paths.insert(path.to_string(), Instant::now() + (BLOCK_FOR - age));
+            }
+        }
+    }
+
     fn block(&self) {
         *self.blocked_until.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Instant::now() + BLOCK_FOR);
@@ -301,6 +370,7 @@ impl Session {
         if self.refusal_checked.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.load_path_refusals();
         let Some(at) = self
             .refusal_file()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -443,6 +513,7 @@ impl Session {
             crate::netlog::cache_hit(self.site.name, url.as_str());
             return Ok(body);
         }
+        let path = url.path().to_string();
         let result = self.fetch(url).await;
         match &result {
             Ok(body) if !ttl.is_zero() => {
@@ -451,6 +522,10 @@ impl Session {
                 }
             }
             Ok(_) => {}
+            // One endpoint refused, the session works: only that path waits.
+            Err(FetchError::Blocked(_)) if self.path_blocked(&path) => {
+                STATS.errors.fetch_add(1, Ordering::Relaxed);
+            }
             Err(e @ (FetchError::Blocked(_) | FetchError::Unavailable(_))) => {
                 STATS.errors.fetch_add(1, Ordering::Relaxed);
                 if !self.is_blocked() {
@@ -473,6 +548,13 @@ impl Session {
             return Err(FetchError::Blocked(format!(
                 "{} refused an earlier request; not asking again for now",
                 name
+            )));
+        }
+        if self.path_blocked(url.path()) {
+            return Err(FetchError::Blocked(format!(
+                "{} refused {} earlier; not asking again for now",
+                name,
+                url.path()
             )));
         }
         self.ensure_cookies(None).await?;
@@ -543,6 +625,13 @@ impl Session {
                     )));
                 }
                 Verdict::Blocked(why) => {
+                    // The cookie page answered, so this is the endpoint's
+                    // refusal (NSE's CDN refuses `quote-equity` but serves
+                    // the option chain): only this path waits. A site with
+                    // no cookie page has nothing else to tell it apart.
+                    if self.site.home.is_some() {
+                        self.block_path(url.path());
+                    }
                     return Err(FetchError::Blocked(format!(
                         "{} refused the request ({})",
                         name, why
@@ -634,6 +723,66 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_plain_403_from_one_endpoint_leaves_the_others_open() {
+        // The cookie page answers, one API refuses with a plain 403, another works.
+        let server = crate::testutil::MockServer::start(vec![
+            (200, "<html>home</html>".into()),
+            (403, r#"{"msg":"forbidden"}"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+        ])
+        .await;
+        let s = Session::for_tests(super::super::nse::site(&server.url), DiskCache::Off);
+        assert!(
+            s.get_json("/api/refused", &[], Duration::ZERO)
+                .await
+                .is_err()
+        );
+        assert!(!s.is_blocked(), "the session stays open");
+        assert!(s.get_json("/api/works", &[], Duration::ZERO).await.is_ok());
+        // The refused path is not asked again.
+        let before = server.requests().len();
+        assert!(
+            s.get_json("/api/refused", &[], Duration::ZERO)
+                .await
+                .is_err()
+        );
+        assert_eq!(server.requests().len(), before);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_refusal_is_remembered_by_the_next_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "sw-path-refusal-{}-{}",
+            std::process::id(),
+            crate::selfupdate::now_secs()
+        ));
+        let server = crate::testutil::MockServer::start(vec![
+            (200, "<html>home</html>".into()),
+            (403, "<HTML>Access Denied</HTML>".into()),
+            (200, r#"{"ok":true}"#.into()),
+        ])
+        .await;
+        let site = || super::super::nse::site(&server.url);
+        let first = Session::for_tests(site(), DiskCache::Dir(dir.clone()));
+        assert!(
+            first
+                .get_json("/api/refused", &[], Duration::ZERO)
+                .await
+                .is_err()
+        );
+        let next = Session::for_tests(site(), DiskCache::Dir(dir.clone()));
+        let before = server.requests().len();
+        assert!(
+            next.get_json("/api/refused", &[], Duration::ZERO)
+                .await
+                .is_err()
+        );
+        assert_eq!(server.requests().len(), before, "not asked again");
+        assert!(!next.is_blocked());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_refusal_is_remembered_by_the_next_session_but_an_outage_is_not() {
         let dir = std::env::temp_dir().join(format!(
@@ -764,10 +913,21 @@ mod tests {
         let err = s.get_json("/api/a", &[], Duration::ZERO).await.unwrap_err();
         assert!(matches!(err, FetchError::Blocked(_)), "{err:?}");
         assert!(err.to_string().contains("NSE refused"), "{err}");
+        // The cookie page answered, so only the refusing endpoint waits.
+        assert!(!s.is_blocked());
+        assert!(s.get_json("/api/a", &[], Duration::ZERO).await.is_err());
+        assert_eq!(server.requests().len(), 2, "no retry, no second ask");
+        assert!(s.get_json("/api/b", &[], Duration::ZERO).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_refused_cookie_page_blocks_the_whole_session() {
+        let server = MockServer::start(vec![(403, "<HTML>Access Denied</HTML>".into())]).await;
+        let s = Session::for_tests(site(&server.url, true), DiskCache::Off);
+        assert!(s.get_json("/api/a", &[], Duration::ZERO).await.is_err());
         assert!(s.is_blocked());
-        // Later calls don't reach the site at all.
         assert!(s.get_json("/api/b", &[], Duration::ZERO).await.is_err());
-        assert_eq!(server.requests().len(), 2);
+        assert_eq!(server.requests().len(), 1);
     }
 
     #[tokio::test]

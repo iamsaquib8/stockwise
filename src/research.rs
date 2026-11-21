@@ -1814,6 +1814,8 @@ async fn fetch_nse_holdings(
                     out.push(h);
                 }
             }
+            // NSE refused: the shared session stops asking, and so does this loop.
+            Ok(Err(_)) if crate::providers::nse::shared_session().is_blocked() => break,
             Ok(Err(_)) => {}
             Err(_) => timed_out = true,
         }

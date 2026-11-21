@@ -21,12 +21,12 @@ use crate::api::{YahooClient, build_url};
 use crate::i18n::{Msg, t};
 use crate::market::{AssetClass, Market};
 use crate::output::CsvRow;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// What happens on a calendar date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -766,62 +766,35 @@ fn nse_refused(status: reqwest::StatusCode) -> anyhow::Error {
     )
 }
 
-/// One NSE session per run: a page load for the cookies the API expects,
-/// then JSON requests at least a second apart. No retries.
+/// NSE's corporate-calendar API through the process-wide NSE session (one
+/// cookie handshake, one rate limit and refusal state for every NSE request).
 struct NseSession {
-    client: reqwest::Client,
-    last: Instant,
+    session: std::sync::Arc<crate::providers::session::Session>,
 }
 
 impl NseSession {
     async fn open() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(NSE_UA)
-            .cookie_store(true)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .context("Failed to build HTTP client")?;
-        let resp = client
-            .get(format!("{NSE_BASE}{}", NSE_ENDPOINTS[0].1))
-            .header(reqwest::header::ACCEPT, "text/html")
-            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-            .send()
-            .await
-            .context("Cannot reach nseindia.com; showing Yahoo Finance dates only")?;
-        if !resp.status().is_success() {
-            return Err(nse_refused(resp.status()));
+        let session = crate::providers::nse::shared_session();
+        if session.is_blocked() {
+            return Err(nse_refused(reqwest::StatusCode::FORBIDDEN));
         }
-        Ok(Self {
-            client,
-            last: Instant::now(),
-        })
+        Ok(Self { session })
     }
 
-    async fn get_json(&mut self, path: &str, referer: &str, symbol: &str) -> Result<Value> {
-        let wait = NSE_GAP.saturating_sub(self.last.elapsed());
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        let url = build_url(
-            &format!("{NSE_BASE}{path}"),
-            None,
-            &[("index", "equities"), ("symbol", symbol)],
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::REFERER, format!("{NSE_BASE}{referer}"))
-            .send()
-            .await;
-        self.last = Instant::now();
-        let resp = resp.context("Request to nseindia.com failed")?;
-        if !resp.status().is_success() {
-            return Err(nse_refused(resp.status()));
-        }
-        let body = resp.text().await.context("Failed to read NSE response")?;
-        serde_json::from_str(&body).map_err(|_| nse_refused(reqwest::StatusCode::OK))
+    async fn get_json(&mut self, path: &str, _referer: &str, symbol: &str) -> Result<Value> {
+        use crate::providers::session::FetchError;
+        self.session
+            .get_json(
+                path,
+                &[("index", "equities"), ("symbol", symbol)],
+                Duration::from_secs(3600),
+            )
+            .await
+            .map_err(|e| match e {
+                FetchError::Blocked(_) => nse_refused(reqwest::StatusCode::FORBIDDEN),
+                FetchError::Format(_) => nse_refused(reqwest::StatusCode::OK),
+                other => anyhow!("Request to nseindia.com failed ({other})"),
+            })
     }
 }
 

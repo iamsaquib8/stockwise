@@ -1132,6 +1132,14 @@ pub struct YahooClient {
     pub(crate) exchange_backup: bool,
 }
 
+/// Whether `url` is on nseindia.com (the site or its archive host).
+fn is_nse_host(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "nseindia.com" || h.ends_with(".nseindia.com"))
+}
+
 impl YahooClient {
     pub async fn new() -> Result<Self> {
         let client = reqwest::Client::builder()
@@ -2330,7 +2338,24 @@ impl YahooClient {
 
     /// GET from NSE India (JSON APIs + archives). NSE rejects requests without
     /// a browser-like Referer. (The cookie store keeps Yahoo's cookie to yahoo.com.)
+    ///
+    /// nseindia.com requests go through the process-wide NSE session, so the
+    /// research, results and `hot` requests share one cookie handshake, one
+    /// rate limit and one refusal state with the quote provider (and this
+    /// client's cache).
     pub async fn nse_get_text(&self, url: &str, ttl: Duration) -> Result<String> {
+        #[cfg(test)]
+        let mocked = self.url_rewrite.is_some();
+        #[cfg(not(test))]
+        let mocked = false;
+        if !mocked && is_nse_host(url) {
+            let session = providers::nse::shared_session();
+            session.set_cache(self.cache.clone());
+            return session.get_text(url, &[], ttl).await.map_err(|e| {
+                count(&STATS.errors);
+                anyhow::anyhow!("{e}")
+            });
+        }
         self.fetch_with(
             url,
             ttl,
