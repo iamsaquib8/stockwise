@@ -67,7 +67,7 @@ pub async fn cmd_ipo(
 
 /// The stock action engine's line for an issue that already trades.
 async fn listed_action(client: &YahooClient, symbol: &str) -> Option<String> {
-    let sym = format!("{symbol}.NS");
+    let sym = ipo::yahoo_symbol(symbol);
     let q = client
         .get_quote(&[sym.as_str()])
         .await
@@ -787,9 +787,10 @@ pub(crate) async fn ipo_review_report(
         futures_util::stream::iter(jobs)
             .map(|(sym, close, logged)| async move {
                 let from = close.unwrap_or(logged);
+                let ysym = ipo::yahoo_symbol(&sym);
                 let bars = client
                     .get_chart_between(
-                        &format!("{sym}.NS"),
+                        &ysym,
                         ipo::day_start(from - chrono::Duration::days(1)),
                         end,
                         "1d",
@@ -975,7 +976,7 @@ async fn fill_listing_prices(
         .iter()
         .enumerate()
         .filter(|(_, s)| s.listing_open <= 0.0 || s.listing_close <= 0.0)
-        .map(|(i, s)| (i, format!("{}.NS", s.symbol), s.listing_date))
+        .map(|(i, s)| (i, ipo::yahoo_symbol(&s.symbol), s.listing_date))
         .collect();
     let bars: Vec<(usize, Option<(chrono::NaiveDate, f64, f64)>)> =
         futures_util::stream::iter(jobs)

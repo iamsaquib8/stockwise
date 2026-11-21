@@ -819,7 +819,25 @@ pub fn merge_detail_json(
                     .collect()
             })
             .unwrap_or_default();
-        if !extra.is_empty() {
+        let has_nse_issue_size = nse_titles.iter().any(|t| t == "issue size");
+        let mut extra_push = Vec::with_capacity(extra.len());
+        let mut bse_issue_size = None;
+        for item in extra {
+            let is_size = item
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case("issue size"));
+            if is_size && has_nse_issue_size {
+                if let Some(v) = item.get("value").and_then(Value::as_str)
+                    && !v.trim().is_empty()
+                {
+                    bse_issue_size = Some(v.trim().to_string());
+                }
+            } else {
+                extra_push.push(item);
+            }
+        }
+        if !extra_push.is_empty() {
             if d.pointer("/issueInfo/dataList")
                 .and_then(Value::as_array)
                 .is_none()
@@ -830,8 +848,30 @@ pub fn merge_detail_json(
                 .pointer_mut("/issueInfo/dataList")
                 .and_then(Value::as_array_mut)
             {
-                list.extend(extra);
+                list.extend(extra_push);
             }
+        }
+        if let Some(bse_val) = bse_issue_size
+            && let Some(list) = d
+                .pointer_mut("/issueInfo/dataList")
+                .and_then(Value::as_array_mut)
+            && let Some(entry) = list.iter_mut().find(|e| {
+                e.get("title")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("issue size"))
+            })
+        {
+            let prev = entry
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let merged = if prev.is_empty() {
+                bse_val
+            } else {
+                format!("{prev}; {bse_val}")
+            };
+            entry["value"] = json!(merged);
         }
     }
     if !had_book && let Some(cat) = book.and_then(|b| b.get("activeCat")) {
@@ -1244,5 +1284,52 @@ mod tests {
         assert!(meta.missing.contains(&F_PRICE_BAND.to_string()));
         assert!(meta.missing.contains(&F_LOT.to_string()));
         assert!(meta.coverage < 60.0);
+    }
+
+    #[test]
+    fn merge_detail_json_preserves_nse_anchor_shares_when_bse_supplies_split() {
+        let mut detail = Some(json!({
+            "issueInfo": {
+                "dataList": [
+                    {
+                        "title": "Issue Size",
+                        "value": "Rs 9,001 crore (including Anchor reservation portion of 2,00,00,000 Equity Shares)"
+                    },
+                    { "title": "Price Range", "value": "Rs.135 to Rs.142" },
+                    { "title": "Bid Lot", "value": "105" }
+                ]
+            },
+            "activeCat": {
+                "dataList": [
+                    { "srNo": "1", "category": "QIB", "noOfShareOffered": 100, "noOfSharesBid": 200, "noOfTotalMeant": 2.0 },
+                    { "srNo": "2", "category": "NII", "noOfShareOffered": 100, "noOfSharesBid": 300, "noOfTotalMeant": 3.0 },
+                    { "srNo": "3", "category": "Retail", "noOfShareOffered": 100, "noOfSharesBid": 400, "noOfTotalMeant": 4.0 }
+                ]
+            }
+        }));
+        let bse = BseDetail {
+            board: Some(BoardKind::Mainboard),
+            open_date: None,
+            close_date: None,
+            issue_info: json!({
+                "issueInfo": {
+                    "dataList": [
+                        { "title": "Issue Size", "value": "Offer for Sale: 66,18,38,000 Equity Shares" }
+                    ]
+                }
+            }),
+        };
+        let mut row = nse_row("BIGIPO", "Big Issue Limited");
+        row.price_band = PriceBand {
+            raw: "Rs.135 to Rs.142".into(),
+            low: Some(135.0),
+            high: Some(142.0),
+        };
+        let mut meta = Meta::default();
+        merge_detail_json(&mut detail, &mut row, Some(&bse), None, &mut meta);
+        let d = detail.unwrap();
+        let (_, _, st) = crate::ipo::parse_issue_info(&d, &row.price_band);
+        assert_eq!(st.anchor_shares, Some(20_000_000));
+        assert_eq!(st.fresh_pct, Some(0.0));
     }
 }

@@ -244,14 +244,35 @@ fn sorted_quantile(v: &[f64], p: f64) -> f64 {
 // ── Regime ──
 
 /// Recency-weighted median listing-day return (percent) of the listings in
-/// `history` (listing date, return %) dated before `at` and within
+/// `history` (listing date, return %) dated strictly before `at` and within
 /// [`REGIME_WINDOW_DAYS`]. `None` below [`REGIME_MIN_SAMPLE`] listings.
 pub fn regime_asof(history: &[(NaiveDate, f64)], at: NaiveDate) -> Option<f64> {
+    regime_window(history, at, false)
+}
+
+/// Recency-weighted median listing-day return (percent) of the listings in
+/// `history` up to and including `today` within [`REGIME_WINDOW_DAYS`].
+pub fn regime_through(history: &[(NaiveDate, f64)], today: NaiveDate) -> Option<f64> {
+    regime_window(history, today, true)
+}
+
+fn regime_window(
+    history: &[(NaiveDate, f64)],
+    ref_date: NaiveDate,
+    inclusive: bool,
+) -> Option<f64> {
     let mut pts: Vec<(f64, f64)> = history
         .iter()
-        .filter(|(d, r)| *d < at && (at - *d).num_days() <= REGIME_WINDOW_DAYS && r.is_finite())
+        .filter(|(d, r)| {
+            let in_side = if inclusive {
+                *d <= ref_date
+            } else {
+                *d < ref_date
+            };
+            in_side && (ref_date - *d).num_days() <= REGIME_WINDOW_DAYS && r.is_finite()
+        })
         .map(|(d, r)| {
-            let age = (at - *d).num_days() as f64;
+            let age = (ref_date - *d).num_days() as f64;
             (*r, 0.5f64.powf(age / REGIME_HALF_LIFE_DAYS))
         })
         .collect();
@@ -310,8 +331,11 @@ impl Sample {
     }
 
     fn valid(&self) -> bool {
-        self.issue_price > 0.0
+        self.issue_price.is_finite()
+            && self.issue_price > 0.0
+            && self.listing_close.is_finite()
             && self.listing_close > 0.0
+            && self.listing_open.is_finite()
             && self.listing_open > 0.0
             && [self.qib_x, self.nii_x, self.retail_x]
                 .iter()
@@ -353,6 +377,7 @@ pub fn fit(samples: &[Sample], huber: bool, fit_date: NaiveDate) -> Result<Listi
     }
     let history: Vec<(NaiveDate, f64)> = rows
         .iter()
+        .filter(|s| s.valid())
         .map(|s| (s.listing_date, s.listing_return_pct()))
         .collect();
     let regimes: Vec<Option<f64>> = rows
@@ -616,6 +641,7 @@ pub fn samples_to_csv(rows: &[Sample]) -> String {
 pub fn loss_calibration(m: &ListingModel, rows: &[Sample]) -> Vec<(String, usize, Option<f64>)> {
     let history: Vec<(NaiveDate, f64)> = rows
         .iter()
+        .filter(|s| s.valid())
         .map(|s| (s.listing_date, s.listing_return_pct()))
         .collect();
     let bands = [(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 1.01)];
@@ -870,5 +896,48 @@ mod tests {
         let c = as_const(&testing::model());
         assert!(c.starts_with("const BUILTIN: Option<Builtin> = Some(("));
         assert!(c.matches(", ").count() >= 24);
+    }
+
+    #[test]
+    fn regime_through_includes_180_day_boundary_and_loss_calibration_skips_invalid_rows() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let mut hist: Vec<(NaiveDate, f64)> = (0..7)
+            .map(|k| (today - chrono::Duration::days(10 + k), 12.0))
+            .collect();
+        hist.push((today - chrono::Duration::days(REGIME_WINDOW_DAYS), 8.0));
+        // `regime_asof(today + 1)` misses the 180-day listing; `regime_through` includes it.
+        assert_eq!(
+            regime_asof(&hist, today + chrono::Duration::days(1)),
+            None
+        );
+        assert!(regime_through(&hist, today).is_some());
+
+        let m = testing::model();
+        let mut valid_rows: Vec<Sample> = (0..10)
+            .map(|k| Sample {
+                symbol: format!("V{k}"),
+                listing_date: today - chrono::Duration::days(10 + k * 5),
+                issue_price: 100.0,
+                qib_x: 20.0,
+                nii_x: 15.0,
+                retail_x: 8.0,
+                listing_open: 112.0,
+                listing_close: 110.0,
+            })
+            .collect();
+        let expected = loss_calibration(&m, &valid_rows);
+        for k in 0..6 {
+            valid_rows.push(Sample {
+                symbol: format!("BAD{k}"),
+                listing_date: today - chrono::Duration::days(5 + k),
+                issue_price: 100.0,
+                qib_x: 10.0,
+                nii_x: 5.0,
+                retail_x: 3.0,
+                listing_open: 0.0,
+                listing_close: 0.0,
+            });
+        }
+        assert_eq!(loss_calibration(&m, &valid_rows), expected);
     }
 }

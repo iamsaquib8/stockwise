@@ -441,6 +441,8 @@ pub async fn fetch_board(
         );
         sort_board(&mut ongoing, &mut upcoming);
     }
+    ongoing.retain(|r| filter.matches(r.board));
+    upcoming.retain(|r| filter.matches(r.board));
 
     let regime = recent_regime(yahoo, &mut recent, today).await;
     if regime.sample_size > 0 {
@@ -544,14 +546,6 @@ pub async fn fetch_board(
         row.verdict = Some(v);
     }
 
-    let ongoing: Vec<IpoSummaryRow> = ongoing
-        .into_iter()
-        .filter(|r| filter.matches(r.board))
-        .collect();
-    let upcoming: Vec<IpoSummaryRow> = upcoming
-        .into_iter()
-        .filter(|r| filter.matches(r.board))
-        .collect();
     let recent: Vec<IpoSummaryRow> = recent
         .into_iter()
         .filter(|r| filter.matches(r.board))
@@ -623,6 +617,19 @@ fn notice_nse_ipo_failure(
         .is_some_and(|e| session.notice(e, IPO_FALLBACK))
 }
 
+/// Yahoo Finance symbol for an Indian IPO symbol: numeric BSE scrip codes get
+/// `.BO`, NSE symbols get `.NS`, and an already-suffixed symbol is kept.
+pub fn yahoo_symbol(sym: &str) -> String {
+    let upper = sym.trim().to_ascii_uppercase();
+    if upper.ends_with(".NS") || upper.ends_with(".BO") {
+        upper
+    } else if !upper.is_empty() && upper.chars().all(|c| c.is_ascii_digit()) {
+        format!("{upper}.BO")
+    } else {
+        format!("{upper}.NS")
+    }
+}
+
 /// Past issues read for the regime (the board shows fewer).
 const REGIME_PAST_ROWS: usize = 120;
 
@@ -635,7 +642,7 @@ async fn recent_regime(
     let mut quote_syms: Vec<String> = vec!["^NSEI".to_string(), "^INDIAVIX".to_string()];
     for row in recent.iter().take(30) {
         if row.status == IpoStatus::Listed && !row.symbol.is_empty() {
-            quote_syms.push(format!("{}.NS", row.symbol));
+            quote_syms.push(yahoo_symbol(&row.symbol));
         }
     }
     let quote_refs: Vec<&str> = quote_syms.iter().map(String::as_str).collect();
@@ -956,7 +963,7 @@ pub async fn fetch_analysis(
     let mut recent_for_regime = parse_past_issues(&past_val, today, REGIME_PAST_ROWS);
     let search_name = clean_company_for_search(&base_row.company_name, &symbol);
     let buzz_query = format!("\"{search_name}\" IPO GMP OR review OR subscription");
-    let ns_sym = format!("{symbol}.NS");
+    let ns_sym = yahoo_symbol(&symbol);
     let (regime, rss_xml, own_quote, ctx) = tokio::join!(
         recent_regime(yahoo, &mut recent_for_regime, today),
         fetch_india_news_rss(yahoo, &buzz_query),
@@ -1525,7 +1532,7 @@ fn apply_quotes_to_recent(recent: &mut [IpoSummaryRow], quotes: &[Quote]) {
         .filter_map(|q| q.symbol.as_deref().map(|s| (s, q)))
         .collect();
     for row in recent.iter_mut() {
-        let key = format!("{}.NS", row.symbol);
+        let key = yahoo_symbol(&row.symbol);
         if let Some(q) = map.get(key.as_str())
             && let Some(price) = q.regular_market_price
             && price > 0.0
@@ -1602,7 +1609,7 @@ pub async fn fetch_listing_days(yahoo: &YahooClient, rows: &mut [IpoSummaryRow],
         .filter_map(|(i, r)| {
             let ld = r.listing_date?;
             ((today - ld).num_days() <= crate::ipo_model::REGIME_WINDOW_DAYS && ld <= today)
-                .then(|| (i, format!("{}.NS", r.symbol), ld))
+                .then(|| (i, yahoo_symbol(&r.symbol), ld))
         })
         .collect();
     let bars: Vec<(usize, Option<(NaiveDate, f64, f64)>)> = futures_util::stream::iter(jobs)
@@ -1656,9 +1663,7 @@ pub fn compute_regime(recent: &[IpoSummaryRow], quotes: &[Quote], today: NaiveDa
         })
         .collect();
     let history: Vec<(NaiveDate, f64)> = priced.iter().map(|(_, d, r)| (*d, *r)).collect();
-    // Listings up to and including today count: `regime_asof` looks strictly before its date.
-    let weighted = crate::ipo_model::regime_asof(&history, today + chrono::Duration::days(1))
-        .map(|v| round(v, 2));
+    let weighted = crate::ipo_model::regime_through(&history, today).map(|v| round(v, 2));
     let sample_size = priced.len();
     let positive_count = priced.iter().filter(|(_, _, p)| *p > 0.0).count();
     let hit_rate_pct = if sample_size > 0 {
@@ -1749,7 +1754,7 @@ pub fn parse_subscription(detail: &Value) -> SubscriptionBreakdown {
         }
     }
 
-    let use_active = active_total_bids > 0;
+    let use_active = active_total_bids > 0 || (bid_details.is_empty() && !active_cat.is_empty());
     let rows_src = if use_active {
         &active_cat
     } else {
@@ -3795,5 +3800,50 @@ mod tests {
         row.close_date = NaiveDate::from_ymd_opt(2026, 11, 5);
         row.qib_x = Some(0.0);
         assert_eq!(derive_quick_signal(&row, today), "BOOK BUILDING");
+    }
+
+    #[test]
+    fn yahoo_symbol_uses_bo_for_bse_codes_and_parse_sub_handles_zero_bids() {
+        assert_eq!(yahoo_symbol("544612"), "544612.BO");
+        assert_eq!(yahoo_symbol("BCSSL"), "BCSSL.NS");
+        assert_eq!(yahoo_symbol("544612.bo"), "544612.BO");
+
+        let zero_book = serde_json::json!({
+            "activeCat": {
+                "dataList": [
+                    { "srNo": "1", "category": "QIB", "noOfShareOffered": 1_000_000.0, "noOfSharesBid": 0.0, "noOfTotalMeant": 0.0 },
+                    { "srNo": "2", "category": "NII", "noOfShareOffered": 500_000.0, "noOfSharesBid": 0.0, "noOfTotalMeant": 0.0 },
+                    { "srNo": "3", "category": "Retail", "noOfShareOffered": 1_500_000.0, "noOfSharesBid": 0.0, "noOfTotalMeant": 0.0 }
+                ]
+            }
+        });
+        let sub = parse_subscription(&zero_book);
+        assert_eq!(sub.qib_x, Some(0.0));
+        assert_eq!(sub.nii_x, Some(0.0));
+        assert_eq!(sub.retail_x, Some(0.0));
+    }
+
+    #[test]
+    fn board_filter_retains_sme_before_ongoing_enrichment_cap() {
+        let mut board = fixture_board(BoardFilter::All, 10);
+        let template = board.ongoing[0].clone();
+        let mut ongoing = Vec::new();
+        for n in 0..6 {
+            let mut r = template.clone();
+            r.symbol = format!("MAIN{n}");
+            r.board = BoardKind::Mainboard;
+            ongoing.push(r);
+        }
+        for n in 0..2 {
+            let mut r = template.clone();
+            r.symbol = format!("SME{n}");
+            r.board = BoardKind::Sme;
+            ongoing.push(r);
+        }
+        ongoing.retain(|r| BoardFilter::Sme.matches(r.board));
+        let enriched: Vec<&str> = ongoing.iter().take(6).map(|r| r.symbol.as_str()).collect();
+        assert_eq!(enriched, ["SME0", "SME1"]);
+        board.ongoing = ongoing;
+        assert_eq!(board.ongoing.len(), 2);
     }
 }

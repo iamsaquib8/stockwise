@@ -304,11 +304,11 @@ pre_issue_shares = 0          # "Capital Structure": shares before the issue
 # ofs_shares = 0
 revenue_cr = []               # revenue from operations, e.g. [812.4, 1034.0, 1290.7]
 pat_cr = []                   # restated profit after tax, same years
-net_worth_cr = 0.0            # latest year
-total_debt_cr = 0.0
-cash_cr = 0.0
-promoter_pre_pct = 0.0
-promoter_post_pct = 0.0
+# net_worth_cr = 0.0          # latest year
+# total_debt_cr = 0.0
+# cash_cr = 0.0
+# promoter_pre_pct = 0.0
+# promoter_post_pct = 0.0
 peers = []                    # "Comparison with listed industry peers", NSE symbols
 
 # One entry per selling shareholder; kind = promoter, pe, vc or other.
@@ -405,10 +405,10 @@ pub fn valuation(
             .fresh_shares
             .or_else(|| Some(fresh_cr? * 1e7 / cap.filter(|c| *c > 0.0)?));
         // Share counts from the RHP beat the rupee split in the issue text.
-        if let (Some(f), Some(o), Some(c)) = (fresh_shares, r.ofs_shares, cap)
+        if let (Some(f), Some(o)) = (fresh_shares, r.ofs_shares)
             && (f + o) > 0.0
         {
-            v.ofs_pct = Some(o * c / ((f + o) * c) * 100.0);
+            v.ofs_pct = Some(o / (f + o) * 100.0);
         }
         v.post_issue_shares = match (r.pre_issue_shares, fresh_shares) {
             (Some(p), Some(f)) if p > 0.0 => Some(p + f),
@@ -433,11 +433,9 @@ pub fn valuation(
             }
             _ => None,
         };
-        v.ev_sales = match (v.market_cap_cr, rev) {
-            (Some(m), Some(rv)) if rv > 0.0 => {
-                let ev = m + r.total_debt_cr.unwrap_or(0.0)
-                    - r.cash_cr.unwrap_or(0.0)
-                    - fresh_proceeds_cr.unwrap_or(0.0);
+        v.ev_sales = match (v.market_cap_cr, rev, r.total_debt_cr, r.cash_cr) {
+            (Some(m), Some(rv), Some(debt), Some(cash)) if rv > 0.0 => {
+                let ev = m + debt - cash - fresh_proceeds_cr.unwrap_or(0.0);
                 Some(ev / rv)
             }
             _ => None,
@@ -1026,6 +1024,18 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         return v;
     }
 
+    if i.bidding_open() && (i.qib_x.is_none() || i.nii_x.is_none() || i.retail_x.is_none()) {
+        if !gates.is_empty() {
+            return avoid(i, gates, coverage, missing, None, Vec::new());
+        }
+        return no_call(
+            i,
+            "Category subscription missing (need QIB, NII and retail)".to_string(),
+            coverage,
+            missing,
+        );
+    }
+
     let features = Features {
         qib_x: i.qib_x.unwrap_or(0.0),
         nii_x: i.nii_x.unwrap_or(0.0),
@@ -1034,7 +1044,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
     };
     let mu = model.predict(&features);
     let p_loss = model.p_loss(mu);
-    let outlook = ListingOutlook {
+    let outlook = i.bidding_open().then(|| ListingOutlook {
         expected_gain_pct: round(mu, 1),
         p_loss: round(p_loss, 3),
         p10_pct: round(model.quantile(mu, 0.10), 1),
@@ -1044,7 +1054,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         model_n: model.n,
         model_r2: model.r2,
         model_resid_sd: model.resid_sd,
-    };
+    });
     let days = blocked_days(i.today, i.close_date);
     let ev_at = |gain: f64| -> Vec<CategoryEv> {
         i.odds
@@ -1052,12 +1062,16 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             .filter_map(|o| expected_value(o, gain, days))
             .collect()
     };
-    let evs = ev_at(mu);
+    let evs = if i.bidding_open() {
+        ev_at(mu)
+    } else {
+        Vec::new()
+    };
     // Before bidding opens the odds are unknown: the EV test waits for them.
     let retail_ev_positive = |gain: f64| ev_at(gain).first().is_none_or(|e| e.ev_inr > 0.0);
 
     if !gates.is_empty() {
-        return avoid(i, gates, coverage, missing, Some(outlook), evs);
+        return avoid(i, gates, coverage, missing, outlook, evs);
     }
 
     let listing_ok = |m: f64, p: f64| m > 0.0 && p < MAX_P_LOSS && retail_ev_positive(m);
@@ -1108,7 +1122,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         // trigger never goes below 1x, the AVOID gate at close.
         match threshold {
             Some(q) => {
-                let q = q.max(1.0);
+                let q = (q.max(1.0) * 10.0).ceil() / 10.0;
                 threshold_shown = Some(q);
                 kind = Kind::Wait;
                 let day = i.close_date.map_or("the closing day".to_string(), |d| {
@@ -1147,7 +1161,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
                     )],
                     coverage,
                     missing,
-                    Some(outlook),
+                    outlook,
                     evs,
                 );
             }
@@ -1167,17 +1181,20 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             )],
             coverage,
             missing,
-            Some(outlook),
+            outlook,
             evs,
         );
     } else {
         kind = if_strong;
+        let out_ref = outlook
+            .as_ref()
+            .expect("listing outlook is populated when bidding is open");
         reasons.push(format!(
             "Expected listing {} (10th–90th percentile {} to {}), P(loss) {:.0}%, from QIB {}, \
              NII {}, retail {}",
             pct(mu),
-            pct(outlook.p10_pct),
-            pct(outlook.p90_pct),
+            pct(out_ref.p10_pct),
+            pct(out_ref.p90_pct),
             p_loss * 100.0,
             times(i.qib_x),
             times(i.nii_x),
@@ -1235,7 +1252,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         qib_threshold_x: threshold_shown.map(|q| round(q, 1)),
         invalidation,
         review_by: review_date(i, kind),
-        outlook: Some(outlook),
+        outlook,
         expected_value: evs,
         plan,
         overhang: anchor_unlocks(i.close_date, i.today),
@@ -1853,5 +1870,95 @@ mod tests {
         }
         assert_eq!(cagr_pct(&[100.0]), None);
         assert_eq!(cagr_pct(&[-5.0, 10.0]), None);
+    }
+
+    #[test]
+    fn missing_category_book_when_open_never_defaults_to_zero() {
+        let m = model();
+        // Open issue with missing category subscription -> NO CALL, not AVOID from 0x bids.
+        let mut i = strong();
+        i.book_final = true;
+        i.qib_x = None;
+        i.nii_x = None;
+        i.retail_x = None;
+        let v = decide(&i, Some(&m));
+        assert_eq!(v.kind, Kind::NoCall, "{v:?}");
+        assert!(v.outlook.is_none());
+
+        // Partial book (missing NII) -> NO CALL instead of inflating prediction with nii_x = 0.0.
+        let mut partial = strong();
+        partial.nii_x = None;
+        assert_eq!(decide(&partial, Some(&m)).kind, Kind::NoCall);
+
+        // Missing book + hard gate still AVOIDs, without a fabricated 0x outlook.
+        let mut gated = i.clone();
+        gated.valuation = valuation(
+            Some(&rhp()),
+            Some(200.0),
+            Some(200.0),
+            Some(0.0),
+            &peers(10.0),
+        );
+        let vg = decide(&gated, Some(&m));
+        assert_eq!(vg.kind, Kind::Avoid);
+        assert!(vg.outlook.is_none());
+
+        // Upcoming issue (bidding not open yet) still WAITs with a trigger, without 0x outlook.
+        let mut up = strong();
+        up.status = IpoStatus::Upcoming;
+        up.book_final = false;
+        up.qib_x = None;
+        up.nii_x = None;
+        up.retail_x = None;
+        let vu = decide(&up, Some(&m));
+        assert_eq!(vu.kind, Kind::Wait);
+        assert!(vu.outlook.is_none());
+        assert!(vu.trigger.is_some());
+    }
+
+    #[test]
+    fn wait_threshold_rounds_up_so_meeting_it_clears_listing_gate() {
+        let m = crate::ipo_model::builtin().unwrap_or_else(model);
+        let mut i = strong();
+        i.book_final = false;
+        i.today = d("2026-11-23");
+        i.qib_x = Some(0.5);
+        i.nii_x = Some(5.03);
+        i.retail_x = Some(2.0);
+        i.regime_pct = Some(10.0);
+        let v = decide(&i, Some(&m));
+        if let Some(q) = v.qib_threshold_x {
+            assert_eq!(v.kind, Kind::Wait);
+            let mut at = i.clone();
+            at.qib_x = Some(q);
+            at.book_final = true;
+            assert_eq!(
+                decide(&at, Some(&m)).kind,
+                Kind::Apply,
+                "meeting QIB >= {q:.1}x must pass"
+            );
+        }
+    }
+
+    #[test]
+    fn rhp_template_omits_optional_zeros_and_valuation_handles_missing_cap_or_debt() {
+        let parsed: RhpFigures = toml::from_str(RHP_TEMPLATE).expect("RHP_TEMPLATE parses");
+        assert_eq!(parsed.net_worth_cr, None);
+        assert_eq!(parsed.total_debt_cr, None);
+        assert_eq!(parsed.cash_cr, None);
+        assert_eq!(parsed.promoter_pre_pct, None);
+        assert_eq!(parsed.promoter_post_pct, None);
+
+        let mut r = rhp();
+        r.ofs_shares = Some(3.0e7);
+        let v_no_cap = valuation(Some(&r), None, None, None, &[]);
+        assert_eq!(v_no_cap.ofs_pct, Some(75.0));
+        let v_zero_cap = valuation(Some(&r), Some(0.0), None, None, &[]);
+        assert_eq!(v_zero_cap.ofs_pct, Some(75.0));
+
+        let mut r_no_debt = rhp();
+        r_no_debt.total_debt_cr = None;
+        let v_no_debt = valuation(Some(&r_no_debt), Some(200.0), Some(200.0), Some(0.0), &[]);
+        assert_eq!(v_no_debt.ev_sales, None);
     }
 }
