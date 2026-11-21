@@ -2361,10 +2361,14 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
         year_end.format("%d %b %Y")
     ));
     if report.sales.is_empty() {
-        println!(
-            "  {}",
-            "No sales recorded this tax year. Record one with `stockwise portfolio sell`.".dimmed()
-        );
+        // Other sales this year (intraday, other currencies, debt funds,
+        // gold ETFs, crypto) are shown in their own sections.
+        let msg = if any_sale_this_year {
+            "No listed-share sales this tax year (Sec. 111A/112A); the year's other sales are listed below."
+        } else {
+            "No sales recorded this tax year. Record one with `stockwise portfolio sell`."
+        };
+        println!("  {}", msg.dimmed());
     } else {
         println!(
             "  {:<14} {:>9} {:<12} {:<12} {:>12} {:>5}",
