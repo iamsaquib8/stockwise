@@ -268,12 +268,26 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     }
     // One Indian stock: NSE's sector P/E to compare with, and its
     // surveillance flags (ASM/GSM, suspension).
-    if quotes.len() == 1
-        && let Some(sym) = quotes[0].symbol.clone()
-        && sym.ends_with(".NS")
-        && market::AssetClass::of(&sym) == market::AssetClass::Stock
-        && let Ok(Some(info)) = client.nse_equity_info(&sym).await
-    {
+    let nse_info = match quotes.first().and_then(|q| q.symbol.clone()) {
+        Some(sym)
+            if quotes.len() == 1
+                && sym.ends_with(".NS")
+                && market::AssetClass::of(&sym) == market::AssetClass::Stock =>
+        {
+            match client.nse_equity_info(&sym).await {
+                Ok(info) => info,
+                // Not the same as "checked, no flags": say it.
+                Err(e) => {
+                    metas[0].warn(format!(
+                        "NSE surveillance and sector P/E could not be checked ({e:#})"
+                    ));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Some(info) = nse_info {
         if quotes[0].sector_pe.is_none() {
             quotes[0].sector_pe = info.sector_pe;
         }
@@ -406,8 +420,10 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
         {
             print_kv(t(Msg::DividendYield), &format!("{:.2}%", div * 100.0));
         }
-        if let Some(source) = &q.data_source {
-            println!("\n  {}", crate::providers::source_footer(source).dimmed());
+        // The meta footer names the sources; keep only CoinGecko's
+        // attribution, which its terms ask for.
+        if q.data_source.as_deref() == Some(crate::providers::ProviderKind::CoinGecko.name()) {
+            println!("\n  {}", "Powered by CoinGecko".dimmed());
         }
         for w in &meta.warnings {
             println!("  {} {}", "!".yellow(), w.dimmed());

@@ -94,6 +94,14 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     if fmt == Format::Json {
         let mut json = risk_json(&resolved, cur, period, &rc);
         json["price"] = serde_json::json!(closes.last().copied());
+        // Drawdown dates come from the adjusted series; its price levels are
+        // the traded closes on those bars (the two series are aligned).
+        if let Some((_, peak, trough)) = technical::max_drawdown(&rc)
+            && let Some(dd) = json.get_mut("max_drawdown").and_then(|v| v.as_object_mut())
+        {
+            dd.insert("peak_price".into(), serde_json::json!(closes[peak]));
+            dd.insert("trough_price".into(), serde_json::json!(closes[trough]));
+        }
         if let Some(s) = &source {
             json["meta"] = serde_json::json!({ "sources": [s] });
         }
@@ -164,7 +172,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
             "Peak → Trough",
             &format!(
                 "{}{:.2} → {}{:.2}",
-                csym, rc[peak_idx], csym, rc[trough_idx]
+                csym, closes[peak_idx], csym, closes[trough_idx]
             ),
         );
         print_kv(
@@ -581,8 +589,24 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
             .and_then(|m| m.data_source.as_deref())
             .unwrap_or(crate::provenance::YAHOO),
     );
-    if let Some(ts) = chart.timestamp.as_ref().and_then(|t| t.last()) {
-        meta.set_as_of_unix(*ts);
+    // Dated by the last bar the fit used: a trailing slot without a close
+    // (today's, mid-session) is not data.
+    let closes_col = chart
+        .indicators
+        .quote
+        .first()
+        .and_then(|q| q.close.as_deref())
+        .unwrap_or_default();
+    if let Some(ts) = chart
+        .timestamp
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .zip(closes_col)
+        .rev()
+        .find_map(|(t, c)| c.map(|_| *t))
+    {
+        meta.set_as_of_unix(ts);
     }
     meta.set_fields(&[("volatility", vol.is_some())]);
     for w in chart.meta.iter().flat_map(|m| m.warnings.iter()) {
@@ -591,9 +615,11 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     println!("\n  {}", meta.footer().dimmed());
     println!(
         "\n  {}",
-        "A straight line fitted to the last 90 closes and extended. It describes the past trend; it is NOT a prediction."
-            .dimmed()
-            .italic()
+        format!(
+            "A straight line fitted to the last {window} closes and extended. It describes the past trend; it is NOT a prediction."
+        )
+        .dimmed()
+        .italic()
     );
     println!();
     Ok(())
