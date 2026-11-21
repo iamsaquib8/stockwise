@@ -1143,7 +1143,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let cur = val.currency(&h.symbol);
         let cur = cur.as_deref();
         let mut label = h.symbol.clone();
-        if pending.for_symbol(&h.symbol).first().is_some() {
+        if !pending.for_symbol(&h.symbol).is_empty() {
             label.push('†');
         }
         if h.has_estimated_dates() {
