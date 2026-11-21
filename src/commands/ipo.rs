@@ -92,7 +92,7 @@ fn ist_today() -> chrono::NaiveDate {
 }
 
 /// Append the board's verdicts to the IPO track record (best effort).
-fn log_board(v: &IpoBoardView) {
+pub(crate) fn log_board(v: &IpoBoardView) {
     let today = ist_today();
     let entries: Vec<_> = v
         .ongoing
@@ -436,7 +436,11 @@ pub fn print_ipo_analysis(a: &IpoAnalysis, stock_action: Option<&str>) {
         );
         println!("  {}", subline.dimmed());
         for e in &v.expected_value {
-            let ev = format!("₹{:.0}", e.ev_inr);
+            let ev = if e.ev_inr < 0.0 {
+                format!("−{}", money(-e.ev_inr))
+            } else {
+                money(e.ev_inr)
+            };
             println!(
                 "  {} {:>12} blocked  odds {:>6.2}%  cost ₹{:<6.0} EV {}",
                 pad_end(&e.category, 16),
@@ -1081,4 +1085,24 @@ pub async fn cmd_ipo_calibrate(opts: CalibrateOptions, fmt: Format) -> Result<()
     }
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The printers run on every verdict kind the fixtures produce without
+    /// panicking (the text itself is checked in `crate::ipo`).
+    #[test]
+    fn board_and_analysis_print() {
+        let mut board = ipo::fixture_board(BoardFilter::All, 10);
+        for (symbol, capital) in [("BCSSL", Some(250_000.0)), ("MAXENGS", None)] {
+            let a = ipo::fixture_analysis(symbol, None, capital).unwrap();
+            print_ipo_analysis(&a, Some("HOLD — test"));
+            if let Some(row) = board.ongoing.iter_mut().find(|r| r.symbol == symbol) {
+                row.verdict = Some(a.verdict.clone());
+            }
+        }
+        print_ipo_board(&board);
+    }
 }

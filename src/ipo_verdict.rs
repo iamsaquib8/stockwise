@@ -1118,13 +1118,23 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
                     "{} if QIB ≥ {q:.1}x by 3 PM IST on {day}",
                     if_strong.label()
                 ));
-                reasons.push(format!(
-                    "Book still building: QIB {} so far; the model needs QIB ≥ {q:.1}x (with NII \
-                     and retail at their current levels) for a positive expected listing with \
-                     P(loss) under {:.0}%",
-                    times(i.qib_x),
-                    MAX_P_LOSS * 100.0
-                ));
+                let now = i.qib_x.unwrap_or(0.0);
+                reasons.push(if now >= q {
+                    format!(
+                        "Book still building: QIB {} already clears the {q:.1}x the model needs \
+                         (with NII and retail at their current levels); the call waits for the \
+                         institutional book to close at 3 PM IST",
+                        times(i.qib_x)
+                    )
+                } else {
+                    format!(
+                        "Book still building: QIB {} so far; the model needs QIB ≥ {q:.1}x (with \
+                         NII and retail at their current levels) for a positive expected listing \
+                         with P(loss) under {:.0}%",
+                        times(i.qib_x),
+                        MAX_P_LOSS * 100.0
+                    )
+                });
                 invalidation = Some(format!("QIB ends below {q:.1}x at close"));
             }
             None => {
