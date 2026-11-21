@@ -745,10 +745,6 @@ fn short_conf(c: Confidence) -> &'static str {
 pub fn coverage(i: &Inputs) -> (f64, Vec<String>) {
     let v = &i.valuation;
     let book = i.bidding_open();
-    let applications_known = i
-        .odds
-        .first()
-        .is_some_and(|o| o.applications.is_some() || o.basis == "undersubscribed");
     let checks: Vec<(&str, bool, bool)> = match i.board {
         BoardKind::Mainboard => vec![
             ("price band", i.cap_price.is_some(), true),
@@ -757,7 +753,6 @@ pub fn coverage(i: &Inputs) -> (f64, Vec<String>) {
             ("QIB subscription", i.qib_x.is_some(), book),
             ("NII subscription", i.nii_x.is_some(), book),
             ("retail subscription", i.retail_x.is_some(), book),
-            ("retail applications", applications_known, book),
             ("post-issue shares", v.post_issue_shares.is_some(), true),
             ("profit after tax", v.loss_making.is_some(), true),
             (

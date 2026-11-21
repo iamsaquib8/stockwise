@@ -1,0 +1,49 @@
+{
+  "_note": "NSE /api/ipo-detail?symbol=BLSPOLY&series=EQ as read on 2026-11-21 (final book), trimmed to the fields StockWise reads. activeCat is the consolidated NSE + BSE book; bidDetails (NSE only) and the base64 demand chart are left out. No application counts were present.",
+  "companyName": "BLS Polymers Limited",
+  "metaInfo": {
+    "companyName": "BLS Polymers Limited",
+    "industry": "Specialty Chemicals",
+    "isin": "INE0ZCQ01019",
+    "listingDate": "2026-11-03",
+    "symbol": "BLSPOLY"
+  },
+  "activeCat": {
+    "dataList": [
+      {"category": "Category", "noOfShareOffered": "No.of shares offered/reserved", "noOfSharesBid": "No. of shares bid for", "noOfTotalMeant": "No. of times of total meant for the category", "srNo": "Sr.No."},
+      {"category": "Qualified Institutional Buyers(QIBs)", "noOfShareOffered": "3400000", "noOfSharesBid": "680857700", "noOfTotalMeant": "200.25226470588234", "srNo": "1"},
+      {"category": "Foreign Institutional Investors(FIIs)", "noOfShareOffered": "", "noOfSharesBid": "91090400", "noOfTotalMeant": "", "srNo": "1(a)"},
+      {"category": "Domestic Financial Institutions(Banks/ Financial Institutions(FIs)/ Insurance Companies)", "noOfShareOffered": "", "noOfSharesBid": "302828500", "noOfTotalMeant": "", "srNo": "1(b)"},
+      {"category": "Mutual funds", "noOfShareOffered": "", "noOfSharesBid": "4036200", "noOfTotalMeant": "", "srNo": "1(c)"},
+      {"category": "Others", "noOfShareOffered": "", "noOfSharesBid": "282902600", "noOfTotalMeant": "", "srNo": "1(d)"},
+      {"category": "Non Institutional Investors", "noOfShareOffered": "2550000", "noOfSharesBid": "1425969900", "noOfTotalMeant": "559.2038823529412", "srNo": "2"},
+      {"category": "Non Institutional Investors(Bid amount of more than Ten Lakh Rupees)", "noOfShareOffered": "1700000", "noOfSharesBid": "1007815300", "noOfTotalMeant": "592.8325294117647", "srNo": "2.1"},
+      {"category": "Corporates", "noOfShareOffered": "", "noOfSharesBid": "6743000", "noOfTotalMeant": "", "srNo": "2.1(a)"},
+      {"category": "Individuals(Other than RIIs)", "noOfShareOffered": "", "noOfSharesBid": "969650700", "noOfTotalMeant": "", "srNo": "2.1(b)"},
+      {"category": "Others", "noOfShareOffered": "", "noOfSharesBid": "31421600", "noOfTotalMeant": "", "srNo": "2.1(c)"},
+      {"category": "Non Institutional Investors(Bid amount of more than Two Lakh Rupees upto Ten Lakh Rupees)", "noOfShareOffered": "850000", "noOfSharesBid": "418154600", "noOfTotalMeant": "491.94658823529414", "srNo": "2.2"},
+      {"category": "Corporates", "noOfShareOffered": "", "noOfSharesBid": "650800", "noOfTotalMeant": "", "srNo": "2.2(a)"},
+      {"category": "Individuals(Other than RIIs)", "noOfShareOffered": "", "noOfSharesBid": "409332900", "noOfTotalMeant": "", "srNo": "2.2(b)"},
+      {"category": "Others", "noOfShareOffered": "", "noOfSharesBid": "8170900", "noOfTotalMeant": "", "srNo": "2.2(c)"},
+      {"category": "Retail Individual Investors(RIIs)", "noOfShareOffered": "5950000", "noOfSharesBid": "763731000", "noOfTotalMeant": "128.3581512605042", "srNo": "3"},
+      {"category": "Cut Off", "noOfShareOffered": "", "noOfSharesBid": "687568500", "noOfTotalMeant": "", "srNo": "3(a)"},
+      {"category": "Price bids", "noOfShareOffered": "", "noOfSharesBid": "76162500", "noOfTotalMeant": "", "srNo": "3(b)"},
+      {"category": "Total", "noOfShareOffered": "1.19E7", "noOfSharesBid": "2.8705586E9", "noOfTotalMeant": "241.22341176470587", "srNo": null}
+    ]
+  },
+  "issueInfo": {
+    "dataList": [
+      {"title": "Symbol", "value": "BLSPOLY"},
+      {"title": "Issue Period", "value": "27-Oct-2026 to 29-Oct-2026"},
+      {"title": "Issue Size", "value": "\"Initial Public Offer comprising of Fresh Issue aggregating upto 1,70,00,000 Equity Shares (including Anchor reservation portion of 51,00,000 Equity Shares)\""},
+      {"title": "Issue Type", "value": "Book Building"},
+      {"title": "Price Range", "value": "Rs. 142/- to Rs. 150/- per Equity Share"},
+      {"title": "Bid Lot", "value": "100 Equity Shares and in multiples thereof"},
+      {"title": "Book Running Lead Managers", "value": "Unistone Capital Private Limited"},
+      {"title": "Name of the Registrar", "value": "KFin Technologies Limited"},
+      {"title": "Ratios / Basis of Issue Price", "value": "https://nsearchives.nseindia.com/content/ipo/RATIOS_BLSPOLY.zip"},
+      {"title": "Red Herring Prospectus", "value": "https://nsearchives.nseindia.com/content/ipo/RHP_BLSPOLY.zip"},
+      {"title": "Anchor Allocation Report", "value": "https://nsearchives.nseindia.com/content/ipo/ANCHOR_BLSPOLY.zip"}
+    ]
+  }
+}

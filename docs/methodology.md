@@ -261,8 +261,7 @@ fields missing, the methodology version and the disclaimer.
 
 Missing data counts against coverage; nothing stands in at a neutral value.
 Mainboard fields: price band, lot size, the fresh/OFS split, QIB, NII and
-retail subscription and the retail application count (expected only once
-bidding opens), post-issue shares, profit after tax, P/E at the upper band,
+retail subscription (expected only once bidding opens), post-issue shares, profit after tax, P/E at the upper band,
 the peer median P/E, revenue growth, promoter holding after the issue, the
 OFS sellers (when there is an offer for sale) and the IPO market regime.
 Below 60% the verdict is NO CALL with the missing fields listed; any gate
@@ -340,7 +339,10 @@ date, n, R² and residual sd are printed with every verdict.
   retail one lot, and NII the minimum sNII application (just above ₹2
   lakh), per applicant by lottery when a category is oversubscribed; a bNII
   winner (above ₹10 lakh) receives that same sNII-sized packet. Without
-  application counts, 1 ÷ the share subscription is shown as a lower bound.
+  application counts, 1 ÷ the share subscription is shown as a lower bound
+  (every application is at least the minimum). NSE's issue detail did not
+  carry application counts for the 354 issues read on 21 Nov 2026, so the
+  lower bound is the usual case and the expected values are conservative.
   SME individual applications are at least two lots and above ₹2 lakh.
 - **Expected value** = odds × expected listing gain × allotted amount − the
   return forgone on the blocked money (7% a year, for the days to the close

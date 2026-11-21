@@ -1219,12 +1219,23 @@ fn parse_board_item(
     Some(row)
 }
 
+/// Whether an NSE `securityType` / `series` is an equity issue (mainboard or SME).
+fn is_equity_issue(series: &str) -> bool {
+    matches!(
+        series.trim().to_ascii_uppercase().as_str(),
+        "EQUITY" | "EQ" | "SME" | "SM" | "BE"
+    )
+}
+
 pub fn parse_past_issues(past_val: &Value, today: NaiveDate, limit: usize) -> Vec<IpoSummaryRow> {
     let Some(arr) = past_val.as_array() else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for item in arr.iter().take(limit) {
+    for item in arr {
+        if out.len() >= limit {
+            break;
+        }
         let Some(symbol) = str_field(item, &["symbol"]).map(|s| s.trim().to_ascii_uppercase())
         else {
             continue;
@@ -1236,6 +1247,11 @@ pub fn parse_past_issues(past_val: &Value, today: NaiveDate, limit: usize) -> Ve
             str_field(item, &["company", "companyName"]).unwrap_or_else(|| symbol.clone());
         let series =
             str_field(item, &["securityType", "series"]).unwrap_or_else(|| "EQ".to_string());
+        // NSE's past-issues list also carries debt, REIT and InvIT issues
+        // (`securityType` DEBT, REIT, InvIT); equity is `Equity` or `SME`.
+        if !is_equity_issue(&series) {
+            continue;
+        }
         let board = BoardKind::from_series(&series);
         let open_date = str_field(item, &["ipoStartDate"]).and_then(|s| parse_nse_date(&s));
         let close_date = str_field(item, &["ipoEndDate"]).and_then(|s| parse_nse_date(&s));
@@ -3177,6 +3193,55 @@ mod tests {
         assert_ne!(v.kind, verdict::Kind::Wait, "{v:?}");
     }
 
+    /// The live NSE answer (recorded 2026-11-21): consolidated book in
+    /// `activeCat`, `Total` row without a serial number, no application counts.
+    #[test]
+    fn live_nse_ipo_detail_fixture_parses() {
+        let detail: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/nse_ipo_detail_blspoly.json"
+        ))
+        .unwrap();
+        let sub = parse_subscription(&detail);
+        assert_eq!(sub.source_note, "Consolidated NSE + BSE live bid book");
+        assert_eq!(sub.qib_x, Some(200.25));
+        assert_eq!(sub.nii_x, Some(559.2));
+        assert_eq!(sub.bnii_x, Some(592.83));
+        assert_eq!(sub.snii_x, Some(491.95));
+        assert_eq!(sub.retail_x, Some(128.36));
+        assert_eq!(sub.total_x, Some(241.22));
+        assert_eq!(sub.mf_share_of_qib_pct, Some(0.6));
+        let (retail, snii, bnii) = category_books(&sub);
+        assert_eq!(retail.offered_shares, Some(5_950_000));
+        assert_eq!(snii.offered_shares, Some(850_000));
+        assert_eq!(bnii.offered_shares, Some(1_700_000));
+        assert_eq!(retail.applications, None);
+        let (lot, band, st) = parse_issue_info(&detail, &PriceBand::default());
+        assert_eq!(lot, Some(100));
+        assert_eq!(band.unwrap().cap_price(), Some(150.0));
+        // 1,70,00,000 fresh shares × ₹150 = ₹255 crore, all fresh.
+        assert_eq!(st.total_issue_cr, Some(255.0));
+        assert_eq!(st.fresh_pct, Some(100.0));
+        assert_eq!(st.anchor_shares, Some(5_100_000));
+        assert!(
+            st.ratios_url
+                .as_deref()
+                .unwrap()
+                .ends_with("RATIOS_BLSPOLY.zip")
+        );
+        // Without application counts the odds are the 1 ÷ x lower bound.
+        let opt = build_allotment_optimizer(
+            BoardKind::Mainboard,
+            lot,
+            Some(150.0),
+            &sub,
+            None,
+            Some(10.0),
+            4,
+        );
+        assert_eq!(opt.buckets[0].basis, "lower bound");
+        assert!((opt.buckets[0].p_allot.unwrap() - 1.0 / 128.36).abs() < 1e-9);
+    }
+
     #[test]
     fn indian_number_formatting_groups_lakhs_and_crores() {
         assert_eq!(fmt_int_indian(999), "999");
@@ -3234,6 +3299,25 @@ mod tests {
         ]);
         let rows = parse_past_issues(&past, today, 10);
         assert_eq!(rows[0].status, IpoStatus::ClosedPendingListing);
+        // The live list (2026-11-21) labels equity `Equity` and `SME`, and
+        // also carries debt, REIT and InvIT issues, which are not IPOs here.
+        let live = serde_json::json!([
+            {"symbol": "NCDX", "company": "Some Finance NCD", "issuePrice": "1000", "listingDate": "20-OCT-2026", "securityType": "DEBT"},
+            {"symbol": "REITX", "company": "Some REIT", "issuePrice": "100", "listingDate": "20-OCT-2026", "securityType": "REIT"},
+            {"symbol": "INVX", "company": "Some InvIT", "issuePrice": "100", "listingDate": "20-OCT-2026", "securityType": "InvIT"},
+            {"symbol": "BLSPOLY", "company": "BLS Polymers Limited", "issuePrice": "   150", "listingDate": "03-NOV-2026", "securityType": "Equity"},
+            {"symbol": "VPFL", "company": "Vedant Poly Fabs Limited", "issuePrice": "94", "listingDate": "09-NOV-2026", "securityType": "SME"}
+        ]);
+        let live_rows = parse_past_issues(&live, today, 2);
+        let got: Vec<(&str, BoardKind)> = live_rows
+            .iter()
+            .map(|r| (r.symbol.as_str(), r.board))
+            .collect();
+        assert_eq!(
+            got,
+            [("BLSPOLY", BoardKind::Mainboard), ("VPFL", BoardKind::Sme)]
+        );
+        assert_eq!(live_rows[0].issue_price, Some(150.0));
         assert!(rows[0].window_note.contains("Allotment/Listing pending"));
         assert_eq!(rows[1].status, IpoStatus::Listed);
         assert_eq!(rows[1].issue_price, Some(1119.0));
