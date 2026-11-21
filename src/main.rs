@@ -21,6 +21,7 @@ mod benchmark;
 mod bleed;
 mod bonds;
 mod brokers;
+mod business_groups;
 mod calendar;
 mod charts;
 mod checkup;
@@ -30,6 +31,7 @@ mod commodity;
 mod conditions;
 mod config;
 mod connect;
+mod corp_actions;
 mod crossmarket;
 mod daemon;
 mod daemon_status;
@@ -38,12 +40,14 @@ mod derivatives;
 mod display;
 mod events;
 mod funds;
+mod fx_history;
 mod global_lists;
 mod goals;
 mod greeks;
 mod gsec;
 mod i18n;
 mod income;
+mod index_weights;
 mod insights;
 mod intraday;
 mod ipo;
@@ -85,6 +89,7 @@ mod technical;
 #[cfg(test)]
 mod testutil;
 mod tools;
+mod trade_charges;
 #[cfg(feature = "tui")]
 mod tui;
 mod verdict;
@@ -1340,6 +1345,12 @@ enum PortfolioCmd {
         /// converted at that day's exchange rate. The market comes from -m/--market
         #[arg(long, value_parser = currency_code)]
         currency: Option<String>,
+        /// Brokerage, taxes and fees paid on the purchase, in total (in the
+        /// --currency paid, else the holding's); counted in realized P&L.
+        /// `auto` estimates an NSE/BSE delivery buy's STT, stamp duty,
+        /// exchange, SEBI and GST charges (no brokerage)
+        #[arg(long, value_parser = trade_charges::parse)]
+        charges: Option<trade_charges::ChargesArg>,
     },
     /// Record a sale: oldest lots first (FIFO), realized P&L kept for `tax`
     Sell {
@@ -1354,6 +1365,11 @@ enum PortfolioCmd {
         /// Show the FIFO lots, tax and LTCG countdown without recording the sale
         #[arg(long, alias = "dry-run")]
         preview: bool,
+        /// Brokerage, taxes and fees paid on the sale, in total; realized P&L is net of them.
+        /// `auto` estimates an NSE/BSE delivery sell's STT, exchange, SEBI,
+        /// GST and DP charges (no brokerage)
+        #[arg(long, value_parser = trade_charges::parse)]
+        charges: Option<trade_charges::ChargesArg>,
     },
     /// A holding's lots, sales and dividends; --lot N fixes or deletes a lot, --undo-sale N puts a sale back
     #[command(group(clap::ArgGroup::new("lot_change").multiple(true)))]
@@ -4987,6 +5003,7 @@ async fn dispatch(
                 date,
                 force,
                 currency,
+                charges,
             }) => {
                 commands::cmd_portfolio_add(
                     &symbol,
@@ -4995,6 +5012,7 @@ async fn dispatch(
                     date.as_deref(),
                     force,
                     currency.as_deref(),
+                    charges,
                     m,
                 )
                 .await
@@ -5005,6 +5023,7 @@ async fn dispatch(
                 price,
                 date,
                 preview,
+                ..
             }) if preview => {
                 commands::cmd_portfolio_sell_preview(&symbol, shares, price, date.as_deref(), m)
                     .await
@@ -5014,8 +5033,12 @@ async fn dispatch(
                 shares,
                 price,
                 date,
+                charges,
                 ..
-            }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
+            }) => {
+                commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), charges, m)
+                    .await
+            }
             Some(PortfolioCmd::Lots {
                 symbol,
                 lot,

@@ -36,6 +36,51 @@ pub const WEAK_SCORE: f64 = 45.0;
 /// Daily closes needed before volatility, drawdown or beta are shown.
 pub const MIN_CLOSES: usize = 60;
 
+/// How long a holding's lots must be held to be long-term, for the
+/// investor's country of residence (see `portfolio_analyze::term_rule`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TermRule {
+    /// The months [`Country::long_term_months`] gives for `tax_country`.
+    #[default]
+    CountryDefault,
+    /// This many months (an Indian resident's foreign shares: 24).
+    Months(u32),
+    /// Never long-term: every gain is taxed at the slab rate (crypto).
+    NoLongTerm,
+    /// An Indian debt fund: units bought from 1 April 2023 are slab-taxed
+    /// with no long-term term; older units are long-term after 24 months.
+    DebtFund,
+}
+
+/// The day from which Indian debt-fund units have no long-term term
+/// (Finance Act 2023, Sec. 50AA).
+pub fn debt_fund_cutoff() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2023, 4, 1).expect("valid date")
+}
+
+impl TermRule {
+    /// Months a lot bought on `bought` must be held to turn long-term, given
+    /// the country's default; `None` when it never turns long-term.
+    pub fn months_for(self, default: Option<u32>, bought: NaiveDate) -> Option<u32> {
+        match self {
+            TermRule::CountryDefault => default,
+            TermRule::Months(m) => Some(m),
+            TermRule::NoLongTerm => None,
+            TermRule::DebtFund if bought >= debt_fund_cutoff() => None,
+            TermRule::DebtFund => Some(24),
+        }
+    }
+
+    /// Whether the holding has a tax term at all (gains are split into
+    /// short and long term).
+    pub fn has_terms(self, default: Option<u32>) -> bool {
+        match self {
+            TermRule::CountryDefault => default.is_some(),
+            _ => true,
+        }
+    }
+}
+
 /// One purchase lot still held.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LotInput {
@@ -81,6 +126,40 @@ pub struct PositionInput {
     pub risk_tier: Option<String>,
     /// Whose holding-period rules apply (`None`: no long-term rate).
     pub tax_country: Option<Country>,
+    /// Trailing P/E, price to book, and dividend yield (a fraction) from the
+    /// quote; `None` when the quote has none (funds, loss-makers' P/E).
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    pub dividend_yield: Option<f64>,
+    /// The holding period for the investor's residence (see [`TermRule`]).
+    pub term_rule: TermRule,
+    /// Cost in the base currency at each purchase's own exchange rate (or
+    /// what was paid in the base). `None`: `cost × fx_to_base` (today's rate).
+    pub cost_base: Option<f64>,
+    /// `closes` converted to the base currency at each day's rate; empty
+    /// when the holding is in the base currency or no rates were found.
+    pub closes_base: Vec<(NaiveDate, f64)>,
+}
+
+impl PositionInput {
+    /// Closes in the base currency: `closes_base`, else `closes` when the
+    /// holding is in the base currency (`fx_to_base` of 1).
+    pub fn base_closes(&self) -> &[(NaiveDate, f64)] {
+        if !self.closes_base.is_empty() {
+            &self.closes_base
+        } else if self.fx_to_base == Some(1.0) {
+            &self.closes
+        } else {
+            &[]
+        }
+    }
+
+    /// Cost in the base currency: at the purchases' rates when known, else
+    /// at today's.
+    pub fn base_cost(&self) -> Option<f64> {
+        self.cost_base
+            .or_else(|| self.fx_to_base.map(|r| self.cost * r))
+    }
 }
 
 /// Settings that apply to the whole portfolio.
@@ -109,8 +188,12 @@ pub struct Position {
     pub cost: f64,
     pub value: Option<f64>,
     pub value_base: Option<f64>,
-    /// Cost at today's exchange rate, alongside `value_base`.
+    /// Cost in the base currency at the purchases' own exchange rates
+    /// (today's when those are unknown), alongside `value_base`.
     pub cost_base: Option<f64>,
+    /// Part of the base-currency P&L from exchange-rate moves since the
+    /// purchases: cost at today's rate less cost at the purchases' rates.
+    pub fx_effect_base: Option<f64>,
     pub weight_pct: Option<f64>,
     pub pnl: Option<f64>,
     pub pnl_pct: Option<f64>,
@@ -248,6 +331,65 @@ pub struct Analysis {
     pub observations: Vec<Observation>,
     /// Holdings with no price or no exchange rate, left out of totals.
     pub left_out: Vec<String>,
+    /// Value-weighted P/E, P/B and dividend yield of the holdings that have them.
+    pub valuation: ValuationSnapshot,
+}
+
+/// The portfolio's valuation multiples, weighted by value. P/E and P/B are
+/// harmonic means (the portfolio's price over its share of earnings or
+/// book), so one very expensive stock does not swamp the figure. Holdings
+/// with a loss (no trailing P/E) are counted apart.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ValuationSnapshot {
+    pub pe: Option<f64>,
+    /// Share of the value the P/E covers, percent.
+    pub pe_coverage_pct: f64,
+    pub pb: Option<f64>,
+    pub pb_coverage_pct: f64,
+    /// Percent.
+    pub dividend_yield_pct: Option<f64>,
+    pub dividend_coverage_pct: f64,
+    /// Holdings with a quote but no trailing P/E (usually a trailing loss).
+    pub without_pe: Vec<String>,
+}
+
+/// [`ValuationSnapshot`] of `inputs`, valued by `positions`.
+pub fn valuation_snapshot(inputs: &[PositionInput], positions: &[Position]) -> ValuationSnapshot {
+    let total: f64 = positions.iter().filter_map(|p| p.value_base).sum();
+    let mut out = ValuationSnapshot::default();
+    if total <= 0.0 {
+        return out;
+    }
+    let (mut pe_w, mut pe_inv, mut pb_w, mut pb_inv, mut dy_w, mut dy) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (i, p) in inputs.iter().zip(positions) {
+        let Some(v) = p.value_base.filter(|v| *v > 0.0) else {
+            continue;
+        };
+        match i.pe.filter(|x| x.is_finite() && *x > 0.0) {
+            Some(pe) => {
+                pe_w += v;
+                pe_inv += v / pe;
+            }
+            None if i.pb.is_some() => out.without_pe.push(i.symbol.clone()),
+            None => {}
+        }
+        if let Some(pb) = i.pb.filter(|x| x.is_finite() && *x > 0.0) {
+            pb_w += v;
+            pb_inv += v / pb;
+        }
+        if let Some(y) = i.dividend_yield.filter(|x| x.is_finite() && *x >= 0.0) {
+            dy_w += v;
+            dy += v * y;
+        }
+    }
+    out.pe = (pe_inv > 0.0).then(|| pe_w / pe_inv);
+    out.pe_coverage_pct = pct(pe_w, total);
+    out.pb = (pb_inv > 0.0).then(|| pb_w / pb_inv);
+    out.pb_coverage_pct = pct(pb_w, total);
+    out.dividend_yield_pct = (dy_w > 0.0).then(|| dy / dy_w * 100.0);
+    out.dividend_coverage_pct = pct(dy_w, total);
+    out
 }
 
 fn pct(part: f64, whole: f64) -> f64 {
@@ -293,7 +435,7 @@ fn max_drawdown(closes: &[f64]) -> Option<f64> {
 }
 
 /// Closes of the sessions both series have, in date order.
-fn join(a: &[(NaiveDate, f64)], b: &[(NaiveDate, f64)]) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn join(a: &[(NaiveDate, f64)], b: &[(NaiveDate, f64)]) -> (Vec<f64>, Vec<f64>) {
     let theirs: std::collections::HashMap<NaiveDate, f64> = b.iter().copied().collect();
     a.iter()
         .filter_map(|(d, x)| theirs.get(d).map(|y| (*x, *y)))
@@ -324,16 +466,22 @@ fn beta(asset: &[(NaiveDate, f64)], bench: &[(NaiveDate, f64)]) -> Option<f64> {
 fn position(p: &PositionInput, ctx: &Context, total_base: f64) -> Position {
     let value_base = p.value.zip(p.fx_to_base).map(|(v, r)| v * r);
     let pnl = p.value.map(|v| v - p.cost);
-    let months = p.tax_country.and_then(Country::long_term_months);
+    let default_months = p.tax_country.and_then(Country::long_term_months);
     let long_term_on = |d: NaiveDate, m: u32| crate::sellpreview::long_term_from(d, m);
     let (mut st, mut lt, mut any_term) = (0.0, 0.0, false);
     let (mut st_lots, mut lt_lots) = (0, 0);
     let mut next: Option<NextLongTerm> = None;
-    if let (Some(price), Some(m)) = (p.price, months) {
+    if let Some(price) = p.price.filter(|_| p.term_rule.has_terms(default_months)) {
         for lot in &p.lots {
             let Some(d) = lot.date else { continue };
             let gain = lot.qty * (price - lot.price);
             any_term = true;
+            let Some(m) = p.term_rule.months_for(default_months, d) else {
+                // Never long-term: slab-taxed.
+                st += gain;
+                st_lots += 1;
+                continue;
+            };
             match long_term_on(d, m) {
                 Some(on) if on > ctx.today => {
                     st += gain;
@@ -375,7 +523,11 @@ fn position(p: &PositionInput, ctx: &Context, total_base: f64) -> Position {
         cost: p.cost,
         value: p.value,
         value_base,
-        cost_base: value_base.and(p.fx_to_base).map(|r| p.cost * r),
+        cost_base: value_base.and(p.base_cost()),
+        fx_effect_base: value_base
+            .and(p.fx_to_base)
+            .zip(p.cost_base)
+            .map(|(r, hist)| p.cost * r - hist),
         weight_pct: value_base.map(|v| pct(v, total_base)),
         pnl,
         pnl_pct: pnl.map(|g| pct(g, p.cost)),
@@ -406,7 +558,15 @@ fn position(p: &PositionInput, ctx: &Context, total_base: f64) -> Position {
             .filter(|(h, _)| *h > 0.0)
             .map(|(h, c)| (1.0 - c / h) * 100.0),
         max_drawdown_pct: max_drawdown(closes),
-        beta: beta(&p.closes, &ctx.benchmark_closes),
+        // Against a benchmark in the base currency, so in the base too.
+        beta: beta(
+            if p.base_closes().is_empty() {
+                &p.closes
+            } else {
+                p.base_closes()
+            },
+            &ctx.benchmark_closes,
+        ),
         score: p.score.map(|s| s.0),
         score_coverage: p.score.map(|s| s.1),
         risk_tier: p.risk_tier.clone(),
@@ -478,46 +638,27 @@ fn concentration(positions: &[Position]) -> Concentration {
     }
 }
 
-/// The portfolio's daily value index over the sessions every holding with
-/// history shares (joined by date, so a holiday in one market does not
-/// shift another's prices), each weighted by today's value: the risk of
-/// the portfolio as it stands, not as it was held.
+/// The portfolio's daily value index, each holding weighted by today's
+/// base-currency value: the risk of the portfolio as it stands, not as it
+/// was held. Closes are in the base currency (so currency moves count) and
+/// sit on the union of every holding's sessions: each day's return is the
+/// weighted return of the holdings priced on that day and the day before,
+/// so a holding with a short history or another market's holidays only
+/// leaves out its own missing days instead of cutting every series to the
+/// shortest common window.
 fn risk(inputs: &[PositionInput], positions: &[Position], ctx: &Context, total: f64) -> Risk {
-    let with: Vec<(&PositionInput, f64)> = inputs
+    let with: Vec<(&[(NaiveDate, f64)], f64)> = inputs
         .iter()
         .zip(positions)
-        .filter(|(i, _)| i.closes.len() >= MIN_CLOSES)
-        .filter_map(|(i, p)| p.value_base.filter(|v| *v > 0.0).map(|v| (i, v)))
+        .filter_map(|(i, p)| {
+            let closes = i.base_closes();
+            (closes.len() >= MIN_CLOSES)
+                .then_some(closes)
+                .zip(p.value_base.filter(|v| *v > 0.0))
+        })
         .collect();
     let covered: f64 = with.iter().map(|(_, v)| v).sum();
-    let maps: Vec<std::collections::HashMap<NaiveDate, f64>> = with
-        .iter()
-        .map(|(i, _)| i.closes.iter().copied().collect())
-        .collect();
-    let mut dates: Vec<NaiveDate> = with
-        .first()
-        .map(|(i, _)| i.closes.iter().map(|(d, _)| *d).collect())
-        .unwrap_or_default();
-    dates.retain(|d| maps.iter().all(|m| m.contains_key(d)));
-    dates.sort();
-    let sessions = dates.len();
-    let index: Vec<(NaiveDate, f64)> = match dates.last() {
-        Some(last_day) => dates
-            .iter()
-            .map(|d| {
-                let v: f64 = with
-                    .iter()
-                    .zip(&maps)
-                    .map(|((_, v), m)| {
-                        let last = m[last_day];
-                        if last > 0.0 { v * m[d] / last } else { 0.0 }
-                    })
-                    .sum();
-                (*d, v)
-            })
-            .collect(),
-        None => Vec::new(),
-    };
+    let index = weighted_index(&with);
     let values: Vec<f64> = index.iter().map(|(_, v)| *v).collect();
     let scored: Vec<(f64, f64)> = positions
         .iter()
@@ -526,7 +667,7 @@ fn risk(inputs: &[PositionInput], positions: &[Position], ctx: &Context, total: 
     let score_weight: f64 = scored.iter().map(|(_, w)| w).sum();
     Risk {
         coverage_pct: pct(covered, total),
-        sessions,
+        sessions: index.len(),
         volatility_pct: volatility(&returns(&values)),
         max_drawdown_pct: max_drawdown(&values),
         beta: beta(&index, &ctx.benchmark_closes),
@@ -534,6 +675,59 @@ fn risk(inputs: &[PositionInput], positions: &[Position], ctx: &Context, total: 
         weighted_score: (score_weight > 0.0)
             .then(|| scored.iter().map(|(s, w)| s * w).sum::<f64>() / score_weight),
     }
+}
+
+/// A growth-of-100 index of `series` (dated closes, each with a fixed
+/// weight) on the union of their dates. Each day's return is the
+/// weight-averaged return of the series with a close on that day and an
+/// earlier one (forward-filled across their own gaps).
+pub fn weighted_index(series: &[(&[(NaiveDate, f64)], f64)]) -> Vec<(NaiveDate, f64)> {
+    let mut calendar: Vec<NaiveDate> = series
+        .iter()
+        .flat_map(|(s, _)| s.iter().map(|(d, _)| *d))
+        .collect();
+    calendar.sort();
+    calendar.dedup();
+    let aligned: Vec<Vec<Option<f64>>> = series
+        .iter()
+        .map(|(s, _)| {
+            let mut sorted = s.to_vec();
+            sorted.sort_by_key(|p| p.0);
+            crate::benchmark::align(&calendar, &sorted)
+        })
+        .collect();
+    let mut index: Vec<(NaiveDate, f64)> = Vec::new();
+    for t in 1..calendar.len() {
+        let (mut num, mut den) = (0.0, 0.0);
+        for ((_, w), a) in series.iter().zip(&aligned) {
+            if let (Some(p0), Some(p1)) = (a[t - 1], a[t]) {
+                num += w * (p1 / p0 - 1.0);
+                den += w;
+            }
+        }
+        if den <= 0.0 {
+            continue;
+        }
+        if index.is_empty() {
+            index.push((calendar[t - 1], 100.0));
+        }
+        let last = index.last().expect("just pushed").1;
+        index.push((calendar[t], last * (1.0 + num / den)));
+    }
+    index
+}
+
+/// A benchmark blended from several indices (closes in the base currency),
+/// each with a fixed weight, e.g. NIFTY 50 and the S&P 500 in the shares of
+/// a portfolio's Indian and US holdings. Daily returns are blended on the
+/// union of their sessions.
+pub fn blend_benchmarks(parts: &[(Vec<(NaiveDate, f64)>, f64)]) -> Vec<(NaiveDate, f64)> {
+    let refs: Vec<(&[(NaiveDate, f64)], f64)> = parts
+        .iter()
+        .filter(|(s, w)| !s.is_empty() && *w > 0.0)
+        .map(|(s, w)| (s.as_slice(), *w))
+        .collect();
+    weighted_index(&refs)
 }
 
 fn money(v: f64, cur: Option<&str>) -> String {
@@ -682,7 +876,10 @@ fn observations(a: &Analysis, ctx: &Context) -> Vec<Observation> {
         );
     }
     for g in &a.by_sector {
-        if g.name != UNKNOWN_SECTOR && g.weight_pct > SECTOR_LIMIT_PCT {
+        if g.name != UNKNOWN_SECTOR
+            && !crate::xray::is_fund_sector_label(&g.name)
+            && g.weight_pct > SECTOR_LIMIT_PCT
+        {
             add(
                 "sector_concentration",
                 Level::Notice,
@@ -693,6 +890,29 @@ fn observations(a: &Analysis, ctx: &Context) -> Vec<Observation> {
                 ),
             );
         }
+    }
+    // One promoter behind several holdings (Tata, Adani, ...).
+    let held: Vec<(String, f64)> = a
+        .positions
+        .iter()
+        .filter_map(|p| Some((p.symbol.clone(), p.value_base?)))
+        .collect();
+    let total: f64 = held.iter().map(|h| h.1).sum();
+    for g in crate::business_groups::group_exposure(&held, total)
+        .iter()
+        .filter(|g| g.is_concentrated && g.companies.len() > 1)
+    {
+        add(
+            "group_concentration",
+            Level::Notice,
+            None,
+            format!(
+                "{} group companies ({}) are {:.1}% of the portfolio; group-level news moves them together.",
+                g.group,
+                g.companies.join(", "),
+                g.weight_pct
+            ),
+        );
     }
     if a.by_currency.len() > 1
         && let Some(g) = a.by_currency.iter().find(|g| g.name != a.base_currency)
@@ -748,9 +968,8 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
     let positions: Vec<Position> = inputs.iter().map(|p| position(p, ctx, total)).collect();
     let cost: f64 = positions
         .iter()
-        .zip(inputs)
-        .filter(|(p, _)| p.value_base.is_some())
-        .filter_map(|(p, i)| i.fx_to_base.map(|r| p.cost * r))
+        .filter(|p| p.value_base.is_some())
+        .filter_map(|p| p.cost_base)
         .sum();
     let day_change: f64 = positions.iter().filter_map(|p| p.day_change_base).sum();
     let left_out: Vec<String> = positions
@@ -767,15 +986,22 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
     for (p, i) in positions.iter().zip(inputs) {
         terms.short_term_gain += to_base(p, i, p.short_term_gain).unwrap_or(0.0);
         terms.long_term_gain += to_base(p, i, p.long_term_gain).unwrap_or(0.0);
-        if let Some(m) = i.tax_country.and_then(Country::long_term_months) {
+        let default_months = i.tax_country.and_then(Country::long_term_months);
+        if i.term_rule.has_terms(default_months) {
             for l in &i.lots {
-                match l
-                    .date
-                    .and_then(|d| crate::sellpreview::long_term_from(d, m))
+                let Some(d) = l.date else {
+                    terms.undated_lots += 1;
+                    continue;
+                };
+                match i
+                    .term_rule
+                    .months_for(default_months, d)
+                    .map(|m| crate::sellpreview::long_term_from(d, m))
                 {
-                    None => terms.undated_lots += 1,
-                    Some(on) if on > ctx.today => terms.short_term_lots += 1,
-                    Some(_) => terms.long_term_lots += 1,
+                    None => terms.short_term_lots += 1,
+                    Some(None) => terms.undated_lots += 1,
+                    Some(Some(on)) if on > ctx.today => terms.short_term_lots += 1,
+                    Some(Some(_)) => terms.long_term_lots += 1,
                 }
             }
         }
@@ -803,6 +1029,7 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
         risk: risk(inputs, &positions, ctx, total),
         observations: Vec::new(),
         left_out,
+        valuation: valuation_snapshot(inputs, &positions),
         positions,
     };
     a.observations = observations(&a, ctx);
@@ -812,6 +1039,35 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valuation_multiples_are_value_weighted_harmonic_means() {
+        let mk = |sym: &str, pe: Option<f64>, pb: Option<f64>, dy: Option<f64>| PositionInput {
+            symbol: sym.into(),
+            pe,
+            pb,
+            dividend_yield: dy,
+            ..Default::default()
+        };
+        let pos = |sym: &str, v: f64| Position {
+            value_base: Some(v),
+            ..position(&holding(sym, 1.0, v, v), &ctx(), v)
+        };
+        let inputs = vec![
+            mk("A", Some(10.0), Some(2.0), Some(0.02)),
+            mk("B", Some(40.0), Some(8.0), Some(0.0)),
+            mk("C", None, Some(1.0), None),
+        ];
+        let positions = vec![pos("A", 500.0), pos("B", 500.0), pos("C", 1000.0)];
+        let v = valuation_snapshot(&inputs, &positions);
+        // 1000 / (500/10 + 500/40) = 16.
+        assert!((v.pe.unwrap() - 16.0).abs() < 1e-9);
+        assert!((v.pe_coverage_pct - 50.0).abs() < 1e-9);
+        assert_eq!(v.without_pe, ["C"]);
+        // 2000 / (250 + 62.5 + 1000).
+        assert!((v.pb.unwrap() - 2000.0 / 1312.5).abs() < 1e-9);
+        assert!((v.dividend_yield_pct.unwrap() - 1.0).abs() < 1e-9);
+    }
 
     fn day(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -1025,11 +1281,120 @@ mod tests {
             "{:?}",
             x.positions[0].beta
         );
-        // Two holdings: only the sessions both have count.
+        // Two holdings: every session either has counts; a day B misses
+        // leaves only B out of that day's return.
         let mut other = holding("B.NS", 1.0, 100.0, 100.0);
         other.closes = b_dated;
         let y = analyze(&[h, other], &ctx());
-        assert_eq!(y.risk.sessions, 135);
+        assert_eq!(y.risk.sessions, 150);
+    }
+
+    #[test]
+    fn a_short_history_does_not_cut_the_long_one() {
+        // A has a year of closes, NEW only the last 70 sessions. The
+        // portfolio index still spans the year.
+        let long = dated((0..250).map(|i| 100.0 + i as f64 * 0.2).collect());
+        let short: Vec<(NaiveDate, f64)> = long[180..].iter().map(|(d, c)| (*d, c * 2.0)).collect();
+        let mut a = holding("A.NS", 1.0, 100.0, 150.0);
+        a.closes = long;
+        let mut b = holding("NEW.NS", 1.0, 100.0, 300.0);
+        b.closes = short;
+        let x = analyze(&[a, b], &ctx());
+        assert_eq!(x.risk.sessions, 250);
+        assert!((x.risk.coverage_pct - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_uses_closes_in_the_base_currency() {
+        let mut us = holding("AAPL", 1.0, 100.0, 100.0);
+        us.currency = Some("USD".into());
+        us.fx_to_base = Some(84.0);
+        us.closes = dated(vec![100.0; 80]);
+        // Without base closes a foreign holding is left out of risk.
+        let a = analyze(std::slice::from_ref(&us), &ctx());
+        assert_eq!(a.risk.coverage_pct, 0.0);
+        // A flat price with a moving rupee is not flat in rupees.
+        us.closes_base = dated((0..80).map(|i| 100.0 * (80.0 + i as f64 * 0.05)).collect());
+        let b = analyze(&[us], &ctx());
+        assert!((b.risk.coverage_pct - 100.0).abs() < 1e-9);
+        assert!(b.risk.max_drawdown_pct == Some(0.0));
+        assert_eq!(b.risk.sessions, 80);
+    }
+
+    #[test]
+    fn blended_benchmark_weights_daily_returns() {
+        let a = dated(vec![100.0, 110.0, 110.0]);
+        let b = dated(vec![100.0, 100.0, 90.0]);
+        let blend = blend_benchmarks(&[(a, 0.5), (b, 0.5)]);
+        let v: Vec<f64> = blend.iter().map(|(_, v)| *v).collect();
+        assert_eq!(v.len(), 3);
+        assert!((v[1] - 105.0).abs() < 1e-9);
+        assert!((v[2] - 105.0 * 0.95).abs() < 1e-9);
+        // Empty parts are ignored.
+        assert_eq!(blend_benchmarks(&[(Vec::new(), 1.0)]), Vec::new());
+    }
+
+    #[test]
+    fn an_indian_residents_us_lot_held_18_months_is_short_term() {
+        // Bought 18 months before `today` (2026-11-15).
+        let mut us = holding("AAPL", 10.0, 100.0, 150.0);
+        us.currency = Some("USD".into());
+        us.fx_to_base = Some(84.0);
+        us.tax_country = Some(Country::India);
+        us.term_rule = TermRule::Months(24);
+        us.lots[0].date = Some(day("2025-05-15"));
+        let a = analyze(std::slice::from_ref(&us), &ctx());
+        let p = &a.positions[0];
+        assert_eq!((p.short_term_lots, p.long_term_lots), (1, 0));
+        assert_eq!(p.long_term_gain, Some(0.0));
+        assert_eq!(p.next_long_term.as_ref().unwrap().date, day("2027-05-16"));
+        assert_eq!((a.terms.short_term_lots, a.terms.long_term_lots), (1, 0));
+        // Under the 12-month rule it would have been long-term.
+        us.term_rule = TermRule::CountryDefault;
+        let b = analyze(&[us], &ctx());
+        assert_eq!(b.positions[0].long_term_lots, 1);
+    }
+
+    #[test]
+    fn debt_fund_units_from_april_2023_are_never_long_term() {
+        let mut f = holding("MF:119551", 100.0, 10.0, 12.0);
+        f.term_rule = TermRule::DebtFund;
+        f.lots = vec![
+            LotInput {
+                qty: 50.0,
+                price: 10.0,
+                date: Some(day("2021-01-10")),
+                estimated: false,
+            },
+            LotInput {
+                qty: 50.0,
+                price: 10.0,
+                date: Some(day("2023-06-01")),
+                estimated: false,
+            },
+        ];
+        let a = analyze(&[f], &ctx());
+        let p = &a.positions[0];
+        // The old lot is long-term after 24 months; the new one never.
+        assert_eq!((p.short_term_lots, p.long_term_lots), (1, 1));
+        assert!(p.next_long_term.is_none());
+        assert_eq!(p.short_term_gain, Some(100.0));
+    }
+
+    #[test]
+    fn cost_at_the_purchase_rate_shows_the_rupee_gain() {
+        // Bought at USDINR 75, same dollar price today at 84: +12% in rupees.
+        let mut us = holding("AAPL", 10.0, 100.0, 100.0);
+        us.market = "United States".into();
+        us.currency = Some("USD".into());
+        us.fx_to_base = Some(84.0);
+        us.cost_base = Some(10.0 * 100.0 * 75.0);
+        let a = analyze(&[us], &ctx());
+        assert!((a.pnl_pct - 12.0).abs() < 1e-9);
+        let p = &a.positions[0];
+        assert_eq!(p.pnl, Some(0.0));
+        assert!((p.fx_effect_base.unwrap() - 9000.0).abs() < 1e-9);
+        assert!((a.by_currency[0].pnl_base - 9000.0).abs() < 1e-9);
     }
 
     #[test]

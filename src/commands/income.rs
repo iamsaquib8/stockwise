@@ -58,12 +58,20 @@ pub async fn cmd_income(
     let client = YahooClient::new()
         .await
         .context("Could not connect to fetch market quotes")?;
+    // A split or bonus not yet applied to the lots: project on the share
+    // count after it (the price and the dividend per share are already
+    // post-split), and say so.
+    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    let portfolio = pending.adjusted(&portfolio);
     let raw_symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let resolved = resolve_symbols(&raw_symbols, market);
+    // Held symbols are stored as Yahoo symbols already (`AAPL`,
+    // `RELIANCE.NS`): resolving them again for `-m in` would ask for
+    // `AAPL.NS`, and a US holding would have no price.
+    let resolved = raw_symbols;
 
     let val = crate::commands::value_holdings(&client, &resolved, market, base)
         .await
@@ -124,6 +132,7 @@ pub async fn cmd_income(
             }
         }
         Format::Table => {
+            pending.print();
             print_income_table(&report, by_holding);
             Ok(())
         }
@@ -452,6 +461,15 @@ fn print_income_table(report: &IncomeReport, by_holding: bool) {
         }
     }
     println!();
+
+    if !report.excluded.is_empty() {
+        println!(
+            "  {} No live price for {} — left out of the totals and projections.",
+            "!".yellow(),
+            report.excluded.join(", ")
+        );
+        println!();
+    }
 
     // 4. Payout Safety & Sustainability Warnings
     if !report.payout_warnings.is_empty() {

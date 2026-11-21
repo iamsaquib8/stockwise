@@ -1024,14 +1024,14 @@ mod tests {
 
     #[test]
     fn sip_corpus_grows_each_instalment_for_its_own_time() {
-        // ₹15,000/month at 12% a year (1% a month), issue #67.
+        // ₹15,000/month at 12% a year (0.9489% a month, compounding to 12%), issue #67.
         let five = sip_corpus(15_000.0, 5, 12.0);
         let ten = sip_corpus(15_000.0, 10, 12.0);
         assert!(
-            (five / 100_000.0 - 12.37).abs() / 12.37 < 0.005,
+            (five / 100_000.0 - 12.17).abs() / 12.17 < 0.005,
             "5y {five}"
         );
-        assert!((ten / 100_000.0 - 34.85).abs() / 34.85 < 0.005, "10y {ten}");
+        assert!((ten / 100_000.0 - 33.61).abs() / 33.61 < 0.005, "10y {ten}");
         // Never more than paid in times the growth of the full period.
         assert!(five < 15_000.0 * 60.0 * 1.12_f64.powi(5));
     }

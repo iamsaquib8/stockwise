@@ -1346,7 +1346,14 @@ mod tests {
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["holdings", "totals", "unpriced", "unconverted", "notes"]
+            [
+                "holdings",
+                "totals",
+                "unpriced",
+                "unconverted",
+                "notes",
+                "warnings"
+            ]
         );
         let totals: Vec<&str> = v["totals"]
             .as_object()
@@ -1356,7 +1363,15 @@ mod tests {
             .collect();
         assert_eq!(
             totals,
-            ["cost_basis", "value", "pnl", "pnl_percent", "currency"]
+            [
+                "cost_basis",
+                "value",
+                "pnl",
+                "pnl_percent",
+                "currency",
+                "fx_effect",
+                "cost_at_today_fx"
+            ]
         );
         assert_eq!(v["holdings"][0]["symbol"], "TCS.NS");
         assert_eq!(v["holdings"][0]["pnl"], 6000.0);

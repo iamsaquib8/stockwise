@@ -803,6 +803,16 @@ enum Span<'a> {
 /// Daily history of `symbol` from Yahoo, with splits: share counts are in
 /// today's units and Yahoo's closes are split-adjusted.
 async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Result<History> {
+    let v = chart_json(client, symbol, span).await?;
+    history_from_json(v, symbol)
+}
+
+/// The raw Yahoo chart response for `symbol` (daily bars, splits).
+async fn chart_json(
+    client: &YahooClient,
+    symbol: &str,
+    span: Span<'_>,
+) -> Result<serde_json::Value> {
     let (from, to);
     let mut query = vec![("interval", "1d"), ("events", "splits")];
     match span {
@@ -826,7 +836,10 @@ async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Re
         Some(symbol),
         &query,
     );
-    let v = client.raw_get(&url).await?;
+    client.raw_get(&url).await
+}
+
+fn history_from_json(v: serde_json::Value, symbol: &str) -> Result<History> {
     let gmtoffset = v
         .pointer("/chart/result/0/meta/gmtoffset")
         .and_then(|o| o.as_i64())
@@ -839,6 +852,107 @@ async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Re
         .and_then(|r| r.into_iter().next())
         .with_context(|| format!("No price history for {}", symbol))?;
     Ok(history_from_chart(data, gmtoffset))
+}
+
+/// Daily closes adjusted for dividends as well as splits (Yahoo's
+/// `adjclose`), dated like [`history_from_chart`]: a total-return series
+/// for an ETF that pays its dividends out. `None` without adjusted closes.
+fn adjusted_closes(v: &serde_json::Value) -> Option<Vec<(NaiveDate, f64)>> {
+    let r = v.pointer("/chart/result/0")?;
+    let gmtoffset = r
+        .pointer("/meta/gmtoffset")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+    let stamps = r.get("timestamp")?.as_array()?;
+    let adj = r.pointer("/indicators/adjclose/0/adjclose")?.as_array()?;
+    let mut out: Vec<(NaiveDate, f64)> = Vec::new();
+    for (ts, c) in stamps.iter().zip(adj) {
+        let (Some(ts), Some(c)) = (ts.as_i64(), c.as_f64()) else {
+            continue;
+        };
+        if !c.is_finite() || c <= 0.0 {
+            continue;
+        }
+        let Some(day) =
+            chrono::DateTime::from_timestamp(ts + gmtoffset + 3 * 3600, 0).map(|d| d.date_naive())
+        else {
+            continue;
+        };
+        match out.last_mut() {
+            Some(last) if last.0 == day => last.1 = c,
+            _ => out.push((day, c)),
+        }
+    }
+    (out.len() >= 2).then_some(out)
+}
+
+/// Where a price index's total-return series comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TotalReturn {
+    /// A total-return index Yahoo carries (`^SP500TR`).
+    Index(&'static str),
+    /// No such index on Yahoo: the dividend-adjusted closes of an ETF that
+    /// tracks it (NIFTYBEES for NIFTY 50). It trails the index by the ETF's
+    /// expense ratio (about 0.04% a year for NIFTYBEES).
+    AdjustedEtf(&'static str),
+}
+
+impl TotalReturn {
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            TotalReturn::Index(s) | TotalReturn::AdjustedEtf(s) => s,
+        }
+    }
+
+    /// "S&P 500 TR", "NIFTY 50 TR (NIFTYBEES adjusted)".
+    pub(crate) fn label(self, index_name: &str) -> String {
+        match self {
+            TotalReturn::Index(_) => format!("{index_name} TR"),
+            TotalReturn::AdjustedEtf(s) => {
+                format!("{index_name} TR ({} adjusted)", s.trim_end_matches(".NS"))
+            }
+        }
+    }
+}
+
+/// The total-return series for a price index, when one can be had.
+pub(crate) fn total_return_source(symbol: &str) -> Option<TotalReturn> {
+    match symbol {
+        "^GSPC" => Some(TotalReturn::Index("^SP500TR")),
+        "^NDX" => Some(TotalReturn::Index("^XNDX")),
+        "^DJI" => Some(TotalReturn::Index("^DJITR")),
+        "^NSEI" => Some(TotalReturn::AdjustedEtf("NIFTYBEES.NS")),
+        "^NSEBANK" => Some(TotalReturn::AdjustedEtf("BANKBEES.NS")),
+        _ => None,
+    }
+}
+
+/// Whether a total-return series reaches back to `since` (within the
+/// lookup slack of a few holidays): a series that starts later would price
+/// the early flows at its first close.
+fn covers_since(closes: &[(NaiveDate, f64)], since: NaiveDate) -> bool {
+    closes.len() >= 2 && closes[0].0 <= since + chrono::Days::new(10)
+}
+
+/// The total-return closes of `tr` from `since`, in its own currency, or
+/// `None` when they can't be fetched or don't reach back far enough.
+pub(crate) async fn total_return_closes(
+    client: &YahooClient,
+    tr: TotalReturn,
+    since: NaiveDate,
+) -> Option<(Vec<(NaiveDate, f64)>, Option<String>)> {
+    let v = chart_json(client, tr.symbol(), Span::Since(since))
+        .await
+        .ok()?;
+    let currency = v
+        .pointer("/chart/result/0/meta/currency")
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
+    let closes = match tr {
+        TotalReturn::Index(_) => history_from_json(v, tr.symbol()).ok()?.closes,
+        TotalReturn::AdjustedEtf(_) => adjusted_closes(&v)?,
+    };
+    covers_since(&closes, since).then_some((closes, currency))
 }
 
 /// A fund's NAV history from api.mfapi.in, for `MF:<code>` holdings.
@@ -1253,7 +1367,9 @@ pub async fn cmd_portfolio_benchmark(
         });
     }
 
-    let analysis = benchmark::analyze(&calendar, &bench_prices, &holdings);
+    // Alpha over the base currency's risk-free rate (Jensen's alpha).
+    let analysis = benchmark::analyze(&calendar, &bench_prices, &holdings)
+        .map(|a| a.with_risk_free(benchmark::risk_free_rate(&base)));
     if let Some(a) = &analysis {
         for h in a.holdings.iter().filter(|h| h.days_unpriced > 0) {
             flag(
@@ -1537,38 +1653,65 @@ pub async fn portfolio_pme_report(
                 twin_xirr_percent: None,
                 twin_shares: 0.0,
                 benchmark_end_price: 0.0,
+                excluded: Vec::new(),
+                benchmark_kind: "price".into(),
+                dividends_included: false,
+                index_start_date: String::new(),
+                flows_before_index: 0,
+                twin_capped_sales: 0,
             },
             holdings: Vec::new(),
         });
     }
 
-    let val = super::portfolio::value_holdings(src, &symbols, market, Some(&base)).await?;
-
-    let mut all_flows: Vec<(NaiveDate, f64)> = Vec::new();
-    let mut holding_flows: Vec<(String, Vec<(NaiveDate, f64)>)> = Vec::new();
-
-    for sym in &symbols {
-        let raw_flows = portfolio.cash_flows(sym);
-        let mut base_flows = Vec::new();
-        for (d, amt) in raw_flows {
-            if let Some(converted) = val.to_base(sym, amt) {
-                base_flows.push((d, converted));
-                all_flows.push((d, converted));
-            }
-        }
-        holding_flows.push((sym.clone(), base_flows));
-    }
-    all_flows.sort_by_key(|f| f.0);
-
-    let start_date = match all_flows.first() {
-        Some(f) => f.0,
-        None => today,
-    };
-
+    let mut val = super::portfolio::value_holdings(src, &symbols, market, Some(&base)).await?;
+    // Splits not yet applied would show as a fake loss; closed positions
+    // may be in a currency no open holding uses; each flow at its own
+    // day's exchange rate.
+    let pending = crate::corp_actions::pending_splits_live(portfolio).await;
+    let portfolio = &pending.adjusted(portfolio);
+    let mut currencies: Vec<String> = symbols.iter().filter_map(|s| val.currency(s)).collect();
+    currencies.sort();
+    currencies.dedup();
     let client = src.yahoo().await?;
-    let bench_hist = daily_history(client, &bench_symbol, Span::Since(start_date))
-        .await
-        .with_context(|| format!("No price history for the benchmark {}", bench_symbol))?;
+    val.add_rates(client, &currencies).await;
+    val.load_history(portfolio).await;
+
+    let first_flow = symbols
+        .iter()
+        .flat_map(|s| portfolio.cash_flows(s))
+        .map(|f| f.0)
+        .min()
+        .unwrap_or(today);
+
+    // A total-return index when Yahoo has one, compared with the
+    // portfolio's dividends; else the price index with dividends left out
+    // on both sides.
+    let tri = match total_return_source(&bench_symbol) {
+        Some(tr) => total_return_closes(client, tr, first_flow)
+            .await
+            .map(|(closes, currency)| {
+                (
+                    tr,
+                    History {
+                        closes,
+                        splits: Vec::new(),
+                        currency,
+                    },
+                )
+            }),
+        None => None,
+    };
+    let tr_label = tri.as_ref().map(|(tr, _)| tr.label(&bench_name));
+    let (used_symbol, bench_hist, total_return) = match tri {
+        Some((tr, h)) => (tr.symbol().to_string(), h, true),
+        None => {
+            let h = daily_history(client, &bench_symbol, Span::Since(first_flow))
+                .await
+                .with_context(|| format!("No price history for the benchmark {}", bench_symbol))?;
+            (bench_symbol.clone(), h, false)
+        }
+    };
     if bench_hist.closes.len() < 2 {
         bail!(
             "Not enough price history for the benchmark {}",
@@ -1596,14 +1739,71 @@ pub async fn portfolio_pme_report(
             );
         }
     }
+    let name = tr_label.unwrap_or(bench_name);
+    pme_report_from(
+        portfolio,
+        &val,
+        &bench_closes,
+        today,
+        (used_symbol, name),
+        total_return,
+    )
+}
 
-    let actual_portfolio_value = val.totals(portfolio).value;
-    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, &bench_closes, today)
+/// The PME report of `portfolio` (valued by `val`, base-currency
+/// `bench_closes`). Open holdings without a price or exchange rate are left
+/// out on both sides and listed in `excluded`. With a price-only index
+/// (`total_return` false) dividends are left out of the flows, since the
+/// index has none either.
+pub(crate) fn pme_report_from(
+    portfolio: &Portfolio,
+    val: &super::portfolio::Valuation,
+    bench_closes: &[(NaiveDate, f64)],
+    today: NaiveDate,
+    (bench_symbol, bench_name): (String, String),
+    total_return: bool,
+) -> Result<crate::pme::PmeReport> {
+    let mut all_flows: Vec<(NaiveDate, f64)> = Vec::new();
+    let mut holding_flows: Vec<(String, Vec<(NaiveDate, f64)>, f64)> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
+    let mut actual_portfolio_value = 0.0;
+
+    for sym in portfolio.symbols_with_history() {
+        // An open holding without a value would count its cost as a total loss.
+        let value = match portfolio.holding(&sym) {
+            Some(h) => match val
+                .price(&sym)
+                .and_then(|p| val.to_base(&sym, p * h.shares))
+            {
+                Some(v) => v,
+                None => {
+                    excluded.push(sym);
+                    continue;
+                }
+            },
+            None => 0.0,
+        };
+        let Some(items) = val.flow_items_base(portfolio, &sym) else {
+            excluded.push(sym);
+            continue;
+        };
+        let flows: Vec<(NaiveDate, f64)> = items
+            .into_iter()
+            .filter(|(_, _, k)| total_return || *k != pf::FlowKind::Dividend)
+            .map(|(d, a, _)| (d, a))
+            .collect();
+        actual_portfolio_value += value;
+        all_flows.extend(flows.iter().copied());
+        holding_flows.push((sym, flows, value));
+    }
+    all_flows.sort_by_key(|f| f.0);
+    let start_date = all_flows.first().map_or(today, |f| f.0);
+
+    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, bench_closes, today)
         .context("Could not compute PME for portfolio")?;
-
     let (twin_shares, _) =
-        crate::pme::twin_shares_and_value(&all_flows, &bench_closes, today).unwrap_or((0.0, 0.0));
-    let bench_end_price = crate::pme::benchmark_price_on(&bench_closes, today).unwrap_or(0.0);
+        crate::pme::twin_shares_and_value(&all_flows, bench_closes, today).unwrap_or((0.0, 0.0));
+    let bench_end_price = crate::pme::benchmark_price_on(bench_closes, today).unwrap_or(0.0);
 
     let mut total_invested = 0.0;
     let mut total_distributed = 0.0;
@@ -1618,7 +1818,7 @@ pub async fn portfolio_pme_report(
     let summary = crate::pme::PmeSummary {
         benchmark_symbol: bench_symbol,
         benchmark_name: bench_name,
-        base_currency: base,
+        base_currency: val.base().to_string(),
         start_date: start_date.to_string(),
         end_date: today.to_string(),
         total_invested: round(total_invested, 2),
@@ -1632,18 +1832,27 @@ pub async fn portfolio_pme_report(
         twin_xirr_percent: pme_res.twin_xirr_percent.map(|x| round(x, 2)),
         twin_shares: round(twin_shares, 4),
         benchmark_end_price: round(bench_end_price, 2),
+        excluded,
+        benchmark_kind: if total_return {
+            "total_return"
+        } else {
+            "price"
+        }
+        .to_string(),
+        dividends_included: total_return,
+        index_start_date: bench_closes
+            .first()
+            .map_or(String::new(), |c| c.0.to_string()),
+        flows_before_index: crate::pme::flows_before_index(&all_flows, bench_closes),
+        twin_capped_sales: pme_res.twin_capped_sales,
     };
 
     let mut holdings = Vec::new();
-    for (sym, flows) in holding_flows {
+    for (sym, flows, h_val) in holding_flows {
         if flows.is_empty() {
             continue;
         }
-        let h_val = portfolio.holding(&sym).map_or(0.0, |h| {
-            val.price(&sym)
-                .map_or(0.0, |p| val.to_base(&sym, p * h.shares).unwrap_or(0.0))
-        });
-        if let Some(res) = crate::pme::compute_pme(&flows, h_val, &bench_closes, today) {
+        if let Some(res) = crate::pme::compute_pme(&flows, h_val, bench_closes, today) {
             holdings.push(crate::pme::HoldingPme {
                 symbol: sym,
                 actual_value: round(res.actual_value, 2),
@@ -1710,6 +1919,13 @@ pub async fn cmd_portfolio_pme(
         "Benchmark",
         &format!("{} ({})", s.benchmark_name, s.benchmark_symbol),
     );
+    if !s.dividends_included {
+        println!(
+            "  {}",
+            "Price index without dividends: the portfolio's dividends are left out too, so both sides compare price returns."
+                .dimmed()
+        );
+    }
     print_kv("Period", &format!("{} → {}", s.start_date, s.end_date));
     print_kv("Base Currency", &s.base_currency);
     print_kv("Total Invested", &format_price(s.total_invested, base_cur));
@@ -1800,6 +2016,30 @@ pub async fn cmd_portfolio_pme(
                 pad_start(&alpha_cell, 14),
             );
         }
+    }
+    println!();
+    if !s.excluded.is_empty() {
+        println!(
+            "  {} {} holding(s) without a price or exchange rate left out on both sides: {}",
+            "!".yellow(),
+            s.excluded.len(),
+            s.excluded.join(", ")
+        );
+    }
+    if s.flows_before_index > 0 {
+        println!(
+            "  {} {} cash flow(s) dated before the index history (starts {}) are priced at its first close.",
+            "!".yellow(),
+            s.flows_before_index,
+            s.index_start_date
+        );
+    }
+    if s.twin_capped_sales > 0 {
+        println!(
+            "  {} {} sale(s) were larger than the Index Twin's holding: the twin sold only what it held.",
+            "·".dimmed(),
+            s.twin_capped_sales
+        );
     }
     println!();
     Ok(())
@@ -2500,14 +2740,23 @@ pub(crate) async fn goal_rows(
     let store: goals::GoalStore = store::load(GOALS_FILE)?;
     let today = chrono::Local::now().date_naive();
     let mut rows = Vec::new();
-    for g in &store.goals {
+    // One goal per holding: a holding linked to several goals counts
+    // towards the first only.
+    let allocation = store.allocate();
+    for (g, (holdings, dropped)) in store.goals.iter().zip(allocation) {
+        for (h, first) in &dropped {
+            eprintln!(
+                "  ! {h} is linked to goals `{first}` and `{}`: it counts towards `{first}` only.",
+                g.name
+            );
+        }
         let months_left = goal_due(today, &g.by)
             .and_then(|d| goals::months_between(today, d))
             .unwrap_or(0);
-        let (linked, valued_at) = if g.holdings.is_empty() {
+        let (linked, valued_at) = if holdings.is_empty() {
             (0.0, "none")
         } else {
-            let l = linked_value(src, &g.holdings, market, false).await?;
+            let l = linked_value(src, &holdings, market, false).await?;
             (l.value, if l.live { "market" } else { "cost" })
         };
         let infl = g.inflation_pct.unwrap_or(0.0);
@@ -2534,7 +2783,7 @@ pub(crate) async fn goal_rows(
             target_future,
             by: g.by.clone(),
             months_left,
-            holdings: g.holdings.clone(),
+            holdings,
             linked_value: linked,
             valued_at,
             funded_pct: if target_future > 0.0 {
@@ -2576,6 +2825,16 @@ pub fn cmd_goal_add(a: GoalAdd) -> Result<()> {
     store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
         if s.find(&saved.name).is_some() {
             bail!("A goal named `{}` exists: remove it first", saved.name);
+        }
+        // One goal per holding, so no holding's value is counted twice.
+        for h in &saved.holdings {
+            if let Some(other) = s.linked_elsewhere(h, &saved.name) {
+                bail!(
+                    "{} already counts towards goal `{}`: a holding can be linked to one goal only",
+                    h,
+                    other.name
+                );
+            }
         }
         s.goals.push(saved.clone());
         Ok(())
@@ -2897,6 +3156,59 @@ pub fn cmd_goal_prepay(a: PrepayArgs, market: Market, json: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nifty_compares_with_niftybees_adjusted_closes() {
+        let tr = total_return_source("^NSEI").unwrap();
+        assert_eq!(tr, TotalReturn::AdjustedEtf("NIFTYBEES.NS"));
+        assert_eq!(tr.label("NIFTY 50"), "NIFTY 50 TR (NIFTYBEES adjusted)");
+        assert_eq!(
+            total_return_source("^NSEBANK"),
+            Some(TotalReturn::AdjustedEtf("BANKBEES.NS"))
+        );
+        let sp = total_return_source("^GSPC").unwrap();
+        assert_eq!(
+            (sp.symbol(), sp.label("S&P 500").as_str()),
+            ("^SP500TR", "S&P 500 TR")
+        );
+        // SENSEX has no total-return series here: the price index is used.
+        assert_eq!(total_return_source("^BSESN"), None);
+    }
+
+    #[test]
+    fn adjusted_closes_come_from_adjclose_not_close() {
+        // Two sessions (IST, gmtoffset 19800); the second paid a dividend.
+        let v = serde_json::json!({"chart": {"result": [{
+            "meta": {"gmtoffset": 19800, "currency": "INR"},
+            "timestamp": [1704166200, 1704252600],
+            "indicators": {
+                "quote": [{"close": [240.0, 238.0]}],
+                "adjclose": [{"adjclose": [236.0, 238.0]}]
+            }
+        }]}});
+        let closes = adjusted_closes(&v).unwrap();
+        assert_eq!(closes.len(), 2);
+        assert_eq!(
+            closes[0],
+            (NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), 236.0)
+        );
+        // No adjusted closes: none (the caller falls back to the price index).
+        let bare = serde_json::json!({"chart": {"result": [{
+            "timestamp": [1704166200, 1704252600],
+            "indicators": {"quote": [{"close": [240.0, 238.0]}]}
+        }]}});
+        assert!(adjusted_closes(&bare).is_none());
+    }
+
+    #[test]
+    fn a_total_return_series_must_reach_back_to_the_first_flow() {
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let closes = vec![(d("2020-01-02"), 100.0), (d("2025-01-02"), 180.0)];
+        assert!(covers_since(&closes, d("2019-12-28")));
+        assert!(covers_since(&closes, d("2021-06-01")));
+        assert!(!covers_since(&closes, d("2019-06-01")));
+        assert!(!covers_since(&closes[..1], d("2020-01-02")));
+    }
     use crate::portfolio::Lot;
 
     #[test]

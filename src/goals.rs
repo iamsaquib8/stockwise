@@ -45,9 +45,15 @@ fn amount_error(s: &str) -> String {
     format!("`{s}` is not an amount: use e.g. 1cr, 25L, 50k or 250000")
 }
 
-/// Monthly rate for an annual return in percent: annual ÷ 12.
+/// The monthly rate that compounds to an annual return of `annual_pct`
+/// percent over twelve months: `(1 + r)^(1/12) − 1` (12% a year is 0.9489% a
+/// month, not 1%, which would compound to 12.68%).
 pub fn monthly_rate(annual_pct: f64) -> f64 {
-    annual_pct / 100.0 / 12.0
+    let r = annual_pct / 100.0;
+    if r <= -1.0 {
+        return -1.0;
+    }
+    (1.0 + r).powf(1.0 / 12.0) - 1.0
 }
 
 /// What `n` monthly payments of 1, each at the start of a month, grow to by
@@ -388,8 +394,8 @@ pub struct SipPlan {
     pub years: u32,
     pub months: u32,
     pub annual_return_pct: f64,
-    /// The same return compounded monthly, as a yearly rate: 12% a year is
-    /// 12.68% effective.
+    /// The monthly rate compounded over a year: equal to the annual return,
+    /// since the monthly rate is `(1 + r)^(1/12) − 1`.
     pub effective_annual_pct: f64,
     pub step_up_pct: f64,
     /// Money already invested towards the goal; it grows at the same return.
@@ -1774,6 +1780,53 @@ impl GoalStore {
             .iter()
             .find(|g| g.name.eq_ignore_ascii_case(name))
     }
+
+    /// The saved goal other than `except` that `holding` already counts towards.
+    pub fn linked_elsewhere(&self, holding: &str, except: &str) -> Option<&SavedGoal> {
+        let key = holding_key(holding);
+        self.goals.iter().find(|g| {
+            !g.name.eq_ignore_ascii_case(except) && g.holdings.iter().any(|h| holding_key(h) == key)
+        })
+    }
+
+    /// Each goal's holdings with one goal per holding: a holding linked to
+    /// several goals (saved before this rule) counts towards the first only,
+    /// so its value is never counted twice. Per goal, in order: the
+    /// holdings it keeps, and the (holding, earlier goal) pairs it gives up.
+    pub fn allocate(&self) -> Vec<(Vec<String>, Vec<(String, String)>)> {
+        let mut owner: Vec<(String, String)> = Vec::new();
+        self.goals
+            .iter()
+            .map(|g| {
+                let mut kept = Vec::new();
+                let mut dropped = Vec::new();
+                for h in &g.holdings {
+                    let key = holding_key(h);
+                    match owner.iter().find(|(k, _)| *k == key) {
+                        Some((_, first)) if !first.eq_ignore_ascii_case(&g.name) => {
+                            dropped.push((h.clone(), first.clone()));
+                        }
+                        Some(_) => {}
+                        None => {
+                            owner.push((key, g.name.clone()));
+                            kept.push(h.clone());
+                        }
+                    }
+                }
+                (kept, dropped)
+            })
+            .collect()
+    }
+}
+
+/// A holding name compared across goals: upper case, without an Indian
+/// exchange suffix (`niftybees` and `NIFTYBEES.NS` are one holding).
+fn holding_key(name: &str) -> String {
+    let up = name.trim().to_uppercase();
+    up.strip_suffix(".NS")
+        .or_else(|| up.strip_suffix(".BO"))
+        .unwrap_or(&up)
+        .to_string()
 }
 
 /// Indian digit grouping: 12345678.4 → "1,23,45,678".
@@ -1829,6 +1882,56 @@ mod tests {
     }
 
     #[test]
+    fn the_monthly_rate_compounds_to_the_annual_return() {
+        // 12% a year is 0.9489% a month, not 1%.
+        assert!(near(monthly_rate(12.0) * 100.0, 0.948_879, 1e-6));
+        assert!(near((1.0 + monthly_rate(12.0)).powi(12), 1.12, 1e-12));
+        assert!(near(effective_annual_pct(12.0), 12.0, 1e-9));
+        assert_eq!(monthly_rate(0.0), 0.0);
+        assert_eq!(monthly_rate(-150.0), -1.0);
+        // A SIP of 1 a month at the start of each month for 10 years at 12%:
+        // ((1+i)^120 − 1)/i × (1+i) with the effective monthly i.
+        let i = 1.12f64.powf(1.0 / 12.0) - 1.0;
+        let fv = ((1.0 + i).powi(120) - 1.0) / i * (1.0 + i);
+        assert!(near(sip_growth_factor(10, 12.0, 0.0), fv, 1e-9));
+        assert!(near(fv, 224.036, 0.001), "{fv}");
+    }
+
+    #[test]
+    fn a_holding_counts_towards_one_goal_only() {
+        let goal = |name: &str, holdings: &[&str]| SavedGoal {
+            name: name.into(),
+            target: 1e6,
+            by: "2030-01".into(),
+            inflation_pct: None,
+            holdings: holdings.iter().map(|h| h.to_string()).collect(),
+            return_pct: None,
+            created: String::new(),
+        };
+        let store = GoalStore {
+            goals: vec![
+                goal("House", &["NIFTYBEES", "MF:122639"]),
+                goal("School", &["niftybees.ns", "GOLDBEES"]),
+            ],
+        };
+        let alloc = store.allocate();
+        assert_eq!(alloc[0].0, vec!["NIFTYBEES", "MF:122639"]);
+        assert!(alloc[0].1.is_empty());
+        assert_eq!(alloc[1].0, vec!["GOLDBEES"]);
+        assert_eq!(
+            alloc[1].1,
+            vec![("niftybees.ns".to_string(), "House".to_string())]
+        );
+        assert_eq!(
+            store
+                .linked_elsewhere("NIFTYBEES.NS", "Car")
+                .map(|g| g.name.as_str()),
+            Some("House")
+        );
+        assert!(store.linked_elsewhere("GOLDBEES", "School").is_none());
+    }
+
+    #[test]
     fn indian_amounts_parse() {
         assert_eq!(parse_amount("1cr"), Ok(1e7));
         assert_eq!(parse_amount("1.5 Crore"), Ok(1.5e7));
@@ -1846,15 +1949,15 @@ mod tests {
 
     #[test]
     fn sip_for_one_crore_in_fifteen_years() {
-        // i = 1% a month, n = 180: FV factor = ((1.01^180 − 1) / 0.01) × 1.01
-        // = (5.995802 − 1) / 0.01 × 1.01 = 504.576; ₹1 Cr / 504.576 = ₹19,819.
+        // i = 1.12^(1/12) − 1 = 0.948879% a month, n = 180: FV factor =
+        // ((1.12^15 − 1) / i) × (1 + i) = 475.931; ₹1 Cr / 475.931 = ₹21,011.
         let p = plan_sip(1e7, 15, 12.0, 0.0, 0.0);
-        assert!(near(p.monthly_sip, 19_818.6, 1.0), "{}", p.monthly_sip);
-        assert!(near(p.total_invested, 19_818.6 * 180.0, 200.0));
+        assert!(near(p.monthly_sip, 21_011.4, 1.0), "{}", p.monthly_sip);
+        assert!(near(p.total_invested, 21_011.4 * 180.0, 200.0));
         assert!(near(p.schedule.last().unwrap().value, 1e7, 1e-3));
-        // Lump sum today: 1 Cr / 1.01^180 = ₹16.68 L.
+        // Lump sum today: 1 Cr / 1.12^15 = ₹18.27 L.
         assert!(
-            near(p.lump_sum_today, 1_667_833.0, 5.0),
+            near(p.lump_sum_today, 1_826_962.6, 5.0),
             "{}",
             p.lump_sum_today
         );
@@ -1863,17 +1966,17 @@ mod tests {
 
     #[test]
     fn step_up_lowers_the_first_sip() {
-        // 10% yearly step-up: factor = 12.80933 × Σ 1.1^y × 1.126825^(14−y)
-        // = 12.80933 × 67.794 = 868.39, so ₹1 Cr needs ₹11,516 a month at first.
+        // 10% yearly step-up: factor = 12.76650 × Σ 1.1^y × 1.12^(14−y)
+        // = 12.76650 × 64.81588 = 827.47, so ₹1 Cr needs ₹12,085 a month at first.
         let p = plan_sip(1e7, 15, 12.0, 10.0, 0.0);
-        assert!(near(p.monthly_sip, 11_515.6, 1.0), "{}", p.monthly_sip);
+        assert!(near(p.monthly_sip, 12_085.0, 1.0), "{}", p.monthly_sip);
         assert!(near(
             p.final_monthly_sip,
             p.monthly_sip * 1.1f64.powi(14),
             1e-6
         ));
         // Month by month, the stepped-up SIP lands on the target.
-        let i = 0.01;
+        let i = monthly_rate(12.0);
         let mut value = 0.0;
         for y in 0..15 {
             for _ in 0..12 {
@@ -1892,10 +1995,10 @@ mod tests {
 
     #[test]
     fn savings_reduce_or_cover_the_sip() {
-        // ₹10 L saved grows to 10 L × 1.01^180 = ₹59.96 L of the ₹1 Cr.
+        // ₹10 L saved grows to 10 L × 1.12^15 = ₹54.74 L of the ₹1 Cr.
         let p = plan_sip(1e7, 15, 12.0, 0.0, 1e6);
-        assert!(near(p.savings_future_value, 5_995_802.0, 5.0));
-        assert!(near(p.monthly_sip, (1e7 - 5_995_802.0) / 504.576, 1.0));
+        assert!(near(p.savings_future_value, 5_473_565.8, 5.0));
+        assert!(near(p.monthly_sip, (1e7 - 5_473_565.8) / 475.931, 1.0));
         let covered = plan_sip(1e6, 15, 12.0, 0.0, 1e6);
         assert_eq!(covered.monthly_sip, 0.0);
         assert!(covered.schedule.iter().all(|y| y.monthly_sip == 0.0));
@@ -1906,12 +2009,12 @@ mod tests {
         // ₹80,000 today at 6% for 20 years: 80,000 × 1.06^20 = ₹2,56,571 a month.
         let plan = plan_retirement(80_000.0, 20, 30, 6.0, 12.0, 7.0, 0.0, 0.0);
         assert!(near(plan.monthly_expense_at_retirement, 256_570.8, 0.5));
-        // v = 1/1.0058333; a year of payments = (1 − v^12)/(1 − v) = 11.62454;
-        // q = 1.06 × v^12 = 0.988538; Σ q^y (30 years) = 25.50867;
-        // corpus = 2,56,570.84 × 11.62454 × 25.50867 = ₹7.608 Cr.
-        assert!(near(plan.corpus, 76_080_039.0, 50.0), "{}", plan.corpus);
+        // v = 1.07^(−1/12); a year of payments = (1 − v^12)/(1 − v) = 11.63579;
+        // q = 1.06 × v^12 = 0.990654; Σ q^y (30 years) = 26.26787;
+        // corpus = 2,56,570.84 × 11.63579 × 26.26787 = ₹7.842 Cr.
+        assert!(near(plan.corpus, 78_420_229.2, 50.0), "{}", plan.corpus);
         // Drawing the expense month by month (rising 6% a year) empties it.
-        let i = 0.07 / 12.0;
+        let i = monthly_rate(7.0);
         let mut left = plan.corpus;
         for y in 0..30 {
             for _ in 0..12 {
@@ -1937,15 +2040,15 @@ mod tests {
     #[test]
     fn education_goal_inflates_the_cost() {
         // ₹25 L at 8% for 10 years: 25 L × 1.08^10 = ₹53.97 L. At 12%, the
-        // 120-month factor is ((1.01^120 − 1)/0.01) × 1.01 = 232.339, so the
-        // SIP is 53,97,312 / 232.339 = ₹23,230.
+        // 120-month factor is ((1.12^10 − 1)/i) × (1 + i) = 224.036, so the
+        // SIP is 53,97,312 / 224.036 = ₹24,091.
         let mut req = SipRequest::new(0.0, 0, Region::India);
         req.return_pct = Some(12.0);
         req.tax_kind = Some(TaxKind::None);
         let e = plan_education(25e5, 120, 8.0, req);
         assert!(near(e.future_cost, 5_397_312.5, 1.0), "{}", e.future_cost);
         assert!(
-            near(e.sip.plan.monthly_sip, 23_230.0, 2.0),
+            near(e.sip.plan.monthly_sip, 24_091.3, 2.0),
             "{}",
             e.sip.plan.monthly_sip
         );
@@ -2024,11 +2127,11 @@ mod tests {
 
     #[test]
     fn sub_year_plans_land_on_the_target() {
-        // 6 months at 12%: factor = ((1.01^6 − 1)/0.01) × 1.01 = 6.2135.
+        // 6 months at 12%: factor = ((1.12^0.5 − 1)/i) × (1 + i) = 6.20245.
         let p = plan_sip_months(100_000.0, 6, 12.0, 0.0, 0.0, None);
         assert_eq!((p.months, p.years), (6, 1));
         assert!(
-            near(p.monthly_sip, 100_000.0 / 6.213_54, 0.5),
+            near(p.monthly_sip, 100_000.0 / 6.202_45, 0.5),
             "{}",
             p.monthly_sip
         );
@@ -2040,8 +2143,8 @@ mod tests {
         assert!(near(p.periods.last().unwrap().value, 500_000.0, 1e-6));
         assert!(near(p.final_monthly_sip, p.monthly_sip * 1.1, 1e-9));
         assert_eq!(p.schedule.len(), 2);
-        // The 12% label is 12.68% once compounded monthly.
-        assert!(near(p.effective_annual_pct, 10.4713, 1e-3));
+        // The monthly rate compounds back to the annual return asked for.
+        assert!(near(p.effective_annual_pct, 10.0, 1e-9));
     }
 
     #[test]
@@ -2069,20 +2172,21 @@ mod tests {
     #[test]
     fn one_year_sip_has_eleven_short_term_lots() {
         // ₹10,000 a month for 12 months at 12%: the first instalment is held
-        // 12 months (long-term, gain ₹1,268 — inside the ₹1.25 L exemption);
+        // 12 months (long-term, gain ₹1,200 — inside the ₹1.25 L exemption);
         // the other 11 are held 11..1 months (STCG 20% + 4% cess, 1% load).
         let rates = monthly_rates(12, 12.0, None);
         let g = growth_to_end(&rates);
         let r = redeem(&lots_for(10_000.0, 0.0, 0.0, &g), &equity_india(1.0));
         assert_eq!((r.short_term_lots, r.long_term_lots), (11, 1));
         let (mut gain, mut load, mut gross) = (0.0, 0.0, 0.0);
+        let i = monthly_rate(12.0);
         for m in 1..12 {
-            let v = 10_000.0 * 1.01f64.powi(12 - m);
+            let v = 10_000.0 * (1.0 + i).powi(12 - m);
             load += v * 0.01;
             gain += v * 0.99 - 10_000.0;
             gross += v;
         }
-        let first = 10_000.0 * 1.01f64.powi(12);
+        let first = 10_000.0 * (1.0 + i).powi(12);
         assert!(near(r.exit_load, load, 1e-6));
         assert!(near(r.short_term_gain, gain, 1e-6));
         assert!(near(r.tax, gain * 0.2 * 1.04, 1e-6), "{}", r.tax);
@@ -2097,8 +2201,9 @@ mod tests {
         let r = redeem(&lots_for(50_000.0, 0.0, 0.0, &g), &equity_india(0.0));
         assert_eq!((r.short_term_lots, r.long_term_lots), (11, 109));
         let (mut st, mut lt) = (0.0, 0.0);
+        let i = monthly_rate(12.0);
         for m in 0..120 {
-            let v = 50_000.0 * 1.01f64.powi(120 - m);
+            let v = 50_000.0 * (1.0 + i).powi(120 - m);
             if 120 - m >= 12 {
                 lt += v - 50_000.0
             } else {
@@ -2175,7 +2280,7 @@ mod tests {
             })
         };
         let p = spec(&flat);
-        let want = 10_000.0 * annuity_due_fv(0.01, 120);
+        let want = 10_000.0 * annuity_due_fv(monthly_rate(12.0), 120);
         assert!(near(p.p10, want, 1e-3) && near(p.p90, want, 1e-3), "{p:?}");
         assert!(p.success_prob_pct > 99.0 || want < 2_300_000.0);
         let vols = vec![0.15 / 12f64.sqrt(); 120];

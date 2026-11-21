@@ -108,6 +108,20 @@ pub struct PortfolioXrayReport {
     pub sector_allocation: Vec<SectorExposure>,
     pub asset_class_split: AssetClassSplit,
     pub funds_analyzed: Vec<AnalyzedFund>,
+    /// Holdings left out: no price, or no exchange rate into the base.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<ExcludedHolding>,
+    /// Indian business groups (Tata, Adani, ...) by their weight, directly
+    /// and through funds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub business_groups: Vec<crate::business_groups::GroupExposure>,
+}
+
+/// A holding the X-Ray could not value, and why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExcludedHolding {
+    pub symbol: String,
+    pub reason: String,
 }
 
 /// Single holding input passed into the X-Ray analytics engine.
@@ -172,6 +186,8 @@ pub fn index_for_etf(symbol: &str) -> Option<&'static str> {
         "PSUBNKBEES" => Some("NIFTY PSU BANK"),
         "INFRABEES" => Some("NIFTY INFRA"),
         "CPSEETF" => Some("NIFTY CPSE"),
+        "SPY" | "VOO" | "IVV" | "SPLG" => Some("S&P 500"),
+        "QQQ" | "QQQM" => Some("NASDAQ 100"),
         _ => None,
     }
 }
@@ -224,6 +240,12 @@ pub fn default_etf_name(symbol: &str) -> Option<&'static str> {
         "SETFNN50" => Some("SBI Nifty Next 50 ETF"),
         "SETFBANK" => Some("SBI Nifty Bank ETF"),
         "SETFGOLD" => Some("SBI Gold ETF"),
+        "SPY" => Some("SPDR S&P 500 ETF Trust"),
+        "VOO" => Some("Vanguard S&P 500 ETF"),
+        "IVV" => Some("iShares Core S&P 500 ETF"),
+        "SPLG" => Some("SPDR Portfolio S&P 500 ETF"),
+        "QQQ" => Some("Invesco QQQ Trust"),
+        "QQQM" => Some("Invesco NASDAQ 100 ETF"),
         _ => None,
     }
 }
@@ -248,6 +270,8 @@ pub fn default_etf_category(symbol: &str) -> Option<&'static str> {
         "PSUBNKBEES" => Some("Equity Scheme - Sectoral / PSU Bank (NIFTY PSU BANK)"),
         "INFRABEES" => Some("Equity Scheme - Sectoral / Infrastructure (NIFTY INFRA)"),
         "CPSEETF" => Some("Equity Scheme - Thematic / CPSE"),
+        "SPY" | "VOO" | "IVV" | "SPLG" => Some("Equity - Large Cap (S&P 500)"),
+        "QQQ" | "QQQM" => Some("Equity - Large Cap Growth (NASDAQ 100)"),
         "GOLDBEES" | "SETFGOLD" | "HDFCGOLD" | "GOLDIETF" | "GOLD1" | "GOLDCASE" => {
             Some("Commodity - Gold")
         }
@@ -279,9 +303,8 @@ pub fn default_etf_sector(symbol: &str) -> Option<&'static str> {
         | "SILVERIETF" | "HDFCSILVER" | "SILVER1" => Some("Precious Metals"),
         "LIQUIDBEES" => Some("Cash / Liquid"),
         "NIFTYBEES" | "SETFNIF50" | "HDFCNIFETF" | "ICICINIFTY" | "NIFTYETF" | "JUNIORBEES"
-        | "SETFNN50" | "NEXT50" | "NEXT50ETF" | "MID150BEES" | "MIDCAPETF" => {
-            Some("Broad Market / Index")
-        }
+        | "SETFNN50" | "NEXT50" | "NEXT50ETF" | "MID150BEES" | "MIDCAPETF" | "SPY" | "VOO"
+        | "IVV" | "SPLG" | "QQQ" | "QQQM" => Some("Broad Market / Index"),
         _ => None,
     }
 }
@@ -369,38 +392,46 @@ pub fn classify_market_cap(market_cap: Option<f64>, currency: Option<&str>) -> M
 }
 
 /// Estimate fund market cap weights `(large_pct, mid_pct, small_pct)` from fund category and name.
-pub fn classify_fund_market_cap(category: Option<&str>, name: Option<&str>) -> (f64, f64, f64) {
+/// Large caps are the 100 largest companies (SEBI), so the NIFTY NEXT 50
+/// (ranks 51-100) is large cap too. `None` when the text says nothing about
+/// size: the fund is counted as unclassified, never assumed large cap.
+pub fn classify_fund_market_cap(
+    category: Option<&str>,
+    name: Option<&str>,
+) -> Option<(f64, f64, f64)> {
     let text = format!("{} {}", category.unwrap_or(""), name.unwrap_or("")).to_ascii_lowercase();
 
-    if text.contains("large & mid")
-        || text.contains("large and mid")
-        || text.contains("next 50")
-        || text.contains("next50")
-        || text.contains("junior")
-    {
-        (0.50, 0.50, 0.0)
+    if text.contains("large & mid") || text.contains("large and mid") {
+        Some((0.50, 0.50, 0.0))
     } else if text.contains("flexi cap")
         || text.contains("multi cap")
         || text.contains("flexicap")
         || text.contains("multicap")
     {
         // Standard Indian Flexi/Multi cap benchmark distribution
-        (0.65, 0.25, 0.10)
+        Some((0.65, 0.25, 0.10))
     } else if text.contains("large cap")
         || text.contains("large blend")
         || text.contains("large growth")
         || text.contains("large value")
         || text.contains("nifty 50")
         || text.contains("nifty50")
+        || text.contains("next 50")
+        || text.contains("next50")
+        || text.contains("junior")
+        || text.contains("nifty 100")
         || text.contains("nifty bees")
         || text.contains("niftybees")
-        || text.contains("bank")
+        || text.contains("nifty bank")
         || text.contains("s&p 500")
         || text.contains("sp500")
+        || text.contains("nasdaq 100")
+        || text.contains("nasdaq-100")
         || text.contains("mega")
         || text.contains("top 100")
+        || text.contains("bluechip")
     {
-        (1.00, 0.0, 0.0)
+        Some((1.00, 0.0, 0.0))
     } else if text.contains("mid cap")
         || text.contains("mid-cap")
         || text.contains("midcap")
@@ -409,18 +440,174 @@ pub fn classify_fund_market_cap(category: Option<&str>, name: Option<&str>) -> (
         || text.contains("mid 150")
         || text.contains("mid150")
     {
-        (0.0, 1.00, 0.0)
+        Some((0.0, 1.00, 0.0))
     } else if text.contains("small cap")
         || text.contains("small-cap")
         || text.contains("smallcap")
         || text.contains("russell 2000")
         || text.contains("micro")
     {
-        (0.0, 0.0, 1.00)
+        Some((0.0, 0.0, 1.00))
     } else {
-        // Default to Large Cap for general index/blend equity funds
-        (1.00, 0.0, 0.0)
+        None
     }
+}
+
+/// Gold and silver instruments, matched by exact (suffix-free) symbol so a
+/// company with "GOLD" in its ticker is not taken for bullion.
+pub const COMMODITY_SYMBOLS: &[&str] = &[
+    // India: gold and silver ETFs.
+    "GOLDBEES",
+    "SILVERBEES",
+    "GOLD1",
+    "SILVER1",
+    "GOLDIETF",
+    "SILVERIETF",
+    "HDFCGOLD",
+    "HDFCSILVER",
+    "SETFGOLD",
+    "GOLDCASE",
+    "AXISGOLD",
+    "KOTAKGOLD",
+    "GOLDSHARE",
+    "BSLGOLDETF",
+    "QGOLDHALF",
+    "LICMFGOLD",
+    "TATAGOLD",
+    "TATSILV",
+    "ICICISILVE",
+    "SILVERETF",
+    "GOLDETF",
+    // US: bullion ETFs and trusts.
+    "GLD",
+    "IAU",
+    "GLDM",
+    "SGOL",
+    "IAUM",
+    "AAAU",
+    "BAR",
+    "PHYS",
+    "SLV",
+    "SIVR",
+    "PSLV",
+    // Futures.
+    "GC=F",
+    "SI=F",
+];
+
+/// Whether `symbol` is a gold or silver instrument: an SGB or a symbol on
+/// [`COMMODITY_SYMBOLS`].
+pub fn is_commodity_symbol(symbol: &str) -> bool {
+    let upper = symbol.trim().to_ascii_uppercase();
+    if crate::offmarket::is_sgb(&upper) || upper.starts_with("SGB") {
+        return true;
+    }
+    let bare = canonical_ticker(&upper);
+    COMMODITY_SYMBOLS.iter().any(|c| *c == upper || *c == bare)
+}
+
+/// The sector label a fund gets when its holdings are not looked through
+/// one by one: a sectoral fund's sector ("Financial Services" for a banking
+/// fund), else `Fund: <category>` from its AMFI scheme category or name
+/// ("Fund: Large Cap", "Fund: Index (NIFTY 50)", "Fund: Debt"), else
+/// [`FUND_NO_LOOK_THROUGH`]. Funds are never lumped into one sector.
+pub fn fund_sector_label(symbol: &str, name: Option<&str>, category: Option<&str>) -> String {
+    if let Some(index) = crate::index_weights::index_of_fund(symbol, name) {
+        // A sector index is that sector.
+        return match index {
+            "NIFTY BANK" => "Financial Services".to_string(),
+            _ => format!("{FUND_PREFIX}Index ({index})"),
+        };
+    }
+    let text = format!("{} {}", category.unwrap_or(""), name.unwrap_or("")).to_ascii_lowercase();
+    if text.trim().is_empty() {
+        return FUND_NO_LOOK_THROUGH.to_string();
+    }
+    // "banking and psu" is a debt category: check it before the sector words.
+    if text.contains("banking and psu") || text.contains("banking & psu") {
+        return format!("{FUND_PREFIX}Debt");
+    }
+    let sectoral = text.contains("sectoral") || text.contains("thematic");
+    let sector_words = [
+        ("bank", "Financial Services"),
+        ("financial", "Financial Services"),
+        ("pharma", "Healthcare"),
+        ("health", "Healthcare"),
+        ("technology", "Technology"),
+        ("digital", "Technology"),
+        (" it ", "Technology"),
+        ("infra", "Industrials"),
+        ("fmcg", "Consumer Defensive"),
+        ("consumption", "Consumer Defensive"),
+        ("auto", "Consumer Cyclical"),
+        ("energy", "Energy"),
+        ("power", "Utilities"),
+        ("psu", "Industrials"),
+    ];
+    if sectoral || !text.contains("cap") {
+        let padded = format!(" {text} ");
+        if let Some((_, sec)) = sector_words.iter().find(|(w, _)| padded.contains(w)) {
+            return sec.to_string();
+        }
+    }
+    let kinds = [
+        ("large & mid", "Large & Mid Cap"),
+        ("large and mid", "Large & Mid Cap"),
+        ("large cap", "Large Cap"),
+        ("bluechip", "Large Cap"),
+        ("mid cap", "Mid Cap"),
+        ("midcap", "Mid Cap"),
+        ("small cap", "Small Cap"),
+        ("smallcap", "Small Cap"),
+        ("flexi cap", "Flexi Cap"),
+        ("flexicap", "Flexi Cap"),
+        ("multi cap", "Multi Cap"),
+        ("multicap", "Multi Cap"),
+        ("focused", "Focused"),
+        ("value", "Value / Contra"),
+        ("contra", "Value / Contra"),
+        ("dividend yield", "Dividend Yield"),
+        ("elss", "ELSS"),
+        ("tax saver", "ELSS"),
+        ("aggressive hybrid", "Hybrid"),
+        ("balanced", "Hybrid"),
+        ("hybrid", "Hybrid"),
+        ("arbitrage", "Arbitrage"),
+        ("international", "International"),
+        ("overseas", "International"),
+        ("fund of funds", "Fund of Funds"),
+        ("fof", "Fund of Funds"),
+        ("gold", "Gold"),
+        ("silver", "Silver"),
+        ("liquid", "Liquid"),
+        ("overnight", "Liquid"),
+        ("money market", "Liquid"),
+        ("gilt", "Debt"),
+        ("debt", "Debt"),
+        ("bond", "Debt"),
+        ("duration", "Debt"),
+        ("credit risk", "Debt"),
+        ("corporate", "Debt"),
+        ("banking and psu", "Debt"),
+        ("index", "Index"),
+    ];
+    match kinds.iter().find(|(w, _)| text.contains(w)) {
+        Some((_, k)) => format!("{FUND_PREFIX}{k}"),
+        None => FUND_NO_LOOK_THROUGH.to_string(),
+    }
+}
+
+/// Prefix of the sector labels [`fund_sector_label`] gives funds.
+pub const FUND_PREFIX: &str = "Fund: ";
+
+/// The sector of a fund nothing is known about.
+pub const FUND_NO_LOOK_THROUGH: &str = "Fund (no look-through)";
+
+/// Whether `sector` is one of [`fund_sector_label`]'s fund labels rather than
+/// an economic sector: such slices are left out of sector-concentration
+/// notices (a large-cap fund holds many sectors).
+pub fn is_fund_sector_label(sector: &str) -> bool {
+    sector.starts_with(FUND_PREFIX) || sector == FUND_NO_LOOK_THROUGH
 }
 
 /// Classify asset class for a portfolio holding.
@@ -431,14 +618,17 @@ pub fn classify_asset_class(
     category: Option<&str>,
 ) -> AssetClassType {
     let sym_upper = symbol.to_ascii_uppercase();
-    if is_sgb
-        || sym_upper.contains("SGB")
-        || sym_upper.contains("GOLD")
-        || sym_upper.contains("SILVER")
-    {
+    if is_sgb || is_commodity_symbol(symbol) {
         return AssetClassType::Commodity;
     }
     let cat_lower = category.unwrap_or("").to_ascii_lowercase();
+    // A gold or silver fund (ETF or fund of funds) by its scheme category.
+    if is_fund
+        && (cat_lower.contains("gold") || cat_lower.contains("silver"))
+        && !cat_lower.contains("equity")
+    {
+        return AssetClassType::Commodity;
+    }
     if cat_lower.contains("liquid")
         || cat_lower.contains("overnight")
         || cat_lower.contains("money market")
@@ -475,6 +665,21 @@ fn pct(part: f64, total: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+/// The sector slice of a fund whose sector weights are not known: the
+/// quote's own sector for a sector ETF, else [`fund_sector_label`].
+fn fund_sector(h: &XrayInputHolding, category: Option<&str>, name: Option<&str>) -> String {
+    let category = h.fund_category.as_deref().or(category);
+    let name = h
+        .name
+        .as_deref()
+        .or(name)
+        .or_else(|| default_etf_name(&h.symbol));
+    if let Some(sec) = default_etf_sector(&h.symbol).filter(|s| *s != "Broad Market / Index") {
+        return normalize_sector(Some(sec));
+    }
+    fund_sector_label(&h.symbol, name, category)
 }
 
 #[derive(Default)]
@@ -523,6 +728,8 @@ pub fn compute_xray_with_threshold(
             sector_allocation: Vec::new(),
             asset_class_split: AssetClassSplit::default(),
             funds_analyzed: Vec::new(),
+            excluded: Vec::new(),
+            business_groups: Vec::new(),
         };
     }
 
@@ -567,9 +774,18 @@ pub fn compute_xray_with_threshold(
         }
 
         if is_fund {
-            let profile_opt = fund_profiles
+            // The fund's own holdings when known, else the shipped weights
+            // of the index it tracks (never equal weights).
+            let given = fund_profiles
                 .get(&h.symbol)
                 .or_else(|| fund_profiles.get(&canonical_ticker(&h.symbol)));
+            let shipped = given.is_none().then(|| {
+                let name = h.name.as_deref().or_else(|| default_etf_name(&h.symbol));
+                crate::index_weights::for_fund(&h.symbol, name).map(|t| {
+                    t.fund_profile(&h.symbol, name.map(str::to_string), h.currency.clone())
+                })
+            });
+            let profile_opt = given.or(shipped.as_ref().and_then(Option::as_ref));
 
             let look_through_available = profile_opt.is_some_and(|p| !p.holdings.is_empty());
             let (holdings_count, coverage_pct) = if let Some(p) = profile_opt {
@@ -641,19 +857,8 @@ pub fn compute_xray_with_threshold(
                         *sector_values.entry(sec_name).or_default() += h.value * w;
                     }
                 } else if asset_class == AssetClassType::Equity {
-                    let sec_source = h
-                        .fund_category
-                        .as_deref()
-                        .or(profile.category.as_deref())
-                        .or(h.sector.as_deref())
-                        .or_else(|| {
-                            if is_known_etf(&h.symbol) {
-                                default_etf_sector(&h.symbol)
-                            } else {
-                                None
-                            }
-                        });
-                    let sec_name = normalize_sector(sec_source);
+                    let sec_name =
+                        fund_sector(h, profile.category.as_deref(), profile.name.as_deref());
                     *sector_values.entry(sec_name).or_default() += h.value;
                 }
 
@@ -677,27 +882,19 @@ pub fn compute_xray_with_threshold(
                             None
                         }
                     });
-                    let (large_p, mid_p, small_p) =
-                        classify_fund_market_cap(cat_source, name_source);
-                    large_cap_val += h.value * large_p;
-                    mid_cap_val += h.value * mid_p;
-                    small_cap_val += h.value * small_p;
+                    match classify_fund_market_cap(cat_source, name_source) {
+                        Some((large_p, mid_p, small_p)) => {
+                            large_cap_val += h.value * large_p;
+                            mid_cap_val += h.value * mid_p;
+                            small_cap_val += h.value * small_p;
+                        }
+                        None => unclassified_cap_val += h.value,
+                    }
                 }
             } else {
                 // Fund without constituent look-through
                 if asset_class == AssetClassType::Equity {
-                    let sec_source =
-                        h.fund_category
-                            .as_deref()
-                            .or(h.sector.as_deref())
-                            .or_else(|| {
-                                if is_known_etf(&h.symbol) {
-                                    default_etf_sector(&h.symbol)
-                                } else {
-                                    None
-                                }
-                            });
-                    let sec_name = normalize_sector(sec_source);
+                    let sec_name = fund_sector(h, None, None);
                     *sector_values.entry(sec_name).or_default() += h.value;
 
                     let cat_source = h.fund_category.as_deref().or_else(|| {
@@ -714,11 +911,14 @@ pub fn compute_xray_with_threshold(
                             None
                         }
                     });
-                    let (large_p, mid_p, small_p) =
-                        classify_fund_market_cap(cat_source, name_source);
-                    large_cap_val += h.value * large_p;
-                    mid_cap_val += h.value * mid_p;
-                    small_cap_val += h.value * small_p;
+                    match classify_fund_market_cap(cat_source, name_source) {
+                        Some((large_p, mid_p, small_p)) => {
+                            large_cap_val += h.value * large_p;
+                            mid_cap_val += h.value * mid_p;
+                            small_cap_val += h.value * small_p;
+                        }
+                        None => unclassified_cap_val += h.value,
+                    }
                 }
             }
         } else if asset_class == AssetClassType::Equity {
@@ -822,16 +1022,25 @@ pub fn compute_xray_with_threshold(
         .collect();
     sector_allocation.sort_by(|a, b| b.value.total_cmp(&a.value));
 
+    let business_groups = crate::business_groups::group_exposure(
+        &effective_holdings
+            .iter()
+            .map(|e| (e.symbol.clone(), e.total_value))
+            .collect::<Vec<_>>(),
+        total_value,
+    );
     PortfolioXrayReport {
         portfolio_name: portfolio_name.to_string(),
         base_currency: base_currency.to_string(),
         total_value: round_2(total_value),
+        business_groups,
         effective_holdings,
         concentrations_above_10pct,
         market_cap_breakdown,
         sector_allocation,
         asset_class_split: asset_classes,
         funds_analyzed,
+        excluded: Vec::new(),
     }
 }
 
@@ -1443,9 +1652,10 @@ mod tests {
         assert_eq!(report.funds_analyzed.len(), 1);
         let fund = &report.funds_analyzed[0];
         assert_eq!(fund.symbol, "NIFTYBEES.NS");
-        assert!(!fund.look_through_available);
-        assert_eq!(fund.holdings_count, 0);
-        assert_eq!(fund.coverage_pct, 0.0);
+        // Looked through with the shipped NIFTY 50 weights.
+        assert!(fund.look_through_available);
+        assert_eq!(fund.holdings_count, 24);
+        assert!((fund.coverage_pct - 79.9).abs() < 0.01);
         assert_eq!(fund.name.as_deref(), Some("Nippon India ETF Nifty 50 BeES"));
 
         // 3. Asset class is 100% Equity
@@ -1458,15 +1668,20 @@ mod tests {
         assert_eq!(report.market_cap_breakdown.unclassified_value, 0.0);
         assert_eq!(report.market_cap_breakdown.unclassified_pct, 0.0);
 
-        // 5. Sector allocation includes Technology (TCS) and Broad Market / Index (NIFTYBEES)
-        assert_eq!(report.sector_allocation.len(), 2);
-        let bm = report
+        // 5. Sectors come from the index's split, TCS adding to Technology;
+        // no "Broad Market / Index" lump.
+        assert!(
+            !report
+                .sector_allocation
+                .iter()
+                .any(|s| s.sector == "Broad Market / Index")
+        );
+        let tech = report
             .sector_allocation
             .iter()
-            .find(|s| s.sector == "Broad Market / Index")
+            .find(|s| s.sector == "Technology")
             .unwrap();
-        assert_eq!(bm.value, 25000.0);
-        assert_eq!(bm.weight_pct, 50.0);
+        assert!((tech.value - (25000.0 + 25000.0 * 0.105)).abs() < 0.01);
     }
 
     #[test]
@@ -1487,10 +1702,17 @@ mod tests {
 
         let report = compute_xray("bank_test", "INR", &holdings, &HashMap::new());
         assert_eq!(report.total_value, 50000.0);
-        assert!(report.concentrations_above_10pct.is_empty());
+        // Looked through with the NIFTY BANK weights: HDFC Bank and ICICI
+        // Bank are each above 10% of a portfolio that is all BANKBEES.
+        let flagged: Vec<&str> = report
+            .concentrations_above_10pct
+            .iter()
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(flagged, vec!["HDFCBANK.NS", "ICICIBANK.NS"]);
 
         assert_eq!(report.funds_analyzed.len(), 1);
-        assert!(!report.funds_analyzed[0].look_through_available);
+        assert!(report.funds_analyzed[0].look_through_available);
         assert_eq!(
             report.funds_analyzed[0].name.as_deref(),
             Some("Nippon India ETF Nifty Bank BeES")
@@ -1669,5 +1891,140 @@ mod tests {
             default_etf_sector("NIFTYBEES"),
             Some("Broad Market / Index")
         );
+    }
+    fn fund_only(symbol: &str, name: Option<&str>, category: Option<&str>) -> XrayInputHolding {
+        XrayInputHolding {
+            symbol: symbol.to_string(),
+            name: name.map(str::to_string),
+            shares: 100.0,
+            price: 100.0,
+            value: 10_000.0,
+            sector: None,
+            market_cap: None,
+            currency: Some("INR".to_string()),
+            is_fund: true,
+            is_sgb: false,
+            fund_category: category.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn niftybees_looks_through_with_index_weights_not_equal_weights() {
+        let report = compute_xray(
+            "p",
+            "INR",
+            &[fund_only("NIFTYBEES.NS", None, None)],
+            &HashMap::new(),
+        );
+        let hdfc = report
+            .effective_holdings
+            .iter()
+            .find(|e| canonical_ticker(&e.symbol) == "HDFCBANK")
+            .unwrap();
+        // About 13% (its NIFTY 50 weight), not 2% (one fiftieth).
+        assert!(
+            (hdfc.effective_weight_pct - 13.1).abs() < 0.5,
+            "{}",
+            hdfc.effective_weight_pct
+        );
+        assert!(report.funds_analyzed[0].look_through_available);
+        // Sectors come from the index, not "Broad Market / Index".
+        let fin = report
+            .sector_allocation
+            .iter()
+            .find(|s| s.sector == "Financial Services")
+            .unwrap();
+        assert!((fin.weight_pct - 37.5).abs() < 0.01);
+        assert_eq!(report.market_cap_breakdown.large_cap_pct, 100.0);
+    }
+
+    #[test]
+    fn commodities_match_exact_symbols_only() {
+        assert_eq!(
+            classify_asset_class("GOLDBEES.NS", true, false, None),
+            AssetClassType::Commodity
+        );
+        assert_eq!(
+            classify_asset_class("GLD", true, false, None),
+            AssetClassType::Commodity
+        );
+        // A company with GOLD or SILVER in its ticker is a stock.
+        for stock in ["GOLDIAM.NS", "SILVERTUC.NS", "GOLDMAN", "GFI", "RGLD"] {
+            assert_eq!(
+                classify_asset_class(stock, false, false, None),
+                AssetClassType::Equity,
+                "{stock}"
+            );
+        }
+        assert_eq!(
+            classify_asset_class("SGBAUG28V-GB.NS", false, true, None),
+            AssetClassType::Commodity
+        );
+        // A gold fund of funds by its AMFI category.
+        assert_eq!(
+            classify_asset_class("MF:1", true, false, Some("Other Scheme - Gold ETF FoF")),
+            AssetClassType::Commodity
+        );
+    }
+
+    #[test]
+    fn next_50_is_large_cap_and_unknown_funds_are_unclassified() {
+        assert_eq!(
+            classify_fund_market_cap(Some("Index fund (NIFTY NEXT 50)"), None),
+            Some((1.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            classify_fund_market_cap(None, Some("Some Opportunities Fund")),
+            None
+        );
+        let report = compute_xray(
+            "p",
+            "INR",
+            &[fund_only("MF:999", Some("Some Opportunities Fund"), None)],
+            &HashMap::new(),
+        );
+        assert_eq!(report.market_cap_breakdown.large_cap_value, 0.0);
+        assert_eq!(report.market_cap_breakdown.unclassified_pct, 100.0);
+        assert_eq!(report.sector_allocation[0].sector, FUND_NO_LOOK_THROUGH);
+    }
+
+    #[test]
+    fn funds_get_their_own_sector_labels() {
+        assert_eq!(
+            fund_sector_label(
+                "MF:1",
+                Some("X Large Cap Fund"),
+                Some("Equity Scheme - Large Cap Fund")
+            ),
+            "Fund: Large Cap"
+        );
+        assert_eq!(
+            fund_sector_label(
+                "MF:2",
+                Some("X Banking & Financial Services Fund"),
+                Some("Equity Scheme - Sectoral/ Thematic")
+            ),
+            "Financial Services"
+        );
+        assert_eq!(
+            fund_sector_label(
+                "MF:3",
+                Some("X Banking and PSU Debt Fund"),
+                Some("Debt Scheme - Banking and PSU Fund")
+            ),
+            "Fund: Debt"
+        );
+        assert_eq!(
+            fund_sector_label(
+                "MF:4",
+                Some("UTI Nifty 50 Index Fund"),
+                Some("Other Scheme - Index Funds")
+            ),
+            "Fund: Index (NIFTY 50)"
+        );
+        assert_eq!(fund_sector_label("MF:5", None, None), FUND_NO_LOOK_THROUGH);
+        assert!(is_fund_sector_label("Fund: Large Cap"));
+        assert!(is_fund_sector_label(FUND_NO_LOOK_THROUGH));
+        assert!(!is_fund_sector_label("Financial Services"));
     }
 }
