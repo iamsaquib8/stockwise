@@ -328,6 +328,16 @@ impl Valuation {
         portfolio: &Portfolio,
         symbol: &str,
     ) -> Option<Vec<(chrono::NaiveDate, f64)>> {
+        self.flow_items_base(portfolio, symbol)
+            .map(|v| v.into_iter().map(|(d, a, _)| (d, a)).collect())
+    }
+
+    /// [`Valuation::flows_base`] with what each flow was.
+    pub fn flow_items_base(
+        &self,
+        portfolio: &Portfolio,
+        symbol: &str,
+    ) -> Option<Vec<(chrono::NaiveDate, f64, pf::FlowKind)>> {
         let own = self.currency(symbol);
         portfolio
             .cash_flow_items(symbol)
@@ -339,10 +349,10 @@ impl Valuation {
                     && *rate > 0.0
                 {
                     let (major, _) = market::to_major(f.amount, &cur);
-                    return Some((f.date, major * rate));
+                    return Some((f.date, major * rate, f.kind));
                 }
                 let (rate, _) = self.currency_rate_on(&cur, f.date)?;
-                Some((f.date, f.amount * rate))
+                Some((f.date, f.amount * rate, f.kind))
             })
             .collect()
     }
@@ -3903,6 +3913,82 @@ mod tests {
         assert!((left.charges.unwrap() - 12.0).abs() < 1e-9);
         // Undoing the sale gives the charges back to a lot.
         assert_eq!(sales[0].to_lot().charges, Some(8.0));
+    }
+
+    #[test]
+    fn pme_leaves_out_a_delisted_holding_on_both_sides() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        // Delisted: no price. Valued at 0 it would be a 100% loss.
+        p.add_lot("GONE.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        let symbols = vec!["TCS.NS".to_string(), "GONE.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(120.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let closes = vec![(day("2024-01-02"), 100.0), (day("2025-01-02"), 120.0)];
+        let r = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^NSEI".into(), "NIFTY 50".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.summary.excluded, vec!["GONE.NS".to_string()]);
+        assert_eq!(r.summary.total_invested, 1000.0);
+        assert_eq!(r.summary.actual_value, 1200.0);
+        // Matched the index exactly once the delisted holding is out.
+        assert_eq!(r.summary.value_added, 0.0);
+        assert_eq!(r.summary.benchmark_kind, "price");
+    }
+
+    #[test]
+    fn pme_with_a_price_index_leaves_dividends_out() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        p.dividends.push(pf::DividendReceived {
+            symbol: "TCS.NS".into(),
+            ex_date: "2024-06-01".into(),
+            per_share: 5.0,
+            qty: 10.0,
+            amount: 50.0,
+            currency: None,
+        });
+        let symbols = vec!["TCS.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(120.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let closes = vec![(day("2024-01-02"), 100.0), (day("2025-01-02"), 120.0)];
+        let price_only = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^NSEI".into(), "NIFTY 50".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(price_only.summary.total_distributed, 0.0);
+        assert!(!price_only.summary.dividends_included);
+        let tri = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^SP500TR".into(), "TR".into()),
+            true,
+        )
+        .unwrap();
+        assert_eq!(tri.summary.total_distributed, 50.0);
     }
 
     use super::fx_pair;

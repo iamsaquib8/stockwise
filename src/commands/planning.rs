@@ -1537,38 +1537,57 @@ pub async fn portfolio_pme_report(
                 twin_xirr_percent: None,
                 twin_shares: 0.0,
                 benchmark_end_price: 0.0,
+                excluded: Vec::new(),
+                benchmark_kind: "price".into(),
+                dividends_included: false,
+                index_start_date: String::new(),
+                flows_before_index: 0,
+                twin_capped_sales: 0,
             },
             holdings: Vec::new(),
         });
     }
 
-    let val = super::portfolio::value_holdings(src, &symbols, market, Some(&base)).await?;
-
-    let mut all_flows: Vec<(NaiveDate, f64)> = Vec::new();
-    let mut holding_flows: Vec<(String, Vec<(NaiveDate, f64)>)> = Vec::new();
-
-    for sym in &symbols {
-        let raw_flows = portfolio.cash_flows(sym);
-        let mut base_flows = Vec::new();
-        for (d, amt) in raw_flows {
-            if let Some(converted) = val.to_base(sym, amt) {
-                base_flows.push((d, converted));
-                all_flows.push((d, converted));
-            }
-        }
-        holding_flows.push((sym.clone(), base_flows));
-    }
-    all_flows.sort_by_key(|f| f.0);
-
-    let start_date = match all_flows.first() {
-        Some(f) => f.0,
-        None => today,
-    };
-
+    let mut val = super::portfolio::value_holdings(src, &symbols, market, Some(&base)).await?;
+    // Splits not yet applied would show as a fake loss; closed positions
+    // may be in a currency no open holding uses; each flow at its own
+    // day's exchange rate.
+    let pending = crate::corp_actions::pending_splits_live(portfolio).await;
+    let portfolio = &pending.adjusted(portfolio);
+    let mut currencies: Vec<String> = symbols.iter().filter_map(|s| val.currency(s)).collect();
+    currencies.sort();
+    currencies.dedup();
     let client = src.yahoo().await?;
-    let bench_hist = daily_history(client, &bench_symbol, Span::Since(start_date))
-        .await
-        .with_context(|| format!("No price history for the benchmark {}", bench_symbol))?;
+    val.add_rates(client, &currencies).await;
+    val.load_history(portfolio).await;
+
+    let first_flow = symbols
+        .iter()
+        .flat_map(|s| portfolio.cash_flows(s))
+        .map(|f| f.0)
+        .min()
+        .unwrap_or(today);
+
+    // A total-return index when Yahoo has one, compared with the
+    // portfolio's dividends; else the price index with dividends left out
+    // on both sides.
+    let tri = match total_return_symbol(&bench_symbol) {
+        Some(tr) => daily_history(client, tr, Span::Since(first_flow))
+            .await
+            .ok()
+            .filter(|h| h.closes.len() >= 2)
+            .map(|h| (tr.to_string(), h)),
+        None => None,
+    };
+    let (used_symbol, bench_hist, total_return) = match tri {
+        Some((sym, h)) => (sym, h, true),
+        None => {
+            let h = daily_history(client, &bench_symbol, Span::Since(first_flow))
+                .await
+                .with_context(|| format!("No price history for the benchmark {}", bench_symbol))?;
+            (bench_symbol.clone(), h, false)
+        }
+    };
     if bench_hist.closes.len() < 2 {
         bail!(
             "Not enough price history for the benchmark {}",
@@ -1596,14 +1615,85 @@ pub async fn portfolio_pme_report(
             );
         }
     }
+    let name = if total_return {
+        format!("{} (total return)", bench_name)
+    } else {
+        bench_name
+    };
+    pme_report_from(
+        portfolio,
+        &val,
+        &bench_closes,
+        today,
+        (used_symbol, name),
+        total_return,
+    )
+}
 
-    let actual_portfolio_value = val.totals(portfolio).value;
-    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, &bench_closes, today)
+/// The total-return version of a price index Yahoo carries.
+fn total_return_symbol(symbol: &str) -> Option<&'static str> {
+    match symbol {
+        "^GSPC" => Some("^SP500TR"),
+        "^NDX" => Some("^XNDX"),
+        "^DJI" => Some("^DJITR"),
+        _ => None,
+    }
+}
+
+/// The PME report of `portfolio` (valued by `val`, base-currency
+/// `bench_closes`). Open holdings without a price or exchange rate are left
+/// out on both sides and listed in `excluded`. With a price-only index
+/// (`total_return` false) dividends are left out of the flows, since the
+/// index has none either.
+pub(crate) fn pme_report_from(
+    portfolio: &Portfolio,
+    val: &super::portfolio::Valuation,
+    bench_closes: &[(NaiveDate, f64)],
+    today: NaiveDate,
+    (bench_symbol, bench_name): (String, String),
+    total_return: bool,
+) -> Result<crate::pme::PmeReport> {
+    let mut all_flows: Vec<(NaiveDate, f64)> = Vec::new();
+    let mut holding_flows: Vec<(String, Vec<(NaiveDate, f64)>, f64)> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
+    let mut actual_portfolio_value = 0.0;
+
+    for sym in portfolio.symbols_with_history() {
+        // An open holding without a value would count its cost as a total loss.
+        let value = match portfolio.holding(&sym) {
+            Some(h) => match val
+                .price(&sym)
+                .and_then(|p| val.to_base(&sym, p * h.shares))
+            {
+                Some(v) => v,
+                None => {
+                    excluded.push(sym);
+                    continue;
+                }
+            },
+            None => 0.0,
+        };
+        let Some(items) = val.flow_items_base(portfolio, &sym) else {
+            excluded.push(sym);
+            continue;
+        };
+        let flows: Vec<(NaiveDate, f64)> = items
+            .into_iter()
+            .filter(|(_, _, k)| total_return || *k != pf::FlowKind::Dividend)
+            .map(|(d, a, _)| (d, a))
+            .collect();
+        actual_portfolio_value += value;
+        all_flows.extend(flows.iter().copied());
+        holding_flows.push((sym, flows, value));
+    }
+    all_flows.sort_by_key(|f| f.0);
+    let start_date = all_flows.first().map_or(today, |f| f.0);
+
+    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, bench_closes, today)
         .context("Could not compute PME for portfolio")?;
-
     let (twin_shares, _) =
-        crate::pme::twin_shares_and_value(&all_flows, &bench_closes, today).unwrap_or((0.0, 0.0));
-    let bench_end_price = crate::pme::benchmark_price_on(&bench_closes, today).unwrap_or(0.0);
+        crate::pme::twin_shares_and_value(&all_flows, bench_closes, today).unwrap_or((0.0, 0.0));
+    let bench_end_price = crate::pme::benchmark_price_on(bench_closes, today).unwrap_or(0.0);
 
     let mut total_invested = 0.0;
     let mut total_distributed = 0.0;
@@ -1618,7 +1708,7 @@ pub async fn portfolio_pme_report(
     let summary = crate::pme::PmeSummary {
         benchmark_symbol: bench_symbol,
         benchmark_name: bench_name,
-        base_currency: base,
+        base_currency: val.base().to_string(),
         start_date: start_date.to_string(),
         end_date: today.to_string(),
         total_invested: round(total_invested, 2),
@@ -1632,18 +1722,27 @@ pub async fn portfolio_pme_report(
         twin_xirr_percent: pme_res.twin_xirr_percent.map(|x| round(x, 2)),
         twin_shares: round(twin_shares, 4),
         benchmark_end_price: round(bench_end_price, 2),
+        excluded,
+        benchmark_kind: if total_return {
+            "total_return"
+        } else {
+            "price"
+        }
+        .to_string(),
+        dividends_included: total_return,
+        index_start_date: bench_closes
+            .first()
+            .map_or(String::new(), |c| c.0.to_string()),
+        flows_before_index: crate::pme::flows_before_index(&all_flows, bench_closes),
+        twin_capped_sales: pme_res.twin_capped_sales,
     };
 
     let mut holdings = Vec::new();
-    for (sym, flows) in holding_flows {
+    for (sym, flows, h_val) in holding_flows {
         if flows.is_empty() {
             continue;
         }
-        let h_val = portfolio.holding(&sym).map_or(0.0, |h| {
-            val.price(&sym)
-                .map_or(0.0, |p| val.to_base(&sym, p * h.shares).unwrap_or(0.0))
-        });
-        if let Some(res) = crate::pme::compute_pme(&flows, h_val, &bench_closes, today) {
+        if let Some(res) = crate::pme::compute_pme(&flows, h_val, bench_closes, today) {
             holdings.push(crate::pme::HoldingPme {
                 symbol: sym,
                 actual_value: round(res.actual_value, 2),
@@ -1710,6 +1809,13 @@ pub async fn cmd_portfolio_pme(
         "Benchmark",
         &format!("{} ({})", s.benchmark_name, s.benchmark_symbol),
     );
+    if !s.dividends_included {
+        println!(
+            "  {}",
+            "Price index without dividends: the portfolio's dividends are left out too, so both sides compare price returns."
+                .dimmed()
+        );
+    }
     print_kv("Period", &format!("{} → {}", s.start_date, s.end_date));
     print_kv("Base Currency", &s.base_currency);
     print_kv("Total Invested", &format_price(s.total_invested, base_cur));
@@ -1800,6 +1906,30 @@ pub async fn cmd_portfolio_pme(
                 pad_start(&alpha_cell, 14),
             );
         }
+    }
+    println!();
+    if !s.excluded.is_empty() {
+        println!(
+            "  {} {} holding(s) without a price or exchange rate left out on both sides: {}",
+            "!".yellow(),
+            s.excluded.len(),
+            s.excluded.join(", ")
+        );
+    }
+    if s.flows_before_index > 0 {
+        println!(
+            "  {} {} cash flow(s) dated before the index history (starts {}) are priced at its first close.",
+            "!".yellow(),
+            s.flows_before_index,
+            s.index_start_date
+        );
+    }
+    if s.twin_capped_sales > 0 {
+        println!(
+            "  {} {} sale(s) were larger than the Index Twin's holding: the twin sold only what it held.",
+            "·".dimmed(),
+            s.twin_capped_sales
+        );
     }
     println!();
     Ok(())
