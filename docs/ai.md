@@ -326,7 +326,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `harvest` | Lot-level loss-harvesting candidates and the unused ₹1.25 lakh LTCG exemption | `harvest --json` |
 | `rebalance` | Trades to reach your saved target weights (or equal weight); buy-only when `inflow` is given | `rebalance --json` |
 | `calendar` | Results, ex-dividend and split dates for tickers, or for your holdings and watchlist | `calendar --json` |
-| `ipo_board` / `ipo_analyze` | Open, upcoming and recently listed IPOs from NSE; one issue's terms, subscription and allotment odds | `ipo --json` |
+| `ipo_board` / `ipo_analyze` | Open, upcoming and recently listed IPOs from NSE with the engine's verdict per issue; one issue's verdict, listing model, valuation, subscription, allotment odds and plan | `ipo --json` |
 | `goal_sip` / `goal_education` | SIP for a goal: horizon-matched return, tax at redemption, outcome bands | `goal sip\|education --json` |
 | `goal_retire` | Retirement corpus and SIP, withdrawal rate, survival after a 30% first-day fall, year-1 SWP vs FD tax (no outcome bands) | `goal retire --json` |
 | `goal_swp` / `goal_prepay` | Withdrawal runway (SWP vs FD tax); loan prepayment against a SIP | `goal swp\|prepay --json` |

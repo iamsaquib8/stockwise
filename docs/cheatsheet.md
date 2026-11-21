@@ -64,8 +64,9 @@ Actions are rule-based educational signals, not advice: see
 | Positive and negative findings | `stockwise insights LT` |
 | Rule-based action and the 6-pillar score behind it | `stockwise verdict LT` · `stockwise verdict LT --horizon short --explain` |
 | Piotroski F-score & Altman Z-score | `stockwise fundamental score INFY --explain` · `stockwise fundamental score TCS --json` |
-| Open and upcoming IPOs | `stockwise ipo` |
-| One IPO: demand, scores and allotment odds | `stockwise ipo BCSSL --capital 2.5L` |
+| Open and upcoming IPOs, a verdict each | `stockwise ipo` |
+| One IPO: verdict, listing model, valuation, odds | `stockwise ipo BCSSL --capital 2.5L` |
+| How past IPO verdicts did | `stockwise ipo review` |
 | RSI, MACD, Bollinger Bands | `stockwise technical TCS -p 6mo --explain` |
 | Price chart with volume | `stockwise history AAPL -m us -p 1y` |
 | Compare stocks | `stockwise compare TCS INFY WIPRO` |

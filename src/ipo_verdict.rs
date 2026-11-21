@@ -295,7 +295,7 @@ pub struct RhpFigures {
 }
 
 pub const RHP_TEMPLATE: &str = r#"# RHP figures for one IPO. Save as ipo/<SYMBOL>.toml in the StockWise data
-# directory (`stockwise config path` shows it). Amounts in rupees crore, oldest
+# directory (`--rhp-template` prints the full path first). Amounts in rupees crore, oldest
 # financial year first. Leave out what you don't have: missing figures lower
 # the verdict's data coverage, they are never guessed.
 
