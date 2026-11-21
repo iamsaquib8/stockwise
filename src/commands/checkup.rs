@@ -877,6 +877,15 @@ pub(crate) async fn wrap_report(
     if portfolio.holdings.is_empty() && portfolio.realized.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
     }
+    // A split Yahoo reports but the lots have not taken yet: value a copy
+    // with it applied (closes are in today's share count).
+    let pending = if offline {
+        Default::default()
+    } else {
+        crate::corp_actions::pending_splits_live(&portfolio).await
+    };
+    pending.print();
+    let portfolio = pending.adjusted(&portfolio);
     // The checkup describes what is held now; a portfolio sold out during
     // the year still gets its review, without that part.
     let run = if portfolio.holdings.is_empty() {
@@ -908,6 +917,9 @@ pub(crate) async fn wrap_report(
     let mut val = val;
     let currencies = val.currencies(&symbols);
     val.add_rates(src, &currencies).await;
+    if !offline {
+        val.load_history(&portfolio).await;
+    }
     symbols.sort();
 
     let histories: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> =
@@ -927,22 +939,10 @@ pub(crate) async fn wrap_report(
         } else {
             wrap::close_on(closes, as_of)
         };
-        let mut y = wrap::symbol_year(&portfolio, sym, &period, as_of, start, end);
-        match val.to_base(sym, 1.0) {
-            Some(fx) => {
-                let conv = |v: &mut f64| *v *= fx;
-                y.start_value = y.start_value.map(|v| v * fx);
-                y.end_value = y.end_value.map(|v| v * fx);
-                conv(&mut y.bought);
-                conv(&mut y.sold);
-                conv(&mut y.dividends);
-                conv(&mut y.realized_gain);
-                for f in &mut y.flows {
-                    f.1 *= fx;
-                }
-            }
-            None => y.unconverted = true,
-        }
+        // Each amount at its own day's exchange rate (today's when no
+        // history was found).
+        let fx = |d: chrono::NaiveDate| val.rate_on(sym, d).map(|r| r.0);
+        let y = wrap::symbol_year_in(&portfolio, sym, &period, as_of, start, end, &fx);
         years.push(y);
     }
     let t = wrap::totals(&years, &period, as_of, 3);
@@ -953,12 +953,37 @@ pub(crate) async fn wrap_report(
         Market::Global(x) => x.info().benchmark(),
         _ => ("^GSPC", "S&P 500"),
     };
-    let bench = src
-        .chart(bench_symbol, range, "1d")
-        .await
-        .map(|c| closes_of(&c))
-        .unwrap_or_default();
+    // A total-return index when Yahoo has one; else the price index,
+    // compared with the return without dividends.
+    let tri = match bench_symbol {
+        "^GSPC" => Some("^SP500TR"),
+        "^NDX" => Some("^XNDX"),
+        "^DJI" => Some("^DJITR"),
+        _ => None,
+    };
+    let mut bench_total_return = false;
+    let mut bench = Vec::new();
+    if let Some(tr) = tri {
+        bench = src
+            .chart(tr, range, "1d")
+            .await
+            .map(|c| closes_of(&c))
+            .unwrap_or_default();
+        bench_total_return = wrap::benchmark_return(&bench, &period, as_of).is_some();
+    }
+    if !bench_total_return {
+        bench = src
+            .chart(bench_symbol, range, "1d")
+            .await
+            .map(|c| closes_of(&c))
+            .unwrap_or_default();
+    }
     let benchmark_return_pct = wrap::benchmark_return(&bench, &period, as_of);
+    let compared = if bench_total_return {
+        t.return_pct
+    } else {
+        t.price_return_pct
+    };
     let at_work = t.start_value + t.bought;
     let share = |v: f64| (at_work > 0.0).then(|| v / at_work * 100.0);
 
@@ -998,12 +1023,17 @@ pub(crate) async fn wrap_report(
         base_currency: val.base().to_string(),
         redacted: false,
         return_pct: t.return_pct,
-        benchmark: bench_name.to_string(),
+        benchmark: if bench_total_return {
+            format!("{} TR", bench_name)
+        } else {
+            bench_name.to_string()
+        },
         benchmark_return_pct,
-        alpha_bps: t
-            .return_pct
+        alpha_bps: compared
             .zip(benchmark_return_pct)
             .map(|(r, b)| (r - b) * 100.0),
+        price_return_pct: t.price_return_pct,
+        benchmark_total_return: bench_total_return,
         start_value: Some(t.start_value),
         end_value: Some(t.end_value),
         capital_deployed: Some(t.bought),
