@@ -3443,6 +3443,36 @@ pub async fn cmd_portfolio_xray(
         println!();
     }
 
+    // Indian business groups: one promoter behind several holdings.
+    if !report.business_groups.is_empty() {
+        print_section("Business groups (direct + through funds)");
+        for g in &report.business_groups {
+            let line = format!(
+                "  {:<38} {:>6.2}%  {}",
+                g.group,
+                g.weight_pct,
+                g.companies.join(", ")
+            );
+            if g.is_concentrated {
+                println!("{}", line.yellow());
+            } else {
+                println!("{}", line);
+            }
+        }
+        if report.business_groups.iter().any(|g| g.is_concentrated) {
+            println!(
+                "  {} {}",
+                "!".yellow().bold(),
+                format!(
+                    "Over {:.0}% of the portfolio shares one promoter group: group-level news moves these holdings together.",
+                    crate::business_groups::GROUP_NOTICE_PCT
+                )
+                .yellow()
+            );
+        }
+        println!();
+    }
+
     if report.market_cap_breakdown.small_cap_pct > prof.max_smallcap_weight + 1e-6 {
         println!(
             "  {} {}",

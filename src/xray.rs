@@ -111,6 +111,10 @@ pub struct PortfolioXrayReport {
     /// Holdings left out: no price, or no exchange rate into the base.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded: Vec<ExcludedHolding>,
+    /// Indian business groups (Tata, Adani, ...) by their weight, directly
+    /// and through funds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub business_groups: Vec<crate::business_groups::GroupExposure>,
 }
 
 /// A holding the X-Ray could not value, and why.
@@ -725,6 +729,7 @@ pub fn compute_xray_with_threshold(
             asset_class_split: AssetClassSplit::default(),
             funds_analyzed: Vec::new(),
             excluded: Vec::new(),
+            business_groups: Vec::new(),
         };
     }
 
@@ -1017,10 +1022,18 @@ pub fn compute_xray_with_threshold(
         .collect();
     sector_allocation.sort_by(|a, b| b.value.total_cmp(&a.value));
 
+    let business_groups = crate::business_groups::group_exposure(
+        &effective_holdings
+            .iter()
+            .map(|e| (e.symbol.clone(), e.total_value))
+            .collect::<Vec<_>>(),
+        total_value,
+    );
     PortfolioXrayReport {
         portfolio_name: portfolio_name.to_string(),
         base_currency: base_currency.to_string(),
         total_value: round_2(total_value),
+        business_groups,
         effective_holdings,
         concentrations_above_10pct,
         market_cap_breakdown,
