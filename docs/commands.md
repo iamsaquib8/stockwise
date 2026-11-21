@@ -101,6 +101,40 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Exits 1 if market data is unreachable or the config file is invalid |
 | `use [MARKET\|PORTFOLIO]... [--bind\|--unbind] [--json]` | Show the market and portfolio in use, or switch them: `use us`, `use long-term`, `use us-tech us --bind`. See [Market and portfolio context](#market-and-portfolio-context) |
 
+### Background worker
+
+`stockwise worker start` runs the background worker (live quotes while the
+market is open, queued tasks, alerts, the post-close sync) detached until
+`worker stop` or a reboot. To have it start at every login instead:
+
+| Command | Description |
+|---------|-------------|
+| `worker start` / `stop` / `status` / `run` | Start it detached / stop it / show whether it runs and what is queued / run it in this terminal |
+| `worker install [--dry-run] [--interval MIN]` | Run the worker at login as a per-user service: a launchd agent on macOS (`~/Library/LaunchAgents/com.stockwise.worker.plist`, output in `worker.log` in the data directory), a systemd user service on Linux (`~/.config/systemd/user/stockwise-worker.service`, output in `journalctl --user -u stockwise-worker`). It runs this executable as `stockwise -m MARKET worker run` and is restarted `--interval` minutes (default 1) after it exits with an error, never after a clean `worker stop`. Reinstalling replaces the unit and restarts it. `--dry-run` prints the unit file and the commands and changes nothing. Other systems get an error: start the worker yourself at login |
+| `worker uninstall [--dry-run]` | Stop the service and remove its unit file |
+| `worker service-status` | Whether the unit file exists, whether launchd / systemd has it loaded, and whether a worker is running |
+
+Only user-level locations are written; nothing needs `sudo`. `STOCKWISE_HOME`,
+`STOCKWISE_CONFIG` and `STOCKWISE_PORTFOLIO` are copied into the unit when set,
+so the service uses the same data directory, config file and portfolio. Other
+variables, notification secrets in particular, are not: the unit is a
+plain-text file, so keep those in the config file. The commands it runs:
+
+```text
+# macOS
+launchctl bootout gui/$UID/com.stockwise.worker        # if loaded; errors ignored
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.stockwise.worker.plist
+                                                       # or `launchctl load -w` on old macOS
+# Linux
+systemctl --user daemon-reload
+systemctl --user enable --now stockwise-worker.service
+```
+
+A systemd user service stops when you log out unless lingering is on
+(`loginctl enable-linger`). If a worker started with `worker start` is
+already running, stop it first: the service's worker cannot take the lock
+while it runs and retries after `--interval`.
+
 ## Analysis
 
 > **Guide:** [Check a stock or fund fast](guide-research.md).
@@ -1098,6 +1132,86 @@ with `--no-default-features` (cargo features `tui` and `server`).
 |---------|-------------|
 | `tui [-i SECONDS]` | Full-screen live dashboard: indices, watchlist, portfolio P&L, alerts and a chart of the selected symbol. Refreshes every 30s by default (10-3600). `?` shows the keys. See [tui.md](tui.md) |
 | `serve [--bind ADDR] [--allow-remote] [--open]` | Web dashboard at `/` (`--open` opens it in your browser), JSON API (`/api/quote`, `/api/history/{symbol}`, `/api/markets`, `/api/search`, `/api/portfolio`, `/api/watchlist`, `/api/alerts`), `/healthz` and Prometheus `/metrics`. Listens on `127.0.0.1:8787`; other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`. See [server.md](server.md) |
+| `statusbar [--format tmux\|waybar\|sketchybar\|starship\|json] [--symbols A,B] [--max N] [--refresh SECS]` | One compact line for a status bar: the portfolio's day change, then its largest holdings and watchlist symbols (or `--symbols`). Answers from a local cache and fetches at most once a minute. See [Status bars](#status-bars) |
+
+### Status bars
+
+`stockwise statusbar` prints one line such as
+`▲ ₹+12.3k (+0.8%) · RELIANCE +1.2% · TCS −0.4%`: the portfolio's day change
+in its base currency (the same one `dashboard` totals in), then its largest
+holdings by value, then watchlist symbols, up to `--max` (default 3).
+`--symbols RELIANCE,TCS` shows those symbols instead of the portfolio.
+
+Status bars run it every few seconds, so it is built to be quick and never
+hang:
+
+- It answers from `statusbar_cache.json` in the data directory. It goes to the
+  network at most once per `--refresh` seconds (default 60, at least 5), and the
+  whole refresh (quotes and exchange rates) must finish within 3 seconds.
+- When a refresh fails or times out, the cached line is shown with
+  `(as of HH:MM)` and the waybar class `stale`. A failed attempt also waits out
+  `--refresh` before the next one, so a dead network costs one try a minute.
+- With every market of the shown symbols closed, it fetches once after the
+  close (for the first 15 minutes, while closing prices settle) and then stays
+  offline until the next open.
+- It always exits 0. With no holdings it says so; offline with no cache it
+  prints `stockwise: offline (no data)`.
+
+| `--format` | Output |
+|---|---|
+| `tmux` (default) | `#[fg=green]…#[default]` / `#[fg=red]` colour codes |
+| `waybar` | One JSON object `{"text","tooltip","class"}`; `class` is `up`, `down`, `flat` or `stale`, the tooltip lists the value, each price and the time. `&`, `<`, `>` are Pango-escaped |
+| `sketchybar` | `label='…' label.color=0xAARRGGBB`, shell-quoted, to `eval` after `sketchybar --set "$NAME"` |
+| `starship` | Plain text, no colour codes |
+| `json` | `{"text","as_of","stale","market_open","class","error","portfolio":{"currency","value","day_change","day_change_pct"},"rows":[{"symbol","price","change_pct","currency"}]}`; `portfolio` is `null` with `--symbols` or no holdings |
+
+**tmux** (`~/.tmux.conf`; tmux re-runs it every `status-interval` seconds):
+
+```tmux
+set -g status-interval 10
+set -g status-right '#(stockwise statusbar) '
+set -g status-right-length 80
+```
+
+**waybar** (`~/.config/waybar/config`, then add `"custom/stockwise"` to a
+`modules-*` list; style `#custom-stockwise.up`, `.down`, `.stale` in
+`style.css`):
+
+```json
+"custom/stockwise": {
+    "exec": "stockwise statusbar --format waybar",
+    "return-type": "json",
+    "interval": 15
+}
+```
+
+**sketchybar** (`~/.config/sketchybar/sketchybarrc`):
+
+```sh
+sketchybar --add item stockwise right \
+           --set stockwise update_freq=15 script="$PLUGIN_DIR/stockwise.sh"
+```
+
+and `$PLUGIN_DIR/stockwise.sh` (executable):
+
+```sh
+#!/bin/sh
+eval "sketchybar --set \"\$NAME\" $(stockwise statusbar --format sketchybar)"
+```
+
+**starship** (`~/.config/starship.toml`):
+
+```toml
+[custom.stockwise]
+command = "stockwise statusbar --format starship"
+when = true
+shell = ["sh"]
+format = "[$output]($style) "
+style = "dimmed"
+```
+
+The prompt waits for the command, but a cached line returns in milliseconds; a
+refresh is bounded by the 3 second budget.
 
 ## Live trading
 
