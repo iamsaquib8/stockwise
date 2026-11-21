@@ -81,10 +81,15 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     if closes.len() < 30 {
         bail!("Not enough price data for risk analysis — try a longer period, e.g. -p 2y");
     }
+    // Returns, volatility and drawdowns from closes that include dividends
+    // (Yahoo's adjclose) when the chart has them; prices stay as traded.
+    let rc = chart.return_closes();
+    let rc = if rc.len() == closes.len() { rc } else { closes.clone() };
 
     let source = chart.meta.as_ref().and_then(|m| m.data_source.clone());
     if fmt == Format::Json {
-        let mut json = risk_json(&resolved, cur, period, &closes);
+        let mut json = risk_json(&resolved, cur, period, &rc);
+        json["price"] = serde_json::json!(closes.last().copied());
         if let Some(s) = &source {
             json["meta"] = serde_json::json!({ "sources": [s] });
         }
@@ -92,8 +97,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     let current = *closes.last().unwrap();
-    let first = closes[0];
-    let total_return = (current / first - 1.0) * 100.0;
+    let total_return = (rc[rc.len() - 1] / rc[0] - 1.0) * 100.0;
 
     print_header(&format!("Risk Analysis: {}", resolved));
     println!(
@@ -108,7 +112,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     );
 
     print_section("Volatility Metrics");
-    if let Some(vol) = technical::annualized_volatility_with(&closes, ppy) {
+    if let Some(vol) = technical::annualized_volatility_with(&rc, ppy) {
         print_kv("Annual Volatility", &format!("{:.2}%", vol * 100.0));
         let level = risk_level(vol);
         let level = if vol > 0.3 {
@@ -122,7 +126,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     print_section("Risk-Adjusted Returns");
-    if let Some(sharpe) = technical::sharpe_ratio_with(&closes, 0.05, ppy) {
+    if let Some(sharpe) = technical::sharpe_ratio_with(&rc, 0.05, ppy) {
         let color = if sharpe > 1.0 {
             format!("{:.3}", sharpe).green().to_string()
         } else if sharpe > 0.0 {
@@ -139,15 +143,15 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
         };
         print_kv("Interpretation", interp);
     }
-    if let Some(sortino) = technical::sortino_ratio_with(&closes, 0.05, ppy) {
+    if let Some(sortino) = technical::sortino_ratio_with(&rc, 0.05, ppy) {
         print_kv("Sortino Ratio", &format!("{:.3}", sortino));
     }
-    if let Some(calmar) = technical::calmar_ratio_with(&closes, ppy) {
+    if let Some(calmar) = technical::calmar_ratio_with(&rc, ppy) {
         print_kv("Calmar Ratio", &format!("{:.3}", calmar));
     }
 
     print_section("Drawdown Analysis");
-    if let Some((mdd, peak_idx, trough_idx)) = technical::max_drawdown(&closes) {
+    if let Some((mdd, peak_idx, trough_idx)) = technical::max_drawdown(&rc) {
         print_kv(
             "Max Drawdown",
             &format!("-{:.2}%", mdd * 100.0).red().to_string(),
@@ -156,7 +160,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
             "Peak → Trough",
             &format!(
                 "{}{:.2} → {}{:.2}",
-                csym, closes[peak_idx], csym, closes[trough_idx]
+                csym, rc[peak_idx], csym, rc[trough_idx]
             ),
         );
         print_kv(
@@ -166,13 +170,13 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     print_section("Value at Risk (VaR)");
-    if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
+    if let Some(var95) = technical::value_at_risk(&rc, 0.95) {
         print_kv(
             "Daily VaR (95%)",
             &format!("{:.2}%", var95 * 100.0).red().to_string(),
         );
     }
-    if let Some(var99) = technical::value_at_risk(&closes, 0.99) {
+    if let Some(var99) = technical::value_at_risk(&rc, 0.99) {
         print_kv(
             "Daily VaR (99%)",
             &format!("{:.2}%", var99 * 100.0).red().to_string(),
@@ -600,13 +604,7 @@ pub async fn cmd_options(symbol: &str, period: &str, market: Market) -> Result<(
 
     // Fetch 1mo data for realized vol
     let chart = client.get_chart(&resolved, period, "1d").await?;
-    let closes: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|q| q.close.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
+    let closes = chart.return_closes();
     if let Some(vol) = technical::annualized_volatility(&closes) {
         print_kv("Realized Vol (1M)", &format!("{:.1}%", vol * 100.0));
         // Estimate option prices using simplified Black-Scholes-ish approach

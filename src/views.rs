@@ -515,7 +515,7 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
-        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s] }),
+        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s], ..Default::default() }),
     }
 }
 
@@ -856,6 +856,7 @@ pub mod fixtures {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(
                 (0..closes.len() as i64)
@@ -870,6 +871,7 @@ pub mod fixtures {
                     close: some(closes),
                     volume: Some(closes.iter().map(|_| Some(1000)).collect()),
                 }],
+                adjclose: None,
             },
             events: None,
         }

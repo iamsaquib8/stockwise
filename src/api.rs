@@ -584,12 +584,9 @@ pub struct Quote {
 }
 
 /// Provenance of a merged quote: every source that supplied a field, in the
-/// order they answered (`["Yahoo Finance", "Finnhub"]`).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct QuoteMeta {
-    pub sources: Vec<String>,
-}
+/// order they answered (`["Yahoo Finance", "Finnhub"]`), plus the missing
+/// fields, warnings and coverage once a command has checked them.
+pub use crate::provenance::Meta as QuoteMeta;
 
 /// Unix seconds as a number or Yahoo's `{raw, fmt}`; anything else is None
 /// rather than a failed quote.
@@ -686,6 +683,51 @@ impl ChartData {
         bars.pop()
     }
 
+    /// One close per bar for return and volatility maths: Yahoo's
+    /// split- and dividend-adjusted `adjclose` when the chart carries a full
+    /// series of it, else `close` (split-adjusted by Yahoo, and by
+    /// [`YahooClient::get_chart`] for the other sources). `None` where a bar
+    /// has no value. Price levels (targets, stops, charts) keep using `close`.
+    pub fn return_close_series(&self) -> Vec<Option<f64>> {
+        let close = self
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_deref())
+            .unwrap_or_default();
+        match self
+            .indicators
+            .adjclose
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.adjclose.as_deref())
+        {
+            Some(adj) if adj.len() == close.len() && adj.iter().any(Option::is_some) => {
+                adj.to_vec()
+            }
+            _ => close.to_vec(),
+        }
+    }
+
+    /// [`Self::return_close_series`] without the bars that have no value.
+    pub fn return_closes(&self) -> Vec<f64> {
+        self.return_close_series()
+            .into_iter()
+            .flatten()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect()
+    }
+
+    /// Whether the closes include dividends (Yahoo's `adjclose`).
+    pub fn has_adjclose(&self) -> bool {
+        self.indicators
+            .adjclose
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.adjclose.as_ref())
+            .is_some_and(|v| v.iter().any(Option::is_some))
+    }
+
     /// Closing prices with the session date of each bar, dated in the
     /// exchange's time zone (`gmtoffset`; see [`bar_date`] for the slack). Bars without a close are skipped.
     pub fn dated_closes(&self) -> Vec<(chrono::NaiveDate, f64)> {
@@ -735,7 +777,7 @@ pub struct SplitEvent {
     pub denominator: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ChartMeta {
     #[serde(rename = "regularMarketPrice")]
     pub regular_market_price: Option<f64>,
@@ -766,14 +808,28 @@ pub struct ChartMeta {
     /// (`providers::router`); `None` for Yahoo and a configured provider.
     #[serde(skip)]
     pub data_source: Option<String>,
+    /// What the reader should know about these bars: they came from a
+    /// fallback, were adjusted here, or are stale (`get_chart`).
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Indicators {
     pub quote: Vec<QuoteIndicator>,
+    /// Closes adjusted for splits *and* dividends (Yahoo daily and longer
+    /// bars). `close` is adjusted for splits only. Read it through
+    /// [`ChartData::return_closes`].
+    #[serde(default)]
+    pub adjclose: Option<Vec<AdjCloseIndicator>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+pub struct AdjCloseIndicator {
+    pub adjclose: Option<Vec<Option<f64>>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct QuoteIndicator {
     pub open: Option<Vec<Option<f64>>>,
     pub high: Option<Vec<Option<f64>>>,

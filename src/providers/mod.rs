@@ -1309,6 +1309,7 @@ impl Series {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(self.bars.iter().map(|b| noon(b.date)).collect()),
             indicators: Indicators {
@@ -1319,6 +1320,7 @@ impl Series {
                     close: Some(self.bars.iter().map(|b| b.close).collect()),
                     volume: Some(self.bars.iter().map(|b| b.volume).collect()),
                 }],
+                adjclose: None,
             },
             // Dividends/splits come from Yahoo (`get_corporate_actions`).
             events: None,
@@ -1356,6 +1358,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
             exchange_name: None,
             gmtoffset: None,
             data_source: None,
+            warnings: Vec::new(),
         }),
         timestamp: Some(bars.iter().map(|b| b.ts).collect()),
         indicators: Indicators {
@@ -1366,6 +1369,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
                 close: Some(bars.iter().map(|b| Some(b.close)).collect()),
                 volume: Some(bars.iter().map(|b| b.volume).collect()),
             }],
+            adjclose: None,
         },
         events: None,
     }

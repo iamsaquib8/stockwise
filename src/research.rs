@@ -338,6 +338,10 @@ pub struct Series {
     pub low: Vec<f64>,
     pub close: Vec<f64>,
     pub volume: Vec<f64>,
+    /// Closes adjusted for dividends as well as splits (Yahoo's `adjclose`),
+    /// one per bar; empty when the chart did not carry them for every bar.
+    /// Read through [`Series::return_closes`].
+    pub adj_close: Vec<f64>,
 }
 
 impl Series {
@@ -352,6 +356,14 @@ impl Series {
         let get = |v: &Option<Vec<Option<f64>>>, i: usize| {
             v.as_ref().and_then(|x| x.get(i).copied().flatten())
         };
+        let adj = c
+            .indicators
+            .adjclose
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.adjclose.clone())
+            .filter(|a| a.len() == ts.len());
+        let mut adj_ok = adj.is_some();
         for (i, &t) in ts.iter().enumerate() {
             let Some(close) = get(&q.close, i).filter(|c| *c > 0.0) else {
                 continue;
@@ -367,9 +379,14 @@ impl Series {
                 s.low.pop();
                 s.close.pop();
                 s.volume.pop();
+                s.adj_close.pop();
             }
             s.dates.push(date);
             s.close.push(close);
+            match adj.as_ref().and_then(|a| a[i]).filter(|v| *v > 0.0) {
+                Some(v) if adj_ok => s.adj_close.push(v),
+                _ => adj_ok = false,
+            }
             s.open.push(get(&q.open, i).unwrap_or(close));
             s.high.push(get(&q.high, i).unwrap_or(close));
             s.low.push(get(&q.low, i).unwrap_or(close));
@@ -380,7 +397,20 @@ impl Series {
                     .unwrap_or(0) as f64,
             );
         }
+        if !adj_ok {
+            s.adj_close.clear();
+        }
         s
+    }
+
+    /// Closes for return and volatility maths: the dividend-adjusted ones
+    /// when every bar has one, else `close`. Price levels keep using `close`.
+    pub fn return_closes(&self) -> &[f64] {
+        if !self.adj_close.is_empty() && self.adj_close.len() == self.close.len() {
+            &self.adj_close
+        } else {
+            &self.close
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -401,7 +431,8 @@ impl Series {
         if n <= sessions || sessions == 0 {
             return None;
         }
-        Some(self.close[n - 1] / self.close[n - 1 - sessions] - 1.0)
+        let c = self.return_closes();
+        Some(c[n - 1] / c[n - 1 - sessions] - 1.0)
     }
 
     /// Index of the first session on or after `d`.

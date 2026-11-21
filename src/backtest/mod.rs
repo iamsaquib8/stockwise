@@ -80,6 +80,56 @@ impl Bars {
         bars
     }
 
+    /// Bars whose prices include dividends: each bar's open, high, low and
+    /// close are scaled by its `adjclose / close`, so a strategy's returns
+    /// count the dividends a holder received. Charts without Yahoo's
+    /// `adjclose` (other sources, intraday bars) give [`Bars::from_chart`].
+    pub fn from_chart_total_return(chart: &crate::api::ChartData) -> Bars {
+        let adj = chart.return_close_series();
+        let close = chart
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_deref())
+            .unwrap_or_default();
+        if !chart.has_adjclose() || adj.len() != close.len() {
+            return Bars::from_chart(chart);
+        }
+        let factors: Vec<Option<f64>> = adj
+            .iter()
+            .zip(close)
+            .map(|(a, c)| match (a, c) {
+                (Some(a), Some(c)) if *c > 0.0 && *a > 0.0 => Some(a / c),
+                _ => None,
+            })
+            .collect();
+        let mut scaled = crate::api::ChartData {
+            meta: None,
+            timestamp: chart.timestamp.clone(),
+            indicators: crate::api::Indicators::default(),
+            events: None,
+        };
+        let Some(q) = chart.indicators.quote.first() else {
+            return Bars::default();
+        };
+        let scale = |s: &Option<Vec<Option<f64>>>| {
+            s.as_ref().map(|v| {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, p)| Some((*p)? * factors.get(i).copied().flatten()?))
+                    .collect()
+            })
+        };
+        scaled.indicators.quote.push(crate::api::QuoteIndicator {
+            open: scale(&q.open),
+            high: scale(&q.high),
+            low: scale(&q.low),
+            close: scale(&q.close),
+            volume: q.volume.clone(),
+        });
+        Bars::from_chart(&scaled)
+    }
+
     fn push(&mut self, t: i64, o: f64, h: f64, l: f64, c: f64, v: u64) {
         self.time.push(t);
         self.open.push(o);
@@ -144,6 +194,34 @@ mod tests {
     use crate::api::{ChartData, Indicators, QuoteIndicator};
 
     #[test]
+    fn total_return_bars_scale_prices_by_adjclose() {
+        let chart = ChartData {
+            meta: None,
+            events: None,
+            timestamp: Some(vec![0, 86_400]),
+            indicators: Indicators {
+                quote: vec![QuoteIndicator {
+                    open: Some(vec![Some(100.0), Some(100.0)]),
+                    high: Some(vec![Some(100.0), Some(100.0)]),
+                    low: Some(vec![Some(100.0), Some(100.0)]),
+                    close: Some(vec![Some(100.0), Some(100.0)]),
+                    volume: Some(vec![Some(1), Some(1)]),
+                }],
+                adjclose: Some(vec![crate::api::AdjCloseIndicator {
+                    adjclose: Some(vec![Some(98.0), Some(100.0)]),
+                }]),
+            },
+        };
+        let b = Bars::from_chart_total_return(&chart);
+        assert_eq!(b.close, vec![98.0, 100.0]);
+        assert_eq!(b.open, vec![98.0, 100.0]);
+        // Without adjclose the raw prices stand.
+        let mut raw = chart;
+        raw.indicators.adjclose = None;
+        assert_eq!(Bars::from_chart_total_return(&raw).close, vec![100.0, 100.0]);
+    }
+
+    #[test]
     fn from_chart_drops_incomplete_bars_and_same_day_duplicates() {
         let chart = ChartData {
             meta: None,
@@ -157,6 +235,7 @@ mod tests {
                     close: Some(vec![Some(10.5), Some(10.0), Some(12.5), Some(13.0)]),
                     volume: Some(vec![Some(100), Some(100), None, Some(300)]),
                 }],
+                adjclose: None,
             },
         };
         let b = Bars::from_chart(&chart);

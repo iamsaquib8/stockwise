@@ -1177,19 +1177,20 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
 
         // Risk
         print_section("Risk Profile");
-        if let Some(vol) = technical::annualized_volatility(&closes) {
+        let rc = chart.return_closes();
+        if let Some(vol) = technical::annualized_volatility(&rc) {
             print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
         }
-        if let Some(sharpe) = technical::sharpe_ratio(&closes, 0.05) {
+        if let Some(sharpe) = technical::sharpe_ratio(&rc, 0.05) {
             print_kv("Sharpe Ratio", &format!("{:.2}", sharpe));
         }
-        if let Some((mdd, _, _)) = technical::max_drawdown(&closes) {
+        if let Some((mdd, _, _)) = technical::max_drawdown(&rc) {
             print_kv(
                 "Max Drawdown",
                 &format!("-{:.1}%", mdd * 100.0).red().to_string(),
             );
         }
-        if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
+        if let Some(var95) = technical::value_at_risk(&rc, 0.95) {
             print_kv("Daily VaR (95%)", &format!("{:.2}%", var95 * 100.0));
         }
 
@@ -1714,6 +1715,7 @@ mod tests {
                     close: Some(close),
                     volume: Some(vec![Some(100); n]),
                 }],
+                adjclose: None,
             },
             events: None,
         }

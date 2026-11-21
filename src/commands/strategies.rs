@@ -519,13 +519,12 @@ pub(super) async fn longterm_scores(
     }
     futures_util::stream::iter(first.into_iter().map(|(q, _)| async move {
         let sym = q.symbol.as_deref().unwrap_or("");
-        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-            c.indicators
-                .quote
-                .first()
-                .and_then(|qi| qi.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-        });
+        let hist = client
+            .get_chart(sym, "1y", "1d")
+            .await
+            .ok()
+            .map(|c| c.return_closes())
+            .filter(|c| !c.is_empty());
         longterm::score_for_longterm(q, hist.as_deref())
     }))
     .buffered(8)
