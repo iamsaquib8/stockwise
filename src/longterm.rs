@@ -168,7 +168,11 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     seen[0] |=
         q.trailing_pe.is_some() || q.price_to_book.is_some() || q.enterprise_to_ebitda.is_some();
     if let Some(pe) = q.trailing_pe {
-        if pe > 0.0 && pe < 12.0 {
+        if pe <= 0.0 {
+            // A negative P/E is a loss, not a bargain.
+            val -= 10.0;
+            lowered_by.push("Loss-making (negative P/E)".into());
+        } else if pe < 12.0 {
             val += 25.0;
             raised_by.push(format!("P/E {:.1} (below 12)", pe));
         } else if pe < 18.0 {
@@ -348,14 +352,14 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         } else if de < 80.0 {
             quality += 5.0;
             safety += 5.0;
-        } else if de > 150.0 {
-            quality -= 10.0;
-            safety -= 15.0;
-            lowered_by.push(format!("Debt/equity {:.0} (above 150)", de));
         } else if de > 250.0 {
             quality -= 20.0;
             safety -= 25.0;
             lowered_by.push(format!("Debt/equity {:.0} (above 250)", de));
+        } else if de > 150.0 {
+            quality -= 10.0;
+            safety -= 15.0;
+            lowered_by.push(format!("Debt/equity {:.0} (above 150)", de));
         }
     }
 
@@ -440,8 +444,11 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // PILLAR 5: DIVIDEND
     // ══════════════════════════════════════════
 
-    seen[4] = q.trailing_annual_dividend_yield.is_some();
-    let div_yield = q.trailing_annual_dividend_yield.unwrap_or(0.0);
+    // Yahoo's trailing yield is wrong for many NSE stocks; the corrected
+    // fraction is what counts.
+    let div_fraction = q.dividend_yield_fraction();
+    seen[4] = div_fraction.is_some();
+    let div_yield = div_fraction.unwrap_or(0.0);
     if div_yield > 0.04 {
         dividend += 25.0;
         raised_by.push(format!(
@@ -458,7 +465,7 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         dividend += 8.0;
     }
     // No dividend isn't necessarily bad for growth stocks
-    if div_yield == 0.0 && growth > 70.0 {
+    if seen[4] && div_yield == 0.0 && growth > 70.0 {
         dividend += 5.0; // no dividend is not penalised for fast growers
     }
 
@@ -553,12 +560,28 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
 
     // Dynamic weighting: growth investors weight growth more, value investors weight valuation more
     // We use a balanced approach with slight tilt to quality+growth (long-term compounders)
-    let total = [val, growth, quality, momentum, dividend, safety]
+    // Only pillars with data count: a pillar left at its starting 50 for
+    // lack of inputs would pull every composite toward the middle.
+    let pillars = [val, growth, quality, momentum, dividend, safety];
+    let seen_weight: f64 = seen
         .iter()
         .zip(WEIGHTS)
-        .map(|(score, w)| score * w)
-        .sum::<f64>()
-        .clamp(0.0, 100.0);
+        .filter(|(has, _)| **has)
+        .map(|(_, w)| w)
+        .sum();
+    let total = if seen_weight > 0.0 {
+        (pillars
+            .iter()
+            .zip(WEIGHTS)
+            .zip(seen)
+            .filter(|(_, has)| *has)
+            .map(|((score, w), _)| score * w)
+            .sum::<f64>()
+            / seen_weight)
+            .clamp(0.0, 100.0)
+    } else {
+        50.0
+    };
 
     let data_coverage = seen
         .iter()
@@ -581,20 +604,55 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // PROJECTIONS
     // ══════════════════════════════════════════
 
-    // Estimated annual return: data-driven from score + growth + earnings yield
-    let base_return = match total {
-        s if s >= 85.0 => 20.0,
-        s if s >= 75.0 => 16.0,
-        s if s >= 65.0 => 12.0,
-        s if s >= 55.0 => 9.0,
-        s if s >= 45.0 => 6.0,
-        s if s >= 35.0 => 3.0,
-        _ => 0.0,
+    // Assumed annual return. Not a forecast, and never read off the score
+    // itself (that would make the projection repeat the score): the
+    // earnings yield plus growth (revenue growth, else earnings growth,
+    // held to -10%..15%), blended 70/30 with the last year's price return
+    // (held to -10%..25%) when there is a price history. Without either,
+    // the score's band stands in and the reasons say so.
+    let fundamental = {
+        let ey = q
+            .trailing_pe
+            .filter(|pe| *pe > 0.0)
+            .map(|pe| 100.0 / pe)
+            .or_else(
+                || match (q.eps_trailing_twelve_months, q.regular_market_price) {
+                    (Some(e), Some(p)) if p > 0.0 => Some(e / p * 100.0),
+                    _ => None,
+                },
+            );
+        let g = q
+            .revenue_growth
+            .or(q.earnings_quarterly_growth)
+            .map(|g| (g * 100.0).clamp(-10.0, 15.0));
+        match (ey, g) {
+            (Some(ey), Some(g)) => Some(ey + g),
+            (Some(ey), None) => Some(ey),
+            _ => None,
+        }
     };
-
-    // Adjust return estimate based on growth rate
-    let growth_adj = q.revenue_growth.unwrap_or(0.0) * 15.0; // revenue growth contributes
-    let est_annual = (base_return + growth_adj).clamp(0.0, 30.0);
+    let historical = hist_closes.and_then(|c| match (c.first(), c.last()) {
+        (Some(a), Some(b)) if *a > 0.0 && c.len() >= 200 => {
+            let years = c.len() as f64 / 252.0;
+            Some((((b / a).powf(1.0 / years) - 1.0) * 100.0).clamp(-10.0, 25.0))
+        }
+        _ => None,
+    });
+    let est_annual = match (fundamental, historical) {
+        (Some(f), Some(h)) => 0.7 * f + 0.3 * h,
+        (Some(f), None) => f,
+        (None, Some(h)) => h,
+        (None, None) => {
+            lowered_by.push("No earnings or price history: projection uses the score band".into());
+            match total {
+                s if s >= 75.0 => 12.0,
+                s if s >= 55.0 => 8.0,
+                s if s >= 35.0 => 4.0,
+                _ => 0.0,
+            }
+        }
+    }
+    .clamp(0.0, 30.0);
 
     let projected_5y = ((1.0 + est_annual / 100.0_f64).powi(5) - 1.0) * 100.0;
     let projected_10y = ((1.0 + est_annual / 100.0_f64).powi(10) - 1.0) * 100.0;
@@ -905,7 +963,10 @@ fn monte_carlo_5y(closes: &[f64], est_annual: f64) -> (f64, f64, f64) {
 }
 
 fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
-    let daily_return = est_annual / 100.0 / 252.0;
+    // Log returns with a drift of ln(1 + r) a year: the median path then
+    // compounds at the assumed return, so the median matches the 5-year
+    // projection and volatility only widens the range around it.
+    let daily_log_drift = (1.0 + est_annual / 100.0).ln() / 252.0;
     let daily_vol = vol / (252.0_f64).sqrt();
     let days = 252 * 5; // 5 years
     let sims = 1000;
@@ -928,13 +989,12 @@ fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
             let u2 = (seed >> 33) as f64 / (1u64 << 31) as f64;
             let u1 = u1.max(1e-10);
             let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-            let ret = daily_return + daily_vol * z;
-            value *= 1.0 + ret;
+            value *= (daily_log_drift + daily_vol * z).exp();
         }
         results.push(value - 100.0); // return %
     }
 
-    results.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(f64::total_cmp);
     let median = results[sims / 2];
     let p10 = results[sims / 10];
     let p90 = results[sims * 9 / 10];
@@ -1213,6 +1273,76 @@ mod tests {
     }
 
     /// The opposite extreme: expensive, losing money, heavy debt, downtrend.
+    #[test]
+    fn debt_above_250_is_its_own_band() {
+        let mut q = weak_quote("DEBT");
+        q.debt_to_equity = Some(300.0);
+        let s = score_for_longterm(&q, None);
+        assert!(
+            s.lowered_by.iter().any(|r| r.contains("above 250")),
+            "{:?}",
+            s.lowered_by
+        );
+        assert!(!s.lowered_by.iter().any(|r| r.contains("above 150")));
+    }
+
+    #[test]
+    fn a_negative_pe_is_a_loss_not_a_bargain() {
+        let mut q = mock_quote(-8.0, -10.0, -0.05, -0.1, 0.0);
+        q.trailing_pe = Some(-8.0);
+        let s = score_for_longterm(&q, None);
+        assert!(s.lowered_by.iter().any(|r| r.contains("negative P/E")));
+        assert!(!s.raised_by.iter().any(|r| r.contains("P/E")));
+        assert!(s.valuation_score < 50.0);
+    }
+
+    #[test]
+    fn pillars_without_data_do_not_pull_the_composite_to_the_middle() {
+        // Strong valuation and quality, nothing else known.
+        let mut q = Quote::default();
+        q.symbol = Some("ONLY.NS".into());
+        q.regular_market_price = Some(100.0);
+        q.trailing_pe = Some(10.0);
+        q.return_on_equity = Some(0.30);
+        q.profit_margins = Some(0.25);
+        let s = score_for_longterm(&q, None);
+        let seen: Vec<f64> = [s.valuation_score, s.quality_score].to_vec();
+        let lo = seen.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            s.total_score >= lo - 1e-9,
+            "{} vs {:?}",
+            s.total_score,
+            seen
+        );
+    }
+
+    #[test]
+    fn the_monte_carlo_median_matches_the_projection() {
+        let q = mock_quote(15.0, 13.0, 0.2, 0.2, 0.01);
+        let s = score_for_longterm(&q, None);
+        let gap = (s.monte_carlo_median - s.projected_5y_return).abs();
+        assert!(
+            gap < 0.25 * s.projected_5y_return.abs().max(10.0),
+            "median {} vs projection {}",
+            s.monte_carlo_median,
+            s.projected_5y_return
+        );
+    }
+
+    #[test]
+    fn the_projection_is_not_read_off_the_score() {
+        // Same score inputs, different earnings yield: different return.
+        let cheap = mock_quote(10.0, 9.0, 0.15, 0.18, 0.02);
+        let dear = {
+            let mut q = cheap.clone();
+            q.trailing_pe = Some(40.0);
+            q
+        };
+        let a = score_for_longterm(&cheap, None).est_annual_return;
+        let b = score_for_longterm(&dear, None).est_annual_return;
+        assert!(a > b, "{a} vs {b}");
+    }
+
     fn weak_quote(symbol: &str) -> Quote {
         let mut q = mock_quote(80.0, 120.0, -0.1, -0.2, 0.0);
         q.symbol = Some(symbol.into());

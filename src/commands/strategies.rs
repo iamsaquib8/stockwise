@@ -518,6 +518,10 @@ pub(super) async fn longterm_scores(
         first.truncate(LONGTERM_CHART_LIMIT);
     }
     futures_util::stream::iter(first.into_iter().map(|(q, _)| async move {
+        // The bulk quote has no margins, debt, beta or growth: fetch them
+        // for the finalists so quality and safety are scored on data.
+        let mut q = q.clone();
+        crate::research::enrich_quote(client, &mut q, false).await;
         let sym = q.symbol.as_deref().unwrap_or("");
         let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
             c.indicators
@@ -526,7 +530,7 @@ pub(super) async fn longterm_scores(
                 .and_then(|qi| qi.close.as_ref())
                 .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
         });
-        longterm::score_for_longterm(q, hist.as_deref())
+        longterm::score_for_longterm(&q, hist.as_deref())
     }))
     .buffered(8)
     .collect()
@@ -616,7 +620,7 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                     sym, q.regular_market_price.unwrap_or(0.0),
                     q.trailing_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
                     q.forward_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
-                    q.trailing_annual_dividend_yield.map_or("0".into(), |v| format!("{:.2}%", v * 100.0)),
+                    q.dividend_yield_fraction().map_or("0".into(), |v| format!("{:.2}%", v * 100.0)),
                     q.regular_market_change_percent.unwrap_or(0.0),
                     q.fifty_day_average.unwrap_or(0.0), q.two_hundred_day_average.unwrap_or(0.0),
                 ));

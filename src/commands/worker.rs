@@ -464,8 +464,9 @@ fn print_eod_table(state: &DaemonState, market: Market) {
     );
     println!("  {}", "─".repeat(62).dimmed());
     for p in &state.positions {
-        let pnl = crate::daemon::signed_money(csym, p.pnl);
-        let pnl = if p.pnl >= 0.0 {
+        let net = state.net_pnl(p);
+        let pnl = crate::daemon::signed_money(csym, net);
+        let pnl = if net >= 0.0 {
             pnl.green().to_string()
         } else {
             pnl.red().to_string()
@@ -481,7 +482,11 @@ fn print_eod_table(state: &DaemonState, market: Market) {
     }
     println!("  {}", "─".repeat(62).dimmed());
     let total = state.total_pnl();
-    let wins = state.positions.iter().filter(|p| p.pnl > 0.0).count();
+    let wins = state
+        .positions
+        .iter()
+        .filter(|p| state.net_pnl(p) > 0.0)
+        .count();
     let total_str = crate::daemon::signed_money(csym, total);
     let total_str = if total >= 0.0 {
         total_str.green().bold().to_string()
@@ -489,16 +494,22 @@ fn print_eod_table(state: &DaemonState, market: Market) {
         total_str.red().bold().to_string()
     };
     println!(
-        "  Total: {}  |  {} wins, {} losses",
+        "  Total: {}  |  {} wins, {} losses  |  charges and slippage {}{:.2} (already in the P&L)",
         total_str,
         wins,
-        state.positions.len() - wins
+        state.positions.len() - wins,
+        csym,
+        state.total_charges()
     );
 }
 
 fn eod_message(state: &DaemonState, market: Market, title: &str) -> Message {
     let csym = currency(market);
-    let wins = state.positions.iter().filter(|p| p.pnl > 0.0).count();
+    let wins = state
+        .positions
+        .iter()
+        .filter(|p| state.net_pnl(p) > 0.0)
+        .count();
     let mut body = format!(
         "P&L {} ({:+.2}% of {}{:.0}) — {} wins, {} losses",
         crate::daemon::signed_money(csym, state.total_pnl()),
@@ -515,7 +526,7 @@ fn eod_message(state: &DaemonState, market: Market, title: &str) -> Message {
             crate::intraday::Direction::label_of(&p.direction),
             csym,
             p.current_price,
-            crate::daemon::signed_money(csym, p.pnl),
+            crate::daemon::signed_money(csym, state.net_pnl(p)),
             p.status
         ));
     }
@@ -631,17 +642,18 @@ async fn tick(
             println!("  {} Running 9-strategy scan...", "⟳".yellow());
             let client = feed.client().await?;
             let signals = intraday::scan_intraday(client, market).await?;
+            // Kelly sizing only once the paper record has 30+ closed trades;
+            // a fixed 0.5% risk per trade before that.
+            let track_record = SimHistory::load()
+                .ok()
+                .and_then(|h| h.track_record(market.id()));
             let limits = intraday::PlanLimits {
                 max_risk_pct: 1.0,
                 max_position_pct: state.risk.max_position_pct,
                 max_positions: state.risk.max_positions,
+                track_record,
             };
-            let plans = intraday::generate_trade_plans_with(
-                &signals,
-                state.capital,
-                state.target_pct,
-                limits,
-            );
+            let plans = intraday::generate_trade_plans_with(&signals, state.capital, limits);
             if plans.is_empty() {
                 println!(
                     "  {} No qualified trades yet. Rescanning in a minute.",
@@ -1008,7 +1020,11 @@ async fn eod_ai_report(state: &DaemonState, market: Market) {
         return;
     }
     println!("  {} Generating AI end-of-day notes...", "⟳".yellow());
-    let wins = state.positions.iter().filter(|p| p.pnl > 0.0).count();
+    let wins = state
+        .positions
+        .iter()
+        .filter(|p| state.net_pnl(p) > 0.0)
+        .count();
     let mut data = format!(
         "Intraday results: P&L={}{:.0}, {} wins {} losses\n",
         csym,
@@ -1019,7 +1035,11 @@ async fn eod_ai_report(state: &DaemonState, market: Market) {
     for p in &state.positions {
         data.push_str(&format!(
             "{}: entry={:.2}, exit={:.2}, pnl={:.0}, status={}\n",
-            p.symbol, p.entry_price, p.current_price, p.pnl, p.status
+            p.symbol,
+            p.entry_price,
+            p.current_price,
+            state.net_pnl(p),
+            p.status
         ));
     }
     if let Ok(report) = ai.generate_intraday_report(&data).await {
@@ -1179,6 +1199,7 @@ mod tests {
             score: 70.0,
             entered_at: None,
             initial_stop: None,
+            trail_distance: None,
         });
         state
     }
@@ -1203,7 +1224,7 @@ mod tests {
         assert_eq!(state.positions[0].status, PositionStatus::Open);
         assert_eq!(state.open_count(), 1);
         assert_eq!(state.risk.realized_pnl, 0.0);
-        assert_eq!(state.total_pnl(), 0.0);
+        assert_eq!(state.positions[0].pnl, 0.0);
     }
 
     #[tokio::test]

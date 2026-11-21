@@ -68,7 +68,8 @@ pub fn rsi(data: &[f64], period: usize) -> Series {
     let mut avg_loss = (1..=period).map(loss).sum::<f64>() / p;
     let value = |g: f64, l: f64| {
         if l == 0.0 {
-            100.0
+            // No losses: overbought only if prices actually rose.
+            if g == 0.0 { 50.0 } else { 100.0 }
         } else {
             100.0 - 100.0 / (1.0 + g / l)
         }

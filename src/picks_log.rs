@@ -1,0 +1,338 @@
+//! The track record of `picks`: every run appends its list to
+//! `signal_log.json` in the data directory (user data, unlike `cache.db`,
+//! which may be deleted at any time), and `picks review` measures each
+//! logged pick from the day it was first listed against the market's
+//! benchmark.
+//!
+//! Fundamentals have no point-in-time history, so the scoring cannot be
+//! backtested honestly; this forward record is the evidence.
+
+use anyhow::Result;
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+const FILE: &str = "signal_log.json";
+
+fn long() -> String {
+    "long".to_string()
+}
+/// Oldest entries are dropped past this many.
+const MAX_ENTRIES: usize = 50_000;
+
+/// One listed stock of one run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    /// Session date of the run (local date).
+    pub date: NaiveDate,
+    /// `pick` for `picks`; other kinds may follow.
+    pub kind: String,
+    /// `long` or `short` (the list's horizon); `long` for older entries.
+    #[serde(default = "long")]
+    pub horizon: String,
+    /// Market code (`in`, `us`).
+    pub market: String,
+    /// The scan's scope ("India", "NIFTY 50", ...).
+    pub universe: String,
+    pub symbol: String,
+    /// 1 for the highest score.
+    pub rank: usize,
+    pub score: f64,
+    /// Price when listed.
+    pub price: f64,
+    pub currency: Option<String>,
+    /// [`crate::picks::METHODOLOGY`] of the run.
+    pub methodology: String,
+}
+
+/// Append `entries`; a stock already logged that day for the same kind,
+/// market and scope is not logged again, so re-running a scan does not
+/// count a pick twice.
+pub fn record(entries: Vec<Entry>) -> Result<usize> {
+    crate::store::update::<Vec<Entry>, _>(FILE, |log| Ok(merge(log, entries)))
+}
+
+fn merge(log: &mut Vec<Entry>, entries: Vec<Entry>) -> usize {
+    let mut added = 0;
+    for e in entries {
+        let dup = log.iter().any(|o| {
+            o.date == e.date
+                && o.kind == e.kind
+                && o.horizon == e.horizon
+                && o.market == e.market
+                && o.universe == e.universe
+                && o.symbol == e.symbol
+        });
+        if !dup {
+            log.push(e);
+            added += 1;
+        }
+    }
+    if log.len() > MAX_ENTRIES {
+        let extra = log.len() - MAX_ENTRIES;
+        log.drain(..extra);
+    }
+    added
+}
+
+/// Every logged entry, oldest first.
+pub fn load() -> Vec<Entry> {
+    crate::store::load::<Vec<Entry>>(FILE).unwrap_or_default()
+}
+
+/// `90d`, `12w`, `6m`, `1y` or a plain number of days.
+pub fn parse_days(s: &str) -> Result<u32, String> {
+    let s = s.trim().to_ascii_lowercase();
+    let (num, mult) = match s.chars().last() {
+        Some('d') => (&s[..s.len() - 1], 1),
+        Some('w') => (&s[..s.len() - 1], 7),
+        Some('m') => (&s[..s.len() - 1], 30),
+        Some('y') => (&s[..s.len() - 1], 365),
+        _ => (s.as_str(), 1),
+    };
+    num.parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .map(|n| n * mult)
+        .ok_or_else(|| format!("'{s}' is not a period like 90d, 12w, 6m or 1y"))
+}
+
+/// One pick measured since it was first listed.
+#[derive(Debug, Clone, Serialize)]
+pub struct Row {
+    pub symbol: String,
+    pub picked_on: NaiveDate,
+    pub days: i64,
+    pub rank: usize,
+    pub score: f64,
+    pub entry_price: f64,
+    pub price: f64,
+    pub currency: Option<String>,
+    /// Price return since listing, as a fraction (dividends not included).
+    pub return_pct: f64,
+    /// The benchmark's return over the same days.
+    pub benchmark_pct: Option<f64>,
+    /// `return_pct - benchmark_pct`.
+    pub excess_pct: Option<f64>,
+}
+
+/// The track record over a window.
+#[derive(Debug, Clone, Serialize)]
+pub struct Review {
+    pub benchmark: Option<String>,
+    pub since: NaiveDate,
+    pub rows: Vec<Row>,
+    /// Logged picks without a current price (delisted, renamed, failed).
+    pub unpriced: Vec<String>,
+    /// Share of picks that rose.
+    pub hit_rate: Option<f64>,
+    /// Share of picks that beat the benchmark.
+    pub beat_rate: Option<f64>,
+    pub mean_return: Option<f64>,
+    pub median_return: Option<f64>,
+    pub mean_excess: Option<f64>,
+    pub median_excess: Option<f64>,
+    pub methodologies: Vec<String>,
+}
+
+/// The benchmark close on or before `date`.
+fn close_on(series: &[(NaiveDate, f64)], date: NaiveDate) -> Option<f64> {
+    series
+        .iter()
+        .take_while(|(d, _)| *d <= date)
+        .last()
+        .map(|(_, c)| *c)
+}
+
+fn mean(v: &[f64]) -> Option<f64> {
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+}
+
+fn median(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(f64::total_cmp);
+    let n = s.len();
+    Some(if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    })
+}
+
+/// Measure the `pick` entries of `market` logged on or after `since`, each
+/// from its first listing in the window, with `prices` (current price by
+/// symbol) and the benchmark's daily closes (oldest first).
+pub fn review(
+    entries: &[Entry],
+    market: &str,
+    horizon: &str,
+    since: NaiveDate,
+    today: NaiveDate,
+    prices: &HashMap<String, f64>,
+    benchmark: Option<(&str, &[(NaiveDate, f64)])>,
+) -> Review {
+    let mut first: Vec<&Entry> = Vec::new();
+    for e in entries.iter().filter(|e| {
+        e.kind == "pick" && e.market == market && e.horizon == horizon && e.date >= since
+    }) {
+        match first.iter_mut().find(|f| f.symbol == e.symbol) {
+            Some(f) if e.date < f.date => *f = e,
+            Some(_) => {}
+            None => first.push(e),
+        }
+    }
+    let bench_now = benchmark.and_then(|(_, s)| s.last().map(|(_, c)| *c));
+    let mut rows = Vec::new();
+    let mut unpriced = Vec::new();
+    let mut methodologies: Vec<String> = Vec::new();
+    for e in first {
+        if !methodologies.contains(&e.methodology) {
+            methodologies.push(e.methodology.clone());
+        }
+        let Some(&price) = prices.get(&e.symbol).filter(|p| **p > 0.0) else {
+            unpriced.push(e.symbol.clone());
+            continue;
+        };
+        if e.price <= 0.0 {
+            unpriced.push(e.symbol.clone());
+            continue;
+        }
+        let ret = price / e.price - 1.0;
+        let bench = match (benchmark, bench_now) {
+            (Some((_, s)), Some(now)) => close_on(s, e.date).map(|then| now / then - 1.0),
+            _ => None,
+        };
+        rows.push(Row {
+            symbol: e.symbol.clone(),
+            picked_on: e.date,
+            days: (today - e.date).num_days(),
+            rank: e.rank,
+            score: e.score,
+            entry_price: e.price,
+            price,
+            currency: e.currency.clone(),
+            return_pct: ret,
+            benchmark_pct: bench,
+            excess_pct: bench.map(|b| ret - b),
+        });
+    }
+    rows.sort_by(|a, b| {
+        a.picked_on
+            .cmp(&b.picked_on)
+            .then_with(|| a.rank.cmp(&b.rank))
+    });
+    let returns: Vec<f64> = rows.iter().map(|r| r.return_pct).collect();
+    let excess: Vec<f64> = rows.iter().filter_map(|r| r.excess_pct).collect();
+    let share = |n: usize, d: usize| (d > 0).then(|| n as f64 / d as f64);
+    Review {
+        benchmark: benchmark.map(|(name, _)| name.to_string()),
+        since,
+        hit_rate: share(returns.iter().filter(|r| **r > 0.0).count(), returns.len()),
+        beat_rate: share(excess.iter().filter(|r| **r > 0.0).count(), excess.len()),
+        mean_return: mean(&returns),
+        median_return: median(&returns),
+        mean_excess: mean(&excess),
+        median_excess: median(&excess),
+        rows,
+        unpriced,
+        methodologies,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn entry(date: &str, sym: &str, price: f64) -> Entry {
+        Entry {
+            date: d(date),
+            kind: "pick".into(),
+            horizon: "long".into(),
+            market: "in".into(),
+            universe: "India".into(),
+            symbol: sym.into(),
+            rank: 1,
+            score: 80.0,
+            price,
+            currency: Some("INR".into()),
+            methodology: "2".into(),
+        }
+    }
+
+    #[test]
+    fn a_rerun_on_the_same_day_is_not_logged_twice() {
+        let mut log = vec![entry("2026-01-05", "A.NS", 100.0)];
+        let added = merge(
+            &mut log,
+            vec![
+                entry("2026-01-05", "A.NS", 101.0),
+                entry("2026-01-06", "A.NS", 102.0),
+            ],
+        );
+        assert_eq!(added, 1);
+        assert_eq!(log.len(), 2);
+    }
+
+    #[test]
+    fn review_measures_each_pick_from_its_first_listing() {
+        let log = vec![
+            entry("2026-01-05", "A.NS", 100.0),
+            entry("2026-02-02", "A.NS", 130.0),
+            entry("2026-01-05", "B.NS", 50.0),
+            entry("2026-01-05", "GONE.NS", 10.0),
+            // Before the window: ignored.
+            entry("2025-06-01", "OLD.NS", 10.0),
+        ];
+        let prices = HashMap::from([
+            ("A.NS".to_string(), 120.0),
+            ("B.NS".to_string(), 45.0),
+            ("OLD.NS".to_string(), 20.0),
+        ]);
+        let bench = vec![
+            (d("2026-01-02"), 20_000.0),
+            (d("2026-01-05"), 20_000.0),
+            (d("2026-03-02"), 21_000.0),
+        ];
+        let r = review(
+            &log,
+            "in",
+            "long",
+            d("2026-01-01"),
+            d("2026-03-02"),
+            &prices,
+            Some(("NIFTY 50", &bench)),
+        );
+        assert_eq!(r.rows.len(), 2);
+        assert_eq!(r.unpriced, ["GONE.NS"]);
+        let a = &r.rows[0];
+        assert_eq!(a.symbol, "A.NS");
+        assert_eq!(a.picked_on, d("2026-01-05"));
+        assert!((a.return_pct - 0.20).abs() < 1e-9);
+        assert!((a.benchmark_pct.unwrap() - 0.05).abs() < 1e-9);
+        assert!((a.excess_pct.unwrap() - 0.15).abs() < 1e-9);
+        assert_eq!(a.days, 56);
+        // A up 20%, B down 10%: half rose, half beat the index.
+        assert_eq!(r.hit_rate, Some(0.5));
+        assert_eq!(r.beat_rate, Some(0.5));
+        assert!((r.mean_return.unwrap() - 0.05).abs() < 1e-9);
+        assert!((r.median_excess.unwrap() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn periods_parse() {
+        assert_eq!(parse_days("90d"), Ok(90));
+        assert_eq!(parse_days("12w"), Ok(84));
+        assert_eq!(parse_days("6m"), Ok(180));
+        assert_eq!(parse_days("1y"), Ok(365));
+        assert_eq!(parse_days("30"), Ok(30));
+        assert!(parse_days("0d").is_err());
+        assert!(parse_days("soon").is_err());
+    }
+}
