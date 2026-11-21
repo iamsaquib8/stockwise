@@ -1666,8 +1666,11 @@ impl YahooClient {
         if covered.is_empty() || !provider.can_serve(&covered) {
             return self.yahoo_quote(symbols).await;
         }
-        let from_provider = provider.quotes(&covered).await.unwrap_or_default();
-        let yahoo = match self.yahoo_quote(symbols).await {
+        // Different hosts, different limits: ask the provider and Yahoo at once.
+        let (from_provider, yahoo) =
+            tokio::join!(provider.quotes(&covered), self.yahoo_quote(symbols));
+        let from_provider = from_provider.unwrap_or_default();
+        let yahoo = match yahoo {
             Ok(q) => q,
             Err(e) if from_provider.is_empty() => return Err(e),
             Err(_) => Vec::new(),

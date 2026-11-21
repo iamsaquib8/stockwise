@@ -240,7 +240,12 @@ pub fn tbill_price(yield_pct: f64, days: i64) -> Result<f64> {
     if !yield_pct.is_finite() || yield_pct <= -100.0 {
         bail!("yield must be above −100%, got {yield_pct}");
     }
-    Ok(FACE / (1.0 + yield_pct / 100.0 * days as f64 / 365.0))
+    // A long bill at a deeply negative yield would divide by zero or less.
+    let discount = 1.0 + yield_pct / 100.0 * days as f64 / 365.0;
+    if discount <= 0.0 {
+        bail!("a {yield_pct}% yield over {days} days gives no valid T-bill price");
+    }
+    Ok(FACE / discount)
 }
 
 #[cfg(test)]
@@ -253,6 +258,13 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    #[test]
+    fn tbill_price_refuses_a_non_positive_discount_factor() {
+        assert!(tbill_price(-60.0, 730).is_err());
+        assert!(tbill_price(-99.0, 365).is_ok_and(|p| p.is_finite() && p > 0.0));
+        assert!(tbill_price(-100.0 * 365.0 / 400.0, 400).is_err());
     }
 
     #[test]

@@ -386,7 +386,8 @@ pub struct MarketSection {
     pub rows: Vec<IndexRow>,
 }
 
-/// The `markets` sections, one quote request each.
+/// The `markets` sections from one quote request (and the India 10-year
+/// yield fetched alongside it, when the Indian section is shown).
 pub async fn market_sections(
     src: &impl DataSource,
     market: Market,
@@ -394,19 +395,40 @@ pub async fn market_sections(
     fx: bool,
     global: bool,
 ) -> Result<Vec<MarketSection>> {
-    let mut out = Vec::new();
-    let specs = section_order(market, crypto, fx)
+    let specs: Vec<SectionSpec> = section_order(market, crypto, fx)
         .into_iter()
         .map(section_spec)
-        .chain(global.then(global_section_spec));
+        .chain(global.then(global_section_spec))
+        .collect();
+    let mut symbols: Vec<&str> = Vec::new();
+    for (sym, _) in specs.iter().flat_map(|s| &s.items) {
+        if !symbols.contains(&sym.as_str()) {
+            symbols.push(sym);
+        }
+    }
+    let wants_10y = specs.iter().any(|s| s.region == "Indian Markets");
+    let (quotes, india_10y) = tokio::join!(src.quotes(&symbols), async {
+        if wants_10y { src.india_10y().await } else { None }
+    });
+    let quotes = quotes?;
+    let mut out = Vec::with_capacity(specs.len());
     for spec in specs {
-        let symbols: Vec<&str> = spec.items.iter().map(|(sym, _)| sym.as_str()).collect();
-        let quotes = src.quotes(&symbols).await?;
-        let mut rows = index_rows(spec.region, &spec.items, &quotes);
+        // This section's quotes, in its own order.
+        let mine: Vec<Quote> = spec
+            .items
+            .iter()
+            .filter_map(|(sym, _)| {
+                quotes
+                    .iter()
+                    .find(|q| q.symbol.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(sym)))
+                    .cloned()
+            })
+            .collect();
+        let mut rows = index_rows(spec.region, &spec.items, &mine);
         if spec.region == "Indian Markets"
-            && let Some(y) = src.india_10y().await
+            && let Some(y) = &india_10y
         {
-            rows.push(india_10y_row(spec.region, &y));
+            rows.push(india_10y_row(spec.region, y));
         }
         out.push(MarketSection {
             region: spec.region,

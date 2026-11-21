@@ -229,11 +229,21 @@ pub(crate) async fn check_symbols_before_add(
 }
 
 pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Result<()> {
-    let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
+    cmd_quote_with(&client, symbols, market, fmt).await
+}
+
+/// `cmd_quote` on a client the caller already has (one handshake, one cache).
+pub async fn cmd_quote_with(
+    client: &YahooClient,
+    symbols: &[String],
+    market: Market,
+    fmt: Format,
+) -> Result<()> {
+    let resolved = resolve_symbols(symbols, market);
     // Yahoo silently drops unknown symbols; name them instead.
-    let views::QuoteSet { quotes, missing } = views::quotes(&client, &resolved).await?;
-    let suggestions = symbol_suggestions(&client, &missing).await;
+    let views::QuoteSet { quotes, missing } = views::quotes(client, &resolved).await?;
+    let suggestions = symbol_suggestions(client, &missing).await;
     let missing_err = || {
         anyhow::anyhow!(
             "{}",
@@ -258,7 +268,7 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
                 == market::AssetClass::Stock
         {
             let mut filled = crate::provenance::Meta::default();
-            crate::providers::fill::complete_fundamentals(&client, q, &mut filled).await;
+            crate::providers::fill::complete_fundamentals(client, q, &mut filled).await;
             let mut m = crate::provenance::for_quote(q);
             m.merge(&filled);
             metas.push(m);
@@ -460,9 +470,12 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
         return cmd_ultra_overview(symbol, &resolved, market).await;
     }
     // Research first, so the rule-based action is the first line printed.
-    let researched = match YahooClient::new().await {
-        Ok(client) => crate::research::fetch(
-            &client,
+    // One client serves the research and the quote: one handshake, and the
+    // quote the research fetched is reused from its cache.
+    let client = YahooClient::new().await.ok();
+    let researched = match &client {
+        Some(client) => crate::research::fetch(
+            client,
             &resolved,
             market,
             30,
@@ -476,13 +489,18 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
             super::actions::apply_holding(&mut v, &bundle, market);
             v
         }),
-        Err(_) => None,
+        None => None,
     };
     if let Some(v) = &researched {
         println!();
         print!("{}", crate::verdict::render_action(&v.action));
     }
-    cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
+    match &client {
+        Some(client) => {
+            cmd_quote_with(client, &[symbol.to_string()], market, Format::Table).await?
+        }
+        None => cmd_quote(&[symbol.to_string()], market, Format::Table).await?,
+    }
     if let Some(v) = researched {
         print_section(&format!(
             "Quick Research Snapshot (6-Pillar Score · Profile: {})",

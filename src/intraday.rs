@@ -200,6 +200,23 @@ pub struct SectorHeat {
 // CORE ENGINE
 // ══════════════════════════════════════════════════════════
 
+/// A VWAP cross on this bar: the previous bar closed at or below the VWAP and
+/// this one closes less than 0.5% above it (Long, a reclaim), or the mirror
+/// image (Short, a rejection). The distance from the VWAP is in percent.
+fn vwap_cross(prev_close: f64, price: f64, vwap: f64) -> Option<(Direction, f64)> {
+    if vwap <= 0.0 {
+        return None;
+    }
+    let dist_pct = (price - vwap) / vwap * 100.0;
+    if prev_close <= vwap && dist_pct > 0.0 && dist_pct < 0.5 {
+        Some((Direction::Long, dist_pct))
+    } else if prev_close >= vwap && dist_pct < 0.0 && dist_pct > -0.5 {
+        Some((Direction::Short, -dist_pct))
+    } else {
+        None
+    }
+}
+
 /// Detect market regime from price action
 fn detect_regime(closes: &[f64]) -> MarketRegime {
     if closes.len() < 20 {
@@ -401,22 +418,22 @@ fn compute_signal(
     // ── Strategy: VWAP Reclaim (today's session VWAP) ──
     let vwap = session.vwap;
     let above_vwap = vwap.is_some_and(|v| price > v);
-    if let Some(v) = vwap {
-        let dist_pct = ((price - v) / v) * 100.0;
-        if dist_pct > 0.0 && dist_pct < 0.5 {
-            strategies.push(StrategySignal {
+    let prev_close = closes.len().checked_sub(2).map(|i| closes[i]);
+    if let (Some(v), Some(prev)) = (vwap, prev_close) {
+        match vwap_cross(prev, price, v) {
+            Some((Direction::Long, dist)) => strategies.push(StrategySignal {
                 name: "VWAP Reclaim",
                 direction: Direction::Long,
                 strength: 75.0,
-                reason: format!("Price {:.2}% above the session VWAP", dist_pct),
-            });
-        } else if dist_pct < 0.0 && dist_pct > -0.5 {
-            strategies.push(StrategySignal {
+                reason: format!("Crossed above the session VWAP; now {:.2}% above", dist),
+            }),
+            Some((Direction::Short, dist)) => strategies.push(StrategySignal {
                 name: "VWAP Rejection",
                 direction: Direction::Short,
                 strength: 65.0,
-                reason: format!("Price {:.2}% below the session VWAP", -dist_pct),
-            });
+                reason: format!("Crossed below the session VWAP; now {:.2}% below", dist),
+            }),
+            _ => {}
         }
     }
 
@@ -1224,6 +1241,20 @@ impl IntradaySignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vwap_reclaim_needs_a_cross() {
+        // Crossed up from below: a reclaim.
+        assert!(matches!(vwap_cross(99.8, 100.2, 100.0), Some((Direction::Long, _))));
+        // Already above on the previous bar: no new reclaim.
+        assert!(vwap_cross(100.3, 100.2, 100.0).is_none());
+        // Crossed down from above: a rejection.
+        assert!(matches!(vwap_cross(100.1, 99.8, 100.0), Some((Direction::Short, _))));
+        // Already below: nothing.
+        assert!(vwap_cross(99.5, 99.8, 100.0).is_none());
+        // Too far past the VWAP to call it a reclaim.
+        assert!(vwap_cross(99.0, 101.0, 100.0).is_none());
+    }
 
     #[test]
     fn obv_trend_reads_negative_series_correctly() {
