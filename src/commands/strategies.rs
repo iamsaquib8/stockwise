@@ -430,7 +430,11 @@ pub async fn cmd_intraday(
             format!("{}{:.2}", csym, s.price),
             chg,
             rsi_str,
-            format!("{:.1}x", s.volume_ratio),
+            if s.volume_known {
+                format!("{:.1}x", s.volume_ratio)
+            } else {
+                "—".to_string()
+            },
             regime_str,
             score_str,
             conf_str
@@ -659,10 +663,15 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
             // Build summary for AI
             let mut data = String::new();
             for s in signals.iter().take(10) {
-                data.push_str(&format!("{}: price={:.2}, chg={:+.2}%, RSI={}, vol={:.1}x, regime={}, score={:.0}, strategies={}\n",
+                let vol = if s.volume_known {
+                    format!("{:.1}x", s.volume_ratio)
+                } else {
+                    "N/A".to_string()
+                };
+                data.push_str(&format!("{}: price={:.2}, chg={:+.2}%, RSI={}, vol={}, regime={}, score={:.0}, strategies={}\n",
                     s.symbol, s.price, s.change_pct,
                     s.rsi.map_or("N/A".into(), |r| format!("{:.0}", r)),
-                    s.volume_ratio, s.regime, s.score,
+                    vol, s.regime, s.score,
                     s.strategies.iter().map(|st| st.name).collect::<Vec<_>>().join("+")
                 ));
             }

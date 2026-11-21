@@ -2196,7 +2196,7 @@ enum SimCmd {
         /// Target return in percent
         target: Option<f64>,
     },
-    /// Live P&L of the open session
+    /// Live P&L of the open session, after estimated charges
     Status,
     /// Settle open sessions from each day's 5-minute bars (stop or target first?)
     Settle {
@@ -2204,7 +2204,7 @@ enum SimCmd {
         #[arg(long)]
         now: bool,
     },
-    /// Past sessions and the bot's confidence rating
+    /// Past sessions, charges paid and a paper-record rating
     #[command(alias = "stats")]
     History {
         #[command(flatten)]

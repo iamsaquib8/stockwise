@@ -201,12 +201,27 @@ pub struct SimSession {
     pub win_count: Option<u32>,
     pub loss_count: Option<u32>,
     pub settled: bool,
+    /// The cost model fixed when the session started (`sim start`, or the
+    /// daemon's own), so settling later under other settings never changes
+    /// what the session pays. Missing in sessions from before 0.9.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_model: Option<CostModel>,
 }
 
 /// History of all simulation sessions
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SimHistory {
     pub sessions: Vec<SimSession>,
+}
+
+impl SimSession {
+    /// The charges and slippage this session pays: the model saved with it,
+    /// else the current settings (sessions from before 0.9).
+    pub fn costs(&self) -> CostModel {
+        self.cost_model
+            .clone()
+            .unwrap_or_else(|| paper_cost_model(&self.market))
+    }
 }
 
 impl SimHistory {
@@ -235,37 +250,30 @@ impl SimHistory {
     pub fn stats(&self, market: &str) -> SimStats {
         let settled: Vec<&SimSession> = self.in_market(market).filter(|s| s.settled).collect();
         let total_days = settled.len();
-        let distinct_days = settled
-            .iter()
-            .map(|s| s.date.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+        // Day statistics group sessions by date: several sessions on one
+        // date (settle --now, then start again) are one day.
+        let mut daily: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+        for s in &settled {
+            *daily.entry(s.date.as_str()).or_default() += s.total_pnl.unwrap_or(0.0);
+        }
+        let distinct_days = daily.len();
         let gross_trades = settled
             .iter()
             .flat_map(|s| &s.trades)
             .filter(|t| t.pnl.is_some() && t.charges.is_none())
             .count() as u32;
-        let winning_days = settled
-            .iter()
-            .filter(|s| s.total_pnl.unwrap_or(0.0) > 0.0)
-            .count();
+        let winning_days = daily.values().filter(|p| **p > 0.0).count();
         let total_pnl: f64 = settled.iter().filter_map(|s| s.total_pnl).sum();
         let total_trades: u32 = settled.iter().map(|s| s.trades.len() as u32).sum();
         let winning_trades: u32 = settled.iter().filter_map(|s| s.win_count).sum();
         let losing_trades: u32 = settled.iter().filter_map(|s| s.loss_count).sum();
-        let avg_daily_pnl = if total_days > 0 {
-            total_pnl / total_days as f64
+        let avg_daily_pnl = if distinct_days > 0 {
+            total_pnl / distinct_days as f64
         } else {
             0.0
         };
-        let best_day = settled
-            .iter()
-            .filter_map(|s| s.total_pnl)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let worst_day = settled
-            .iter()
-            .filter_map(|s| s.total_pnl)
-            .fold(f64::INFINITY, f64::min);
+        let best_day = daily.values().copied().fold(f64::NEG_INFINITY, f64::max);
+        let worst_day = daily.values().copied().fold(f64::INFINITY, f64::min);
 
         let sharpe = sharpe_over_trading_days(&settled, market_of(market));
         let total_charges: f64 = settled
@@ -274,13 +282,13 @@ impl SimHistory {
             .filter_map(|t| t.charges)
             .sum();
 
-        // Max consecutive wins/losses
+        // Max consecutive winning / losing dates.
         let mut max_win_streak = 0u32;
         let mut max_loss_streak = 0u32;
         let mut win_streak = 0u32;
         let mut loss_streak = 0u32;
-        for s in &settled {
-            if s.total_pnl.unwrap_or(0.0) > 0.0 {
+        for &pnl in daily.values() {
+            if pnl > 0.0 {
                 win_streak += 1;
                 loss_streak = 0;
                 max_win_streak = max_win_streak.max(win_streak);
@@ -316,8 +324,8 @@ impl SimHistory {
             } else {
                 0.0
             },
-            day_win_rate: if total_days > 0 {
-                winning_days as f64 / total_days as f64 * 100.0
+            day_win_rate: if distinct_days > 0 {
+                winning_days as f64 / distinct_days as f64 * 100.0
             } else {
                 0.0
             },
@@ -570,7 +578,8 @@ fn finish(pos: &LivePosition, time: DateTime<Utc>) -> Replay {
 
 #[derive(Debug)]
 pub struct SimStats {
-    /// Settled sessions.
+    /// Settled sessions. Day statistics (winning days, day win rate, best
+    /// and worst day, average, streaks) group them by date.
     pub total_days: usize,
     /// Distinct dates among the settled sessions.
     pub distinct_days: usize,
@@ -634,6 +643,7 @@ mod tests {
             win_count: Some(wins),
             loss_count: Some(losses),
             settled: true,
+            cost_model: None,
         }
     }
 
@@ -689,6 +699,30 @@ mod tests {
     }
 
     #[test]
+    fn day_statistics_group_sessions_by_date() {
+        // 100 winning sessions on one date and 19 losing dates: one winning
+        // day of 20, not 100 of 119.
+        let mut h = SimHistory::default();
+        for _ in 0..100 {
+            h.sessions.push(make_session("2026-04-01", 10.0, 1, 0));
+        }
+        for d in 2..=20 {
+            h.sessions
+                .push(make_session(&format!("2026-04-{d:02}"), -1.0, 0, 1));
+        }
+        let s = h.stats("IN");
+        assert_eq!(
+            (s.total_days, s.distinct_days, s.winning_days),
+            (119, 20, 1)
+        );
+        assert!((s.day_win_rate - 5.0).abs() < 1e-9);
+        assert_eq!(s.best_day, Some(1000.0));
+        assert_eq!(s.worst_day, Some(-1.0));
+        assert_eq!((s.max_win_streak, s.max_loss_streak), (1, 19));
+        assert!((s.avg_daily_pnl - (1000.0 - 19.0) / 20.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_win_streak() {
         let mut h = SimHistory::default();
         h.sessions.push(make_session("2026-04-01", 100.0, 1, 0));
@@ -714,6 +748,7 @@ mod tests {
             win_count: None,
             loss_count: None,
             settled: false,
+            cost_model: None,
         });
         let s = h.stats("IN");
         assert_eq!(s.total_days, 0); // unsettled shouldn't count
