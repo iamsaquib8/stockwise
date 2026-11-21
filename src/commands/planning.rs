@@ -1253,7 +1253,9 @@ pub async fn cmd_portfolio_benchmark(
         });
     }
 
-    let analysis = benchmark::analyze(&calendar, &bench_prices, &holdings);
+    // Alpha over the base currency's risk-free rate (Jensen's alpha).
+    let analysis = benchmark::analyze(&calendar, &bench_prices, &holdings)
+        .map(|a| a.with_risk_free(benchmark::risk_free_rate(&base)));
     if let Some(a) = &analysis {
         for h in a.holdings.iter().filter(|h| h.days_unpriced > 0) {
             flag(

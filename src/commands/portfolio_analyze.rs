@@ -403,7 +403,7 @@ pub(crate) async fn gather_inputs(
     // A split or bonus not yet applied to the lots would show as a fake
     // loss: analyse a copy with it applied, and say so.
     let pending = match client {
-        Some(c) if !cfg!(test) => pending_splits(c, &loaded).await,
+        Some(c) if !cfg!(test) => crate::corp_actions::pending_splits(c, &loaded).await,
         _ => crate::corp_actions::PendingSplits::default(),
     };
     let portfolio = pending.adjusted(&loaded);
@@ -601,43 +601,6 @@ pub(crate) async fn gather_inputs(
         pending,
         residence: home,
     })
-}
-
-/// [`crate::corp_actions::pending_splits`] over owned holdings, so the
-/// future is `Send` for any lifetime (the TUI and MCP server spawn it).
-async fn pending_splits(
-    client: &YahooClient,
-    portfolio: &Portfolio,
-) -> crate::corp_actions::PendingSplits {
-    let jobs: Vec<(pf::Holding, String)> = portfolio
-        .holdings
-        .iter()
-        .filter(|h| !market::is_namespaced(&h.symbol) && !offmarket::is_off_market(&h.symbol))
-        .filter_map(|h| {
-            let since = h.lots.iter().map(|l| l.units_date()).min()?.to_string();
-            Some((h.clone(), since))
-        })
-        .collect();
-    let results: Vec<(String, Option<Vec<pf::Split>>)> =
-        futures_util::stream::iter(jobs.into_iter().map(|(h, since)| async move {
-            let found = super::portfolio::fetch_actions(client, &h.symbol, &since)
-                .await
-                .ok()
-                .map(|(splits, _, _)| crate::corp_actions::pending_of(&h, splits));
-            (h.symbol, found)
-        }))
-        .buffered(6)
-        .collect()
-        .await;
-    let mut out = crate::corp_actions::PendingSplits::default();
-    for (sym, found) in results {
-        match found {
-            Some(v) if !v.is_empty() => out.by_symbol.push((sym, v)),
-            Some(_) => {}
-            None => out.unchecked.push(sym),
-        }
-    }
-    out
 }
 
 /// One index of a (possibly blended) benchmark.
