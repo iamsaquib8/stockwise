@@ -10,6 +10,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::if_same_then_else)]
 
+mod action;
 mod ai;
 mod alerts;
 mod api;
