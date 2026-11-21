@@ -106,16 +106,13 @@ pub const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("ITC", &["ITC", "ITCHOTELS"]),
-    (
-        "Hinduja",
-        &["ASHOKLEY", "INDUSINDBK", "HINDUJAGL", "GOCOLORS"],
-    ),
+    ("Hinduja", &["ASHOKLEY", "INDUSINDBK", "HGS"]),
     (
         "Godrej",
         &["GODREJCP", "GODREJPROP", "GODREJIND", "GODREJAGRO"],
     ),
     ("Bharti", &["BHARTIARTL", "BHARTIHEXA", "INDUSTOWER"]),
-    ("RPSG", &["CESC", "PCBL", "FIRSTSOUR"]),
+    ("RPSG", &["CESC", "PCBL", "FSL"]),
     ("Wadia", &["BRITANNIA", "BOMDYEING"]),
     (
         "Public sector (Government of India)",
@@ -220,6 +217,9 @@ mod tests {
         assert_eq!(group_of("M&M.NS"), Some("Mahindra"));
         assert_eq!(group_of("AAPL"), None);
         assert_eq!(group_of("INFY.NS"), None);
+        assert_eq!(group_of("HGS.NS"), Some("Hinduja"));
+        assert_eq!(group_of("FSL.NS"), Some("RPSG"));
+        assert_eq!(group_of("GOCOLORS.NS"), None);
     }
 
     #[test]

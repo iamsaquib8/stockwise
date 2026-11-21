@@ -106,7 +106,16 @@ impl PendingSplits {
                 d.child_symbol(sym)
             )
         });
-        splits.chain(demergers).collect()
+        let mut out: Vec<String> = splits.chain(demergers).collect();
+        // A failed check is not a clean one: a post-split price on an
+        // unadjusted share count would show as a loss.
+        if !self.unchecked.is_empty() {
+            out.push(format!(
+                "Could not check {} for splits or bonuses: their share counts are not verified.",
+                self.unchecked.join(", ")
+            ));
+        }
+        out
     }
 
     /// Print [`PendingSplits::warnings`] in yellow.
@@ -211,13 +220,39 @@ pub async fn pending_splits_live(portfolio: &Portfolio) -> PendingSplits {
     }
     match YahooClient::new().await {
         Ok(client) => pending_splits(&client, portfolio).await,
-        Err(_) => PendingSplits::offline(portfolio),
+        // No client is no check, not a clean result.
+        Err(_) => PendingSplits {
+            unchecked: checkable(portfolio),
+            ..PendingSplits::offline(portfolio)
+        },
     }
+}
+
+/// The holdings Yahoo reports splits for (not funds or SGBs).
+fn checkable(portfolio: &Portfolio) -> Vec<String> {
+    portfolio
+        .holdings
+        .iter()
+        .filter(|h| !crate::market::is_namespaced(&h.symbol))
+        .filter(|h| !crate::offmarket::is_off_market(&h.symbol))
+        .map(|h| h.symbol.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unchecked_symbol_is_warned_about() {
+        let p = PendingSplits {
+            unchecked: vec!["INFY.NS".into()],
+            ..Default::default()
+        };
+        let w = p.warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("INFY.NS") && w[0].contains("not verified"));
+    }
 
     fn portfolio_with(sym: &str, qty: f64, price: f64, date: &str) -> Portfolio {
         let mut p = Portfolio::default();

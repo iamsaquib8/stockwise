@@ -360,11 +360,20 @@ pub fn symbol_year_in(
             price.map(|px| shares * px)
         }
     };
-    let (r_open, r_end) = (rate(period.opening()), rate(as_of));
+    // An endpoint worth nothing needs no exchange rate.
+    let mut at = |day: NaiveDate, v: Option<f64>| match v {
+        Some(v) if v.abs() > 1e-9 => Some(v * rate(day)),
+        other => other,
+    };
+    let start_value = at(
+        period.opening(),
+        value(shares_at(p, symbol, period.opening()), start_price),
+    );
+    let end_value = at(as_of, value(shares_at(p, symbol, as_of), end_price));
     let mut y = SymbolYear {
         symbol: symbol.to_string(),
-        start_value: value(shares_at(p, symbol, period.opening()), start_price).map(|v| v * r_open),
-        end_value: value(shares_at(p, symbol, as_of), end_price).map(|v| v * r_end),
+        start_value,
+        end_value,
         ..Default::default()
     };
     if let Some(h) = p.holding(symbol) {
@@ -381,20 +390,22 @@ pub fn symbol_year_in(
         .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
     {
         let (bought, sold) = (date(&s.buy_date), date(&s.sell_date));
+        // Purchase charges go with the purchase, the sale's with the sale.
+        let buy_cost = s.qty * s.buy_price + s.buy_charges();
         if inside(bought) {
             let d = bought.expect("checked");
-            let cost = s.qty * s.buy_price * rate(d);
+            let cost = buy_cost * rate(d);
             y.bought += cost;
             y.flows.push((d, cost));
         }
         if inside(sold) {
             let d = sold.expect("checked");
             let r = rate(d);
-            let proceeds = (s.qty * s.sell_price - s.charges()) * r;
+            let proceeds = (s.qty * s.sell_price - s.sell_charges()) * r;
             y.sold += proceeds;
             // At the purchase's rate for the cost, the sale's for the rest.
             let cost_rate = bought.map_or(r, &mut rate);
-            y.realized_gain += proceeds - s.qty * s.buy_price * cost_rate;
+            y.realized_gain += proceeds - buy_cost * cost_rate;
             y.flows.push((d, -proceeds));
         }
     }
@@ -1171,6 +1182,22 @@ mod tests {
             &none,
         );
         assert!(y.unconverted);
+    }
+
+    #[test]
+    fn a_holding_bought_in_the_period_needs_no_opening_rate() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "CCC",
+            crate::portfolio::Lot::new(10.0, 100.0, "2026-06-01", "manual"),
+        );
+        let fy = Period::indian_fy(2026).unwrap();
+        // No rate on the opening day; every later day has one.
+        let fx = |day: NaiveDate| (day > fy.opening()).then_some(80.0);
+        let y = symbol_year_in(&p, "CCC", &fy, d("2026-11-17"), None, Some(110.0), &fx);
+        assert!(!y.unconverted);
+        assert_eq!(y.start_value, Some(0.0));
+        assert_eq!(y.end_value, Some(1100.0 * 80.0));
     }
 
     #[test]

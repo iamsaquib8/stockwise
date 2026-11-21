@@ -60,9 +60,12 @@ pub struct LockedRow {
     pub symbol: String,
     pub units: f64,
     /// The day the earliest of these units can be redeemed.
-    pub unlocks_on: String,
+    pub unlocks_on: Option<String>,
     /// The day the last of them can.
-    pub all_unlocked_on: String,
+    pub all_unlocked_on: Option<String>,
+    /// Units whose purchase date is a guess: their unlock date is unknown.
+    #[serde(skip_serializing_if = "crate::portfolio_analysis::is_zero")]
+    pub unknown_date_units: f64,
 }
 
 /// An ELSS (tax-saver) fund, by its scheme name.
@@ -82,26 +85,34 @@ pub(crate) fn elss_locked(
         if !name_of(&h.symbol).is_some_and(|n| is_elss(&n)) {
             continue;
         }
+        // A guessed purchase date gives no real unlock date.
+        let unknown: f64 = h
+            .lots
+            .iter()
+            .filter(|l| l.date_estimated)
+            .map(|l| l.qty)
+            .sum();
         let unlocks: Vec<(chrono::NaiveDate, f64)> = h
             .lots
             .iter()
+            .filter(|l| !l.date_estimated)
             .filter_map(|l| {
                 let d = pf::parse_date(&l.date).ok()?;
                 let free = d.checked_add_months(chrono::Months::new(36))?;
                 (free > today).then_some((free, l.qty))
             })
             .collect();
-        let (Some(first), Some(last)) = (
-            unlocks.iter().map(|u| u.0).min(),
-            unlocks.iter().map(|u| u.0).max(),
-        ) else {
+        if unlocks.is_empty() && unknown <= 0.0 {
             continue;
-        };
+        }
+        let first = unlocks.iter().map(|u| u.0).min();
+        let last = unlocks.iter().map(|u| u.0).max();
         out.push(LockedRow {
             symbol: h.symbol.clone(),
             units: unlocks.iter().map(|u| u.1).sum(),
-            unlocks_on: first.to_string(),
-            all_unlocked_on: last.to_string(),
+            unlocks_on: first.map(|d| d.to_string()),
+            all_unlocked_on: last.map(|d| d.to_string()),
+            unknown_date_units: unknown,
         });
     }
     out
@@ -119,6 +130,10 @@ pub struct ForeignTaxRow {
     pub short_term_gain: Option<f64>,
     pub long_term_gain: Option<f64>,
     pub estimated_tax: Option<f64>,
+    /// Why there is no gain: another currency than the tax currency, or a
+    /// missing price, rate or purchase date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -344,16 +359,26 @@ pub(crate) fn term_rule(
     };
     let local = home.currency_scale(currency.unwrap_or("")).is_some();
     match home {
-        Country::India if !local => (Some(home), TermRule::Months(24)),
         Country::India => {
             use crate::offmarket::IndiaClass;
+            // What the asset is decides first: a crypto asset is a VDA
+            // whether it is quoted in rupees or dollars.
             let rule = match crate::offmarket::india_class(symbol, mark) {
                 IndiaClass::Vda => TermRule::NoLongTerm,
-                IndiaClass::Other(_)
-                    if offmarket::is_fund(symbol)
-                        && mark.and_then(|m| m.category.as_deref()).is_some() =>
-                {
-                    TermRule::DebtFund
+                _ if !local => TermRule::Months(24),
+                IndiaClass::Other(_) if offmarket::is_fund(symbol) => {
+                    match mark.and_then(|m| m.category.as_deref()) {
+                        // A Specified Mutual Fund (Sec. 50AA: over 65% in
+                        // debt and money-market instruments) has no
+                        // long-term term for units bought from April 2023.
+                        Some(cat) if debt_oriented(cat, mark.and_then(|m| m.name.as_deref())) => {
+                            TermRule::DebtFund
+                        }
+                        // Gold, international and other non-equity fund
+                        // units: long-term after 24 months.
+                        Some(_) => TermRule::Months(24),
+                        None => TermRule::CountryDefault,
+                    }
                 }
                 _ => TermRule::CountryDefault,
             };
@@ -361,6 +386,34 @@ pub(crate) fn term_rule(
         }
         _ => (Some(home), TermRule::CountryDefault),
     }
+}
+
+/// A debt-oriented fund (a Specified Mutual Fund under Sec. 50AA), by its
+/// AMFI category and name: debt schemes, conservative hybrids (75-90% in
+/// debt), and funds of funds or index funds that hold debt.
+pub(crate) fn debt_oriented(category: &str, name: Option<&str>) -> bool {
+    let cat = category.to_ascii_lowercase();
+    if cat.contains("debt scheme") || cat.contains("conservative hybrid") {
+        return true;
+    }
+    let name = name.unwrap_or("").to_ascii_lowercase();
+    let debt_name = [
+        "liquid",
+        "overnight",
+        "money market",
+        "gilt",
+        "bond",
+        "debt",
+        "income fund",
+        "target maturity",
+        "crisil ibx",
+        "sdl",
+    ]
+    .iter()
+    .any(|w| name.contains(w));
+    (cat.contains("fof") || cat.contains("fund of funds") || cat.contains("index"))
+        && debt_name
+        && !name.contains("gold")
 }
 
 /// Daily closes with their session date (in the market's own time zone,
@@ -708,11 +761,13 @@ pub(crate) fn benchmark_regions(
         else {
             continue;
         };
+        // Every valued holding counts towards the 5% cutoff, whether or not
+        // its currency has an index here.
+        total += v;
         let Some((symbol, name, currency)) = val.currency(&h.symbol).as_deref().and_then(index_for)
         else {
             continue;
         };
-        total += v;
         match regions.iter_mut().find(|r| r.symbol == symbol) {
             Some(r) => r.weight += v,
             None => regions.push(Region {
@@ -844,12 +899,33 @@ fn foreign_rows(
                 .is_none()
         })
         .map(|i| {
-            let months = i
-                .term_rule
-                .months_for(country.long_term_months(), today)
-                .or(country.long_term_months());
-            let gains = foreign_gains(portfolio.holding(&i.symbol), i.price, months, val, today)
-                .filter(|_| in_tax_currency);
+            // A crypto asset (VDA) never turns long-term and is taxed at a
+            // flat 30% in India; other foreign assets follow their rule.
+            let vda = i.term_rule == TermRule::NoLongTerm;
+            let months = if vda {
+                None
+            } else {
+                i.term_rule
+                    .months_for(country.long_term_months(), today)
+                    .or(country.long_term_months())
+            };
+            let st_rate = if vda && country == Country::India {
+                30.0
+            } else {
+                st_rate
+            };
+            let raw = foreign_gains(portfolio.holding(&i.symbol), i.price, months, val, today);
+            let gains = raw.filter(|_| in_tax_currency);
+            let unavailable = match (raw, in_tax_currency) {
+                (_, false) => Some(format!(
+                    "run with --base {} for the gain",
+                    country.tax_currency()
+                )),
+                (None, true) => {
+                    Some("no price, exchange rate or purchase date for the gain".to_string())
+                }
+                (Some(_), true) => None,
+            };
             ForeignTaxRow {
                 symbol: i.symbol.clone(),
                 currency: i.currency.clone(),
@@ -859,6 +935,7 @@ fn foreign_rows(
                 estimated_tax: gains.map(|(st, lt)| {
                     round((st.max(0.0) * st_rate + lt.max(0.0) * lt_rate) / 100.0, 2)
                 }),
+                unavailable,
             }
         })
         .collect()
@@ -919,10 +996,10 @@ fn print_tax_left_out(tx: &TaxIfSold) {
                     term
                 ),
                 _ => println!(
-                    "    {} {} (run with --base {} for the gain)",
+                    "    {} {} ({})",
                     pad_end(&f.symbol, 14).cyan(),
                     term,
-                    tx.currency
+                    f.unavailable.as_deref().unwrap_or("no gain available")
                 ),
             }
         }
@@ -954,17 +1031,26 @@ fn print_tax_left_out(tx: &TaxIfSold) {
                 .dimmed()
         );
         for l in &tx.locked {
-            let when = if l.unlocks_on == l.all_unlocked_on {
-                format!("from {}", l.unlocks_on)
-            } else {
-                format!("from {} (all by {})", l.unlocks_on, l.all_unlocked_on)
-            };
-            println!(
-                "    {} {:.3} units, redeemable {}",
-                pad_end(&l.symbol, 14).cyan(),
-                l.units,
-                when
-            );
+            if let (Some(first), Some(last)) = (&l.unlocks_on, &l.all_unlocked_on) {
+                let when = if first == last {
+                    format!("from {first}")
+                } else {
+                    format!("from {first} (all by {last})")
+                };
+                println!(
+                    "    {} {:.3} units, redeemable {}",
+                    pad_end(&l.symbol, 14).cyan(),
+                    l.units,
+                    when
+                );
+            }
+            if l.unknown_date_units > 0.0 {
+                println!(
+                    "    {} {:.3} units with an unknown purchase date: unlock date unknown",
+                    pad_end(&l.symbol, 14).cyan(),
+                    l.unknown_date_units
+                );
+            }
         }
     }
 }
@@ -1103,7 +1189,7 @@ pub(crate) fn print_analysis(report: &AnalyzeReport) {
         a.concentration.effective_holdings
     );
     let v = &a.valuation;
-    if v.pe.is_some() || v.pb.is_some() {
+    if v.pe.is_some() || v.pb.is_some() || v.dividend_yield_pct.is_some() {
         let cell = |x: Option<f64>, cover: f64| {
             x.map_or("–".to_string(), |x| {
                 format!("{x:.1} ({cover:.0}% of value)")
@@ -1375,6 +1461,61 @@ pub async fn cmd_portfolio_analyze(
 mod tests {
     use super::*;
 
+    fn fund_mark(sym: &str, category: &str, name: &str) -> crate::offmarket::Mark {
+        crate::offmarket::Mark {
+            symbol: sym.into(),
+            name: Some(name.into()),
+            source: crate::offmarket::PriceSource::AmfiNav,
+            as_of: None,
+            category: Some(category.into()),
+        }
+    }
+
+    #[test]
+    fn only_debt_oriented_funds_lose_the_long_term_term() {
+        let india = Some(Country::India);
+        let debt = fund_mark(
+            "MF:1",
+            "Debt Scheme - Corporate Bond Fund",
+            "HDFC Corporate Bond",
+        );
+        assert_eq!(
+            term_rule(india, "MF:1", Some("INR"), Some(&debt)).1,
+            TermRule::DebtFund
+        );
+        let gold = fund_mark("MF:2", "Other Scheme - FoF Domestic", "SBI Gold Fund");
+        assert_eq!(
+            term_rule(india, "MF:2", Some("INR"), Some(&gold)).1,
+            TermRule::Months(24)
+        );
+        let intl = fund_mark(
+            "MF:3",
+            "Other Scheme - FoF Overseas",
+            "Motilal Nasdaq 100 FOF",
+        );
+        assert_eq!(
+            term_rule(india, "MF:3", Some("INR"), Some(&intl)).1,
+            TermRule::Months(24)
+        );
+    }
+
+    #[test]
+    fn crypto_is_never_long_term_whatever_its_quote_currency() {
+        let india = Some(Country::India);
+        assert_eq!(
+            term_rule(india, "BTC-USD", Some("USD"), None).1,
+            TermRule::NoLongTerm
+        );
+        assert_eq!(
+            term_rule(india, "BTC-INR", Some("INR"), None).1,
+            TermRule::NoLongTerm
+        );
+        assert_eq!(
+            term_rule(india, "AAPL", Some("USD"), None).1,
+            TermRule::Months(24)
+        );
+    }
+
     #[test]
     fn elss_units_stay_locked_for_three_years_from_each_purchase() {
         let mut p = Portfolio::default();
@@ -1396,8 +1537,14 @@ mod tests {
         let locked = elss_locked(&p, names, today);
         assert_eq!(locked.len(), 1);
         assert_eq!(locked[0].units, 9.0);
-        assert_eq!(locked[0].unlocks_on, "2027-01-10");
-        assert_eq!(locked[0].all_unlocked_on, "2028-03-05");
+        assert_eq!(locked[0].unlocks_on.as_deref(), Some("2027-01-10"));
+        assert_eq!(locked[0].all_unlocked_on.as_deref(), Some("2028-03-05"));
+        // A guessed purchase date has no unlock date.
+        p.holdings[0].lots[2].date_estimated = true;
+        let locked = elss_locked(&p, names, today);
+        assert_eq!(locked[0].units, 5.0);
+        assert_eq!(locked[0].unknown_date_units, 4.0);
+        assert_eq!(locked[0].all_unlocked_on.as_deref(), Some("2027-01-10"));
         assert!(is_elss("Mirae Asset Tax Saver Fund"));
         assert!(!is_elss("Nippon India Small Cap"));
     }

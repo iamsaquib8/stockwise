@@ -33,6 +33,11 @@ pub const DRAWDOWN_NOTE_PCT: f64 = 25.0;
 pub const NEAR_RANGE_PCT: f64 = 3.0;
 /// A long-term score below this (with enough data) is noted.
 pub const WEAK_SCORE: f64 = 45.0;
+/// For `skip_serializing_if`.
+pub fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
 /// Daily closes needed before volatility, drawdown or beta are shown.
 pub const MIN_CLOSES: usize = 60;
 
@@ -700,7 +705,11 @@ pub fn weighted_index(series: &[(&[(NaiveDate, f64)], f64)]) -> Vec<(NaiveDate, 
     for t in 1..calendar.len() {
         let (mut num, mut den) = (0.0, 0.0);
         for ((_, w), a) in series.iter().zip(&aligned) {
-            if let (Some(p0), Some(p1)) = (a[t - 1], a[t]) {
+            // A zero or broken close would make every later value non-finite.
+            if let (Some(p0), Some(p1)) = (a[t - 1], a[t])
+                && p0 > 0.0
+                && p1.is_finite()
+            {
                 num += w * (p1 / p0 - 1.0);
                 den += w;
             }
@@ -1039,6 +1048,14 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zero_close_does_not_break_the_weighted_index() {
+        let good = dated(vec![100.0, 101.0, 102.0, 103.0]);
+        let bad = dated(vec![50.0, 0.0, 51.0, 52.0]);
+        let idx = weighted_index(&[(&good, 0.5), (&bad, 0.5)]);
+        assert!(idx.iter().all(|(_, v)| v.is_finite()), "{idx:?}");
+    }
 
     #[test]
     fn valuation_multiples_are_value_weighted_harmonic_means() {

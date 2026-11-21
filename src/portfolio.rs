@@ -673,6 +673,21 @@ impl Sale {
         self.charges.unwrap_or(0.0)
     }
 
+    /// The part of [`Sale::charges`] paid when the shares were bought (the
+    /// lot's purchase charges), converted at the purchase date's rate.
+    pub fn buy_charges(&self) -> f64 {
+        self.origin
+            .as_ref()
+            .and_then(|o| o.charges)
+            .unwrap_or(0.0)
+            .min(self.charges())
+    }
+
+    /// The part of [`Sale::charges`] paid on the sale itself.
+    pub fn sell_charges(&self) -> f64 {
+        self.charges() - self.buy_charges()
+    }
+
     /// The lot this sale took its shares from, with the sold quantity.
     pub fn to_lot(&self) -> Lot {
         let mut lot = Lot::new(self.qty, self.buy_price, self.buy_date.clone(), "manual");
@@ -1939,9 +1954,18 @@ impl Portfolio {
                         && l.adjustments == lot.adjustments
                         && l.units_as_of == lot.units_as_of
                         && l.order_id == lot.order_id
+                        && l.fx_currency == lot.fx_currency
+                        && l.fx_rate == lot.fx_rate
                 });
                 match same {
-                    Some(l) => l.qty += lot.qty,
+                    Some(l) => {
+                        l.qty += lot.qty;
+                        // The sold shares' part of the purchase charges goes back.
+                        l.charges = match (l.charges, lot.charges) {
+                            (None, None) => None,
+                            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+                        };
+                    }
                     None => h.lots.push(lot),
                 }
                 h.recompute();
@@ -2464,14 +2488,14 @@ impl Portfolio {
             if let (Some(b), Some(d)) = (date_of(&s.buy_date), date_of(&s.sell_date)) {
                 flows.push(CashFlow {
                     date: b,
-                    amount: -s.qty * s.buy_price,
+                    amount: -(s.qty * s.buy_price + s.buy_charges()),
                     paid: s.fx_currency.clone().zip(s.buy_fx_rate),
                     currency: None,
                     kind: FlowKind::Buy,
                 });
                 flows.push(CashFlow {
                     date: d,
-                    amount: s.qty * s.sell_price - s.charges(),
+                    amount: s.qty * s.sell_price - s.sell_charges(),
                     paid: None,
                     currency: None,
                     kind: FlowKind::Sale,
@@ -2492,6 +2516,38 @@ impl Portfolio {
         flows.sort_by_key(|f| f.date);
         flows
     }
+}
+
+/// Split `total` (a fee) over `weights` in whole minor units (paise,
+/// cents): each part is a multiple of 0.01, and the parts add up to `total`
+/// rounded to 0.01. The paise left after flooring go one each to the
+/// largest remainders, ties to the earlier part.
+pub fn allocate_minor_units(total: f64, weights: &[f64]) -> Vec<f64> {
+    let units = (total * 100.0).round() as i64;
+    let sum: f64 = weights.iter().filter(|w| **w > 0.0).sum();
+    if weights.is_empty() || sum <= 0.0 || units <= 0 {
+        return vec![0.0; weights.len()];
+    }
+    let exact: Vec<f64> = weights
+        .iter()
+        .map(|w| units as f64 * w.max(0.0) / sum)
+        .collect();
+    let mut parts: Vec<i64> = exact.iter().map(|e| e.floor() as i64).collect();
+    let mut left = units - parts.iter().sum::<i64>();
+    let mut order: Vec<usize> = (0..exact.len()).collect();
+    order.sort_by(|&a, &b| {
+        (exact[b] - exact[b].floor())
+            .total_cmp(&(exact[a] - exact[a].floor()))
+            .then(a.cmp(&b))
+    });
+    for i in order {
+        if left <= 0 {
+            break;
+        }
+        parts[i] += 1;
+        left -= 1;
+    }
+    parts.into_iter().map(|p| p as f64 / 100.0).collect()
 }
 
 /// What a [`CashFlow`] was.
@@ -4907,6 +4963,47 @@ mod tests {
             bonus: None,
         };
         assert_eq!(p.apply_split("RELIANCE.NS", &split), 0);
+    }
+
+    #[test]
+    fn a_fee_splits_in_whole_paise_and_adds_up() {
+        let parts = allocate_minor_units(0.01, &[1.0, 1.0]);
+        assert_eq!(parts, [0.01, 0.0]);
+        let parts = allocate_minor_units(10.0, &[1.0, 1.0, 1.0]);
+        assert_eq!(parts, [3.34, 3.33, 3.33]);
+        assert!((parts.iter().sum::<f64>() - 10.0).abs() < 1e-9);
+        assert_eq!(allocate_minor_units(5.0, &[]), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn undo_sale_gives_the_purchase_charges_back_to_the_lot() {
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(100.0, 10.0, "2024-01-02", "manual");
+        lot.charges = Some(50.0);
+        p.add_lot("TCS.NS", lot);
+        p.sell_fifo("TCS.NS", 30.0, 12.0, "2025-01-02", "manual")
+            .unwrap();
+        assert!((p.holding("TCS.NS").unwrap().lots[0].charges.unwrap() - 35.0).abs() < 1e-9);
+        p.undo_sale("TCS.NS", 1).unwrap();
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 1);
+        assert_eq!(h.lots[0].qty, 100.0);
+        assert!((h.lots[0].charges.unwrap() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn undo_sale_keeps_lots_paid_at_different_rates_apart() {
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(83.0);
+        p.add_lot("AAPL", lot);
+        p.sell_fifo("AAPL", 4.0, 120.0, "2025-01-02", "manual")
+            .unwrap();
+        // The rest of the lot gets a different recorded rate.
+        p.holdings[0].lots[0].fx_rate = Some(84.0);
+        p.undo_sale("AAPL", 1).unwrap();
+        assert_eq!(p.holding("AAPL").unwrap().lots.len(), 2);
     }
 
     #[test]

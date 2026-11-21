@@ -1780,15 +1780,15 @@ pub(crate) fn pme_report_from(
             },
             None => 0.0,
         };
-        let Some(items) = val.flow_items_base(portfolio, &sym) else {
+        // Price-only: dividends are dropped before conversion, so a dividend
+        // without an exchange rate does not take its holding out.
+        let Some(items) = val.flow_items_base_where(portfolio, &sym, |f| {
+            total_return || f.kind != pf::FlowKind::Dividend
+        }) else {
             excluded.push(sym);
             continue;
         };
-        let flows: Vec<(NaiveDate, f64)> = items
-            .into_iter()
-            .filter(|(_, _, k)| total_return || *k != pf::FlowKind::Dividend)
-            .map(|(d, a, _)| (d, a))
-            .collect();
+        let flows: Vec<(NaiveDate, f64)> = items.into_iter().map(|(d, a, _)| (d, a)).collect();
         actual_portfolio_value += value;
         all_flows.extend(flows.iter().copied());
         holding_flows.push((sym, flows, value));
@@ -1796,8 +1796,23 @@ pub(crate) fn pme_report_from(
     all_flows.sort_by_key(|f| f.0);
     let start_date = all_flows.first().map_or(today, |f| f.0);
 
-    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, bench_closes, today)
-        .context("Could not compute PME for portfolio")?;
+    // Nothing left to compare (every holding excluded): report the
+    // exclusions with no metrics instead of failing.
+    let pme_res = if all_flows.is_empty() {
+        crate::pme::PmeResult {
+            actual_value: actual_portfolio_value,
+            twin_value: 0.0,
+            value_added: 0.0,
+            pme_ratio: None,
+            direct_alpha_percent: None,
+            actual_xirr_percent: None,
+            twin_xirr_percent: None,
+            twin_capped_sales: 0,
+        }
+    } else {
+        crate::pme::compute_pme(&all_flows, actual_portfolio_value, bench_closes, today)
+            .context("Could not compute PME for portfolio")?
+    };
     let (twin_shares, _) =
         crate::pme::twin_shares_and_value(&all_flows, bench_closes, today).unwrap_or((0.0, 0.0));
     let bench_end_price = crate::pme::benchmark_price_on(bench_closes, today).unwrap_or(0.0);
@@ -1901,6 +1916,16 @@ pub async fn cmd_portfolio_pme(
         Format::Table => {}
     }
 
+    if report.holdings.is_empty() && s.actual_value == 0.0 && !s.excluded.is_empty() {
+        println!(
+            "\n  {} No holding could be compared with {}: {} left out for want of a price or exchange rate ({}).",
+            "!".yellow(),
+            s.benchmark_name,
+            s.excluded.len(),
+            s.excluded.join(", ")
+        );
+        return Ok(());
+    }
     if report.holdings.is_empty() && s.actual_value == 0.0 {
         println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
         return Ok(());
@@ -2025,7 +2050,7 @@ pub async fn cmd_portfolio_pme(
     }
     if s.flows_before_index > 0 {
         println!(
-            "  {} {} cash flow(s) dated before the index history (starts {}) are priced at its first close.",
+            "  {} {} cash flow(s) dated more than a week before the index history (starts {}) are priced at its first close.",
             "!".yellow(),
             s.flows_before_index,
             s.index_start_date
@@ -2033,7 +2058,7 @@ pub async fn cmd_portfolio_pme(
     }
     if s.twin_capped_sales > 0 {
         println!(
-            "  {} {} sale(s) were larger than the Index Twin's holding: the twin sold only what it held.",
+            "  {} {} sale(s) or dividend(s) were larger than the Index Twin's holding: the twin paid out only what it held.",
             "·".dimmed(),
             s.twin_capped_sales
         );
