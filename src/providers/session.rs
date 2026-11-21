@@ -334,20 +334,27 @@ impl Session {
         }
         self.limiter.wait().await;
         STATS.requests.fetch_add(1, Ordering::Relaxed);
-        let resp = self
+        let started = Instant::now();
+        let sent = self
             .client
             .get(home)
             .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
             .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
             .send()
-            .await
-            .map_err(|e| {
-                FetchError::Unavailable(format!(
-                    "{} is unreachable ({})",
-                    self.site.name,
-                    e.without_url()
-                ))
-            })?;
+            .await;
+        crate::netlog::request(
+            self.site.name,
+            home,
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+            started.elapsed(),
+        );
+        let resp = sent.map_err(|e| {
+            FetchError::Unavailable(format!(
+                "{} is unreachable ({})",
+                self.site.name,
+                e.without_url()
+            ))
+        })?;
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
         if status == 403 || looks_blocked(&body) {
@@ -387,6 +394,7 @@ impl Session {
             && let Some(cache) = self.cache.get()
             && let Some(body) = cache.lock().await.get(&cache_key).await
         {
+            crate::netlog::cache_hit(self.site.name, url.as_str());
             return Ok(body);
         }
         let result = self.fetch(url).await;
@@ -437,7 +445,15 @@ impl Session {
                 req = req.header(reqwest::header::ORIGIN, origin);
             }
             let last = attempt + 1 >= MAX_ATTEMPTS;
-            let resp = match req.send().await {
+            let started = Instant::now();
+            let sent = req.send().await;
+            crate::netlog::request(
+                name,
+                url.as_str(),
+                sent.as_ref().ok().map(|r| r.status().as_u16()),
+                started.elapsed(),
+            );
+            let resp = match sent {
                 Ok(resp) => resp,
                 Err(_) if !last => {
                     tokio::time::sleep(backoff(attempt, self.retry_base, None)).await;

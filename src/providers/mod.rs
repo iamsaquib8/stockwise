@@ -1081,7 +1081,16 @@ impl Http {
         if let Auth::Header(header, prefix) = auth {
             req = req.header(header, format!("{}{}", prefix, self.key));
         }
-        let resp = match req.send().await {
+        let started = Instant::now();
+        let sent = req.send().await;
+        // The key may sit in the query string: netlog prints host and path only.
+        crate::netlog::request(
+            name,
+            sent.as_ref().map_or("", |r| r.url().as_str()),
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+            started.elapsed(),
+        );
+        let resp = match sent {
             Ok(resp) => resp,
             // Unreachable or timing out: don't make every remaining symbol
             // wait for it too.

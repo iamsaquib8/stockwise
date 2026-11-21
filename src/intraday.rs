@@ -1245,11 +1245,17 @@ mod tests {
     #[test]
     fn vwap_reclaim_needs_a_cross() {
         // Crossed up from below: a reclaim.
-        assert!(matches!(vwap_cross(99.8, 100.2, 100.0), Some((Direction::Long, _))));
+        assert!(matches!(
+            vwap_cross(99.8, 100.2, 100.0),
+            Some((Direction::Long, _))
+        ));
         // Already above on the previous bar: no new reclaim.
         assert!(vwap_cross(100.3, 100.2, 100.0).is_none());
         // Crossed down from above: a rejection.
-        assert!(matches!(vwap_cross(100.1, 99.8, 100.0), Some((Direction::Short, _))));
+        assert!(matches!(
+            vwap_cross(100.1, 99.8, 100.0),
+            Some((Direction::Short, _))
+        ));
         // Already below: nothing.
         assert!(vwap_cross(99.5, 99.8, 100.0).is_none());
         // Too far past the VWAP to call it a reclaim.

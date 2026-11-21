@@ -36,6 +36,24 @@ pub static STATS: FetchStats = FetchStats {
     cache_misses: AtomicU64::new(0),
 };
 
+/// A short source name for a request's host, for `--verbose` lines.
+fn host_source(url: &str) -> &'static str {
+    let host = host_of(url);
+    if host.contains("yahoo") {
+        "Yahoo"
+    } else if host.contains("nseindia") {
+        "NSE"
+    } else if host.contains("bseindia") {
+        "BSE"
+    } else if host.contains("sec.gov") {
+        "EDGAR"
+    } else if host.contains("google") {
+        "Google News"
+    } else {
+        "HTTP"
+    }
+}
+
 fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
@@ -1382,6 +1400,7 @@ impl YahooClient {
         if !cache_ttl.is_zero() {
             let mut cache = self.cache.lock().await;
             if let Some(cached) = cache.get(&cache_key(url)).await {
+                crate::netlog::cache_hit(host_source(url), url);
                 return Ok(cached);
             }
         }
@@ -1436,7 +1455,14 @@ impl YahooClient {
                 req = req.header(*k, *v);
             }
             count(&STATS.requests);
+            let started = Instant::now();
             let result = req.send().await;
+            crate::netlog::request(
+                host_source(url),
+                url,
+                result.as_ref().ok().map(|r| r.status().as_u16()),
+                started.elapsed(),
+            );
 
             match result {
                 Ok(resp) => {

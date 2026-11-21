@@ -997,7 +997,11 @@ fn simple_monte_carlo(est_annual: f64, vol: f64) -> (f64, f64, f64) {
         .collect();
 
     results.sort_by(f64::total_cmp);
-    (results[SIMS / 2], results[SIMS / 10], results[SIMS * 9 / 10])
+    (
+        results[SIMS / 2],
+        results[SIMS / 10],
+        results[SIMS * 9 / 10],
+    )
 }
 
 #[cfg(test)]
@@ -1146,7 +1150,11 @@ mod tests {
         let q = |z: f64| ((mu + sd * z).exp() - 1.0) * 100.0;
         // 1000 draws: within a few percent of the exact quantiles.
         assert!((median - q(0.0)).abs() < 0.12 * q(0.0), "median {median}");
-        assert!((p10 - q(-1.2816)).abs() < 12.0, "p10 {p10} vs {}", q(-1.2816));
+        assert!(
+            (p10 - q(-1.2816)).abs() < 12.0,
+            "p10 {p10} vs {}",
+            q(-1.2816)
+        );
         assert!((p90 - q(1.2816)).abs() < 25.0, "p90 {p90} vs {}", q(1.2816));
     }
 

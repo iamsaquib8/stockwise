@@ -408,7 +408,11 @@ pub async fn market_sections(
     }
     let wants_10y = specs.iter().any(|s| s.region == "Indian Markets");
     let (quotes, india_10y) = tokio::join!(src.quotes(&symbols), async {
-        if wants_10y { src.india_10y().await } else { None }
+        if wants_10y {
+            src.india_10y().await
+        } else {
+            None
+        }
     });
     let quotes = quotes?;
     let mut out = Vec::with_capacity(specs.len());
@@ -420,7 +424,11 @@ pub async fn market_sections(
             .filter_map(|(sym, _)| {
                 quotes
                     .iter()
-                    .find(|q| q.symbol.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(sym)))
+                    .find(|q| {
+                        q.symbol
+                            .as_deref()
+                            .is_some_and(|s| s.eq_ignore_ascii_case(sym))
+                    })
                     .cloned()
             })
             .collect();
