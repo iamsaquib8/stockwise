@@ -1219,6 +1219,28 @@ that returns the `stockwise trade` command for you to run yourself.")]
         open: bool,
     },
 
+    /// One-line portfolio day change and quotes for tmux, waybar, sketchybar, starship
+    #[command(after_help = STATUSBAR_HELP)]
+    Statusbar {
+        /// Output dialect
+        #[arg(long, value_enum, default_value = "tmux", ignore_case = true)]
+        format: commands::StatusbarFormat,
+        /// Show these symbols instead of the portfolio, e.g. RELIANCE,TCS
+        #[arg(long, value_delimiter = ',', value_name = "A,B")]
+        symbols: Vec<String>,
+        /// At most this many symbols after the portfolio change
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(0..=20))]
+        max: u64,
+        /// Go to the network at most once per SECS (the line is cached in between)
+        #[arg(
+            long,
+            default_value_t = 60,
+            value_name = "SECS",
+            value_parser = clap::value_parser!(u64).range(5..=86400)
+        )]
+        refresh: u64,
+    },
+
     // ── Setup ──
     /// Encrypted, portable backup of your data: export to a .swbak file, restore from one
     #[command(after_help = "Examples:\n  \
@@ -1336,6 +1358,30 @@ enum WorkerAction {
         #[arg(long)]
         once: bool,
     },
+    /// Start it at login as a user launchd agent (macOS) or systemd user service (Linux)
+    #[command(after_help = "Examples:\n  \
+stockwise worker install --dry-run       show the unit file and commands, change nothing\n  \
+stockwise -m us worker install           the worker for the US market\n\n\
+Writes ~/Library/LaunchAgents/com.stockwise.worker.plist or\n\
+~/.config/systemd/user/stockwise-worker.service (never a system-wide location),\n\
+running this executable with `worker run`. STOCKWISE_HOME, STOCKWISE_CONFIG and\n\
+STOCKWISE_PORTFOLIO are carried over when set.")]
+    Install {
+        /// Print the unit file and the commands without writing or running anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Minutes to wait before restarting a worker that exited with an error
+        #[arg(long, default_value_t = 1, value_name = "MIN", value_parser = clap::value_parser!(u64).range(1..=1440))]
+        interval: u64,
+    },
+    /// Stop the login service and remove its unit file
+    Uninstall {
+        /// Print what would be run and removed, and do nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Is the login service installed and loaded
+    ServiceStatus,
 }
 
 #[derive(Subcommand)]
@@ -2628,6 +2674,29 @@ fn mf_period(s: &str) -> Result<String, String> {
     funds::parse_period(s).map(|_| s.trim().to_lowercase())
 }
 
+const STATUSBAR_HELP: &str = "\
+Prints one compact line such as `▲ ₹+12.3k (+0.8%) · RELIANCE +1.2% · TCS −0.4%`:
+the portfolio's day change, then its largest holdings and watchlist symbols.
+It answers from statusbar_cache.json in the data directory and fetches at most
+once per --refresh seconds, within 3 s; on failure the cached line is shown
+with `(as of HH:MM)`. With every market closed it fetches the close once.
+
+Formats:
+  tmux        #[fg=green]…#[default] colour codes
+  waybar      {\"text\",\"tooltip\",\"class\"}; class is up, down, flat or stale
+  sketchybar  label='…' label.color=0xAARRGGBB, for
+              eval \"sketchybar --set $NAME $(stockwise statusbar --format sketchybar)\"
+  starship    plain text, no colour codes
+  json        portfolio value and day change, rows, as_of, stale
+
+Examples:
+  set -g status-right '#(stockwise statusbar)'          in ~/.tmux.conf
+  stockwise statusbar --format waybar --max 2
+  stockwise statusbar --symbols RELIANCE,TCS --format starship
+  stockwise statusbar -m us --symbols AAPL,MSFT --refresh 120
+
+docs/commands.md has waybar, sketchybar and starship snippets.";
+
 const COMMODITY_HELP: &str = "\
 Spot is the COMEX front-month future (Yahoo GC=F / SI=F) converted at USD/INR:
 international prices, before Indian import duty and GST. MCX futures have no
@@ -3624,7 +3693,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Planning", &["goal"]),
     ("AI assistants", &["ask", "mcp", "connect", "undo"]),
-    ("Interfaces", &["tui", "serve"]),
+    ("Interfaces", &["tui", "serve", "statusbar"]),
     ("Live trading", &["trade"]),
     (
         "Setup",
@@ -4685,6 +4754,13 @@ async fn dispatch(
         },
         Commands::Worker { action } => {
             let name = match action {
+                WorkerAction::Install { dry_run, interval } => {
+                    return commands::cmd_worker_install(m, dry_run, interval);
+                }
+                WorkerAction::Uninstall { dry_run } => {
+                    return commands::cmd_worker_uninstall(dry_run);
+                }
+                WorkerAction::ServiceStatus => return commands::cmd_worker_service_status(),
                 WorkerAction::Start => "start",
                 WorkerAction::Stop => "stop",
                 WorkerAction::Status => "status",
@@ -5646,6 +5722,12 @@ async fn dispatch(
             allow_remote,
             open,
         } => commands::cmd_serve(&bind, allow_remote, open, m).await,
+        Commands::Statusbar {
+            format,
+            symbols,
+            max,
+            refresh,
+        } => commands::cmd_statusbar(m, format, &symbols, max as usize, refresh).await,
         Commands::Ask {
             question,
             interactive,
