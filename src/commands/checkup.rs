@@ -684,19 +684,24 @@ pub(crate) async fn run_checkup(
         max_smallcap_weight: g.ctx.max_smallcap_weight,
     };
     let mut checkup = ck::evaluate(&input, skipped);
-    let mut actions: Vec<ck::HoldingAction> = super::actions::quick_actions(&g.portfolio, &g.val)
-        .into_iter()
-        .map(|(symbol, action)| ck::HoldingAction {
-            weight_pct: analysis
-                .positions
-                .iter()
-                .find(|p| p.symbol == symbol)
-                .and_then(|p| p.weight_pct)
-                .map(|w| round(w, 2)),
-            symbol,
-            action,
-        })
-        .collect();
+    let enriched = match client {
+        Some(c) => super::actions::enriched_quotes(c, &g.portfolio, &g.val).await,
+        None => Default::default(),
+    };
+    let mut actions: Vec<ck::HoldingAction> =
+        super::actions::quick_actions(&g.portfolio, &g.val, &enriched)
+            .into_iter()
+            .map(|(symbol, action)| ck::HoldingAction {
+                weight_pct: analysis
+                    .positions
+                    .iter()
+                    .find(|p| p.symbol == symbol)
+                    .and_then(|p| p.weight_pct)
+                    .map(|w| round(w, 2)),
+                symbol,
+                action,
+            })
+            .collect();
     actions.sort_by(|a, b| {
         a.action
             .kind

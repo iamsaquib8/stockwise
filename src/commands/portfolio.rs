@@ -847,7 +847,7 @@ pub(crate) fn portfolio_report(
     today: chrono::NaiveDate,
 ) -> PortfolioReport {
     let totals = val.totals(portfolio);
-    let mut actions = super::actions::quick_actions(portfolio, val);
+    let mut actions = super::actions::quick_actions(portfolio, val, &Default::default());
     let holdings = portfolio
         .holdings
         .iter()
@@ -1062,6 +1062,15 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             }
             let mut report = portfolio_report(&portfolio, &val, chrono::Local::now().date_naive());
             report.warnings = pending.warnings();
+            if let Some(c) = client.as_ref().filter(|_| live) {
+                let enriched = super::actions::enriched_quotes(c, &portfolio, &val).await;
+                let mut actions = super::actions::quick_actions(&portfolio, &val, &enriched);
+                for row in report.holdings.iter_mut() {
+                    if let Some(a) = actions.remove(&row.symbol) {
+                        row.action = Some(a);
+                    }
+                }
+            }
             report
         };
         return match fmt {
@@ -1123,7 +1132,8 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .max(12);
     let fx_w = if any_foreign { 12 } else { 0 };
     let rule = "─".repeat(81 + 13 + sw + fx_w);
-    let actions = super::actions::quick_actions(&portfolio, &val);
+    let enriched = super::actions::enriched_quotes(&client, &portfolio, &val).await;
+    let actions = super::actions::quick_actions(&portfolio, &val, &enriched);
     let fx_head = if any_foreign {
         format!(" {}", pad_start("FX effect", 11).bold())
     } else {

@@ -486,6 +486,9 @@ pub struct Inputs {
     pub pe_own_median: Option<f64>,
     /// The sector's P/E (NSE sector index) or the median of its peers.
     pub pe_sector: Option<f64>,
+    /// The median P/E of a broad set of stocks (the `picks` scan), used only
+    /// when there is neither an own median nor a sector figure.
+    pub pe_market: Option<f64>,
     pub tech: Technicals,
     pub next_earnings: Option<NaiveDate>,
     pub market_cap: Option<f64>,
@@ -551,7 +554,10 @@ impl Inputs {
             }
             (Some(o), _) if o > 0.0 => Some((o, "its own median P/E")),
             (_, Some(s)) if s > 0.0 => Some((s, "the sector P/E")),
-            _ => None,
+            _ => self
+                .pe_market
+                .filter(|m| *m > 0.0)
+                .map(|m| (m, "the market median P/E")),
         }
     }
 
@@ -1774,6 +1780,22 @@ mod tests {
         i.pe_sector = Some(17.0); // 20 <= 1.2 x 17 = 20.4
         assert_eq!(decide(&i).kind, Kind::Buy);
         i.pe_sector = Some(16.0); // 19.2
+        assert_eq!(decide(&i).kind, Kind::Watch);
+    }
+
+    #[test]
+    fn market_median_is_the_last_resort_reference() {
+        let mut i = good();
+        i.pe_own_median = None;
+        i.pe_market = Some(18.0); // 20 <= 21.6
+        let a = decide(&i);
+        assert_eq!(a.kind, Kind::Buy);
+        assert!(
+            a.reasons.iter().any(|r| r.contains("market median")),
+            "{:?}",
+            a.reasons
+        );
+        i.pe_sector = Some(15.0); // the sector figure wins over the market: 20 > 18
         assert_eq!(decide(&i).kind, Kind::Watch);
     }
 

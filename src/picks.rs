@@ -738,6 +738,7 @@ pub async fn run(
     let (mut picks, flagged, thin_data) = select(score(&kept, &history, horizon), top);
     let today = chrono::Local::now().date_naive();
     let profile = crate::config::effective_profile();
+    let refs = PeReferences::of(&kept);
     for p in picks.iter_mut() {
         let (Some(q), Some(series)) = (
             kept.iter()
@@ -746,7 +747,7 @@ pub async fn run(
         ) else {
             continue;
         };
-        p.action = Some(action_for(q, series, horizon, today, &profile));
+        p.action = Some(action_for(q, series, horizon, today, &profile, &refs));
     }
     Ok(Run {
         picks,
@@ -763,19 +764,65 @@ pub async fn run(
     })
 }
 
+/// Peer P/E figures from a scan, the valuation reference of the actions
+/// when the exchange gives no sector P/E.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeReferences {
+    /// Median trailing P/E by sector, for sectors with at least 3 profitable
+    /// stocks in the scan.
+    pub sector: HashMap<String, f64>,
+    /// Median trailing P/E of the profitable stocks scanned (at least 10).
+    pub market: Option<f64>,
+}
+
+impl PeReferences {
+    pub fn of(quotes: &[Quote]) -> Self {
+        let pe = |q: &Quote| q.trailing_pe.filter(|p| p.is_finite() && *p > 0.0);
+        let median = |mut v: Vec<f64>| -> f64 {
+            v.sort_by(|a, b| a.total_cmp(b));
+            let n = v.len();
+            if n % 2 == 1 {
+                v[n / 2]
+            } else {
+                (v[n / 2 - 1] + v[n / 2]) / 2.0
+            }
+        };
+        let mut by_sector: HashMap<String, Vec<f64>> = HashMap::new();
+        for q in quotes {
+            if let (Some(s), Some(p)) = (q.sector.as_deref().filter(|s| !s.is_empty()), pe(q)) {
+                by_sector.entry(s.to_string()).or_default().push(p);
+            }
+        }
+        let all: Vec<f64> = quotes.iter().filter_map(pe).collect();
+        PeReferences {
+            sector: by_sector
+                .into_iter()
+                .filter(|(_, v)| v.len() >= 3)
+                .map(|(s, v)| (s, median(v)))
+                .collect(),
+            market: (all.len() >= 10).then(|| median(all)),
+        }
+    }
+}
+
 /// The rule action for a finalist, from its enriched quote, a year of daily
-/// bars and its long-term score.
+/// bars, its long-term score and the scan's peer P/E figures.
 pub fn action_for(
     q: &Quote,
     series: &crate::research::Series,
     horizon: Horizon,
     today: chrono::NaiveDate,
     profile: &crate::config::EffectiveProfile,
+    refs: &PeReferences,
 ) -> crate::action::Action {
     let closes = (!series.close.is_empty()).then_some(series.close.as_slice());
     let score = crate::longterm::score_for_longterm(q, closes);
-    let i = crate::action::inputs_from_quote(q, series, &score, horizon.into(), today)
+    let mut i = crate::action::inputs_from_quote(q, series, &score, horizon.into(), today)
         .with_profile(profile);
+    if i.pe_sector.is_none() {
+        i.pe_sector = q.sector.as_ref().and_then(|s| refs.sector.get(s)).copied();
+    }
+    i.pe_market = refs.market;
     crate::action::decide(&i)
 }
 
@@ -1210,6 +1257,33 @@ mod tests {
         assert_eq!(bare.score, 50.0);
         assert_eq!(bare.coverage, 0.0);
         assert!(bare.strongest().is_empty());
+    }
+
+    #[test]
+    fn pe_references_need_enough_peers() {
+        let mut qs = Vec::new();
+        for (i, pe) in [10.0, 20.0, 30.0, -5.0].iter().enumerate() {
+            let mut q = quote(&format!("B{i}.NS"), "Banks");
+            q.trailing_pe = Some(*pe);
+            qs.push(q);
+        }
+        let mut lone = quote("X.NS", "Media");
+        lone.trailing_pe = Some(50.0);
+        qs.push(lone);
+        let r = PeReferences::of(&qs);
+        assert_eq!(r.sector.get("Banks"), Some(&20.0));
+        assert!(
+            !r.sector.contains_key("Media"),
+            "one stock is not a sector median"
+        );
+        assert_eq!(r.market, None, "fewer than 10 profitable stocks");
+        for i in 0..8 {
+            let mut q = quote(&format!("M{i}.NS"), "Media");
+            q.trailing_pe = Some(40.0);
+            qs.push(q);
+        }
+        let r = PeReferences::of(&qs);
+        assert_eq!(r.market, Some(40.0));
     }
 
     #[test]

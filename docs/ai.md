@@ -291,7 +291,7 @@ the data directory. Add them to `args` or the client's `env`.
 
 ### Tools
 
-There are 54 tools that read, and 13 more that change your files when you
+There are 66 tools that read, and 13 more that change your files when you
 turn them on ([below](#changes-the-assistant-can-make)). Each result is JSON
 with the data, a short "not financial advice" `note`, and `truncated` when long
 lists were shortened.

@@ -138,11 +138,50 @@ pub(crate) fn quick_holding_action(
     action::decide(&i)
 }
 
+/// Fundamentals for the listed stocks among the holdings: the bulk quote
+/// carries no ROE, margins, debt or sector, so each stock's quote is
+/// completed (`quoteSummary`, then the exchange and keyed fallbacks) before
+/// the rules read it. By symbol; funds, SGBs and failed lookups are absent.
+pub(crate) async fn enriched_quotes(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    val: &super::portfolio::Valuation,
+) -> std::collections::HashMap<String, Quote> {
+    if cfg!(test) {
+        return Default::default();
+    }
+    let todo: Vec<Quote> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| !crate::offmarket::is_off_market(&h.symbol))
+        .filter_map(|h| val.quote(&h.symbol).cloned())
+        .filter(|q| {
+            q.quote_type
+                .as_deref()
+                .is_none_or(|t| t.eq_ignore_ascii_case("EQUITY"))
+        })
+        .collect();
+    futures_util::stream::iter(todo.into_iter().map(|mut q| async move {
+        let mut meta = crate::provenance::Meta::default();
+        crate::research::enrich_quote_with(client, &mut q, false, &mut meta).await;
+        let m = q.meta.get_or_insert_with(Default::default);
+        m.merge(&meta);
+        (q.symbol.clone().unwrap_or_default(), q)
+    }))
+    .buffered(CHART_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect()
+}
+
 /// Quick actions for every holding of `portfolio` valued by `val`, by
-/// symbol. Off-market funds and SGBs get NO CALL.
+/// symbol, reading `enriched` quotes where there are some. Off-market funds
+/// and SGBs get NO CALL.
 pub(crate) fn quick_actions(
     portfolio: &Portfolio,
     val: &super::portfolio::Valuation,
+    enriched: &std::collections::HashMap<String, Quote>,
 ) -> std::collections::HashMap<String, Action> {
     let profile = crate::config::effective_profile();
     let notes = notes();
@@ -152,7 +191,7 @@ pub(crate) fn quick_actions(
         .holdings
         .iter()
         .filter_map(|h| {
-            let q = val.quote(&h.symbol)?;
+            let q = enriched.get(&h.symbol).or_else(|| val.quote(&h.symbol))?;
             let weight = val
                 .price(&h.symbol)
                 .and_then(|p| val.to_base(&h.symbol, h.shares * p))
@@ -249,6 +288,10 @@ pub(crate) async fn review(
         }
     }
 
+    let enriched = match client {
+        Some(c) => enriched_quotes(c, &g.portfolio, &g.val).await,
+        None => Default::default(),
+    };
     let stocks: Vec<String> = a
         .positions
         .iter()
@@ -276,7 +319,7 @@ pub(crate) async fn review(
         let Some(h) = g.portfolio.holding(&p.symbol) else {
             continue;
         };
-        let q = g.val.quote(&p.symbol);
+        let q = enriched.get(&p.symbol).or_else(|| g.val.quote(&p.symbol));
         let currency = p.currency.clone();
         let action = match q {
             None => {

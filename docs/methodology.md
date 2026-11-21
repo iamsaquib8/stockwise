@@ -108,9 +108,11 @@ After the gates, the stock is **BUY** when all of these hold:
   median is the trailing P/E (four quarters of EPS over that day's close) at
   each quarter end inside the price history available, up to 5 years; it
   needs at least three quarter ends. The sector P/E is the NSE sector index
-  P/E or the median of the stock's peers. The quote-based views have no
-  quarter history, so they use the sector P/E only. A missing P/E or
-  reference fails this rule;
+  P/E or, in `picks`, the median P/E of the scan's stocks in the same sector
+  (at least 3). When there is neither, `picks` falls back to the median P/E
+  of every profitable stock scanned (at least 10). The quote-based views have
+  no quarter history, so they have no own median. A missing P/E or reference
+  fails this rule;
 - the invalidation price is below the last close.
 
 Short horizon adds two more: the close is above the **50-day average**, and
