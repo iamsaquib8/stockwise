@@ -358,3 +358,122 @@ fn the_user_agent_names_the_tool_and_carries_no_address() {
     assert!(USER_AGENT.starts_with("stockwise/"));
     assert!(!USER_AGENT.contains('@'));
 }
+
+fn instant(end: &str, val: f64, form: &str, filed: &str) -> Value {
+    json!({"end": end, "val": val, "accn": "0000000000-00-000000",
+           "fy": 2025, "fp": "Q3", "form": form, "filed": filed})
+}
+
+/// The calendar filer with a balance sheet: equity 450 and debt 90 + 10 on
+/// 2025-09-30; commercial paper only on an older date.
+pub(crate) fn calendar_filer_with_balance_sheet() -> String {
+    let mut v: Value = serde_json::from_str(&calendar_filer()).unwrap();
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    let concept = |facts: Vec<Value>| json!({"units": {"USD": facts}});
+    gaap.insert(
+        "StockholdersEquity".into(),
+        concept(vec![
+            instant("2024-12-31", 400.0, "10-K", "2025-02-01"),
+            instant("2025-09-30", 440.0, "10-Q", "2025-10-30"),
+            // Restated in a later filing: the latest filing wins.
+            instant("2025-09-30", 450.0, "10-Q", "2025-11-15"),
+        ]),
+    );
+    gaap.insert(
+        "LongTermDebtNoncurrent".into(),
+        concept(vec![instant("2025-09-30", 90.0, "10-Q", "2025-10-30")]),
+    );
+    gaap.insert(
+        "LongTermDebtCurrent".into(),
+        concept(vec![instant("2025-09-30", 10.0, "10-Q", "2025-10-30")]),
+    );
+    gaap.insert(
+        "CommercialPaper".into(),
+        concept(vec![instant("2024-12-31", 35.0, "10-K", "2025-02-01")]),
+    );
+    v.to_string()
+}
+
+#[test]
+fn ratios_come_from_trailing_quarters_and_the_latest_balance_sheet() {
+    let st = parse_company_facts(&calendar_filer_with_balance_sheet()).unwrap();
+    assert_eq!(st.equity, Some((d("2025-09-30"), 450.0)));
+    assert_eq!(st.debt, Some(100.0));
+    let r = st.ratios();
+    // Last four quarters: revenue 210 + 220 + 230 + 240, net income a tenth.
+    let close = |a: Option<f64>, b: f64| assert!((a.unwrap() - b).abs() < 1e-9, "{a:?} vs {b}");
+    close(r.profit_margin, 0.1);
+    close(r.operating_margin, 0.1);
+    close(r.roe, 90.0 / 450.0);
+    close(r.debt_to_equity, 100.0 / 450.0 * 100.0);
+    // Q3 2025 revenue 240 against Q3 2024's 200.
+    close(r.revenue_growth, 0.2);
+    close(r.eps_ttm, 9.0);
+    assert_eq!(r.as_of, Some(d("2025-09-30")));
+}
+
+#[test]
+fn no_balance_sheet_means_no_roe_or_leverage() {
+    let st = parse_company_facts(&calendar_filer()).unwrap();
+    assert_eq!(st.equity, None);
+    let r = st.ratios();
+    assert_eq!(r.roe, None);
+    assert_eq!(r.debt_to_equity, None);
+    assert!(r.profit_margin.is_some());
+}
+
+#[test]
+fn current_debt_totals_are_not_counted_twice() {
+    let mut v: Value = serde_json::from_str(&calendar_filer()).unwrap();
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    let concept =
+        |val: f64| json!({"units": {"USD": [instant("2025-09-30", val, "10-Q", "2025-10-30")]}});
+    gaap.insert("StockholdersEquity".into(), concept(400.0));
+    gaap.insert("LongTermDebtNoncurrent".into(), concept(90.0));
+    // DebtCurrent 30 already holds the 20 of borrowings and 5 of paper.
+    gaap.insert("DebtCurrent".into(), concept(30.0));
+    gaap.insert("ShortTermBorrowings".into(), concept(20.0));
+    gaap.insert("CommercialPaper".into(), concept(5.0));
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(120.0));
+
+    // Without DebtCurrent: borrowings already hold the paper.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.remove("DebtCurrent");
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(110.0));
+
+    // Paper alone counts.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.remove("ShortTermBorrowings");
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(95.0));
+}
+
+#[test]
+fn margins_never_mix_quarterly_and_annual_windows() {
+    // Quarterly revenue complete, one quarterly net income missing: the
+    // margin comes from the fiscal year on both sides, or not at all.
+    let p = |end: &str, rev: f64, ni: Option<f64>| Period {
+        end: d(end),
+        revenue: Some(rev),
+        net_income: ni,
+        ..Default::default()
+    };
+    let st = Statements {
+        quarterly: vec![
+            p("2024-12-31", 100.0, Some(10.0)),
+            p("2025-03-31", 100.0, None),
+            p("2025-06-30", 200.0, Some(20.0)),
+            p("2025-09-30", 200.0, Some(20.0)),
+        ],
+        annual: vec![p("2024-12-31", 400.0, Some(40.0))],
+        ..Default::default()
+    };
+    assert_eq!(st.ratios().profit_margin, Some(0.1));
+    let no_year = Statements {
+        annual: vec![],
+        ..st
+    };
+    assert_eq!(no_year.ratios().profit_margin, None);
+}

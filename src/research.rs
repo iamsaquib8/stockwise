@@ -338,6 +338,10 @@ pub struct Series {
     pub low: Vec<f64>,
     pub close: Vec<f64>,
     pub volume: Vec<f64>,
+    /// Closes adjusted for dividends as well as splits (Yahoo's `adjclose`),
+    /// one per bar; empty when the chart did not carry them for every bar.
+    /// Read through [`Series::return_closes`].
+    pub adj_close: Vec<f64>,
 }
 
 impl Series {
@@ -352,6 +356,16 @@ impl Series {
         let get = |v: &Option<Vec<Option<f64>>>, i: usize| {
             v.as_ref().and_then(|x| x.get(i).copied().flatten())
         };
+        let adj = c
+            .indicators
+            .adjclose
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.adjclose.clone())
+            .filter(|a| a.len() == ts.len());
+        // One adjusted value per retained row (kept aligned through the
+        // duplicate replacement below); used only if every row has one.
+        let mut adj_rows: Vec<Option<f64>> = Vec::new();
         for (i, &t) in ts.iter().enumerate() {
             let Some(close) = get(&q.close, i).filter(|c| *c > 0.0) else {
                 continue;
@@ -367,9 +381,11 @@ impl Series {
                 s.low.pop();
                 s.close.pop();
                 s.volume.pop();
+                adj_rows.pop();
             }
             s.dates.push(date);
             s.close.push(close);
+            adj_rows.push(adj.as_ref().and_then(|a| a[i]).filter(|v| *v > 0.0));
             s.open.push(get(&q.open, i).unwrap_or(close));
             s.high.push(get(&q.high, i).unwrap_or(close));
             s.low.push(get(&q.low, i).unwrap_or(close));
@@ -380,7 +396,23 @@ impl Series {
                     .unwrap_or(0) as f64,
             );
         }
+        if adj.is_some() {
+            s.adj_close = adj_rows
+                .into_iter()
+                .collect::<Option<Vec<f64>>>()
+                .unwrap_or_default();
+        }
         s
+    }
+
+    /// Closes for return and volatility maths: the dividend-adjusted ones
+    /// when every bar has one, else `close`. Price levels keep using `close`.
+    pub fn return_closes(&self) -> &[f64] {
+        if !self.adj_close.is_empty() && self.adj_close.len() == self.close.len() {
+            &self.adj_close
+        } else {
+            &self.close
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -401,7 +433,8 @@ impl Series {
         if n <= sessions || sessions == 0 {
             return None;
         }
-        Some(self.close[n - 1] / self.close[n - 1 - sessions] - 1.0)
+        let c = self.return_closes();
+        Some(c[n - 1] / c[n - 1 - sessions] - 1.0)
     }
 
     /// Index of the first session on or after `d`.
@@ -589,6 +622,8 @@ pub struct Research {
     pub days: i64,
     /// Snapshot time (unix seconds)
     pub now: i64,
+    /// Where the data came from, what is missing, and coverage (#338).
+    pub meta: crate::provenance::Meta,
 }
 
 impl Research {
@@ -1018,11 +1053,29 @@ pub fn apply_summary(q: &mut Quote, summary: &Value) {
     q.beta = q.beta.or(raw(sd, "beta")).or(raw(ks, "beta"));
 }
 
-/// Quote modules `apply_summary` reads. `profile_only` asks for the sector
-/// and industry alone, which is all `peers` needs per candidate.
-pub async fn enrich_quote(client: &YahooClient, q: &mut Quote, profile_only: bool) {
-    let Some(sym) = q.symbol.clone() else { return };
-    let modules: &[&str] = if profile_only {
+/// Fill a quote from Yahoo's `quoteSummary` (the modules `apply_summary`
+/// reads). `profile_only` asks for the sector and industry alone, which is
+/// all `peers` needs per candidate. Yahoo only, one request; a failure is
+/// returned as a warning (empty when it worked) instead of vanishing.
+/// [`enrich_quote_with`] also tries the other sources.
+pub async fn enrich_quote(client: &YahooClient, q: &mut Quote, profile_only: bool) -> Vec<String> {
+    let Some(sym) = q.symbol.clone() else {
+        return Vec::new();
+    };
+    match client
+        .quote_summary(&sym, summary_modules(profile_only))
+        .await
+    {
+        Ok(summary) => {
+            apply_summary(q, &summary);
+            Vec::new()
+        }
+        Err(e) => vec![format!("Yahoo fundamentals unavailable for {sym} ({e:#})")],
+    }
+}
+
+fn summary_modules(profile_only: bool) -> &'static [&'static str] {
+    if profile_only {
         &["assetProfile"]
     } else {
         &[
@@ -1031,9 +1084,31 @@ pub async fn enrich_quote(client: &YahooClient, q: &mut Quote, profile_only: boo
             "defaultKeyStatistics",
             "summaryDetail",
         ]
-    };
-    if let Ok(summary) = client.quote_summary(&sym, modules).await {
-        apply_summary(q, &summary);
+    }
+}
+
+/// [`enrich_quote`], then (unless `profile_only`) every fallback for the
+/// fields Yahoo left empty: SEC EDGAR for US stocks, NSE and BSE for Indian
+/// ones, Finnhub and FMP when their keys are set
+/// ([`crate::providers::fill::complete_fundamentals`]). Sources, the source
+/// of each filled field, failures, missing fields and coverage go into
+/// `meta`.
+pub async fn enrich_quote_with(
+    client: &YahooClient,
+    q: &mut Quote,
+    profile_only: bool,
+    meta: &mut crate::provenance::Meta,
+) {
+    for w in enrich_quote(client, q, profile_only).await {
+        meta.warn(w);
+    }
+    if profile_only {
+        for s in crate::provenance::quote_sources(q) {
+            meta.add_source(&s);
+        }
+        meta.set_fields(&crate::provenance::stock_field_checks(q));
+    } else {
+        crate::providers::fill::complete_fundamentals(client, q, meta).await;
     }
 }
 
@@ -1824,7 +1899,7 @@ pub async fn fetch(
     needs: Needs,
 ) -> Result<Research> {
     let symbol = market::resolve_symbol(symbol, market);
-    let quote = client
+    let mut quote = client
         .get_quote(&[symbol.as_str()])
         .await?
         .into_iter()
@@ -1873,12 +1948,16 @@ pub async fn fetch(
         },
         async {
             if needs.prices {
-                client
-                    .get_chart(&symbol, "2y", "1d")
-                    .await
-                    .map(|c| Series::from_chart(&c))
+                client.get_chart(&symbol, "2y", "1d").await.map(|c| {
+                    let (source, notes) = c
+                        .meta
+                        .as_ref()
+                        .map(|m| (m.data_source.clone(), m.warnings.clone()))
+                        .unwrap_or_default();
+                    (Series::from_chart(&c), source, notes)
+                })
             } else {
-                Ok(Series::default())
+                Ok((Series::default(), None, Vec::new()))
             }
         },
         async {
@@ -1974,7 +2053,8 @@ pub async fn fetch(
     let mut warnings = Vec::new();
     let summary = soft(summary, "Yahoo fundamentals", &mut warnings);
     let timeseries = soft(timeseries, "Yahoo financial statements", &mut warnings);
-    let prices = soft(prices, "Price history", &mut warnings);
+    let (prices, price_source, price_notes) = soft(prices, "Price history", &mut warnings);
+    warnings.extend(price_notes);
     let bench = soft(bench, "Benchmark history", &mut warnings);
     let gnews = soft(gnews, "Google News", &mut warnings);
     let yrss = soft(yrss, "Yahoo RSS", &mut warnings);
@@ -1983,6 +2063,7 @@ pub async fn fetch(
     warnings.extend(holdings.note);
     let holdings = holdings.holdings;
     let pit = soft(pit, "NSE insider trades", &mut warnings);
+    let pit_found = !pit.is_empty();
     let corp_actions = soft(corp, "NSE corporate actions", &mut warnings);
 
     // Statements may be reported in another currency than the share trades in.
@@ -2033,6 +2114,73 @@ pub async fn fetch(
         .and_then(|p| text(p, "industry"))
         .or(quote.industry.clone());
 
+    // Fundamentals: Yahoo's quote, then its quoteSummary, then the other
+    // sources for whatever is still empty (`providers::fill`). Nothing is
+    // defaulted; what no source has is listed in `meta.missing`.
+    let mut meta = crate::provenance::Meta::default();
+    if needs.statements || needs.ownership || needs.prices {
+        if !summary.is_null() {
+            apply_summary(&mut quote, &summary);
+        }
+        crate::providers::fill::complete_fundamentals(client, &mut quote, &mut meta).await;
+    } else {
+        meta = crate::provenance::for_quote(&quote);
+    }
+    let sector = sector.or(quote.sector.clone());
+    let industry = industry.or(quote.industry.clone());
+    let mut checks = if needs.statements || needs.ownership || needs.prices {
+        crate::provenance::stock_field_checks(&quote)
+    } else {
+        crate::provenance::quote_field_checks(&quote)
+    };
+    if crate::market::AssetClass::of(&symbol) != crate::market::AssetClass::Stock {
+        checks = crate::provenance::quote_field_checks(&quote);
+    }
+    // Indian stocks: what NSE supplied beyond the fundamentals, and the
+    // exchange's surveillance flags, which an investor must see.
+    if nse.is_some() && crate::market::AssetClass::of(&symbol) == crate::market::AssetClass::Stock {
+        if needs.ownership {
+            checks.push((crate::provenance::F_SHAREHOLDING, !holdings.is_empty()));
+        }
+        for (found, source) in [
+            (!holdings.is_empty(), "NSE shareholding"),
+            (pit_found, "NSE insider trades"),
+            (!filings.is_empty(), "NSE filings"),
+            (!corp_actions.is_empty(), "NSE corporate actions"),
+        ] {
+            if found {
+                meta.add_source(source);
+            }
+        }
+        if (needs.ownership || needs.statements)
+            && let Ok(Some(info)) = client.nse_equity_info(&symbol).await
+        {
+            for f in info.flags {
+                meta.warn(f);
+            }
+        }
+    }
+    if needs.prices {
+        checks.push((crate::provenance::F_HISTORY, !prices.is_empty()));
+        if let Some(s) = &price_source {
+            meta.add_source(s);
+        }
+        if let Some(last) = prices.dates.last()
+            && meta.as_of.is_none()
+        {
+            meta.as_of = Some(last.to_string());
+        }
+    }
+    meta.set_fields(&checks);
+    for w in &warnings {
+        meta.warn(w.clone());
+    }
+    for w in &meta.warnings {
+        if !warnings.contains(w) {
+            warnings.push(w.clone());
+        }
+    }
+
     let mut fin = parse_fin(&summary, &quote);
     if let Some(c) = &fin_ccy {
         convert_fin(&mut fin, fx.factor(c));
@@ -2067,6 +2215,7 @@ pub async fn fetch(
         warnings,
         days,
         now,
+        meta,
     })
 }
 

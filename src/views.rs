@@ -505,17 +505,24 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
             ts,
         })
         .collect();
-    let (currency, source) = chart
+    let (currency, source, warnings) = chart
         .meta
-        .map(|m| (m.currency, m.data_source))
+        .map(|m| (m.currency, m.data_source, m.warnings))
         .unwrap_or_default();
+    // A fallback source or a warning (stale cache, adjusted bars) is kept;
+    // a plain Yahoo answer carries no meta.
+    let meta = (source.is_some() || !warnings.is_empty()).then(|| crate::api::QuoteMeta {
+        sources: source.into_iter().collect(),
+        warnings,
+        ..Default::default()
+    });
     History {
         symbol: symbol.to_string(),
         currency,
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
-        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s] }),
+        meta,
     }
 }
 
@@ -856,6 +863,7 @@ pub mod fixtures {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(
                 (0..closes.len() as i64)
@@ -870,6 +878,7 @@ pub mod fixtures {
                     close: some(closes),
                     volume: Some(closes.iter().map(|_| Some(1000)).collect()),
                 }],
+                adjclose: None,
             },
             events: None,
         }
@@ -1341,7 +1350,14 @@ mod tests {
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["holdings", "totals", "unpriced", "unconverted", "notes"]
+            [
+                "holdings",
+                "totals",
+                "unpriced",
+                "unconverted",
+                "notes",
+                "warnings"
+            ]
         );
         let totals: Vec<&str> = v["totals"]
             .as_object()
@@ -1351,7 +1367,15 @@ mod tests {
             .collect();
         assert_eq!(
             totals,
-            ["cost_basis", "value", "pnl", "pnl_percent", "currency"]
+            [
+                "cost_basis",
+                "value",
+                "pnl",
+                "pnl_percent",
+                "currency",
+                "fx_effect",
+                "cost_at_today_fx"
+            ]
         );
         assert_eq!(v["holdings"][0]["symbol"], "TCS.NS");
         assert_eq!(v["holdings"][0]["pnl"], 6000.0);

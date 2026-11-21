@@ -120,6 +120,9 @@ pub struct DecisionVerdict {
     /// Profile-specific guardrail observations (neutral, non-advisory).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_notes: Vec<String>,
+    /// Sources, as-of time, missing fields, warnings and coverage of the
+    /// data behind the score (`provenance::Meta`).
+    pub meta: crate::provenance::Meta,
     pub disclaimer: &'static str,
 }
 
@@ -677,6 +680,7 @@ pub fn generate_verdict_with_profile(
         next_catalyst,
         warnings: r.warnings.clone(),
         profile_notes,
+        meta: r.meta.clone(),
         disclaimer: DISCLAIMER,
     }
 }
@@ -807,6 +811,7 @@ pub fn render_snapshot(v: &DecisionVerdict, symbol_hint: &str) -> String {
         .dimmed()
         .italic()
     );
+    outln!(o, "  {}", v.meta.footer().dimmed());
     o
 }
 
@@ -914,6 +919,7 @@ pub fn render_verdict(v: &DecisionVerdict, explain: bool) -> String {
         }
     }
 
+    outln!(o, "\n  {}", v.meta.footer().dimmed());
     outln!(o, "\n  {}\n", v.disclaimer.dimmed().italic());
     o
 }

@@ -93,6 +93,25 @@ impl Finnhub {
         Ok(parse_profile(&json))
     }
 
+    /// Basic financials (`/stock/metric?metric=all`): ROE, net margin,
+    /// debt/equity, revenue growth, beta, EPS, P/E and P/B.
+    pub async fn ratios(&self, symbol: &str) -> Result<Option<super::router::Ratios>> {
+        let Some(t) = ticker(symbol) else {
+            return Ok(None);
+        };
+        let json = self
+            .http
+            .get_json(
+                "/stock/metric",
+                &[("symbol", &t), ("metric", "all")],
+                AUTH,
+                Duration::from_secs(6 * 3600),
+                check,
+            )
+            .await?;
+        Ok(parse_metrics(&json))
+    }
+
     /// Profile, latest recommendation trend and earnings surprises: three
     /// requests, so the caller asks only when it needs all three.
     pub async fn fundamentals(&self, symbol: &str) -> Result<Option<Fundamentals>> {
@@ -159,6 +178,26 @@ pub fn parse_profile(json: &Value) -> Option<Profile> {
     })
 }
 
+/// `/stock/metric`: percentages for ROE, margin and growth, a plain ratio
+/// for debt/equity. Converted to Yahoo's units (fractions; D/E in percent).
+pub fn parse_metrics(json: &Value) -> Option<super::router::Ratios> {
+    let m = json.get("metric")?;
+    let n = |k: &str| m.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
+    let r = super::router::Ratios {
+        roe: n("roeTTM").map(|v| v / 100.0),
+        debt_to_equity: n("totalDebt/totalEquityQuarterly")
+            .or(n("totalDebt/totalEquityAnnual"))
+            .map(|v| v * 100.0),
+        profit_margin: n("netProfitMarginTTM").map(|v| v / 100.0),
+        revenue_growth: n("revenueGrowthQuarterlyYoy").map(|v| v / 100.0),
+        beta: n("beta"),
+        eps_ttm: n("epsTTM").or(n("epsInclExtraItemsTTM")),
+        pe: n("peTTM").filter(|v| *v > 0.0),
+        pb: n("pbQuarterly").or(n("pbAnnual")).filter(|v| *v > 0.0),
+    };
+    (r != super::router::Ratios::default()).then_some(r)
+}
+
 /// `/stock/recommendation`: one row per month, newest first.
 pub fn parse_recommendation(json: &Value) -> Option<Recommendation> {
     let latest = json
@@ -216,6 +255,23 @@ mod tests {
     const PROFILE: &str = r#"{"country":"US","currency":"USD","exchange":"NASDAQ NMS - GLOBAL MARKET","finnhubIndustry":"Technology","name":"Apple Inc","marketCapitalization":2900000.5,"ticker":"AAPL"}"#;
     const RECOMMENDATION: &str = r#"[{"buy":24,"hold":7,"period":"2026-10-01","sell":1,"strongBuy":13,"strongSell":0,"symbol":"AAPL"},{"buy":20,"hold":9,"period":"2026-09-01","sell":2,"strongBuy":11,"strongSell":1,"symbol":"AAPL"}]"#;
     const EARNINGS: &str = r#"[{"actual":1.64,"estimate":1.6,"period":"2026-09-30","quarter":4,"surprise":0.04,"surprisePercent":2.5,"symbol":"AAPL","year":2026},{"actual":null,"estimate":1.5,"period":"2026-06-30","symbol":"AAPL"}]"#;
+
+    #[test]
+    fn metrics_convert_percentages_to_yahoo_units() {
+        let json: Value = serde_json::from_str(
+            r#"{"metric":{"roeTTM":150.0,"netProfitMarginTTM":24.3,"totalDebt/totalEquityQuarterly":1.5,
+                "revenueGrowthQuarterlyYoy":6.0,"beta":1.2,"epsTTM":6.5,"peTTM":38.0,"pbQuarterly":44.0},
+                "metricType":"all","symbol":"AAPL"}"#,
+        )
+        .unwrap();
+        let r = parse_metrics(&json).unwrap();
+        assert_eq!(r.roe, Some(1.5));
+        assert!((r.profit_margin.unwrap() - 0.243).abs() < 1e-12);
+        assert_eq!(r.debt_to_equity, Some(150.0));
+        assert_eq!(r.revenue_growth, Some(0.06));
+        assert_eq!(r.beta, Some(1.2));
+        assert!(parse_metrics(&serde_json::json!({"metric": {}})).is_none());
+    }
 
     #[test]
     fn maps_only_plain_us_tickers() {

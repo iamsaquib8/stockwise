@@ -2,44 +2,89 @@
 
 ## Intraday Bot
 
-9-strategy multi-signal engine for day trading.
+9-strategy multi-signal scanner for day trading. The scanner shows signals
+only: no sizes, no price levels, no orders.
 
 ```bash
-stockwise bot 25000 2       # ₹25K capital, 2% daily target
-stockwise -m us bot 5000 1  # US market, $5K, 1% target
+stockwise intraday          # NSE
+stockwise -m us intraday    # US market
 ```
+
+`bot` is an alias of `intraday`. It still accepts a capital and a target
+(`stockwise bot 25000 2`) so older scripts run, but it ignores them. To size
+paper trades with a capital, use [`sim`](#paper-trading-simulator) or the
+[daemon](#intraday-daemon).
 
 ### Strategies
 
 | # | Strategy | Signal | Trigger |
 |---|----------|--------|---------|
-| 1 | RSI Reversal | Long/Short | RSI <30 (oversold) or >70 (overbought) |
-| 2 | VWAP Reclaim | Long | Price crosses above VWAP from below |
-| 3 | BB Squeeze | Long | Tight Bollinger bands + price above middle |
-| 4 | BB Bounce | Long | Price touching lower Bollinger Band |
+| 1 | Dip | Long | One vote for any oversold reading: RSI <40 (<30 strongly), price at the lower Bollinger Band, price >3% below the 20-day average, or OBV rising while price is flat or down |
+| 2 | Overextended | Short | One vote for RSI >70 or price at the upper Bollinger Band |
+| 3 | VWAP Reclaim / Rejection | Long/Short | Price within 0.5% above (or below) today's session VWAP |
+| 4 | BB Squeeze | Long | Tight Bollinger bands + price above middle |
 | 5 | MACD Cross | Long/Short | Histogram sign change (fresh crossover) |
-| 6 | Volume Breakout | Long | 2x+ avg volume with positive price action |
-| 7 | Support Bounce | Long | Price at pivot S1 level |
-| 8 | OBV Divergence | Long | Volume accumulating while price flat/down |
-| 9 | Mean Reversion | Long | Price >3% below 20-SMA |
+| 6 | Volume Breakout | Long | Today's volume 2x+ the usual pace for this time of day, with positive price action |
+| 7 | Support Bounce | Long | Price at the prior session's pivot S1 |
+| 8 | Resistance Test | Short | Price at the prior session's pivot R1 |
+| 9 | Gap Fill | Long/Short | Unfilled gap in the last five sessions |
+
+The readings behind **Dip** describe one move, so they share one vote, as
+strong as the strongest reading (at most 100). A single fall is no longer
+counted four times. **Overextended** works the same way for overbought
+readings.
+
+### Data
+
+- Daily indicators (trend, RSI, MACD, Bollinger bands, ATR, OBV) use about
+  three months of daily bars. MACD needs 35, so it can fire; one month (about
+  21 bars) never could.
+- VWAP is today's session VWAP from 5-minute bars.
+- Volume pace compares today's volume with what the previous sessions had
+  traded by the same minute of the session. Partial volume is never compared
+  with a full day's average.
+- When the pace is unknown (before the open, or with fewer than two earlier
+  sessions of 5-minute bars), it lowers the score like a quiet day. It is
+  never assumed to be normal.
+- A bar with any missing price is dropped as a whole, so the close, high, low
+  and volume columns always line up.
 
 ### Scoring
 
 - Each strategy generates a strength score (0-100)
-- Consensus bonus: +8 per additional agreeing strategy
-- Volume multiplier: 1.15x if volume >1.5x average
-- Regime multiplier: 1.2x if trade aligns with strong trend, 0.6x if counter-trend
-- Confidence: HIGH (score >=75, 3+ strategies), MEDIUM (>=60, 2+), LOW (others)
+- Opposing votes are netted, not dropped: the score is the net strength
+  (long minus short) per agreeing vote
+- Consensus bonus: +8 per agreeing vote beyond the first, after subtracting
+  opposing votes
+- Volume multiplier: 1.15x if the pace is over 1.5x, 1.0x over 1x, 0.85x
+  below that or when unknown
+- Regime multiplier: 1.2x with a strong trend, 1.1x with a trend; against
+  the trend 0.75x, or 0.6x against a strong trend
+- Confidence: HIGH (score >=75, net 3+ votes), MEDIUM (>=60, net 2+), LOW (others)
 
-### Position Sizing (Kelly Criterion)
+### Position Sizing (paper trading: `sim` and the daemon)
 
-- Half-Kelly fraction for safety (max 25% of capital)
-- 1% max risk per trade
+- Exit level at least 1 × ATR from the price. The prior session's S1 (R1
+  for a short) is used only when it lies 1–2 ATR away. A level closer than
+  that would be hit by ordinary noise and would inflate the size.
+- The default sizing budget is **0.5% of capital** per trade: the size is
+  the largest whose loss at the exact exit level, charges and slippage
+  included, stays within it. The 30% position cap can make a position
+  smaller, so its actual loss at the exit level depends on its size and how
+  far the level is.
+- After **30 or more closed paper trades** in `sim_history.json` (counting
+  only trades settled with charges, from 0.9 on), half-Kelly from the
+  measured win rate and average win/loss replaces the 0.5% budget, capped at
+  1%. If the record shows no edge, the budget is 0.25%. There are no assumed
+  win rates.
+- Plans are ranked by score alone. A high reward-to-risk ratio from a tight
+  level says nothing about the odds, so it doesn't lift a plan.
 - Never more than 30% of capital in one position
 - At most 5 plans, and **together they never need more than your capital**:
   walking down the ranking, a plan that doesn't fit in what's left is shrunk
   to what does (or dropped)
-- Exit level for each paper position: uses support levels when available, else ATR-based
+- The trailing exit level hangs 1.5 × ATR behind the price, in both `sim` and
+  the daemon
 
 ### Output
 
@@ -134,17 +179,52 @@ command exits non-zero if nothing was settled.
 
 ### What It Tracks
 
-- Per trade: opening and closing price, whether level 2 or the exit level was reached, P&L, strategies used
+- Per trade: opening and closing price, whether level 2 or the exit level was reached, charges, P&L after charges, strategies used
 - Per day: total P&L, win/loss count, how often level 2 was reached
-- Cumulative: equity curve, Sharpe ratio, win streaks, day/trade win rates
+- Cumulative: equity curve, charges paid, Sharpe ratio, win streaks, day/trade win rates
 
-### Confidence Rating (after 5+ days)
+The Sharpe ratio uses **every trading day** from the first session to the
+last. A trading day without a session counts as 0%, so skipping days doesn't
+flatter it.
+
+### Charges and slippage
+
+Every paper P&L (`sim settle`, `sim status`, the daemon and its kill switch)
+is **after** charges and slippage:
+
+| Market | Default |
+|--------|---------|
+| India | NSE intraday at a discount broker: brokerage ₹20 or 0.03% per order (the lower), STT 0.025% on the sale, exchange 0.00297%, SEBI ₹10/crore, GST 18% on those, stamp duty 0.003% on the purchase |
+| Others | Commission-free |
+| All | 5 bps of slippage per fill |
+
+A short pays STT on its opening sale and stamp duty on its closing
+purchase. Override the defaults with environment variables:
+
+| Variable | Values |
+|----------|--------|
+| `STOCKWISE_SIM_COSTS` | `in-intraday`, `in-delivery`, `us` or `none` |
+| `STOCKWISE_SIM_BROKERAGE` | `20` (flat), `0.03%`, or `20,0.03%` (the lower) |
+| `STOCKWISE_SIM_SLIPPAGE_BPS` | e.g. `5` |
+
+A daemon session keeps the cost model it started with, and each closed
+position keeps the charges it closed with, so changing these settings later
+never rewrites a finished result. Sessions settled before 0.9 keep their
+gross P&L; `sim history` says how many trades are gross, and they don't count
+toward the 30 trades for Kelly sizing.
+
+### Paper Record Rating (after 20+ dates and 30+ trades)
 
 | Rating | Criteria |
 |--------|----------|
 | HIGH | >65% day win rate + >55% trade win rate + profitable |
 | MODERATE | >50% day win rate + profitable |
 | LOW | Below moderate threshold |
+
+Several sessions on one date count as one day. A rating describes the paper
+record only. A few days of results say almost
+nothing about an intraday system. Paper fills are also optimistic: real
+orders queue and move the price.
 
 ### Practice mode
 
@@ -181,12 +261,13 @@ status 0 (for example from cron or a systemd timer).
 Lifecycle (NSE; NYSE uses the same offsets from 09:30–16:00 ET):
 ```
 9:00 AM   Pre-market scan (sectors, gaps)
-9:15 AM   Enter up to 5 positions (9 strategies, Kelly sizing, ≤ capital in total)
+9:15 AM   Enter up to 5 positions (0.5% sizing budget each, or half-Kelly
+          after 30 paper trades; ≤ capital in total)
 9:30–3:15 Monitor every 60 seconds:
           - Level 1 reached → book 50%, move the exit level to the opening price
           - Level 2 reached → close fully
           - Exit level reached → close, record the loss
-          - Trailing exit level updates (1.5% trail)
+          - Trailing exit level updates (1.5 × ATR trail)
           - Wind-down (2 PM+): tighten the exit level to 0.5%
 3:15 PM   Square off all remaining positions
 3:20 PM   Settle → save to sim_history.json → AI EOD report → wait for the
@@ -199,9 +280,12 @@ closed all day; the daemon prints the reason and the next session, then
 sleeps until 15 minutes before it.
 
 Risk controls:
-- 1% max risk per trade, 30% max per position, total allocation ≤ capital
+- 0.5% sizing budget per trade (half-Kelly capped at 1% after 30 closed
+  paper trades), 30% max per position, total allocation ≤ capital. A
+  position held smaller by the 30% cap can lose less than the budget at its
+  exit level.
 - 3% daily loss kill switch (closes everything; counts every realised exit,
-  including level 2 exits)
+  including level 2 exits, after charges and slippage)
 - Max 5 concurrent positions
 - Entries only in the first 15 minutes; no new entries after that
 - Forced square-off 15 minutes before the close

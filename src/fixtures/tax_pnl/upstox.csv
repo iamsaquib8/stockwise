@@ -1,0 +1,5 @@
+Upstox (RKSV Securities) - Capital Gain Statement 01/04/2026 to 31/03/2027
+Anonymised sample for StockWise tests: names and amounts are illustrative.
+Scrip Name,ISIN,Buy Date,Sell Date,Quantity,Buy Rate,Buy Amount,Sell Rate,Sell Amount,Days,Short Term/Long Term,Profit/Loss
+ITC,INE154A01025,02/01/2026,05/06/2026,50,410,,450,22500,154,Short Term,2000
+SBIN,INE062A01020,10/07/2026,10/07/2026,100,800,80000,805,80500,0,Intraday,500

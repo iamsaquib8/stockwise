@@ -21,6 +21,7 @@ mod benchmark;
 mod bleed;
 mod bonds;
 mod brokers;
+mod business_groups;
 mod calendar;
 mod charts;
 mod checkup;
@@ -30,6 +31,7 @@ mod commodity;
 mod conditions;
 mod config;
 mod connect;
+mod corp_actions;
 mod crossmarket;
 mod daemon;
 mod daemon_status;
@@ -38,12 +40,14 @@ mod derivatives;
 mod display;
 mod events;
 mod funds;
+mod fx_history;
 mod global_lists;
 mod goals;
 mod greeks;
 mod gsec;
 mod i18n;
 mod income;
+mod index_weights;
 mod insights;
 mod intraday;
 mod ipo;
@@ -60,10 +64,12 @@ mod output;
 mod pagecache;
 mod payoff;
 mod picks;
+mod picks_log;
 mod pme;
 mod portfolio;
 mod portfolio_analysis;
 mod practice;
+mod provenance;
 mod providers;
 mod pta_export;
 mod rebalance;
@@ -79,10 +85,14 @@ mod sp500;
 mod store;
 mod tax;
 mod tax_export;
+mod tax_foreign;
+mod tax_income;
+mod tax_reconcile;
 mod technical;
 #[cfg(test)]
 mod testutil;
 mod tools;
+mod trade_charges;
 #[cfg(feature = "tui")]
 mod tui;
 mod verdict;
@@ -588,9 +598,12 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
-    /// Stocks ranked against each other on value, quality, growth and trend (a score, not a
-    /// recommendation)
+    /// Stocks ranked against each other on value, quality, growth, trend and risk; `picks
+    /// review` shows how past lists did
+    #[command(args_conflicts_with_subcommands = true)]
     Picks {
+        #[command(subcommand)]
+        action: Option<PicksCmd>,
         /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
         /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
@@ -601,6 +614,18 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// How many of the highest scores to show (0 for all)
         #[arg(long, default_value_t = 15)]
         top: usize,
+        /// Least market cap, in crore in India (default 500) and millions elsewhere (US
+        /// default 1000); 0 turns the floor off
+        #[arg(long)]
+        min_mcap: Option<f64>,
+        /// Least average value traded a day over three months, in crore in India (default 2)
+        /// and millions elsewhere (US default 5); 0 turns the floor off
+        #[arg(long)]
+        min_adv: Option<f64>,
+        /// long (years: value, quality, growth lead) or short (weeks to months: momentum,
+        /// volume and risk lead)
+        #[arg(long, value_enum, ignore_case = true, default_value = "long")]
+        horizon: picks::Horizon,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -761,6 +786,9 @@ stockwise options TCS                     expected moves (same as `options moves
         /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
+        /// Print the scores and data provenance as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Background worker: intraday paper-trading loop or daily long-term scan
@@ -909,7 +937,12 @@ stockwise tax in                                  this tax year's estimate\n  \
 stockwise tax export in --fy 2025-26 --out cg.csv ITR Schedule CG / 112A CSV\n  \
 stockwise tax export us --fy 2025 --json          Form 8949 rows as JSON\n  \
 stockwise tax advance                             advance tax quarterly instalments (in)\n  \
-stockwise tax advance --fy 2025-26 --paid 25000   track shortfall and 234C interest"
+stockwise tax advance --fy 2025-26 --paid 25000   track shortfall and 234C interest\n  \
+stockwise tax reconcile taxpnl.xlsx               compare with Zerodha/Groww/Upstox tax P&L\n  \
+stockwise tax income --fy 2026-27                 dividends and interest with TDS (Schedule OS)\n  \
+stockwise tax foreign --year 2025                 Schedule FA and Form 67 (foreign assets)\n  \
+stockwise tax export in --audit-pack audit/       one workpaper CSV per sale\n\n\
+Estimates: verify with your CA or your broker's tax statements before filing."
     )]
     Tax {
         #[command(subcommand)]
@@ -1321,6 +1354,12 @@ enum PortfolioCmd {
         /// converted at that day's exchange rate. The market comes from -m/--market
         #[arg(long, value_parser = currency_code)]
         currency: Option<String>,
+        /// Brokerage, taxes and fees paid on the purchase, in total (in the
+        /// --currency paid, else the holding's); counted in realized P&L.
+        /// `auto` estimates an NSE/BSE delivery buy's STT, stamp duty,
+        /// exchange, SEBI and GST charges (no brokerage)
+        #[arg(long, value_parser = trade_charges::parse)]
+        charges: Option<trade_charges::ChargesArg>,
     },
     /// Record a sale: oldest lots first (FIFO), realized P&L kept for `tax`
     Sell {
@@ -1335,6 +1374,11 @@ enum PortfolioCmd {
         /// Show the FIFO lots, tax and LTCG countdown without recording the sale
         #[arg(long, alias = "dry-run")]
         preview: bool,
+        /// Brokerage, taxes and fees paid on the sale, in total; realized P&L is net of them.
+        /// `auto` estimates an NSE/BSE delivery sell's STT, exchange, SEBI,
+        /// GST and DP charges (no brokerage)
+        #[arg(long, value_parser = trade_charges::parse)]
+        charges: Option<trade_charges::ChargesArg>,
     },
     /// A holding's lots, sales and dividends; --lot N fixes or deletes a lot, --undo-sale N puts a sale back
     #[command(group(clap::ArgGroup::new("lot_change").multiple(true)))]
@@ -1559,6 +1603,69 @@ tradebook and CAS imports) — verify it with your broker's tax P&L before filin
         /// JSON instead of CSV
         #[arg(long)]
         json: bool,
+        /// India: which schedule — cg (capital gains, the default), os
+        /// (dividends and interest), fa (foreign assets, calendar year) or
+        /// form67 (foreign tax credit)
+        #[arg(long, value_enum, default_value = "cg")]
+        schedule: commands::ExportSchedule,
+        /// India: write one workpaper CSV per sale (lot, dates, cost, 31 Jan
+        /// 2018 FMV, gain, rule applied), summary.csv and the Schedule CG
+        /// CSV into this directory
+        #[arg(long, value_name = "DIR", conflicts_with_all = ["out", "json"])]
+        audit_pack: Option<std::path::PathBuf>,
+        /// Your slab rate in percent, for the Form 67 credit limit
+        #[arg(long, value_name = "PCT", default_value_t = 30.0)]
+        slab: f64,
+    },
+    /// Compare realised gains with a broker's tax P&L (Zerodha, Groww, Upstox; CSV or .xlsx)
+    #[command(
+        after_help = "Matches sale by sale on ISIN (or symbol) and sale date, and \
+explains each difference: buy date or cost, grandfathering, charges, quantity. Read-only.\n\n\
+Examples:\n  \
+stockwise tax reconcile ~/Downloads/taxpnl-FY2026-27.xlsx\n  \
+stockwise tax reconcile groww-capital-gains.csv --fy 2026-27 --json"
+    )]
+    Reconcile {
+        /// The broker's tax P&L / capital-gains report
+        file: std::path::PathBuf,
+        /// Whose file it is [default: detected from the file]
+        #[arg(long, value_enum, ignore_case = true)]
+        broker: Option<crate::tax_reconcile::Broker>,
+        /// Financial year: 2025-26 or AY2026-27 [default: the year of the file's sales]
+        #[arg(long, value_name = "YEAR")]
+        fy: Option<String>,
+        /// Compare every StockWise sale, not just those from this broker's account
+        #[arg(long)]
+        all_accounts: bool,
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dividend and interest income with TDS by advance-tax quarter (ITR Schedule OS)
+    Income {
+        /// Financial year: 2025-26 or AY2026-27 [default: current FY]
+        #[arg(long, value_name = "YEAR")]
+        fy: Option<String>,
+        /// Also write the Schedule OS CSV to this file
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        format: TableOutput,
+    },
+    /// Foreign assets (Schedule FA, calendar year) and foreign tax credit (Form 67)
+    Foreign {
+        /// Financial year; Schedule FA covers the calendar year it starts in
+        #[arg(long, value_name = "YEAR", conflicts_with = "year")]
+        fy: Option<String>,
+        /// Calendar year for Schedule FA (Form 67 uses the FY starting that April)
+        #[arg(long)]
+        year: Option<i32>,
+        /// Your slab rate in percent, for the Form 67 credit limit
+        #[arg(long, value_name = "PCT", default_value_t = 30.0)]
+        slab: f64,
+        /// JSON output
+        #[arg(long)]
+        json: bool,
     },
     /// Advance tax quarterly instalment schedule under Section 211 / 234C (India)
     #[command(
@@ -1574,6 +1681,12 @@ under Section 208 and 211, with Section 234C(1) capital-gains proviso protection
         /// date; an AMOUNT without a date is assumed paid on time
         #[arg(long, value_name = "[DATE:]AMOUNT")]
         paid: Vec<String>,
+        /// Save the --paid payments (dated) so later runs and the reminder count them
+        #[arg(long)]
+        record: bool,
+        /// Add dividends and interest at this slab rate (percent), in the quarter received
+        #[arg(long, value_name = "PCT")]
+        slab: Option<f64>,
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -2378,7 +2491,7 @@ enum ConfigCmd {
 }
 
 /// `--json` / `--csv` for commands that print a table.
-#[derive(Args, Clone, Copy, Default)]
+#[derive(Args, Clone, Copy, Debug, Default)]
 struct TableOutput {
     /// Print JSON instead of a table
     #[arg(long, conflicts_with = "csv")]
@@ -2451,6 +2564,21 @@ Examples:
   stockwise bonds calc \"6.94% GS 2036\" --ytm 7.4  price for a yield
   stockwise bonds calc --coupon 7.1 --maturity 2034-04-08 --price 99.5
   stockwise bonds calc --tbill --maturity 2027-01-14 --price 98.6";
+
+#[derive(Subcommand, Debug, Clone)]
+enum PicksCmd {
+    /// How past lists did: each logged pick since it was first listed, against the benchmark
+    Review {
+        /// How far back: 90d, 12w, 6m, 1y
+        #[arg(long, default_value = "90d", value_parser = picks_log::parse_days)]
+        since: u32,
+        /// Which lists: long or short
+        #[arg(long, value_enum, ignore_case = true, default_value = "long")]
+        horizon: picks::Horizon,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+}
 
 #[derive(Subcommand, Debug, Clone)]
 enum FundamentalCmd {
@@ -4595,11 +4723,27 @@ async fn dispatch(
         Commands::Surprise { universe } => commands::cmd_surprise(m, universe).await,
         Commands::Matrix { universe } => commands::cmd_matrix(m, universe).await,
         Commands::Picks {
+            action:
+                Some(PicksCmd::Review {
+                    since,
+                    horizon,
+                    out,
+                }),
+            ..
+        } => commands::cmd_picks_review(m, since, horizon, out.into()).await,
+        Commands::Picks {
+            action: None,
             universe,
             cap,
             top,
+            min_mcap,
+            min_adv,
+            horizon,
             out,
-        } => commands::cmd_picks(m, universe, cap, top, out.into()).await,
+        } => {
+            let floors = picks::Floors::for_market(m, cap, min_mcap, min_adv);
+            commands::cmd_picks(m, universe, cap, floors, horizon, top, out.into()).await
+        }
         Commands::Screen {
             category,
             universe,
@@ -4841,9 +4985,11 @@ async fn dispatch(
             target,
             strategy,
         } => commands::cmd_intraday(amount, target, strategy.as_deref(), m).await,
-        Commands::Longterm { amount, universe } => {
-            commands::cmd_longterm(amount, m, universe).await
-        }
+        Commands::Longterm {
+            amount,
+            universe,
+            json,
+        } => commands::cmd_longterm(amount, m, universe, json).await,
         Commands::Daemon { mode, amount, once } => {
             commands::cmd_daemon(&value_name(mode), amount, m, once).await
         }
@@ -4934,6 +5080,7 @@ async fn dispatch(
                 date,
                 force,
                 currency,
+                charges,
             }) => {
                 commands::cmd_portfolio_add(
                     &symbol,
@@ -4942,6 +5089,7 @@ async fn dispatch(
                     date.as_deref(),
                     force,
                     currency.as_deref(),
+                    charges,
                     m,
                 )
                 .await
@@ -4952,6 +5100,7 @@ async fn dispatch(
                 price,
                 date,
                 preview,
+                ..
             }) if preview => {
                 commands::cmd_portfolio_sell_preview(&symbol, shares, price, date.as_deref(), m)
                     .await
@@ -4961,8 +5110,12 @@ async fn dispatch(
                 shares,
                 price,
                 date,
+                charges,
                 ..
-            }) => commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), m).await,
+            }) => {
+                commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), charges, m)
+                    .await
+            }
             Some(PortfolioCmd::Lots {
                 symbol,
                 lot,
@@ -5174,33 +5327,85 @@ async fn dispatch(
             let parsed = crate::rebalance::parse_targets(&targets)?;
             commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
         }
-        Commands::Harvest { out } => commands::cmd_harvest(m, out.into()).await,
+        Commands::Harvest { out } => {
+            crate::offmarket::load_etf_categories().await;
+            commands::cmd_harvest(m, out.into()).await
+        }
         Commands::Tax {
             action,
             country,
             out,
-        } => match action {
-            Some(TaxCmd::Export {
-                country,
-                fy,
-                out,
-                json,
-            }) => {
-                let country = match country {
-                    Some(c) => value_name(c),
-                    None if m == Market::Us => "us".into(),
-                    None => "in".into(),
-                };
-                commands::cmd_tax_export(&country, fy.as_deref(), out.as_deref(), json).await
+        } => {
+            // Gold, silver, international and debt ETFs by NSE category (cached).
+            crate::offmarket::load_etf_categories().await;
+            match action {
+                Some(TaxCmd::Export {
+                    country,
+                    fy,
+                    out,
+                    json,
+                    schedule,
+                    audit_pack,
+                    slab,
+                }) => {
+                    let country = match country {
+                        Some(c) => value_name(c),
+                        None if m == Market::Us => "us".into(),
+                        None => "in".into(),
+                    };
+                    let india = country == "in";
+                    if !india && (audit_pack.is_some() || schedule != commands::ExportSchedule::Cg)
+                    {
+                        anyhow::bail!("--audit-pack and --schedule are for `tax export in`");
+                    }
+                    if let Some(dir) = audit_pack {
+                        commands::cmd_tax_audit_pack(fy.as_deref(), &dir).await
+                    } else if schedule != commands::ExportSchedule::Cg {
+                        commands::cmd_tax_export_schedule(
+                            schedule,
+                            fy.as_deref(),
+                            slab,
+                            out.as_deref(),
+                            json,
+                        )
+                        .await
+                    } else {
+                        commands::cmd_tax_export(&country, fy.as_deref(), out.as_deref(), json)
+                            .await
+                    }
+                }
+                Some(TaxCmd::Reconcile {
+                    file,
+                    broker,
+                    fy,
+                    all_accounts,
+                    json,
+                }) => {
+                    commands::cmd_tax_reconcile(&file, broker, fy.as_deref(), all_accounts, json)
+                        .await
+                }
+                Some(TaxCmd::Income { fy, out, format }) => {
+                    commands::cmd_tax_income(fy.as_deref(), format.into(), out.as_deref()).await
+                }
+                Some(TaxCmd::Foreign {
+                    fy,
+                    year,
+                    slab,
+                    json,
+                }) => commands::cmd_tax_foreign(fy.as_deref(), year, slab, json).await,
+                Some(TaxCmd::Advance {
+                    fy,
+                    paid,
+                    record,
+                    slab,
+                    json,
+                }) => commands::cmd_tax_advance(fy.as_deref(), &paid, slab, record, json).await,
+                None => {
+                    let country = country.expect("clap requires COUNTRY without a subcommand");
+                    commands::cmd_tax(&value_name(country), m, out.into()).await
+                }
             }
-            Some(TaxCmd::Advance { fy, paid, json }) => {
-                commands::cmd_tax_advance(fy.as_deref(), &paid, json).await
-            }
-            None => {
-                let country = country.expect("clap requires COUNTRY without a subcommand");
-                commands::cmd_tax(&value_name(country), m, out.into()).await
-            }
-        },
+        }
         Commands::Goal { action } => run_goal(action, m).await,
         Commands::Divcal => commands::cmd_divcal(m).await,
         Commands::Pcorr => commands::cmd_pcorr(m).await,
@@ -7017,7 +7222,14 @@ mod tests {
 
         let cli = Cli::try_parse_from(["stockwise", "tax", "advance"]).unwrap();
         let Commands::Tax {
-            action: Some(TaxCmd::Advance { fy, paid, json }),
+            action:
+                Some(TaxCmd::Advance {
+                    fy,
+                    paid,
+                    json,
+                    record,
+                    slab,
+                }),
             country,
             ..
         } = cli.command
@@ -7025,6 +7237,95 @@ mod tests {
             panic!("expected tax advance");
         };
         assert!(country.is_none() && fy.is_none() && paid.is_empty() && !json);
+        assert!(!record && slab.is_none());
+
+        let cli = Cli::try_parse_from([
+            "stockwise",
+            "tax",
+            "reconcile",
+            "pnl.xlsx",
+            "--broker",
+            "zerodha",
+        ])
+        .unwrap();
+        let Commands::Tax {
+            action: Some(TaxCmd::Reconcile { file, broker, .. }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected tax reconcile");
+        };
+        assert_eq!(file, std::path::PathBuf::from("pnl.xlsx"));
+        assert_eq!(broker, Some(crate::tax_reconcile::Broker::Zerodha));
+
+        let cli = Cli::try_parse_from(["stockwise", "tax", "income", "--fy", "2026-27", "--csv"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Tax {
+                action: Some(TaxCmd::Income {
+                    format: TableOutput { csv: true, .. },
+                    ..
+                }),
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["stockwise", "tax", "foreign", "--year", "2025"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Tax {
+                action: Some(TaxCmd::Foreign {
+                    year: Some(2025),
+                    ..
+                }),
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "stockwise",
+            "tax",
+            "export",
+            "in",
+            "--audit-pack",
+            "audit",
+            "--fy",
+            "2026-27",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Tax {
+                action: Some(TaxCmd::Export {
+                    audit_pack: Some(_),
+                    ..
+                }),
+                ..
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["stockwise", "tax", "export", "in", "--schedule", "os"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Tax {
+                action: Some(TaxCmd::Export {
+                    schedule: commands::ExportSchedule::Os,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "stockwise",
+                "tax",
+                "export",
+                "in",
+                "--audit-pack",
+                "a",
+                "--json"
+            ])
+            .is_err()
+        );
 
         let cli = Cli::try_parse_from([
             "stockwise",
@@ -7038,7 +7339,7 @@ mod tests {
         ])
         .unwrap();
         let Commands::Tax {
-            action: Some(TaxCmd::Advance { fy, paid, json }),
+            action: Some(TaxCmd::Advance { fy, paid, json, .. }),
             ..
         } = cli.command
         else {
