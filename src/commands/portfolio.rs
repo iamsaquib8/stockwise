@@ -33,19 +33,34 @@ pub(crate) struct Valuation {
     /// 31 Jan 2018 prices (Section 112A grandfathering) for the symbols whose
     /// old lots need one; only `tax_valuation` fills it.
     pub fmv_2018: Vec<(String, f64)>,
+    /// Daily exchange rates into the base, to cost purchases, sales and
+    /// dividends at the rate of their own day ([`Valuation::load_history`]).
+    pub hist: crate::fx_history::FxHistory,
 }
 
 /// Cost and value in the base currency, leaving out holdings without a live
 /// price or an exchange rate (named here instead of being valued at 0).
 #[derive(Default)]
 pub(crate) struct Totals {
+    /// Cost in the base currency at each purchase's own exchange rate.
     pub cost: f64,
     pub value: f64,
+    /// The same cost at today's exchange rate: `cost_today - cost` is what
+    /// currency moves added to the value ([`Totals::fx_effect`]).
+    pub cost_today: f64,
     pub unpriced: Vec<String>,
     pub unconverted: Vec<String>,
+    /// Holdings whose cost had no historical rate and was converted at
+    /// today's (named in a note).
+    pub cost_at_today_fx: Vec<String>,
 }
 
 impl Totals {
+    /// Gain or loss from exchange-rate moves since the purchases, in the base.
+    pub fn fx_effect(&self) -> f64 {
+        self.cost_today - self.cost
+    }
+
     pub fn pnl_pct(&self) -> f64 {
         if self.cost > 0.0 {
             (self.value - self.cost) / self.cost * 100.0
@@ -76,6 +91,13 @@ impl Totals {
                 "  {} No exchange rate for {} — excluded from totals.",
                 "!".yellow(),
                 self.unconverted.join(", ")
+            );
+        }
+        if !self.cost_at_today_fx.is_empty() {
+            println!(
+                "  {} No exchange rate for the purchase dates of {}: their cost is converted at today's rate.",
+                "·".dimmed(),
+                self.cost_at_today_fx.join(", ")
             );
         }
     }
@@ -202,16 +224,147 @@ impl Valuation {
             };
             match (
                 self.to_base(&h.symbol, h.shares * price),
+                self.holding_cost_base(h),
                 self.to_base(&h.symbol, h.cost_basis()),
             ) {
-                (Some(v), Some(c)) => {
+                (Some(v), Some((c, historical)), Some(today)) => {
                     t.value += v;
                     t.cost += c;
+                    t.cost_today += today;
+                    if !historical {
+                        t.cost_at_today_fx.push(h.symbol.clone());
+                    }
                 }
                 _ => t.unconverted.push(h.symbol.clone()),
             }
         }
         t
+    }
+
+    /// Units of base per unit of `symbol`'s currency on `date`: the day's
+    /// reference rate when [`Valuation::load_history`] found one (true),
+    /// else today's rate (false).
+    pub fn rate_on(&self, symbol: &str, date: chrono::NaiveDate) -> Option<(f64, bool)> {
+        let cur = self.currency(symbol)?;
+        self.currency_rate_on(&cur, date)
+    }
+
+    /// [`Valuation::rate_on`] for a currency.
+    pub fn currency_rate_on(&self, cur: &str, date: chrono::NaiveDate) -> Option<(f64, bool)> {
+        if let Some(r) = self.hist.rate_on(cur, date) {
+            return Some((r, true));
+        }
+        self.fx.rate(cur).map(|r| (r, cur == self.base()))
+    }
+
+    /// What `lot` of `symbol` cost in the base currency: what was paid when
+    /// it was bought in the base (`portfolio add --currency`), else its cost
+    /// at the purchase date's rate, else at today's. The flag is false when
+    /// today's rate had to be used.
+    pub fn lot_cost_base(&self, symbol: &str, lot: &Lot) -> Option<(f64, bool)> {
+        let cur = self.currency(symbol)?;
+        let cost = lot.cost();
+        let (major_cost, _) = market::to_major(cost, &cur);
+        if let Some(paid) = lot.base_cost(self.base(), major_cost) {
+            return Some((paid, true));
+        }
+        let date = pf::parse_date(&lot.date).ok();
+        let (rate, historical) = match date {
+            Some(d) => self.currency_rate_on(&cur, d)?,
+            None => (self.fx.rate(&cur)?, false),
+        };
+        Some((cost * rate, historical))
+    }
+
+    /// [`Valuation::lot_cost_base`] summed over a holding's lots.
+    pub fn holding_cost_base(&self, h: &pf::Holding) -> Option<(f64, bool)> {
+        h.lots.iter().try_fold((0.0, true), |(sum, all), l| {
+            let (c, hist) = self.lot_cost_base(&h.symbol, l)?;
+            Some((sum + c, all && hist))
+        })
+    }
+
+    /// A sale's gain in the base currency: proceeds less charges at the sale
+    /// date's rate, less the cost at the purchase's (what was paid in the
+    /// base when the lot records it).
+    pub fn sale_gain_base(&self, sale: &pf::Sale) -> Option<f64> {
+        let cur = self.currency(&sale.symbol)?;
+        let sold = pf::parse_date(&sale.sell_date).ok();
+        let bought = pf::parse_date(&sale.buy_date).ok();
+        let rate = |d: Option<chrono::NaiveDate>| match d {
+            Some(d) => self.currency_rate_on(&cur, d).map(|r| r.0),
+            None => self.fx.rate(&cur),
+        };
+        let proceeds = (sale.qty * sale.sell_price - sale.charges()) * rate(sold)?;
+        let cost_local = sale.qty * sale.buy_price;
+        let (major_cost, _) = market::to_major(cost_local, &cur);
+        let cost = match sale
+            .fx_currency
+            .as_deref()
+            .zip(sale.buy_fx_rate)
+            .filter(|(c, r)| c.eq_ignore_ascii_case(self.base()) && *r > 0.0)
+        {
+            Some((_, r)) => major_cost * r,
+            None => cost_local * rate(bought)?,
+        };
+        Some(proceeds - cost)
+    }
+
+    /// A dividend in the base currency at its ex-date's rate.
+    pub fn dividend_base(&self, d: &pf::DividendReceived) -> Option<f64> {
+        let cur = d.currency.clone().or_else(|| self.currency(&d.symbol))?;
+        let rate = match pf::parse_date(&d.ex_date).ok() {
+            Some(day) => self.currency_rate_on(&cur, day)?.0,
+            None => self.fx.rate(&cur)?,
+        };
+        Some(d.amount * rate)
+    }
+
+    /// `symbol`'s cash flows (see [`Portfolio::cash_flow_items`]) in the
+    /// base currency, each at its own date's rate (a purchase paid in the
+    /// base at what was paid). `None` when a flow has no rate at all.
+    pub fn flows_base(
+        &self,
+        portfolio: &Portfolio,
+        symbol: &str,
+    ) -> Option<Vec<(chrono::NaiveDate, f64)>> {
+        let own = self.currency(symbol);
+        portfolio
+            .cash_flow_items(symbol)
+            .into_iter()
+            .map(|f| {
+                let cur = f.currency.clone().or_else(|| own.clone())?;
+                if let Some((paid, rate)) = &f.paid
+                    && paid.eq_ignore_ascii_case(self.base())
+                    && *rate > 0.0
+                {
+                    let (major, _) = market::to_major(f.amount, &cur);
+                    return Some((f.date, major * rate));
+                }
+                let (rate, _) = self.currency_rate_on(&cur, f.date)?;
+                Some((f.date, f.amount * rate))
+            })
+            .collect()
+    }
+
+    /// Load daily exchange rates for every currency `portfolio` has
+    /// bought, sold or been paid dividends in, from its first such day.
+    /// Without a network connection and nothing cached, conversions fall
+    /// back to today's rate.
+    pub async fn load_history(&mut self, portfolio: &Portfolio) {
+        let mut needs: Vec<(String, chrono::NaiveDate)> = Vec::new();
+        for sym in portfolio.symbols_with_history() {
+            let own = self.currency(&sym);
+            for f in portfolio.cash_flow_items(&sym) {
+                if let Some(cur) = f.currency.or_else(|| own.clone()) {
+                    needs.push((cur, f.date));
+                }
+            }
+        }
+        if needs.iter().all(|(c, _)| self.hist.has(c)) {
+            return;
+        }
+        self.hist = crate::fx_history::FxHistory::load(self.base(), &needs).await;
     }
 
     /// "1 USD = ₹84.12" for each currency that was converted.
@@ -298,6 +451,7 @@ impl Valuation {
             fx: Fx::new(market_currency(market)),
             off: OffMarket::default(),
             fmv_2018: Vec::new(),
+            hist: Default::default(),
         };
         let currencies = v.currencies(symbols);
         let base = match base {
@@ -306,6 +460,7 @@ impl Valuation {
             None => market_currency(market).to_string(),
         };
         v.fx = Fx::new(&base);
+        v.hist = crate::fx_history::FxHistory::new(&base);
         v
     }
 
@@ -355,7 +510,7 @@ impl Valuation {
 
 /// Splits and dividends for `symbol` from `since` (YYYY-MM-DD) to today,
 /// oldest first, and the currency the dividends are paid in.
-pub(super) async fn fetch_actions(
+pub(crate) async fn fetch_actions(
     client: &YahooClient,
     symbol: &str,
     since: &str,

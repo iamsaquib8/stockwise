@@ -181,6 +181,21 @@ pub struct Lot {
     /// the account their `source` names, or to no account at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The currency the lot was paid for in, when it differs from the one it
+    /// trades in (rupees for a US share): `portfolio add --currency`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_currency: Option<String>,
+    /// Units of `fx_currency` paid per unit of the lot's own (major)
+    /// currency on the purchase date. With it the cost in `fx_currency` is
+    /// exactly what was paid (see [`Lot::base_cost`]); without it the cost is
+    /// converted at the purchase date's reference rate (`fx_history`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_rate: Option<f64>,
+    /// Brokerage, taxes and fees paid on the purchase, in the lot's own
+    /// currency. Part of the cost of the shares sold out of it, so realized
+    /// P&L is net of them; a partial sale takes its share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
 }
 
 /// The demat account a source stands for: `import:kite` and `broker:zerodha`
@@ -209,7 +224,33 @@ impl Lot {
             units_as_of: None,
             order_id: None,
             account: None,
+            fx_currency: None,
+            fx_rate: None,
+            charges: None,
         }
+    }
+
+    /// What was paid in `currency` for the lot (its cost in its own major
+    /// currency times [`Lot::fx_rate`]), when the lot was paid for in it.
+    /// `cost` is the lot's cost in its own major currency.
+    pub fn base_cost(&self, currency: &str, cost: f64) -> Option<f64> {
+        let paid = self.fx_currency.as_deref()?;
+        let rate = self.fx_rate.filter(|r| r.is_finite() && *r > 0.0)?;
+        paid.eq_ignore_ascii_case(currency).then_some(cost * rate)
+    }
+
+    /// Take `take` shares out of the lot: its charges shrink in proportion.
+    /// Returns the charges that went with the shares taken.
+    fn shrink(&mut self, take: f64) -> Option<f64> {
+        let before = self.qty;
+        self.qty -= take;
+        let charges = self.charges?;
+        if before <= EPS {
+            return None;
+        }
+        let gone = charges * (take / before).min(1.0);
+        self.charges = Some(charges - gone).filter(|c| *c > EPS);
+        Some(gone)
     }
 
     /// The lot's account: the one saved with it, else the one its source names.
@@ -321,6 +362,17 @@ pub struct Sale {
     /// intraday even when sold on the allotment date.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bonus_shares: bool,
+    /// Brokerage, taxes and fees of the sale plus the sold shares' part of
+    /// the lot's purchase charges, in the holding's currency. Realized P&L
+    /// is net of them ([`Sale::gain`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
+    /// The lot's [`Lot::fx_currency`] and [`Lot::fx_rate`]: what the sold
+    /// shares cost in the currency they were paid for in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_currency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buy_fx_rate: Option<f64>,
 }
 
 /// The parts of a [`Lot`] a [`Sale`] does not otherwise keep.
@@ -335,6 +387,9 @@ pub struct SoldLot {
     pub order_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The sold shares' part of the lot's purchase charges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
 }
 
 /// How many earlier versions of a portfolio file are kept
@@ -343,6 +398,12 @@ pub const BACKUPS_KEPT: usize = 5;
 
 impl Sale {
     fn from_lot(symbol: &str, lot: &Lot, qty: f64, date: &str, price: f64, source: &str) -> Self {
+        // `lot` is the lot as it was before the shares were taken.
+        let buy_charges = lot
+            .charges
+            .filter(|_| lot.qty > EPS)
+            .map(|c| c * (qty / lot.qty).min(1.0))
+            .filter(|c| *c > EPS);
         Self {
             symbol: symbol.to_string(),
             qty,
@@ -361,6 +422,7 @@ impl Sale {
                 units_as_of: lot.units_as_of.clone(),
                 order_id: lot.order_id.clone(),
                 account: lot.account.clone(),
+                charges: buy_charges,
             }),
             bonuses: lot
                 .adjustments
@@ -369,13 +431,31 @@ impl Sale {
                 .cloned()
                 .collect(),
             bonus_shares: lot.source == BONUS_SOURCE,
+            charges: buy_charges,
+            fx_currency: lot.fx_currency.clone(),
+            buy_fx_rate: lot.fx_rate,
         }
+    }
+
+    /// Add the sale's own charges (brokerage, STT, fees) to those it took
+    /// from its lot.
+    pub fn add_charges(&mut self, charges: f64) {
+        if charges.is_finite() && charges > 0.0 {
+            self.charges = Some(self.charges.unwrap_or(0.0) + charges);
+        }
+    }
+
+    /// The sale's charges, 0 when none were recorded.
+    pub fn charges(&self) -> f64 {
+        self.charges.unwrap_or(0.0)
     }
 
     /// The lot this sale took its shares from, with the sold quantity.
     pub fn to_lot(&self) -> Lot {
         let mut lot = Lot::new(self.qty, self.buy_price, self.buy_date.clone(), "manual");
         lot.date_estimated = self.buy_date_estimated;
+        lot.fx_currency = self.fx_currency.clone();
+        lot.fx_rate = self.buy_fx_rate;
         match &self.origin {
             Some(o) => {
                 lot.source = o.source.clone();
@@ -383,6 +463,7 @@ impl Sale {
                 lot.units_as_of = o.units_as_of.clone();
                 lot.order_id = o.order_id.clone();
                 lot.account = o.account.clone();
+                lot.charges = o.charges;
             }
             None => {
                 // An older sale does not say which splits its lot had taken.
@@ -404,8 +485,9 @@ impl Sale {
             .or_else(|| account_of_source(&self.source))
     }
 
+    /// Proceeds less cost less charges, in the holding's currency.
     pub fn gain(&self) -> f64 {
-        self.qty * (self.sell_price - self.buy_price)
+        self.qty * (self.sell_price - self.buy_price) - self.charges()
     }
 
     /// A same-day buy and sell: flagged when it was recorded, or bought and
@@ -793,7 +875,7 @@ fn take_fifo(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64)>, f64
             remaining
         };
         taken.push((lot.clone(), take));
-        lot.qty -= take;
+        lot.shrink(take);
         remaining -= take;
     }
     lots.retain(|l| l.qty > EPS);
@@ -2096,29 +2178,84 @@ impl Portfolio {
     /// lots and sold ones), sale proceeds and dividends positive. The caller
     /// adds today's value of what is still held.
     pub fn cash_flows(&self, symbol: &str) -> Vec<(NaiveDate, f64)> {
+        self.cash_flow_items(symbol)
+            .into_iter()
+            .map(|f| (f.date, f.amount))
+            .collect()
+    }
+
+    /// [`Portfolio::cash_flows`] with what each flow needs to be converted
+    /// at its own date's exchange rate. Purchases include their charges and
+    /// sale proceeds are net of the sale's.
+    pub fn cash_flow_items(&self, symbol: &str) -> Vec<CashFlow> {
         let sym = symbol.to_uppercase();
         let mut flows = Vec::new();
         if let Some(h) = self.holding(&sym) {
             for l in &h.lots {
                 if let Some(d) = date_of(&l.date) {
-                    flows.push((d, -l.cost()));
+                    flows.push(CashFlow {
+                        date: d,
+                        amount: -(l.cost() + l.charges.unwrap_or(0.0)),
+                        paid: l.fx_currency.clone().zip(l.fx_rate),
+                        currency: None,
+                        kind: FlowKind::Buy,
+                    });
                 }
             }
         }
         for s in self.realized.iter().filter(|s| s.symbol == sym) {
             if let (Some(b), Some(d)) = (date_of(&s.buy_date), date_of(&s.sell_date)) {
-                flows.push((b, -s.qty * s.buy_price));
-                flows.push((d, s.qty * s.sell_price));
+                flows.push(CashFlow {
+                    date: b,
+                    amount: -s.qty * s.buy_price,
+                    paid: s.fx_currency.clone().zip(s.buy_fx_rate),
+                    currency: None,
+                    kind: FlowKind::Buy,
+                });
+                flows.push(CashFlow {
+                    date: d,
+                    amount: s.qty * s.sell_price - s.charges(),
+                    paid: None,
+                    currency: None,
+                    kind: FlowKind::Sale,
+                });
             }
         }
         for d in self.dividends.iter().filter(|d| d.symbol == sym) {
             if let Some(x) = date_of(&d.ex_date) {
-                flows.push((x, d.amount));
+                flows.push(CashFlow {
+                    date: x,
+                    amount: d.amount,
+                    paid: None,
+                    currency: d.currency.clone(),
+                    kind: FlowKind::Dividend,
+                });
             }
         }
-        flows.sort_by_key(|f| f.0);
+        flows.sort_by_key(|f| f.date);
         flows
     }
+}
+
+/// What a [`CashFlow`] was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowKind {
+    Buy,
+    Sale,
+    Dividend,
+}
+
+/// One dated cash flow of a holding, in its own currency unless `currency`
+/// says otherwise (a dividend paid in another currency).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CashFlow {
+    pub date: NaiveDate,
+    pub amount: f64,
+    /// For a purchase paid in another currency: that currency and the rate
+    /// paid (see [`Lot::fx_rate`]).
+    pub paid: Option<(String, f64)>,
+    pub currency: Option<String>,
+    pub kind: FlowKind,
 }
 
 /// Annualized money-weighted return (XIRR) of `flows` plus `value_now`
