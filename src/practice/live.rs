@@ -218,6 +218,7 @@ mod tests {
             win_count: Some(1),
             loss_count: Some(0),
             settled: true,
+            cost_model: None,
         }
     }
 

@@ -207,9 +207,10 @@ purchase. Override the defaults with environment variables:
 | `STOCKWISE_SIM_BROKERAGE` | `20` (flat), `0.03%`, or `20,0.03%` (the lower) |
 | `STOCKWISE_SIM_SLIPPAGE_BPS` | e.g. `5` |
 
-A daemon session keeps the cost model it started with, and each closed
+Every session keeps the cost model it started with (`sim start`, or the
+daemon's, including a day it hands to `sim settle`), and each closed
 position keeps the charges it closed with, so changing these settings later
-never rewrites a finished result. Sessions settled before 0.9 keep their
+never rewrites a result. Sessions settled before 0.9 keep their
 gross P&L; `sim history` says how many trades are gross, and they don't count
 toward the 30 trades for Kelly sizing.
 

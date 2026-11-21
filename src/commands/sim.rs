@@ -177,6 +177,7 @@ pub async fn cmd_sim(
                 win_count: None,
                 loss_count: None,
                 settled: false,
+                cost_model: Some(costs),
             });
             history.save()?;
 
@@ -226,7 +227,7 @@ pub async fn cmd_sim(
                 );
                 println!("  {}", "─".repeat(66).dimmed());
 
-                let costs = crate::simulator::paper_cost_model(&session.market);
+                let costs = session.costs();
                 let mut total_pnl = 0.0_f64;
                 for t in &session.trades {
                     let current = quotes
@@ -756,7 +757,7 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             continue;
         }
 
-        let costs = crate::simulator::paper_cost_model(&session.market);
+        let costs = session.costs();
         print_header(&format!("Settling — {}", session.date));
         println!("  Costs: {}", costs.describe(csym));
         println!(
@@ -971,6 +972,7 @@ mod tests {
                 win_count: Some(2),
                 loss_count: Some(0),
                 settled: true,
+                cost_model: None,
             });
         }
         let stats = h.stats("IN");
