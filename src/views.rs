@@ -505,20 +505,24 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
             ts,
         })
         .collect();
-    let (currency, source) = chart
+    let (currency, source, warnings) = chart
         .meta
-        .map(|m| (m.currency, m.data_source))
+        .map(|m| (m.currency, m.data_source, m.warnings))
         .unwrap_or_default();
+    // A fallback source or a warning (stale cache, adjusted bars) is kept;
+    // a plain Yahoo answer carries no meta.
+    let meta = (source.is_some() || !warnings.is_empty()).then(|| crate::api::QuoteMeta {
+        sources: source.into_iter().collect(),
+        warnings,
+        ..Default::default()
+    });
     History {
         symbol: symbol.to_string(),
         currency,
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
-        meta: source.map(|s| crate::api::QuoteMeta {
-            sources: vec![s],
-            ..Default::default()
-        }),
+        meta,
     }
 }
 

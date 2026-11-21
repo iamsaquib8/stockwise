@@ -6,10 +6,13 @@
 //! `checkup`, `income`, `xray`, `wrap`) call [`pending_splits`] and value an
 //! in-memory copy with the event applied ([`PendingSplits::adjusted`]), so a
 //! 2:1 split shows no fake 50% loss before `portfolio actions --apply` is run.
-//! The file itself is only changed by `portfolio actions --apply`.
+//! Indian demergers ([`crate::portfolio::DEMERGERS`]) are detected the same
+//! way, from the lots alone: the copy holds the new company's shares and the
+//! parent at its reduced cost. The file itself is only changed by
+//! `portfolio actions --apply`.
 
 use crate::api::YahooClient;
-use crate::portfolio::{Holding, Lot, Portfolio, Split};
+use crate::portfolio::{Demerger, Holding, Lot, Portfolio, Split};
 use futures_util::StreamExt;
 
 /// Yahoo requests in flight at once.
@@ -22,11 +25,22 @@ pub struct PendingSplits {
     pub by_symbol: Vec<(String, Vec<Split>)>,
     /// Symbols whose corporate actions could not be fetched.
     pub unchecked: Vec<String>,
+    /// Demergers not yet applied to a parent lot held on the record date:
+    /// (held parent symbol, demerger). Found from the lots, no network.
+    pub demergers: Vec<(String, &'static Demerger)>,
 }
 
 impl PendingSplits {
+    /// Only the demergers pending in `portfolio` (for callers with no network).
+    pub fn offline(portfolio: &Portfolio) -> Self {
+        Self {
+            demergers: portfolio.pending_demergers(),
+            ..Self::default()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.by_symbol.is_empty()
+        self.by_symbol.is_empty() && self.demergers.is_empty()
     }
 
     pub fn for_symbol(&self, symbol: &str) -> &[Split] {
@@ -46,15 +60,20 @@ impl PendingSplits {
         h.lots.iter().map(|l| adjusted_qty(l, splits)).sum()
     }
 
-    /// A copy of `portfolio` with every pending event applied to its lots,
-    /// each as a split (quantity up, price down, cost and date kept). A bonus
-    /// issue gives the same share count; how Indian tax dates the bonus
-    /// shares is left to `portfolio actions --apply`.
+    /// A copy of `portfolio` with every pending event applied to its lots.
+    /// A demerger is applied as `portfolio actions --apply` would (a lot of
+    /// the new company per parent lot, the parent's cost reduced). Splits
+    /// and bonuses are each applied as a split (quantity up, price down,
+    /// cost and date kept). A bonus issue gives the same share count; how
+    /// Indian tax dates the bonus shares is left to `portfolio actions --apply`.
     pub fn adjusted(&self, portfolio: &Portfolio) -> Portfolio {
         if self.is_empty() {
             return portfolio.clone();
         }
         let mut p = portfolio.clone();
+        for (sym, d) in &self.demergers {
+            p.apply_demerger(sym, d);
+        }
         for (sym, splits) in &self.by_symbol {
             for s in splits {
                 let as_split = Split {
@@ -67,19 +86,27 @@ impl PendingSplits {
         p
     }
 
-    /// One line per symbol: "split pending: run `portfolio actions --apply`".
+    /// One line per symbol: "split pending: run `portfolio actions --apply`",
+    /// then one per pending demerger.
     pub fn warnings(&self) -> Vec<String> {
-        self.by_symbol
-            .iter()
-            .map(|(sym, splits)| {
-                format!(
-                    "{} split pending ({}): run `stockwise portfolio actions {} --apply`. Valued at the adjusted share count meanwhile.",
-                    sym,
-                    describe(splits),
-                    sym
-                )
-            })
-            .collect()
+        let splits = self.by_symbol.iter().map(|(sym, splits)| {
+            format!(
+                "{} split pending ({}): run `stockwise portfolio actions {} --apply`. Valued at the adjusted share count meanwhile.",
+                sym,
+                describe(splits),
+                sym
+            )
+        });
+        let demergers = self.demergers.iter().map(|(sym, d)| {
+            format!(
+                "{} demerger pending ({}): run `stockwise portfolio actions {} --apply`. Valued with the {} shares and the reduced cost meanwhile.",
+                sym,
+                d.describe(sym),
+                sym,
+                d.child_symbol(sym)
+            )
+        });
+        splits.chain(demergers).collect()
     }
 
     /// Print [`PendingSplits::warnings`] in yellow.
@@ -89,6 +116,19 @@ impl PendingSplits {
             println!("  {} {}", "!".yellow(), w);
         }
     }
+}
+
+/// `symbols` plus the new companies of the demergers pending in
+/// `portfolio`, for a valuation made before [`PendingSplits::adjusted`]
+/// adds their lots.
+pub fn with_demerger_children(portfolio: &Portfolio, mut symbols: Vec<String>) -> Vec<String> {
+    for (sym, d) in portfolio.pending_demergers() {
+        let child = d.child_symbol(&sym);
+        if !symbols.contains(&child) {
+            symbols.push(child);
+        }
+    }
+    symbols
 }
 
 /// `2:1 on 2024-10-28, 1:1 on ...`.
@@ -150,7 +190,7 @@ pub async fn pending_splits(client: &YahooClient, portfolio: &Portfolio) -> Pend
         .buffer_unordered(CONCURRENCY)
         .collect()
         .await;
-    let mut out = PendingSplits::default();
+    let mut out = PendingSplits::offline(portfolio);
     for (sym, found) in results {
         match found {
             Some(v) if !v.is_empty() => out.by_symbol.push((sym, v)),
@@ -163,14 +203,15 @@ pub async fn pending_splits(client: &YahooClient, portfolio: &Portfolio) -> Pend
     out
 }
 
-/// [`pending_splits`] with a fresh client; empty when Yahoo is unreachable.
+/// [`pending_splits`] with a fresh client; only the demergers (which need
+/// no network) when Yahoo is unreachable.
 pub async fn pending_splits_live(portfolio: &Portfolio) -> PendingSplits {
     if cfg!(test) || portfolio.holdings.is_empty() {
-        return PendingSplits::default();
+        return PendingSplits::offline(portfolio);
     }
     match YahooClient::new().await {
         Ok(client) => pending_splits(&client, portfolio).await,
-        Err(_) => PendingSplits::default(),
+        Err(_) => PendingSplits::offline(portfolio),
     }
 }
 
@@ -195,6 +236,7 @@ mod tests {
                 pending_of(h, vec![split.clone(), Split::new("2023-01-01", 5.0, 1.0)]),
             )],
             unchecked: vec![],
+            demergers: vec![],
         };
         // The split before the purchase is not pending.
         assert_eq!(pending.for_symbol("RELIANCE.NS"), &[split]);
@@ -220,7 +262,40 @@ mod tests {
         let pending = PendingSplits {
             by_symbol: vec![("TCS.NS".into(), vec![bonus])],
             unchecked: vec![],
+            demergers: vec![],
         };
         assert_eq!(pending.adjusted(&p).holding("TCS.NS").unwrap().shares, 20.0);
+    }
+
+    #[test]
+    fn a_pending_demerger_shows_in_the_valuation_copy_only() {
+        let p = portfolio_with("ITC.NS", 1000.0, 400.0, "2020-03-02");
+        let pending = PendingSplits::offline(&p);
+        assert!(!pending.is_empty());
+        let adj = pending.adjusted(&p);
+        let hotels = adj.holding("ITCHOTELS.NS").unwrap();
+        assert_eq!(hotels.shares, 100.0);
+        assert!(
+            (hotels.cost_basis() + adj.holding("ITC.NS").unwrap().cost_basis() - 400_000.0).abs()
+                < 1e-6
+        );
+        assert!(
+            p.holding("ITCHOTELS.NS").is_none(),
+            "the original is untouched"
+        );
+        let w = pending.warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("demerger pending"), "{}", w[0]);
+        assert!(
+            w[0].contains("portfolio actions ITC.NS --apply"),
+            "{}",
+            w[0]
+        );
+        assert_eq!(
+            with_demerger_children(&p, vec!["ITC.NS".into()]),
+            vec!["ITC.NS".to_string(), "ITCHOTELS.NS".to_string()]
+        );
+        // Once applied, nothing is pending.
+        assert!(PendingSplits::offline(&adj).is_empty());
     }
 }

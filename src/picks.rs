@@ -694,14 +694,16 @@ pub async fn run(
         // Missing figures (a fallback snapshot without market caps or
         // average volume) are a data problem, not a floor set too high.
         let no_mcap = below.iter().filter(|q| q.market_cap.is_none()).count();
-        let no_adv = below
-            .iter()
-            .filter(|q| {
-                q.average_daily_volume_3_month.is_none() || q.regular_market_price.is_none()
-            })
-            .count();
-        let missing = (floors.min_mcap > 0.0 && no_mcap == universe_len)
-            || (floors.min_adv > 0.0 && no_adv == universe_len);
+        let lacks_adv = |q: &Quote| {
+            q.average_daily_volume_3_month.is_none() || q.regular_market_price.is_none()
+        };
+        let no_adv = below.iter().filter(|q| lacks_adv(q)).count();
+        // Every rejected stock lacks a figure some enabled floor needs (one
+        // may lack its market cap, another its volume): a data problem.
+        let missing = below.iter().all(|q| {
+            (floors.min_mcap > 0.0 && q.market_cap.is_none())
+                || (floors.min_adv > 0.0 && lacks_adv(q))
+        });
         if missing {
             bail!(
                 "None of the {} stocks has the figures the floors need (market cap: {} missing, \

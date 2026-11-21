@@ -940,6 +940,7 @@ pub(crate) async fn load_portfolio_report_named(
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
+    let symbols = crate::corp_actions::with_demerger_children(&portfolio, symbols);
     let mut val = value_holdings(src, &symbols, market, base).await?;
     let pending = crate::corp_actions::pending_splits_live(&portfolio).await;
     let portfolio = pending.adjusted(&portfolio);
@@ -1047,6 +1048,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 .iter()
                 .map(|h| h.symbol.clone())
                 .collect();
+            let symbols = crate::corp_actions::with_demerger_children(&portfolio, symbols);
             let client = YahooClient::new().await.ok();
             let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
             if !live {
@@ -1054,7 +1056,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             }
             let pending = match client.as_ref().filter(|_| live) {
                 Some(c) => crate::corp_actions::pending_splits(c, &portfolio).await,
-                None => Default::default(),
+                None => crate::corp_actions::PendingSplits::offline(&portfolio),
             };
             let portfolio = pending.adjusted(&portfolio);
             if live {
@@ -1085,6 +1087,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     }
 
     let symbols: Vec<String> = loaded.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let symbols = crate::corp_actions::with_demerger_children(&loaded, symbols);
     let client = YahooClient::new().await.ok();
     let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
     let Some(client) = client.filter(|_| live) else {
@@ -2500,8 +2503,100 @@ pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market)
     Ok(())
 }
 
-/// Splits, bonuses and dividends since the first purchase of each holding.
-/// Shows what would change; only `apply` writes, and applying twice is a no-op.
+/// The demergers in [`pf::DEMERGERS`] of the parent `sym`, one report line
+/// each for those not yet recorded, which are added to `plan`. With `apply`
+/// each is also applied to `portfolio` (the working copy). Counts go to
+/// `(lots, done)`: parent lots to split, demergers already applied.
+fn preview_demergers(
+    portfolio: &mut Portfolio,
+    sym: &str,
+    apply: bool,
+    plan: &mut Vec<(String, &'static pf::Demerger)>,
+    notes: &mut Vec<String>,
+    (lots, done): (&mut usize, &mut usize),
+) -> Vec<String> {
+    let cur = pf::symbol_currency(sym);
+    let mut lines = Vec::new();
+    for d in pf::demergers_for(sym) {
+        let Some(h) = portfolio.holding(sym) else {
+            continue;
+        };
+        let child = d.child_symbol(sym);
+        // Sold after the record date before this was applied: the new
+        // shares of those lots are not added, and the sale used the full cost.
+        let sold: f64 = portfolio
+            .realized
+            .iter()
+            .filter(|s| {
+                s.symbol == h.symbol
+                    && s.buy_date.as_str() < d.record_date
+                    && s.sell_date.as_str() >= d.record_date
+            })
+            .map(|s| s.qty)
+            .sum();
+        let mut copy = h.lots.clone();
+        let out = pf::apply_demerger_to(&mut copy, d);
+        if out.lots == 0 {
+            if h.lots.iter().any(|l| l.adjustments.contains(&d.id())) {
+                *done += 1;
+            }
+            continue;
+        }
+        if sold > 0.0 {
+            notes.push(format!(
+                "{} share(s) of {} bought before its {} record date were sold after it: \
+                 their {} shares are not added and those sales used the full cost.",
+                sold, h.symbol, d.record_date, child
+            ));
+        }
+        if portfolio
+            .holding(&child)
+            .is_some_and(|c| c.lots.iter().any(|l| l.source != pf::DEMERGER_SOURCE))
+        {
+            notes.push(format!(
+                "You already hold {child}. If a broker import added the shares this demerger \
+                 gave you, they are now counted twice: remove the imported lot."
+            ));
+        }
+        let child_qty: f64 = out.child_lots.iter().map(|l| l.qty).sum();
+        let child_cost: f64 = out.child_lots.iter().map(Lot::cost).sum();
+        let mut what = format!(
+            "+{} {} at {} ({}% of cost), keeping the purchase dates; {} keeps {}% of its cost",
+            child_qty,
+            child,
+            format_price(child_cost, cur),
+            d.child_cost_pct,
+            h.symbol,
+            ((100.0 - d.child_cost_pct) * 100.0).round() / 100.0
+        );
+        if out.fraction_dropped > 1e-9 {
+            what.push_str(&format!(
+                "; {} fractional share(s) paid in cash, not recorded",
+                (out.fraction_dropped * 1e6).round() / 1e6
+            ));
+        }
+        lines.push(format!(
+            "  {} Demerger into {} ({}:{}, record date {}) — {} lot(s): {}",
+            if apply { "✓".green() } else { "+".yellow() },
+            child,
+            d.child_shares,
+            d.parent_shares,
+            d.record_date,
+            out.lots,
+            what
+        ));
+        *lots += out.lots;
+        plan.push((sym.to_string(), d));
+        if apply {
+            portfolio.apply_demerger(sym, d);
+        }
+    }
+    lines
+}
+
+/// Splits, bonuses, Indian demergers and dividends since the first purchase
+/// of each holding. Shows what would change; only `apply` writes, and
+/// applying twice is a no-op.
 pub async fn cmd_portfolio_actions(
     symbol: Option<&str>,
     apply: bool,
@@ -2555,7 +2650,20 @@ pub async fn cmd_portfolio_actions(
     let (mut done_splits, mut done_divs) = (0usize, 0usize);
     let mut plan = Vec::new();
     let mut failed = Vec::new();
+    // Demergers come from `pf::DEMERGERS`, not Yahoo: (parent symbol,
+    // demerger) for each one still to record; written only with `apply`.
+    let mut demerger_plan: Vec<(String, &'static pf::Demerger)> = Vec::new();
+    let (mut demerger_lots, mut done_demergers) = (0usize, 0usize);
+    let mut demerger_notes: Vec<String> = Vec::new();
     for sym in &targets {
+        let demerger_lines = preview_demergers(
+            &mut portfolio,
+            sym,
+            apply,
+            &mut demerger_plan,
+            &mut demerger_notes,
+            (&mut demerger_lots, &mut done_demergers),
+        );
         let first = portfolio
             .holding(sym)
             .into_iter()
@@ -2573,6 +2681,12 @@ pub async fn cmd_portfolio_actions(
             Ok(a) => a,
             Err(e) => {
                 failed.push(format!("{}: {:#}", sym, e));
+                if !demerger_lines.is_empty() {
+                    println!("\n  {}", sym.cyan().bold());
+                    for l in &demerger_lines {
+                        println!("{}", l);
+                    }
+                }
                 continue;
             }
         };
@@ -2588,7 +2702,7 @@ pub async fn cmd_portfolio_actions(
         let currency = quote_currency.or_else(|| pf::symbol_currency(sym).map(str::to_string));
         let cur = currency.as_deref();
 
-        let mut lines = Vec::new();
+        let mut lines = demerger_lines;
         for split in &splits {
             let Some(h) = portfolio.holding(sym) else {
                 continue;
@@ -2695,33 +2809,41 @@ pub async fn cmd_portfolio_actions(
     }
 
     cal.save();
-    if failed.len() == targets.len() {
+    if failed.len() == targets.len() && demerger_lots == 0 {
         bail!("Could not fetch corporate actions: {}", failed.join("; "));
     }
-    let pending = split_lots + bonus_lots + new_divs;
+    let pending = split_lots + bonus_lots + new_divs + demerger_lots;
     println!();
     let totals: Vec<String> = div_total
         .iter()
         .map(|(c, t)| format_price(*t, Some(c.as_str())))
         .collect();
-    let earlier = if done_splits + done_divs > 0 {
+    let earlier = if done_splits + done_divs + done_demergers > 0 {
+        let demergers = if done_demergers > 0 {
+            format!(", {} demerger(s)", done_demergers)
+        } else {
+            String::new()
+        };
         format!(
-            " ({} split(s) and {} dividend(s) applied earlier)",
-            done_splits, done_divs
+            " ({} split(s){} and {} dividend(s) applied earlier)",
+            done_splits, demergers, done_divs
         )
     } else {
         String::new()
     };
     if pending == 0 {
         println!(
-            "  {} Up to date — no new splits, bonuses or dividends since your purchases{}.",
+            "  {} Up to date — no new splits, bonuses, demergers or dividends since your purchases{}.",
             "✓".green(),
             earlier
         );
     } else if apply {
-        // The network work is done: apply it to the file as it is now. Both
-        // steps are idempotent, so a lot already adjusted is skipped.
+        // The network work is done: apply it to the file as it is now. Every
+        // step is idempotent, so a lot already adjusted is skipped.
         Portfolio::update(|p| {
+            for (sym, d) in &demerger_plan {
+                p.apply_demerger(sym, d);
+            }
             for (sym, splits, divs, currency) in &plan {
                 for split in splits {
                     p.apply_split(sym, split);
@@ -2732,11 +2854,17 @@ pub async fn cmd_portfolio_actions(
             }
             Ok(())
         })?;
-        let bonus = if bonus_lots > 0 {
+        let mut bonus = if bonus_lots > 0 {
             format!(", added bonus shares for {} lot(s)", bonus_lots)
         } else {
             String::new()
         };
+        if demerger_lots > 0 {
+            bonus.push_str(&format!(
+                ", split the cost of {} lot(s) for demergers",
+                demerger_lots
+            ));
+        }
         println!(
             "  {} Adjusted {} lot(s) for splits/bonuses{} and recorded {} dividend(s){}.",
             "✓".green().bold(),
@@ -2750,9 +2878,14 @@ pub async fn cmd_portfolio_actions(
             }
         );
     } else {
+        let demergers = if demerger_lots > 0 {
+            format!(", {} lot(s) to split for demergers", demerger_lots)
+        } else {
+            String::new()
+        };
         println!(
-            "  {} lot(s) to adjust for splits/bonuses, {} lot(s) to receive bonus shares, {} dividend(s) to record. Nothing changed yet —",
-            split_lots, bonus_lots, new_divs
+            "  {} lot(s) to adjust for splits/bonuses, {} lot(s) to receive bonus shares{}, {} dividend(s) to record. Nothing changed yet —",
+            split_lots, bonus_lots, demergers, new_divs
         );
         println!(
             "  run {} to apply them (safe to repeat).",
@@ -2783,6 +2916,25 @@ pub async fn cmd_portfolio_actions(
             "!".yellow(),
             nse_offline_note(&cal, &nse_offline).dimmed()
         );
+    }
+    if demerger_lots > 0 {
+        println!(
+            "  {}",
+            "Demergers: each parent lot held on the record date keeps its quantity and purchase \
+             date and gives the company's published share of its cost to a new lot of the \
+             resulting company, dated on the same purchase date (Income-tax Act Sec. 49(2C), \
+             49(2D) and 2(42A)). Fractions of a share, paid in cash by the company, are not \
+             recorded."
+                .dimmed()
+        );
+        let mut sources: Vec<&str> = demerger_plan.iter().map(|(_, d)| d.source).collect();
+        sources.dedup();
+        for src in sources {
+            println!("  {}", format!("Source: {src}").dimmed());
+        }
+    }
+    for n in &demerger_notes {
+        println!("  {} {}", "!".yellow(), n.dimmed());
     }
     println!();
     Ok(())
@@ -4045,6 +4197,7 @@ mod tests {
                 vec![Split::new("2024-10-28", 2.0, 1.0)],
             )],
             unchecked: vec![],
+            demergers: vec![],
         };
         let q = Quote {
             symbol: Some("RELIANCE.NS".into()),

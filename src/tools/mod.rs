@@ -143,15 +143,19 @@ pub struct Hints {
     pub open_world: bool,
 }
 
-/// The annotations of `tool`. Read tools are read-only and idempotent
-/// (`picks` also appends its list to the local track record, once a day per
-/// list, the same bookkeeping as `stockwise picks`). Write tools only touch
+/// Read tools that also write a local record: `picks` appends its list to
+/// the track record (`signal_log.json`), once a day per list, like
+/// `stockwise picks`. Not read-only, but never destructive and idempotent.
+pub const LOGGING_READS: &[&str] = &["picks"];
+
+/// The annotations of `tool`. Read tools are read-only (except
+/// [`LOGGING_READS`]) and idempotent. Write tools only touch
 /// local files, so they are closed-world; see [`workspace::write_effect`]
 /// for which overwrite or remove and which repeat safely.
 pub fn hints(tool: &Tool) -> Hints {
     match access(tool.name) {
         Access::Read => Hints {
-            read_only: true,
+            read_only: !LOGGING_READS.contains(&tool.name),
             destructive: false,
             idempotent: true,
             open_world: !CLOSED_WORLD.contains(&tool.name),
@@ -1692,7 +1696,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "correlate",
         title: "Correlation of stocks",
-        description: "How closely 2 to 10 tickers moved together over the last year: the correlation matrix of daily returns on common trading days (1 moves together, 0 unrelated, -1 opposite). Useful to see whether holdings diversify each other.",
+        description: "How closely 2 to 10 tickers moved together over the last year: the correlation of daily returns on common trading days for each pair, as correlations[A][B] (1 moves together, 0 unrelated, -1 opposite). Useful to see whether holdings diversify each other.",
         params: &[
             req(
                 "symbols",

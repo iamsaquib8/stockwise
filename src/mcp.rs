@@ -691,15 +691,16 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
             )
         }
         "tax_aware_rebalance" => format!(
-            "Help me rebalance my StockWise portfolio with tax in mind. Call rebalance for the \
-             drift from my target weights, tax_estimate for realized gains and the exemption \
-             left, holdings_lots for each lot's holding period, and harvest for losses that \
-             could offset gains. For each holding over its target show the trim, the tax it \
-             would cost (short- or long-term, by lot), and cheaper ways to get there: using \
-             new money instead of selling, waiting for lots about to turn long-term, or \
-             pairing with harvestable losses. Present it as options and their costs, and \
-             remind me to check the figures against my broker's tax P&L. TODO(0.9 workstream \
-             G): call `rebalance_plan` with `raise` once it lands.{POLICY}"
+            "Show me my StockWise portfolio's drift from its target weights with the tax \
+             figures next to it. Call rebalance for the drift and the trades it computes, \
+             tax_estimate for realized gains and the exemption left, holdings_lots for each \
+             lot's holding period and the next lot to turn long-term, and harvest for the \
+             unrealized losses it lists. For each holding off its target show the drift and the \
+             trade rebalance returned, and for any sale in it the tax estimate by lot (short- \
+             or long-term) from the tools. Report only what the tools returned: do not choose \
+             which holdings to sell, when to sell, or how to pair sales with losses. Remind me \
+             to check the figures against my broker's tax P&L. TODO(0.9 workstream G): call \
+             `rebalance_plan` with `raise` once it lands.{POLICY}"
         ),
         "weekly_review" => format!(
             "Review my week with StockWise. Call portfolio_summary and portfolio_pme for how the \

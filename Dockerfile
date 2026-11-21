@@ -18,6 +18,7 @@ COPY src ./src
 COPY examples/strategies ./examples/strategies
 COPY web ./web
 COPY skills/stockwise/SKILL.md ./skills/stockwise/SKILL.md
+COPY docs/methodology.md ./docs/methodology.md
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \
