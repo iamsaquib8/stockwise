@@ -1503,6 +1503,93 @@ impl Portfolio {
         self.sell_lots(symbol, qty, price, date, source, None, false)
     }
 
+    /// Sell `qty` shares taken from the lots numbered `lot_nos` (1-based,
+    /// oldest first, as `portfolio lots` lists them), in the order given:
+    /// specific identification, as US brokers allow. Records one [`Sale`]
+    /// per lot touched and drops the holding when nothing is left. Indian
+    /// demat sales are first-in, first-out; use [`Portfolio::sell_fifo`].
+    pub fn sell_specific(
+        &mut self,
+        symbol: &str,
+        qty: f64,
+        price: f64,
+        date: &str,
+        source: &str,
+        lot_nos: &[usize],
+    ) -> Result<Vec<Sale>> {
+        if qty <= EPS || !qty.is_finite() {
+            bail!("Quantity to sell must be positive");
+        }
+        if price < 0.0 || !price.is_finite() {
+            bail!("Sale price can't be negative");
+        }
+        if lot_nos.is_empty() {
+            bail!("Give the lots to sell from, e.g. --lots 2,3");
+        }
+        let sym = symbol.to_uppercase();
+        let Some(h) = self.holding_mut(&sym) else {
+            bail!("{} is not in this portfolio", sym);
+        };
+        let count = h.lots.len();
+        let mut order: Vec<usize> = Vec::new();
+        for &n in lot_nos {
+            if n == 0 || n > count {
+                bail!("{} has no lot #{} (it has {})", sym, n, count);
+            }
+            if order.contains(&(n - 1)) {
+                bail!("Lot #{} is listed twice", n);
+            }
+            let lot = &h.lots[n - 1];
+            if lot.date.as_str() > date {
+                bail!(
+                    "Lot #{} of {} was bought on {}, after the sale date {}",
+                    n,
+                    sym,
+                    lot.date,
+                    date
+                );
+            }
+            order.push(n - 1);
+        }
+        let available: f64 = order.iter().map(|&i| h.lots[i].qty).sum();
+        if qty > available + EPS {
+            bail!(
+                "Cannot sell {} {} from lot{} {}: they hold {}",
+                qty,
+                sym,
+                if order.len() == 1 { "" } else { "s" },
+                lot_nos
+                    .iter()
+                    .map(|n| format!("#{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                available
+            );
+        }
+        let mut remaining = qty;
+        let mut sales = Vec::new();
+        for i in order {
+            if remaining <= EPS {
+                break;
+            }
+            let lot = &mut h.lots[i];
+            let take = if remaining >= lot.qty - EPS {
+                lot.qty
+            } else {
+                remaining
+            };
+            sales.push(Sale::from_lot(&sym, lot, take, date, price, source));
+            lot.shrink(take);
+            remaining -= take;
+        }
+        h.recompute();
+        if h.lots.is_empty() {
+            self.holdings.retain(|h| h.symbol != sym);
+        }
+        self.realized.extend(sales.iter().cloned());
+        Ok(sales)
+    }
+
     /// [`Portfolio::sell_fifo`] from one account's lots only (`None`: any),
     /// taking shares bought on `date` first when `net_same_day` (a buy and
     /// sell on one day are intraday and leave the older lots alone); those

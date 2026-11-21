@@ -631,35 +631,59 @@ pub(crate) async fn run_checkup(
             None
         }
     };
+    // The same normalized targets and 5/25 bands as `portfolio target drift`.
     let drift = (!g.portfolio.targets.is_empty()).then(|| {
         let band = g
             .portfolio
             .drift_tolerance
             .unwrap_or(crate::config::effective_profile().default_drift_pct);
-        g.portfolio
-            .targets
+        let band = if band > 0.0 {
+            band
+        } else {
+            crate::rebalance::ABSOLUTE_BAND_PCT
+        };
+        let base = analysis.base_currency.clone();
+        let inputs: Vec<crate::rebalance::HoldingInput> = analysis
+            .positions
             .iter()
-            .map(|(key, target)| {
-                let canon = crate::xray::canonical_ticker(key);
-                let current = analysis
-                    .positions
-                    .iter()
-                    .find(|p| crate::xray::canonical_ticker(&p.symbol) == canon)
-                    .and_then(|p| p.weight_pct)
-                    .or_else(|| {
-                        analysis
-                            .by_sector
-                            .iter()
-                            .find(|s| s.name.eq_ignore_ascii_case(key))
-                            .map(|s| s.weight_pct)
-                    })
-                    .unwrap_or(0.0);
-                ck::DriftFacts {
-                    key: key.clone(),
-                    current_pct: current,
-                    target_pct: *target,
-                    band_pct: band,
-                }
+            .filter_map(|p| {
+                let value = p.value_base?;
+                let is_fund = crate::offmarket::is_fund(&p.symbol);
+                let foreign = p
+                    .currency
+                    .as_deref()
+                    .is_some_and(|c| !c.eq_ignore_ascii_case(&base));
+                Some(crate::rebalance::HoldingInput {
+                    symbol: p.symbol.clone(),
+                    shares: p.shares,
+                    value,
+                    price: if p.shares > 0.0 {
+                        value / p.shares
+                    } else {
+                        0.0
+                    },
+                    sector: p.sector.clone(),
+                    is_fund,
+                    is_etf: crate::xray::is_known_etf(&p.symbol),
+                    asset_class: crate::rebalance::classify(
+                        &p.symbol,
+                        is_fund,
+                        crate::xray::default_etf_category(&p.symbol),
+                        foreign,
+                    ),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        crate::rebalance::drift_report(&inputs, &g.portfolio.targets, band, &base)
+            .rows
+            .into_iter()
+            .filter(|r| r.kind != "untargeted")
+            .map(|r| ck::DriftFacts {
+                key: r.key,
+                current_pct: r.current_pct,
+                target_pct: r.target_pct,
+                band_pct: r.band_pct,
             })
             .collect()
     });

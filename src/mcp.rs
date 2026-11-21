@@ -700,8 +700,8 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
              would cost (short- or long-term, by lot), and cheaper ways to get there: using \
              new money instead of selling, waiting for lots about to turn long-term, or \
              pairing with harvestable losses. Present it as options and their costs, and \
-             remind me to check the figures against my broker's tax P&L. TODO(0.9 workstream \
-             G): call `rebalance_plan` with `raise` once it lands.{POLICY}"
+             remind me to check the figures against my broker's tax P&L. If I need cash, call \
+             rebalance with `raise` for the sells that raise it at the lowest tax.{POLICY}"
         ),
         "weekly_review" => format!(
             "Review my week with StockWise. Call portfolio_summary and portfolio_pme for how the \

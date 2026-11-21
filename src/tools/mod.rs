@@ -843,8 +843,11 @@ pub const TOOLS: &[Tool] = &[
         name: "rebalance",
         title: "Portfolio rebalance plan",
         description: "Rebalance plan for the user's portfolio against their saved target weights \
-                      (or equal weight): current vs target weight, drift tolerance band, and \
-                      buy/sell trade sizing (or buy-only allocation when `inflow` is provided).",
+                      (symbols, sectors or asset classes; equal weight without any): current vs \
+                      target weight, drift tolerance band, whole-share trades whose cash \
+                      balances, the lots each sell takes, its STCG/LTCG tax and trade costs. \
+                      `inflow` invests new cash buy-only (add `with_sells` for a full \
+                      rebalance); `raise` sells only, at the lowest tax, to raise cash.",
         params: &[
             opt(
                 "inflow",
@@ -853,6 +856,27 @@ pub const TOOLS: &[Tool] = &[
                     max: 1e11,
                 },
                 "Fresh cash inflow for buy-only rebalancing without selling",
+            ),
+            opt(
+                "with_sells",
+                Kind::Bool,
+                "With inflow: also sell overweight holdings (a full rebalance)",
+            ),
+            opt(
+                "raise",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1e11,
+                },
+                "Sell only, to raise this much cash at the lowest tax",
+            ),
+            opt(
+                "cash_buffer",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e11,
+                },
+                "Cash to keep uninvested",
             ),
             opt(
                 "drift",

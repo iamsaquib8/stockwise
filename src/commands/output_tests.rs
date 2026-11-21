@@ -1576,3 +1576,88 @@ fn us_harvest_does_not_count_recent_bonus_shares_as_a_buy() {
         .unwrap();
     assert_eq!(row.recent_buy, None);
 }
+
+/// `harvest -m us` sells only the losing lots: the row names them, and
+/// recording the sale with `portfolio sell --lots` books exactly that loss.
+#[test]
+fn us_harvest_is_recordable_with_lots() {
+    // AAPL: 10 @ 100 (2025-01-06, a gain) and 8 @ 200 (2026-03-02, the
+    // loss), price 150. FIFO would sell the gain first.
+    let mut p = lots(&[
+        ("AAPL", 10.0, 100.0, "2025-01-06"),
+        ("AAPL", 8.0, 200.0, "2026-03-02"),
+    ]);
+    let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let val = Valuation::new(
+        vec![Quote {
+            currency: Some("USD".into()),
+            ..quote("AAPL", Some(150.0), None)
+        }],
+        &symbols,
+        Market::Us,
+        None,
+    );
+    let h = super::holdings::compute_harvest(&p, &val, Market::Us, day("2026-11-01"));
+    let row = &h.loss_candidates[0];
+    assert_eq!(row.shares, 8.0);
+    assert_eq!(row.pnl, -400.0);
+    assert_eq!(row.lots.as_deref(), Some("2"));
+    assert_eq!(
+        row.record.as_deref(),
+        Some("stockwise portfolio sell AAPL 8 --lots 2")
+    );
+    // Record it as the row says.
+    let sales = p
+        .sell_specific("AAPL", row.shares, 150.0, "2026-11-01", "manual", &[2])
+        .unwrap();
+    let booked: f64 = sales.iter().map(|s| s.gain()).sum();
+    assert!((booked - row.pnl).abs() < 1e-9);
+    // The gain lot is still held.
+    let left = p.holding("AAPL").unwrap();
+    assert_eq!(left.lots.len(), 1);
+    assert_eq!(left.lots[0].price, 100.0);
+}
+
+/// The LTCG step-up sells the exact share count whose gain fits the ₹1.25
+/// lakh exemption left, oldest lots first, and labels the rate with cess.
+#[test]
+fn ltcg_step_up_sells_the_exact_share_count() {
+    // TCS: 100 @ 500 (2020) and 100 @ 900 (2024-01), price 1,500; both
+    // long-term on 2026-11-01. Lot 1: 100 × 1,000 = ₹1,00,000. The ₹25,000
+    // left fits floor(25,000 / 600) = 41 shares of lot 2 (₹24,600).
+    let p = lots(&[
+        ("TCS.NS", 100.0, 500.0, "2020-01-01"),
+        ("TCS.NS", 100.0, 900.0, "2024-01-15"),
+    ]);
+    let h = super::holdings::compute_harvest(
+        &p,
+        &valued(&p, vec![quote("TCS.NS", Some(1500.0), None)]),
+        Market::In,
+        day("2026-11-01"),
+    );
+    let r = &h.gain_harvest_candidates[0];
+    assert_eq!(r.shares, 141.0);
+    assert_eq!(r.lt_pnl, 124_600.0);
+    // 12.5% + 4% cess = 13%.
+    assert_eq!(r.estimated_tax_saved, 16_198.0);
+    assert_eq!(
+        r.record.as_deref(),
+        Some("stockwise portfolio sell TCS.NS 141")
+    );
+    assert!(h.notes.iter().any(|n| n.contains("next trading day")));
+}
+
+/// Losses brought forward set off first, so more long-term gain fits.
+#[test]
+fn carried_forward_losses_widen_the_tax_free_room() {
+    let p = lots(&[("TCS.NS", 200.0, 500.0, "2020-01-01")]);
+    let val = valued(&p, vec![quote("TCS.NS", Some(1500.0), None)]);
+    let carry = super::holdings::CarriedForward {
+        short_term: 0.0,
+        long_term: 20_000.0,
+    };
+    let h = super::holdings::compute_harvest_with(&p, &val, Market::In, day("2026-11-01"), carry);
+    assert!((h.tax_free_gain_room - 145_000.0).abs() < 0.02);
+    assert_eq!(h.gain_harvest_candidates[0].shares, 145.0);
+    assert_eq!(h.carried_forward.long_term, 20_000.0);
+}
