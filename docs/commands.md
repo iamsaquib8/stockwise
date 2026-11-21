@@ -443,7 +443,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N [--date YYYY-MM-DD] [--qty Q] [--price P] \| --delete] [--undo-sale N]` | Lots, sales, dividends and XIRR of one holding, each numbered. `--lot N` corrects a lot's date, quantity or price, or `--delete`s it without recording a sale; `--undo-sale N` drops sale N from the realised gains and puts its shares back as the lot they came from |
 | `portfolio restore [N]` | Lists the last five saved versions of the portfolio (`portfolio.json.1` is the newest), or brings version N back. The version it replaces becomes backup 1, so a restore can be undone |
-| `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares and records dividends, and is safe to repeat |
+| `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses, Indian demergers and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares, adds lots of a demerged company at the official share of cost, records dividends, and is safe to repeat |
 | `portfolio list` | Your portfolios: the default one and every named one |
 | `portfolio benchmark [NIFTY\|SENSEX\|SP500\|...] [-p 1y] [--base inr\|usd] [--json\|--csv]` | Time-weighted return against an index over the period, from the lots held each day: alpha, beta, tracking error, and attribution by holding and sector (see [below](#benchmark-and-attribution)) |
 | `portfolio pme [NIFTY\|SPY\|VOO\|VWCE\|NIFTYBEES\|...] [--base inr\|usd] [--json\|--csv]` | Public Market Equivalent (Index Twin): mirror exact tradebook cash flows into a passive benchmark; computes Kaplan-Schoar PME, Direct Alpha, twin value, and net currency value added vs the index (see [below](#public-market-equivalent-index-twin)) |
@@ -1107,6 +1107,21 @@ two lots — 100 @ ₹1,000 and 100 @ ₹0 — and selling 100 at ₹600 records
 stock, still multiplies the lots. When NSE cannot be reached, splits are
 applied as splits and the output says so: check any bonus lots among them
 against your tax statement.
+
+Indian demergers come from a table in StockWise, not Yahoo: Reliance → Jio
+Financial Services (record date 20 Jul 2023, 1 for 1, 4.68% of cost), ITC →
+ITC Hotels (6 Jan 2025, 1 for 10, 13.51%) and Tata Motors (`TATAMOTORS` or
+`TMPV`) → `TMCV` (14 Oct 2025, 1 for 1, 31.15%). Each figure is from the
+company's own filing with the exchanges. For every lot bought before the record
+date, `--apply` adds a lot of the new company with the same purchase date
+(Sec. 2(42A)) and that share of the lot's cost and charges (Sec. 49(2C)); the
+parent lot keeps its quantity and the rest of the cost (Sec. 49(2D)). The
+company issues whole shares per demat account and pays for fractions in cash,
+so each account's new shares are rounded down; the cash is not recorded. Until
+it is applied, `portfolio`, `analyze`, `checkup`, `income`, `xray` and `wrap`
+value a copy with the demerger in it and print "demerger pending". If a broker
+import already added the new shares, `--apply` warns that they are now counted
+twice.
 
 **Imports.** A holdings export (Kite, INDmoney) has no purchase dates: existing
 lots are kept and only the quantity is matched — more shares add a lot dated
