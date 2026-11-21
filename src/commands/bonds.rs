@@ -8,7 +8,8 @@ use chrono::NaiveDate;
 use std::time::Duration;
 
 /// Network timeout for the CCIL and RBI pages.
-const TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const BONDS_TIMEOUT: Duration = Duration::from_secs(20);
+const TIMEOUT: Duration = BONDS_TIMEOUT;
 
 fn print_rows<T: Serialize + CsvRow>(fmt: Format, rows: &[T]) -> Result<()> {
     match fmt {
@@ -131,7 +132,7 @@ pub async fn cmd_bonds_list(query: Option<&str>, fmt: Format) -> Result<()> {
     Ok(())
 }
 
-fn matches_query(s: &Security, q: &str) -> bool {
+pub(crate) fn matches_query(s: &Security, q: &str) -> bool {
     let q = q.trim();
     if q.len() == 4
         && let Ok(year) = q.parse::<i32>()

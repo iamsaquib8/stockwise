@@ -101,13 +101,21 @@ and their `_remove` pairs change them.
 the advance-tax schedule, `harvest` for loss and 112A harvesting. With the CLI,
 `stockwise tax export in --fy 2025-26 --json` gives Schedule CG rows.
 
+**Indian fixed income, gold and currency.** `bonds_yields` (G-sec curve),
+`bonds_list` and `bonds_calc` (price, yield, duration of a G-sec or T-bill),
+`commodity` (gold and silver in rupees; `view: sgb` for Sovereign Gold Bonds
+against gold), `fx_history` (USD/INR and other pairs). `returns`, `correlate`
+and `compare` work for any ticker; `portfolio_wrap` with `fy: 2025-26`
+reviews an Indian financial year. Prompts `mf_review` and
+`advance_tax_check` cover funds and advance tax.
+
 **Results season.** `calendar` and `income_calendar` for dates,
 `quarterly_results` and `events` for what was reported.
 
 **MCP extras.** Built-in prompts: `daily_briefing`, `should_i_buy`,
 `exit_check`, `smallcap_short_scan`, `tax_aware_rebalance`, `weekly_review`,
-`review_portfolio`, `tax_harvest_check`, `explain_option_chain`,
-`onboard_profile`. Resources: `stockwise://portfolio`, `watchlist`, `alerts`,
+`mf_review`, `advance_tax_check`, `review_portfolio`, `tax_harvest_check`,
+`explain_option_chain`, `onboard_profile`. Resources: `stockwise://portfolio`, `watchlist`, `alerts`,
 `profile`, `picks/latest`, `track-record`, `methodology`, and
 `stockwise://quote/{symbol}`. The main tools also return `structuredContent`
 that follows their `outputSchema`.

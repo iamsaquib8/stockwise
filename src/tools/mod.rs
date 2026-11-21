@@ -14,6 +14,7 @@
 mod args;
 pub(crate) mod extra;
 mod handlers;
+mod more;
 pub mod schema;
 mod workspace;
 
@@ -173,7 +174,8 @@ pub fn default_timeout(name: &str) -> std::time::Duration {
     let secs = match name {
         "picks" | "picks_review" | "market_conditions" | "portfolio_analyze"
         | "portfolio_checkup" | "portfolio_pme" | "backtest" | "screen" | "verdicts" | "movers"
-        | "ipo_analyze" | "mf_bleed" | "income_calendar" => 180,
+        | "ipo_analyze" | "mf_bleed" | "income_calendar" | "compare" | "returns" | "correlate"
+        | "portfolio_wrap" => 180,
         _ => 60,
     };
     std::time::Duration::from_secs(secs)
@@ -1529,6 +1531,163 @@ pub const TOOLS: &[Tool] = &[
             Kind::Integer { min: 1, max: 100 },
             "How many (default 20)",
         )],
+        personal: true,
+    },
+    // India-first extras; handlers in more.rs.
+    Tool {
+        name: "bonds_yields",
+        title: "Indian government bond yields",
+        description: "India's government securities yield curve: T-bill and G-sec yields by tenor (91 days to 40 years) with the benchmark security, its yield to maturity and the date, from CCIL (RBI's list when CCIL is down).",
+        params: &[],
+        personal: false,
+    },
+    Tool {
+        name: "bonds_list",
+        title: "Find an Indian government security",
+        description: "RBI's list of outstanding central government securities: ISIN, name (e.g. 7.18% GS 2033), coupon, maturity, the NSE symbol and the amount outstanding in crore. Filter by words of the name, an ISIN or a maturity year.",
+        params: &[opt(
+            "query",
+            Kind::Str,
+            "Words, an ISIN or a maturity year, e.g. \"2033\", \"718GS2033\"",
+        )],
+        personal: false,
+    },
+    Tool {
+        name: "bonds_calc",
+        title: "G-sec price and yield calculator",
+        description: "Price to yield or yield to price for an Indian government security (semi-annual coupons, 30/360) or a T-bill: clean and dirty price, accrued interest, yield to maturity, modified duration, convexity and the cash flows. Give a security (its name or ISIN, looked up in RBI's list) or a coupon and maturity, and a price or a yield.",
+        params: &[
+            opt(
+                "security",
+                Kind::Str,
+                "Name or ISIN, e.g. 718GS2033 or IN0020230036",
+            ),
+            opt(
+                "coupon",
+                Kind::Number {
+                    min: 0.0,
+                    max: 30.0,
+                },
+                "Coupon, percent a year (with maturity, instead of a security)",
+            ),
+            opt("maturity", Kind::Str, "Maturity date YYYY-MM-DD"),
+            opt(
+                "price",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1000.0,
+                },
+                "Price per ₹100 face value",
+            ),
+            opt(
+                "ytm",
+                Kind::Number {
+                    min: 0.0,
+                    max: 50.0,
+                },
+                "Yield to maturity, percent (instead of a price)",
+            ),
+            opt(
+                "settle",
+                Kind::Str,
+                "Settlement date YYYY-MM-DD (default: today's session)",
+            ),
+            opt("tbill", Kind::Bool, "A Treasury bill (discount, no coupon)"),
+            opt(
+                "dirty",
+                Kind::Bool,
+                "The price includes accrued interest (NSE quotes G-secs dirty)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "commodity",
+        title: "Gold, silver and Sovereign Gold Bonds",
+        description: "Gold and silver for Indian investors. spot: international gold and silver in rupees per 10 g and per kg, with USD/INR. futures: MCX-style futures quotes. etfs: gold and silver ETFs on NSE. sgb: every Sovereign Gold Bond series on NSE with its price, the gold value of one unit, the premium or discount to gold, coupon and maturity.",
+        params: &[opt(
+            "view",
+            Kind::Enum(&["spot", "futures", "etfs", "sgb"]),
+            "Which view (default spot)",
+        )],
+        personal: false,
+    },
+    Tool {
+        name: "fx_history",
+        title: "Currency against the rupee",
+        description: "History of a currency against the rupee (or another base): first and last rate, change, high and low over a period and the recent daily rates. Useful for US holdings of an Indian investor (USD/INR moves change their rupee value).",
+        params: &[
+            opt(
+                "currency",
+                Kind::Str,
+                "3-letter code, e.g. USD (default), EUR, GBP, AED, SGD, JPY",
+            ),
+            opt("base", Kind::Str, "Base currency (default INR)"),
+            opt(
+                "period",
+                Kind::Enum(&["1mo", "3mo", "6mo", "ytd", "1y", "2y", "5y", "10y"]),
+                "Period (default 1y)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "returns",
+        title: "Trailing returns",
+        description: "A stock's, ETF's or index's trailing price returns over 1 week, 1, 3 and 6 months and 1, 2 and 5 years, annualized beyond a year, and what ₹1 lakh (or 100,000 of its currency) became. Price returns: dividends not included.",
+        params: &[
+            req("symbol", Kind::Str, "Ticker, e.g. NIFTYBEES, ^NSEI, TCS"),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "correlate",
+        title: "Correlation of stocks",
+        description: "How closely 2 to 10 tickers moved together over the last year: the correlation matrix of daily returns on common trading days (1 moves together, 0 unrelated, -1 opposite). Useful to see whether holdings diversify each other.",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 10 },
+                "2 to 10 tickers, e.g. [\"HDFCBANK\", \"ICICIBANK\", \"TCS\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "compare",
+        title: "Compare stocks side by side",
+        description: "Up to 6 stocks side by side: price, market cap and cap tier, P/E (trailing and forward), P/B, EPS, ROE, margins, debt to equity, revenue and earnings growth, dividend yield, beta and the 52-week range. Ratios are fractions (0.012 = 1.2%).",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 6 },
+                "2 to 6 tickers, e.g. [\"TCS\", \"INFY\", \"HCLTECH\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "portfolio_wrap",
+        title: "Portfolio year in review",
+        description: "The portfolio's year in review: return over the year (or an Indian financial year), money in and out, dividends, realized gains, best and worst holdings, and the checkup's main findings. Pass fy for an April-March year such as 2025-26.",
+        params: &[
+            opt("year", Kind::Str, "Calendar year, e.g. 2025"),
+            opt("fy", Kind::Str, "Indian financial year, e.g. 2025-26"),
+            opt(
+                "redact",
+                Kind::Bool,
+                "Leave out amounts, keeping percentages (to share)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
         personal: true,
     },
 ];

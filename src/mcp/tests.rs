@@ -219,6 +219,8 @@ async fn prompts_fill_in_their_arguments() {
             "smallcap_short_scan",
             "tax_aware_rebalance",
             "weekly_review",
+            "mf_review",
+            "advance_tax_check",
             "review_portfolio",
             "tax_harvest_check",
             "explain_option_chain",
@@ -951,4 +953,40 @@ fn new_prompts_render_with_the_policy() {
             .unwrap()
             .contains("holdings_lots")
     );
+}
+
+#[test]
+fn search_completions_put_the_users_market_first() {
+    let found = vec![
+        "VGT".to_string(),
+        "INFY".to_string(),
+        "INFY.BO".to_string(),
+        "NAUKRI.NS".to_string(),
+        "INFY.NS".to_string(),
+    ];
+    assert_eq!(
+        rank_for_market(found.clone(), "INF", Market::In),
+        ["INFY.NS", "INFY.BO", "NAUKRI.NS"],
+        "NSE before BSE, prefix matches first, foreign listings dropped"
+    );
+    assert_eq!(
+        rank_for_market(found.clone(), "INF", Market::Us)[..2],
+        ["INFY".to_string(), "VGT".to_string()]
+    );
+    // No Indian listing at all: keep what search found.
+    assert_eq!(
+        rank_for_market(vec!["VGT".into()], "VG", Market::In),
+        ["VGT"]
+    );
+}
+
+#[test]
+fn instructions_cover_the_indian_market() {
+    for needle in ["TCS.NS", "lakh", "crore", "IST", "1.25 lakh", "April to March", "bonds_", "commodity", "fx_history", "mf_bleed"] {
+        assert!(INSTRUCTIONS.contains(needle), "{needle}");
+    }
+    let t = prompt_text("advance_tax_check", &Map::new()).unwrap();
+    assert!(t.contains("tax_advance") && t.contains("15 March"));
+    let t = prompt_text("mf_review", &Map::new()).unwrap();
+    assert!(t.contains("mf_bleed") && t.contains("not enough data for a call"));
 }

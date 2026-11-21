@@ -19,8 +19,11 @@ or another.
   history, technicals, risk, scorecards and 6-pillar scores (one stock with
   `verdict`, up to 25 with `verdicts`), events, mutual funds, option chains,
   IPOs, screens, picks and their track record, market conditions, backtests,
-  your portfolio dashboard and lots, tax estimate, advance tax, harvest and
-  rebalance plans, calendar, goals, watchlist and alerts.
+  your portfolio dashboard, lots and year in review, tax estimate, advance
+  tax, harvest and rebalance plans, calendar, goals, watchlist and alerts.
+  For Indian investors there are also G-sec yields and a bond calculator,
+  gold, silver and Sovereign Gold Bonds in rupees, USD/INR history, trailing
+  returns, correlation and side-by-side comparison.
 - **It follows a recommendations policy.** Buy or sell actions come only from
   StockWise's own rule-based engine, never from the assistant; the assistant
   explains them and never invents price levels. When less than 60% of the data
@@ -157,6 +160,13 @@ Questions that work well, grouped by what they use:
 | "Rank small caps for the next few weeks." | `picks` with `cap: small`, `horizon: short` |
 | "How did the picks lists of the last 3 months do against NIFTY?" | `picks_review` |
 | "Score TCS, INFY, HCLTECH, WIPRO and TECHM side by side." | `verdicts` |
+| "Compare HDFCBANK, ICICIBANK and KOTAKBANK on valuation and ROE." | `compare` |
+| "What have NIFTYBEES' returns been over 1, 3 and 5 years?" | `returns` |
+| "Do my bank stocks move together?" | `correlate` |
+| "Where are G-sec yields, and what does 7.18% GS 2033 yield at ₹101.50?" | `bonds_yields`, `bonds_calc` |
+| "Which Sovereign Gold Bond trades at the biggest discount to gold?" | `commodity` with `view: sgb` |
+| "How much has the dollar moved against the rupee this year?" | `fx_history` |
+| "How did my portfolio do in FY 2025-26?" | `portfolio_wrap` with `fy: 2025-26` |
 
 With `--allow-writes`:
 
@@ -179,6 +189,8 @@ from the prompt menu:
 | `smallcap_short_scan` | Small caps ranked for weeks to months, with the short-horizon track record |
 | `tax_aware_rebalance` | Drift from your targets and the tax each trim would cost |
 | `weekly_review` | The portfolio against its benchmark, past picks lists, and this week's changes |
+| `mf_review` | Regular-plan cost against Direct, fund overlap with your stocks (India) |
+| `advance_tax_check` | Capital gains this financial year and the advance-tax instalments due (India) |
 | `review_portfolio` | Value, P&L, concentration and risk |
 | `tax_harvest_check` | Unrealised gains and losses by lot before 31 March |
 | `explain_option_chain` | An option chain in plain words |

@@ -1142,3 +1142,74 @@ async fn analysis_movers_dividends_and_emergency_run_on_fixtures() {
     assert_eq!(v["data"]["changes"][0]["tool"], "watchlist_add");
     let _ = std::fs::remove_dir_all(&w.dir);
 }
+
+// ── India-first extras ──
+
+#[tokio::test]
+async fn returns_and_correlation_run_on_charts() {
+    let c = ctx();
+    let v = c.call("returns", &json!({"symbol": "TCS"})).await.unwrap();
+    let rows = v["data"]["returns"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{v}");
+    assert_eq!(v["data"]["symbol"], "TCS.NS");
+
+    let v = c
+        .call("correlate", &json!({"symbols": ["TCS", "INFY", "NOPE"]}))
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["symbols"], json!(["TCS.NS", "INFY.NS"]));
+    assert_eq!(v["data"]["missing"], json!(["NOPE.NS"]));
+    let m = v["data"]["matrix"].as_array().unwrap();
+    assert_eq!(m.len(), 2);
+    assert!((m[0][0].as_f64().unwrap() - 1.0).abs() < 1e-9);
+
+    assert!(c.call("correlate", &json!({"symbols": ["TCS"]})).await.is_err());
+    assert!(
+        c.call("fx_history", &json!({"currency": "DOLLARS"}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn bond_calculator_needs_no_network_with_coupon_and_maturity() {
+    let c = ctx();
+    let v = c
+        .call(
+            "bonds_calc",
+            &json!({"coupon": 7.18, "maturity": "2033-08-14", "price": 101.5, "settle": "2026-11-20"}),
+        )
+        .await
+        .unwrap();
+    let ytm = v["data"]["ytm_percent"]
+        .as_f64()
+        .or_else(|| v["data"]["ytm"].as_f64())
+        .unwrap_or_else(|| panic!("a yield: {v}"));
+    assert!(ytm > 6.0 && ytm < 7.5, "{v}");
+    assert!(
+        c.call("bonds_calc", &json!({"maturity": "not a date"}))
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn india_extras_are_read_only_and_open_world() {
+    for name in [
+        "bonds_yields",
+        "bonds_list",
+        "bonds_calc",
+        "commodity",
+        "fx_history",
+        "returns",
+        "correlate",
+        "compare",
+        "portfolio_wrap",
+    ] {
+        let h = hints(tool(name));
+        assert!(h.read_only && h.idempotent && !h.destructive, "{name}");
+        // bonds_calc looks a named security up in RBI's list.
+        assert!(h.open_world, "{name}");
+    }
+    assert!(tool("portfolio_wrap").personal);
+}

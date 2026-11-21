@@ -74,6 +74,16 @@ call and offer none.
 StockWise is not a SEBI-registered investment adviser or research analyst; prices can be \
 delayed, so verify before acting.
 
+Indian market: bare tickers are NSE (`TCS` is `TCS.NS`; `.BO` for BSE); amounts are in rupees, \
+written the Indian way (₹1,25,000; lakh = 1,00,000, crore = 1,00,00,000; `picks` floors are in \
+crore). NSE trades 09:15-15:30 IST on weekdays and Yahoo quotes run about 15 minutes late. \
+Listed equity held over 12 months is long term: LTCG over ₹1.25 lakh a year is taxed at 12.5%, \
+STCG at 20%, and the tax year runs April to March (`tax_estimate`, `tax_advance` for the 15 June, \
+September, December and March instalments, `harvest`). For Indian investors there are also \
+mutual funds (`mf_search`, `mf_nav`, `mf_sip`, `mf_bleed` for Regular against Direct plans), \
+F&O option chains (`options_*`), IPOs, G-sec yields and the bond calculator (`bonds_*`), gold, \
+silver and Sovereign Gold Bonds (`commodity`) and USD/INR (`fx_history`).
+
 Scores from `verdict`, `verdicts` and `picks` describe data. Every `picks` list is logged; when \
 presenting picks, cite how earlier lists did (`picks_review`, or the stockwise://track-record \
 resource), including when they lagged the index. `fit_check` says whether a stock meets the \
@@ -370,10 +380,9 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
                 .ok()
                 .and_then(Result::ok)
                 .unwrap_or_default();
-            for r in found {
-                if let Some(sym) = r.symbol
-                    && !out.contains(&sym)
-                {
+            let found: Vec<String> = found.into_iter().filter_map(|r| r.symbol).collect();
+            for sym in rank_for_market(found, &q, self.ctx.market) {
+                if !out.contains(&sym) {
                     out.push(sym);
                 }
             }
@@ -423,6 +432,39 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
             }
         });
     }
+}
+
+/// Search results ordered for the user's market: for India, NSE then BSE
+/// listings (and nothing else when there are any), for the US, symbols
+/// without an exchange suffix; within each group, tickers that start with
+/// what was typed come first. Yahoo's search is fuzzy ("INF" finds US
+/// funds), so this keeps the user's own market on top.
+fn rank_for_market(found: Vec<String>, typed: &str, market: Market) -> Vec<String> {
+    let home = |s: &str| match market {
+        Market::In => s.ends_with(".NS") || s.ends_with(".BO"),
+        Market::Us => !s.contains('.') && !s.contains('=') && !s.starts_with('^'),
+        _ => true,
+    };
+    let any_home = found.iter().any(|s| home(s));
+    let mut ranked: Vec<(u8, usize, String)> = found
+        .into_iter()
+        .enumerate()
+        .filter(|(_, s)| !(market == Market::In && any_home && !home(s)))
+        .map(|(i, s)| {
+            let up = s.to_ascii_uppercase();
+            let starts = up.starts_with(typed);
+            let group = match (home(&s), starts, up.ends_with(".BO")) {
+                (true, true, false) => 0,
+                (true, true, true) => 1,
+                (true, false, _) => 2,
+                (false, true, _) => 3,
+                (false, false, _) => 4,
+            };
+            (group, i, s)
+        })
+        .collect();
+    ranked.sort();
+    ranked.into_iter().map(|(_, _, s)| s).collect()
 }
 
 /// The URIs in `stamps` whose files changed since the last look, with the
@@ -536,6 +578,18 @@ const PROMPTS: &[(&str, &str, &str, &[PromptArg])] = &[
         "weekly_review",
         "Weekly review against the track record",
         "How the portfolio and the past picks lists did, against the benchmark, with the changes made this week",
+        &[],
+    ),
+    (
+        "mf_review",
+        "Review my mutual funds",
+        "Regular-plan cost against Direct, overlap with your stocks, and recent NAVs of your funds (India)",
+        &[],
+    ),
+    (
+        "advance_tax_check",
+        "Advance tax check",
+        "Capital gains so far this financial year and the advance-tax instalments due on 15 June, September, December and March (India)",
         &[],
     ),
     (
@@ -658,6 +712,25 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
              picks that is: say plainly when the sample is too small to mean much), and the \
              changes made. Be as clear about misses as about hits.{POLICY}"
         ),
+        "mf_review" => format!(
+            "Review my Indian mutual funds with StockWise. Call portfolio_summary for the funds \
+             I hold (MF: holdings), mf_bleed for what Regular plans cost me against the Direct \
+             plan of the same scheme over time, portfolio_analyze for overlap between my funds \
+             and my stocks and for concentration, and mf_nav for the funds' recent NAVs. Show \
+             each fund's value and gain, the yearly and long-run cost of Regular plans (with the \
+             exit load and tax a switch could trigger, as caveats), and where my funds hold the \
+             same stocks I already own.{POLICY}"
+        ),
+        "advance_tax_check" => "Check my Indian advance tax with StockWise. Call tax_advance \
+             for the instalments (15 June 15%, 15 September 45%, 15 December 75%, 15 March \
+             100% of the year's tax), tax_estimate for realized short- and long-term gains this \
+             financial year and the ₹1.25 lakh LTCG exemption left, and harvest for losses that \
+             could reduce the gains. Show what is due by the next date, what was already \
+             covered, and interest under sections 234B and 234C if an instalment is missed, as \
+             estimates. Remind me that this covers only the capital gains StockWise has \
+             recorded, not salary or other income, and to check with my broker's tax P&L or a \
+             tax adviser."
+            .to_string(),
         "onboard_profile" => "Help me set up my StockWise investor profile. Call \
              profile_questions and ask me its questions one at a time, in plain words, with the \
              choices; accept my own words and map them to a choice, asking again if unsure. \
