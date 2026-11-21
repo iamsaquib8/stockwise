@@ -221,6 +221,8 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         if f < t * 0.8 && t > 0.0 && f > 0.0 {
             val += 10.0;
             growth += 10.0;
+            // Expected earnings growth is growth data: keep the pillar.
+            seen[1] = true;
             raised_by.push(format!(
                 "Forward P/E {:.0} is more than 20% below trailing P/E {:.0} (earnings estimated to rise)",
                 f, t
@@ -866,7 +868,7 @@ pub fn render_report(scores: &[LongTermScore], monthly: f64, csym: &str) -> Stri
             &mut o,
             "Assumed annual return",
             &format!(
-                "{:.1}% (set from the score; not a forecast)",
+                "{:.1}% (earnings yield, growth and price history; score band without them; not a forecast)",
                 s.est_annual_return
             ),
         );
@@ -949,7 +951,7 @@ pub fn render_report(scores: &[LongTermScore], monthly: f64, csym: &str) -> Stri
         &mut o,
         format!(
             "  {}",
-            "The assumed return and the simulation are illustrations built from the score and the past year's volatility. Past performance does not predict future results."
+            "The assumed return comes from the earnings yield plus growth, blended with the last year's price return (the score's band only when neither is known); the simulation adds the past year's volatility. Both are illustrations, not forecasts: past performance does not predict future results."
                 .dimmed()
                 .italic()
         ),

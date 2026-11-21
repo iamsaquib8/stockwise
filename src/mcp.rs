@@ -350,7 +350,7 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
     fn picks_log(&self) -> Vec<crate::picks_log::Entry> {
         match &self.files {
             Some(f) => crate::store::load_from(&f.data_dir.join(PICKS_LOG)).unwrap_or_default(),
-            None => crate::picks_log::load(),
+            None => crate::picks_log::load().unwrap_or_default(),
         }
     }
 

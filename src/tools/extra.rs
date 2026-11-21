@@ -96,7 +96,8 @@ pub(super) async fn run<D: DataSource>(
             // stockwise://picks/latest) counts lists an assistant asked for.
             let scope =
                 crate::commands::cap_scope(universe.map_or(m.label(), |u| u.nse_index()), cap);
-            crate::commands::log_picks(m, &scope, horizon, &run.picks);
+            let level = crate::commands::benchmark_level(client, m).await;
+            crate::commands::log_picks(m, &scope, horizon, &run.picks, level);
             Ok(picks_value(&run))
         }
         "picks_review" => {
@@ -169,6 +170,22 @@ pub(super) async fn run<D: DataSource>(
 
 /// The `picks` tool's result: the list, what was left out and why, and the
 /// method behind the scores.
+/// The method line of a picks result, with the weights of the horizon that
+/// was scored (from the scorer's own table).
+fn picks_method(horizon: crate::picks::Horizon) -> String {
+    let [v, q, g, t, r] = horizon.weights();
+    let pct = |w: f64| format!("{:.0}%", w * 100.0);
+    format!(
+        "Percentile ranks among the stocks that clear the size and liquidity floors ({} horizon): value {}, quality {}, growth {}, trend {}, risk {}. Losses and negative book value rank last; implausible figures are left out to check; stocks under 60% data coverage are left out; with a positive top, at most 3 per known sector; a pillar without data pulls the score toward 50.",
+        horizon.as_str(),
+        pct(v),
+        pct(q),
+        pct(g),
+        pct(t),
+        pct(r)
+    )
+}
+
 pub(crate) fn picks_value(run: &crate::picks::Run) -> Value {
     json!({
         "scanned": run.scanned,
@@ -179,7 +196,7 @@ pub(crate) fn picks_value(run: &crate::picks::Run) -> Value {
         "meta": run.meta,
         "methodology": run.methodology,
         "horizon": run.horizon,
-        "method": "Percentile ranks among the stocks that clear the size and liquidity floors: value 25%, quality 25%, growth 15%, trend 20%, risk 15%. Losses and negative book value rank last; implausible figures are left out to check; at most 3 per sector; a pillar without data pulls the score toward 50.",
+        "method": picks_method(run.horizon),
     })
 }
 

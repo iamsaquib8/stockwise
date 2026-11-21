@@ -609,6 +609,7 @@ async fn structured_results_follow_their_output_schemas() {
         risk: Some(f64::NAN),
         coverage: 0.8,
         flags: Vec::new(),
+        quoted_at: None,
     };
     let mut flagged = pick.clone();
     flagged.flags = vec!["P/E below 3".into()];
@@ -639,6 +640,7 @@ async fn structured_results_follow_their_output_schemas() {
         score: 71.0,
         price: 3500.0,
         currency: Some("INR".into()),
+        benchmark_price: None,
         methodology: crate::picks::METHODOLOGY.into(),
     };
     let prices = std::collections::HashMap::from([("TCS.NS".to_string(), 4100.0)]);
@@ -650,7 +652,12 @@ async fn structured_results_follow_their_output_schemas() {
         day("2026-08-01"),
         day("2026-11-21"),
         &prices,
-        Some(("NIFTY 50", &closes)),
+        &std::collections::HashMap::new(),
+        Some(crate::picks_log::Benchmark {
+            name: "NIFTY 50",
+            closes: &closes,
+            now: None,
+        }),
     );
     let mut rv = serde_json::to_value(&review).unwrap();
     rv["market"] = json!("in");
@@ -782,6 +789,7 @@ async fn new_resources_read_the_picks_log_methodology_and_quote_template() {
         score: 80.0 - rank as f64,
         price: 100.0,
         currency: Some("INR".into()),
+        benchmark_price: None,
         methodology: "2".into(),
     };
     let log = vec![

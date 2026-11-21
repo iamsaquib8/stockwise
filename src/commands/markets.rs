@@ -1666,8 +1666,9 @@ pub async fn cmd_picks(
     let client = YahooClient::new().await?;
     // A cap tier is ranked within itself: large caps against large caps.
     let run = crate::picks::run(&client, market, universe, cap, floors, horizon, top).await?;
+    let bench_level = benchmark_level(&client, market).await;
     let scope = cap_scope(universe.map_or(market.label(), |u| u.nse_index()), cap);
-    log_picks(market, &scope, horizon, &run.picks);
+    log_picks(market, &scope, horizon, &run.picks, bench_level);
 
     if !fmt.is_table() {
         return match fmt {
@@ -1784,7 +1785,7 @@ pub async fn cmd_picks(
         trend_lines[0],
         trend_lines[1],
         "Losses and negative book value rank last. Data: share of the score that had data; the rest pulls",
-        "the score toward 50. At most 3 stocks per sector. `stockwise picks review` shows how past lists did.",
+        "the score toward 50. With a positive --top, at most 3 stocks per known sector. `picks review`: past lists.",
     ] {
         println!("  {}", line.dimmed().italic());
     }
@@ -1801,20 +1802,41 @@ pub async fn cmd_picks(
     Ok(())
 }
 
+/// The benchmark's level now, logged with each list so `picks review`
+/// compares the stock and the index at the same moment.
+pub(crate) async fn benchmark_level(client: &YahooClient, market: Market) -> Option<f64> {
+    let (sym, _) = crate::picks::benchmark(market)?;
+    client
+        .get_quote(&[sym])
+        .await
+        .ok()?
+        .into_iter()
+        .next()?
+        .regular_market_price
+        .filter(|p| *p > 0.0)
+}
+
 /// Append a list to the track record; a failure to save never fails the scan.
+/// Each pick is filed under the exchange session its price came from (a US
+/// quote from Monday afternoon in New York is Monday's, wherever this runs).
 pub(crate) fn log_picks(
     market: Market,
     scope: &str,
     horizon: crate::picks::Horizon,
     picks: &[crate::picks::Pick],
+    benchmark_price: Option<f64>,
 ) {
-    let date = chrono::Local::now().date_naive();
+    let now = chrono::Utc::now();
     let entries: Vec<crate::picks_log::Entry> = picks
         .iter()
         .enumerate()
         .filter_map(|(i, p)| {
+            let at = p
+                .quoted_at
+                .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+                .unwrap_or(now);
             Some(crate::picks_log::Entry {
-                date,
+                date: crate::clock::session_date(market, at),
                 kind: "pick".into(),
                 horizon: horizon.as_str().into(),
                 market: market.code().into(),
@@ -1824,6 +1846,7 @@ pub(crate) fn log_picks(
                 score: p.score,
                 price: p.price.filter(|x| *x > 0.0)?,
                 currency: p.currency.clone(),
+                benchmark_price,
                 methodology: crate::picks::METHODOLOGY.into(),
             })
         })
@@ -1836,6 +1859,22 @@ pub(crate) fn log_picks(
     }
 }
 
+/// Shares one share listed on `since` became through splits and bonus
+/// issues after that date; `None` when Yahoo's actions could not be read.
+async fn split_factor(client: &YahooClient, symbol: &str, since: chrono::NaiveDate) -> Option<f64> {
+    let day = since.format("%Y-%m-%d").to_string();
+    let (splits, _, _) = crate::commands::portfolio::fetch_actions(client, symbol, &day)
+        .await
+        .ok()?;
+    Some(
+        splits
+            .iter()
+            .filter(|s| s.date.as_str() > day.as_str() && s.denominator > 0.0)
+            .map(|s| s.ratio())
+            .product(),
+    )
+}
+
 /// The track record of `market`'s `horizon` lists logged in the last
 /// `since_days`: each pick measured from its first listing against the
 /// market's benchmark. Shared by `picks review` and the MCP tool.
@@ -1845,50 +1884,62 @@ pub(crate) async fn picks_review_report(
     since_days: u32,
     horizon: crate::picks::Horizon,
 ) -> Result<crate::picks_log::Review> {
+    use futures_util::StreamExt;
     market.require_stocks("picks review")?;
     let today = chrono::Local::now().date_naive();
-    let since = today - chrono::Duration::days(since_days as i64);
-    let log = crate::picks_log::load();
-    let symbols: Vec<String> = {
-        let mut s: Vec<String> = log
-            .iter()
-            .filter(|e| {
-                e.kind == "pick"
-                    && e.market == market.code()
-                    && e.horizon == horizon.as_str()
-                    && e.date >= since
-            })
-            .map(|e| e.symbol.clone())
-            .collect();
-        s.sort();
-        s.dedup();
-        s
-    };
-    if symbols.is_empty() {
+    let since = today
+        .checked_sub_days(chrono::Days::new(since_days as u64))
+        .ok_or_else(|| anyhow::anyhow!("--since {since_days} days reaches before any date"))?;
+    let log =
+        crate::picks_log::load().context("Could not read the track record (signal_log.json)")?;
+    let mut first: std::collections::BTreeMap<String, chrono::NaiveDate> = Default::default();
+    for e in log.iter().filter(|e| {
+        e.kind == "pick"
+            && e.market == market.code()
+            && e.horizon == horizon.as_str()
+            && e.date >= since
+    }) {
+        let d = first.entry(e.symbol.clone()).or_insert(e.date);
+        *d = (*d).min(e.date);
+    }
+    if first.is_empty() {
         bail!(
             "No picks logged for this market in the last {} days. Every `stockwise picks` run is \
              logged; run one now and review it later.",
             since_days
         );
     }
-    let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+    let refs: Vec<&str> = first.keys().map(String::as_str).collect();
     let prices: std::collections::HashMap<String, f64> = client
         .get_quote(&refs)
         .await
-        .unwrap_or_default()
+        .context("Could not fetch current prices for the logged picks")?
         .into_iter()
         .filter_map(|q| Some((q.symbol.clone()?, q.regular_market_price?)))
         .collect();
-    let bench = match crate::picks::benchmark(market) {
+    // Owned jobs: a stream over borrowed keys trips the `Send` bound of the
+    // MCP handler that calls this.
+    let jobs: Vec<(String, chrono::NaiveDate)> =
+        first.iter().map(|(s, d)| (s.clone(), *d)).collect();
+    let splits: std::collections::HashMap<String, Option<f64>> = futures_util::stream::iter(jobs)
+        .map(|(sym, date): (String, chrono::NaiveDate)| async move {
+            let f = split_factor(client, &sym, date).await;
+            (sym, f)
+        })
+        .buffer_unordered(6)
+        .collect()
+        .await;
+    let (bench, bench_now) = match crate::picks::benchmark(market) {
         Some((sym, name)) => {
             let range = if since_days > 330 { "5y" } else { "2y" };
-            client
+            let closes = client
                 .get_chart(sym, range, "1d")
                 .await
                 .ok()
-                .map(|c| (name, c.dated_closes()))
+                .map(|c| (name, c.dated_closes()));
+            (closes, benchmark_level(client, market).await)
         }
-        None => None,
+        None => (None, None),
     };
     Ok(crate::picks_log::review(
         &log,
@@ -1897,7 +1948,12 @@ pub(crate) async fn picks_review_report(
         since,
         today,
         &prices,
-        bench.as_ref().map(|(n, s)| (*n, s.as_slice())),
+        &splits,
+        bench.as_ref().map(|(n, s)| crate::picks_log::Benchmark {
+            name: n,
+            closes: s.as_slice(),
+            now: bench_now,
+        }),
     ))
 }
 
@@ -1907,14 +1963,16 @@ pub async fn cmd_picks_review(
     market: Market,
     since_days: u32,
     horizon: crate::picks::Horizon,
-    json: bool,
+    fmt: Format,
 ) -> Result<()> {
     market.require_stocks("picks review")?;
     let client = YahooClient::new().await?;
     let review = picks_review_report(&client, market, since_days, horizon).await?;
     let since = review.since;
-    if json {
-        return output::print_json(&review);
+    match fmt {
+        Format::Csv => return output::print_csv(&review.rows),
+        Format::Json => return output::print_json(&review),
+        _ => {}
     }
     print_header(&format!(
         "Picks Track Record — {}, {} term (since {})",
@@ -1978,6 +2036,13 @@ pub async fn cmd_picks_review(
         pct(review.mean_excess).trim(),
         pct(review.median_excess).trim()
     );
+    if !review.unverified.is_empty() {
+        println!(
+            "  {} left out, splits since listing could not be checked: {}",
+            "⚠".yellow(),
+            review.unverified.join(", ")
+        );
+    }
     if !review.unpriced.is_empty() {
         println!(
             "  {} no current price for: {}",

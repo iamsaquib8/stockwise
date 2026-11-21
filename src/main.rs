@@ -597,6 +597,7 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
     },
     /// Stocks ranked against each other on value, quality, growth, trend and risk; `picks
     /// review` shows how past lists did
+    #[command(args_conflicts_with_subcommands = true)]
     Picks {
         #[command(subcommand)]
         action: Option<PicksCmd>,
@@ -2413,7 +2414,7 @@ enum ConfigCmd {
 }
 
 /// `--json` / `--csv` for commands that print a table.
-#[derive(Args, Clone, Copy, Default)]
+#[derive(Args, Clone, Copy, Debug, Default)]
 struct TableOutput {
     /// Print JSON instead of a table
     #[arg(long, conflicts_with = "csv")]
@@ -2497,9 +2498,8 @@ enum PicksCmd {
         /// Which lists: long or short
         #[arg(long, value_enum, ignore_case = true, default_value = "long")]
         horizon: picks::Horizon,
-        /// Print JSON instead of a table
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        out: TableOutput,
     },
 }
 
@@ -4650,10 +4650,10 @@ async fn dispatch(
                 Some(PicksCmd::Review {
                     since,
                     horizon,
-                    json,
+                    out,
                 }),
             ..
-        } => commands::cmd_picks_review(m, since, horizon, json).await,
+        } => commands::cmd_picks_review(m, since, horizon, out.into()).await,
         Commands::Picks {
             action: None,
             universe,

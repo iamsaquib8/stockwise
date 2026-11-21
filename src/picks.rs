@@ -50,7 +50,7 @@ impl Horizon {
     /// Pillar weights (value, quality, growth, trend, risk); they add up
     /// to 1. Short term still keeps some quality and value in: momentum in
     /// a weak business is how most short-term losses start.
-    fn weights(self) -> [f64; 5] {
+    pub fn weights(self) -> [f64; 5] {
         match self {
             Horizon::Long => [0.25, 0.25, 0.15, 0.20, 0.15],
             Horizon::Short => [0.10, 0.15, 0.10, 0.45, 0.20],
@@ -128,6 +128,10 @@ pub struct Pick {
     /// left out of the list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<String>,
+    /// When the price was quoted (Unix seconds), so the track record files
+    /// the pick under its exchange session date.
+    #[serde(skip)]
+    pub quoted_at: Option<i64>,
 }
 
 impl CsvRow for Pick {
@@ -212,7 +216,11 @@ impl Floors {
     pub fn admits(&self, q: &Quote) -> bool {
         let mcap_ok = self.min_mcap <= 0.0 || q.market_cap.is_some_and(|m| m >= self.min_mcap);
         let adv = match (q.average_daily_volume_3_month, q.regular_market_price) {
-            (Some(v), Some(p)) => Some(v as f64 * p),
+            // London quotes in pence: turnover is compared in pounds.
+            (Some(v), Some(p)) => {
+                let (major, _) = market::to_major(p, q.currency.as_deref().unwrap_or(""));
+                Some(v as f64 * major)
+            }
             _ => None,
         };
         let adv_ok = self.min_adv <= 0.0 || adv.is_some_and(|a| a >= self.min_adv);
@@ -224,10 +232,19 @@ impl Floors {
 /// India, millions or billions elsewhere.
 pub fn describe_amount(market: Market, amount: f64) -> String {
     match market {
-        Market::In => format!("₹{:.0} crore", amount / 1e7).replace("₹0 crore", "₹0"),
+        // Below a crore, lakh: ₹25 lakh is not "₹0" (0 is a disabled floor).
+        Market::In if amount <= 0.0 => "₹0".to_string(),
+        Market::In if amount < 1e7 => format!("₹{} lakh", trim_number(amount / 1e5)),
+        Market::In => format!("₹{} crore", trim_number(amount / 1e7)),
         _ if amount >= 1e9 => format!("{:.1} billion", amount / 1e9),
         _ => format!("{:.1} million", amount / 1e6),
     }
+}
+
+/// `12`, `2.5`, `0.25`: a floor value without trailing zeros.
+fn trim_number(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// The unit of `--min-mcap` / `--min-adv` for `market`: its name and size.
@@ -259,7 +276,8 @@ impl History {
         let n = closes.len();
         let mut h = History::default();
         if n >= MIN_CLOSES_RISK {
-            h.volatility = crate::technical::annualized_volatility(closes).filter(|v| *v > 0.0);
+            // A flat price is measured risk (zero), not missing history.
+            h.volatility = crate::technical::annualized_volatility(closes);
             h.drawdown = crate::technical::max_drawdown(closes).map(|d| d.0);
         }
         if n >= MIN_CLOSES_MOMENTUM {
@@ -342,12 +360,13 @@ fn measures(q: &Quote, h: &History) -> Measures {
         (Some(f), Some(t), Some(n)) if t > 0.0 && n >= MIN_ANALYSTS => Some((f - t) / t),
         _ => None,
     };
+    // Momentum per unit of volatility needs some volatility to divide by.
     let momentum = match (h.momentum, h.volatility) {
-        (Some(m), Some(v)) => Some(m / v),
+        (Some(m), Some(v)) if v > 0.0 => Some(m / v),
         _ => None,
     };
     let momentum_3m = match (h.momentum_3m, h.volatility) {
-        (Some(m), Some(v)) => Some(m / v),
+        (Some(m), Some(v)) if v > 0.0 => Some(m / v),
         _ => None,
     };
     Measures {
@@ -514,7 +533,10 @@ pub fn score(quotes: &[Quote], history: &HashMap<String, History>, horizon: Hori
                 margin[i]
             };
             let eps_g_i = if mi.loss { bottom } else { eps_g[i] };
-            let (value, cv) = blend(&[(ey[i], 0.5), (by[i], 0.3), (dy[i], 0.2)]);
+            // Negative equity (even with a positive book value on file, when
+            // debt to equity says otherwise) ranks last on book yield too.
+            let by_i = if mi.negative_book { bottom } else { by[i] };
+            let (value, cv) = blend(&[(ey[i], 0.5), (by_i, 0.3), (dy[i], 0.2)]);
             // Negative equity: quality is at the bottom, whatever the margin.
             let (quality, cq) = if mi.negative_book {
                 (bottom, 1.0)
@@ -563,6 +585,7 @@ pub fn score(quotes: &[Quote], history: &HashMap<String, History>, horizon: Hori
                 risk,
                 coverage,
                 flags: data_flags(q),
+                quoted_at: q.regular_market_time,
             }
         })
         .collect();
@@ -589,7 +612,7 @@ pub fn select(scored: Vec<Pick>, top: usize) -> (Vec<Pick>, Vec<Pick>, usize) {
         return (clean, flagged, thin);
     }
     let mut per_sector: HashMap<String, usize> = HashMap::new();
-    let mut out = Vec::with_capacity(top);
+    let mut out = Vec::with_capacity(top.min(clean.len()));
     for p in clean {
         if out.len() >= top {
             break;
@@ -608,7 +631,9 @@ pub fn select(scored: Vec<Pick>, top: usize) -> (Vec<Pick>, Vec<Pick>, usize) {
 
 /// How many first-stage leaders get fundamentals and prices.
 fn finalists(top: usize, available: usize) -> usize {
-    (top * 4).clamp(MIN_FINALISTS, MAX_FINALISTS).min(available)
+    top.saturating_mul(4)
+        .clamp(MIN_FINALISTS, MAX_FINALISTS)
+        .min(available)
 }
 
 /// A finished scan.
@@ -659,6 +684,27 @@ pub async fn run(
     if kept.is_empty() {
         if universe_len == 0 {
             bail!("No stocks to score in this universe and cap tier");
+        }
+        // Missing figures (a fallback snapshot without market caps or
+        // average volume) are a data problem, not a floor set too high.
+        let no_mcap = below.iter().filter(|q| q.market_cap.is_none()).count();
+        let no_adv = below
+            .iter()
+            .filter(|q| {
+                q.average_daily_volume_3_month.is_none() || q.regular_market_price.is_none()
+            })
+            .count();
+        let missing = (floors.min_mcap > 0.0 && no_mcap == universe_len)
+            || (floors.min_adv > 0.0 && no_adv == universe_len);
+        if missing {
+            bail!(
+                "None of the {} stocks has the figures the floors need (market cap: {} missing, \
+                 3-month average volume: {} missing); the quote provider probably fell back to a \
+                 snapshot without them. Try again in a few minutes",
+                universe_len,
+                no_mcap,
+                no_adv
+            );
         }
         bail!(
             "None of the {} stocks clears the size and liquidity floors (market cap {} and {} \
@@ -1048,6 +1094,28 @@ mod tests {
     }
 
     #[test]
+    fn amounts_below_a_crore_read_in_lakh() {
+        assert_eq!(describe_amount(Market::In, 0.25e7), "₹25 lakh");
+        assert_eq!(describe_amount(Market::In, 0.0), "₹0");
+        assert_eq!(describe_amount(Market::In, 500e7), "₹500 crore");
+        assert_eq!(describe_amount(Market::In, 2.5e7), "₹2.5 crore");
+        assert_eq!(describe_amount(Market::Us, 1e9), "1.0 billion");
+    }
+
+    #[test]
+    fn london_turnover_is_counted_in_pounds() {
+        let f = Floors {
+            min_mcap: 0.0,
+            min_adv: 1e6,
+        };
+        let mut q = quote("VOD.L", "X");
+        q.currency = Some("GBp".into());
+        q.regular_market_price = Some(200.0); // pence
+        q.average_daily_volume_3_month = Some(100_000); // £200,000 a day
+        assert!(!f.admits(&q));
+    }
+
+    #[test]
     fn history_measures_need_enough_closes() {
         let h = History::from_closes(&closes(100.0, 0.2, 0.01));
         assert!(h.volatility.is_some() && h.drawdown.is_some());
@@ -1056,6 +1124,9 @@ mod tests {
         assert!(m > 0.1 && m < 0.2, "{m}");
         let short = History::from_closes(&[100.0; 30]);
         assert_eq!(short, History::default());
+        // A flat year is zero volatility (measured), with no momentum ratio.
+        let flat = History::from_closes(&[100.0; 250]);
+        assert_eq!(flat.volatility, Some(0.0));
     }
 
     #[test]
@@ -1098,5 +1169,6 @@ mod tests {
         assert_eq!(finalists(0, 1_000), 60);
         assert_eq!(finalists(100, 1_000), 200);
         assert_eq!(finalists(15, 20), 20);
+        assert_eq!(finalists(usize::MAX, 1_000), 200);
     }
 }

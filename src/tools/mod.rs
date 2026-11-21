@@ -1396,12 +1396,12 @@ pub const TOOLS: &[Tool] = &[
             opt(
                 "min_mcap",
                 Kind::Number { min: 0.0, max: 1e7 },
-                "Least market cap: crore in India (default 500), millions elsewhere (US default 1000); 0 for none",
+                "Least market cap: crore in India, millions elsewhere. Defaults for the default tier: India 500, US 1000; `cap` small: India 500, US 300; micro: India 100, US 50; other exchanges: none. 0 turns the floor off",
             ),
             opt(
                 "min_adv",
                 Kind::Number { min: 0.0, max: 1e6 },
-                "Least average value traded a day: crore in India (default 2), millions elsewhere (US default 5); 0 for none",
+                "Least 3-month average value traded a day: crore in India, millions elsewhere. Defaults for the default tier: India 2, US 5; `cap` small: India 1, US 2; micro: India 0.5, US 0.5; other exchanges: none. 0 turns the floor off",
             ),
             MARKET,
         ],
