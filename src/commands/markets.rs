@@ -1498,7 +1498,7 @@ impl From<&crate::api::Quote> for ScreenRow {
             change_percent: q.regular_market_change_percent,
             pe: q.trailing_pe,
             market_cap: q.market_cap,
-            dividend_yield: q.trailing_annual_dividend_yield,
+            dividend_yield: q.dividend_yield_fraction(),
             currency: q.currency.clone(),
             cap_tier: market::cap_tier_of(q).as_str(),
         }
@@ -1517,7 +1517,7 @@ pub(crate) fn screen_matches<'a>(
         "growth" => ("Growth Stocks (EPS Forward > EPS TTM)".into(),
             quotes.iter().filter(|q| matches!((q.eps_trailing_twelve_months, q.eps_forward), (Some(ttm), Some(fwd)) if fwd > ttm && ttm > 0.0)).collect()),
         "dividend" => ("Dividend Stocks (Yield > 2%)".into(),
-            quotes.iter().filter(|q| q.trailing_annual_dividend_yield.is_some_and(|d| d > 0.02)).collect()),
+            quotes.iter().filter(|q| q.dividend_yield_fraction().is_some_and(|d| d > 0.02)).collect()),
         "momentum" => {
             let mut s: Vec<&crate::api::Quote> = quotes.iter().collect();
             s.retain(|q| q.regular_market_change_percent.is_some());
@@ -1657,40 +1657,55 @@ pub async fn cmd_picks(
     market: Market,
     universe: Option<market::Universe>,
     cap: Option<market::CapFilter>,
+    floors: crate::picks::Floors,
+    horizon: crate::picks::Horizon,
     top: usize,
     fmt: Format,
 ) -> Result<()> {
     market.require_stocks("picks")?;
     let client = YahooClient::new().await?;
     // A cap tier is ranked within itself: large caps against large caps.
-    let quotes = market::filter_by_cap(universe_quotes(&client, market, universe).await?, cap);
-    if quotes.is_empty() {
-        bail!("No stocks to score in this universe and cap tier");
-    }
-    let mut picks = crate::picks::score(&quotes);
-    let scanned = picks.len();
-    if top > 0 {
-        picks.truncate(top);
-    }
+    let run = crate::picks::run(&client, market, universe, cap, floors, horizon, top).await?;
+    let scope = cap_scope(universe.map_or(market.label(), |u| u.nse_index()), cap);
+    log_picks(market, &scope, horizon, &run.picks);
 
     if !fmt.is_table() {
         return match fmt {
-            Format::Csv => output::print_csv(&picks),
-            _ => output::print_json(&picks),
+            Format::Csv => output::print_csv(&run.picks),
+            _ => output::print_json(&run),
         };
     }
 
-    print_header(&format!(
-        "Highest Scores — {} Market",
-        cap_scope(market.label(), cap)
-    ));
+    let title = match horizon {
+        crate::picks::Horizon::Long => "Highest Scores, long term",
+        crate::picks::Horizon::Short => "Highest Scores, short term (weeks to months)",
+    };
+    print_header(&format!("{title} — {scope}"));
     println!(
-        "  {} {} stocks ranked against each other on value, quality, growth and trend\n",
+        "  {} {} stocks ranked against each other on value, quality, growth, trend and risk",
         "⟳".yellow(),
-        scanned
+        run.scanned
     );
+    if run.below_floor > 0 {
+        println!(
+            "  {} {} more left out: market cap under {} or under {} traded a day (--min-mcap / --min-adv)",
+            "ⓘ".dimmed(),
+            run.below_floor,
+            crate::picks::describe_amount(market, floors.min_mcap),
+            crate::picks::describe_amount(market, floors.min_adv)
+        );
+    }
+    if run.thin_data > 0 {
+        println!(
+            "  {} {} more left out: less than {:.0}% of their data came through",
+            "ⓘ".dimmed(),
+            run.thin_data,
+            crate::picks::MIN_COVERAGE * 100.0
+        );
+    }
+    println!();
     println!(
-        "  {:<14} {:>10} {:>8} {:>6} {:>6} {:>8} {:>7} {:>6} {:>5}  {}",
+        "  {:<14} {:>10} {:>8} {:>6} {:>6} {:>8} {:>7} {:>6} {:>5} {:>5}  {}",
         "Symbol".bold(),
         "Price".bold(),
         "Chg%".bold(),
@@ -1699,13 +1714,14 @@ pub async fn cmd_picks(
         "Quality".bold(),
         "Growth".bold(),
         "Trend".bold(),
+        "Risk".bold(),
         "Data".bold(),
         "Top fifth on".bold()
     );
-    println!("  {}", "─".repeat(96).dimmed());
+    println!("  {}", "─".repeat(102).dimmed());
 
     let pillar = |v: Option<f64>| v.map_or("–".to_string(), |v| format!("{:.0}", v));
-    for p in &picks {
+    for p in &run.picks {
         let pct = p.change_percent.unwrap_or(0.0);
         let pct_str = if pct >= 0.0 {
             format!("{:>8}", format!("+{:.2}%", pct))
@@ -1723,7 +1739,7 @@ pub async fn cmd_picks(
             score.dimmed().to_string()
         };
         println!(
-            "  {:<14} {:>10} {} {} {:>6} {:>8} {:>7} {:>6} {:>4.0}%  {}",
+            "  {:<14} {:>10} {} {} {:>6} {:>8} {:>7} {:>6} {:>5} {:>4.0}%  {}",
             p.symbol.cyan(),
             format_price(p.price.unwrap_or(0.0), p.currency.as_deref()),
             pct_str,
@@ -1732,34 +1748,235 @@ pub async fn cmd_picks(
             pillar(p.quality),
             pillar(p.growth),
             pillar(p.trend),
+            pillar(p.risk),
             p.coverage * 100.0,
             p.strongest().join(", ").dimmed()
         );
     }
-    println!(
-        "\n  {}",
-        "Each number is a percentile rank among the stocks scanned (100 is the highest). Value: earnings yield,"
-            .dimmed()
-            .italic()
+    if !run.flagged.is_empty() {
+        let names: Vec<String> = run
+            .flagged
+            .iter()
+            .take(6)
+            .map(|p| format!("{} ({})", p.symbol, p.flags.join(", ")))
+            .collect();
+        println!(
+            "\n  {} {} left out to check data: {}{}",
+            "⚠".yellow(),
+            run.flagged.len(),
+            names.join("; "),
+            if run.flagged.len() > 6 { "; …" } else { "" }
+        );
+    }
+    let trend_lines: [&str; 2] = match horizon {
+        crate::picks::Horizon::Long => [
+            "Growth: forward against trailing EPS (3+ analysts), revenue growth. Trend: 12-1 month momentum per",
+            "unit of volatility, price against the 200-day average. Risk: low volatility, drawdown and beta.",
+        ],
+        crate::picks::Horizon::Short => [
+            "Growth: forward against trailing EPS, revenue growth. Trend (45% of the score): 3-month momentum per",
+            "unit of volatility, price against the 50-day average, 52-week range, volume against usual. Risk: 20%.",
+        ],
+    };
+    for line in [
+        "Each number is a percentile rank among the stocks scanned (100 is the highest). Value: earnings",
+        "yield, book value to price, dividend yield. Quality: return on equity, profit margin, low debt.",
+        trend_lines[0],
+        trend_lines[1],
+        "Losses and negative book value rank last. Data: share of the score that had data; the rest pulls",
+        "the score toward 50. At most 3 stocks per sector. `stockwise picks review` shows how past lists did.",
+    ] {
+        println!("  {}", line.dimmed().italic());
+    }
+    if cap.is_none() && matches!(market, Market::In | Market::Us) {
+        println!(
+            "  {}",
+            "Small caps rank against each other with `--cap small` (or `--cap micro`), with floors sized for them."
+                .dimmed()
+                .italic()
+        );
+    }
+    println!();
+    Ok(())
+}
+
+/// Append a list to the track record; a failure to save never fails the scan.
+fn log_picks(
+    market: Market,
+    scope: &str,
+    horizon: crate::picks::Horizon,
+    picks: &[crate::picks::Pick],
+) {
+    let date = chrono::Local::now().date_naive();
+    let entries: Vec<crate::picks_log::Entry> = picks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            Some(crate::picks_log::Entry {
+                date,
+                kind: "pick".into(),
+                horizon: horizon.as_str().into(),
+                market: market.code().into(),
+                universe: scope.into(),
+                symbol: p.symbol.clone(),
+                rank: i + 1,
+                score: p.score,
+                price: p.price.filter(|x| *x > 0.0)?,
+                currency: p.currency.clone(),
+                methodology: crate::picks::METHODOLOGY.into(),
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::picks_log::record(entries) {
+        eprintln!("  ⓘ Could not save this list to the track record: {e:#}");
+    }
+}
+
+/// `picks review`: every pick logged in the last `since_days`, measured from
+/// its first listing against the market's benchmark.
+pub async fn cmd_picks_review(
+    market: Market,
+    since_days: u32,
+    horizon: crate::picks::Horizon,
+    json: bool,
+) -> Result<()> {
+    market.require_stocks("picks review")?;
+    let today = chrono::Local::now().date_naive();
+    let since = today - chrono::Duration::days(since_days as i64);
+    let log = crate::picks_log::load();
+    let symbols: Vec<String> = {
+        let mut s: Vec<String> = log
+            .iter()
+            .filter(|e| {
+                e.kind == "pick"
+                    && e.market == market.code()
+                    && e.horizon == horizon.as_str()
+                    && e.date >= since
+            })
+            .map(|e| e.symbol.clone())
+            .collect();
+        s.sort();
+        s.dedup();
+        s
+    };
+    if symbols.is_empty() {
+        bail!(
+            "No picks logged for this market in the last {} days. Every `stockwise picks` run is \
+             logged; run one now and review it later.",
+            since_days
+        );
+    }
+    let client = YahooClient::new().await?;
+    let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
+    let prices: std::collections::HashMap<String, f64> = client
+        .get_quote(&refs)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|q| Some((q.symbol.clone()?, q.regular_market_price?)))
+        .collect();
+    let bench = match crate::picks::benchmark(market) {
+        Some((sym, name)) => {
+            let range = if since_days > 330 { "5y" } else { "2y" };
+            client
+                .get_chart(sym, range, "1d")
+                .await
+                .ok()
+                .map(|c| (name, c.dated_closes()))
+        }
+        None => None,
+    };
+    let review = crate::picks_log::review(
+        &log,
+        market.code(),
+        horizon.as_str(),
+        since,
+        today,
+        &prices,
+        bench.as_ref().map(|(n, s)| (*n, s.as_slice())),
     );
+    if json {
+        return output::print_json(&review);
+    }
+    print_header(&format!(
+        "Picks Track Record — {}, {} term (since {})",
+        market.label(),
+        horizon.as_str(),
+        since.format("%d %b %Y")
+    ));
     println!(
-        "  {}",
-        "book value to price, dividend yield. Quality: return on equity. Growth: forward against trailing EPS."
-            .dimmed()
-            .italic()
+        "  {} each pick from the day it was first listed; price return, dividends not included",
+        "ⓘ".dimmed()
     );
+    if let Some(b) = &review.benchmark {
+        println!("  {} benchmark: {}", "ⓘ".dimmed(), b);
+    }
+    println!();
     println!(
-        "  {}",
-        "Trend: price and 50-day average against the 200-day, place in the 52-week range. Data: share of the"
-            .dimmed()
-            .italic()
+        "  {:<14} {:>11} {:>5} {:>6} {:>10} {:>10} {:>8} {:>8} {:>8}",
+        "Symbol".bold(),
+        "Listed".bold(),
+        "Days".bold(),
+        "Score".bold(),
+        "Then".bold(),
+        "Now".bold(),
+        "Return".bold(),
+        "Index".bold(),
+        "Excess".bold()
     );
+    println!("  {}", "─".repeat(90).dimmed());
+    let pct = |v: Option<f64>| match v {
+        Some(v) if v >= 0.0 => format!("{:>8}", format!("+{:.1}%", v * 100.0))
+            .green()
+            .to_string(),
+        Some(v) => format!("{:>8}", format!("{:.1}%", v * 100.0))
+            .red()
+            .to_string(),
+        None => format!("{:>8}", "–"),
+    };
+    for r in &review.rows {
+        println!(
+            "  {:<14} {:>11} {:>5} {:>6.0} {:>10} {:>10} {} {} {}",
+            r.symbol.cyan(),
+            r.picked_on.format("%d %b %Y").to_string(),
+            r.days,
+            r.score,
+            format_price(r.entry_price, r.currency.as_deref()),
+            format_price(r.price, r.currency.as_deref()),
+            pct(Some(r.return_pct)),
+            pct(r.benchmark_pct),
+            pct(r.excess_pct)
+        );
+    }
+    println!();
+    let share = |v: Option<f64>| v.map_or("–".to_string(), |v| format!("{:.0}%", v * 100.0));
     println!(
-        "  {}",
-        "score that had data; the rest pulls the score toward 50. Scores describe the data; they are not a recommendation."
-            .dimmed()
-            .italic()
+        "  {} picks · rose: {} · beat the index: {} · mean return {} (median {}) · mean excess {} (median {})",
+        review.rows.len(),
+        share(review.hit_rate),
+        share(review.beat_rate),
+        pct(review.mean_return).trim(),
+        pct(review.median_return).trim(),
+        pct(review.mean_excess).trim(),
+        pct(review.median_excess).trim()
     );
+    if !review.unpriced.is_empty() {
+        println!(
+            "  {} no current price for: {}",
+            "⚠".yellow(),
+            review.unpriced.join(", ")
+        );
+    }
+    if review.methodologies.len() > 1 {
+        println!(
+            "  {} lists from different scoring versions ({}); see docs/methodology.md",
+            "ⓘ".dimmed(),
+            review.methodologies.join(", ")
+        );
+    }
     println!();
     Ok(())
 }

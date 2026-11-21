@@ -23,6 +23,7 @@
 
 - [Cheatsheet](cheatsheet.md)
 - [Commands](commands.md)
+- [Methodology: how scores are made](methodology.md)
 - [Markets](markets.md)
 - [Data providers](data-providers.md)
 - [AI](ai.md)

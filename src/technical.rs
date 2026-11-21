@@ -66,7 +66,9 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
     }
 
     if avg_loss == 0.0 {
-        return Some(100.0);
+        // No losses: 100 when prices rose, 50 when they did not move at all
+        // (a flat series is neither overbought nor oversold).
+        return Some(if avg_gain == 0.0 { 50.0 } else { 100.0 });
     }
 
     let rs = avg_gain / avg_loss;
@@ -76,12 +78,11 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
 /// Calculate MACD (Moving Average Convergence Divergence)
 /// Returns (macd_line, signal_line, histogram)
 pub fn macd(data: &[f64]) -> Option<(f64, f64, f64)> {
-    // For signal line, we need MACD history
+    // The signal line is a 9-period EMA of the MACD line, which needs 26
+    // bars before its first value: fewer than 35 bars give no signal line,
+    // and a made-up one (zero) would turn the MACD line into a histogram.
     if data.len() < 35 {
-        let ema26 = ema(data, 26)?;
-        let ema12 = ema(data, 12)?;
-        let macd_line = ema12 - ema26;
-        return Some((macd_line, 0.0, macd_line));
+        return None;
     }
 
     let ema26_iter = ema_iter(data, 26)?;
@@ -772,6 +773,21 @@ mod tests {
         assert!(result.is_some());
         let (line, _signal, _hist) = result.unwrap();
         assert!(line > 0.0); // uptrend = positive MACD
+    }
+
+    #[test]
+    fn rsi_of_a_flat_series_is_neutral() {
+        assert_eq!(rsi(&[100.0; 30], 14), Some(50.0));
+        let rising: Vec<f64> = (0..30).map(|i| 100.0 + i as f64).collect();
+        assert_eq!(rsi(&rising, 14), Some(100.0));
+    }
+
+    #[test]
+    fn macd_needs_enough_bars_for_a_signal_line() {
+        let data: Vec<f64> = (0..34).map(|i| 100.0 + i as f64).collect();
+        assert_eq!(macd(&data), None);
+        let data: Vec<f64> = (0..35).map(|i| 100.0 + i as f64).collect();
+        assert!(macd(&data).is_some());
     }
 
     #[test]
