@@ -415,19 +415,22 @@ pub async fn feed(
     days: u32,
     filings: bool,
 ) -> (Vec<NewsItem>, Vec<String>) {
-    use futures_util::StreamExt;
-    let results: Vec<Fetched> = futures_util::stream::iter(entries.iter().map(|e| {
-        let q = Query {
+    let queries: Vec<Query> = entries
+        .iter()
+        .map(|e| Query {
             symbol: e.symbol.clone(),
             company: e.company.clone(),
             days,
             filings,
-        };
-        async move { fetch(client, &q).await }
-    }))
-    .buffer_unordered(6)
-    .collect()
-    .await;
+        })
+        .collect();
+    // Six symbols at a time, with `join_all` (a buffered stream of borrowing
+    // closures is not `Send` inside `tokio::spawn`).
+    let mut results: Vec<Fetched> = Vec::new();
+    for chunk in queries.chunks(6) {
+        let futs: Vec<_> = chunk.iter().map(|q| fetch(client, q)).collect();
+        results.extend(futures_util::future::join_all(futs).await);
+    }
     let mut items = Vec::new();
     let mut failures = Vec::new();
     for r in results {

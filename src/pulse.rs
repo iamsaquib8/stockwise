@@ -317,7 +317,6 @@ fn quote_for<'a>(quotes: &'a [Quote], symbol: &str) -> Option<&'a Quote> {
 
 /// Gather the pulse for the portfolio (and watchlist).
 pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyhow::Result<Pulse> {
-    use futures_util::StreamExt;
     let portfolio = crate::portfolio::Portfolio::load()?;
     let watchlist = if opts.watchlist {
         crate::watchlist::Watchlist::load().map(|w| w.symbols).unwrap_or_default()
@@ -388,20 +387,26 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
         .filter(|s| !crate::market::is_namespaced(s))
         .cloned()
         .collect();
-    let bars: Vec<(String, Option<Series>)> = futures_util::stream::iter(stock_syms.iter().map(|s| async move {
-        let c = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get_chart(s, "1y", "1d"),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .map(|c| Series::from_chart(&c));
-        (s.clone(), c)
-    }))
-    .buffer_unordered(8)
-    .collect()
-    .await;
+    // In chunks with `join_all` rather than a buffered stream: the stream's
+    // borrowing closures make the future fail `Send` inside `tokio::spawn`.
+    let mut bars: Vec<(String, Option<Series>)> = Vec::new();
+    for chunk in stock_syms.chunks(8) {
+        let futs: Vec<_> = chunk
+            .iter()
+            .map(|s| async move {
+                let c = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    client.get_chart(s, "1y", "1d"),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .map(|c| Series::from_chart(&c));
+                (s.clone(), c)
+            })
+            .collect();
+        bars.extend(futures_util::future::join_all(futs).await);
+    }
 
     // News.
     let mut news_items: Vec<NewsItem> = Vec::new();

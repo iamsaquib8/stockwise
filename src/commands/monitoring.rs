@@ -33,28 +33,31 @@ async fn price_pass(
     t: &Thresholds,
     intraday_only: bool,
 ) -> Vec<Signal> {
-    use futures_util::StreamExt;
     let held: Vec<(String, f64)> = portfolio
         .holdings
         .iter()
         .filter(|h| !market::is_namespaced(&h.symbol) && h.shares > 0.0)
         .map(|h| (h.symbol.clone(), h.avg_cost))
         .collect();
-    let per: Vec<Vec<Signal>> = futures_util::stream::iter(held.into_iter().map(|(s, cost)| async move {
-        let Ok(Ok(chart)) = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get_chart(&s, "1y", "1d"),
-        )
-        .await
-        else {
-            return Vec::new();
-        };
-        let series = crate::research::Series::from_chart(&chart);
-        crate::monitor::price_signals(&s, &series, (cost > 0.0).then_some(cost), t)
-    }))
-    .buffer_unordered(8)
-    .collect()
-    .await;
+    let mut per: Vec<Vec<Signal>> = Vec::new();
+    for chunk in held.chunks(8) {
+        let futs: Vec<_> = chunk
+            .iter()
+            .map(|(s, cost)| async move {
+                let Ok(Ok(chart)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    client.get_chart(s, "1y", "1d"),
+                )
+                .await
+                else {
+                    return Vec::new();
+                };
+                let series = crate::research::Series::from_chart(&chart);
+                crate::monitor::price_signals(s, &series, (*cost > 0.0).then_some(*cost), t)
+            })
+            .collect();
+        per.extend(futures_util::future::join_all(futs).await);
+    }
     per.into_iter()
         .flatten()
         .filter(|s| !intraday_only || s.kind.intraday())

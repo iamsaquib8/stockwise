@@ -490,6 +490,9 @@ struct WorkerState {
     /// Where the next sync resumes over already-seen symbols for filing checks.
     #[serde(default)]
     filing_cursor: usize,
+    /// Unix time of the last intraday monitor pass.
+    #[serde(default)]
+    last_monitor_pass: Option<i64>,
 }
 
 /// After the close: refresh tracked snapshots, append today's NAV for held
@@ -1034,7 +1037,11 @@ async fn notify_after_close(
     let mut held: Vec<String> = portfolio
         .holdings
         .iter()
-        .filter(|h| h.symbol.ends_with(".NS"))
+        .filter(|h| {
+            h.symbol.ends_with(".NS")
+                || h.symbol.ends_with(".BO")
+                || crate::alerts::alert_market(&h.symbol) == Some(Market::Us)
+        })
         .map(|h| h.symbol.clone())
         .collect();
     held.sort();
@@ -1051,11 +1058,11 @@ async fn notify_after_close(
         if !keep_going() {
             bail!("cancelled");
         }
-        let base = symbol.trim_end_matches(".NS");
-        // A failed fetch records nothing, so the next sync tries again.
+        // NSE for `.NS`, BSE for `.BO`, SEC EDGAR for US tickers. A failed
+        // fetch records nothing, so the next sync tries again.
         let fetched = tokio::time::timeout(
             Duration::from_secs(10),
-            crate::research::fetch_nse_filings(client, base, FILING_LOOKBACK_DAYS),
+            crate::news::filings(client, &symbol, FILING_LOOKBACK_DAYS),
         )
         .await;
         if let Ok(Ok(list)) = fetched {
@@ -1067,25 +1074,30 @@ async fn notify_after_close(
     if !keep_going() {
         bail!("cancelled");
     }
-    let mut sent = 0;
-    let mut filings = 0;
-    for p in pending {
-        // Silent records (first sight, a lot sold before it turned) carry no
-        // message: remember them straight away.
-        let silent = p.msg.title.is_empty();
-        let delivered = silent || notifier.send_logged(&p.msg).await;
-        if !silent {
-            sent += 1;
-            filings += usize::from(p.filings.is_some());
+    // Silent records (first sight, a lot sold before it turned) carry no
+    // message: remember them straight away. Everything else goes out as one
+    // message — the digest when it is on, else a batch.
+    let (silent, loud): (Vec<Pending>, Vec<Pending>) =
+        pending.into_iter().partition(|p| p.msg.title.is_empty());
+    let sent = loud.len();
+    let filings = loud.iter().filter(|p| p.filings.is_some()).count();
+    let notices: Vec<crate::notify::Message> = loud.iter().map(|p| p.msg.clone()).collect();
+    let delivered = deliver_after_close(client, market, &notifier, notices).await;
+    let mut record = |p: Pending| {
+        state.ltcg_notified.extend(p.ltcg_keys);
+        if let Some((symbol, end)) = p.result {
+            state.last_results.insert(symbol, end);
         }
-        if delivered {
-            state.ltcg_notified.extend(p.ltcg_keys);
-            if let Some((symbol, end)) = p.result {
-                state.last_results.insert(symbol, end);
-            }
-            if let Some((symbol, ids)) = p.filings {
-                record_filings(&mut state.filings_seen, symbol, ids);
-            }
+        if let Some((symbol, ids)) = p.filings {
+            record_filings(&mut state.filings_seen, symbol, ids);
+        }
+    };
+    for p in silent {
+        record(p);
+    }
+    if delivered {
+        for p in loud {
+            record(p);
         }
     }
     trim_notified(&mut state.ltcg_notified);
@@ -1102,6 +1114,77 @@ async fn notify_after_close(
         total: sent,
         filings,
     })
+}
+
+/// Send the after-close notices as one message: inside the digest (day
+/// P&L, contributors, monitor signals, alerts, dates) when it is on, else
+/// batched. Returns whether it was delivered (true with no channels, so
+/// nothing queues up forever).
+async fn deliver_after_close(
+    client: &YahooClient,
+    market: Market,
+    notifier: &crate::notify::Notifier,
+    notices: Vec<crate::notify::Message>,
+) -> bool {
+    if !notifier.is_enabled() {
+        return true;
+    }
+    let t = crate::monitor::Thresholds::from_config();
+    if t.enabled && t.digest {
+        let mut mst: crate::monitor::MonitorState =
+            crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+        if let Ok((digest, signals)) =
+            crate::commands::build_digest(client, market, notices.clone(), &mut mst).await
+        {
+            if digest.is_empty() {
+                return true;
+            }
+            let delivered = notifier
+                .send_logged(&crate::digest::render(&digest))
+                .await;
+            if delivered {
+                let cursor = mst.cursor;
+                let _ = crate::store::update::<crate::monitor::MonitorState, ()>(
+                    crate::monitor::STATE_FILE,
+                    |st| {
+                        st.record(&signals);
+                        st.cursor = cursor;
+                        st.last_digest = Some(digest.date.clone());
+                        st.last_pass = Some(Utc::now().timestamp());
+                        Ok(())
+                    },
+                );
+            }
+            return delivered;
+        }
+    }
+    match notices.as_slice() {
+        [] => true,
+        [one] => notifier.send_logged(one).await,
+        many => {
+            notifier
+                .send_logged(&crate::notify::batch(
+                    &format!("StockWise: {} notices after the close", many.len()),
+                    many,
+                ))
+                .await
+        }
+    }
+}
+
+/// How often the worker runs the intraday monitor pass.
+const MONITOR_EVERY: i64 = 15 * 60;
+
+/// Whether any held symbol's market is open at `now`.
+fn held_market_open(now: chrono::DateTime<Utc>) -> bool {
+    Portfolio::load()
+        .map(|p| {
+            p.holdings
+                .iter()
+                .filter_map(|h| crate::alerts::alert_market(&h.symbol))
+                .any(|m| clock::is_open(m, now))
+        })
+        .unwrap_or(false)
 }
 
 /// The session date whose post-close sync is due, if any: the market closed
@@ -1443,6 +1526,23 @@ pub async fn run_worker(market: Market) -> Result<()> {
             }
             state.last_alert_pass = Some(now.timestamp());
         }
+        // Holding monitor: price signals while a held market is open.
+        let monitor_due = state
+            .last_monitor_pass
+            .is_none_or(|t| now.timestamp() - t >= MONITOR_EVERY);
+        if monitor_due && held_market_open(now) {
+            state.last_monitor_pass = Some(now.timestamp());
+            if let Ok(client) = YahooClient::new().await {
+                let notifier = crate::notify::Notifier::from_env();
+                if let Err(e) = crate::commands::intraday_pass(&client, &notifier).await {
+                    eprintln!("monitor pass failed: {e:#}");
+                }
+            }
+        }
+        // Notices held for quiet hours go out once they end.
+        if now.timestamp() % 300 < 5 {
+            crate::notify::Notifier::from_env().flush_held().await;
+        }
         if let Some(date) = eod_due(market, now, &state) {
             let has_work = Portfolio::load().is_ok_and(|p| !p.holdings.is_empty())
                 || !tracked_symbols().is_empty();
@@ -1452,8 +1552,10 @@ pub async fn run_worker(market: Market) -> Result<()> {
             // The sync saved its notification state: reload it, then record
             // the date, so neither write erases the other.
             let alert_pass = state.last_alert_pass;
+            let monitor_pass = state.last_monitor_pass;
             state = crate::store::load(STATE_FILE).unwrap_or_default();
             state.last_alert_pass = alert_pass;
+            state.last_monitor_pass = monitor_pass;
             state.last_eod = Some(date);
             let _ = crate::store::save(STATE_FILE, &state, false);
         }
