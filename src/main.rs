@@ -2581,8 +2581,9 @@ Examples:
 
 Verdicts: APPLY, APPLY – SELL ON LISTING, WAIT (with the QIB level that would turn it
 into APPLY), AVOID or NO CALL (data coverage below 60%). Rules: docs/methodology.md,
-\"IPO verdicts\". Data comes from NSE's IPO pages, the RHP figures you save, live peer
-quotes and Yahoo prices; GMP is unofficial press chatter and only ever a red flag.
+\"IPO verdicts\". Data comes from NSE's IPO pages (with BSE's public-issue pages
+filling fields NSE lacks), the RHP figures you save, live peer quotes and Yahoo
+prices; GMP is unofficial press chatter and only ever a red flag.
 A rule-based educational signal, not investment advice. The RHP is the source document.";
 
 #[derive(Subcommand, Debug, Clone)]

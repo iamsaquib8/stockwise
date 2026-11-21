@@ -126,7 +126,7 @@ one category with `stockwise mf screen flexi cap`.
 ```bash
 stockwise options chain NIFTY     # strikes with open interest, IV and greeks
 stockwise options oi NIFTY        # open-interest walls, put/call ratio, max pain
-stockwise ipo                     # open and upcoming IPOs from NSE, a verdict each
+stockwise ipo                     # open and upcoming IPOs (NSE + BSE fallback), a verdict each
 stockwise ipo BCSSL               # APPLY / WAIT / AVOID / NO CALL with reasons and plan
 ```
 

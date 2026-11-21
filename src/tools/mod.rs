@@ -146,13 +146,15 @@ pub struct Hints {
 
 /// Read tools that also write a local record: `picks` appends its list to
 /// the track record (`signal_log.json`), once a day per list, like
-/// `stockwise picks`. Not read-only, but never destructive and idempotent.
+/// `stockwise picks`. Not read-only and not idempotent (a repeat can log new
+/// picks when market data moves), and never destructive.
 pub const LOGGING_READS: &[&str] = &["picks"];
 
-/// The annotations of `tool`. Read tools are read-only (except
-/// [`LOGGING_READS`], which append to the track record) and idempotent. Write tools only touch
-/// local files, so they are closed-world; see [`workspace::write_effect`]
-/// for which overwrite or remove and which repeat safely.
+/// The annotations of `tool`. Read tools are read-only and idempotent (except
+/// [`LOGGING_READS`], which append to the track record and are neither
+/// read-only nor idempotent). Write tools only touch local files, so they are
+/// closed-world; see [`workspace::write_effect`] for which overwrite or
+/// remove and which repeat safely.
 pub fn hints(tool: &Tool) -> Hints {
     match access(tool.name) {
         Access::Read => Hints {
@@ -1068,13 +1070,15 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "ipo_board",
         title: "Indian IPO board",
-        description: "Indian IPOs from NSE: issues open for bidding now, upcoming issues and \
-                      recently listed ones, each with price band, lot size, minimum application, \
-                      issue size and live QIB/NII/retail subscription. Open and upcoming issues \
-                      carry the engine's `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT with its \
-                      QIB trigger, AVOID or NO_CALL, with reasons and confidence). Recent \
-                      listings show their listing-day return; the regime is the recency-weighted \
-                      median listing-day return. Mainboard and SME issues are labelled.",
+        description: "Indian IPOs from NSE, with BSE's public-issue pages filling fields NSE \
+                      lacks (`meta` names the sources, `field_sources`, `missing` and \
+                      `coverage`): issues open for bidding now, upcoming issues and recently listed \
+                      ones, each with price band, lot size, minimum application, issue size and \
+                      live QIB/NII/retail subscription. Open and upcoming issues carry the \
+                      engine's `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT with its QIB trigger, \
+                      AVOID or NO_CALL, with reasons and confidence). Recent listings show their \
+                      listing-day return; the regime is the recency-weighted median listing-day \
+                      return. Mainboard and SME issues are labelled.",
         params: &[
             opt(
                 "board",
@@ -1092,16 +1096,17 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "ipo_analyze",
         title: "Indian IPO analysis",
-        description: "One Indian IPO by NSE symbol or company name, led by the rule-based \
-                      `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT, AVOID, NO_CALL or LISTED) \
-                      with up to three reasons, confidence, trigger or invalidation, review date, \
-                      coverage and missing fields; the calibrated listing-day model (expected \
-                      gain, P(close below issue), fit stats); expected value per minimum \
-                      application; the listing-day plan and anchor lock-in dates; valuation at \
-                      the upper band against listed peers (from the user's RHP figures file); \
-                      subscription by category; allotment odds from application counts (and \
-                      what `capital` buys); unofficial GMP. Report the verdict as given; never \
-                      change it.",
+        description: "One Indian IPO by NSE symbol or company name (from NSE, with BSE filling \
+                      gaps; `meta` names the sources, `field_sources`, `missing` and `coverage`), \
+                      led by the rule-based `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT, AVOID, \
+                      NO_CALL or LISTED) with up to three reasons, confidence, trigger or \
+                      invalidation, review date, coverage and missing fields; the calibrated \
+                      listing-day model (expected gain, P(close below issue), fit stats); \
+                      expected value per minimum application; the listing-day plan and anchor \
+                      lock-in dates; valuation at the upper band against listed peers (from the \
+                      user's RHP figures file); subscription by category; allotment odds from \
+                      application counts (and what `capital` buys); unofficial GMP. Report the \
+                      verdict as given; never change it.",
         params: &[
             req(
                 "symbol",
