@@ -2907,11 +2907,23 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
         p.targets.len(),
         if p.targets.len() == 1 { "" } else { "s" }
     );
-    println!(
-        "  {}",
-        "A symbol target is carved out of its sector and asset-class targets, so nested targets don't add up twice."
+    if kind.contains("sector") || kind.contains("asset class") {
+        println!(
+            "  {}",
+            "Symbol targets inside it are carved out of it, so nested targets don't add up twice."
+                .dimmed()
+        );
+    }
+    if total < 100.0 - 1e-6 {
+        println!(
+            "  {}",
+            format!(
+                "Note: Remaining {:.1}% will be distributed among untargeted holdings during rebalancing.",
+                100.0 - total
+            )
             .dimmed()
-    );
+        );
+    }
     if total > 100.0 + 1e-6 {
         println!(
             "  {}",
@@ -3105,6 +3117,7 @@ pub(crate) async fn plan_inputs(
     configured: &std::collections::BTreeMap<String, f64>,
     market: Market,
     today: chrono::NaiveDate,
+    sector_client: Option<&YahooClient>,
 ) -> Result<(Vec<HoldingInput>, Valuation, Vec<String>)> {
     use crate::rebalance::{AssetClass, Fees, LotInput, classify, matches_symbol};
     let mut symbols: Vec<String> = portfolio
@@ -3140,6 +3153,20 @@ pub(crate) async fn plan_inputs(
     let val = value_holdings(src, &symbols, market, None).await?;
     let base = val.base().to_string();
     let home = super::portfolio_analyze::residence(market);
+    // Sector targets need sectors: stored snapshots, then a lookup each.
+    let wants_sectors = configured.keys().any(|k| {
+        AssetClass::parse(k).is_none()
+            && !portfolio
+                .holdings
+                .iter()
+                .any(|h| matches_symbol(k, &h.symbol))
+            && !unheld.iter().any(|u| matches_symbol(k, u))
+    });
+    let looked_up = if wants_sectors {
+        super::portfolio_analyze::sectors(sector_client, &symbols).await
+    } else {
+        Default::default()
+    };
     let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
 
     let mut inputs = Vec::new();
@@ -3265,7 +3292,9 @@ pub(crate) async fn plan_inputs(
             shares,
             value: shares * price_base,
             price: price_base,
-            sector: quote.and_then(|q| q.sector.clone()),
+            sector: quote
+                .and_then(|q| q.sector.clone())
+                .or_else(|| looked_up.get(sym).cloned()),
             is_fund,
             is_etf,
             asset_class: classify(sym, is_fund, category, foreign),
@@ -3292,6 +3321,7 @@ pub(crate) async fn rebalance_plan(
     portfolio: &Portfolio,
     args: &RebalanceArgs,
     market: Market,
+    sector_client: Option<&YahooClient>,
 ) -> Result<(crate::rebalance::RebalancePlan, Valuation)> {
     let configured: std::collections::BTreeMap<String, f64> = if args.targets.is_empty() {
         portfolio.targets.clone()
@@ -3299,7 +3329,8 @@ pub(crate) async fn rebalance_plan(
         args.targets.iter().cloned().collect()
     };
     let today = chrono::Local::now().date_naive();
-    let (inputs, val, excluded) = plan_inputs(src, portfolio, &configured, market, today).await?;
+    let (inputs, val, excluded) =
+        plan_inputs(src, portfolio, &configured, market, today, sector_client).await?;
 
     let prof = crate::config::effective_profile();
     let base = val.base().to_string();
@@ -3365,7 +3396,7 @@ pub async fn cmd_rebalance(args: &RebalanceArgs, json: bool, market: Market) -> 
     }
 
     let client = YahooClient::new().await?;
-    let (plan, val) = rebalance_plan(&client, &portfolio, args, market).await?;
+    let (plan, val) = rebalance_plan(&client, &portfolio, args, market, Some(&client)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         return Ok(());
@@ -3586,10 +3617,18 @@ pub(crate) async fn drift_report_for(
     src: &impl views::DataSource,
     portfolio: &Portfolio,
     market: Market,
+    sector_client: Option<&YahooClient>,
 ) -> Result<(crate::rebalance::DriftReport, Valuation)> {
     let today = chrono::Local::now().date_naive();
-    let (inputs, val, excluded) =
-        plan_inputs(src, portfolio, &portfolio.targets, market, today).await?;
+    let (inputs, val, excluded) = plan_inputs(
+        src,
+        portfolio,
+        &portfolio.targets,
+        market,
+        today,
+        sector_client,
+    )
+    .await?;
     let (band, _) = drift_band(portfolio);
     let band = if band > 0.0 {
         band
@@ -3617,7 +3656,7 @@ pub async fn drift_notice_today(market: Market) -> Result<Option<String>> {
         return Ok(None);
     }
     let client = YahooClient::new().await?;
-    let (report, _) = drift_report_for(&client, &portfolio, market).await?;
+    let (report, _) = drift_report_for(&client, &portfolio, market, Some(&client)).await?;
     Ok(report.notice())
 }
 
@@ -3635,7 +3674,7 @@ pub async fn cmd_portfolio_target_drift_report(market: Market, json: bool) -> Re
         return Ok(());
     }
     let client = YahooClient::new().await?;
-    let (report, val) = drift_report_for(&client, &portfolio, market).await?;
+    let (report, val) = drift_report_for(&client, &portfolio, market, Some(&client)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());

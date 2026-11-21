@@ -386,7 +386,7 @@ fn closes_of(chart: &crate::api::ChartData) -> Vec<(chrono::NaiveDate, f64)> {
 
 /// Sectors of `symbols`: stored snapshots first, then (with `client`) one
 /// profile lookup each for the rest, at most [`SECTOR_LIMIT`].
-async fn sectors(
+pub(crate) async fn sectors(
     client: Option<&YahooClient>,
     symbols: &[String],
 ) -> std::collections::HashMap<String, String> {

@@ -795,7 +795,7 @@ fn apply_cap(weights: &mut [f64], holdings: &[HoldingInput], cap: f64, warnings:
         let mut excess = 0.0;
         for (i, h) in holdings.iter().enumerate() {
             if h.single_stock() && w[i] > cap + 1e-6 {
-                if !fixed[i] {
+                if !fixed[i] && weights[i] > cap + 1e-6 {
                     capped.push(format!("{} target {:.1}%", h.symbol, weights[i]));
                 }
                 excess += w[i] - cap;
@@ -1281,7 +1281,11 @@ pub fn plan(
                 }
                 let want = orders[i].target_value - h.value;
                 if want < 0.0 {
-                    let q = h.units_down((-want / h.price).min(h.shares));
+                    let mut q = h.units_down((-want / h.price).min(h.shares));
+                    // Rounding down must not leave a stock above the limit.
+                    if !under_cap(h, h.value - q * h.price, kept, o) {
+                        q = h.units_up((-want / h.price).min(h.shares));
+                    }
                     if q * h.price >= o.min_trade.max(EPS) {
                         orders[i].sell = q;
                     }

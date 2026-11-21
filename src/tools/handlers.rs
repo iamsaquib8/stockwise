@@ -699,7 +699,7 @@ async fn rebalance(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> 
         drift: a.f64("drift"),
         ..Default::default()
     };
-    let (plan, _) = commands::rebalance_plan(src, &p, &args, m).await?;
+    let (plan, _) = commands::rebalance_plan(src, &p, &args, m, None).await?;
     Ok(serde_json::to_value(plan)?)
 }
 
