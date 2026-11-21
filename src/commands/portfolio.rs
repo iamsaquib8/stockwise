@@ -3283,6 +3283,15 @@ pub fn cmd_portfolio_rename(old: &str, new: &str, market: Market) -> Result<()> 
             _ => raw,
         }
     };
+    if from == to {
+        println!(
+            "\n  {} Nothing to rename: {} is already held as {}.\n",
+            "·".dimmed(),
+            old.trim().to_uppercase(),
+            to
+        );
+        return Ok(());
+    }
     let summary = format!("{from} → {to}");
     let out =
         Portfolio::update(|p| p.journalled("rename", &summary, |p| p.rename_symbol(&from, &to)))?;

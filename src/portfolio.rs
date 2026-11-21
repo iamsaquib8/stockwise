@@ -2857,13 +2857,26 @@ impl Portfolio {
         }
     }
 
+    /// A fingerprint of `symbols`' states that survives a save and a load:
+    /// JSON number parsing may move a float by its last bit, so every
+    /// number is rounded to 10 significant digits first.
     fn state_fingerprint(&self, symbols: &[String]) -> String {
+        fn round(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Number(n) => {
+                    if let Some(f) = n.as_f64().filter(|_| !n.is_i64() && !n.is_u64()) {
+                        *v = serde_json::Value::String(format!("{f:.9e}"));
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(round),
+                serde_json::Value::Object(o) => o.values_mut().for_each(round),
+                _ => {}
+            }
+        }
         let states: Vec<SymbolState> = symbols.iter().map(|s| self.symbol_state(s)).collect();
-        fingerprint(
-            serde_json::to_string(&states)
-                .unwrap_or_default()
-                .as_bytes(),
-        )
+        let mut value = serde_json::to_value(&states).unwrap_or_default();
+        round(&mut value);
+        fingerprint(value.to_string().as_bytes())
     }
 
     /// Run `change` and, when it changed any symbol, add a [`JournalEntry`]
@@ -6370,9 +6383,11 @@ mod tests {
         });
         p.journalled("rename", "TCS.NS → TCSX.NS", |p| {
             p.rename_symbol("TCS.NS", "TCSX.NS")
-        });
+        })
+        .unwrap();
         // A no-op is not journalled.
-        p.journalled("rename", "nothing", |p| p.rename_symbol("GONE.NS", "X.NS"));
+        p.journalled("rename", "nothing", |p| p.rename_symbol("GONE.NS", "X.NS"))
+            .unwrap();
         assert_eq!(p.journal.len(), 2);
         let symbols: Vec<&str> = p.journal[0]
             .before
@@ -6390,6 +6405,18 @@ mod tests {
         assert!(p.holding("JIOFIN.NS").is_none());
         assert_eq!(serde_json::to_string(&p.holdings).unwrap(), original);
         assert!(p.undo_last_action().is_err(), "nothing left");
+        // Undo still works after the file is saved and loaded again (JSON
+        // may move a float by its last bit).
+        let mut q = Portfolio::default();
+        q.add_lot("RELIANCE.NS", lot(10.0, 2000.0, "2019-04-01"));
+        q.journalled("demerger", "RIL", |q| {
+            q.apply_demerger_terms("RELIANCE.NS", &jio_terms(), None)
+        });
+        let path = temp_dir("journal-round-trip").join("portfolio.json");
+        q.save_to(&path).unwrap();
+        let mut loaded = Portfolio::load_from(&path).unwrap();
+        assert_eq!(loaded.undo_last_action().unwrap().action, "demerger");
+        assert!(loaded.holding("JIOFIN.NS").is_none());
         // An old file without a journal still loads; an empty one is not written.
         let json = serde_json::to_string(&Portfolio::default()).unwrap();
         assert!(!json.contains("journal"), "{json}");
