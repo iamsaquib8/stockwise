@@ -805,14 +805,15 @@ fn verdict_tool_result_has_scores_and_an_engine_action() {
 }
 
 #[test]
-fn ipo_tools_are_described_without_a_call() {
+fn ipo_tools_describe_the_engine_verdict() {
     use crate::action::testing::assert_action_well_formed;
     for name in ["ipo_board", "ipo_analyze"] {
         let t = tool(name);
         assert_action_well_formed(t.title);
         assert_action_well_formed(t.description);
-        assert!(!t.description.to_lowercase().contains("verdict"), "{name}");
+        assert!(t.description.contains("`verdict`"), "{name}");
     }
+    assert!(tool("ipo_analyze").description.contains("never change it"));
 }
 
 // ── workspace changes ──

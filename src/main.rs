@@ -55,6 +55,9 @@ mod insider;
 mod insights;
 mod intraday;
 mod ipo;
+mod ipo_log;
+mod ipo_model;
+mod ipo_verdict;
 mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
@@ -630,9 +633,11 @@ flows, bulk/block deals, F&O ban list, OI build-up and cross-market movers.")]
     Peers { symbol: String },
     /// Insider activity and analyst consensus
     Insider { symbol: String },
-    /// Indian IPOs: open and upcoming issues, subscription, allotment odds and demand scores
-    #[command(after_help = IPO_HELP)]
+    /// Indian IPOs: a rule-based verdict per issue (APPLY, WAIT, AVOID...), subscription, valuation, allotment odds
+    #[command(after_help = IPO_HELP, args_conflicts_with_subcommands = true)]
     Ipo {
+        #[command(subcommand)]
+        cmd: Option<IpoCmd>,
         /// IPO symbol or company name for the deep analysis (omit for the live board)
         symbol: Option<String>,
         /// Mainboard, SME or both
@@ -644,6 +649,12 @@ flows, bulk/block deals, F&O ban list, OI build-up and cross-market movers.")]
         /// Recently closed or listed issues to show on the board
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=30))]
         recent: u32,
+        /// RHP figures file to read (default: ipo/<SYMBOL>.toml in the data directory)
+        #[arg(long)]
+        rhp: Option<std::path::PathBuf>,
+        /// Print a template of the RHP figures file and where to save it
+        #[arg(long)]
+        rhp_template: bool,
         #[command(flatten)]
         out: JsonOutput,
     },
@@ -2532,14 +2543,51 @@ enum SimCmd {
 
 const IPO_HELP: &str = "\
 Examples:
-  stockwise ipo                          open, upcoming and recently listed IPOs
+  stockwise ipo                          open, upcoming and recent IPOs, a verdict per issue
   stockwise ipo --board sme              SME issues only
-  stockwise ipo BCSSL                    subscription, demand by price, 6-pillar score
-  stockwise ipo BCSSL --capital 2.5L     allotment odds at ₹2.5 lakh
+  stockwise ipo BCSSL                    verdict, listing model, valuation, allotment odds
+  stockwise ipo BCSSL --capital 2.5L     what ₹2.5 lakh buys: odds and expected value
+  stockwise ipo BCSSL --rhp-template     the RHP figures file to fill in for the valuation
+  stockwise ipo review --since 1y        how past verdicts did on listing day and after
+  stockwise ipo calibrate                refit the listing-day model on past NSE issues
   stockwise ipo --json                   the board as JSON
 
-Data comes from NSE's IPO pages; GMP and broker calls are unofficial press chatter.
-Scores describe the data; they are not a recommendation. The prospectus (RHP) is the source document.";
+Verdicts: APPLY, APPLY – SELL ON LISTING, WAIT (with the QIB level that would turn it
+into APPLY), AVOID or NO CALL (data coverage below 60%). Rules: docs/methodology.md,
+\"IPO verdicts\". Data comes from NSE's IPO pages, the RHP figures you save, live peer
+quotes and Yahoo prices; GMP is unofficial press chatter and only ever a red flag.
+A rule-based educational signal, not investment advice. The RHP is the source document.";
+
+#[derive(Subcommand, Debug, Clone)]
+enum IpoCmd {
+    /// How past IPO verdicts did: listing-day and 3-month returns per verdict, vs NIFTY 50
+    Review {
+        /// How far back: 90d, 6m, 1y
+        #[arg(long, default_value = "1y", value_parser = picks_log::parse_days)]
+        since: u32,
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Refit the listing-day model on past NSE mainboard issues (or a CSV of them)
+    Calibrate {
+        /// CSV with symbol, listing_date, issue_price, qib_x, nii_x, retail_x
+        /// [, listing_open, listing_close]; prices missing are fetched from Yahoo
+        #[arg(long)]
+        csv: Option<std::path::PathBuf>,
+        /// Earliest listing date to use (YYYY-MM-DD; default three years ago)
+        #[arg(long)]
+        since: Option<chrono::NaiveDate>,
+        /// Save the fit as ipo_model.json in the data directory (verdicts then use it)
+        #[arg(long)]
+        save: bool,
+        /// Print the fit as the constant for src/ipo_model.rs
+        #[arg(long)]
+        print_const: bool,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+}
 
 /// Which IPO boards `stockwise ipo` lists.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -5051,10 +5099,42 @@ async fn dispatch(
         Commands::Peers { symbol } => commands::cmd_peers(&symbol, m).await,
         Commands::Insider { symbol } => commands::cmd_insider(&symbol, m).await,
         Commands::Ipo {
+            cmd: Some(IpoCmd::Review { since, out }),
+            ..
+        } => commands::cmd_ipo_review(since, out.into()).await,
+        Commands::Ipo {
+            cmd:
+                Some(IpoCmd::Calibrate {
+                    csv,
+                    since,
+                    save,
+                    print_const,
+                    json,
+                }),
+            ..
+        } => {
+            let since = since.unwrap_or_else(|| {
+                chrono::Local::now().date_naive() - chrono::Duration::days(3 * 365)
+            });
+            commands::cmd_ipo_calibrate(
+                commands::CalibrateOptions {
+                    csv,
+                    since,
+                    save,
+                    print_const,
+                },
+                Format::from_flags(json, false),
+            )
+            .await
+        }
+        Commands::Ipo {
+            cmd: None,
             symbol,
             board,
             capital,
             recent,
+            rhp,
+            rhp_template,
             out,
         } => {
             commands::cmd_ipo(
@@ -5062,6 +5142,8 @@ async fn dispatch(
                 board.into(),
                 capital,
                 recent as usize,
+                rhp.as_deref(),
+                rhp_template,
                 out.into(),
             )
             .await

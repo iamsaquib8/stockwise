@@ -390,6 +390,7 @@ async fn ipo_analyze(src: &impl DataSource, a: &Args) -> Result<Value> {
         a.need_str("symbol")?,
         series,
         a.f64("capital"),
+        None,
     )
     .await?;
     let mut v = serde_json::to_value(analysis)?;
