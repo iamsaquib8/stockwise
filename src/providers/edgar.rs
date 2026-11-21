@@ -562,6 +562,30 @@ fn explain(e: anyhow::Error, what: &str) -> anyhow::Error {
     }
 }
 
+/// GET an EDGAR document (JSON or XML) with the User-Agent SEC asks for,
+/// cached for `ttl`. A refusal says how to set `STOCKWISE_SEC_USER_AGENT`.
+pub async fn get(client: &YahooClient, url: &str, ttl: Duration, what: &str) -> Result<String> {
+    let ua = user_agent();
+    let headers = [
+        ("User-Agent", ua.as_str()),
+        ("Accept", "application/json, application/xml, text/xml"),
+    ];
+    client
+        .fetch_with(url, ttl, &headers)
+        .await
+        .map_err(|e| explain(e, what))
+}
+
+/// The CIK of a US stock symbol from SEC's ticker list; `None` for anything
+/// that is not a listed US stock.
+pub async fn cik(client: &YahooClient, symbol: &str) -> Result<Option<u64>> {
+    let Some(ticker) = ticker(symbol) else {
+        return Ok(None);
+    };
+    let list = get(client, TICKERS_URL, TICKERS_TTL, "EDGAR ticker list").await?;
+    Ok(find_cik(&list, &ticker))
+}
+
 /// US statements of `symbol` from EDGAR. `None` for a symbol that is not a
 /// US stock, is not in the ticker list, or has no US GAAP facts (foreign
 /// filers report on other forms).
