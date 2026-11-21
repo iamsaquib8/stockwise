@@ -502,7 +502,33 @@ pub fn parse_company_facts(json: &str) -> Result<Statements> {
 // Fetch
 // ───────────────────────────────────────────────────────────────
 
-const HEADERS: &[(&str, &str)] = &[("User-Agent", USER_AGENT), ("Accept", "application/json")];
+/// SEC's fair-access policy asks for a contact in the User-Agent and
+/// refuses some requests without one (HTTP 403). StockWise sends no address
+/// of its own; `STOCKWISE_SEC_USER_AGENT` (for example `Your Name
+/// you@example.com`) supplies one when SEC insists.
+const UA_ENV: &str = "STOCKWISE_SEC_USER_AGENT";
+
+fn user_agent() -> String {
+    std::env::var(UA_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| USER_AGENT.to_string())
+}
+
+/// A refusal from SEC, with what to do about it.
+fn explain(e: anyhow::Error, what: &str) -> anyhow::Error {
+    let refused = e
+        .downcast_ref::<crate::api::HttpStatusError>()
+        .is_some_and(|h| h.status() == reqwest::StatusCode::FORBIDDEN);
+    if refused {
+        e.context(format!(
+            "{what}: SEC refused the request (HTTP 403); it asks for a contact in the User-Agent, set {UA_ENV}=\"Your Name you@example.com\""
+        ))
+    } else {
+        e.context(format!("{what} unavailable"))
+    }
+}
 
 /// US statements of `symbol` from EDGAR. `None` for a symbol that is not a
 /// US stock, is not in the ticker list, or has no US GAAP facts (foreign
@@ -511,18 +537,20 @@ pub async fn fetch(client: &YahooClient, symbol: &str) -> Result<Option<Statemen
     let Some(ticker) = ticker(symbol) else {
         return Ok(None);
     };
+    let ua = user_agent();
+    let headers = [("User-Agent", ua.as_str()), ("Accept", "application/json")];
     let list = client
-        .fetch_with(TICKERS_URL, TICKERS_TTL, HEADERS)
+        .fetch_with(TICKERS_URL, TICKERS_TTL, &headers)
         .await
-        .context("EDGAR ticker list unavailable")?;
+        .map_err(|e| explain(e, "EDGAR ticker list"))?;
     let Some(cik) = find_cik(&list, &ticker) else {
         return Ok(None);
     };
     let url = format!("{FACTS_URL}{cik:010}.json");
     let body = client
-        .fetch_with(&url, FACTS_TTL, HEADERS)
+        .fetch_with(&url, FACTS_TTL, &headers)
         .await
-        .context("EDGAR company facts unavailable")?;
+        .map_err(|e| explain(e, "EDGAR company facts"))?;
     let st = parse_company_facts(&body)?;
     Ok((!st.quarterly.is_empty() || !st.annual.is_empty() || st.equity.is_some()).then_some(st))
 }

@@ -219,6 +219,12 @@ impl std::fmt::Display for HttpStatusError {
 
 impl std::error::Error for HttpStatusError {}
 
+impl HttpStatusError {
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.status
+    }
+}
+
 /// True when `err` is (or wraps) an HTTP 404 from [`YahooClient`], such as a
 /// symbol Yahoo has no chart for.
 pub fn is_not_found(err: &anyhow::Error) -> bool {

@@ -340,6 +340,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_sec_refusal_says_how_to_fix_it() {
+        let server = crate::testutil::MockServer::start(vec![(403, "Forbidden".into())]).await;
+        let client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        let mut q = Quote {
+            symbol: Some("CALX".into()),
+            regular_market_price: Some(100.0),
+            currency: Some("USD".into()),
+            ..Default::default()
+        };
+        let mut meta = Meta::default();
+        complete_fundamentals(&client, &mut q, &mut meta).await;
+        let w = meta.warnings.join(" ");
+        assert!(
+            w.contains("HTTP 403") && w.contains("STOCKWISE_SEC_USER_AGENT"),
+            "{w}"
+        );
+    }
+
+    #[tokio::test]
     async fn indian_fundamentals_fill_from_nse_and_bse() {
         let results = serde_json::json!({"resCmpData": [
             {"re_to_dt": "30-SEP-2025", "re_net_sale": 240000, "re_net_profit": 24000, "re_dil_eps": 17.5},
