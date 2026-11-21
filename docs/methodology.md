@@ -13,9 +13,12 @@ broken or one-off figures at the top of the list.
 
 ### 1. Who gets scored
 
-The scan starts from the market's universe: the stocks listed on BSE that
-traded on the last session, plus NIFTY 500, for India; the S&P 1500 for the
-US. Only stocks that clear two floors are scored:
+The scan starts from the market's universe. For India, that is the stocks
+listed on BSE that traded at least ₹10 lakh on the last session, plus NIFTY
+500. This is a prerequisite of the universe, separate from the floors below:
+`--min-adv 0` does not bring in a BSE-only stock under ₹10 lakh (use
+`--universe all` for every BSE stock). For the US, the universe is the
+S&P 1500. Only stocks that clear two floors are scored:
 
 | Market and tier | Market cap at least | Average traded value a day (3 months) at least |
 |---|---|---|
@@ -115,8 +118,9 @@ for Infosys.
 
 ### 7. Diversity
 
-At most **3 stocks per sector** in a list (`--top 0` lists every stock
-without the limit).
+With a positive `--top`, at most **3 stocks per sector** are listed. Only
+stocks with a known sector count toward the limit. `--top 0` lists every
+stock without it.
 
 ### 8. Track record
 
@@ -148,9 +152,11 @@ the evidence. Check it before trusting a list.
 - A negative P/E is a loss and lowers the valuation pillar.
 - The **assumed annual return** comes from the earnings yield plus growth
   (revenue growth, else earnings growth, held to −10%…15%), blended 70/30
-  with the last year's price return (held to −10%…25%). It is never read off
-  the score. Without either input, the score's band stands in, and the
-  reasons say so.
+  with the last year's price return (held to −10%…25%). When only one of
+  the two is known, that one is used. Only when both are missing does the
+  score's band stand in, and the reasons say so. The final figure is held
+  to 0%…30%: for example, −5% and −10% blend to −6.5% and are reported as
+  0%.
 - The Monte Carlo range uses log returns whose median path compounds at the
   assumed return. Its median matches the 5-year projection; volatility only
   widens the range.
@@ -162,5 +168,5 @@ finalists get their fundamentals fetched before the final score.
 
 - **RSI** of a flat series is 50, not 100 (nothing rose, so nothing is
   overbought).
-- **MACD** needs 35 bars for its signal line. With fewer it gives no reading,
+- **MACD** needs 34 bars for its signal line. With fewer it gives no reading,
   instead of a signal line of zero.

@@ -12,7 +12,7 @@ readme = "README.md"
 license = "MIT"
 keywords = ["stocks", "portfolio", "tax", "india", "mcp"]
 categories = ["command-line-utilities", "finance"]
-exclude = ["assets/", "docs/", "site/", ".github/", "*.tape", "install.sh", "packaging/", "Dockerfile", ".dockerignore", "flake.nix", "flake.lock", "pyproject.toml", "scripts/"]
+exclude = ["assets/", "docs/*", "!docs/methodology.md", "site/", ".github/", "*.tape", "install.sh", "packaging/", "Dockerfile", ".dockerignore", "flake.nix", "flake.lock", "pyproject.toml", "scripts/"]
 
 # `cargo binstall stockwise` downloads the prebuilt release binary instead of
 # compiling. Asset names must match .github/workflows/release.yml.

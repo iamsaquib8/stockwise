@@ -523,13 +523,12 @@ pub(super) async fn longterm_scores(
         let mut q = q.clone();
         crate::research::enrich_quote(client, &mut q, false).await;
         let sym = q.symbol.as_deref().unwrap_or("");
-        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-            c.indicators
-                .quote
-                .first()
-                .and_then(|qi| qi.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-        });
+        let hist = client
+            .get_chart(sym, "1y", "1d")
+            .await
+            .ok()
+            .map(|c| c.return_closes())
+            .filter(|c| !c.is_empty());
         longterm::score_for_longterm(&q, hist.as_deref())
     }))
     .buffered(8)
@@ -541,12 +540,21 @@ pub async fn cmd_longterm(
     amount: Option<f64>,
     market: Market,
     universe: Option<market::Universe>,
+    json: bool,
 ) -> Result<()> {
     market.require_bot_support("longterm")?;
     let client = YahooClient::new().await?;
     let quotes = super::markets::universe_quotes(&client, market, universe).await?;
     let csym = market.currency_symbol();
     let monthly = amount.unwrap_or(10000.0);
+
+    if json {
+        let mut scores = longterm_scores(&client, &quotes).await;
+        longterm::rank(&mut scores);
+        let meta = longterm_meta(&quotes, &scores);
+        let rows: Vec<serde_json::Value> = scores.iter().map(longterm_json).collect();
+        return crate::output::print_json(&serde_json::json!({ "scores": rows, "meta": meta }));
+    }
 
     print_header(&format!("Long-Term Scores — {} Market", market.label()));
     println!(
@@ -559,8 +567,59 @@ pub async fn cmd_longterm(
     longterm::rank(&mut scores);
 
     print!("{}", longterm::render_report(&scores, monthly, csym));
+    println!("  {}", longterm_meta(&quotes, &scores).footer().dimmed());
     println!();
     Ok(())
+}
+
+/// Provenance of a `longterm` run: the scan's fundamentals, plus how many
+/// scored stocks had no price history for their volatility.
+fn longterm_meta(
+    quotes: &[crate::api::Quote],
+    scores: &[longterm::LongTermScore],
+) -> crate::provenance::Meta {
+    let mut meta = crate::provenance::for_scan(quotes);
+    let no_vol = scores
+        .iter()
+        .filter(|s| s.monte_carlo_median.is_none())
+        .count();
+    if no_vol > 0 {
+        meta.warn(format!(
+            "volatility missing for {no_vol} of {} scored stocks (no price history)",
+            scores.len()
+        ));
+        if no_vol * 2 > scores.len() {
+            meta.missing.push("volatility".into());
+        }
+    }
+    meta
+}
+
+fn longterm_json(s: &longterm::LongTermScore) -> serde_json::Value {
+    serde_json::json!({
+        "symbol": s.symbol,
+        "name": s.name,
+        "price": s.price,
+        "currency": s.currency,
+        "total_score": s.total(),
+        "data_coverage": s.data_coverage,
+        "pillars": {
+            "valuation": s.pillar_data[0].then_some(s.valuation_score),
+            "growth": s.pillar_data[1].then_some(s.growth_score),
+            "quality": s.pillar_data[2].then_some(s.quality_score),
+            "momentum": s.pillar_data[3].then_some(s.momentum_score),
+            "dividend": s.pillar_data[4].then_some(s.dividend_score),
+            "safety": s.pillar_data[5].then_some(s.safety_score),
+        },
+        "raised_by": s.raised_by,
+        "lowered_by": s.lowered_by,
+        "est_annual_return_percent": s.est_annual_return,
+        "simulated_5y_return_percent": {
+            "p10": s.monte_carlo_p10,
+            "median": s.monte_carlo_median,
+            "p90": s.monte_carlo_p90,
+        },
+    })
 }
 
 // ── Tax Calculator ──

@@ -78,10 +78,11 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
 /// Calculate MACD (Moving Average Convergence Divergence)
 /// Returns (macd_line, signal_line, histogram)
 pub fn macd(data: &[f64]) -> Option<(f64, f64, f64)> {
-    // The signal line is a 9-period EMA of the MACD line, which needs 26
-    // bars before its first value: fewer than 35 bars give no signal line,
-    // and a made-up one (zero) would turn the MACD line into a histogram.
-    if data.len() < 35 {
+    // The signal line is a 9-period EMA of the MACD line. The MACD line
+    // starts at bar 26, so 34 bars give nine MACD values, enough to seed it;
+    // with fewer there is no signal line, and a made-up one (zero) would
+    // turn the MACD line into a histogram.
+    if data.len() < 34 {
         return None;
     }
 
@@ -784,9 +785,9 @@ mod tests {
 
     #[test]
     fn macd_needs_enough_bars_for_a_signal_line() {
-        let data: Vec<f64> = (0..34).map(|i| 100.0 + i as f64).collect();
+        let data: Vec<f64> = (0..33).map(|i| 100.0 + i as f64).collect();
         assert_eq!(macd(&data), None);
-        let data: Vec<f64> = (0..35).map(|i| 100.0 + i as f64).collect();
+        let data: Vec<f64> = (0..34).map(|i| 100.0 + i as f64).collect();
         assert!(macd(&data).is_some());
     }
 

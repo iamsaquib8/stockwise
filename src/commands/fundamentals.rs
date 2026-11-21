@@ -102,6 +102,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
+            "meta": r_opt.as_ref().map(|r| &r.meta),
         });
         return output::print_json(&out);
     }
@@ -880,11 +881,29 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     // ── 1. Quote + Fundamentals ──
     let mut quotes = client.get_quote(&[cur_ref.as_str()]).await?;
     let q = quotes.first_mut().context("Symbol not found")?;
-    crate::research::enrich_quote(&client, q, false).await;
+    let mut meta = crate::provenance::Meta::default();
+    crate::research::enrich_quote_with(&client, q, false, &mut meta).await;
     let q = &*q;
-    let r_opt = crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::ALL)
-        .await
-        .ok();
+    let r_opt = match crate::research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        crate::research::Needs::ALL,
+    )
+    .await
+    {
+        Ok(r) => {
+            let mut m = r.meta.clone();
+            m.merge(&meta);
+            meta = m;
+            Some(r)
+        }
+        Err(e) => {
+            meta.warn(format!("Research data unavailable ({e:#})"));
+            None
+        }
+    };
 
     if json {
         let cards = r_opt
@@ -902,6 +921,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
+            "meta": meta,
         });
         return output::print_json(&out);
     }
@@ -1177,19 +1197,20 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
 
         // Risk
         print_section("Risk Profile");
-        if let Some(vol) = technical::annualized_volatility(&closes) {
+        let rc = chart.return_closes();
+        if let Some(vol) = technical::annualized_volatility(&rc) {
             print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
         }
-        if let Some(sharpe) = technical::sharpe_ratio(&closes, 0.05) {
+        if let Some(sharpe) = technical::sharpe_ratio(&rc, 0.05) {
             print_kv("Sharpe Ratio", &format!("{:.2}", sharpe));
         }
-        if let Some((mdd, _, _)) = technical::max_drawdown(&closes) {
+        if let Some((mdd, _, _)) = technical::max_drawdown(&rc) {
             print_kv(
                 "Max Drawdown",
                 &format!("-{:.1}%", mdd * 100.0).red().to_string(),
             );
         }
-        if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
+        if let Some(var95) = technical::value_at_risk(&rc, 0.95) {
             print_kv("Daily VaR (95%)", &format!("{:.2}%", var95 * 100.0));
         }
 
@@ -1243,6 +1264,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     print_hint(&format!(
         "Drill down: stockwise verdict {bare} · stockwise score {bare} · stockwise insights {bare} · stockwise events {bare}"
     ));
+    for w in &meta.warnings {
+        println!("  {} {}", "!".yellow(), w.dimmed());
+    }
+    println!("\n  {}", meta.footer().dimmed());
     println!(
         "\n  {}",
         "Not financial advice. Do your own research."
@@ -1714,6 +1739,7 @@ mod tests {
                     close: Some(close),
                     volume: Some(vec![Some(100); n]),
                 }],
+                adjclose: None,
             },
             events: None,
         }

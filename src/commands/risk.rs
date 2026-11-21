@@ -81,10 +81,19 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     if closes.len() < 30 {
         bail!("Not enough price data for risk analysis — try a longer period, e.g. -p 2y");
     }
+    // Returns, volatility and drawdowns from closes that include dividends
+    // (Yahoo's adjclose) when the chart has them; prices stay as traded.
+    let rc = chart.return_closes();
+    let rc = if rc.len() == closes.len() {
+        rc
+    } else {
+        closes.clone()
+    };
 
     let source = chart.meta.as_ref().and_then(|m| m.data_source.clone());
     if fmt == Format::Json {
-        let mut json = risk_json(&resolved, cur, period, &closes);
+        let mut json = risk_json(&resolved, cur, period, &rc);
+        json["price"] = serde_json::json!(closes.last().copied());
         if let Some(s) = &source {
             json["meta"] = serde_json::json!({ "sources": [s] });
         }
@@ -92,8 +101,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     let current = *closes.last().unwrap();
-    let first = closes[0];
-    let total_return = (current / first - 1.0) * 100.0;
+    let total_return = (rc[rc.len() - 1] / rc[0] - 1.0) * 100.0;
 
     print_header(&format!("Risk Analysis: {}", resolved));
     println!(
@@ -108,7 +116,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     );
 
     print_section("Volatility Metrics");
-    if let Some(vol) = technical::annualized_volatility_with(&closes, ppy) {
+    if let Some(vol) = technical::annualized_volatility_with(&rc, ppy) {
         print_kv("Annual Volatility", &format!("{:.2}%", vol * 100.0));
         let level = risk_level(vol);
         let level = if vol > 0.3 {
@@ -122,7 +130,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     print_section("Risk-Adjusted Returns");
-    if let Some(sharpe) = technical::sharpe_ratio_with(&closes, 0.05, ppy) {
+    if let Some(sharpe) = technical::sharpe_ratio_with(&rc, 0.05, ppy) {
         let color = if sharpe > 1.0 {
             format!("{:.3}", sharpe).green().to_string()
         } else if sharpe > 0.0 {
@@ -139,15 +147,15 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
         };
         print_kv("Interpretation", interp);
     }
-    if let Some(sortino) = technical::sortino_ratio_with(&closes, 0.05, ppy) {
+    if let Some(sortino) = technical::sortino_ratio_with(&rc, 0.05, ppy) {
         print_kv("Sortino Ratio", &format!("{:.3}", sortino));
     }
-    if let Some(calmar) = technical::calmar_ratio_with(&closes, ppy) {
+    if let Some(calmar) = technical::calmar_ratio_with(&rc, ppy) {
         print_kv("Calmar Ratio", &format!("{:.3}", calmar));
     }
 
     print_section("Drawdown Analysis");
-    if let Some((mdd, peak_idx, trough_idx)) = technical::max_drawdown(&closes) {
+    if let Some((mdd, peak_idx, trough_idx)) = technical::max_drawdown(&rc) {
         print_kv(
             "Max Drawdown",
             &format!("-{:.2}%", mdd * 100.0).red().to_string(),
@@ -156,7 +164,7 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
             "Peak → Trough",
             &format!(
                 "{}{:.2} → {}{:.2}",
-                csym, closes[peak_idx], csym, closes[trough_idx]
+                csym, rc[peak_idx], csym, rc[trough_idx]
             ),
         );
         print_kv(
@@ -166,13 +174,13 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     }
 
     print_section("Value at Risk (VaR)");
-    if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
+    if let Some(var95) = technical::value_at_risk(&rc, 0.95) {
         print_kv(
             "Daily VaR (95%)",
             &format!("{:.2}%", var95 * 100.0).red().to_string(),
         );
     }
-    if let Some(var99) = technical::value_at_risk(&closes, 0.99) {
+    if let Some(var99) = technical::value_at_risk(&rc, 0.99) {
         print_kv(
             "Daily VaR (99%)",
             &format!("{:.2}%", var99 * 100.0).red().to_string(),
@@ -481,8 +489,16 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     let window = 90.min(n);
     let recent = &closes[n - window..];
     let (slope, intercept) = linear_regression(recent);
-    let vol = technical::annualized_volatility(recent).unwrap_or(0.3);
-    let daily_vol = vol / (252.0_f64).sqrt();
+    // Volatility from the same window of closes, dividends included when
+    // Yahoo sent adjclose. Measured or missing, never assumed.
+    let rc = chart.return_closes();
+    let vol_window = if rc.len() == n {
+        &rc[n - window..]
+    } else {
+        recent
+    };
+    let vol = technical::annualized_volatility(vol_window);
+    let daily_vol = vol.map(|v| v / (252.0_f64).sqrt());
 
     // Project forward
     let mut forecast = closes.clone();
@@ -490,10 +506,12 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     let mut lower = Vec::new();
     for d in 0..days {
         let projected = slope * (window + d) as f64 + intercept;
-        let band = daily_vol * projected * ((d + 1) as f64).sqrt();
         forecast.push(projected);
-        upper.push(projected + 1.96 * band);
-        lower.push(projected - 1.96 * band);
+        if let Some(dv) = daily_vol {
+            let band = dv * projected * ((d + 1) as f64).sqrt();
+            upper.push(projected + 1.96 * band);
+            lower.push(projected - 1.96 * band);
+        }
     }
 
     let current = *closes.last().unwrap();
@@ -529,13 +547,16 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     } else {
         format!("{:.2}%", change_pct).red().to_string()
     };
-    print_kv("Expected Change", &chg);
+    print_kv("Trend-line projection", &chg);
     print_kv(
         "Daily Trend",
         &format!("{}{:.4}/day", if slope >= 0.0 { "+" } else { "" }, slope),
     );
 
-    print_section("Confidence Bands (95%)");
+    print_section("Volatility Bands (95%)");
+    if vol.is_none() {
+        print_kv("Bands", "missing (volatility could not be measured)");
+    }
     if let (Some(u), Some(l)) = (upper.last(), lower.last()) {
         print_kv(
             "Upper Band",
@@ -548,11 +569,29 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
             &format!("{:.2}%", ((u - l) / projected_end) * 100.0),
         );
     }
-    print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
+    print_kv(
+        "Annualized Vol",
+        &vol.map_or("missing".to_string(), |v| format!("{:.1}%", v * 100.0)),
+    );
 
+    let mut meta = crate::provenance::Meta::from_source(
+        chart
+            .meta
+            .as_ref()
+            .and_then(|m| m.data_source.as_deref())
+            .unwrap_or(crate::provenance::YAHOO),
+    );
+    if let Some(ts) = chart.timestamp.as_ref().and_then(|t| t.last()) {
+        meta.set_as_of_unix(*ts);
+    }
+    meta.set_fields(&[("volatility", vol.is_some())]);
+    for w in chart.meta.iter().flat_map(|m| m.warnings.iter()) {
+        println!("  {} {}", "!".yellow(), w.dimmed());
+    }
+    println!("\n  {}", meta.footer().dimmed());
     println!(
         "\n  {}",
-        "Forecast based on linear trend extrapolation. NOT a prediction."
+        "A straight line fitted to the last 90 closes and extended. It describes the past trend; it is NOT a prediction."
             .dimmed()
             .italic()
     );
@@ -600,13 +639,7 @@ pub async fn cmd_options(symbol: &str, period: &str, market: Market) -> Result<(
 
     // Fetch 1mo data for realized vol
     let chart = client.get_chart(&resolved, period, "1d").await?;
-    let closes: Vec<f64> = chart
-        .indicators
-        .quote
-        .first()
-        .and_then(|q| q.close.as_ref())
-        .map(|c| c.iter().filter_map(|v| *v).collect())
-        .unwrap_or_default();
+    let closes = chart.return_closes();
     if let Some(vol) = technical::annualized_volatility(&closes) {
         print_kv("Realized Vol (1M)", &format!("{:.1}%", vol * 100.0));
         // Estimate option prices using simplified Black-Scholes-ish approach

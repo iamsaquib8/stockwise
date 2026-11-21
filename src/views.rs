@@ -515,7 +515,10 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
-        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s] }),
+        meta: source.map(|s| crate::api::QuoteMeta {
+            sources: vec![s],
+            ..Default::default()
+        }),
     }
 }
 
@@ -856,6 +859,7 @@ pub mod fixtures {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(
                 (0..closes.len() as i64)
@@ -870,6 +874,7 @@ pub mod fixtures {
                     close: some(closes),
                     volume: Some(closes.iter().map(|_| Some(1000)).collect()),
                 }],
+                adjclose: None,
             },
             events: None,
         }
@@ -1341,7 +1346,14 @@ mod tests {
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["holdings", "totals", "unpriced", "unconverted", "notes"]
+            [
+                "holdings",
+                "totals",
+                "unpriced",
+                "unconverted",
+                "notes",
+                "warnings"
+            ]
         );
         let totals: Vec<&str> = v["totals"]
             .as_object()
@@ -1351,7 +1363,15 @@ mod tests {
             .collect();
         assert_eq!(
             totals,
-            ["cost_basis", "value", "pnl", "pnl_percent", "currency"]
+            [
+                "cost_basis",
+                "value",
+                "pnl",
+                "pnl_percent",
+                "currency",
+                "fx_effect",
+                "cost_at_today_fx"
+            ]
         );
         assert_eq!(v["holdings"][0]["symbol"], "TCS.NS");
         assert_eq!(v["holdings"][0]["pnl"], 6000.0);

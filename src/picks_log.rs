@@ -38,9 +38,14 @@ pub struct Entry {
     /// 1 for the highest score.
     pub rank: usize,
     pub score: f64,
-    /// Price when listed.
+    /// Price when listed. A market observation used only for returns
+    /// (a ratio), never booked as money, so `f64` like every other quote.
     pub price: f64,
     pub currency: Option<String>,
+    /// The benchmark's level at the same moment, so the review compares
+    /// matching observations; absent in lists logged before 0.9.
+    #[serde(default)]
+    pub benchmark_price: Option<f64>,
     /// [`crate::picks::METHODOLOGY`] of the run.
     pub methodology: String,
 }
@@ -75,10 +80,15 @@ fn merge(log: &mut Vec<Entry>, entries: Vec<Entry>) -> usize {
     added
 }
 
-/// Every logged entry, oldest first.
-pub fn load() -> Vec<Entry> {
-    crate::store::load::<Vec<Entry>>(FILE).unwrap_or_default()
+/// Every logged entry, oldest first; empty when nothing was logged yet. An
+/// unreadable file is an error: reporting it as "no picks" would hide it,
+/// and the next scan could not append to it either.
+pub fn load() -> Result<Vec<Entry>> {
+    crate::store::load::<Vec<Entry>>(FILE)
 }
+
+/// Longest lookback `picks review` accepts: ten years.
+pub const MAX_LOOKBACK_DAYS: u32 = 3_650;
 
 /// `90d`, `12w`, `6m`, `1y` or a plain number of days.
 pub fn parse_days(s: &str) -> Result<u32, String> {
@@ -93,8 +103,9 @@ pub fn parse_days(s: &str) -> Result<u32, String> {
     num.parse::<u32>()
         .ok()
         .filter(|n| *n > 0)
-        .map(|n| n * mult)
-        .ok_or_else(|| format!("'{s}' is not a period like 90d, 12w, 6m or 1y"))
+        .and_then(|n| n.checked_mul(mult))
+        .filter(|d| *d <= MAX_LOOKBACK_DAYS)
+        .ok_or_else(|| format!("'{s}' is not a period like 90d, 12w, 6m or 1y (at most 10 years)"))
 }
 
 /// One pick measured since it was first listed.
@@ -124,6 +135,9 @@ pub struct Review {
     pub rows: Vec<Row>,
     /// Logged picks without a current price (delisted, renamed, failed).
     pub unpriced: Vec<String>,
+    /// Logged picks whose splits since listing could not be checked: left
+    /// out, since a split would read as a loss.
+    pub unverified: Vec<String>,
     /// Share of picks that rose.
     pub hit_rate: Option<f64>,
     /// Share of picks that beat the benchmark.
@@ -162,9 +176,25 @@ fn median(v: &[f64]) -> Option<f64> {
     })
 }
 
+/// What a review compares with: the benchmark's name, its daily closes
+/// (oldest first) and its level now.
+#[derive(Debug, Clone, Copy)]
+pub struct Benchmark<'a> {
+    pub name: &'a str,
+    pub closes: &'a [(NaiveDate, f64)],
+    pub now: Option<f64>,
+}
+
 /// Measure the `pick` entries of `market` logged on or after `since`, each
 /// from its first listing in the window, with `prices` (current price by
-/// symbol) and the benchmark's daily closes (oldest first).
+/// symbol) and `splits` (shares per listed share since each listing: 2.0
+/// after a 2-for-1 split; `None` when that could not be checked; a symbol
+/// without an entry has had none).
+///
+/// Each leg compares matching observations: a list logged with the
+/// benchmark's level at that moment is measured against its level now;
+/// an older one against the closes of its listing date and of the last
+/// session.
 pub fn review(
     entries: &[Entry],
     market: &str,
@@ -172,7 +202,8 @@ pub fn review(
     since: NaiveDate,
     today: NaiveDate,
     prices: &HashMap<String, f64>,
-    benchmark: Option<(&str, &[(NaiveDate, f64)])>,
+    splits: &HashMap<String, Option<f64>>,
+    benchmark: Option<Benchmark>,
 ) -> Review {
     let mut first: Vec<&Entry> = Vec::new();
     for e in entries.iter().filter(|e| {
@@ -184,9 +215,10 @@ pub fn review(
             None => first.push(e),
         }
     }
-    let bench_now = benchmark.and_then(|(_, s)| s.last().map(|(_, c)| *c));
+    let last_close = benchmark.and_then(|b| b.closes.last().map(|(_, c)| *c));
     let mut rows = Vec::new();
     let mut unpriced = Vec::new();
+    let mut unverified = Vec::new();
     let mut methodologies: Vec<String> = Vec::new();
     for e in first {
         if !methodologies.contains(&e.methodology) {
@@ -200,11 +232,24 @@ pub fn review(
             unpriced.push(e.symbol.clone());
             continue;
         }
-        let ret = price / e.price - 1.0;
-        let bench = match (benchmark, bench_now) {
-            (Some((_, s)), Some(now)) => close_on(s, e.date).map(|then| now / then - 1.0),
-            _ => None,
+        // A 2-for-1 split halves the price without a loss: compare on the
+        // shares a listed share became.
+        let factor = match splits.get(&e.symbol) {
+            None => 1.0,
+            Some(Some(f)) if *f > 0.0 => *f,
+            Some(_) => {
+                unverified.push(e.symbol.clone());
+                continue;
+            }
         };
+        let ret = price * factor / e.price - 1.0;
+        let bench = benchmark.and_then(|b| {
+            let (then, now) = match e.benchmark_price.filter(|p| *p > 0.0) {
+                Some(then) => (then, b.now.or(last_close)?),
+                None => (close_on(b.closes, e.date)?, last_close?),
+            };
+            (then > 0.0).then(|| now / then - 1.0)
+        });
         rows.push(Row {
             symbol: e.symbol.clone(),
             picked_on: e.date,
@@ -228,7 +273,7 @@ pub fn review(
     let excess: Vec<f64> = rows.iter().filter_map(|r| r.excess_pct).collect();
     let share = |n: usize, d: usize| (d > 0).then(|| n as f64 / d as f64);
     Review {
-        benchmark: benchmark.map(|(name, _)| name.to_string()),
+        benchmark: benchmark.map(|b| b.name.to_string()),
         since,
         hit_rate: share(returns.iter().filter(|r| **r > 0.0).count(), returns.len()),
         beat_rate: share(excess.iter().filter(|r| **r > 0.0).count(), excess.len()),
@@ -238,8 +283,25 @@ pub fn review(
         median_excess: median(&excess),
         rows,
         unpriced,
+        unverified,
         methodologies,
     }
+}
+
+impl crate::output::CsvRow for Row {
+    const COLUMNS: &'static [&'static str] = &[
+        "symbol",
+        "picked_on",
+        "days",
+        "rank",
+        "score",
+        "entry_price",
+        "price",
+        "currency",
+        "return_pct",
+        "benchmark_pct",
+        "excess_pct",
+    ];
 }
 
 #[cfg(test)]
@@ -262,6 +324,7 @@ mod tests {
             score: 80.0,
             price,
             currency: Some("INR".into()),
+            benchmark_price: None,
             methodology: "2".into(),
         }
     }
@@ -307,7 +370,12 @@ mod tests {
             d("2026-01-01"),
             d("2026-03-02"),
             &prices,
-            Some(("NIFTY 50", &bench)),
+            &HashMap::new(),
+            Some(Benchmark {
+                name: "NIFTY 50",
+                closes: &bench,
+                now: None,
+            }),
         );
         assert_eq!(r.rows.len(), 2);
         assert_eq!(r.unpriced, ["GONE.NS"]);
@@ -326,6 +394,61 @@ mod tests {
     }
 
     #[test]
+    fn a_split_is_not_a_loss_and_an_unknown_split_is_left_out() {
+        let log = vec![
+            entry("2026-01-05", "SPLIT.NS", 100.0),
+            entry("2026-01-05", "UNKNOWN.NS", 100.0),
+        ];
+        let prices = HashMap::from([
+            ("SPLIT.NS".to_string(), 55.0),
+            ("UNKNOWN.NS".to_string(), 55.0),
+        ]);
+        let splits = HashMap::from([
+            ("SPLIT.NS".to_string(), Some(2.0)),
+            ("UNKNOWN.NS".to_string(), None),
+        ]);
+        let r = review(
+            &log,
+            "in",
+            "long",
+            d("2026-01-01"),
+            d("2026-03-02"),
+            &prices,
+            &splits,
+            None,
+        );
+        assert_eq!(r.rows.len(), 1);
+        assert!((r.rows[0].return_pct - 0.10).abs() < 1e-9);
+        assert_eq!(r.unverified, ["UNKNOWN.NS"]);
+    }
+
+    #[test]
+    fn the_benchmark_leg_uses_the_level_logged_with_the_pick() {
+        let mut e = entry("2026-03-02", "A.NS", 100.0);
+        e.benchmark_price = Some(20_000.0);
+        let prices = HashMap::from([("A.NS".to_string(), 101.0)]);
+        // Same day: the daily close would compare with itself (0%); the
+        // levels logged and now show the index's own move.
+        let closes = vec![(d("2026-03-02"), 20_100.0)];
+        let r = review(
+            &[e],
+            "in",
+            "long",
+            d("2026-03-01"),
+            d("2026-03-02"),
+            &prices,
+            &HashMap::new(),
+            Some(Benchmark {
+                name: "NIFTY 50",
+                closes: &closes,
+                now: Some(20_200.0),
+            }),
+        );
+        assert!((r.rows[0].benchmark_pct.unwrap() - 0.01).abs() < 1e-9);
+        assert!(r.rows[0].excess_pct.unwrap().abs() < 1e-9);
+    }
+
+    #[test]
     fn periods_parse() {
         assert_eq!(parse_days("90d"), Ok(90));
         assert_eq!(parse_days("12w"), Ok(84));
@@ -334,5 +457,8 @@ mod tests {
         assert_eq!(parse_days("30"), Ok(30));
         assert!(parse_days("0d").is_err());
         assert!(parse_days("soon").is_err());
+        assert!(parse_days("11767034y").is_err(), "overflow is rejected");
+        assert!(parse_days("1000000000d").is_err());
+        assert_eq!(parse_days("10y"), Ok(3_650));
     }
 }

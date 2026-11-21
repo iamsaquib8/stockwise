@@ -79,7 +79,7 @@ mod ipo;
 mod markets;
 mod overview;
 mod planning;
-mod portfolio;
+pub(crate) mod portfolio;
 mod portfolio_analyze;
 mod practice;
 mod research;

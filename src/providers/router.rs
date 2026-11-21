@@ -197,6 +197,62 @@ pub struct ScreenQuery {
     pub limit: usize,
 }
 
+/// Valuation and quality ratios from a keyed provider, in Yahoo's units:
+/// fractions, except debt/equity in percent.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Ratios {
+    pub roe: Option<f64>,
+    pub debt_to_equity: Option<f64>,
+    pub profit_margin: Option<f64>,
+    pub revenue_growth: Option<f64>,
+    pub beta: Option<f64>,
+    pub eps_ttm: Option<f64>,
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+}
+
+impl Ratios {
+    /// Fill the quote's empty fields; the names of the fields filled (as in
+    /// `provenance`).
+    pub fn fill(&self, q: &mut Quote) -> Vec<&'static str> {
+        use crate::provenance::*;
+        let mut filled = Vec::new();
+        let mut set = |slot: &mut Option<f64>, v: Option<f64>, name: &'static str| {
+            if slot.is_none()
+                && let Some(v) = v.filter(|v| v.is_finite())
+            {
+                *slot = Some(v);
+                filled.push(name);
+            }
+        };
+        set(&mut q.return_on_equity, self.roe, F_ROE);
+        set(&mut q.debt_to_equity, self.debt_to_equity, F_DE);
+        set(&mut q.profit_margins, self.profit_margin, F_MARGIN);
+        set(&mut q.revenue_growth, self.revenue_growth, F_GROWTH);
+        set(&mut q.beta, self.beta, F_BETA);
+        set(&mut q.eps_trailing_twelve_months, self.eps_ttm, F_EPS);
+        set(&mut q.trailing_pe, self.pe, F_PE);
+        set(&mut q.price_to_book, self.pb, F_PB);
+        filled
+    }
+
+    fn merge(&mut self, other: &Ratios) {
+        macro_rules! keep {
+            ($($f:ident),*) => { $( if self.$f.is_none() { self.$f = other.$f; } )* };
+        }
+        keep!(
+            roe,
+            debt_to_equity,
+            profit_margin,
+            revenue_growth,
+            beta,
+            eps_ttm,
+            pe,
+            pb
+        );
+    }
+}
+
 /// Fill every empty field of `base` from `other`; whether any changed.
 pub fn fill_quote(base: &mut Quote, other: &Quote) -> bool {
     let mut changed = false;
@@ -562,6 +618,36 @@ impl Router {
         if sources.is_empty() {
             return Err(last.unwrap_or_else(|| {
                 anyhow::anyhow!("No configured provider has fundamentals for {symbol}")
+            }));
+        }
+        Ok((merged, sources))
+    }
+
+    /// Ratios (ROE, margins, leverage, growth, beta) merged field by field
+    /// across the keyed providers; the second value names the sources.
+    pub async fn ratios(&self, symbol: &str) -> Result<(Ratios, Vec<&'static str>)> {
+        let mut merged = Ratios::default();
+        let mut sources = Vec::new();
+        let mut last = None;
+        for p in self.serving(Capability::Fundamentals, 1) {
+            if !p.supports(symbol) || p.remaining() == 0 {
+                continue;
+            }
+            match p.ratios(symbol).await {
+                Ok(Some(r)) => {
+                    let before = merged.clone();
+                    merged.merge(&r);
+                    if merged != before {
+                        sources.push(p.name());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => last = Some(e),
+            }
+        }
+        if sources.is_empty() {
+            return Err(last.unwrap_or_else(|| {
+                anyhow::anyhow!("No configured provider has ratios for {symbol}")
             }));
         }
         Ok((merged, sources))

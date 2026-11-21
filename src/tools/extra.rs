@@ -1,10 +1,14 @@
 //! Read tools over the newer commands: the portfolio dashboard, market
-//! conditions, picks, movers, dividends, the emergency fund, the fit check
-//! against the user's own rules, and the journal of assistant changes.
+//! conditions, picks and their track record, batch verdicts, movers,
+//! dividends, the emergency fund, the fit check against the user's own
+//! rules, and the journal of assistant changes.
+//!
+//! Tools that need Yahoo beyond quotes and charts use the data source's own
+//! client (`DataSource::yahoo`), so one MCP session shares one session
+//! crumb, rate limiter and cache across calls.
 
 use super::ToolContext;
 use super::args::Args;
-use crate::api::YahooClient;
 use crate::market::{self, Market};
 use crate::views::{self, DataSource};
 use anyhow::{Context, Result, bail};
@@ -54,13 +58,13 @@ pub(super) async fn run<D: DataSource>(
             Ok(serde_json::to_value(report)?)
         }
         "market_conditions" => {
-            let client = YahooClient::new().await?;
-            let report = crate::commands::conditions_report(&client, m, universe(a, m)?).await?;
+            let client = src.yahoo().await?;
+            let report = crate::commands::conditions_report(client, m, universe(a, m)?).await?;
             Ok(serde_json::to_value(report)?)
         }
         "picks" => {
             m.require_stocks("picks")?;
-            let client = YahooClient::new().await?;
+            let universe = universe(a, m)?;
             let cap = match a.str("cap") {
                 Some(c) => {
                     use clap::ValueEnum;
@@ -77,27 +81,43 @@ pub(super) async fn run<D: DataSource>(
                 Some("short") => crate::picks::Horizon::Short,
                 _ => crate::picks::Horizon::Long,
             };
+            let client = src.yahoo().await?;
             let run = crate::picks::run(
-                &client,
+                client,
                 m,
-                universe(a, m)?,
+                universe,
                 cap,
                 floors,
                 horizon,
                 a.usize_or("top", 10),
             )
             .await?;
-            Ok(json!({
-                "scanned": run.scanned,
-                "below_floor": run.below_floor,
-                "thin_data": run.thin_data,
-                "flagged_check_data": run.flagged.iter().map(|p| json!({"symbol": p.symbol, "flags": p.flags})).collect::<Vec<_>>(),
-                "picks": run.picks,
-                "methodology": run.methodology,
-                "horizon": horizon,
-                "method": "Percentile ranks among the stocks that clear the size and liquidity floors: value 25%, quality 25%, growth 15%, trend 20%, risk 15%. Losses and negative book value rank last; implausible figures are left out to check; at most 3 per sector; a pillar without data pulls the score toward 50.",
-            }))
+            // Logged like `stockwise picks`, so the track record (picks_review,
+            // stockwise://picks/latest) counts lists an assistant asked for.
+            let scope =
+                crate::commands::cap_scope(universe.map_or(m.label(), |u| u.nse_index()), cap);
+            let level = crate::commands::benchmark_level(client, m).await;
+            crate::commands::log_picks(m, &scope, horizon, &run.picks, level);
+            Ok(picks_value(&run))
         }
+        "picks_review" => {
+            let since = crate::picks_log::parse_days(a.str("since").unwrap_or("90d"))
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let horizon = match a.str("horizon") {
+                Some("short") => crate::picks::Horizon::Short,
+                _ => crate::picks::Horizon::Long,
+            };
+            let review =
+                crate::commands::picks_review_report(src.yahoo().await?, m, since, horizon).await?;
+            let mut v = serde_json::to_value(review)?;
+            v["market"] = json!(m.code());
+            v["horizon"] = json!(horizon);
+            v["about"] = json!(
+                "Each pick measured from the day it was first listed; price return, dividends not included. Past lists do not predict future ones."
+            );
+            Ok(v)
+        }
+        "verdicts" => verdicts(src, a, m).await,
         "movers" => {
             m.require_stocks("movers")?;
             let set = views::quotes(src, &m.universe()).await?;
@@ -146,6 +166,111 @@ pub(super) async fn run<D: DataSource>(
         }
         other => bail!("Tool '{}' has no handler", other),
     }
+}
+
+/// The `picks` tool's result: the list, what was left out and why, and the
+/// method behind the scores.
+/// The method line of a picks result, with the weights of the horizon that
+/// was scored (from the scorer's own table).
+fn picks_method(horizon: crate::picks::Horizon) -> String {
+    let [v, q, g, t, r] = horizon.weights();
+    let pct = |w: f64| format!("{:.0}%", w * 100.0);
+    format!(
+        "Percentile ranks among the stocks that clear the size and liquidity floors ({} horizon): value {}, quality {}, growth {}, trend {}, risk {}. Losses and negative book value rank last; implausible figures are left out to check; stocks under 60% data coverage are left out; with a positive top, at most 3 per known sector; a pillar without data pulls the score toward 50.",
+        horizon.as_str(),
+        pct(v),
+        pct(q),
+        pct(g),
+        pct(t),
+        pct(r)
+    )
+}
+
+pub(crate) fn picks_value(run: &crate::picks::Run) -> Value {
+    json!({
+        "scanned": run.scanned,
+        "below_floor": run.below_floor,
+        "thin_data": run.thin_data,
+        "flagged_check_data": run.flagged.iter().map(|p| json!({"symbol": p.symbol, "flags": p.flags})).collect::<Vec<_>>(),
+        "picks": run.picks,
+        "meta": run.meta,
+        "methodology": run.methodology,
+        "horizon": run.horizon,
+        "method": picks_method(run.horizon),
+    })
+}
+
+/// Below this data coverage (percent of inputs with data) a verdict is too
+/// thin to lean on: the line the recommendations policy calls NO CALL.
+pub(crate) const MIN_COVERAGE_PCT: f64 = 60.0;
+
+/// Most stocks researched at once by `verdicts`.
+const VERDICT_CONCURRENCY: usize = 4;
+
+/// Compact 6-pillar scores for up to 25 stocks, researched a few at a time;
+/// a stock that fails is listed in `failed` instead of failing the batch.
+async fn verdicts<D: DataSource>(src: &D, a: &Args, m: Market) -> Result<Value> {
+    use futures_util::StreamExt;
+    let client = src.yahoo().await?;
+    let mut syms: Vec<String> = a
+        .list("symbols")
+        .iter()
+        .map(|s| market::resolve_symbol(s.trim(), m))
+        .collect();
+    syms.dedup();
+    let results: Vec<(String, Result<crate::verdict::DecisionVerdict>)> =
+        futures_util::stream::iter(syms.into_iter().map(|sym| async move {
+            let r = async {
+                let research =
+                    crate::research::fetch(client, &sym, m, 60, crate::research::Needs::VERDICT)
+                        .await?;
+                let cards = crate::insights::generate_rich_insights(&research);
+                Ok(crate::verdict::generate_verdict(&research, &cards))
+            }
+            .await;
+            (sym, r)
+        }))
+        .buffered(VERDICT_CONCURRENCY)
+        .collect()
+        .await;
+    let mut rows = Vec::new();
+    let mut failed = Vec::new();
+    for (sym, r) in results {
+        match r {
+            Ok(v) => rows.push(verdict_row(&v)),
+            Err(e) => failed.push(json!({ "symbol": sym, "error": super::client_error(&e) })),
+        }
+    }
+    if rows.is_empty() && !failed.is_empty() {
+        bail!(
+            "No verdict for any of the symbols{}",
+            market::not_found_hint(m)
+        );
+    }
+    Ok(json!({
+        "verdicts": rows,
+        "failed": failed,
+        "disclaimer": crate::verdict::DISCLAIMER,
+    }))
+}
+
+/// One stock of `verdicts`: the composite, coverage and each pillar's score.
+fn verdict_row(v: &crate::verdict::DecisionVerdict) -> Value {
+    json!({
+        "symbol": v.symbol,
+        "name": v.name,
+        "price": v.price,
+        "currency": v.currency,
+        "overall_score": v.overall_score,
+        "data_coverage": v.data_coverage,
+        "low_coverage": v.data_coverage < MIN_COVERAGE_PCT,
+        "pillars": v.pillars.iter().map(|p| json!({
+            "name": p.name,
+            "score": p.score,
+            "band": p.band,
+        })).collect::<Vec<_>>(),
+        "warnings": v.warnings,
+    })
 }
 
 /// One rule's result.

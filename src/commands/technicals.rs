@@ -573,11 +573,16 @@ pub async fn cmd_chart(symbol: &str, market: Market) -> Result<()> {
 
         let first = closes[0];
         let last = *closes.last().unwrap();
-        let change = ((last / first) - 1.0) * 100.0;
+        // Return and volatility include dividends when Yahoo sent adjclose.
+        let rc = chart.return_closes();
+        let change = match (rc.first(), rc.last()) {
+            (Some(a), Some(b)) => (b / a - 1.0) * 100.0,
+            _ => ((last / first) - 1.0) * 100.0,
+        };
         let min = closes.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = closes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let vol = technical::annualized_volatility_with(
-            &closes,
+            &rc,
             technical::periods_per_year_for(
                 market::AssetClass::of(&resolved),
                 interval,
@@ -664,9 +669,13 @@ pub async fn cmd_multitimeframe(symbol: &str, market: Market) -> Result<()> {
             continue;
         }
 
-        let ret = technical::percent_change(closes[0], *closes.last().unwrap());
+        let rc = chart.return_closes();
+        let ret = match (rc.first(), rc.last()) {
+            (Some(a), Some(b)) => technical::percent_change(*a, *b),
+            _ => technical::percent_change(closes[0], *closes.last().unwrap()),
+        };
         let vol = technical::annualized_volatility_with(
-            &closes,
+            &rc,
             technical::periods_per_year_for(
                 market::AssetClass::of(&resolved),
                 interval,

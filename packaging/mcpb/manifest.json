@@ -32,7 +32,7 @@
   "tools": [
     {
       "name": "quote",
-      "description": "Stock quotes. Live (often delayed) quotes for up to 20 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
+      "description": "Stock quotes. Live (often delayed) quotes for up to 25 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
     },
     {
       "name": "history",
@@ -220,7 +220,15 @@
     },
     {
       "name": "picks",
-      "description": "Highest-scoring stocks. Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data."
+      "description": "Highest-scoring stocks. Stocks of the market that clear size and liquidity floors, ranked against each other on five pillars (value, quality, growth, trend, risk), each a percentile among the stocks scanned, with the share of the score that had data."
+    },
+    {
+      "name": "picks_review",
+      "description": "Track record of picks. How past picks lists did since each stock was first listed, against NIFTY 50 or the S&P 500 total return: hit rate, share that beat the index, mean and median return and excess."
+    },
+    {
+      "name": "verdicts",
+      "description": "6-pillar scores for several stocks. The verdict tool's composite, data coverage and pillar scores for up to 25 tickers in one call."
     },
     {
       "name": "movers",
@@ -241,6 +249,42 @@
     {
       "name": "changes_list",
       "description": "Changes made by assistants. The workspace changes made through StockWise's assistant tools (watchlist, alerts, goals, targets, profile, notes, portfolio), newest first, with each change's id for `stockwise undo`."
+    },
+    {
+      "name": "bonds_yields",
+      "description": "Indian government bond yields. T-bill and G-sec yields by tenor from CCIL, with the benchmark security."
+    },
+    {
+      "name": "bonds_list",
+      "description": "Find an Indian government security. RBI's list of outstanding G-secs: ISIN, coupon, maturity, NSE symbol, amount outstanding."
+    },
+    {
+      "name": "bonds_calc",
+      "description": "G-sec price and yield calculator. Clean and dirty price, accrued interest, yield, duration and convexity of a G-sec or T-bill."
+    },
+    {
+      "name": "commodity",
+      "description": "Gold, silver and Sovereign Gold Bonds. Gold and silver in rupees, futures, NSE gold and silver ETFs, and every SGB series with its premium to gold."
+    },
+    {
+      "name": "fx_history",
+      "description": "Currency against the rupee. History of USD/INR or another pair: change, high, low and daily rates."
+    },
+    {
+      "name": "returns",
+      "description": "Trailing returns. 1 week to 5 years, annualized beyond a year, and what ₹1 lakh became."
+    },
+    {
+      "name": "correlate",
+      "description": "Correlation of stocks. Correlation matrix of daily returns of 2 to 10 tickers over the last year."
+    },
+    {
+      "name": "compare",
+      "description": "Compare stocks side by side. Valuation, quality, growth, dividend and risk figures of up to 6 stocks."
+    },
+    {
+      "name": "portfolio_wrap",
+      "description": "Portfolio year in review. Return over a calendar or Indian financial year, flows, dividends, realized gains, best and worst holdings."
     }
   ],
   "tools_generated": false,

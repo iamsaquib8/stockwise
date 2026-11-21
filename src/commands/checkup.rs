@@ -202,13 +202,15 @@ async fn fetch_fundamentals(
 }
 
 /// Fund holdings for the look-through: saved disclosures first, then (online)
-/// Yahoo's top holdings.
+/// Yahoo's top holdings, then for an index ETF or index fund the shipped
+/// weights of its index ([`crate::index_weights`]). `funds` is (symbol,
+/// value, scheme name).
 async fn fund_holdings(
     client: Option<&YahooClient>,
-    funds: Vec<(String, f64)>,
+    funds: Vec<(String, f64, Option<String>)>,
     market: Market,
 ) -> Vec<ck::FundHoldings> {
-    futures_util::stream::iter(funds.into_iter().map(|(sym, value)| async move {
+    futures_util::stream::iter(funds.into_iter().map(|(sym, value, name)| async move {
         let profile = match crate::funds::load_fund_disclosure(&sym) {
             Some(p) => Some(p),
             None => match client {
@@ -221,16 +223,26 @@ async fn fund_holdings(
                 .and_then(Result::ok),
                 None => None,
             },
-        }?;
+        };
         let holdings: Vec<(String, f64)> = profile
-            .holdings
             .iter()
+            .flat_map(|p| &p.holdings)
             .filter_map(|h| Some((h.key()?, h.weight)))
             .collect();
-        (!holdings.is_empty()).then_some(ck::FundHoldings {
+        if !holdings.is_empty() {
+            return Some(ck::FundHoldings {
+                symbol: sym,
+                value,
+                holdings,
+                index_rest: false,
+            });
+        }
+        let table = crate::index_weights::for_fund(&sym, name.as_deref())?;
+        Some(ck::FundHoldings {
             symbol: sym,
             value,
-            holdings,
+            holdings: table.holdings(),
+            index_rest: true,
         })
     }))
     .buffer_unordered(CONCURRENCY)
@@ -294,6 +306,39 @@ async fn harvest(
     ))
 }
 
+/// Count the shares of `pending` splits and bonuses in `inputs` (lots and
+/// totals), for holdings whose inputs still carry the unadjusted share count
+/// of `portfolio`. Cost is unchanged; value follows the price.
+fn adjust_for_pending_splits(
+    inputs: &mut [pa::PositionInput],
+    portfolio: &Portfolio,
+    pending: &crate::corp_actions::PendingSplits,
+) {
+    for (sym, _) in &pending.by_symbol {
+        let Some(h) = portfolio.holding(sym) else {
+            continue;
+        };
+        let Some(i) = inputs.iter_mut().find(|i| &i.symbol == sym) else {
+            continue;
+        };
+        let adjusted = pending.adjusted_shares(h);
+        // Already counted (or not this holding's share count): leave it.
+        if (i.shares - h.shares).abs() > 1e-9 || h.shares <= 0.0 {
+            continue;
+        }
+        let ratio = adjusted / h.shares;
+        if !ratio.is_finite() || ratio <= 0.0 || (ratio - 1.0).abs() < 1e-12 {
+            continue;
+        }
+        i.shares = adjusted;
+        i.value = i.price.map(|p| p * adjusted);
+        for l in &mut i.lots {
+            l.qty *= ratio;
+            l.price /= ratio;
+        }
+    }
+}
+
 /// Gather and evaluate. `fundamentals` reads statements (network) for the
 /// forensic and valuation lenses; `offline` reads the cache only.
 pub(crate) async fn run_checkup(
@@ -312,10 +357,18 @@ pub(crate) async fn run_checkup(
     if g.portfolio.holdings.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
     }
+    let mut skipped: Vec<String> = Vec::new();
+    // A split or bonus not yet applied to the lots: count the shares after
+    // it, so the holding is not shown at half its value.
+    let pending = match client {
+        Some(c) => crate::corp_actions::pending_splits(c, &g.portfolio).await,
+        None => crate::corp_actions::PendingSplits::default(),
+    };
+    adjust_for_pending_splits(&mut g.inputs, &g.portfolio, &pending);
+    skipped.extend(pending.warnings());
     let analysis = pa::analyze(&g.inputs, &g.ctx);
     let today = g.ctx.today;
     let total = analysis.value;
-    let mut skipped: Vec<String> = Vec::new();
     if !analysis.left_out.is_empty() {
         skipped.push(format!(
             "No price or exchange rate for {}: left out of the totals",
@@ -392,10 +445,17 @@ pub(crate) async fn run_checkup(
     }
 
     // Look-through and fund overlap.
-    let fund_values: Vec<(String, f64)> = holdings
+    let fund_values: Vec<(String, f64, Option<String>)> = holdings
         .iter()
         .filter(|h| h.is_fund)
-        .map(|h| (h.symbol.clone(), h.value))
+        .map(|h| {
+            let name = analysis
+                .positions
+                .iter()
+                .find(|p| p.symbol == h.symbol)
+                .and_then(|p| p.name.clone());
+            (h.symbol.clone(), h.value, name)
+        })
         .collect();
     let funds = fund_holdings(client, fund_values.clone(), market).await;
     let look_through = if funds.is_empty() {
@@ -450,6 +510,17 @@ pub(crate) async fn run_checkup(
         .iter()
         .any(|s| s.closes.len() > ck::MIN_CORRELATION_OBS)
         .then(|| ck::correlated_pairs(&series));
+    // The drawdown is measured on the holdings with a year of closes.
+    let drawdown_coverage_pct = (total > 0.0).then(|| {
+        let covered: f64 = g
+            .inputs
+            .iter()
+            .filter(|i| i.closes.len() >= pa::MIN_CLOSES)
+            .filter_map(|i| holdings.iter().find(|h| h.symbol == i.symbol))
+            .map(|h| h.value)
+            .sum();
+        (covered / total * 100.0).clamp(0.0, 100.0)
+    });
 
     // Amounts reported in the tax, fund or goal currency are ranked in the
     // base currency: fetch those rates too.
@@ -602,6 +673,7 @@ pub(crate) async fn run_checkup(
         funds_compared: funds.len(),
         beta: analysis.risk.beta,
         max_drawdown_pct: analysis.risk.max_drawdown_pct,
+        drawdown_coverage_pct,
         benchmark: analysis.risk.benchmark.clone(),
         correlated,
         tax: tax.clone(),
@@ -877,6 +949,15 @@ pub(crate) async fn wrap_report(
     if portfolio.holdings.is_empty() && portfolio.realized.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
     }
+    // A split Yahoo reports but the lots have not taken yet: value a copy
+    // with it applied (closes are in today's share count).
+    let pending = if offline {
+        Default::default()
+    } else {
+        crate::corp_actions::pending_splits_live(&portfolio).await
+    };
+    pending.print();
+    let portfolio = pending.adjusted(&portfolio);
     // The checkup describes what is held now; a portfolio sold out during
     // the year still gets its review, without that part.
     let run = if portfolio.holdings.is_empty() {
@@ -908,6 +989,9 @@ pub(crate) async fn wrap_report(
     let mut val = val;
     let currencies = val.currencies(&symbols);
     val.add_rates(src, &currencies).await;
+    if !offline {
+        val.load_history(&portfolio).await;
+    }
     symbols.sort();
 
     let histories: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> =
@@ -927,22 +1011,10 @@ pub(crate) async fn wrap_report(
         } else {
             wrap::close_on(closes, as_of)
         };
-        let mut y = wrap::symbol_year(&portfolio, sym, &period, as_of, start, end);
-        match val.to_base(sym, 1.0) {
-            Some(fx) => {
-                let conv = |v: &mut f64| *v *= fx;
-                y.start_value = y.start_value.map(|v| v * fx);
-                y.end_value = y.end_value.map(|v| v * fx);
-                conv(&mut y.bought);
-                conv(&mut y.sold);
-                conv(&mut y.dividends);
-                conv(&mut y.realized_gain);
-                for f in &mut y.flows {
-                    f.1 *= fx;
-                }
-            }
-            None => y.unconverted = true,
-        }
+        // Each amount at its own day's exchange rate (today's when no
+        // history was found).
+        let fx = |d: chrono::NaiveDate| val.rate_on(sym, d).map(|r| r.0);
+        let y = wrap::symbol_year_in(&portfolio, sym, &period, as_of, start, end, &fx);
         years.push(y);
     }
     let t = wrap::totals(&years, &period, as_of, 3);
@@ -953,12 +1025,47 @@ pub(crate) async fn wrap_report(
         Market::Global(x) => x.info().benchmark(),
         _ => ("^GSPC", "S&P 500"),
     };
-    let bench = src
-        .chart(bench_symbol, range, "1d")
-        .await
-        .map(|c| closes_of(&c))
-        .unwrap_or_default();
+    // A total-return index when Yahoo has one; else the price index,
+    // compared with the return without dividends.
+    let tri = super::planning::total_return_source(bench_symbol);
+    let mut bench_total_return = false;
+    let mut bench = Vec::new();
+    match tri {
+        // An ETF's dividend-adjusted closes (NIFTYBEES for NIFTY 50) need
+        // Yahoo's raw chart; offline there are none.
+        Some(tr @ super::planning::TotalReturn::AdjustedEtf(_)) if !offline => {
+            if let Ok(client) = src.yahoo().await
+                && let Some((closes, _)) =
+                    super::planning::total_return_closes(client, tr, period.opening()).await
+            {
+                bench = closes;
+            }
+        }
+        Some(super::planning::TotalReturn::Index(sym)) => {
+            bench = src
+                .chart(sym, range, "1d")
+                .await
+                .map(|c| closes_of(&c))
+                .unwrap_or_default();
+        }
+        _ => {}
+    }
+    if tri.is_some() {
+        bench_total_return = wrap::benchmark_return(&bench, &period, as_of).is_some();
+    }
+    if !bench_total_return {
+        bench = src
+            .chart(bench_symbol, range, "1d")
+            .await
+            .map(|c| closes_of(&c))
+            .unwrap_or_default();
+    }
     let benchmark_return_pct = wrap::benchmark_return(&bench, &period, as_of);
+    let compared = if bench_total_return {
+        t.return_pct
+    } else {
+        t.price_return_pct
+    };
     let at_work = t.start_value + t.bought;
     let share = |v: f64| (at_work > 0.0).then(|| v / at_work * 100.0);
 
@@ -998,12 +1105,16 @@ pub(crate) async fn wrap_report(
         base_currency: val.base().to_string(),
         redacted: false,
         return_pct: t.return_pct,
-        benchmark: bench_name.to_string(),
+        benchmark: match tri.filter(|_| bench_total_return) {
+            Some(tr) => tr.label(bench_name),
+            None => bench_name.to_string(),
+        },
         benchmark_return_pct,
-        alpha_bps: t
-            .return_pct
+        alpha_bps: compared
             .zip(benchmark_return_pct)
             .map(|(r, b)| (r - b) * 100.0),
+        price_return_pct: t.price_return_pct,
+        benchmark_total_return: bench_total_return,
         start_value: Some(t.start_value),
         end_value: Some(t.end_value),
         capital_deployed: Some(t.bought),
