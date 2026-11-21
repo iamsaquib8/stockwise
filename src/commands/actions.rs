@@ -48,8 +48,14 @@ fn next_long_term(
         if on <= today || best.is_some_and(|(_, d, _)| d <= on) {
             continue;
         }
-        let gain = lot.qty * (price - lot.price);
-        let saves = country.map(|c| gain.max(0.0) * (c.st_rate() - c.lt_rate()) / 100.0);
+        let diff_minor =
+            crate::tax::paise::from_rupees(price) - crate::tax::paise::from_rupees(lot.price);
+        let gain_minor = crate::tax::paise::times(diff_minor, lot.qty).max(0);
+        let saves = country.map(|c| {
+            let saved_minor =
+                crate::tax::paise::times(gain_minor, (c.st_rate() - c.lt_rate()) / 100.0);
+            crate::tax::paise::to_rupees(saved_minor)
+        });
         best = Some(((on - today).num_days(), on, saves));
     }
     best
@@ -337,7 +343,10 @@ pub(crate) async fn review(
         let (x, _, _) =
             super::portfolio::build_xray(c, &g.portfolio, &g.val, market, pf::active()).await;
         for e in x.effective_holdings.iter().filter(|e| e.fund_value > 0.0) {
-            lookthrough.insert(e.symbol.clone(), e.effective_weight_pct);
+            lookthrough.insert(
+                crate::xray::canonical_ticker(&e.symbol),
+                e.effective_weight_pct,
+            );
         }
     }
 
@@ -664,5 +673,12 @@ mod tests {
         assert_eq!(days, 11);
         // 10 x 50 gain x (20% - 12.5%).
         assert!((saves.unwrap() - 37.5).abs() < 1e-9, "{saves:?}");
+
+        // Exact minor-unit arithmetic avoids penny drift (`100.25 - 100.15` -> ₹0.08).
+        let mut p2 = Portfolio::default();
+        p2.add_lot("TCS.NS", pf::Lot::new(10.0, 100.15, "2025-12-01", "manual"));
+        let h2 = p2.holding("TCS.NS").unwrap();
+        let (_, _, drift_free) = next_long_term(h2, 100.25, Some("INR"), Market::In, today).unwrap();
+        assert_eq!(drift_free, Some(0.08));
     }
 }

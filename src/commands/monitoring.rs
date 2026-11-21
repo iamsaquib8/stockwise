@@ -109,10 +109,11 @@ pub(crate) async fn full_pass(
         let since = now.timestamp() - 3 * 86_400;
         for i in 0..n {
             let s = &sorted[(start + i) % sorted.len()];
+            let m = crate::alerts::alert_market(s).unwrap_or(market);
             let needs = crate::research::Needs::NONE.with_ownership(true);
             let Ok(Ok(r)) = tokio::time::timeout(
                 std::time::Duration::from_secs(20),
-                crate::research::fetch(client, s, market, 7, needs),
+                crate::research::fetch(client, s, m, 7, needs),
             )
             .await
             else {

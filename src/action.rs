@@ -549,7 +549,11 @@ impl Inputs {
         if self.currency.eq_ignore_ascii_case("INR") {
             return m < SMALL_CAP_INR;
         }
-        crate::market::approx_usd(m, Some(&self.currency)).is_some_and(|usd| usd < SMALL_CAP_USD)
+        // Yahoo reports London prices in pence (`GBp`/`GBX`) while `market_cap`
+        // is already in pounds (`GBP`).
+        let cap_ccy = crate::market::minor_unit(&self.currency)
+            .map_or(self.currency.as_str(), |(major, _)| major);
+        crate::market::approx_usd(m, Some(cap_ccy)).is_some_and(|usd| usd < SMALL_CAP_USD)
     }
 
     fn pe_reference(&self) -> Option<(f64, &'static str)> {
@@ -1371,7 +1375,11 @@ pub fn own_median_pe(r: &crate::research::Research) -> Option<f64> {
         if r.prices.dates[0] > end {
             continue;
         }
-        pes.push(r.prices.close[idx - 1] / eps);
+        let (close_major, _) = crate::market::to_major(
+            r.prices.close[idx - 1],
+            r.currency.as_deref().unwrap_or(""),
+        );
+        pes.push(close_major / eps);
     }
     median(&mut pes).filter(|_| pes.len() >= 3)
 }
@@ -2261,5 +2269,27 @@ mod tests {
         assert_action_well_formed(
             "Recent insider open-market buying; FII selling; `portfolio sell` preview",
         );
+    }
+
+    #[test]
+    fn gbp_pence_prices_do_not_misclassify_large_caps_or_inflate_own_pe() {
+        let mut i = Inputs::new("AZN.L", "GBp", day("2026-11-21"));
+        i.market_cap = Some(27_100_000_000.0); // £27.1B (~$34.4B), large cap
+        assert!(!i.is_small_cap());
+
+        let mut r = crate::research::Research::default();
+        r.currency = Some("GBp".into());
+        for k in 0..7 {
+            let d = day("2025-03-31") + chrono::Duration::days(k * 90);
+            r.prices.dates.push(d);
+            r.prices.close.push(117.0); // 117p = £1.17
+            r.quarters.push(crate::research::Period {
+                end: d,
+                eps: Some(0.025), // 4Q trailing EPS = £0.10
+                ..Default::default()
+            });
+        }
+        let pe = own_median_pe(&r).unwrap();
+        assert!((pe - 11.7).abs() < 1e-6, "expected 11.7, got {pe}");
     }
 }

@@ -203,11 +203,23 @@ pub fn backdrop_symbols(market: Market) -> &'static [(&'static str, &'static str
 /// σ of today's excess move and the volume multiple, from daily bars of
 /// the stock and its benchmark.
 pub fn move_stats(p: &Series, b: &Series) -> (Option<f64>, Option<f64>) {
+    let (sigma, volume_x, _) = move_stats_with_sd(p, b);
+    (sigma, volume_x)
+}
+
+/// Like [`move_stats`], also returning the prior excess-return standard
+/// deviation (`excess_sd`) so callers do not reconstruct it from mismatched
+/// quote and chart returns.
+pub fn move_stats_with_sd(p: &Series, b: &Series) -> (Option<f64>, Option<f64>, Option<f64>) {
     let excess = crate::events::excess_returns(p, b);
-    let sigma = match (excess.split_last(), crate::events::excess_sd(&excess)) {
-        (Some(((_, last), prior)), Some(_)) if !prior.is_empty() => crate::events::excess_sd(prior)
-            .filter(|sd| *sd > 0.0)
-            .map(|sd| last / sd),
+    let sd = match (excess.split_last(), crate::events::excess_sd(&excess)) {
+        (Some((_, prior)), Some(_)) if !prior.is_empty() => {
+            crate::events::excess_sd(prior).filter(|sd| *sd > 0.0)
+        }
+        _ => None,
+    };
+    let sigma = match (excess.split_last(), sd) {
+        (Some(((_, last), _)), Some(sd)) => Some(last / sd),
         _ => None,
     };
     let n = p.volume.len();
@@ -217,7 +229,7 @@ pub fn move_stats(p: &Series, b: &Series) -> (Option<f64>, Option<f64>) {
             (avg > 0.0 && p.volume[n - 1] > 0.0).then(|| p.volume[n - 1] / avg)
         })
         .flatten();
-    (sigma, volume_x)
+    (sigma, volume_x, sd)
 }
 
 /// The one-line reason for a move. Pure: `news` are fresh items for the
@@ -226,6 +238,18 @@ pub fn explain(
     change_pct: Option<f64>,
     bench_pct: Option<f64>,
     sigma: Option<f64>,
+    volume_x: Option<f64>,
+    news: &[NewsItem],
+) -> Why {
+    explain_with_sd(change_pct, bench_pct, sigma, None, volume_x, news)
+}
+
+/// Like [`explain`], using `excess_sd` directly when known.
+pub fn explain_with_sd(
+    change_pct: Option<f64>,
+    bench_pct: Option<f64>,
+    sigma: Option<f64>,
+    excess_sd: Option<f64>,
     volume_x: Option<f64>,
     news: &[NewsItem],
 ) -> Why {
@@ -255,7 +279,14 @@ pub fn explain(
     };
     // The same test `events` uses for an unusual move: 2.5σ (at least 3%)
     // in excess of the benchmark, or a 1.5% move on 3× volume.
-    if let Some(z) = sigma {
+    if let Some(sd) = excess_sd.filter(|s| s.is_finite() && *s > 0.0) {
+        let excess = (change - bench_pct.unwrap_or(0.0)) / 100.0;
+        if crate::events::is_unusual_move(excess, sd, volume_x) {
+            return Why::Unexplained {
+                sigma: (excess / sd).abs(),
+            };
+        }
+    } else if let Some(z) = sigma {
         let sd = if z != 0.0 {
             ((change - bench_pct.unwrap_or(0.0)) / 100.0 / z).abs()
         } else {
@@ -499,10 +530,10 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             .iter()
             .find(|(b, _)| *b == benchmark(s))
             .map(|(_, b)| b);
-        let (sigma, volume_x) = match (series, bench) {
-            (Some(p), Some(b)) => move_stats(p, b),
-            (Some(p), None) => move_stats(p, &Series::default()),
-            _ => (None, None),
+        let (sigma, volume_x, excess_sd) = match (series, bench) {
+            (Some(p), Some(b)) => move_stats_with_sd(p, b),
+            (Some(p), None) => move_stats_with_sd(p, &Series::default()),
+            _ => (None, None, None),
         };
         let gap_pct = q.and_then(|q| {
             let open = q.regular_market_open.filter(|o| *o > 0.0)?;
@@ -527,7 +558,7 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
         news.sort_by(|a, b| b.importance.total_cmp(&a.importance));
         news.truncate(3);
         let bp = bench_pct(s);
-        let why = explain(change_pct, bp, sigma, volume_x, &news);
+        let why = explain_with_sd(change_pct, bp, sigma, excess_sd, volume_x, &news);
         rows.push(Row {
             symbol: s.clone(),
             name: val.name(s).or_else(|| q.and_then(|q| q.short_name.clone())),
@@ -645,5 +676,11 @@ mod tests {
         let (sigma, vol) = move_stats(&p, &b);
         assert!(sigma.unwrap() < -5.0, "{sigma:?}");
         assert!((vol.unwrap() - 3.0).abs() < 1e-9);
+
+        // Using `excess_sd` directly classifies a live +8% move as unusual even if yesterday's z was 0.1.
+        assert_eq!(
+            explain_with_sd(Some(8.0), Some(0.0), Some(0.1), Some(0.01), None, &[]),
+            Why::Unexplained { sigma: 8.0 }
+        );
     }
 }

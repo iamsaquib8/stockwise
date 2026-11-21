@@ -692,12 +692,12 @@ pub fn parse_oi_spurts(v: &Value, quotes: &[Quote], n: usize) -> Vec<OiMove> {
             let pc = quotes
                 .iter()
                 .find(|q| q.symbol.as_deref() == Some(yahoo.as_str()))
-                .and_then(|q| q.regular_market_change_percent);
+                .and_then(|q| q.regular_market_change_percent)?;
             Some(OiMove {
-                reading: oi_reading(pc.unwrap_or(0.0) >= 0.0, oi >= 0.0),
+                reading: oi_reading(pc >= 0.0, oi >= 0.0),
                 symbol,
                 oi_change_pct: oi,
-                price_change_pct: pc,
+                price_change_pct: Some(pc),
             })
         })
         .collect();
@@ -901,13 +901,15 @@ mod tests {
 
         let oi = serde_json::json!({"data": [
             {"symbol": "AAA", "latestOI": 1300, "prevOI": 1000},
-            {"symbol": "BBB", "latestOI": 900, "prevOI": 1000}
+            {"symbol": "BBB", "latestOI": 900, "prevOI": 1000},
+            {"symbol": "NOQUOTE", "latestOI": 2000, "prevOI": 1000}
         ]});
         let qs = vec![
             quote("AAA.NS", 1.0, -2.0, 0, 0),
             quote("BBB.NS", 1.0, 1.0, 0, 0),
         ];
         let o = parse_oi_spurts(&oi, &qs, 5);
+        assert_eq!(o.len(), 2);
         assert_eq!(o[0].symbol, "AAA");
         assert_eq!(o[0].reading, "short build-up");
         assert_eq!(o[1].reading, "short covering");

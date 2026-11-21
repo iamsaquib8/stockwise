@@ -742,8 +742,12 @@ impl Notifier {
     }
 
     async fn deliver_logged(&self, msg: &Message) -> bool {
+        let results = self.send(msg).await;
+        if results.is_empty() {
+            return true;
+        }
         let mut delivered = false;
-        for (channel, result) in self.send(msg).await {
+        for (channel, result) in results {
             match result {
                 Ok(()) => delivered = true,
                 Err(e) => eprintln!("  ! {} notification failed: {:#}", channel, e),
@@ -1342,5 +1346,17 @@ mod tests {
     fn truncate_marks_the_cut() {
         assert_eq!(truncate("abc", 5), "abc");
         assert_eq!(truncate("abcdef", 4), "abc…");
+    }
+
+    #[tokio::test]
+    async fn deliver_logged_returns_true_when_no_channel_routes_priority() {
+        let cfg = NotifyConfig::from_lookup(lookup(&[
+            ("STOCKWISE_NTFY_TOPIC", "t"),
+            ("STOCKWISE_NOTIFY_ROUTES", "ntfy=high"),
+        ]));
+        let n = only(cfg);
+        assert!(n.is_enabled());
+        let normal = Message::new("digest", "body").with_priority(Priority::Normal);
+        assert!(n.deliver_logged(&normal).await);
     }
 }
