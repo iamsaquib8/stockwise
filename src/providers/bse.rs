@@ -209,9 +209,10 @@ fn field<'a>(json: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 
 /// `ComHeadernew` → ratios; `None` when it carries none of them.
 pub fn parse_com_header(json: &Value) -> Option<BseRatios> {
-    let n = |keys: &[&str]| field(json, keys).and_then(signed).filter(|v| *v != 0.0);
+    let n = |keys: &[&str]| field(json, keys).and_then(signed);
     let r = BseRatios {
         pe: n(&["PE", "PERatio"]).filter(|v| *v > 0.0),
+        // Zero EPS or ROE is a real figure (break-even), not "none".
         eps: n(&["EPS"]),
         roe: n(&["ROE"]).map(|v| v / 100.0),
         pb: n(&["PB", "PBRatio"]).filter(|v| *v > 0.0),
@@ -739,6 +740,11 @@ mod tests {
         assert_eq!(
             parse_com_header(&json(r#"{"FaceVal":"10","PE":"-"}"#)),
             None
+        );
+        let zero = parse_com_header(&json(r#"{"EPS":0,"ROE":0,"PE":12}"#)).unwrap();
+        assert_eq!(
+            (zero.eps, zero.roe, zero.pe),
+            (Some(0.0), Some(0.0), Some(12.0))
         );
     }
 

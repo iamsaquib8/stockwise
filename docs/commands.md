@@ -79,8 +79,8 @@ network, invalid config file), `2` invalid arguments.
 
 > **Guide:** [Quickstart: five minutes](quickstart.md) walks through the first commands.
 
-`stockwise SYMBOL` with no command prints a one-screen overview, and bare `stockwise`
-prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
+`stockwise SYMBOL` with no command prints a one-screen overview that starts with the
+stock's [action](#actions), and bare `stockwise` prints a quick start. Short names: `q` (quote), `d` (dashboard), `a` (analyze), `t` (technical),
 `c` (compare), `p` (portfolio), `w` (watch), `ev` (events). The aliases are lowercase: a capital
 single letter is a ticker, so `stockwise C -m us` (Citigroup), `T`, `D`, `A` and `W` work as bare
 symbols, and `stockwise c TCS INFY` still compares. A longer ticker that spells a command, such as
@@ -94,7 +94,7 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | Command | Description |
 |---------|-------------|
 | `quote <SYMBOLS...> [--json\|--csv]` (`q`) | Price, change, day/52-week range, volume, market cap, P/E, EPS, moving averages. Unknown symbols are named in the error |
-| `deep <SYMBOL> [-p PERIOD]` | Everything about one stock: fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights. Default `3mo` |
+| `deep <SYMBOL> [-p PERIOD]` | Everything about one stock, starting with its [action](#actions): fundamentals, technicals, support/resistance, Fibonacci, risk, gaps, volume, insights. Default `3mo` |
 | `markets [--crypto] [--fx] [--global] [--json\|--csv]` | US + India indices (S&P 500, Dow, NASDAQ, Russell, VIX, NIFTY 50, SENSEX, Bank NIFTY, NIFTY IT) and the India 10-year G-sec yield (CCIL, RBI fallback; left out when neither answers); `--crypto` adds the largest coins, `--fx` major pairs (USD/INR, EUR/USD, ...), `--global` one row per exchange's main index (NIFTY 50, S&P 500, FTSE 100, DAX, Nikkei 225, Hang Seng, Straits Times, S&P/TSX, S&P/ASX 200) with whether it is open and its local time. With `-m crypto`, `-m fx`, `-m commodity` or a global exchange that section comes first. `--json` rows carry `region`: `Indian Markets`, `US Markets`, `Crypto`, `FX`, `Commodities`, a country (`United Kingdom`, `Japan`, ...) or `Global` |
 | `dashboard` (`d`) | Indices + portfolio P&L + watchlist + triggered alerts; first-run hints when empty |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
@@ -112,7 +112,7 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `results --holdings` / `--universe nifty50` `[--sort date\|pat\|margin\|surprise]` | Earnings-season scoreboard: how many companies reported the active quarter, aggregate revenue, operating profit and PAT growth YoY, beat / in-line / miss counts, and the reporters table |
 | `events <SYMBOL> [--days N] [--ai]` (`ev`) | Unified timeline of material corporate events, exchange filings, earnings results, and excess market reaction vs NIFTY/S&P 500 |
 | `insights <SYMBOL>` | Positive, negative and neutral findings (Growth, Valuation, Margins, Ownership, etc.) with quantified metrics and XBRL shareholding patterns |
-| `verdict <SYMBOL> [--explain] [--json]` | 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. Size cut-offs (cash, insider trades; market cap in `longterm`) are written in US dollars and amounts in other currencies are converted at rough fixed rates, so the same size scores the same in rupees and dollars. A description of the data, not a recommendation; `--explain` lists the weights and rules |
+| `verdict <SYMBOL> [--horizon short\|long] [--explain] [--json]` | Starts with the stock's [action](#actions) for the horizon (default `long`), then the 6-pillar score: valuation (20%), growth & profitability (25%), balance sheet (15%), smart money & ownership (15%), analyst consensus (10%) and technical trend (15%). Each pillar gets 0–100 and a Strong / Moderate / Weak band, or "no data" when its inputs are missing; the composite (0–100) leaves "no data" pillars out and `data_coverage` says how much of the input was present. Crypto, FX and indices get only the technical pillar. Size cut-offs (cash, insider trades; market cap in `longterm`) are written in US dollars and amounts in other currencies are converted at rough fixed rates, so the same size scores the same in rupees and dollars. `--explain` lists the weights and rules |
 | `score <SYMBOL> [--json] [--explain]` (`scorecard`, `fundamental score`) | Transparent accounting scorecards. **Piotroski F-Score** (2000): nine yes/no signals, most of them this year against last year. A signal whose data is missing shows `n/a`, earns no point and is not counted, so the score reads like `5/7 evaluated`; it is rated only when all nine ran. Net income is estimated from trailing EPS × shares, or margin × revenue, only when no period reports it, and is marked `(est.)`. **Altman Z** (1968): needs all five ratios; with any missing it shows `n/a` and names them, with no zone, and no input is guessed. **Altman Z''** (1995, non-manufacturers) uses book equity over liabilities and is shown with its own factor table whenever X1–X4 exist. In `--json`: `piotroski.evaluated` and `criteria[].evaluated` (`piotroski.rating` is null when not rated), `altman.missing_factors`, `altman.z_double_prime_components` and `altman.z_double_prime_formula_str` |
 | `technical <SYMBOL> [-p] [--json] [--explain]` (`t`) | RSI, MACD, Bollinger Bands, ATR, VWAP, SMA/EMA, braille charts. Default `3mo` |
 | `history <SYMBOL> [-p] [--json\|--csv]` | Braille price chart, volume bars, last 20 bars. `--json`/`--csv` emit every OHLCV bar. Default `1mo` |
@@ -131,6 +131,38 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `forecast <SYMBOL> [-d DAYS] [-p]` | Linear trend projection with 95% bands — a projection, not a prediction |
 
 `--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners.
+
+### Actions
+
+`verdict`, `deep` and a bare `stockwise SYMBOL` start with one line from the
+rule-based action engine, followed by its reasons:
+
+```text
+ACTION: BUY · medium confidence · invalid below ₹2,410.50 · review by 21 Feb 2027
+  • Composite score 71 (65 or more)
+  • Price above its 200-day average (₹2,388.10)
+  • P/E 24.3 within 1.2x the sector P/E (22.0)
+  • Size: at most 6.2% of the portfolio, about 25 shares (risk_per_trade)
+  Methodology 1 (long horizon). Rule-based educational signal from StockWise's published methodology, ...
+```
+
+A stock you don't hold gets BUY, WATCH or AVOID; one you hold gets ADD, HOLD,
+TRIM or EXIT. Below 60% data coverage the line is
+`ACTION: NO CALL — missing: ROE, D/E` and nothing is guessed. A daily close
+below the invalidation price invalidates the action; look again by the review
+date. `--horizon short` (on `verdict`, `portfolio review` and `picks`) sets
+the invalidation at the higher of close − 1.5 × ATR and the 20-day low,
+reviews in 10 sessions, and also asks for a price above the 50-day average and
+rising volume before a BUY. Small caps (below ₹5,000 crore or $2 billion) face
+extra gates: promoter pledge above 10%, thin trading, more than 2 price-band
+hits in 20 sessions (NSE/BSE), an auditor red flag, or exchange surveillance
+make them AVOID. The same action appears in the Action columns of
+`portfolio`, `portfolio checkup` and `picks`, in [`portfolio
+review`](#portfolio-review), as an `action` object in `--json`, and in the MCP
+tools `stock_action` and `portfolio_review`. Every rule and threshold is in
+[methodology.md](methodology.md#actions-methodology-1). Actions are rule-based
+educational signals; StockWise is not a SEBI-registered investment adviser or
+research analyst, and losses are possible ([DISCLAIMER.md](../DISCLAIMER.md)).
 
 ## Market
 
@@ -152,8 +184,8 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `earnings` | Earnings growth for portfolio and watchlist |
 | `surprise [--universe INDEX]` | Forward EPS against trailing EPS, by expected growth; stocks without a forward EPS are left out, and a large scan shows the 25 fastest and the 25 steepest falls |
 | `matrix [--universe INDEX]` | Quality vs growth quadrants |
-| `picks [--universe INDEX] [--cap TIER] [--horizon long\|short] [--top N] [--min-mcap N] [--min-adv N] [--json\|--csv]` | Scores the stocks of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) that clear a size and liquidity floor (India ₹500 crore and ₹2 crore traded a day; US $1 billion and $5 million; lower floors for `--cap small` and `--cap micro`), from 0 to 100, and lists the highest. Five pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity, profit margin, low debt), **growth** (forward against trailing EPS with 3+ analysts, revenue growth), **trend** and **risk** (low volatility, drawdown and beta). The leaders of a first pass get their fundamentals and a year of prices before the final ranking. `--horizon long` (default) weights value and quality; `--horizon short` gives trend 45% (3-month momentum per unit of volatility, the 50-day average, the 52-week range, rising volume) and risk 20%. Losses and negative book value rank last; figures too good to be true (P/E below 3, ROE above 80%, yield above 15%) are listed apart to check; stocks with less than 60% of their data stay out; with a positive `--top`, at most 3 per known sector (`--top 0` has no limit). Every list is logged for `picks review`. Method: [methodology.md](methodology.md) |
-| `picks review [--since 90d] [--horizon long\|short] [--json\|--csv]` | The track record: every logged pick from the day it was first listed, with its return, the benchmark's return over the same days (NIFTY 50 for India, S&P 500 total return for the US) and the difference, plus the share that rose, the share that beat the benchmark, and mean and median returns. Price returns adjusted for splits since listing (a pick whose splits can't be checked is left out); dividends not included. Lists logged with the benchmark's level compare both at the same moment. `--since` takes up to 10 years |
+| `picks [--universe INDEX] [--cap TIER] [--horizon long\|short] [--top N] [--min-mcap N] [--min-adv N] [--json\|--csv]` | Scores the stocks of the scan (the liquid stocks of BSE for India, the S&P 1500 for the US) that clear a size and liquidity floor (India ₹500 crore and ₹2 crore traded a day; US $1 billion and $5 million; lower floors for `--cap small` and `--cap micro`), from 0 to 100, and lists the highest. Five pillars, each a percentile rank among the stocks scanned: **value** (earnings yield, book value to price, dividend yield), **quality** (return on equity, profit margin, low debt), **growth** (forward against trailing EPS with 3+ analysts, revenue growth), **trend** and **risk** (low volatility, drawdown and beta). The leaders of a first pass get their fundamentals and a year of prices before the final ranking. `--horizon long` (default) weights value and quality; `--horizon short` gives trend 45% (3-month momentum per unit of volatility, the 50-day average, the 52-week range, rising volume) and risk 20%. Losses and negative book value rank last; figures too good to be true (P/E below 3, ROE above 80%, yield above 15%) are listed apart to check; stocks with less than 60% of their data stay out; with a positive `--top`, at most 3 per known sector (`--top 0` has no limit). Every list is logged for `picks review`. The finalists get an Action column with their [action](#actions) (also with `--cap small --horizon short`). Method: [methodology.md](methodology.md) |
+| `picks review [--since 90d] [--horizon long\|short] [--json\|--csv]` | The track record: every logged pick from the day it was first listed, with its return, the benchmark's return over the same days (NIFTY 50 for India, S&P 500 total return for the US) and the difference, plus the share that rose, the share that beat the benchmark, and mean and median returns. Price returns adjusted for splits since listing (a pick whose splits can't be checked is left out); dividends not included. The benchmark is measured from the level logged with each list to its level now (both live), so both legs compare the same moments; without those levels no benchmark figure is shown. `--since` takes up to 10 years |
 | `screen <CATEGORY> [--universe INDEX] [--cap TIER] [--json\|--csv]` | `undervalued` (P/E<15), `growth` (forward EPS > trailing), `dividend` (yield>2%), `momentum` (top gainers), `bluechip` (>$100B / >₹5L Cr). The table shows the first 50 matches; `--json` and `--csv` carry them all |
 | `dividends <SYMBOL> [--json]` | Yield, income projection, 10-year DRIP growth |
 
@@ -396,11 +428,11 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 | `whatif <SYMBOL> <AMOUNT> <YYYY-MM-DD> [--json]` | What a lump sum on a past date is worth today |
 | `intraday [-s STRATEGY]` (`bot`) | 9-strategy intraday signal scanner: sector heat, trend breadth, a table of regime, score and strategy agreement, and the strategies behind the strongest signals. No position sizes, entries, stops or targets. `-s` adds a strategy file's rules as a tenth signal. Old `CAPITAL TARGET%` arguments are accepted and ignored |
 | `longterm [MONTHLY_BUDGET]` | 6-pillar scores (0–100) for the market's stock universe, with the facts that added or took away points ("P/E 9.8 (below 12)", "Analyst mean rating 1.4/5 (1 = most positive)"), a data-coverage figure, a risk level (Lower / Moderate / Higher) and rule-based moat signals. A pillar with no inputs shows a dash and the composite shows `n/a` when under half of the weight had data. Also an illustration at an *assumed* annual return set from the score (5- and 10-year growth, the monthly SIP that would reach 10 lakh / 1 million, your `MONTHLY_BUDGET` compounded) and a simulated 5-year range (10th, median, 90th percentile). It describes data; it is not a recommendation and gives no entry, stop or target. No `--json` yet. Wording changes in 0.8.1: the analyst lines no longer say "buy consensus" / "sell consensus" / "upside", the risk tier names `Conservative` / `Aggressive` became `Lower` / `Higher`, and "Best case" / "Worst case" became the 90th / 10th percentile |
-| `daemon intraday [CAPITAL] [--once]` | Paper-trading loop on the NSE clock (IST, holidays included; `-m us` uses NYSE hours in ET): scan, enter at the open, trail stops every 60s, book half at T1, square off 15 minutes before the close, settle into `sim` history, then wait for the next trading day (`--once` exits after one session). Survives network blips, resumes the day after a restart, and squares off on Ctrl+C. **Never sends broker orders** |
+| `daemon intraday [CAPITAL] [--once]` | Paper-trading loop on the NSE clock (IST, holidays included; `-m us` uses NYSE hours in ET): scan, enter at the open (0.5% sizing budget per trade, charges included; half-Kelly after 30 net paper trades), mark positions every 60s with a 1.5 × ATR trailing exit level, book half at T1, square off 15 minutes before the close, settle into `sim` history with P&L after charges and slippage, then wait for the next trading day (`--once` exits after one session). Survives network blips, resumes the day after a restart, and squares off on Ctrl+C. **Never sends broker orders** |
 | `daemon longterm` | Post-market scan: the highest long-term scores, portfolio value and wealth snapshot, triggered alerts, holdings priced below their average cost, and optional AI research notes |
-| `sim start [CAPITAL] [TARGET%]` | Start a paper session with the bot's picks (default ₹25,000, 2%) on a trading day before the close |
-| `sim status` / `history [--json]` | Live P&L / record + confidence rating |
-| `sim settle [--now]` | Settle open sessions from that day's 5-minute bars: stop or target first, else exit at the 15:15 bar. Today's session waits for the close unless `--now` |
+| `sim start [CAPITAL] [TARGET%]` | Start a paper session with the bot's picks (default ₹25,000, 2%) on a trading day before the close. Prints the cost model and sizing, and saves the cost model with the session. Costs: `STOCKWISE_SIM_COSTS`, `STOCKWISE_SIM_BROKERAGE`, `STOCKWISE_SIM_SLIPPAGE_BPS` (see [bots.md](bots.md#charges-and-slippage)) |
+| `sim status` / `history [--json]` | Live P&L after estimated charges / record, charges paid and a paper-record rating (after 20 dates and 30 trades) |
+| `sim settle [--now]` | Settle open sessions from that day's 5-minute bars: stop or target first, else exit at the 15:15 bar. Charges and slippage come out of each trade with the session's saved cost model. Today's session waits for the close unless `--now` |
 | `sim reset [--yes]` | Delete simulator history after confirmation (a timestamped backup is kept) |
 | `sim replay list [--json]` (`scenarios`) | Built-in historical replays: `covid-crash-2020`, `gfc-2008`, `adani-2023`, `dotcom-2000`, `bull-run-2021`, `rate-hikes-2022`. See [simulator.md](simulator.md) |
 | `sim replay start SCENARIO\|file:PATH.toml [--capital] [--costs] [--json]` | Start a replay: daily history is fetched once, then you trade day by day and only ever see bars up to the replay date |
@@ -438,13 +470,13 @@ Data lives in the directory shown by `stockwise doctor`.
 
 | Command | Description |
 |---------|-------------|
-| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency) |
+| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency). An Action column shows each stock's [action](#actions) (`HOLD (med)`, `NO CALL`) |
 | `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
 | `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
 | `portfolio lots <SYMBOL> [--lot N [--date YYYY-MM-DD] [--qty Q] [--price P] \| --delete] [--undo-sale N]` | Lots, sales, dividends and XIRR of one holding, each numbered. `--lot N` corrects a lot's date, quantity or price, or `--delete`s it without recording a sale; `--undo-sale N` drops sale N from the realised gains and puts its shares back as the lot they came from |
 | `portfolio restore [N]` | Lists the last five saved versions of the portfolio (`portfolio.json.1` is the newest), or brings version N back. The version it replaces becomes backup 1, so a restore can be undone |
 | `portfolio actions [SYMBOL] [--apply] [--undo] [--journal]` | Splits, reverse splits, bonuses, demergers and spin-offs (built-in table: Indian demergers, US spin-offs from Form 8937), cash for fractional merger shares, rights issues (reported only) and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares, adds lots of a demerged company at the official share of cost, records the cash for a merger fraction as a sale, records dividends, and is safe to repeat. Every `--apply` is journalled: `--journal` lists the entries, `--undo` takes back the newest |
-| `portfolio demerger <PARENT> <CHILD> [--ratio A:B] [--cost-split PCT] [--date YYYY-MM-DD] [--cash-price P]` (`spinoff`) | Record a demerger or spin-off: each PARENT lot bought before `--date` keeps its quantity, date and `100 − PCT`% of its cost; a CHILD lot with the same purchase date gets A shares per B held and the rest. Ratio and split default to the built-in table. `--cash-price` records the fractional shares paid in cash as a sale. Journalled; repeating it changes nothing |
+| `portfolio demerger <PARENT> <CHILD> [--ratio A:B] [--cost-split PCT] [--date YYYY-MM-DD]` (`spinoff`) | Record a demerger or spin-off: each PARENT lot bought before `--date` keeps its quantity, date and `100 − PCT`% of its cost; a CHILD lot with the same purchase date gets A shares per B held and the rest. Ratio and split default to the built-in table. Shares sold after the record date get the same split, and child shares a broker snapshot already added are taken as the demerger's. Journalled; repeating it changes nothing |
 | `portfolio rename <OLD> <NEW>` | A new ticker for the same company: lots, sales, dividends and imported trades move as they are (merged into NEW if held). Journalled |
 | `portfolio return-of-capital <SYMBOL> <PER_SHARE> --date YYYY-MM-DD` (`roc`) | Cuts the cost of the lots bought before the ex-date by the amount per share, never below zero (the excess is printed as a gain to report). Journalled; repeating it changes nothing |
 | `portfolio sync [BROKER] [--apply] [--json]` | Read-only: the broker's holdings against your lots, per symbol, with the likely cause (unapplied split or demerger, missing buy, missing sale) and the command that fixes it. `--apply` adds only the missing buys (dated today, estimated). Without BROKER: the reports the worker saves daily after the close |
@@ -454,7 +486,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio remove <SYMBOL> [--yes]` | Remove a holding and its lots without recording a sale; asks first when it has more than one lot |
 | `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
-| `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it (see [below](#portfolio-checkup)) |
+| `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it, with an Action column per holding (see [below](#portfolio-checkup)) |
+| `portfolio review [--horizon short\|long] [--json]` | Each holding's [action](#actions), sorted EXIT, TRIM, ADD, HOLD, then NO CALL, with its reasons, invalidation price, review date, size hint and tax note (see [below](#portfolio-review)) |
 | `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
 | `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
@@ -468,11 +501,11 @@ Data lives in the directory shown by `stockwise doctor`.
 | `harvest [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale (see [below](#harvest)) |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
-| `tax export in [--schedule cg\|os\|fa\|form67] [--slab 30] [--fy 2025-26] [--out FILE] [--json]` | India: Schedule OS (dividends and interest with TDS), Schedule FA Table A3 (foreign assets, calendar year) or Form 67 (foreign tax credit) instead of Schedule CG (see [below](#dividend-and-interest-income-schedule-os) and [Schedule FA](#foreign-assets-schedule-fa-and-form-67)) |
-| `tax export in --audit-pack DIR [--fy 2025-26]` | One workpaper CSV per sale (lot, dates, cost, 31 Jan 2018 FMV, gain, rule applied), `summary.csv` and the Schedule CG CSV in `DIR` (see [below](#audit-pack)) |
-| `tax reconcile <FILE> [--broker zerodha\|groww\|upstox\|other] [--fy 2025-26] [--all-accounts] [--json]` | Compare realised gains with a broker's tax P&L (CSV or `.xlsx`) sale by sale, with the likely reason for each difference and STCG/LTCG totals (see [below](#tax-reconcile)) |
-| `tax income [--fy 2025-26] [--out FILE] [--json\|--csv]` | Dividends and SGB interest with gross, TDS and net, by advance-tax period, for ITR Schedule OS (see [below](#dividend-and-interest-income-schedule-os)) |
-| `tax foreign [--year 2025 \| --fy 2025-26] [--slab 30] [--json]` | Schedule FA (initial, peak and closing values of foreign shares in the calendar year, in rupees) and Form 67 foreign tax credit inputs (see [below](#foreign-assets-schedule-fa-and-form-67)) |
+| `tax export in [--schedule cg\|os\|fa\|form67] [--slab 30] [--withholding PCT] [--fy 2025-26] [--out FILE] [--json]` | India: Schedule OS (dividends and interest with TDS), Schedule FA Table A3 (foreign assets, calendar year) or Form 67 (foreign tax credit) instead of Schedule CG (see [below](#dividend-and-interest-income-schedule-os) and [Schedule FA](#foreign-assets-schedule-fa-and-form-67)) |
+| `tax export in --audit-pack DIR [--fy 2025-26]` | One workpaper CSV per rupee sale (lot, dates, cost, 31 Jan 2018 FMV, gain, rule applied), `summary.csv` and the Schedule CG CSV in `DIR`, written whole (see [below](#audit-pack)) |
+| `tax reconcile <FILE> [--broker zerodha\|groww\|upstox\|other] [--fy 2025-26] [--all-accounts] [--json\|--csv]` | Compare realised gains with a broker's tax P&L (CSV or `.xlsx`) sale by sale, with the likely reason for each difference and STCG/LTCG totals (see [below](#tax-reconcile)) |
+| `tax income [--fy 2025-26] [--out FILE] [--withholding PCT] [--json\|--csv]` | Dividends and SGB interest with gross, TDS and net, by advance-tax period, for ITR Schedule OS (see [below](#dividend-and-interest-income-schedule-os)) |
+| `tax foreign [--year 2025 \| --fy 2025-26] [--slab 30] [--withholding PCT] [--json]` | Schedule FA (initial, peak and closing values of foreign shares in the calendar year, in rupees) and Form 67 foreign tax credit inputs (see [below](#foreign-assets-schedule-fa-and-form-67)) |
 | `tax advance [--fy 2025-26] [--paid [DATE:]AMOUNT]... [--record] [--slab PCT] [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator, and the next instalment due with the interest if it is missed (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
 | `income [--months 12] [--by-holding] [--json\|--csv]` (or `portfolio income` / `portfolio dividends`) | 12-month trailing and projected dividend, coupon and passive-income calendar, Yield-on-Cost (YoC), and dividend payout safety checks (see [below](#passive-income-and-dividend-calendar)) |
@@ -527,7 +560,9 @@ them; sold on the exchange, 12.5% after 12 months without the ₹1.25 lakh
 exemption) are left out and listed with the rule that applies (`other_rules`
 in `--json`). So are exchange-traded gold, silver and international ETFs (12.5%
 after 12 months with no exemption, slab rate before) and liquid and debt ETFs
-(slab rate at any holding period). StockWise tells them by category: the
+(slab rate at any holding period for units bought from 1 Apr 2023 under Sec.
+50AA; units bought before that day are long-term after 12 months, see below).
+StockWise tells them by category: the
 underlying of each ETF in NSE's ETF list (`eq_etfseclist.csv`, cached for a day:
 "Domestic Price of Gold", "NASDAQ 100 Index", "Nifty 1D Rate Index", a G-Sec or
 Bharat Bond index, ...). Offline, or for an ETF not in that list, a built-in
@@ -559,7 +594,11 @@ applies:
   long-term after 12 months (listed) or 24 months (unlisted; 36 before 23 Jul
   2024), taxed at 12.5% without indexation and without the ₹1.25 lakh exemption
   (20% with indexation for sales before 23 Jul 2024; indexation is not applied).
-  Losses net against Sec. 112 gains only. Short-term gains go to the slab rate.
+  Short-term gains go to the slab rate. A net short-term loss here, or a net
+  Sec. 112 loss, is set off against the listed-share gains in the estimate
+  above. Estimate limits: StockWise nets Sec. 112 gains and losses with each
+  other first and does not set a Sec. 112A loss off against a positive Sec. 112
+  gain, which the Act allows (Sec. 70/74).
 - **Sec. 115BBH** — crypto: 30% on each gain, no set-off of any loss (not even
   against another crypto gain) and no carry-forward. The 1% TDS under Sec. 194S
   on the sale value is shown so you can match it with Form 26AS.
@@ -725,6 +764,16 @@ gain by hand:
 - `summary.csv`: the same columns, one line per sale, then the totals by rule.
 - `schedule-cg.csv`: the Schedule CG / 112A export of `tax export in`.
 
+Amounts are worked in paise, so each workpaper's equation balances to the
+paisa. The cost of a grandfathered lot is shown with its figures, `max(actual
+cost, min(31 Jan 2018 FMV, sale value))`. An intraday sale's gain is net of its
+recorded charges (business income, as in the Schedule CG export's intraday
+total); capital gains are before charges. Same-day crypto sales stay under Sec.
+115BBH. Sales in another currency are not in the pack. The pack is written to
+a staging folder and moved into place only when every file is written: a rerun
+into the same folder replaces the earlier pack whole, and a folder holding
+anything else is refused.
+
 ```bash
 stockwise tax export in --fy 2026-27 --audit-pack ~/tax/2026-27-audit
 ```
@@ -758,10 +807,20 @@ matched sale that differs gets a likely reason:
 | short/long-term differs | the holding period is counted differently |
 
 Sales on one side only are listed, and the totals compare STCG, LTCG and
-intraday on both sides. By default only StockWise sales from that broker's
-demat account (and sales saved without an account) are compared;
-`--all-accounts` compares them all. Without `--fy` the year is the one most
-of the file's sales fall in. Read-only: the portfolio is not changed.
+intraday on both sides (a broker row matched by ISIN is totalled under the
+StockWise ticker). Cost, sale value and gain are each compared, so equal gains
+over a different cost and sale value still differ. An exact-date group that
+does not cover the whole quantity waits for the sale-date pass. Terms are
+compared by quantity per term, whatever the row order. A row with no readable
+profit, taxable profit or buy and sell value is listed as not compared, never
+read as a zero gain. Each sheet of a workbook is read on its own. A company
+name with no ISIN (some Groww rows) is not matched to a ticker: it shows on
+both sides. For a Zerodha, Groww or Upstox file, StockWise compares its sales
+from that broker's account plus those saved without an account;
+`--all-accounts` compares them all; a file from another broker has no account
+filter. Without `--fy` the year is the one most of the file's sales fall in.
+`--json` and `--csv` give the results for scripts. Read-only: the portfolio is
+not changed.
 
 ```bash
 stockwise tax reconcile ~/Downloads/taxpnl-AB0000-2026_2027.xlsx
@@ -779,18 +838,26 @@ Sep–15 Dec, 16 Dec–15 Mar, 16 Mar–31 Mar), which is also the Sec. 234C spl
 (a dividend received after a due date carries no interest for the earlier
 instalments).
 
-- **TDS** (estimate): 10% on a company's or fund's dividends once its payments
-  to you in the year pass ₹10,000 (₹5,000 up to FY 2024-25), under Sec.
+- **TDS** (estimate): once a company's or fund's dividends to you in the year
+  pass ₹10,000 (₹5,000 up to FY 2024-25), 10% of all of them, under Sec.
   194/194K. A Form 15G/H, a lower-deduction certificate or a missing PAN
   changes it: match it with Form 26AS / AIS.
 - **SGB interest**: no TDS.
-- **Foreign dividends**: converted to rupees at the day's ECB reference rate,
-  with US withholding at the 25% treaty rate for Form 67 (`tax foreign`).
+- **Foreign dividends**: converted to rupees at the day's ECB reference rate
+  (an amount recorded in pence is converted as pounds). The tax withheld abroad
+  is not recorded: `--withholding 25` (or the rate on your statement) shows it;
+  without it the withholding is "unknown".
+- **Dates**: a dividend is placed by its ex-date, as the payment date is not
+  recorded; one paid after a period's end can sit in the earlier period.
+
+When a dividend has no rupee rate or an SGB tranche is not known, it is left
+out and named, and the CSV ends with an `incomplete` block listing them.
 
 `--csv` (or `tax export in --schedule os`) prints the Schedule OS CSV: one row
 per dividend or coupon, then the quarterly breakup. `--out FILE` also writes
 it while showing the table. `tax advance --slab 30` adds this income to the
-advance-tax schedule at your slab rate, in the quarter received.
+advance-tax schedule at your slab rate: dividends in their quarter, SGB
+interest in every quarter (it has no Sec. 234C proviso).
 
 ### Foreign assets (Schedule FA and Form 67)
 
@@ -802,10 +869,21 @@ advance-tax schedule at your slab rate, in the quarter received.
   date acquired, initial value (cost at the purchase day's rate), peak value
   (the highest of units held × close × that day's rate over the year's trading
   days), closing value on 31 December, dividends credited and sale proceeds.
-- **Form 67**: each foreign dividend of the financial year with the tax
-  withheld abroad (US 25%), converted at the rate of the last day of the month
-  before (Rule 128), and the credit — the lower of that tax and the Indian tax
-  on the same income at `--slab` (default 30%) plus cess.
+- **Form 67**: each foreign dividend of the financial year, converted at the
+  rate of the last day of the month before (Rule 128), with the tax withheld
+  abroad at the `--withholding` rate from your broker's statement and the
+  credit — the lower of that tax and the Indian tax on the same income at
+  `--slab` (default 30%, 0 to 50) plus cess. Without `--withholding` the tax
+  and the credit are "unknown". Dates are ex-dates (`date_basis` column), as
+  payment and withholding dates are not recorded. For a return under Sec.
+  139(1) or 139(4), Form 67 is due by the end of the assessment year (Rule
+  128(9)); for an updated return, by the day it is filed.
+
+A purchase made with rupees at a recorded rate (`portfolio add --currency
+INR`) uses that rate for its initial value. A value missing a rupee rate for
+some day is marked in `missing_rates` (not shown as zero), holdings left out
+are listed, and the CSVs end with an `incomplete` block. `--year` must be a
+calendar year whose financial year (from April) has started.
 
 Rupee values use the ECB reference rate for the day (Frankfurter); the rules
 ask for the SBI telegraphic-transfer buying rate, which differs slightly.
@@ -845,13 +923,13 @@ stockwise tax advance --json                      # programmatic JSON output
 
 - **Section 208 Check**: Automatically flags whether advance tax is mandatory (total liability ≥ ₹10,000) or exempt.
 - **Status**: A quarter is `Paid` only when payments dated on or before its due date cover the minimum. With no `--paid`, a quarter past its due date is `Overdue`, because StockWise has no record of any payment.
-- **Section 234C Deferment Interest**: Section 234C looks at what was paid by each due date, so pass each payment with its date (`--paid 2025-06-14:3000`, repeated). It then charges 1% a month (3% for Q1–Q3, 1% for Q4) on each shortfall, rounded down to ₹100, when the payments by that date are below the safe-harbour level (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4). For Q4 the requirement on 15 March is the tax on gains up to 15 March; tax on gains after it carries no interest when paid by 31 March (the proviso). A payment dated before the financial year began is ignored (it was made for an earlier year) and the output says so. A payment without a date is assumed to have been made before every due date, which can understate the interest.
+- **Section 234C Deferment Interest**: Section 234C looks at what was paid by each due date, so pass each payment with its date (`--paid 2025-06-14:3000`, repeated). It then charges 1% a month (3% for Q1–Q3, 1% for Q4) on each shortfall, with the shortfall rounded down to a multiple of ₹100 first (Rule 119A: a ₹1,000 shortfall at 3% is ₹30), when the payments by that date are below the safe-harbour level (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4). The capital-gains and dividend proviso holds only if their tax is paid in the later instalments or by 31 March: once the year is over and the payments by 31 March fall short, every instalment is measured against the whole year's tax. Interest income (SGB coupons) has no proviso and counts toward every instalment. For Q4 the requirement on 15 March is the tax on gains up to 15 March; tax on gains after it carries no interest when paid by 31 March (the proviso). A payment dated before the financial year began is ignored (it was made for an earlier year) and the output says so. A payment without a date is assumed to have been made before every due date, which can understate the interest.
 - **Cess**: The tax and the instalments include the 4% health and education cess; surcharge is left out.
 - **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
-- **Next instalment**: The next due date with the cumulative amount required by it, what has been paid, what is left, and the Section 234C interest if it is missed (3% of the shortfall for Q1–Q3, 1% for Q4, rounded down to ₹100); `next_instalment` in `--json`.
-- **Recorded payments**: `--paid 2026-12-10:25000 --record` saves dated payments in `advance_tax.json` in the data directory; later runs count them without `--paid`.
+- **Next instalment**: The next due date with the cumulative amount required on it (for 15 March, the tax on gains and dividends up to 15 March), what has been paid up to today (dated payments after today are not counted yet), what is left, and the Section 234C interest if nothing more is paid: 3% (Q1–Q3) or 1% (Q4) of the shortfall rounded down to a multiple of ₹100 — none when the payments already meet the safe harbour (12% by 15 June, 36% by 15 September). Under ₹10,000 of tax for the year nothing is shown as payable. `next_instalment` in `--json`.
+- **Recorded payments**: `--paid 2026-12-10:25000 --record` saves dated payments in `advance_tax.json` in the data directory, each for one financial year (`--fy`, or the year of its date; a late payment recorded with `--fy 2025-26` counts for that year). Later runs for that year count them without `--paid`; `--paid` without `--record` counts for the year asked for, this run only. An unreadable `advance_tax.json` is an error and is left untouched.
 - **Dividends and interest**: `--slab 30` adds the year's dividends and SGB interest (see `tax income`) at your slab rate, each in the quarter it was received.
-- **Reminder**: notifiers can call the advance-tax reminder hook, which fires within 7 days of a due date when something is still to pay (capital gains and recorded payments).
+- **Reminder**: notifiers can call the advance-tax reminder hook, which fires within 7 days of a due date when something is still to pay. It covers capital gains and recorded payments only: tax on dividends and SGB interest is not in it, and a portfolio with income but no sales gets no reminder.
 
 
 ### Plain-text accounting export
@@ -942,8 +1020,9 @@ education; check it against your broker's statements.
   or low, a weak long-term score, an estimated purchase date, money in other
   currencies, and holdings left out of the totals.
 
-These are readings of the data, not recommendations: nothing says to buy,
-sell or keep a holding. `--json` prints every figure. The TUI shows the same
+These are readings of the data. The dashboard gives no action; for each
+holding's action, run [`portfolio review`](#portfolio-review). `--json` prints
+every figure. The TUI shows the same
 analysis on its own screen (key `p`).
 
 ### Portfolio checkup
@@ -995,8 +1074,31 @@ source without a rate is listed under "Not checked". A check only counts as
 run when its data was there: unknown cap tiers, funds without disclosed
 holdings or a missing revenue trend leave the check out of the count.
 
-These are observations, not advice: nothing says to buy, sell or keep a
-holding.
+The findings are observations. The Action column next to each holding comes
+from the action engine, as in [`portfolio review`](#portfolio-review); each
+JSON holding carries its `action` object.
+
+### Portfolio review
+
+`stockwise portfolio review [--horizon short|long] [--json]` gives each
+holding its [action](#actions) and sorts them by what needs doing first:
+EXIT, TRIM, ADD, HOLD, then NO CALL. Each holding shows:
+
+- the action line: action, confidence, invalidation price and review date;
+- up to three reasons;
+- a size hint. For TRIM it gives the shares to sell to get back under your
+  profile's `max_stock_weight` (half of it for a small cap); for ADD, the most
+  the rules allow;
+- a tax note when a lot turns long-term within 30 days, such as "waiting 23
+  days saves about ₹4,120 in tax".
+
+For a holding, the invalidation level trails: it is measured from the highest
+close of the last 20 sessions. A close below it is an EXIT. The review works
+from quotes, so it uses the long-term score as the composite and, without a
+results date, reviews in 90 days on the long horizon. Funds, ETFs and SGBs
+get NO CALL. `--json` prints one entry per holding, each with its `action`
+object. The MCP tool `portfolio_review` returns
+the same. Rules: [methodology.md](methodology.md#actions-methodology-1).
 
 ### Portfolio wrap
 
@@ -1118,14 +1220,23 @@ ITC Hotels (6 Jan 2025, 1 for 10, 13.51%) and Tata Motors (`TATAMOTORS` or
 `TMPV`) → `TMCV` (14 Oct 2025, 1 for 1, 31.15%). Each figure is from the
 company's own filing with the exchanges. For every lot bought before the record
 date, `--apply` adds a lot of the new company with the same purchase date
-(Sec. 2(42A)) and that share of the lot's cost and charges (Sec. 49(2C)); the
-parent lot keeps its quantity and the rest of the cost (Sec. 49(2D)). The
-company issues whole shares per demat account and pays for fractions in cash,
-so each account's new shares are rounded down; the cash is not recorded. Until
-it is applied, `portfolio`, `analyze`, `checkup`, `income`, `xray` and `wrap`
-value a copy with the demerger in it and print "demerger pending". If a broker
-import already added the new shares, `--apply` warns that they are now counted
-twice.
+(Sec. 2(42A)) and that share of the lot's cost and charges, rounded to the
+paisa (Sec. 49(2C)); the parent lot keeps its quantity and the rest of the cost
+(Sec. 49(2D)). The new shares count as held only from the record date, so they
+cannot be sold, or counted for a dividend, before it. Shares sold after the
+record date but before `--apply` received the new shares too: their sale's cost
+is split the same way and their new shares are added. Splits and bonuses before
+the record date are applied first, so the entitlement is the record date's
+share count. The company issues whole shares per demat account and pays for
+fractions in cash, so each account's new shares are rounded down once across
+`.NS` and `.BO`; the cash is not recorded. New-company shares already in an
+account with no tradebook, broker order or `portfolio add` behind them (a
+broker holdings snapshot) are taken as the demerger's shares when they cover
+it; when they cover only part, that account is left unchanged and the output
+says why. A tradebook import applies the demerger as it replays, and
+re-importing it leaves both holdings as they were. Until it is applied,
+`portfolio` (online or offline), `analyze`, `checkup`, `income`, `xray` and
+`wrap` value a copy with the demerger in it and print "demerger pending".
 
 **Imports.** A holdings export (Kite, INDmoney) has no purchase dates: existing
 lots are kept and only the quantity is matched — more shares add a lot dated
@@ -1223,14 +1334,17 @@ last year. Returns are assumptions, not promises.
 Both use the same tools (quotes, history, technicals, risk, scorecards,
 insights, events, mutual funds, option chains, IPOs, screens, picks, market
 conditions, backtests, your portfolio dashboard, lots, tax estimate, advance
-tax, harvest and rebalance plans, calendar, goals, watchlist, alerts and
-`fit_check` against your own rules). They read, unless you turn on the
-workspace tools; `undo` reverses what those change. See [ai.md](ai.md).
+tax, harvest and rebalance plans, calendar, goals, watchlist, alerts,
+`fit_check` against your own rules, and the rule-based [actions](#actions)
+from `stock_action` and `portfolio_review`). They read, unless you turn on the
+workspace tools; `undo` reverses what those change. The model explains the
+action the rules computed; it never invents or changes one, and never makes up
+a price level. See [ai.md](ai.md).
 
 | Command | Description |
 |---------|-------------|
 | `ask [QUESTION] [-i] [-c \| --resume ID] [--sessions] [--playbook checkup\|tax-season\|earnings] [--auto] [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers, knowing your investor profile. Needs a model with tool calling. `-i` keeps asking until `exit`; `-c` carries on the newest saved conversation, `--resume ID` a given one, `--sessions` lists them (the newest 50, in `cache.db`). `--playbook` runs a prepared task. `--auto` lets the model change your watchlist, alerts, goals, targets, notes and profile (undo with `undo`). `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage, conversation id). The last request runs without tools, so the model must answer. Educational, not financial advice |
-| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--allow-writes] [--allow-portfolio] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude, Codex, Gemini, Antigravity, Cursor, VS Code and other assistants: 52 tools that read, the portfolio, watchlist and alerts as resources, and four prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-writes` adds 11 workspace tools (watchlist, alerts, goals, targets, notes, profile and profile onboarding); `--allow-portfolio` also adds `portfolio_add` and `portfolio_sell`, which record lots. Each change is journalled for `undo`; neither works with `--allow-remote`. `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
+| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--allow-writes] [--allow-portfolio] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude, Codex, Gemini, Antigravity, Cursor, VS Code and other assistants: 66 tools that read, the portfolio, watchlist and alerts as resources, and four prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-writes` adds 11 workspace tools (watchlist, alerts, goals, targets, notes, profile and profile onboarding); `--allow-portfolio` also adds `portfolio_add` and `portfolio_sell`, which record lots. Each change is journalled for `undo`; neither works with `--allow-remote`. `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
 | `connect [APP...] [--all] [--list] [--remove] [--allow-writes] [--allow-portfolio] [--no-skill] [--dry-run] [--json]` | Add the MCP server to AI apps: Claude Desktop and Code, Cursor, Windsurf, VS Code, Cline, Gemini CLI, Antigravity, Codex, Zed, LM Studio and opencode (Goose and Continue get lines to paste). With no app named, every app found on this computer. Only the `stockwise` entry changes and each config is backed up to `<file>.stockwise.bak`; the agent skill is installed for Claude Code and Antigravity. `--remove` takes it out again |
 | `undo [ID] [--list] [--force] [--json]` | Reverse a change an assistant made (`mcp --allow-writes`, `ask --auto`): the newest by default, or change `ID`. `--list` shows the journal. It refuses when a later change or your own edit touched the same file; `--force` undoes anyway |
 
@@ -1411,6 +1525,14 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
   quoted, quotes doubled), starts with a header row, and ends lines with `\n`.
   CSV columns are the same names as the JSON row keys.
 - The `--ai` section is never part of JSON or CSV output.
+- Every `--json` output that has a stock call carries an `action` object
+  (`verdict`, `deep`, `portfolio`, `portfolio checkup`, `portfolio review`,
+  `picks`): `{kind, label, confidence, reasons, invalidation_price, review_by,
+  size_hint: {max_weight_pct, shares, limited_by}, tax_note, horizon, held,
+  coverage, missing, currency, methodology, disclaimer}`. `kind` is `BUY`,
+  `WATCH`, `AVOID`, `ADD`, `HOLD`, `TRIM`, `EXIT` or `NO_CALL`.
+  `size_hint.shares` and `missing` are left out when empty; other missing
+  values are `null`.
 - `mf` and `options` have their own `--json` (no `--csv`); fractions there are
   decimals (`0.1234` = 12.34%), and missing values are `null`, never 0.
 - `options payoff --json` is `{symbol, source, underlying, currency, as_of, expiry,
@@ -1474,7 +1596,7 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `goal emergency` | `{monthly_expense, months_cover, target, liquid, funded_pct, horizon_months, build: plan, goal, currency}` | — |
 | `goal list` | `{goal, currency, goals: [{name, target, target_future, by, months_left, holdings, linked_value, funded_pct, monthly_sip, status}]}` — `status` is `funded`, `needs_sip` or `overdue` | — |
 | `tax` | `{country, tax_year, currency, sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], holdings: [{symbol, cost, value, short_term_gain, long_term_gain, estimated_dates}], realized: estimate, if_sold_today: estimate, ltcg_exemption_left, unpriced: [symbol], other_currency: [symbol], equity_funds: [symbol], other_rules: [{symbol, reason}], intraday_sales: [{symbol, qty, bought, bought_estimated, sold, gain, term}], intraday_gain}`, estimate = `{short_term_gains, short_term_losses, long_term_gains, long_term_losses, taxable_short_term, taxable_long_term, exemption_used, short_term_tax, long_term_tax, cess, total_tax, loss_carried_forward}` — `term` is `short`, `long`, or null (UK); `ltcg_exemption_left` is India only; `equity_funds` (counted at listed-share rates), `other_rules` (left out: debt/other funds, SGBs) and `intraday_sales` (bought and sold on one day: slab-rate speculative income, left out of every estimate) are filled for India | open holding |
-| `sim history` | `{stats: {days, winning_days, day_win_rate_percent, total_pnl, avg_daily_pnl, best_day, worst_day, trades, winning_trades, losing_trades, trade_win_rate_percent, sharpe, max_win_streak, max_loss_streak}, confidence, sessions: [{date, market, capital, target_percent, settled, trades, pnl, pnl_percent, wins, losses}]}` — `confidence` is `high`, `moderate`, `low`, or null before 5 settled days | — |
+| `sim history` | `{stats: {days, winning_days, day_win_rate_percent, total_pnl, avg_daily_pnl, best_day, worst_day, trades, winning_trades, losing_trades, trade_win_rate_percent, sharpe, max_win_streak, max_loss_streak, charges, distinct_days, gross_trades}, confidence, sessions: [{date, market, capital, target_percent, settled, trades, pnl, pnl_percent, wins, losses}]}` — `days` counts sessions; day statistics group them by date (`distinct_days`). P&L is after charges except for the `gross_trades` settled before 0.9. `confidence` is `high`, `moderate`, `low`, or null before 20 dates and 30 trades | — |
 | `trade selftest` | `{stockwise, os, date, market, broker, broker_name, experimental, account, secrets, orders_enabled, max_order_value_set, amounts_redacted, read_only, checks: [{name, status, detail}], shapes: [{endpoint, status, rows, missing, unknown, error}], summary: {pass, warn, fail, skip}}` — `status` is `pass`, `warn`, `fail` or `skip`; `account` is the last 2 characters only | — |
 | `trade sync` | `{broker, experimental, portfolio, since, applied, orders: [{symbol, order_id, side, date, time, qty, price, fills, result, sales?, held?}], already_synced, skipped: [{order_id, symbol, reason}], open_orders: [{order_id, symbol, side, status, qty, filled_qty}], quantity_check: [{symbol, portfolio_qty, broker_qty}], gtt_changes: [change], notes}` — `result` is `lot`, `sold` (with `sales`) or `unmatched` (with `held`); `applied` is true only when `--apply` wrote something | — |
 | `trade gtt list` | `{broker, experimental, gtts: [{id, symbol, side, qty, trigger, limit, status}], changes: [change], first_check, last_checked}`, change = `{kind, id, symbol, side, qty, trigger, from, to, state}` — `kind` is `new`, `status` or `gone`; `state` is `active`, `triggered`, `cancelled`, `expired`, `rejected` or `other` | — |

@@ -1706,7 +1706,7 @@ pub async fn cmd_picks(
     }
     println!();
     println!(
-        "  {:<14} {:>10} {:>8} {:>6} {:>6} {:>8} {:>7} {:>6} {:>5} {:>5}  {}",
+        "  {:<14} {:>10} {:>8} {:>6} {:>6} {:>8} {:>7} {:>6} {:>5} {:>5}  {:<12} {}",
         "Symbol".bold(),
         "Price".bold(),
         "Chg%".bold(),
@@ -1717,9 +1717,10 @@ pub async fn cmd_picks(
         "Trend".bold(),
         "Risk".bold(),
         "Data".bold(),
+        "Action".bold(),
         "Top fifth on".bold()
     );
-    println!("  {}", "─".repeat(102).dimmed());
+    println!("  {}", "─".repeat(115).dimmed());
 
     let pillar = |v: Option<f64>| v.map_or("–".to_string(), |v| format!("{:.0}", v));
     for p in &run.picks {
@@ -1740,7 +1741,7 @@ pub async fn cmd_picks(
             score.dimmed().to_string()
         };
         println!(
-            "  {:<14} {:>10} {} {} {:>6} {:>8} {:>7} {:>6} {:>5} {:>4.0}%  {}",
+            "  {:<14} {:>10} {} {} {:>6} {:>8} {:>7} {:>6} {:>5} {:>4.0}%  {} {}",
             p.symbol.cyan(),
             format_price(p.price.unwrap_or(0.0), p.currency.as_deref()),
             pct_str,
@@ -1751,6 +1752,7 @@ pub async fn cmd_picks(
             pillar(p.trend),
             pillar(p.risk),
             p.coverage * 100.0,
+            super::portfolio::action_cell(p.action.as_ref()),
             p.strongest().join(", ").dimmed()
         );
     }
@@ -1786,6 +1788,8 @@ pub async fn cmd_picks(
         trend_lines[1],
         "Losses and negative book value rank last. Data: share of the score that had data; the rest pulls",
         "the score toward 50. With a positive --top, at most 3 stocks per known sector. `picks review`: past lists.",
+        "Action: rule-based (methodology 1), as if not held: BUY / WATCH / AVOID or NO CALL on thin data. The rank",
+        "is relative to this scan; the action applies fixed rules. `stockwise verdict SYM` shows the reasons.",
     ] {
         println!("  {}", line.dimmed().italic());
     }
@@ -1797,6 +1801,7 @@ pub async fn cmd_picks(
                 .italic()
         );
     }
+    println!("  {}", crate::action::DISCLAIMER.dimmed().italic());
     println!("  {}", run.meta.footer().dimmed());
     println!();
     Ok(())
@@ -1860,19 +1865,24 @@ pub(crate) fn log_picks(
 }
 
 /// Shares one share listed on `since` became through splits and bonus
-/// issues after that date; `None` when Yahoo's actions could not be read.
+/// issues after that date; `None` when Yahoo's actions could not be read,
+/// or when one of them is malformed (a split that can't be applied must not
+/// read as "no split" and show a false loss).
 async fn split_factor(client: &YahooClient, symbol: &str, since: chrono::NaiveDate) -> Option<f64> {
-    let day = since.format("%Y-%m-%d").to_string();
-    let (splits, _, _) = crate::commands::portfolio::fetch_actions(client, symbol, &day)
-        .await
-        .ok()?;
-    Some(
-        splits
-            .iter()
-            .filter(|s| s.date.as_str() > day.as_str() && s.denominator > 0.0)
-            .map(|s| s.ratio())
-            .product(),
-    )
+    let start = since.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+    let events = client.get_corporate_actions(symbol, start).await.ok()?;
+    let mut factor = 1.0;
+    for s in events.splits.values() {
+        let day = chrono::DateTime::from_timestamp(s.date, 0)?.date_naive();
+        if day <= since {
+            continue;
+        }
+        if !(s.numerator > 0.0 && s.denominator > 0.0) {
+            return None;
+        }
+        factor *= s.numerator / s.denominator;
+    }
+    Some(factor)
 }
 
 /// The track record of `market`'s `horizon` lists logged in the last
@@ -1929,17 +1939,12 @@ pub(crate) async fn picks_review_report(
         .buffer_unordered(6)
         .collect()
         .await;
-    let (bench, bench_now) = match crate::picks::benchmark(market) {
-        Some((sym, name)) => {
-            let range = if since_days > 330 { "5y" } else { "2y" };
-            let closes = client
-                .get_chart(sym, range, "1d")
-                .await
-                .ok()
-                .map(|c| (name, c.dated_closes()));
-            (closes, benchmark_level(client, market).await)
-        }
-        None => (None, None),
+    // The benchmark leg compares the level logged with each list with the
+    // live level now: matched observations, no daily-close fallback.
+    let bench = crate::picks::benchmark(market).map(|(_, name)| name);
+    let bench_now = match bench {
+        Some(_) => benchmark_level(client, market).await,
+        None => None,
     };
     Ok(crate::picks_log::review(
         &log,
@@ -1949,9 +1954,8 @@ pub(crate) async fn picks_review_report(
         today,
         &prices,
         &splits,
-        bench.as_ref().map(|(n, s)| crate::picks_log::Benchmark {
-            name: n,
-            closes: s.as_slice(),
+        bench.map(|name| crate::picks_log::Benchmark {
+            name,
             now: bench_now,
         }),
     ))

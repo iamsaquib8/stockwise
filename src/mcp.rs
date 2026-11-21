@@ -61,15 +61,15 @@ commodity or another exchange. `quote` and `verdicts` take up to 25 tickers in o
 Recommendations policy:
 1. Actions (BUY, WATCH or AVOID for a stock; ADD, HOLD, TRIM or EXIT for a holding) come only \
 from StockWise's deterministic, rule-based engine. Never make one up, never upgrade, soften or \
-reverse one, and never turn scores into one yourself. TODO(0.9 workstream C): name the \
-`stock_action` and `portfolio_review` tools here once they land. Until then no tool returns an \
-action, so give none: describe the scores and readings instead.
-2. Explain an action or a score with the reasons and figures the tool returned. Never invent \
-price levels: give an entry, stop, target or invalidation price only when a tool returned it, \
-exactly as returned.
-3. NO CALL: when a result's data coverage is below 60% (verdict `data_coverage` under 60, \
-verdicts `low_coverage`, a pick's `coverage` under 0.6), say there is not enough data for a \
-call and offer none.
+reverse one, and never turn scores into one yourself. `stock_action` gives the action for one \
+stock (held or not), `portfolio_review` for every holding (EXIT, TRIM, ADD, HOLD first); \
+`verdict` and `picks` carry the same `action` object. Pass `horizon: short` for weeks-to-months \
+rules.
+2. Explain an action with the reasons, confidence, invalidation price, review date, size hint \
+and tax note the tool returned, quoting them as returned. Never invent price levels: give an \
+invalidation, entry, stop or target price only when a tool returned it, exactly as returned.
+3. NO CALL: when the action is NO CALL (data coverage below 60%), say there is not enough data \
+for a call, name the missing fields, and offer none.
 4. Keep the disclaimer: the information is educational, not personalised investment advice; \
 StockWise is not a SEBI-registered investment adviser or research analyst; prices can be \
 delayed, so verify before acting.
@@ -84,7 +84,8 @@ mutual funds (`mf_search`, `mf_nav`, `mf_sip`, `mf_bleed` for Regular against Di
 F&O option chains (`options_*`), IPOs, G-sec yields and the bond calculator (`bonds_*`), gold, \
 silver and Sovereign Gold Bonds (`commodity`) and USD/INR (`fx_history`).
 
-Scores from `verdict`, `verdicts` and `picks` describe data. Every `picks` list is logged; when \
+Scores from `verdict`, `verdicts` and `picks` describe data; the `action` next to them is the \
+call. Every `picks` list is logged; when \
 presenting picks, cite how earlier lists did (`picks_review`, or the stockwise://track-record \
 resource), including when they lagged the index. `fit_check` says whether a stock meets the \
 user's own rules; it is not a recommendation.
@@ -660,25 +661,22 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
                 .map(|a| format!(" with amount {a}"))
                 .unwrap_or_default();
             format!(
-                "I'm thinking about buying {symbol}. Call verdict for {symbol}, quote and risk for \
-                 it, and fit_check for {symbol}{amount}. Walk me through each pillar's score and \
-                 the facts behind it, the composite and the data coverage, the volatility and \
-                 drawdown, and which of my own rules it passes or fails. StockWise has no \
-                 action engine in this version, so do not answer buy or don't buy yourself: \
-                 lay out what the data shows for and against, and what to check next. TODO(0.9 \
-                 workstream C): call `stock_action` and present its action, reasons and \
-                 invalidation instead.{POLICY}"
+                "I'm thinking about buying {symbol}. Call stock_action for {symbol}, verdict and \
+                 risk for it, and fit_check for {symbol}{amount}. Lead with the action exactly as \
+                 stock_action returned it (BUY, WATCH, AVOID or NO CALL), its confidence, its \
+                 reasons, the invalidation price and review date, and the size hint. Then walk \
+                 me through the pillar scores behind it, the volatility and drawdown, and which \
+                 of my own rules it passes or fails. Do not change the action or add levels of \
+                 your own.{POLICY}"
             )
         }
         "exit_check" => format!(
-            "Run an exit check across my StockWise holdings. Call portfolio_summary, then \
-             verdicts with my holdings' symbols (25 at a time), and portfolio_checkup. For each \
-             holding show its weight, P&L, composite score, data coverage and weakest pillar; \
-             then list the holdings that deserve a closer look (weak or falling scores, \
-             concentration over my profile's limit, checkup findings), with the reason for \
-             each. Do not tell me to sell: StockWise has no action engine in this version. \
-             TODO(0.9 workstream C): call `portfolio_review` for ADD/HOLD/TRIM/EXIT actions \
-             instead.{POLICY}"
+            "Run an exit check across my StockWise holdings. Call portfolio_review, then \
+             portfolio_checkup. List the holdings in the order portfolio_review gives (EXIT, \
+             TRIM, ADD, HOLD, NO CALL), each with its action as returned, confidence, reasons, \
+             invalidation price, review date, the shares a TRIM would sell and any tax note \
+             (waiting a few days for long-term rates). Add the checkup findings that touch \
+             each holding. Do not change any action.{POLICY}"
         ),
         "smallcap_short_scan" => {
             let market = arg("market").unwrap_or("in");
@@ -693,15 +691,16 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
             )
         }
         "tax_aware_rebalance" => format!(
-            "Help me rebalance my StockWise portfolio with tax in mind. Call rebalance for the \
-             drift from my target weights, tax_estimate for realized gains and the exemption \
-             left, holdings_lots for each lot's holding period, and harvest for losses that \
-             could offset gains. For each holding over its target show the trim, the tax it \
-             would cost (short- or long-term, by lot), and cheaper ways to get there: using \
-             new money instead of selling, waiting for lots about to turn long-term, or \
-             pairing with harvestable losses. Present it as options and their costs, and \
-             remind me to check the figures against my broker's tax P&L. TODO(0.9 workstream \
-             G): call `rebalance_plan` with `raise` once it lands.{POLICY}"
+            "Show me my StockWise portfolio's drift from its target weights with the tax \
+             figures next to it. Call rebalance for the drift and the trades it computes, \
+             tax_estimate for realized gains and the exemption left, holdings_lots for each \
+             lot's holding period and the next lot to turn long-term, and harvest for the \
+             unrealized losses it lists. For each holding off its target show the drift and the \
+             trade rebalance returned, and for any sale in it the tax estimate by lot (short- \
+             or long-term) from the tools. Report only what the tools returned: do not choose \
+             which holdings to sell, when to sell, or how to pair sales with losses. Remind me \
+             to check the figures against my broker's tax P&L. TODO(0.9 workstream G): call \
+             `rebalance_plan` with `raise` once it lands.{POLICY}"
         ),
         "weekly_review" => format!(
             "Review my week with StockWise. Call portfolio_summary and portfolio_pme for how the \

@@ -268,7 +268,8 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
         {
             return ex.to_string().min(l.date.clone());
         }
-        l.date.clone()
+        // Demerged shares count from the record date, not their tax date.
+        l.held_from().to_string()
     };
     let open: f64 = p.holding(symbol).map_or(0.0, |h| {
         h.lots
@@ -288,7 +289,7 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| s.buy_date.clone())
             } else {
-                s.buy_date.clone()
+                s.held_from().to_string()
             };
             from.as_str() <= day && s.sell_date.as_str() > day
         })
@@ -326,9 +327,16 @@ pub fn symbol_year(
     start_price: Option<f64>,
     end_price: Option<f64>,
 ) -> SymbolYear {
-    symbol_year_in(p, symbol, period, as_of, start_price, end_price, &|_| {
-        Some(1.0)
-    })
+    symbol_year_in(
+        p,
+        symbol,
+        period,
+        as_of,
+        start_price,
+        end_price,
+        None,
+        &|_, _| Some(1.0),
+    )
 }
 
 /// [`symbol_year`] in a base currency: `fx(day)` is the rate on that day
@@ -342,15 +350,27 @@ pub fn symbol_year_in(
     as_of: NaiveDate,
     start_price: Option<f64>,
     end_price: Option<f64>,
-    fx: &dyn Fn(NaiveDate) -> Option<f64>,
+    base: Option<&str>,
+    fx: &dyn Fn(NaiveDate, Option<&str>) -> Option<f64>,
 ) -> SymbolYear {
-    let mut missing = false;
-    let mut rate = |d: NaiveDate| match fx(d) {
+    let missing = std::cell::Cell::new(false);
+    // `fx(day, None)`: the holding's own currency; `Some(cur)`: an amount
+    // recorded in another currency (a dividend paid in pounds).
+    let in_currency = |d: NaiveDate, cur: Option<&str>| match fx(d, cur) {
         Some(r) => r,
         None => {
-            missing = true;
+            missing.set(true);
             1.0
         }
+    };
+    let rate = |d: NaiveDate| in_currency(d, None);
+    // A purchase paid in the base (`portfolio add --currency`): the rate
+    // paid, per unit of the quote (pence for `GBp`).
+    let quote_unit = crate::portfolio::symbol_currency(symbol).unwrap_or("");
+    let paid_rate = |cur: Option<&str>, r: Option<f64>| -> Option<f64> {
+        let (b, c, r) = (base?, cur?, r?);
+        (c.eq_ignore_ascii_case(b) && r > 0.0)
+            .then(|| r * crate::market::to_major(1.0, quote_unit).0)
     };
     let inside = |d: Option<NaiveDate>| d.is_some_and(|d| d >= period.start && d <= as_of);
     let value = |shares: f64, price: Option<f64>| {
@@ -360,17 +380,27 @@ pub fn symbol_year_in(
             price.map(|px| shares * px)
         }
     };
-    let (r_open, r_end) = (rate(period.opening()), rate(as_of));
+    // An endpoint worth nothing needs no exchange rate.
+    let at = |day: NaiveDate, v: Option<f64>| match v {
+        Some(v) if v.abs() > 1e-9 => Some(v * rate(day)),
+        other => other,
+    };
+    let start_value = at(
+        period.opening(),
+        value(shares_at(p, symbol, period.opening()), start_price),
+    );
+    let end_value = at(as_of, value(shares_at(p, symbol, as_of), end_price));
     let mut y = SymbolYear {
         symbol: symbol.to_string(),
-        start_value: value(shares_at(p, symbol, period.opening()), start_price).map(|v| v * r_open),
-        end_value: value(shares_at(p, symbol, as_of), end_price).map(|v| v * r_end),
+        start_value,
+        end_value,
         ..Default::default()
     };
     if let Some(h) = p.holding(symbol) {
         for l in h.lots.iter().filter(|l| inside(date(&l.date))) {
             let d = date(&l.date).expect("checked");
-            let cost = (l.cost() + l.charges.unwrap_or(0.0)) * rate(d);
+            let r = paid_rate(l.fx_currency.as_deref(), l.fx_rate).unwrap_or_else(|| rate(d));
+            let cost = (l.cost() + l.charges.unwrap_or(0.0)) * r;
             y.bought += cost;
             y.flows.push((d, cost));
         }
@@ -381,20 +411,23 @@ pub fn symbol_year_in(
         .filter(|s| s.symbol.eq_ignore_ascii_case(symbol))
     {
         let (bought, sold) = (date(&s.buy_date), date(&s.sell_date));
+        // Purchase charges go with the purchase, the sale's with the sale.
+        let buy_cost = s.qty * s.buy_price + s.buy_charges();
+        let paid = paid_rate(s.fx_currency.as_deref(), s.buy_fx_rate);
         if inside(bought) {
             let d = bought.expect("checked");
-            let cost = s.qty * s.buy_price * rate(d);
+            let cost = buy_cost * paid.unwrap_or_else(|| rate(d));
             y.bought += cost;
             y.flows.push((d, cost));
         }
         if inside(sold) {
             let d = sold.expect("checked");
             let r = rate(d);
-            let proceeds = (s.qty * s.sell_price - s.charges()) * r;
+            let proceeds = (s.qty * s.sell_price - s.sell_charges()) * r;
             y.sold += proceeds;
             // At the purchase's rate for the cost, the sale's for the rest.
-            let cost_rate = bought.map_or(r, &mut rate);
-            y.realized_gain += proceeds - s.qty * s.buy_price * cost_rate;
+            let cost_rate = paid.unwrap_or_else(|| bought.map_or(r, rate));
+            y.realized_gain += proceeds - buy_cost * cost_rate;
             y.flows.push((d, -proceeds));
         }
     }
@@ -404,11 +437,12 @@ pub fn symbol_year_in(
         .filter(|d| d.symbol.eq_ignore_ascii_case(symbol) && inside(date(&d.ex_date)))
     {
         let d = date(&dv.ex_date).expect("checked");
-        let amount = dv.amount * rate(d);
+        // In the currency it was paid in when recorded.
+        let amount = dv.amount * in_currency(d, dv.currency.as_deref());
         y.dividends += amount;
         y.dividend_flows.push((d, -amount));
     }
-    y.unconverted = missing;
+    y.unconverted = missing.get();
     y
 }
 
@@ -1120,7 +1154,9 @@ mod tests {
         let pending = crate::corp_actions::PendingSplits {
             by_symbol: vec![("BBB.NS".into(), vec![Split::new("2026-06-02", 2.0, 1.0)])],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
+            demerger_conflicts: vec![],
         };
         let adj = pending.adjusted(&p);
         // In today's share count before and after the split: 20, never 40.
@@ -1145,7 +1181,8 @@ mod tests {
         let p = fixture();
         let fy = Period::indian_fy(2026).unwrap();
         // Rate 2 before November, 3 from then on.
-        let fx = |day: NaiveDate| Some(if day < d("2026-11-01") { 2.0 } else { 3.0 });
+        let fx =
+            |day: NaiveDate, _: Option<&str>| Some(if day < d("2026-11-01") { 2.0 } else { 3.0 });
         let y = symbol_year_in(
             &p,
             "AAA.NS",
@@ -1153,6 +1190,7 @@ mod tests {
             d("2026-11-17"),
             Some(110.0),
             Some(140.0),
+            None,
             &fx,
         );
         assert_eq!(y.start_value, Some(2200.0));
@@ -1160,7 +1198,7 @@ mod tests {
         assert!(!y.unconverted);
         assert!(!y.dividend_flows.is_empty());
         assert!(y.flows.iter().all(|f| !y.dividend_flows.contains(f)));
-        let none = |_: NaiveDate| None;
+        let none = |_: NaiveDate, _: Option<&str>| None;
         let y = symbol_year_in(
             &p,
             "AAA.NS",
@@ -1168,9 +1206,69 @@ mod tests {
             d("2026-11-17"),
             Some(110.0),
             Some(140.0),
+            None,
             &none,
         );
         assert!(y.unconverted);
+    }
+
+    #[test]
+    fn a_dividend_converts_in_its_own_currency_and_a_paid_lot_at_its_rate() {
+        let mut p = Portfolio::default();
+        let mut lot = crate::portfolio::Lot::new(10.0, 100.0, "2026-06-01", "manual");
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(83.0);
+        p.add_lot("DDD", lot);
+        p.dividends.push(crate::portfolio::DividendReceived {
+            symbol: "DDD".into(),
+            ex_date: "2026-07-01".into(),
+            per_share: 1.0,
+            qty: 10.0,
+            amount: 10.0,
+            currency: Some("GBP".into()),
+        });
+        let fy = Period::indian_fy(2026).unwrap();
+        let fx =
+            |_: NaiveDate, cur: Option<&str>| Some(if cur == Some("GBP") { 100.0 } else { 80.0 });
+        let y = symbol_year_in(
+            &p,
+            "DDD",
+            &fy,
+            d("2026-11-17"),
+            Some(0.0),
+            Some(110.0),
+            Some("INR"),
+            &fx,
+        );
+        // £10 at ₹100, not at the dollar's ₹80.
+        assert_eq!(y.dividends, 1000.0);
+        // Bought at the ₹83 paid, not the reference ₹80.
+        assert_eq!(y.bought, 83_000.0);
+    }
+
+    #[test]
+    fn a_holding_bought_in_the_period_needs_no_opening_rate() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "CCC",
+            crate::portfolio::Lot::new(10.0, 100.0, "2026-06-01", "manual"),
+        );
+        let fy = Period::indian_fy(2026).unwrap();
+        // No rate on the opening day; every later day has one.
+        let fx = |day: NaiveDate, _: Option<&str>| (day > fy.opening()).then_some(80.0);
+        let y = symbol_year_in(
+            &p,
+            "CCC",
+            &fy,
+            d("2026-11-17"),
+            None,
+            Some(110.0),
+            None,
+            &fx,
+        );
+        assert!(!y.unconverted);
+        assert_eq!(y.start_value, Some(0.0));
+        assert_eq!(y.end_value, Some(1100.0 * 80.0));
     }
 
     #[test]

@@ -699,6 +699,8 @@ impl DaemonState {
             loss_count: settled.then_some(trades.len() as u32 - wins),
             trades,
             settled,
+            // `sim settle` replays a handed-over day with this model.
+            cost_model: Some(model),
         }
     }
 }
@@ -893,7 +895,7 @@ mod tests {
         ] {
             text.push_str(&format!("\n{s}"));
         }
-        crate::verdict::testing::assert_neutral(&text);
+        crate::action::testing::assert_action_well_formed(&text);
         for banned in ["ENTRY", "SL ", "T1", "T2", "STOPPED", "TARGET"] {
             assert!(!text.contains(banned), "{banned:?} in {text}");
         }
@@ -1351,6 +1353,10 @@ mod tests {
         let back: DaemonState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.cost_model, s.cost_model);
         assert_eq!(back.positions[0].charges, Some(0.0));
+        // A day handed to `sim settle` carries the model with it.
+        let handed = s.to_sim_session(false);
+        assert_eq!(handed.cost_model, s.cost_model);
+        assert_eq!(handed.costs(), s.costs());
     }
 
     #[test]

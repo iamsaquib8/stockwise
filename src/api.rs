@@ -701,6 +701,16 @@ fn bar_date(ts: i64, offset: i64) -> Option<chrono::NaiveDate> {
     Some(chrono::DateTime::from_timestamp(ts + offset + slack, 0)?.date_naive())
 }
 
+/// Whether `adj` has a usable value on exactly the bars where `close` has
+/// one: same length and the same valid-bar positions, so returns from it
+/// cover the same dates as the traded closes. Otherwise traded closes serve.
+fn adjclose_aligned(adj: &[Option<f64>], close: &[Option<f64>]) -> bool {
+    let valid = |v: &Option<f64>| v.is_some_and(|x| x.is_finite() && x > 0.0);
+    adj.len() == close.len()
+        && adj.iter().any(valid)
+        && adj.iter().zip(close).all(|(a, c)| valid(a) == valid(c))
+}
+
 impl ChartData {
     /// High, low and close of the last *completed* session in a daily chart,
     /// for classic pivot points, which come from the previous session. While
@@ -765,9 +775,7 @@ impl ChartData {
             .and_then(|a| a.first())
             .and_then(|a| a.adjclose.as_deref())
         {
-            Some(adj) if adj.len() == close.len() && adj.iter().any(Option::is_some) => {
-                adj.to_vec()
-            }
+            Some(adj) if adjclose_aligned(adj, close) => adj.to_vec(),
             _ => close.to_vec(),
         }
     }
@@ -783,12 +791,18 @@ impl ChartData {
 
     /// Whether the closes include dividends (Yahoo's `adjclose`).
     pub fn has_adjclose(&self) -> bool {
+        let close = self
+            .indicators
+            .quote
+            .first()
+            .and_then(|q| q.close.as_deref())
+            .unwrap_or_default();
         self.indicators
             .adjclose
             .as_ref()
             .and_then(|a| a.first())
-            .and_then(|a| a.adjclose.as_ref())
-            .is_some_and(|v| v.iter().any(Option::is_some))
+            .and_then(|a| a.adjclose.as_deref())
+            .is_some_and(|adj| adjclose_aligned(adj, close))
     }
 
     /// Closing prices with the session date of each bar, dated in the
@@ -1693,7 +1707,30 @@ impl YahooClient {
         &self,
         symbol: &str,
     ) -> Result<(providers::router::Ratios, Vec<&'static str>)> {
-        self.router.ratios(symbol).await
+        // The configured provider (`STOCKWISE_DATA_PROVIDER=fmp|finnhub`) is
+        // not a router member; ask it first, then let the router fill the
+        // rest. Its fields keep precedence.
+        let primary = match &self.provider {
+            Some(p) if p.supports(symbol) => match p.ratios(symbol).await {
+                Ok(Some(r)) => Some((r, p.name())),
+                Ok(None) => None,
+                Err(e) => return self.router.ratios(symbol).await.map_err(|re| re.context(e)),
+            },
+            _ => None,
+        };
+        match (primary, self.router.ratios(symbol).await) {
+            (Some((mut r, name)), Ok((rest, mut sources))) => {
+                let before = r.clone();
+                r.merge(&rest);
+                let mut names = vec![name];
+                if r != before {
+                    names.append(&mut sources);
+                }
+                Ok((r, names))
+            }
+            (Some((r, name)), Err(_)) => Ok((r, vec![name])),
+            (None, routed) => routed,
+        }
     }
 
     /// NSE's company facts (P/E, sector P/E, industry, shares issued) for an
@@ -1846,7 +1883,10 @@ impl YahooClient {
         };
         // An Indian stock trades on both exchanges at almost the same price:
         // Yahoo's other listing is the most reliable stand-in.
-        if self.exchange_backup_on()
+        // Only for "no such history" (Yahoo's 404): a rate limit or outage
+        // would hit the twin too, and the warning would misstate the cause.
+        if yahoo_err.downcast_ref::<NoPriceHistory>().is_some()
+            && self.exchange_backup_on()
             && let Some(twin) = twin_listing(symbol)
             && let Ok(mut chart) = self.yahoo_chart(&twin, range, interval).await
         {
@@ -3689,6 +3729,59 @@ mod fallback_tests {
             })
             .collect();
         serde_json::json!({ "data": rows }).to_string()
+    }
+
+    #[test]
+    fn a_replaced_duplicate_row_keeps_the_adjusted_series() {
+        // Day 2 appears twice; the first copy has no adjusted close, the
+        // replacement does. The retained rows are complete.
+        let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100000,200000,200100],
+            "indicators":{"quote":[{"close":[100.0,99.0,99.0]}],
+            "adjclose":[{"adjclose":[100.0,null,100.0]}]}}],"error":null}}"#;
+        let resp: ChartResponse = serde_json::from_str(body).unwrap();
+        let chart = resp.chart.result.unwrap().remove(0);
+        let s = crate::research::Series::from_chart(&chart);
+        assert_eq!(s.adj_close, vec![100.0, 100.0]);
+        assert_eq!(s.ret(1), Some(0.0));
+    }
+
+    #[test]
+    fn misaligned_adjclose_falls_back_to_traded_closes() {
+        let chart = |close: Vec<Option<f64>>, adj: Vec<Option<f64>>| ChartData {
+            meta: None,
+            timestamp: Some((0..close.len() as i64).map(|i| i * 86_400).collect()),
+            indicators: Indicators {
+                quote: vec![QuoteIndicator {
+                    close: Some(close),
+                    ..Default::default()
+                }],
+                adjclose: Some(vec![AdjCloseIndicator {
+                    adjclose: Some(adj),
+                }]),
+            },
+            events: None,
+        };
+        // One adjusted value among five traded closes: traded closes serve.
+        let c = chart(
+            vec![
+                Some(100.0),
+                Some(105.0),
+                Some(110.0),
+                Some(115.0),
+                Some(120.0),
+            ],
+            vec![None, None, None, None, Some(120.0)],
+        );
+        assert_eq!(c.return_closes(), vec![100.0, 105.0, 110.0, 115.0, 120.0]);
+        // Same count, different bars: traded closes serve.
+        let c = chart(
+            vec![None, Some(101.0), Some(102.0)],
+            vec![Some(99.0), Some(100.0), None],
+        );
+        assert_eq!(c.return_closes(), vec![101.0, 102.0]);
+        // Aligned: adjusted closes serve.
+        let c = chart(vec![None, Some(101.0)], vec![None, Some(99.0)]);
+        assert_eq!(c.return_closes(), vec![99.0]);
     }
 
     #[tokio::test]

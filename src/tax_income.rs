@@ -73,28 +73,48 @@ impl IncomeKind {
     }
 }
 
-/// One dividend or coupon.
+/// One dividend or coupon. Rupee amounts are in paise (shown and
+/// serialised as rupees).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IncomeRow {
+    /// The ex-date for a dividend (the payment date is not recorded), the
+    /// coupon date for SGB interest.
     pub date: NaiveDate,
+    /// What `date` is: `ex_date` or `coupon_date`.
+    pub date_basis: &'static str,
     pub payer: String,
     pub kind: IncomeKind,
     /// Index into [`QUARTER_LABELS`].
     pub quarter: usize,
+    /// The currency the amount was paid in (major unit: `GBp` is `GBP`).
     pub currency: String,
-    /// In `currency` (equal to `gross` for rupees).
-    pub gross_original: f64,
+    /// In `currency`, in its minor units (cents for dollars).
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub gross_original: i64,
     /// Rupees per unit of `currency` on `date` (1 for rupees).
     pub fx_rate: f64,
-    pub gross: f64,
-    /// Indian TDS deducted (estimate).
-    pub tds: f64,
-    /// Tax withheld abroad, in rupees (US 25% under the DTAA with a W-8BEN).
-    pub foreign_tax: f64,
-    pub net: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub gross: i64,
+    /// Indian TDS (estimate: 10% of every dividend of a payer whose year's
+    /// dividends pass the threshold).
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub tds: i64,
+    /// Tax withheld abroad, in rupees, at the `--withholding` rate given;
+    /// `None` when no rate was given (unknown, not zero).
+    #[serde(serialize_with = "opt_paise")]
+    pub foreign_tax: Option<i64>,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub net: i64,
 }
 
-/// A financial year's dividend and interest income.
+fn opt_paise<S: serde::Serializer>(v: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(p) => s.serialize_f64(crate::tax::paise::to_rupees(*p)),
+        None => s.serialize_none(),
+    }
+}
+
+/// A financial year's dividend and interest income (paise, shown as rupees).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IncomeReport {
     pub fy_label: String,
@@ -102,25 +122,41 @@ pub struct IncomeReport {
     pub fy_end: NaiveDate,
     pub tds_threshold: f64,
     pub rows: Vec<IncomeRow>,
-    pub dividends: f64,
-    pub foreign_dividends: f64,
-    pub interest: f64,
-    pub gross: f64,
-    pub tds: f64,
-    pub foreign_tax: f64,
-    pub net: f64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub dividends: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub foreign_dividends: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub interest: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub gross: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub tds: i64,
+    /// Tax withheld abroad at the rate given; foreign dividends without one
+    /// are in `withholding_unknown`.
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub foreign_tax: i64,
+    #[serde(serialize_with = "crate::tax::paise::serialize")]
+    pub net: i64,
     /// Gross income per [`QUARTER_LABELS`] period: dividends only (the ITR
     /// breakup is for dividends) and all income.
-    pub dividend_by_quarter: [f64; 5],
-    pub income_by_quarter: [f64; 5],
+    #[serde(serialize_with = "crate::tax::paise::serialize_array")]
+    pub dividend_by_quarter: [i64; 5],
+    #[serde(serialize_with = "crate::tax::paise::serialize_array")]
+    pub income_by_quarter: [i64; 5],
     /// Payers whose currency had no rupee rate for a date (left out).
     pub no_rate: Vec<String>,
     /// SGB holdings whose tranche StockWise does not know (no coupons).
     pub unknown_sgbs: Vec<String>,
+    /// Foreign dividends whose tax withheld abroad is not known.
+    pub withholding_unknown: Vec<String>,
 }
 
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
+impl IncomeReport {
+    /// Some income could not be counted: the totals are incomplete.
+    pub fn is_incomplete(&self) -> bool {
+        !self.no_rate.is_empty() || !self.unknown_sgbs.is_empty()
+    }
 }
 
 fn date(s: &str) -> Option<NaiveDate> {
@@ -152,14 +188,14 @@ fn units_held_on(portfolio: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
         .iter()
         .filter(|h| h.symbol == symbol)
         .flat_map(|h| &h.lots)
-        .filter(|l| date(&l.date).is_some_and(|d| d < day))
+        .filter(|l| date(l.held_from()).is_some_and(|d| d < day))
         .map(|l| l.qty)
         .sum();
     let sold_later: f64 = portfolio
         .realized
         .iter()
         .filter(|s| s.symbol == symbol)
-        .filter(|s| date(&s.buy_date).is_some_and(|d| d < day))
+        .filter(|s| date(s.held_from()).is_some_and(|d| d < day))
         .filter(|s| date(&s.sell_date).is_some_and(|d| d >= day))
         .map(|s| s.qty)
         .sum();
@@ -167,84 +203,100 @@ fn units_held_on(portfolio: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
 }
 
 /// The dividend and interest income of the financial year starting
-/// `fy_start`. `fx(currency, date)` gives rupees per unit of a currency on a
-/// day; a dividend whose rate is unknown is left out and named.
+/// `fy_start`. `fx(currency, date)` gives rupees per unit of a (major)
+/// currency on a day; a dividend whose rate is unknown is left out and
+/// named. `withholding` is the rate of tax withheld abroad on foreign
+/// dividends, when known from a statement (US 25% with a W-8BEN, 30%
+/// without); `None` leaves it unknown.
 pub fn income_report(
     portfolio: &Portfolio,
     fy_start: NaiveDate,
+    withholding: Option<f64>,
     fx: impl Fn(&str, NaiveDate) -> Option<f64>,
 ) -> IncomeReport {
+    use crate::tax::paise;
     let (from, to) = crate::tax::Country::India.tax_year(fy_start);
     let y = from.year();
     let threshold = dividend_tds_threshold(y);
     let mut rows: Vec<IncomeRow> = Vec::new();
     let mut no_rate = Vec::new();
+    let mut withholding_unknown = Vec::new();
 
-    // Dividends, oldest first so the TDS threshold is crossed in order.
-    let mut divs: Vec<(&DividendReceived, NaiveDate)> = portfolio
+    let divs: Vec<(&DividendReceived, NaiveDate)> = portfolio
         .dividends
         .iter()
         .filter_map(|d| Some((d, date(&d.ex_date)?)))
         .filter(|(_, d)| *d >= from && *d <= to)
         .collect();
-    divs.sort_by_key(|(d, day)| (*day, d.symbol.clone()));
-    let mut paid_by: Vec<(String, f64)> = Vec::new();
     for (d, day) in divs {
-        let currency = d
+        let listed = d
             .currency
             .clone()
             .or_else(|| crate::portfolio::symbol_currency(&d.symbol).map(str::to_string))
             .unwrap_or_else(|| "INR".into());
-        let domestic = currency.eq_ignore_ascii_case("INR");
-        let rate = if domestic {
+        // A minor unit (`GBp`) becomes its major one, with the amount.
+        let (amount, currency) = crate::market::to_major(d.amount, &listed);
+        let currency = currency.to_uppercase();
+        let domestic = currency == "INR";
+        let Some(rate) = (if domestic {
             Some(1.0)
         } else {
             fx(&currency, day)
-        };
-        let Some(rate) = rate else {
+        }) else {
             no_rate.push(d.symbol.clone());
             continue;
         };
-        let gross = d.amount * rate;
-        let (kind, tds, foreign_tax) = if domestic {
-            let who = payer(&d.symbol);
-            let total = match paid_by.iter_mut().find(|(p, _)| *p == who) {
-                Some((_, t)) => {
-                    *t += gross;
-                    *t
-                }
-                None => {
-                    paid_by.push((who, gross));
-                    gross
-                }
-            };
-            let tds = if total > threshold {
-                gross * DIVIDEND_TDS_RATE
-            } else {
-                0.0
-            };
-            (IncomeKind::Dividend, tds, 0.0)
+        let gross = paise::from_rupees(amount * rate);
+        let (kind, foreign_tax) = if domestic {
+            (IncomeKind::Dividend, Some(0))
         } else {
-            let wht = if currency.eq_ignore_ascii_case("USD") {
-                crate::income::DEFAULT_US_WHT_RATE
-            } else {
-                0.0
-            };
-            (IncomeKind::ForeignDividend, 0.0, gross * wht)
+            match withholding {
+                Some(w) => (IncomeKind::ForeignDividend, Some(paise::times(gross, w))),
+                None => {
+                    withholding_unknown.push(d.symbol.clone());
+                    (IncomeKind::ForeignDividend, None)
+                }
+            }
         };
         rows.push(IncomeRow {
             date: day,
+            date_basis: "ex_date",
             payer: payer(&d.symbol),
             kind,
             quarter: quarter_of(day),
-            currency: currency.to_uppercase(),
-            gross_original: round2(d.amount),
+            currency,
+            gross_original: paise::from_rupees(amount),
             fx_rate: rate,
-            gross: round2(gross),
-            tds: round2(tds),
-            foreign_tax: round2(foreign_tax),
-            net: round2(gross - tds - foreign_tax),
+            gross,
+            tds: 0,
+            foreign_tax,
+            net: gross - foreign_tax.unwrap_or(0),
         });
+    }
+    // TDS on a payer's year: once its dividends to you pass the threshold,
+    // Sec. 194/194K applies to the aggregate (10% of each of its dividends).
+    let mut payers: Vec<String> = rows
+        .iter()
+        .filter(|r| r.kind == IncomeKind::Dividend)
+        .map(|r| r.payer.clone())
+        .collect();
+    payers.sort();
+    payers.dedup();
+    for who in payers {
+        let total: i64 = rows
+            .iter()
+            .filter(|r| r.kind == IncomeKind::Dividend && r.payer == who)
+            .map(|r| r.gross)
+            .sum();
+        if paise::to_rupees(total) > threshold {
+            for r in rows
+                .iter_mut()
+                .filter(|r| r.kind == IncomeKind::Dividend && r.payer == who)
+            {
+                r.tds = paise::times(r.gross, DIVIDEND_TDS_RATE);
+                r.net = r.gross - r.tds;
+            }
+        }
     }
 
     // SGB interest on the units held on each coupon date.
@@ -273,42 +325,43 @@ pub fn income_report(
             if units <= 1e-9 {
                 continue;
             }
-            let gross = units * per_unit;
+            let gross = paise::from_rupees(units * per_unit);
             rows.push(IncomeRow {
                 date: day,
+                date_basis: "coupon_date",
                 payer: t.symbol.to_string(),
                 kind: IncomeKind::SgbInterest,
                 quarter: quarter_of(day),
                 currency: "INR".into(),
-                gross_original: round2(gross),
+                gross_original: gross,
                 fx_rate: 1.0,
-                gross: round2(gross),
-                tds: 0.0,
-                foreign_tax: 0.0,
-                net: round2(gross),
+                gross,
+                tds: 0,
+                foreign_tax: Some(0),
+                net: gross,
             });
         }
     }
     rows.sort_by(|a, b| (a.date, &a.payer).cmp(&(b.date, &b.payer)));
 
-    let sum = |k: Option<IncomeKind>, f: fn(&IncomeRow) -> f64| -> f64 {
-        round2(
-            rows.iter()
-                .filter(|r| k.is_none_or(|k| r.kind == k))
-                .map(f)
-                .sum(),
-        )
+    let sum = |k: Option<IncomeKind>, f: fn(&IncomeRow) -> i64| -> i64 {
+        rows.iter()
+            .filter(|r| k.is_none_or(|k| r.kind == k))
+            .map(f)
+            .sum()
     };
-    let mut dividend_by_quarter = [0.0; 5];
-    let mut income_by_quarter = [0.0; 5];
+    let mut dividend_by_quarter = [0i64; 5];
+    let mut income_by_quarter = [0i64; 5];
     for r in &rows {
         income_by_quarter[r.quarter] += r.gross;
         if r.kind != IncomeKind::SgbInterest {
             dividend_by_quarter[r.quarter] += r.gross;
         }
     }
-    no_rate.sort();
-    no_rate.dedup();
+    for v in [&mut no_rate, &mut withholding_unknown] {
+        v.sort();
+        v.dedup();
+    }
     IncomeReport {
         fy_label: crate::tax::Country::India.tax_year_label(from),
         fy_start: from,
@@ -319,17 +372,19 @@ pub fn income_report(
         interest: sum(Some(IncomeKind::SgbInterest), |r| r.gross),
         gross: sum(None, |r| r.gross),
         tds: sum(None, |r| r.tds),
-        foreign_tax: sum(None, |r| r.foreign_tax),
+        foreign_tax: sum(None, |r| r.foreign_tax.unwrap_or(0)),
         net: sum(None, |r| r.net),
-        dividend_by_quarter: dividend_by_quarter.map(round2),
-        income_by_quarter: income_by_quarter.map(round2),
+        dividend_by_quarter,
+        income_by_quarter,
         rows,
         no_rate,
         unknown_sgbs,
+        withholding_unknown,
     }
 }
 
-/// The income as advance tax sees it: every row at the slab `rate`.
+/// The income as advance tax sees it: every row at the slab `rate`;
+/// dividends with the Sec. 234C proviso, interest without.
 pub fn advance_income(report: &IncomeReport, rate: f64) -> Vec<crate::tax::AdvanceIncome> {
     report
         .rows
@@ -338,17 +393,20 @@ pub fn advance_income(report: &IncomeReport, rate: f64) -> Vec<crate::tax::Advan
             date: r.date,
             amount: r.gross,
             rate,
+            deferrable: r.kind != IncomeKind::SgbInterest,
         })
         .collect()
 }
 
 /// Schedule OS as CSV: one row per dividend or coupon, then the dividend
-/// quarterly breakup ITR asks for (the Sec. 234C periods).
+/// quarterly breakup ITR asks for (the Sec. 234C periods), then any income
+/// left out, so an incomplete file says so.
 pub fn schedule_os_csv(r: &IncomeReport) -> String {
     use crate::output::csv_line;
-    let money = |x: f64| format!("{x:.2}");
+    let money = |x: i64| format!("{:.2}", crate::tax::paise::to_rupees(x) + 0.0);
     let mut out = csv_line(&[
         "date",
+        "date_basis",
         "payer",
         "nature",
         "itr_period",
@@ -363,6 +421,7 @@ pub fn schedule_os_csv(r: &IncomeReport) -> String {
     for row in &r.rows {
         out.push_str(&csv_line(&[
             row.date.format("%Y-%m-%d").to_string(),
+            row.date_basis.to_string(),
             row.payer.clone(),
             row.kind.label().to_string(),
             QUARTER_LABELS[row.quarter].to_string(),
@@ -371,7 +430,9 @@ pub fn schedule_os_csv(r: &IncomeReport) -> String {
             format!("{:.4}", row.fx_rate),
             money(row.gross),
             money(row.tds),
-            money(row.foreign_tax),
+            row.foreign_tax
+                .map(money)
+                .unwrap_or_else(|| "unknown".into()),
             money(row.net),
         ]));
     }
@@ -389,10 +450,24 @@ pub fn schedule_os_csv(r: &IncomeReport) -> String {
         line.push(money(q.iter().sum()));
         out.push_str(&csv_line(&line));
     }
+    let omitted: Vec<(&str, &Vec<String>)> = vec![
+        ("omitted_no_rupee_rate", &r.no_rate),
+        ("omitted_unknown_sgb_tranche", &r.unknown_sgbs),
+        ("foreign_withholding_unknown", &r.withholding_unknown),
+    ];
+    if omitted.iter().any(|(_, v)| !v.is_empty()) {
+        out.push('\n');
+        out.push_str(&csv_line(&["incomplete", "payers"]));
+        for (label, v) in omitted.into_iter().filter(|(_, v)| !v.is_empty()) {
+            out.push_str(&csv_line(&[label.to_string(), v.join(" ")]));
+        }
+    }
     out
 }
 
 #[cfg(test)]
+// Amounts in paise are written rupees_paise: 1_200_00 is ₹1,200.00.
+#[allow(clippy::inconsistent_digit_grouping)]
 mod tests {
     use super::*;
 
@@ -423,14 +498,14 @@ mod tests {
     }
 
     #[test]
-    fn tds_starts_once_a_company_pays_more_than_the_threshold() {
+    fn tds_applies_to_a_payers_whole_year_once_past_the_threshold() {
         assert_eq!(dividend_tds_threshold(2024), 5_000.0);
         assert_eq!(dividend_tds_threshold(2026), 10_000.0);
         let p = portfolio(serde_json::json!({
             "holdings": [],
             "dividends": [
                 div("ITC.NS", "2026-05-28", 6_000.0, "INR"),
-                // 6,000 + 5,000 = 11,000 > 10,000: this one has TDS.
+                // 6,000 + 5,000 = 11,000 > 10,000: 10% of the whole ₹11,000.
                 div("ITC.NS", "2026-11-20", 5_000.0, "INR"),
                 // Another company: its own threshold.
                 div("TCS.NS", "2026-07-10", 9_000.0, "INR"),
@@ -438,40 +513,58 @@ mod tests {
                 div("TCS.NS", "2026-03-10", 50_000.0, "INR"),
             ],
         }));
-        let r = income_report(&p, d("2026-04-01"), |_, _| None);
+        let r = income_report(&p, d("2026-04-01"), None, |_, _| None);
         assert_eq!(r.rows.len(), 3);
         let itc: Vec<&IncomeRow> = r.rows.iter().filter(|r| r.payer == "ITC").collect();
-        assert_eq!(itc[0].tds, 0.0);
-        assert_eq!(itc[1].tds, 500.0);
-        assert_eq!(itc[1].net, 4_500.0);
-        assert!(r.rows.iter().all(|r| r.payer != "TCS" || r.tds == 0.0));
-        assert_eq!(r.dividends, 20_000.0);
-        assert_eq!(r.tds, 500.0);
-        assert_eq!(r.dividend_by_quarter, [6_000.0, 9_000.0, 5_000.0, 0.0, 0.0]);
-        // The same payments in FY 2024-25 cross the old ₹5,000 threshold sooner.
+        assert_eq!(itc[0].tds, 600_00);
+        assert_eq!(itc[1].tds, 500_00);
+        assert_eq!(itc[1].net, 4_500_00);
+        assert!(r.rows.iter().all(|r| r.payer != "TCS" || r.tds == 0));
+        assert_eq!(r.dividends, 20_000_00);
+        assert_eq!(r.tds, 1_100_00);
+        assert_eq!(r.dividend_by_quarter, [6_000_00, 9_000_00, 5_000_00, 0, 0]);
+        assert_eq!(r.rows[0].date_basis, "ex_date");
+        // FY 2024-25: the old ₹5,000 threshold.
         let old = portfolio(serde_json::json!({
             "holdings": [],
             "dividends": [div("ITC.NS", "2024-05-28", 6_000.0, "INR")],
         }));
-        let r = income_report(&old, d("2024-04-01"), |_, _| None);
-        assert_eq!(r.tds, 600.0);
+        let r = income_report(&old, d("2024-04-01"), None, |_, _| None);
+        assert_eq!(r.tds, 600_00);
     }
 
     #[test]
-    fn foreign_dividends_are_converted_and_carry_us_withholding() {
+    fn foreign_dividends_are_converted_and_withholding_is_only_what_was_given() {
         let p = portfolio(serde_json::json!({
             "holdings": [],
             "dividends": [div("AAPL", "2026-08-14", 100.0, "USD"),
-                          div("NESN.SW", "2026-08-14", 50.0, "CHF")],
+                          div("NESN.SW", "2026-08-14", 50.0, "CHF"),
+                          // 250 pence = £2.50.
+                          div("ULVR.L", "2026-09-01", 250.0, "GBp")],
         }));
-        let r = income_report(&p, d("2026-04-01"), |c, _| (c == "USD").then_some(88.0));
-        assert_eq!(r.rows.len(), 1);
-        let row = &r.rows[0];
-        assert_eq!(row.kind, IncomeKind::ForeignDividend);
-        assert_eq!(row.gross, 8_800.0);
-        assert_eq!(row.foreign_tax, 2_200.0);
-        assert_eq!(row.tds, 0.0);
+        let fx = |c: &str, _| match c {
+            "USD" => Some(88.0),
+            "GBP" => Some(110.0),
+            _ => None,
+        };
+        let r = income_report(&p, d("2026-04-01"), None, fx);
+        assert_eq!(r.rows.len(), 2);
+        let aapl = &r.rows[0];
+        assert_eq!(aapl.kind, IncomeKind::ForeignDividend);
+        assert_eq!(aapl.gross, 8_800_00);
+        // No rate given: the tax withheld is unknown, not assumed.
+        assert_eq!(aapl.foreign_tax, None);
+        assert_eq!(aapl.net, 8_800_00);
+        assert_eq!(aapl.tds, 0);
+        let ulvr = &r.rows[1];
+        assert_eq!((ulvr.currency.as_str(), ulvr.gross), ("GBP", 275_00));
         assert_eq!(r.no_rate, vec!["NESN.SW".to_string()]);
+        assert_eq!(r.withholding_unknown.len(), 2);
+        assert!(r.is_incomplete());
+        // With the 25% treaty rate from a statement.
+        let r = income_report(&p, d("2026-04-01"), Some(0.25), fx);
+        assert_eq!(r.rows[0].foreign_tax, Some(2_200_00));
+        assert_eq!(r.rows[0].net, 6_600_00);
     }
 
     #[test]
@@ -485,32 +578,43 @@ mod tests {
                           "buy_price": 3000.0, "sell_date": "2026-08-01",
                           "sell_price": 9000.0, "source": "manual"}],
         }));
-        let r = income_report(&p, d("2026-04-01"), |_, _| None);
+        let r = income_report(&p, d("2026-04-01"), None, |_, _| None);
         let coupons: Vec<&IncomeRow> = r
             .rows
             .iter()
             .filter(|r| r.kind == IncomeKind::SgbInterest)
             .collect();
         assert_eq!(coupons.len(), 2);
-        // May: 14 units (4 sold later); Nov: 10.
-        let per_unit = 3183.0 * 0.0125;
-        assert!((coupons[0].gross - round2(14.0 * per_unit)).abs() < 0.01);
-        assert!((coupons[1].gross - round2(10.0 * per_unit)).abs() < 0.01);
-        assert!(coupons.iter().all(|c| c.tds == 0.0));
-        assert_eq!(coupons[0].quarter, 0);
-        assert_eq!(coupons[1].quarter, 2);
+        // May: 14 units (4 sold later); Nov: 10. ₹39.7875 a unit.
+        assert!(
+            (coupons[0].gross - 557_02).abs() <= 1,
+            "{}",
+            coupons[0].gross
+        );
+        assert!(
+            (coupons[1].gross - 397_88).abs() <= 1,
+            "{}",
+            coupons[1].gross
+        );
+        assert!(coupons.iter().all(|c| c.tds == 0));
+        assert_eq!((coupons[0].quarter, coupons[1].quarter), (0, 2));
+        // Interest has no Sec. 234C proviso; dividends do.
+        let adv = advance_income(&r, 0.3);
+        assert!(adv.iter().all(|a| !a.deferrable));
     }
 
     #[test]
-    fn schedule_os_csv_has_rows_and_the_quarterly_breakup() {
+    fn schedule_os_csv_has_rows_the_quarterly_breakup_and_omissions() {
         let p = portfolio(serde_json::json!({
             "holdings": [],
-            "dividends": [div("ITC.NS", "2026-05-28", 6_000.0, "INR")],
+            "dividends": [div("ITC.NS", "2026-05-28", 6_000.0, "INR"),
+                          div("NESN.SW", "2026-08-14", 50.0, "CHF")],
         }));
-        let r = income_report(&p, d("2026-04-01"), |_, _| None);
+        let r = income_report(&p, d("2026-04-01"), None, |_, _| None);
         let csv = schedule_os_csv(&r);
-        assert!(csv.starts_with("date,payer,nature,itr_period,"));
-        assert!(csv.contains("2026-05-28,ITC,Dividend,Up to 15 Jun,INR,6000.00"));
+        assert!(csv.starts_with("date,date_basis,payer,nature,itr_period,"));
+        assert!(csv.contains("2026-05-28,ex_date,ITC,Dividend,Up to 15 Jun,INR,6000.00"));
         assert!(csv.contains("dividend_income,6000.00,0.00,0.00,0.00,0.00,6000.00"));
+        assert!(csv.contains("omitted_no_rupee_rate,NESN.SW"));
     }
 }

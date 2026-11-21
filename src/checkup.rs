@@ -323,12 +323,25 @@ pub struct Checkup {
     pub evaluated: usize,
     /// Data that could not be read, so its checks were skipped.
     pub skipped: Vec<String>,
+    /// The quote-based rule action for each holding (`crate::action`),
+    /// EXIT first. Empty when the commands layer did not add them.
+    pub actions: Vec<HoldingAction>,
     pub disclaimer: &'static str,
 }
 
+/// One holding's rule action in the checkup.
+#[derive(Debug, Clone, Serialize)]
+pub struct HoldingAction {
+    pub symbol: String,
+    pub weight_pct: Option<f64>,
+    pub action: crate::action::Action,
+}
+
 /// Said under every checkup.
-pub const DISCLAIMER: &str = "Observations from your recorded holdings and public data, not \
-     recommendations to buy, sell or hold. Check the figures with the command shown before acting.";
+pub const DISCLAIMER: &str = "Findings are observations from your recorded holdings and public data. \
+     The Action column comes from StockWise's published rules (methodology 1): educational signals, \
+     not personalised advice; StockWise is not a SEBI-registered adviser. Check the figures with the \
+     command shown before acting.";
 
 // ── Concentration maths ──
 
@@ -1209,6 +1222,7 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
         findings,
         checks,
         skipped,
+        actions: Vec::new(),
         disclaimer: DISCLAIMER,
     }
 }

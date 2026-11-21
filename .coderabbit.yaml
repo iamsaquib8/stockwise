@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
-# CodeRabbit review settings. Rules mirror CLAUDE.md and DISCLAIMER.md.
+# CodeRabbit review settings. Rules mirror CLAUDE.md (recommendations policy) and DISCLAIMER.md.
 language: en-US
 early_access: false
 reviews:
@@ -23,10 +23,17 @@ reviews:
         and `cargo test`: do not comment on formatting or lints.
         - Money is integer minor units (i64) or rust_decimal::Decimal. Flag f64 used for money;
           f64 is fine for analytical ratios (XIRR, Sharpe, beta).
-        - Flag any output, string or doc that reads as financial advice, a stock pick, a
-          buy/sell recommendation or a price target (see DISCLAIMER.md).
-        - Core commands must work offline from local files. Flag runtime telemetry, new
-          network calls on offline paths, or secrets written to logs or URLs.
+        - Recommendations policy: actions (BUY/WATCH/AVOID, ADD/HOLD/TRIM/EXIT) come only
+          from src/action.rs. Flag any action, call or price level (entry, stop, target,
+          invalidation) produced anywhere else, including AI prompts and MCP tool text.
+        - Flag an action shown without its reasons or disclaimer, a BUY, ADD, HOLD or TRIM
+          without its invalidation price, and any action other than NO CALL given when data
+          coverage is below 60%.
+        - Flag a change to a rule or threshold in src/action.rs that does not bump
+          METHODOLOGY and update the "Actions" section of docs/methodology.md.
+        - No telemetry; user data stays local. Portfolio math, tax and backup work offline
+          from local files: flag new network calls on those paths, or secrets written to
+          logs or URLs.
         - Flag committed raw market-data series (OHLCV) outside test fixtures.
         - Use anyhow::Result in the binary; do not add unwrap/expect on user input or I/O.
     - path: "tests/**"

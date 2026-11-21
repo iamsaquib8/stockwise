@@ -430,7 +430,11 @@ pub async fn cmd_intraday(
             format!("{}{:.2}", csym, s.price),
             chg,
             rsi_str,
-            format!("{:.1}x", s.volume_ratio),
+            if s.volume_known {
+                format!("{:.1}x", s.volume_ratio)
+            } else {
+                "—".to_string()
+            },
             regime_str,
             score_str,
             conf_str
@@ -503,6 +507,16 @@ pub(super) async fn longterm_scores(
     client: &YahooClient,
     quotes: &[crate::api::Quote],
 ) -> Vec<longterm::LongTermScore> {
+    longterm_scan(client, quotes).await.0
+}
+
+/// [`longterm_scores`] plus the quotes the scores were computed from (the
+/// finalists' enriched copies, a failed lookup kept as a warning on each),
+/// for the provenance of the run.
+async fn longterm_scan(
+    client: &YahooClient,
+    quotes: &[crate::api::Quote],
+) -> (Vec<longterm::LongTermScore>, Vec<crate::api::Quote>) {
     use futures_util::StreamExt;
     let mut first: Vec<(&crate::api::Quote, Option<f64>)> = quotes
         .iter()
@@ -521,7 +535,9 @@ pub(super) async fn longterm_scores(
         // The bulk quote has no margins, debt, beta or growth: fetch them
         // for the finalists so quality and safety are scored on data.
         let mut q = q.clone();
-        crate::research::enrich_quote(client, &mut q, false).await;
+        for w in crate::research::enrich_quote(client, &mut q, false).await {
+            q.meta.get_or_insert_with(Default::default).warn(w);
+        }
         let sym = q.symbol.as_deref().unwrap_or("");
         let hist = client
             .get_chart(sym, "1y", "1d")
@@ -529,11 +545,14 @@ pub(super) async fn longterm_scores(
             .ok()
             .map(|c| c.return_closes())
             .filter(|c| !c.is_empty());
-        longterm::score_for_longterm(&q, hist.as_deref())
+        let score = longterm::score_for_longterm(&q, hist.as_deref());
+        (score, q)
     }))
     .buffered(8)
-    .collect()
+    .collect::<Vec<_>>()
     .await
+    .into_iter()
+    .unzip()
 }
 
 pub async fn cmd_longterm(
@@ -549,9 +568,9 @@ pub async fn cmd_longterm(
     let monthly = amount.unwrap_or(10000.0);
 
     if json {
-        let mut scores = longterm_scores(&client, &quotes).await;
+        let (mut scores, scored) = longterm_scan(&client, &quotes).await;
         longterm::rank(&mut scores);
-        let meta = longterm_meta(&quotes, &scores);
+        let meta = longterm_meta(&scored, &scores);
         let rows: Vec<serde_json::Value> = scores.iter().map(longterm_json).collect();
         return crate::output::print_json(&serde_json::json!({ "scores": rows, "meta": meta }));
     }
@@ -563,11 +582,11 @@ pub async fn cmd_longterm(
         quotes.len()
     );
 
-    let mut scores = longterm_scores(&client, &quotes).await;
+    let (mut scores, scored) = longterm_scan(&client, &quotes).await;
     longterm::rank(&mut scores);
 
     print!("{}", longterm::render_report(&scores, monthly, csym));
-    println!("  {}", longterm_meta(&quotes, &scores).footer().dimmed());
+    println!("  {}", longterm_meta(&scored, &scores).footer().dimmed());
     println!();
     Ok(())
 }
@@ -644,10 +663,15 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
             // Build summary for AI
             let mut data = String::new();
             for s in signals.iter().take(10) {
-                data.push_str(&format!("{}: price={:.2}, chg={:+.2}%, RSI={}, vol={:.1}x, regime={}, score={:.0}, strategies={}\n",
+                let vol = if s.volume_known {
+                    format!("{:.1}x", s.volume_ratio)
+                } else {
+                    "N/A".to_string()
+                };
+                data.push_str(&format!("{}: price={:.2}, chg={:+.2}%, RSI={}, vol={}, regime={}, score={:.0}, strategies={}\n",
                     s.symbol, s.price, s.change_pct,
                     s.rsi.map_or("N/A".into(), |r| format!("{:.0}", r)),
-                    s.volume_ratio, s.regime, s.score,
+                    vol, s.regime, s.score,
                     s.strategies.iter().map(|st| st.name).collect::<Vec<_>>().join("+")
                 ));
             }

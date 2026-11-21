@@ -55,6 +55,7 @@ fn resolve_symbols(symbols: &[String], market: Market) -> Vec<String> {
         .collect()
 }
 
+mod actions;
 mod alerting;
 mod assistant;
 mod background;
@@ -97,6 +98,8 @@ mod worker;
 #[cfg(test)]
 mod output_tests;
 
+pub use actions::cmd_portfolio_review;
+pub(crate) use actions::{apply_holding, portfolio_review_report};
 pub use alerting::*;
 pub use assistant::*;
 pub use background::*;

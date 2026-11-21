@@ -507,8 +507,10 @@ async fn every_tool_has_annotations_and_the_main_ones_an_output_schema() {
         ] {
             assert!(a[hint].is_boolean(), "{} lacks {hint}: {a}", t["name"]);
         }
-        let write = crate::tools::access(t["name"].as_str().unwrap()) != crate::tools::Access::Read;
-        assert_eq!(a["readOnlyHint"], !write, "{}", t["name"]);
+        let name = t["name"].as_str().unwrap();
+        let write = crate::tools::access(name) != crate::tools::Access::Read;
+        let logs = crate::tools::LOGGING_READS.contains(&name);
+        assert_eq!(a["readOnlyHint"], !write && !logs, "{name}");
         if write {
             assert_eq!(a["openWorldHint"], false, "{}", t["name"]);
         } else {
@@ -572,6 +574,7 @@ async fn structured_results_follow_their_output_schemas() {
         ("quote", json!({"symbols": ["TCS", "INFY", "NOPE"]})),
         ("history", json!({"symbol": "TCS", "period": "1mo"})),
         ("portfolio_summary", json!({})),
+        ("portfolio_analyze", json!({"quick": true})),
         ("tax_estimate", json!({})),
     ] {
         let r = c
@@ -610,6 +613,7 @@ async fn structured_results_follow_their_output_schemas() {
         coverage: 0.8,
         flags: Vec::new(),
         quoted_at: None,
+        action: None,
     };
     let mut flagged = pick.clone();
     flagged.flags = vec!["P/E below 3".into()];
@@ -640,11 +644,10 @@ async fn structured_results_follow_their_output_schemas() {
         score: 71.0,
         price: 3500.0,
         currency: Some("INR".into()),
-        benchmark_price: None,
+        benchmark_price: Some(100.0),
         methodology: crate::picks::METHODOLOGY.into(),
     };
     let prices = std::collections::HashMap::from([("TCS.NS".to_string(), 4100.0)]);
-    let closes = [(day("2026-08-30"), 100.0), (day("2026-11-20"), 104.0)];
     let review = crate::picks_log::review(
         &[entry],
         "in",
@@ -655,8 +658,7 @@ async fn structured_results_follow_their_output_schemas() {
         &std::collections::HashMap::new(),
         Some(crate::picks_log::Benchmark {
             name: "NIFTY 50",
-            closes: &closes,
-            now: None,
+            now: Some(104.0),
         }),
     );
     let mut rv = serde_json::to_value(&review).unwrap();
@@ -916,7 +918,8 @@ fn instructions_state_the_recommendations_policy() {
     assert!(INSTRUCTIONS.contains("NO CALL"));
     assert!(INSTRUCTIONS.contains("below 60%"));
     assert!(INSTRUCTIONS.contains("not personalised investment advice"));
-    assert!(INSTRUCTIONS.contains("TODO(0.9 workstream C)"));
+    assert!(!INSTRUCTIONS.contains("TODO(0.9 workstream C)"));
+    assert!(INSTRUCTIONS.contains("stock_action") && INSTRUCTIONS.contains("portfolio_review"));
     for (name, _, _, args) in PROMPTS {
         for (arg, _, required) in *args {
             assert!(!arg.is_empty() && (*required || !arg.is_empty()), "{name}");
@@ -930,8 +933,15 @@ fn new_prompts_render_with_the_policy() {
     a.insert("symbol".into(), json!("TCS"));
     a.insert("amount".into(), json!("50000"));
     let buy = prompt_text("should_i_buy", &a).unwrap();
-    assert!(buy.contains("verdict for TCS") && buy.contains("fit_check for TCS with amount 50000"));
-    assert!(buy.contains("stock_action"), "TODO for C: {buy}");
+    assert!(
+        buy.contains("stock_action for TCS") && buy.contains("fit_check for TCS with amount 50000")
+    );
+    assert!(!buy.contains("TODO"), "{buy}");
+    let exit = prompt_text("exit_check", &Map::new()).unwrap();
+    assert!(
+        exit.contains("portfolio_review") && !exit.contains("TODO"),
+        "{exit}"
+    );
     assert!(prompt_text("should_i_buy", &Map::new()).is_err());
 
     let scan = prompt_text("smallcap_short_scan", &Map::new()).unwrap();
@@ -951,7 +961,11 @@ fn new_prompts_render_with_the_policy() {
         assert!(t.contains("not personalised investment advice"), "{name}");
         assert!(!t.to_lowercase().contains("you should buy"), "{name}");
     }
-    assert!(prompt_text("exit_check", &a).unwrap().contains("verdicts"));
+    assert!(
+        prompt_text("exit_check", &a)
+            .unwrap()
+            .contains("portfolio_review")
+    );
     assert!(
         prompt_text("weekly_review", &a)
             .unwrap()

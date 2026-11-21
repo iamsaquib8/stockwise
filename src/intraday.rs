@@ -929,7 +929,7 @@ pub fn generate_trade_plans_with(
     // Highest score first (stable: ties keep the scan's order).
     plans.sort_by(|a, b| b.signal.score.total_cmp(&a.signal.score));
 
-    cap_total_allocation(plans, capital, limits.max_positions)
+    cap_total_allocation(plans, capital, limits.max_positions, limits.costs.as_ref())
 }
 
 /// The exit level for a paper trade: 1 × ATR from the price, or the prior
@@ -960,6 +960,7 @@ fn cap_total_allocation(
     plans: Vec<TradePlan>,
     capital: f64,
     max_positions: usize,
+    costs: Option<&crate::backtest::costs::CostModel>,
 ) -> Vec<TradePlan> {
     let mut remaining = capital;
     let mut kept = Vec::new();
@@ -972,11 +973,22 @@ fn cap_total_allocation(
             if qty == 0 {
                 continue;
             }
-            let per_share_risk = plan.max_risk / plan.qty as f64;
             let per_share_profit = plan.expected_profit / plan.qty as f64;
             plan.qty = qty;
             plan.capital_required = qty as f64 * plan.entry;
-            plan.max_risk = qty as f64 * per_share_risk;
+            // Recomputed, not scaled: per-order charges don't shrink with
+            // the quantity.
+            let long = plan.signal.direction == Direction::Long;
+            plan.max_risk = qty as f64 * (plan.entry - plan.stop_loss).abs()
+                + costs.map_or(0.0, |m| {
+                    crate::simulator::round_trip_cost(
+                        m,
+                        long,
+                        qty,
+                        plan.entry,
+                        &[(qty, plan.stop_loss)],
+                    )
+                });
             plan.expected_profit = qty as f64 * per_share_profit;
             plan.position_pct = plan.capital_required / capital * 100.0;
         }
@@ -1769,6 +1781,37 @@ mod tests {
     }
 
     #[test]
+    fn a_shrunk_plan_recomputes_its_cost_inclusive_risk() {
+        // Flat ₹1 per order: 100 shares at 100 with the exit level at 98
+        // lose 200 + 2. Shrunk to 50 by the capital left they lose 100 + 2,
+        // not half of 202.
+        let mut flat = crate::backtest::costs::CostModel::none();
+        flat.brokerage.flat = Some(1.0);
+        let plan = TradePlan {
+            signal: make_signal(80.0, Confidence::High, 2.0),
+            entry: 100.0,
+            target1: 101.0,
+            target2: 102.0,
+            stop_loss: 98.0,
+            trailing_stop: 97.0,
+            qty: 100,
+            capital_required: 10_000.0,
+            max_risk: 202.0,
+            expected_profit: 200.0,
+            risk_reward: 1.0,
+            kelly_fraction: 0.0,
+            position_pct: 0.0,
+        };
+        let kept = cap_total_allocation(vec![plan], 5_000.0, 5, Some(&flat));
+        assert_eq!(kept[0].qty, 50);
+        assert!(
+            (kept[0].max_risk - 102.0).abs() < 1e-9,
+            "{}",
+            kept[0].max_risk
+        );
+    }
+
+    #[test]
     fn the_risk_budget_includes_costs_at_the_exit_level() {
         // $25,000, entry 100, exit level 98: 62 shares lose $124 on price
         // alone but about $130 with slippage. With costs counted the loss at
@@ -1943,13 +1986,13 @@ mod tests {
             position_pct: 0.0,
         };
         let plans = vec![mk("A", 6), mk("B", 6), mk("C", 6)];
-        let kept = cap_total_allocation(plans, 1000.0, 5);
+        let kept = cap_total_allocation(plans, 1000.0, 5, None);
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].qty, 6);
         assert_eq!(kept[1].qty, 4); // only ₹400 left
         assert!((kept[1].max_risk - 4.0).abs() < 1e-9);
         assert!((kept[1].expected_profit - 8.0).abs() < 1e-9);
-        let kept = cap_total_allocation(vec![mk("A", 1), mk("B", 1), mk("C", 1)], 1000.0, 2);
+        let kept = cap_total_allocation(vec![mk("A", 1), mk("B", 1), mk("C", 1)], 1000.0, 2, None);
         assert_eq!(kept.len(), 2);
     }
 

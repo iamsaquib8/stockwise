@@ -226,8 +226,6 @@ stockwise portfolio return-of-capital EMBASSY 5.20 --date 2025-02-10
 
 - `--ratio A:B` means A new shares for every B shares held.
 - Without `--date`, `demerger` applies to every lot you hold now.
-- `--cash-price P` records the fractional new shares the company paid cash for
-  as a sale at P per share.
 - A return of capital never takes a lot's cost below zero. StockWise prints any
   excess, which is a capital gain you report yourself.
 

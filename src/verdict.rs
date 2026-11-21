@@ -1,12 +1,13 @@
-//! 6-pillar score for a stock (US or Indian).
+//! 6-pillar score for a stock (US or Indian), and the rule-based action that
+//! goes with it.
 //!
 //! Six pillars (valuation, growth, balance sheet, smart money, analyst
 //! consensus, technical trend) are each scored 0–100 from fixed rules over the
-//! data StockWise fetched, and combined into a 0–100 composite. The score
-//! describes the data. It is not a recommendation: there is no buy/sell call,
-//! no entry zone, no stop-loss and no target price. A pillar with no data shows
-//! "no data" and is left out of the composite, and `data_coverage` says how
-//! much of the model's input was present.
+//! data StockWise fetched, and combined into a 0–100 composite. A pillar with
+//! no data shows "no data" and is left out of the composite, and
+//! `data_coverage` says how much of the model's input was present. The
+//! action (BUY / WATCH / AVOID, or NO CALL) comes from `crate::action`, the
+//! only place that decides one.
 
 use crate::insights::{Impact, InsightCard};
 use crate::market::AssetClass;
@@ -14,8 +15,9 @@ use crate::research::Research;
 use colored::Colorize;
 
 /// Printed under every score view.
-pub const DISCLAIMER: &str = "A score summarises the data; it is not a recommendation or investment advice. \
-     StockWise is not a SEBI-registered investment adviser or research analyst.";
+pub const DISCLAIMER: &str = "Scores and actions are rule-based educational signals from StockWise's \
+     published methodology, not personalised investment advice. StockWise is not a SEBI-registered \
+     investment adviser or research analyst. You can lose money; decide for yourself.";
 
 /// The composite is only shown when pillars holding at least this share of the
 /// total weight have data.
@@ -123,6 +125,8 @@ pub struct DecisionVerdict {
     /// Sources, as-of time, missing fields, warnings and coverage of the
     /// data behind the score (`provenance::Meta`).
     pub meta: crate::provenance::Meta,
+    /// The rule-based action (`crate::action`), decided from this score.
+    pub action: crate::action::Action,
     pub disclaimer: &'static str,
 }
 
@@ -592,6 +596,16 @@ pub fn generate_verdict_with_profile(
     cards: &[InsightCard],
     profile: &crate::config::EffectiveProfile,
 ) -> DecisionVerdict {
+    generate_verdict_for(r, cards, profile, crate::action::Horizon::Long)
+}
+
+/// The 6-pillar score and the action for `horizon`.
+pub fn generate_verdict_for(
+    r: &Research,
+    cards: &[InsightCard],
+    profile: &crate::config::EffectiveProfile,
+    horizon: crate::action::Horizon,
+) -> DecisionVerdict {
     let price = r.price().unwrap_or(0.0);
     let class = AssetClass::of(&r.symbol);
     let equity = class == AssetClass::Stock;
@@ -665,11 +679,13 @@ pub fn generate_verdict_with_profile(
         Vec::new()
     };
 
-    DecisionVerdict {
+    let currency = r.currency.clone().unwrap_or_else(|| "USD".into());
+    let mut v = DecisionVerdict {
         symbol: r.symbol.clone(),
         name: r.name.clone(),
         price,
-        currency: r.currency.clone().unwrap_or_else(|| "USD".into()),
+        action: crate::action::Action::undecided(&currency),
+        currency,
         overall_score,
         data_coverage,
         pillar_bands: counts,
@@ -682,7 +698,19 @@ pub fn generate_verdict_with_profile(
         profile_notes,
         meta: r.meta.clone(),
         disclaimer: DISCLAIMER,
-    }
+    };
+    v.action = crate::action::for_research(r, &v, profile, horizon, None);
+    v
+}
+
+/// Re-decide the action as a holding (`portfolio` has the stock).
+pub fn set_holding(
+    v: &mut DecisionVerdict,
+    r: &Research,
+    profile: &crate::config::EffectiveProfile,
+    holding: crate::action::HoldingContext,
+) {
+    v.action = crate::action::for_research(r, v, profile, v.action.horizon, Some(holding));
 }
 
 /// Weighted mean over the pillars that have data (weights rescaled), or `None`
@@ -776,8 +804,20 @@ pub fn print_snapshot(v: &DecisionVerdict, symbol_hint: &str) {
     print!("{}", render_snapshot(v, symbol_hint));
 }
 
-/// [`print_snapshot`] as a string.
+/// [`print_snapshot`] as a string: the action, then the score block.
 pub fn render_snapshot(v: &DecisionVerdict, symbol_hint: &str) -> String {
+    let mut o = render_action(&v.action);
+    o.push_str(&render_snapshot_body(v, symbol_hint));
+    o
+}
+
+/// The score block alone, for views that print the action at the top.
+pub fn print_snapshot_body(v: &DecisionVerdict, symbol_hint: &str) {
+    print!("{}", render_snapshot_body(v, symbol_hint));
+}
+
+/// [`print_snapshot_body`] as a string.
+pub fn render_snapshot_body(v: &DecisionVerdict, symbol_hint: &str) -> String {
     let mut o = String::new();
     outln!(
         o,
@@ -815,6 +855,32 @@ pub fn render_snapshot(v: &DecisionVerdict, symbol_hint: &str) -> String {
     o
 }
 
+/// The action block: the `ACTION:` headline in colour, then its reasons,
+/// size hint, tax note and disclaimer.
+pub fn render_action(a: &crate::action::Action) -> String {
+    use crate::action::Kind;
+    let plain = a.render("  ");
+    let mut lines = plain.lines();
+    let head = lines.next().unwrap_or_default();
+    let head = match a.kind {
+        Kind::Buy | Kind::Add => head.green().bold().to_string(),
+        Kind::Avoid | Kind::Exit => head.red().bold().to_string(),
+        Kind::Trim | Kind::Watch => head.yellow().bold().to_string(),
+        Kind::Hold => head.cyan().bold().to_string(),
+        Kind::NoCall => head.dimmed().bold().to_string(),
+    };
+    let mut o = format!("{head}\n");
+    for l in lines {
+        if l.trim_start().starts_with("Methodology") {
+            o.push_str(&format!("{}\n", l.dimmed().italic()));
+        } else {
+            o.push_str(l);
+            o.push('\n');
+        }
+    }
+    o
+}
+
 /// Print the 6-pillar score card in the terminal.
 pub fn print_verdict(v: &DecisionVerdict) {
     print_verdict_with(v, false);
@@ -832,7 +898,9 @@ pub fn render_verdict(v: &DecisionVerdict, explain: bool) -> String {
     let border = "═".repeat(64);
     let subline = "─".repeat(64);
 
-    outln!(o, "\n{}", border.cyan());
+    o.push('\n');
+    o.push_str(&render_action(&v.action));
+    outln!(o, "{}", border.cyan());
     outln!(o, "  6-PILLAR SCORE: {} ({})", v.symbol.bold(), v.name);
     outln!(o, "  Current Price: {}{:.2}", csym, v.price);
     outln!(o, "{}", border.cyan());
@@ -950,56 +1018,9 @@ pub fn explain_lines(v: &DecisionVerdict) -> Vec<String> {
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
-    /// Words and phrases that make output read as advice. Output of every
-    /// score view must contain none of them.
-    pub const FORBIDDEN: &[&str] = &[
-        "buy",
-        "sell",
-        "hold",
-        "accumulate",
-        "take profit",
-        "entry zone",
-        "suggested entry",
-        "stop-loss",
-        "stop loss",
-        "target price",
-        "risk / reward",
-        "risk-reward",
-        "reduce",
-        "avoid",
-        "subscribe",
-        "apply",
-    ];
-
-    /// Panics when `text` contains advice wording. "buying" and "selling" are
-    /// allowed as plain descriptions of insider and institutional flows, and
-    /// "subscribed" / "application" are not the call words "subscribe" / "apply".
-    pub fn assert_neutral(text: &str) {
-        let lower = text.to_lowercase();
-        for word in FORBIDDEN {
-            let mut from = 0;
-            while let Some(i) = lower[from..].find(word) {
-                let at = from + i;
-                let after = lower[at + word.len()..].chars().next();
-                let before = lower[..at].chars().next_back();
-                let whole = !after.is_some_and(|c| c.is_alphanumeric())
-                    && !before.is_some_and(|c| c.is_alphanumeric());
-                assert!(
-                    !whole,
-                    "advice wording {word:?} in output: {}",
-                    &text[at.saturating_sub(40)..(at + 60).min(text.len())]
-                );
-                from = at + word.len();
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::testing::assert_neutral;
     use super::*;
+    use crate::action::testing::assert_action_well_formed;
     use crate::insights::generate_rich_insights;
     use crate::research::{Holding, InsiderTxn, Research};
 
@@ -1175,40 +1196,27 @@ mod tests {
     }
 
     #[test]
-    fn json_has_scores_and_no_advice_fields() {
+    fn json_has_scores_and_a_well_formed_action() {
         let r = full_stock();
         let v = generate_verdict(&r, &generate_rich_insights(&r));
         let json = serde_json::to_value(&v).unwrap();
         let obj = json.as_object().unwrap();
-        for gone in [
-            "action",
-            "entry_zone",
-            "stop_loss",
-            "target_price",
-            "upside_pct",
-            "risk_pct",
-            "risk_reward",
-            "confidence",
-            "short_term",
-            "medium_term",
-            "long_term",
-        ] {
-            assert!(!obj.contains_key(gone), "{gone} should be gone");
-        }
         for kept in [
             "symbol",
             "overall_score",
             "data_coverage",
             "pillars",
+            "action",
             "disclaimer",
         ] {
             assert!(obj.contains_key(kept), "{kept} missing");
         }
-        assert_neutral(&json.to_string());
+        assert!(json["action"]["kind"].is_string());
+        assert_action_well_formed(&json.to_string());
     }
 
     #[test]
-    fn text_output_is_neutral_for_every_shape_of_data() {
+    fn every_shape_of_data_gets_a_well_formed_action_first() {
         let mut shapes = vec![Research::default(), full_stock()];
         let mut bearish = full_stock();
         bearish.quote.regular_market_price = Some(100.0);
@@ -1227,43 +1235,40 @@ mod tests {
         shapes.push(crypto);
         for r in shapes {
             let v = generate_verdict(&r, &generate_rich_insights(&r));
-            assert_neutral(&explain_lines(&v).join("\n"));
-            assert_neutral(&serde_json::to_string(&v).unwrap());
-            assert_neutral(&render_verdict(&v, true));
-            assert_neutral(&render_snapshot(&v, &r.symbol));
-            let mut text = String::new();
-            for p in &v.pillars {
-                text.push_str(&format!("{} {}\n", p.name, p.summary));
-            }
-            text.push_str(&v.bull_points.join("\n"));
-            text.push_str(&v.bear_points.join("\n"));
-            text.push_str(&v.note.clone().unwrap_or_default());
-            text.push_str(v.disclaimer);
-            assert_neutral(&text);
+            assert_action_well_formed(&explain_lines(&v).join("\n"));
+            assert_action_well_formed(&serde_json::to_string(&v).unwrap());
+            let full = render_verdict(&v, true);
+            assert_action_well_formed(&full);
+            let snap = render_snapshot(&v, &r.symbol);
+            assert_action_well_formed(&snap);
+            // The action is the first thing printed.
+            let first = |t: &str| {
+                t.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            assert!(first(&full).contains("ACTION: "), "{full}");
+            assert!(first(&snap).contains("ACTION: "), "{snap}");
         }
     }
 
     #[test]
-    fn neutral_guard_catches_advice() {
-        for bad in [
-            "STRONG BUY",
-            "Sell / avoid",
-            "Entry Zone ₹1",
-            "Stop-Loss Level",
-            "Target Price: 5",
-            "take profit",
-        ] {
-            let caught = std::panic::catch_unwind(|| assert_neutral(bad)).is_err();
-            assert!(caught, "{bad:?} should be flagged");
-        }
-        // Flow descriptions are fine.
-        assert_neutral("Recent insider open-market buying; FII selling");
-    }
-
-    #[test]
-    fn disclaimer_says_not_a_recommendation() {
+    fn disclaimer_names_the_limits() {
         let v = generate_verdict(&Research::default(), &[]);
-        assert!(v.disclaimer.contains("not a recommendation"));
+        assert!(v.disclaimer.contains("rule-based educational signals"));
+        assert!(v.disclaimer.contains("not a SEBI-registered"));
+        assert!(v.disclaimer.contains("lose money"));
+        assert_eq!(v.action.kind, crate::action::Kind::NoCall);
+    }
+
+    #[test]
+    fn short_horizon_is_carried_into_the_action() {
+        let profile = crate::config::EffectiveProfile::default();
+        let r = full_stock();
+        let v = generate_verdict_for(&r, &[], &profile, crate::action::Horizon::Short);
+        assert_eq!(v.action.horizon, crate::action::Horizon::Short);
+        assert_action_well_formed(&render_verdict(&v, false));
     }
 
     #[test]
@@ -1303,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_modes_adjust_weights_and_emit_neutral_guardrail_notes() {
+    fn profile_modes_adjust_weights_and_emit_guardrail_notes() {
         let mut r = full_stock();
         r.fin.beta = Some(1.45);
         r.fin.de = Some(85.0);
@@ -1330,10 +1335,10 @@ mod tests {
             let v = generate_verdict_with_profile(&r, &[], &prof);
             let total_w: f64 = v.pillars.iter().map(|p| p.weight).sum();
             assert!((total_w - 1.0).abs() < 1e-9, "{spec_str}: {total_w}");
-            assert_neutral(&render_verdict(&v, true));
-            assert_neutral(&render_snapshot(&v, &r.symbol));
+            assert_action_well_formed(&render_verdict(&v, true));
+            assert_action_well_formed(&render_snapshot(&v, &r.symbol));
             for note in &v.profile_notes {
-                assert_neutral(note);
+                assert_action_well_formed(note);
             }
             if matches!(spec_str, "passive" | "active:low") {
                 assert!(

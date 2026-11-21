@@ -327,15 +327,28 @@ fn detect(rows: &[Vec<String>]) -> Broker {
     }
 }
 
-/// The sales in a tax P&L given as rows of cells (a CSV or one sheet of a
-/// workbook after another). Section headings set the term of the rows
-/// under them when there is no term column.
-pub fn parse_rows(rows: &[Vec<String>]) -> (Broker, Vec<BrokerRow>) {
-    let broker = detect(rows);
-    let mut out = Vec::new();
+/// A broker file read: its sales, and the rows that looked like sales but
+/// had no readable gain (shown, never counted as zero).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedPnl {
+    pub broker: Broker,
+    pub rows: Vec<BrokerRow>,
+    /// "sheet row N (SYMBOL): no profit, taxable profit or buy and sell value".
+    pub skipped: Vec<String>,
+}
+
+/// The sales in one sheet (or CSV) of a tax P&L given as rows of cells.
+/// Section headings set the term of the rows under them when there is no
+/// term column; each sheet starts with no section and no header.
+fn parse_sheet(
+    rows: &[Vec<String>],
+    sheet: &str,
+    out: &mut Vec<BrokerRow>,
+    skipped: &mut Vec<String>,
+) {
     let mut cols: Option<Columns> = None;
     let mut section: Option<Term> = None;
-    for row in rows {
+    for (n, row) in rows.iter().enumerate() {
         let filled: Vec<&String> = row.iter().filter(|c| !c.trim().is_empty()).collect();
         if filled.is_empty() {
             continue;
@@ -380,11 +393,33 @@ pub fn parse_rows(rows: &[Vec<String>]) -> (Broker, Vec<BrokerRow>) {
                 .and_then(amount)
                 .or_else(|| cell(p).and_then(amount).map(|px| px * qty))
         };
-        let buy_value = value(c.buy_value, c.buy_price).unwrap_or(0.0);
-        let sell_value = value(c.sell_value, c.sell_price).unwrap_or(0.0);
-        let profit = cell(c.profit)
-            .and_then(amount)
-            .unwrap_or(sell_value - buy_value);
+        let buy_value = value(c.buy_value, c.buy_price);
+        let sell_value = value(c.sell_value, c.sell_price);
+        let taxable_profit = cell(c.taxable).and_then(amount);
+        // The gain must be read, or worked out from both values: a row with
+        // neither is reported, not counted as a zero gain.
+        let profit = match (
+            cell(c.profit).and_then(amount),
+            taxable_profit,
+            buy_value,
+            sell_value,
+        ) {
+            (Some(p), _, _, _) => p,
+            (None, Some(t), _, _) => t,
+            (None, None, Some(b), Some(s)) => s - b,
+            _ => {
+                let label = if symbol.is_empty() {
+                    isin.clone().unwrap_or_default()
+                } else {
+                    symbol.clone()
+                };
+                skipped.push(format!(
+                    "{sheet} row {} ({label}): no profit, taxable profit or buy and sell value",
+                    n + 1
+                ));
+                continue;
+            }
+        };
         let charges = match c
             .total_charges
             .and_then(|i| row.get(i))
@@ -403,41 +438,60 @@ pub fn parse_rows(rows: &[Vec<String>]) -> (Broker, Vec<BrokerRow>) {
             qty,
             buy_date: cell(c.buy_date).and_then(|d| crate::portfolio::parse_trade_date(d, false)),
             sell_date,
-            buy_value,
-            sell_value,
+            buy_value: buy_value.unwrap_or(0.0),
+            sell_value: sell_value.unwrap_or(0.0),
             profit,
-            taxable_profit: cell(c.taxable).and_then(amount),
+            taxable_profit,
             fmv: cell(c.fmv).and_then(amount).filter(|v| *v > 0.0),
             term: cell(c.term).and_then(Term::parse).or(section),
             charges,
         });
     }
-    (broker, out)
+}
+
+/// The sales in a tax P&L given as rows of cells (a CSV).
+pub fn parse_rows(rows: &[Vec<String>]) -> ParsedPnl {
+    parse_sheets(&[("CSV".to_string(), rows.to_vec())])
+}
+
+/// The sales of every sheet, each parsed on its own.
+fn parse_sheets(sheets: &[(String, Vec<Vec<String>>)]) -> ParsedPnl {
+    let all: Vec<Vec<String>> = sheets.iter().flat_map(|(_, r)| r.clone()).collect();
+    let broker = detect(&all);
+    let (mut rows, mut skipped) = (Vec::new(), Vec::new());
+    for (name, sheet) in sheets {
+        parse_sheet(sheet, name, &mut rows, &mut skipped);
+    }
+    ParsedPnl {
+        broker,
+        rows,
+        skipped,
+    }
 }
 
 /// Read a tax P&L file: `.xlsx` (every sheet) or CSV.
-pub fn parse_file(bytes: &[u8], name: &str) -> Result<(Broker, Vec<BrokerRow>)> {
-    let rows: Vec<Vec<String>> =
-        if name.to_lowercase().ends_with(".xlsx") || bytes.starts_with(b"PK") {
-            crate::xlsx::read_workbook(bytes)?
-                .into_iter()
-                .flat_map(|s| s.rows)
-                .collect()
-        } else {
-            String::from_utf8_lossy(bytes)
-                .trim_start_matches('\u{feff}')
-                .lines()
-                .map(crate::brokers::csv_fields)
-                .collect()
-        };
-    let (broker, sales) = parse_rows(&rows);
-    if sales.is_empty() {
+pub fn parse_file(bytes: &[u8], name: &str) -> Result<ParsedPnl> {
+    let parsed = if name.to_lowercase().ends_with(".xlsx") || bytes.starts_with(b"PK") {
+        let sheets: Vec<(String, Vec<Vec<String>>)> = crate::xlsx::read_workbook(bytes)?
+            .into_iter()
+            .map(|s| (format!("sheet \"{}\"", s.name), s.rows))
+            .collect();
+        parse_sheets(&sheets)
+    } else {
+        let rows: Vec<Vec<String>> = String::from_utf8_lossy(bytes)
+            .trim_start_matches('\u{feff}')
+            .lines()
+            .map(crate::brokers::csv_fields)
+            .collect();
+        parse_rows(&rows)
+    };
+    if parsed.rows.is_empty() {
         bail!(
             "No sales found in {name}: expected a tax P&L with columns such as Symbol, ISIN, \
              Quantity, Buy Date, Sell Date, Buy Value, Sell Value and Profit"
         );
     }
-    Ok((broker, sales))
+    Ok(parsed)
 }
 
 /// One StockWise sale as reconcile sees it (rupee amounts).
@@ -591,6 +645,9 @@ pub fn reconcile(
 ) -> Reconciliation {
     let mut our_left: Vec<bool> = vec![true; ours.len()];
     let mut their_left: Vec<bool> = vec![true; theirs.len()];
+    // The StockWise symbol a broker row was matched to (it may name the
+    // company or give only an ISIN), so both sides total under one name.
+    let mut their_key: Vec<Option<String>> = vec![None; theirs.len()];
     let mut matched = Vec::new();
 
     // Pass 1: same share, sale date and purchase date. Pass 2: same share
@@ -622,12 +679,24 @@ pub fn reconcile(
                 .collect();
             let os: Vec<&OurSale> = ours_idx.iter().map(|k| &ours[*k]).collect();
             let ts: Vec<&BrokerRow> = theirs_idx.iter().map(|j| &theirs[*j]).collect();
+            // An exact-date group that does not account for the whole
+            // quantity waits for the sale-date pass, which sums every lot.
+            let qty = |a: f64, b: f64| (a - b).abs() <= 1e-6;
+            if pass == 0
+                && !qty(
+                    os.iter().map(|o| o.qty).sum(),
+                    ts.iter().map(|t| t.qty).sum(),
+                )
+            {
+                continue;
+            }
             matched.push(compare(&os, &ts));
             for k in ours_idx {
                 our_left[k] = false;
             }
             for j in theirs_idx {
                 their_left[j] = false;
+                their_key[j] = Some(bare_symbol(&o.symbol));
             }
         }
     }
@@ -667,9 +736,21 @@ pub fn reconcile(
         ot.add(Some(o.term), o.gain);
         ix.push((entry(&bare_symbol(&o.symbol)), true, Some(o.term), o.gain));
     }
-    for t in theirs {
+    for (j, t) in theirs.iter().enumerate() {
         tt.add(t.term, t.gain());
-        ix.push((entry(&bare_symbol(&t.symbol)), false, t.term, t.gain()));
+        // Matched: the StockWise symbol; else a StockWise sale with the same
+        // ISIN names it; else the broker's own name.
+        let key = their_key[j].clone().unwrap_or_else(|| {
+            t.isin
+                .as_deref()
+                .and_then(|i| {
+                    ours.iter()
+                        .find(|o| o.isin.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(i)))
+                })
+                .map(|o| bare_symbol(&o.symbol))
+                .unwrap_or_else(|| bare_symbol(&t.symbol))
+        });
+        ix.push((entry(&key), false, t.term, t.gain()));
     }
     let reason_ix: Vec<(usize, Reason)> = matched
         .iter()
@@ -746,7 +827,39 @@ fn compare(os: &[&OurSale], ts: &[&BrokerRow]) -> Matched {
     } else {
         Term::Short
     };
-    let term_theirs = ts.iter().find_map(|t| t.term);
+    // The term each side gives, compared by quantity per term so the order
+    // of the rows does not matter. Broker rows without a term are left out
+    // of the comparison.
+    let by_term = |pairs: &mut dyn Iterator<Item = (Term, f64)>| {
+        let mut q = [0.0f64; 3];
+        for (t, qty) in pairs {
+            q[t as usize] += qty;
+        }
+        q
+    };
+    let ours_q = by_term(&mut os.iter().map(|o| (o.term, o.qty)));
+    let theirs_q = by_term(&mut ts.iter().filter_map(|t| Some((t.term?, t.qty))));
+    let unknown_q: f64 = ts.iter().filter(|t| t.term.is_none()).map(|t| t.qty).sum();
+    let mut known: Vec<Term> = Vec::new();
+    for t in ts.iter().filter_map(|t| t.term) {
+        if !known.contains(&t) {
+            known.push(t);
+        }
+    }
+    let term_theirs = (known.len() == 1 && unknown_q <= 1e-9).then(|| known[0]);
+    // With equal quantities the split by term must match; when quantities
+    // differ (a missing lot, a split) only which terms appear can be compared.
+    let same_qty = (qty_o - qty_t).abs() <= 1e-6;
+    let term_differs = (0..3).any(|i| {
+        let (o, t) = (ours_q[i] > 1e-9, theirs_q[i] > 1e-9);
+        if !same_qty {
+            (t && !o) || (unknown_q <= 1e-9 && o && !t)
+        } else if unknown_q <= 1e-9 {
+            (ours_q[i] - theirs_q[i]).abs() > 1e-6
+        } else {
+            theirs_q[i] > ours_q[i] + 1e-6
+        }
+    });
     let tol = |scale: f64| (scale.abs() * 0.0005).max(1.0);
     let close = |a: f64, b: f64, scale: f64| (a - b).abs() <= tol(scale);
     let old = os.iter().any(|o| o.grandfathered)
@@ -755,42 +868,60 @@ fn compare(os: &[&OurSale], ts: &[&BrokerRow]) -> Matched {
         })
         || buy_ours.is_some_and(|d| d <= NaiveDate::from_ymd_opt(2018, 1, 31).expect("date"));
 
-    let mut reasons = Vec::new();
-    if (qty_o - qty_t).abs() > 1e-6 {
-        reasons.push(Reason::Quantity);
+    let mut reasons: Vec<Reason> = Vec::new();
+    let mut add = |r: Reason| {
+        if !reasons.contains(&r) {
+            reasons.push(r);
+        }
+    };
+    let qty_differs = (qty_o - qty_t).abs() > 1e-6;
+    if qty_differs {
+        add(Reason::Quantity);
     }
     let our_dates: std::collections::BTreeSet<NaiveDate> = os.iter().map(|o| o.buy_date).collect();
     let their_dates: std::collections::BTreeSet<NaiveDate> =
         ts.iter().filter_map(|t| t.buy_date).collect();
     if !their_dates.is_empty() && our_dates != their_dates {
-        reasons.push(Reason::BuyDate);
+        add(Reason::BuyDate);
     }
-    if !close(gain_o, gain_t, proc_o) {
-        let diff = gain_o - gain_t;
-        if old && term_ours == Term::Long {
-            reasons.push(Reason::Grandfathering);
-        } else if charges > 0.5
-            && (close(diff, charges, proc_o)
-                || close(proc_o - proc_t, charges, proc_o)
-                || close(cost_t - cost_o, charges, proc_o))
-        {
-            reasons.push(Reason::Charges);
-        } else if reasons.is_empty() {
-            if !close(cost_o, cost_t, cost_o) {
-                reasons.push(Reason::Cost);
-            }
-            if !close(proc_o, proc_t, proc_o) {
-                reasons.push(Reason::SaleValue);
-            }
-            if reasons.is_empty() {
+    // Cost, sale value and gain are each checked: equal gains can hide a
+    // cost and a sale value that both differ. A quantity gap explains all
+    // three on its own.
+    if !qty_differs {
+        let grandfathered = old && term_ours == Term::Long;
+        let by_charges = |diff: f64| charges > 0.5 && close(diff, charges, proc_o);
+        let cost_differs = !close(cost_o, cost_t, cost_o.max(cost_t));
+        let proc_differs = !close(proc_o, proc_t, proc_o.max(proc_t));
+        if cost_differs {
+            add(if by_charges(cost_t - cost_o) {
+                Reason::Charges
+            } else if grandfathered {
+                Reason::Grandfathering
+            } else {
+                Reason::Cost
+            });
+        }
+        if proc_differs {
+            add(if by_charges(proc_o - proc_t) {
+                Reason::Charges
+            } else {
+                Reason::SaleValue
+            });
+        }
+        if !close(gain_o, gain_t, proc_o) && !cost_differs && !proc_differs {
+            add(if grandfathered {
+                Reason::Grandfathering
+            } else if by_charges(gain_o - gain_t) {
+                Reason::Charges
+            } else {
                 // Same cost and value but another gain: the broker's own
                 // adjustment, shown as a cost difference.
-                reasons.push(Reason::Cost);
-            }
+                Reason::Cost
+            });
         }
     }
-    if term_theirs.is_some_and(|t| t != term_ours) {
-        reasons.push(Reason::Term);
+    if term_differs {
+        add(Reason::Term);
     }
     Matched {
         symbol: os
@@ -852,7 +983,9 @@ mod tests {
 
     #[test]
     fn zerodha_console_sections_and_columns_are_read() {
-        let (broker, rows) = parse_file(ZERODHA.as_bytes(), "taxpnl.csv").unwrap();
+        let p = parse_file(ZERODHA.as_bytes(), "taxpnl.csv").unwrap();
+        let (broker, rows) = (p.broker, p.rows);
+        assert!(p.skipped.is_empty());
         assert_eq!(broker, Broker::Zerodha);
         assert_eq!(rows.len(), 4);
         let infy = &rows[0];
@@ -874,15 +1007,19 @@ mod tests {
 
     #[test]
     fn groww_and_upstox_layouts_are_read() {
-        let (broker, rows) = parse_file(GROWW.as_bytes(), "groww.csv").unwrap();
+        let p = parse_file(GROWW.as_bytes(), "groww.csv").unwrap();
+        let (broker, rows) = (p.broker, p.rows);
         assert_eq!(broker, Broker::Groww);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].symbol, "TATA MOTORS");
+        // Groww names the company; its ISIN is what matches StockWise's ticker.
+        assert_eq!(rows[0].isin.as_deref(), Some("INE155A01022"));
         assert_eq!(rows[0].term, Some(Term::Short));
         assert_eq!(rows[1].term, Some(Term::Long));
         assert_eq!(rows[1].profit, -1_200.0);
 
-        let (broker, rows) = parse_file(UPSTOX.as_bytes(), "upstox.csv").unwrap();
+        let p = parse_file(UPSTOX.as_bytes(), "upstox.csv").unwrap();
+        let (broker, rows) = (p.broker, p.rows);
         assert_eq!(broker, Broker::Upstox);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].symbol, "ITC");
@@ -898,7 +1035,8 @@ mod tests {
 
     #[test]
     fn matching_sales_agree_and_differences_get_a_reason() {
-        let (broker, theirs) = parse_file(ZERODHA.as_bytes(), "taxpnl.csv").unwrap();
+        let p = parse_file(ZERODHA.as_bytes(), "taxpnl.csv").unwrap();
+        let (broker, theirs) = (p.broker, p.rows);
         let ours = vec![
             // Same as Zerodha's INFY row, but Zerodha nets ₹31.20 of charges.
             ours("INFY", 10.0, "2025-11-03", "2026-05-12", 1_500.0, 1_650.0),
@@ -1005,5 +1143,161 @@ mod tests {
         let r = reconcile(Broker::Other, "FY 2026-27", &ours, &theirs);
         // Held exactly 12 months is short-term: more than 12 are needed.
         assert_eq!(r.matched[0].reasons, vec![Reason::Term]);
+    }
+
+    fn row(
+        sym: &str,
+        qty: f64,
+        buy: Option<&str>,
+        sell: &str,
+        bv: f64,
+        sv: f64,
+        term: Option<Term>,
+    ) -> BrokerRow {
+        BrokerRow {
+            symbol: sym.into(),
+            isin: None,
+            qty,
+            buy_date: buy.map(d),
+            sell_date: d(sell),
+            buy_value: bv,
+            sell_value: sv,
+            profit: sv - bv,
+            taxable_profit: None,
+            fmv: None,
+            term,
+            charges: 0.0,
+        }
+    }
+
+    #[test]
+    fn each_sheet_starts_without_the_previous_sections_term() {
+        let header = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let cols = [
+            "Symbol",
+            "Quantity",
+            "Buy Date",
+            "Sell Date",
+            "Buy Value",
+            "Sell Value",
+        ];
+        let long = vec![
+            header(&["Equity - Long Term"]),
+            header(&cols),
+            header(&["TCS", "1", "2024-01-02", "2026-06-02", "3000", "3400"]),
+        ];
+        let plain = vec![
+            header(&cols),
+            header(&["ITC", "1", "2026-01-02", "2026-06-02", "400", "450"]),
+        ];
+        let p = parse_sheets(&[("a".into(), long), ("b".into(), plain)]);
+        assert_eq!(p.rows.len(), 2);
+        assert_eq!(p.rows[0].term, Some(Term::Long));
+        assert_eq!(p.rows[1].term, None);
+    }
+
+    #[test]
+    fn a_row_without_a_readable_gain_is_reported_not_zero() {
+        let csv = "Symbol,Quantity,Sell Date,Profit,Buy Value,Sell Value\n\
+                   ITC,10,2026-06-02,,,\n\
+                   TCS,1,2026-06-02,0,,\n\
+                   INFY,1,2026-06-02,,1500,1600\n";
+        let p = parse_file(csv.as_bytes(), "x.csv").unwrap();
+        assert_eq!(p.rows.len(), 2);
+        assert_eq!(p.rows[0].profit, 0.0, "a reported zero is kept");
+        assert_eq!(p.rows[1].profit, 100.0);
+        assert_eq!(p.skipped.len(), 1);
+        assert!(p.skipped[0].contains("row 2 (ITC)"), "{:?}", p.skipped);
+    }
+
+    #[test]
+    fn a_partial_exact_date_match_waits_for_the_whole_sale() {
+        // The broker reports one 30-share row with the first buy date.
+        let theirs = vec![row(
+            "ITC",
+            30.0,
+            Some("2026-01-02"),
+            "2026-06-01",
+            12_000.0,
+            13_500.0,
+            Some(Term::Short),
+        )];
+        let ours = vec![
+            ours("ITC", 10.0, "2026-01-02", "2026-06-01", 400.0, 450.0),
+            ours("ITC", 20.0, "2026-02-02", "2026-06-01", 400.0, 450.0),
+        ];
+        let r = reconcile(Broker::Other, "FY 2026-27", &ours, &theirs);
+        assert_eq!(r.matched.len(), 1);
+        assert_eq!(r.matched[0].qty_ours, 30.0);
+        assert_eq!(r.matched[0].reasons, vec![Reason::BuyDate]);
+        assert!(r.only_ours.is_empty());
+    }
+
+    #[test]
+    fn equal_gains_with_different_cost_and_value_still_differ() {
+        let theirs = vec![row(
+            "ITC",
+            1.0,
+            None,
+            "2026-06-01",
+            200.0,
+            250.0,
+            Some(Term::Short),
+        )];
+        let ours = vec![ours("ITC", 1.0, "2026-01-02", "2026-06-01", 100.0, 150.0)];
+        let r = reconcile(Broker::Other, "FY 2026-27", &ours, &theirs);
+        assert!(!r.matched[0].agrees());
+        assert_eq!(r.matched[0].reasons, vec![Reason::Cost, Reason::SaleValue]);
+    }
+
+    #[test]
+    fn term_comparison_does_not_depend_on_row_order() {
+        let ours = vec![
+            ours("ITC", 10.0, "2024-01-02", "2026-06-01", 400.0, 450.0),
+            ours("ITC", 10.0, "2026-01-02", "2026-06-01", 400.0, 450.0),
+        ];
+        let lt = row(
+            "ITC",
+            10.0,
+            None,
+            "2026-06-01",
+            4_000.0,
+            4_500.0,
+            Some(Term::Long),
+        );
+        let st = row(
+            "ITC",
+            10.0,
+            None,
+            "2026-06-01",
+            4_000.0,
+            4_500.0,
+            Some(Term::Short),
+        );
+        for theirs in [vec![lt.clone(), st.clone()], vec![st, lt]] {
+            let r = reconcile(Broker::Other, "FY 2026-27", &ours, &theirs);
+            assert!(r.matched[0].agrees(), "{:?}", r.matched[0].reasons);
+        }
+    }
+
+    #[test]
+    fn a_company_name_matched_by_isin_totals_under_the_ticker() {
+        let mut t = row(
+            "TATA MOTORS",
+            15.0,
+            None,
+            "2026-06-15",
+            13_500.0,
+            14_250.0,
+            Some(Term::Short),
+        );
+        t.isin = Some("INE155A01022".into());
+        let mut o = ours("TATAMOTORS", 15.0, "2026-01-10", "2026-06-15", 900.0, 950.0);
+        o.isin = Some("INE155A01022".into());
+        let r = reconcile(Broker::Groww, "FY 2026-27", &[o], &[t]);
+        assert_eq!(r.matched.len(), 1);
+        assert_eq!(r.by_symbol.len(), 1);
+        assert_eq!(r.by_symbol[0].symbol, "TATAMOTORS");
+        assert_eq!(r.by_symbol[0].difference, 0.0);
     }
 }

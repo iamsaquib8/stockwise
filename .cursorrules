@@ -3,6 +3,6 @@
 
 - Language: Pure Rust 1.97. Never suggest Python runtime dependencies.
 - Precision: Currency balances and tax calculations must use integer minor units (`i64`) or `rust_decimal::Decimal`. Never use raw `f64` for money.
-- Compliance: Strict non-advisory boundary. Never generate buy/sell recommendations or price targets.
-- Verification: Always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` before submitting changes.
-- Architecture: Modular Rust crate structure. Keep CLI parsing in `src/cli/`, business logic in dedicated modules (`src/portfolio/`, `src/tax/`, etc.).
+- Recommendations policy: Actions (BUY/WATCH/AVOID, ADD/HOLD/TRIM/EXIT, NO CALL) are rule-based and deterministic, computed only by `src/action.rs`, each with at most 3 reasons, a confidence level, an invalidation price (BUY, ADD, HOLD, TRIM), a review date and the disclaimer. NO CALL below 60% data coverage. Rules live in `docs/methodology.md` ("Actions"); a rule change bumps `METHODOLOGY`. AI explains the computed action; it never invents, upgrades or changes one, or invents price levels. See `.cursor/rules/03-compliance.mdc`.
+- Verification: Always run `cargo +stable fmt --all -- --check`, `cargo +stable clippy --all-targets --all-features -- -D warnings`, and `cargo +stable test` before submitting changes.
+- Architecture: Modular Rust crate structure. CLI parsing in `src/main.rs`, command handlers in `src/commands/`, business logic in dedicated modules (`src/portfolio.rs`, `src/tax.rs`, `src/action.rs`, etc.).

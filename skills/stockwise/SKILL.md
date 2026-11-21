@@ -1,6 +1,6 @@
 ---
 name: stockwise
-description: Research and track stocks, funds, markets, portfolios, goals and taxes with StockWise (its MCP tools or the `stockwise` command line). Covers Indian (NSE/BSE) and US stocks plus London, Frankfurt, Tokyo, Hong Kong, Singapore, Toronto and Sydney, mutual funds and SIPs, F&O option chains, screens, backtests, market conditions, the user's portfolio and capital-gains tax, watchlist, alerts, goals and investor profile. Use when the user asks about stocks, indices, mutual funds, their portfolio, whether a stock fits their own rules, financial goals or investment tax.
+description: Research and track stocks, funds, markets, portfolios, goals and taxes with StockWise (its MCP tools or the `stockwise` command line). Covers Indian (NSE/BSE) and US stocks plus London, Frankfurt, Tokyo, Hong Kong, Singapore, Toronto and Sydney, mutual funds and SIPs, F&O option chains, screens, backtests, market conditions, the user's portfolio and capital-gains tax, rule-based actions (BUY/WATCH/AVOID, ADD/HOLD/TRIM/EXIT), watchlist, alerts, goals and investor profile. Use when the user asks about stocks, indices, mutual funds, their portfolio, what the rules say to do with a stock or holding, whether a stock fits their own rules, financial goals or investment tax.
 license: MIT
 ---
 
@@ -60,19 +60,28 @@ gives value, P&L, XIRR, split by market, currency, cap tier and sector, tax
 terms, risk and observations. Add `portfolio_summary` for live P&L, and
 `tax_estimate` or `harvest` for tax questions.
 
-**"Should I buy X?" or "Is X good for me?"** Never make up a buy, sell or
-hold call yourself: actions (BUY/WATCH/AVOID, ADD/HOLD/TRIM/EXIT) come only
-from StockWise's rule-based engine, and this version has no action tool yet
-(`stock_action` and `portfolio_review` are coming). Run `verdict` for the
-6-pillar scores and their data coverage, `fit_check` with the symbol (and
-`amount` if the user named one), and `risk`. `fit_check` answers
-`fits_your_rules`: yes, no or unclear, against the user's own limits (largest
-weight of one stock, small-cap share, risk level, and the P/E and ROE limits
-in their note for that stock). Present it as "by your own rules", list the
-failed and unknown rules, and lay out what the data shows for and against.
-When the verdict's `data_coverage` is under 60, say there is not enough data
-for a call (NO CALL). Offer `note_set` to record the user's thesis and limits
-for next time. The MCP prompt `should_i_buy` does all of this.
+**"Should I buy X?" or "Is X good for me?"** Call `stock_action` with the
+symbol (add `horizon: short` for weeks to months), or run
+`stockwise verdict X --json` and read its `action`. Present the action exactly
+as returned: the kind (BUY, WATCH or AVOID; ADD, HOLD, TRIM or EXIT for a
+holding), its confidence, its reasons, the invalidation price (a daily close
+below it invalidates the action), the review date, any size hint and tax note,
+and the disclaimer. Never make up, upgrade or change an action, and never add
+a price level it did not return. If it is NO CALL, say there is not enough
+data for a call and name what is missing. Then add `fit_check` with the
+symbol (and `amount` if the user named one): `fits_your_rules` is yes, no or
+unclear against the user's own limits (largest weight of one stock, small-cap
+share, risk level, and the P/E and ROE limits in their note). Present it as
+"by your own rules" and list the failed and unknown rules. Offer `note_set` to
+record the user's thesis and limits for next time. The MCP prompt
+`should_i_buy` does all of this.
+
+**"What should I do with my holdings?"** Call `portfolio_review` (or
+`stockwise portfolio review --json`). It lists each holding's action sorted
+EXIT, TRIM, ADD, HOLD, then NO CALL, with reasons, invalidation, review date,
+size hint (for TRIM, the shares to sell to get back under `max_stock_weight`)
+and tax notes ("waiting N days saves ₹X"). Mention the tax note before any
+TRIM or EXIT. The MCP prompt `exit_check` uses it.
 
 **"Is it a good time to invest?"** `market_conditions` (or `stockwise conditions --json`)
 shows trend, volatility, breadth and valuation with their history. These are
@@ -83,11 +92,12 @@ floors on five pillars (value, quality, growth, trend, risk) among the stocks
 scanned. Options: `universe` (such as `nifty50` or `smallcap250`), `cap`
 (`small` ranks small caps against each other), `horizon` (`long`, the
 default, or `short` for weeks to months), `min_mcap` and `min_adv`. Leave out
-picks whose `coverage` is under 0.6. Every list is logged, and `picks_review`
+picks whose `coverage` is under 0.6. Finalists carry their rule-based
+`action`; quote it as returned. Every list is logged, and `picks_review`
 shows how earlier lists did against the index: cite it, misses included.
 `verdicts` scores up to 25 tickers in one call, and `quote` prices up to 25.
 `screen`, `movers` and `ipo_board` help too. Each is a starting list for
-research, not a recommendation.
+research; only the `action` objects are calls.
 
 **Watchlist and alerts upkeep.** `watchlist` and `alerts_list` read;
 `watchlist_add`, `alert_add` (price levels or conditions such as RSI below 30)
@@ -139,7 +149,8 @@ that follows their `outputSchema`.
 | Price history | `stockwise history INFY -p 1y --json` |
 | RSI, MACD, moving averages | `stockwise technical TCS -p 6mo --json` |
 | Volatility, Sharpe, drawdown | `stockwise risk HDFCBANK -p 1y --json` |
-| 6-pillar score (not a rating) | `stockwise verdict TCS --json` |
+| Action and 6-pillar score | `stockwise verdict TCS --json` · `stockwise verdict TCS --horizon short --json` |
+| Action for each holding | `stockwise portfolio review --json` |
 | Piotroski and Altman | `stockwise scorecard TCS --json` |
 | Ranked ideas | `stockwise picks --json` · `stockwise picks --cap small --horizon short --json` |
 | Track record of picks | `stockwise picks review --json` |
@@ -164,16 +175,19 @@ to a cloud model.
 
 ## Rules
 
-- **Recommendations policy.** Actions come only from StockWise's
-  deterministic engine; never invent, upgrade or soften one, and never turn
-  scores into one. Explain with the reasons and figures a tool returned, and
-  never invent price levels (entry, stop, target, invalidation). When data
-  coverage is under 60%, say there is not enough data for a call. `verdict`,
-  `scorecard`, `picks` and `fit_check` describe data or the user's own rules;
-  they are not ratings.
-- **Not personalised advice.** Say the information is educational, StockWise
-  is not a SEBI-registered adviser, and quotes can be delayed (NSE quotes from
-  Yahoo are about 15 minutes behind).
+- **Recommendations policy.** Actions are rule-based and deterministic,
+  computed only by StockWise's engine (`stock_action`, `portfolio_review`, and
+  the `action` object in `--json`). Each carries up to three reasons, a
+  confidence level, an invalidation price, a review date and the disclaimer.
+  Explain the computed action with those reasons; never invent, upgrade,
+  soften or change one, never turn scores into one, and never invent price
+  levels (entry, stop, target, invalidation). Below 60% data coverage the
+  engine says NO CALL: say there is not enough data for a call. The rules are
+  in the `stockwise://methodology` resource ("Actions").
+- **Keep the disclaimer.** Actions are rule-based educational signals, not
+  personalised advice. StockWise is not a SEBI-registered investment adviser
+  or research analyst, and losses are possible. Quotes can be delayed (NSE
+  quotes from Yahoo are about 15 minutes behind).
 - **Tax figures are estimates.** They cover only the sales and lots
   StockWise has recorded. Tell the user to check them against their broker's
   tax P&L before filing.

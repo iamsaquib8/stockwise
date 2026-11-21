@@ -533,7 +533,7 @@ fn the_profile_line_carries_the_limits_and_flags_defaults() {
     assert!(line.contains(&format!("{:.0}%", p.max_stock_weight)));
     p.mode_source = crate::config::Source::File;
     assert!(!profile_line(&p).contains("These are defaults"));
-    crate::verdict::testing::assert_neutral(&line);
+    crate::action::testing::assert_action_well_formed(&line);
 }
 
 #[test]
@@ -541,7 +541,7 @@ fn playbooks_are_neutral_and_name_their_tools() {
     use clap::ValueEnum;
     for pb in Playbook::value_variants() {
         let text = pb.prompt();
-        crate::verdict::testing::assert_neutral(text);
+        crate::action::testing::assert_action_well_formed(text);
         for tool in text
             .split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
             .filter(|w| w.contains('_'))
@@ -904,7 +904,7 @@ async fn playbooks_run_end_to_end_on_fixtures_without_advice() {
             let v: Value = serde_json::from_str(m["content"].as_str().unwrap()).unwrap();
             let mut texts = Vec::new();
             strings(&v, &mut texts);
-            crate::verdict::testing::assert_neutral(&texts.join("\n"));
+            crate::action::testing::assert_action_well_formed(&texts.join("\n"));
         }
     }
 }

@@ -26,18 +26,46 @@ pub struct PendingSplits {
     pub by_symbol: Vec<(String, Vec<Split>)>,
     /// Symbols whose corporate actions could not be fetched.
     pub unchecked: Vec<String>,
+    /// Splits dated after the symbol's latest price: that price is still in
+    /// the old share count, so the lots are valued as they are.
+    #[doc(hidden)]
+    pub not_in_price: Vec<(String, Vec<Split>)>,
     /// Demergers not yet applied to a parent lot held on the record date:
     /// (held parent symbol, demerger). Found from the lots, no network.
     pub demergers: Vec<(String, &'static Demerger)>,
+    /// Accounts a pending demerger leaves unchanged because child shares
+    /// already there may or may not be its own (see
+    /// [`Portfolio::apply_demerger`]), one message each.
+    pub demerger_conflicts: Vec<String>,
 }
 
 impl PendingSplits {
     /// Only the demergers pending in `portfolio` (for callers with no network).
     pub fn offline(portfolio: &Portfolio) -> Self {
-        Self {
-            demergers: portfolio.pending_demergers(),
-            ..Self::default()
+        let mut out = Self::default();
+        out.set_demergers(portfolio);
+        out
+    }
+
+    /// Find the demergers pending in `portfolio` and what applying them
+    /// would leave in conflict.
+    fn set_demergers(&mut self, portfolio: &Portfolio) {
+        self.demergers = portfolio.pending_demergers();
+        if self.demergers.is_empty() {
+            return;
         }
+        let mut trial = portfolio.clone();
+        self.demerger_conflicts = self
+            .demergers
+            .iter()
+            .flat_map(|(sym, d)| {
+                trial
+                    .apply_demerger(sym, d)
+                    .conflicts
+                    .into_iter()
+                    .map(move |c| format!("{} demerger into {}: {}", sym, d.child, c))
+            })
+            .collect();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -61,30 +89,63 @@ impl PendingSplits {
         h.lots.iter().map(|l| adjusted_qty(l, splits)).sum()
     }
 
-    /// A copy of `portfolio` with every pending event applied to its lots.
-    /// A demerger is applied as `portfolio actions --apply` would (a lot of
-    /// the new company per parent lot, the parent's cost reduced). Splits
-    /// and bonuses are each applied as a split (quantity up, price down,
-    /// cost and date kept). A bonus issue gives the same share count; how
-    /// Indian tax dates the bonus shares is left to `portfolio actions --apply`.
+    /// A copy of `portfolio` with every pending event applied to its lots,
+    /// oldest first, so a demerger's entitlement counts the splits and
+    /// bonuses before its record date. A demerger is applied as `portfolio
+    /// actions --apply` would (a lot of the new company per parent lot, the
+    /// parent's cost reduced). Splits and bonuses are each applied as a
+    /// split (quantity up, price down, cost and date kept). A bonus issue
+    /// gives the same share count; how Indian tax dates the bonus shares is
+    /// left to `portfolio actions --apply`.
     pub fn adjusted(&self, portfolio: &Portfolio) -> Portfolio {
         if self.is_empty() {
             return portfolio.clone();
         }
         let mut p = portfolio.clone();
-        for (sym, d) in &self.demergers {
-            p.apply_demerger(sym, d);
-        }
+        let mut events: Vec<(&str, &str, Option<Split>, Option<&Demerger>)> = Vec::new();
         for (sym, splits) in &self.by_symbol {
             for s in splits {
                 let as_split = Split {
                     bonus: None,
                     ..s.clone()
                 };
-                p.apply_split(sym, &as_split);
+                events.push((s.date.as_str(), sym.as_str(), Some(as_split), None));
+            }
+        }
+        for (sym, d) in &self.demergers {
+            events.push((d.record_date, sym.as_str(), None, Some(*d)));
+        }
+        // Stable: on the same day a split goes before a demerger.
+        events.sort_by(|a, b| a.0.cmp(b.0).then(a.3.is_some().cmp(&b.3.is_some())));
+        for (_, sym, split, demerger) in events {
+            if let Some(s) = split {
+                p.apply_split(sym, &s);
+            }
+            if let Some(d) = demerger {
+                p.apply_demerger(sym, d);
             }
         }
         p
+    }
+
+    /// Keep only the splits the latest prices already reflect: a split
+    /// dated after the day `priced_on` gives for its symbol (a quote from
+    /// before the ex-date) is moved to `not_in_price`, so a pre-split price
+    /// is never multiplied by the post-split share count.
+    pub fn align_to_quotes(&mut self, priced_on: impl Fn(&str) -> Option<chrono::NaiveDate>) {
+        for (sym, splits) in &mut self.by_symbol {
+            let Some(day) = priced_on(sym) else {
+                continue;
+            };
+            let (later, kept): (Vec<Split>, Vec<Split>) = splits
+                .drain(..)
+                .partition(|s| crate::portfolio::parse_date(&s.date).is_ok_and(|d| d > day));
+            *splits = kept;
+            if !later.is_empty() {
+                self.not_in_price.push((sym.clone(), later));
+            }
+        }
+        self.by_symbol.retain(|(_, v)| !v.is_empty());
     }
 
     /// One line per symbol: "split pending: run `portfolio actions --apply`",
@@ -107,7 +168,29 @@ impl PendingSplits {
                 d.child_symbol(sym)
             )
         });
-        splits.chain(demergers).collect()
+        let not_priced = self.not_in_price.iter().map(|(sym, splits)| {
+            format!(
+                "{} split coming ({}): the latest price is from before it, so the recorded share count is used. Run `stockwise portfolio actions {} --apply` once it takes effect.",
+                sym,
+                describe(splits),
+                sym
+            )
+        });
+        let conflicts = self.demerger_conflicts.iter().cloned();
+        let mut out: Vec<String> = splits
+            .chain(demergers)
+            .chain(conflicts)
+            .chain(not_priced)
+            .collect();
+        // A failed check is not a clean one: a post-split price on an
+        // unadjusted share count would show as a loss.
+        if !self.unchecked.is_empty() {
+            out.push(format!(
+                "Could not check {} for splits or bonuses: their share counts are not verified.",
+                self.unchecked.join(", ")
+            ));
+        }
+        out
     }
 
     /// Print [`PendingSplits::warnings`] in yellow.
@@ -123,10 +206,11 @@ impl PendingSplits {
 /// `portfolio`, for a valuation made before [`PendingSplits::adjusted`]
 /// adds their lots.
 pub fn with_demerger_children(portfolio: &Portfolio, mut symbols: Vec<String>) -> Vec<String> {
-    for (sym, d) in portfolio.pending_demergers() {
-        let child = d.child_symbol(&sym);
-        if !symbols.contains(&child) {
-            symbols.push(child);
+    for (_, d) in portfolio.pending_demergers() {
+        for child in portfolio.demerger_children(d) {
+            if !symbols.contains(&child) {
+                symbols.push(child);
+            }
         }
     }
     symbols
@@ -191,7 +275,7 @@ pub async fn pending_splits(client: &YahooClient, portfolio: &Portfolio) -> Pend
         .buffer_unordered(CONCURRENCY)
         .collect()
         .await;
-    let mut out = PendingSplits::offline(portfolio);
+    let mut out = PendingSplits::default();
     for (sym, found) in results {
         match found {
             Some(v) if !v.is_empty() => out.by_symbol.push((sym, v)),
@@ -201,6 +285,13 @@ pub async fn pending_splits(client: &YahooClient, portfolio: &Portfolio) -> Pend
     }
     out.by_symbol.sort_by(|a, b| a.0.cmp(&b.0));
     out.unchecked.sort();
+    // With the splits known, the trial runs them first (see `adjusted`).
+    let after_splits = PendingSplits {
+        by_symbol: out.by_symbol.clone(),
+        ..PendingSplits::default()
+    }
+    .adjusted(portfolio);
+    out.set_demergers(&after_splits);
     out
 }
 
@@ -212,7 +303,11 @@ pub async fn pending_splits_live(portfolio: &Portfolio) -> PendingSplits {
     }
     match YahooClient::new().await {
         Ok(client) => pending_splits(&client, portfolio).await,
-        Err(_) => PendingSplits::offline(portfolio),
+        // No client is no check, not a clean result.
+        Err(_) => PendingSplits {
+            unchecked: checkable(portfolio),
+            ..PendingSplits::offline(portfolio)
+        },
     }
 }
 
@@ -303,7 +398,7 @@ pub fn rights_entitlements(portfolio: &Portfolio) -> Vec<RightsEntitlement> {
                 .map(|l| {
                     (
                         l.account_key().map(str::to_string),
-                        crate::portfolio::qty_on(l, issue.record_date),
+                        crate::portfolio::qty_on(l.qty, &l.adjustments, issue.record_date),
                     )
                 })
                 .chain(
@@ -567,9 +662,66 @@ impl DriftReport {
 /// Where the daily sync keeps its reports.
 pub const DRIFT_FILE: &str = "holdings-drift.json";
 
+/// The holdings Yahoo reports splits for (not funds or SGBs).
+fn checkable(portfolio: &Portfolio) -> Vec<String> {
+    portfolio
+        .holdings
+        .iter()
+        .filter(|h| !crate::market::is_namespaced(&h.symbol))
+        .filter(|h| !crate::offmarket::is_off_market(&h.symbol))
+        .map(|h| h.symbol.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quote_from_before_the_split_keeps_the_old_share_count() {
+        let p = portfolio_with("RELIANCE.NS", 10.0, 2800.0, "2024-01-10");
+        let mut pending = PendingSplits {
+            by_symbol: vec![(
+                "RELIANCE.NS".into(),
+                vec![Split::new("2024-10-28", 2.0, 1.0)],
+            )],
+            ..Default::default()
+        };
+        // Priced the trading day before the ex-date: still pre-split.
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 10, 25).unwrap();
+        pending.align_to_quotes(|_| Some(day));
+        assert!(pending.is_empty());
+        assert_eq!(
+            pending.adjusted(&p).holding("RELIANCE.NS").unwrap().shares,
+            10.0
+        );
+        assert!(pending.warnings()[0].contains("split coming"));
+        // Priced on the ex-date: post-split.
+        let mut pending = PendingSplits {
+            by_symbol: vec![(
+                "RELIANCE.NS".into(),
+                vec![Split::new("2024-10-28", 2.0, 1.0)],
+            )],
+            ..Default::default()
+        };
+        let day = chrono::NaiveDate::from_ymd_opt(2024, 10, 28).unwrap();
+        pending.align_to_quotes(|_| Some(day));
+        assert_eq!(
+            pending.adjusted(&p).holding("RELIANCE.NS").unwrap().shares,
+            20.0
+        );
+    }
+
+    #[test]
+    fn an_unchecked_symbol_is_warned_about() {
+        let p = PendingSplits {
+            unchecked: vec!["INFY.NS".into()],
+            ..Default::default()
+        };
+        let w = p.warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("INFY.NS") && w[0].contains("not verified"));
+    }
 
     fn portfolio_with(sym: &str, qty: f64, price: f64, date: &str) -> Portfolio {
         let mut p = Portfolio::default();
@@ -588,7 +740,9 @@ mod tests {
                 pending_of(h, vec![split.clone(), Split::new("2023-01-01", 5.0, 1.0)]),
             )],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
+            demerger_conflicts: vec![],
         };
         // The split before the purchase is not pending.
         assert_eq!(pending.for_symbol("RELIANCE.NS"), &[split]);
@@ -614,7 +768,9 @@ mod tests {
         let pending = PendingSplits {
             by_symbol: vec![("TCS.NS".into(), vec![bonus])],
             unchecked: vec![],
+            not_in_price: vec![],
             demergers: vec![],
+            demerger_conflicts: vec![],
         };
         assert_eq!(pending.adjusted(&p).holding("TCS.NS").unwrap().shares, 20.0);
     }
@@ -687,8 +843,8 @@ mod tests {
         ];
         let pending = PendingSplits {
             by_symbol: vec![("TCS.NS".into(), vec![Split::new("2024-06-01", 2.0, 1.0)])],
-            unchecked: vec![],
             demergers: p.pending_demergers(),
+            ..Default::default()
         };
         let rows = drift_report(&p, "zerodha", &broker, &pending);
         let fix = |sym: &str| {

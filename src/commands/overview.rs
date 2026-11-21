@@ -268,12 +268,26 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     }
     // One Indian stock: NSE's sector P/E to compare with, and its
     // surveillance flags (ASM/GSM, suspension).
-    if quotes.len() == 1
-        && let Some(sym) = quotes[0].symbol.clone()
-        && sym.ends_with(".NS")
-        && market::AssetClass::of(&sym) == market::AssetClass::Stock
-        && let Ok(Some(info)) = client.nse_equity_info(&sym).await
-    {
+    let nse_info = match quotes.first().and_then(|q| q.symbol.clone()) {
+        Some(sym)
+            if quotes.len() == 1
+                && sym.ends_with(".NS")
+                && market::AssetClass::of(&sym) == market::AssetClass::Stock =>
+        {
+            match client.nse_equity_info(&sym).await {
+                Ok(info) => info,
+                // Not the same as "checked, no flags": say it.
+                Err(e) => {
+                    metas[0].warn(format!(
+                        "NSE surveillance and sector P/E could not be checked ({e:#})"
+                    ));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Some(info) = nse_info {
         if quotes[0].sector_pe.is_none() {
             quotes[0].sector_pe = info.sector_pe;
         }
@@ -406,8 +420,10 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
         {
             print_kv(t(Msg::DividendYield), &format!("{:.2}%", div * 100.0));
         }
-        if let Some(source) = &q.data_source {
-            println!("\n  {}", crate::providers::source_footer(source).dimmed());
+        // The meta footer names the sources; keep only CoinGecko's
+        // attribution, which its terms ask for.
+        if q.data_source.as_deref() == Some(crate::providers::ProviderKind::CoinGecko.name()) {
+            println!("\n  {}", "Powered by CoinGecko".dimmed());
         }
         for w in &meta.warnings {
             println!("  {} {}", "!".yellow(), w.dimmed());
@@ -443,9 +459,9 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
     if prof.mode == crate::config::ProfileMode::Ultra {
         return cmd_ultra_overview(symbol, &resolved, market).await;
     }
-    cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
-    if let Ok(client) = YahooClient::new().await
-        && let Ok(bundle) = crate::research::fetch(
+    // Research first, so the rule-based action is the first line printed.
+    let researched = match YahooClient::new().await {
+        Ok(client) => crate::research::fetch(
             &client,
             &resolved,
             market,
@@ -453,14 +469,26 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
             crate::research::Needs::VERDICT,
         )
         .await
-    {
-        let cards = crate::insights::generate_rich_insights(&bundle);
-        let v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+        .ok()
+        .map(|bundle| {
+            let cards = crate::insights::generate_rich_insights(&bundle);
+            let mut v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+            super::actions::apply_holding(&mut v, &bundle, market);
+            v
+        }),
+        Err(_) => None,
+    };
+    if let Some(v) = &researched {
+        println!();
+        print!("{}", crate::verdict::render_action(&v.action));
+    }
+    cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
+    if let Some(v) = researched {
         print_section(&format!(
             "Quick Research Snapshot (6-Pillar Score · Profile: {})",
             prof.spec
         ));
-        crate::verdict::print_snapshot(&v, &resolved);
+        crate::verdict::print_snapshot_body(&v, &resolved);
         if prof.mode == crate::config::ProfileMode::Passive {
             println!();
             println!(
@@ -504,6 +532,12 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
     let csym = market::currency_symbol(cur);
     let px = |v: Option<f64>| price_or_na(v, cur, resolved);
     let prof = crate::config::effective_profile();
+
+    let cards = crate::insights::generate_rich_insights(&bundle);
+    let mut v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+    super::actions::apply_holding(&mut v, &bundle, market);
+    println!();
+    print!("{}", crate::verdict::render_action(&v.action));
 
     // 1. Header: Price, Change%, CapTier, 52W Distance, Circuits
     print_header(&format!(
@@ -555,8 +589,6 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
     );
 
     // 2. 6-Pillar Verdict + Piotroski F-Score + Altman Z + CFO/PAT
-    let cards = crate::insights::generate_rich_insights(&bundle);
-    let v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
     let sc = scorecard::generate_scorecard_report(&bundle);
     let cfo_pat = bundle
         .annual
@@ -579,7 +611,7 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
         "N/A".to_string()
     };
     print_section("1. Verdict & Accounting Forensics");
-    crate::verdict::print_snapshot(&v, resolved);
+    crate::verdict::print_snapshot_body(&v, resolved);
     println!(
         "  Piotroski F-Score: {}/{} ({})  |  Altman Z: {}  |  CFO/PAT: {}",
         sc.piotroski.score,

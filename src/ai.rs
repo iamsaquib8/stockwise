@@ -705,19 +705,20 @@ impl AiClient {
 }
 
 /// Bumped whenever the prompts change, and part of every cache key, so an
-/// answer cached under older wording (v1 asked for BUY/HOLD/SELL verdicts)
-/// is never shown again.
-pub const PROMPT_VERSION: u32 = 2;
+/// answer cached under older wording (v1 asked for BUY/HOLD/SELL verdicts;
+/// v2 forbade naming the engine's action) is never shown again.
+pub const PROMPT_VERSION: u32 = 3;
 
 /// Printed under every AI section.
-pub const DISCLAIMER: &str = "AI-generated educational analysis, not investment advice or a \
-     recommendation to buy, sell or hold. StockWise is not a SEBI-registered investment adviser \
-     or research analyst.";
+pub const DISCLAIMER: &str = "AI-generated educational analysis, not investment advice. The AI \
+     explains StockWise's rule-based action and never makes its own. StockWise is not a \
+     SEBI-registered investment adviser or research analyst; you can lose money.";
 
 /// The prompts behind every AI section. Each starts with [`prompts::RULES`]:
-/// the model explains signals, risks and what to watch, in neutral terms,
-/// and never makes a personal buy/sell/hold call — in line with SEBI's
-/// rules for investment advice and research.
+/// the model explains signals, risks and what to watch, and explains the
+/// action computed by `crate::action` when one is given. It never makes,
+/// changes or overrides a call and never invents a price level: actions
+/// come only from the deterministic engine.
 pub mod prompts {
     use super::StockData;
 
@@ -725,10 +726,13 @@ pub mod prompts {
     pub const RULES: &str = "You write short, educational market commentary for StockWise, an \
 open-source tool for individual investors. Rules:
 - Explain what the data shows: signals, trends, valuation context, risks, and what to watch next.
-- Use neutral, conditional language (\"the indicators point to...\", \"a risk is...\", \"if X, then Y\").
-- Never tell the reader to buy, sell, hold, accumulate, trim, enter, exit or avoid anything. Give \
-no price targets, entry or exit levels, stop-losses, position sizes or allocations for the reader, \
-and no ratings such as BUY, SELL or HOLD.
+- Use plain, conditional language (\"the indicators point to...\", \"a risk is...\", \"if X, then Y\").
+- Actions come only from StockWise's rule-based engine. When the data includes an ACTION, explain \
+it with its reasons, invalidation price and review date exactly as given; never change, upgrade, \
+soften or reverse it. When no ACTION is given, never tell the reader to buy, sell, hold, \
+accumulate, trim, enter, exit or avoid anything and give no ratings such as BUY, SELL or HOLD.
+- Never invent price targets, entry or exit levels, stop-losses, position sizes or allocations; \
+quote only levels the data gives.
 - Do not pick a single best investment or a winner.
 - Stick to the data given and say when it is missing or too thin to judge. No hype, no guarantees.
 - Do not add a disclaimer; StockWise prints one.
@@ -782,7 +786,11 @@ In 3-4 sentences cover:
             num(data.beta, 2),
             data.sector,
             data.industry,
-        ))
+        )) + &data.action.as_deref().map_or(String::new(), |a| {
+            format!(
+                "\n\nStockWise's rule-based action (explain it with these reasons; do not change it):\n{a}"
+            )
+        })
     }
 
     pub fn intraday_report(report_data: &str) -> String {
@@ -1121,9 +1129,22 @@ pub struct StockData {
     pub beta: Option<f64>,
     pub sector: String,
     pub industry: String,
+    /// The engine's action (`crate::action`): headline and reasons, for the
+    /// model to explain. `None` when no action was computed.
+    pub action: Option<String>,
 }
 
 impl StockData {
+    /// Attach the engine's action for the model to explain.
+    pub fn with_action(mut self, a: &crate::action::Action) -> Self {
+        let mut text = a.headline();
+        for r in &a.reasons {
+            text.push_str(&format!("\n- {r}"));
+        }
+        self.action = Some(text);
+        self
+    }
+
     pub fn from_quote(q: &crate::api::Quote) -> Self {
         Self {
             symbol: q.symbol.clone().unwrap_or_default(),
@@ -1149,6 +1170,7 @@ impl StockData {
             beta: q.beta,
             sector: q.sector.clone().unwrap_or_default(),
             industry: q.industry.clone().unwrap_or_default(),
+            action: None,
         }
     }
 
@@ -1254,8 +1276,11 @@ mod tests {
         }
         let rules = prompts::RULES.to_lowercase();
         for must in [
+            "actions come only from stockwise's rule-based engine",
+            "never change, upgrade",
             "never tell the reader to buy, sell, hold",
             "no ratings such as buy, sell or hold",
+            "never invent price targets",
             "do not pick a single best investment",
             "what to watch",
             "risks",
@@ -1268,6 +1293,7 @@ mod tests {
     fn disclaimer_says_it_is_education_not_advice() {
         let d = DISCLAIMER.to_lowercase();
         assert!(d.contains("educational") && d.contains("not investment advice"));
+        assert!(d.contains("never makes its own"));
         assert!(d.contains("sebi"));
         assert!(!DISCLAIMER.contains('\n'), "one line under each AI section");
     }

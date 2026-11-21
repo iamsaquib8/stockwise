@@ -768,17 +768,17 @@ async fn long_histories_keep_their_newest_bars() {
 
 #[test]
 fn verdict_tool_is_described_as_scores_not_advice() {
-    use crate::verdict::testing::assert_neutral;
+    use crate::action::testing::assert_action_well_formed;
     let t = tool("verdict");
-    assert_neutral(t.title);
-    assert_neutral(t.description);
+    assert_action_well_formed(t.title);
+    assert_action_well_formed(t.description);
     assert!(t.description.contains("not a recommendation"));
     assert!(!t.title.to_lowercase().contains("verdict"));
 }
 
 #[test]
-fn verdict_tool_result_has_scores_and_no_call() {
-    use crate::verdict::testing::assert_neutral;
+fn verdict_tool_result_has_scores_and_an_engine_action() {
+    use crate::action::testing::assert_action_well_formed;
     for symbol in ["TCS.NS", "BTC-USD"] {
         let mut r = crate::research::Research::default();
         r.symbol = symbol.into();
@@ -789,33 +789,28 @@ fn verdict_tool_result_has_scores_and_no_call() {
         r.fin.rec_mean = Some(1.5);
         r.fin.target_mean = Some(130.0);
         let v = handlers::verdict_value(&r).unwrap();
-        for gone in [
-            "action",
-            "entry_zone",
-            "stop_loss",
-            "target_price",
-            "risk_reward",
-            "confidence",
-        ] {
+        for gone in ["entry_zone", "stop_loss", "target_price", "risk_reward"] {
             assert!(
                 v.get(gone).is_none(),
                 "{symbol}: {gone} leaked into the tool result"
             );
         }
         assert!(v["pillars"].is_array() && v["data_coverage"].is_number());
+        // Thin data: the engine makes no call.
+        assert_eq!(v["action"]["kind"], "NO_CALL", "{symbol}");
         // The envelope the model sees: data plus the note.
         let wrapped = envelope(v, 100_000);
-        assert_neutral(&wrapped.to_string());
+        assert_action_well_formed(&wrapped.to_string());
     }
 }
 
 #[test]
 fn ipo_tools_are_described_without_a_call() {
-    use crate::verdict::testing::assert_neutral;
+    use crate::action::testing::assert_action_well_formed;
     for name in ["ipo_board", "ipo_analyze"] {
         let t = tool(name);
-        assert_neutral(t.title);
-        assert_neutral(t.description);
+        assert_action_well_formed(t.title);
+        assert_action_well_formed(t.description);
         assert!(!t.description.to_lowercase().contains("verdict"), "{name}");
     }
 }
@@ -1115,7 +1110,7 @@ async fn fit_check_answers_against_the_users_own_rules() {
         .await
         .unwrap();
     assert_eq!(v["data"]["fits_your_rules"], "no", "{v}");
-    crate::verdict::testing::assert_neutral(&v.to_string());
+    crate::action::testing::assert_action_well_formed(&v.to_string());
     let _ = std::fs::remove_dir_all(&w.dir);
 }
 
@@ -1158,11 +1153,11 @@ async fn returns_and_correlation_run_on_charts() {
         .call("correlate", &json!({"symbols": ["TCS", "INFY", "NOPE"]}))
         .await
         .unwrap();
-    assert_eq!(v["data"]["symbols"], json!(["TCS.NS", "INFY.NS"]));
     assert_eq!(v["data"]["missing"], json!(["NOPE.NS"]));
-    let m = v["data"]["matrix"].as_array().unwrap();
-    assert_eq!(m.len(), 2);
-    assert!((m[0][0].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    let m = &v["data"]["correlations"];
+    assert_eq!(m.as_object().unwrap().len(), 2, "{v}");
+    assert!((m["TCS.NS"]["TCS.NS"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(m["TCS.NS"]["INFY.NS"], m["INFY.NS"]["TCS.NS"]);
 
     assert!(
         c.call("correlate", &json!({"symbols": ["TCS"]}))
@@ -1217,4 +1212,24 @@ fn india_extras_are_read_only_and_open_world() {
         assert!(h.open_world, "{name}");
     }
     assert!(tool("portfolio_wrap").personal);
+}
+
+#[tokio::test]
+async fn batch_tools_research_each_symbol_once() {
+    // Non-adjacent repeats too: TCS twice, apart.
+    let v = call("correlate", json!({"symbols": ["TCS", "INFY", "tcs"]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        v["data"]["correlations"].as_object().unwrap().len(),
+        2,
+        "{v}"
+    );
+}
+
+#[test]
+fn picks_is_not_read_only_because_it_logs_its_list() {
+    let h = hints(tool("picks"));
+    assert!(!h.read_only && !h.destructive && h.idempotent && h.open_world);
+    assert!(hints(tool("quote")).read_only);
 }

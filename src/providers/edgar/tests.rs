@@ -421,3 +421,59 @@ fn no_balance_sheet_means_no_roe_or_leverage() {
     assert_eq!(r.debt_to_equity, None);
     assert!(r.profit_margin.is_some());
 }
+
+#[test]
+fn current_debt_totals_are_not_counted_twice() {
+    let mut v: Value = serde_json::from_str(&calendar_filer()).unwrap();
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    let concept =
+        |val: f64| json!({"units": {"USD": [instant("2025-09-30", val, "10-Q", "2025-10-30")]}});
+    gaap.insert("StockholdersEquity".into(), concept(400.0));
+    gaap.insert("LongTermDebtNoncurrent".into(), concept(90.0));
+    // DebtCurrent 30 already holds the 20 of borrowings and 5 of paper.
+    gaap.insert("DebtCurrent".into(), concept(30.0));
+    gaap.insert("ShortTermBorrowings".into(), concept(20.0));
+    gaap.insert("CommercialPaper".into(), concept(5.0));
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(120.0));
+
+    // Without DebtCurrent: borrowings already hold the paper.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.remove("DebtCurrent");
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(110.0));
+
+    // Paper alone counts.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.remove("ShortTermBorrowings");
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(95.0));
+}
+
+#[test]
+fn margins_never_mix_quarterly_and_annual_windows() {
+    // Quarterly revenue complete, one quarterly net income missing: the
+    // margin comes from the fiscal year on both sides, or not at all.
+    let p = |end: &str, rev: f64, ni: Option<f64>| Period {
+        end: d(end),
+        revenue: Some(rev),
+        net_income: ni,
+        ..Default::default()
+    };
+    let st = Statements {
+        quarterly: vec![
+            p("2024-12-31", 100.0, Some(10.0)),
+            p("2025-03-31", 100.0, None),
+            p("2025-06-30", 200.0, Some(20.0)),
+            p("2025-09-30", 200.0, Some(20.0)),
+        ],
+        annual: vec![p("2024-12-31", 400.0, Some(40.0))],
+        ..Default::default()
+    };
+    assert_eq!(st.ratios().profit_margin, Some(0.1));
+    let no_year = Statements {
+        annual: vec![],
+        ..st
+    };
+    assert_eq!(no_year.ratios().profit_margin, None);
+}

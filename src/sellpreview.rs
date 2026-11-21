@@ -173,7 +173,7 @@ pub fn fifo_slices(
     let eligible: f64 = holding
         .lots
         .iter()
-        .filter(|l| l.date.as_str() <= date)
+        .filter(|l| l.held_from() <= date)
         .map(|l| l.qty)
         .sum();
     if qty > eligible + EPS {
@@ -195,7 +195,7 @@ pub fn fifo_slices(
         if remaining <= EPS {
             break;
         }
-        if lot.date.as_str() > date {
+        if lot.held_from() > date {
             continue;
         }
         let take = if remaining >= lot.qty - EPS {

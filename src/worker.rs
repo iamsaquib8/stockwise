@@ -1639,7 +1639,9 @@ mod tests {
         // Notices state facts and name a command, not a recommendation (the
         // command's own name, `portfolio sell`, is not advice wording).
         for m in [&soon[0], &now[0]] {
-            crate::verdict::testing::assert_neutral(&m.body.replace("portfolio sell", "portfolio"));
+            crate::action::testing::assert_action_well_formed(
+                &m.body.replace("portfolio sell", "portfolio"),
+            );
         }
     }
 
@@ -1863,7 +1865,9 @@ mod tests {
         assert!(msgs[0].body.contains("03 Nov 2026"), "{}", msgs[0].body);
         assert!(msgs[0].body.contains("CORP ACTION"), "{}", msgs[0].body);
         assert!(msgs[0].body.contains("`stockwise events TCS.NS`"));
-        crate::verdict::testing::assert_neutral(&msgs[0].body.replace("stockwise events", "x"));
+        crate::action::testing::assert_action_well_formed(
+            &msgs[0].body.replace("stockwise events", "x"),
+        );
         assert!(
             deliver_filings("TCS.NS", &both, &mut seen).is_empty(),
             "once"
