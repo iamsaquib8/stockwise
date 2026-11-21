@@ -215,6 +215,7 @@ async fn prompts_fill_in_their_arguments() {
         [
             "daily_briefing",
             "should_i_buy",
+            "should_i_apply_ipo",
             "exit_check",
             "smallcap_short_scan",
             "tax_aware_rebalance",
@@ -227,6 +228,11 @@ async fn prompts_fill_in_their_arguments() {
             "onboard_profile"
         ]
     );
+    let mut ipo_args = Map::new();
+    ipo_args.insert("symbol".into(), json!("BCSSL"));
+    let ipo = prompt_text("should_i_apply_ipo", &ipo_args).unwrap();
+    assert!(ipo.contains("ipo_analyze for BCSSL") && ipo.contains("Do not change the verdict"));
+    assert!(prompt_text("should_i_apply_ipo", &Map::new()).is_err());
     let onboard = prompt_text("onboard_profile", &Map::new()).unwrap();
     assert!(onboard.contains("profile_questions") && onboard.contains("profile_onboard"));
     assert!(onboard.contains("one at a time"));

@@ -1525,6 +1525,34 @@ pub(crate) mod testing {
             walk(&v);
         }
         for line in text.lines() {
+            // IPO verdicts come from `crate::ipo_verdict`, in its headline format.
+            if let Some(at) = line.find("IPO VERDICT: ") {
+                let rest = &line[at + "IPO VERDICT: ".len()..];
+                let label = rest
+                    .split([' ', '·'])
+                    .take_while(|w| !w.is_empty())
+                    .collect::<Vec<_>>();
+                let head = rest.split(" · ").next().unwrap_or_default();
+                let head = head.split(" — ").next().unwrap_or_default();
+                let kind = crate::ipo_verdict::Kind::parse(head).unwrap_or_else(|| {
+                    panic!("IPO VERDICT line with unknown kind ({label:?}): {line}")
+                });
+                use crate::ipo_verdict::Kind as K;
+                match kind {
+                    K::NoCall | K::Listed => {
+                        assert!(
+                            rest.contains(" — "),
+                            "{} without its reason: {line}",
+                            kind.label()
+                        )
+                    }
+                    _ => assert!(
+                        rest.contains(" confidence") && rest.contains("review by"),
+                        "IPO VERDICT line not in the engine's format: {line}"
+                    ),
+                }
+                continue;
+            }
             if let Some(at) = line.find("ACTION: ") {
                 let rest = &line[at + "ACTION: ".len()..];
                 if rest.starts_with("NO CALL") {
@@ -1565,6 +1593,11 @@ pub(crate) mod testing {
                 while let Some(i) = line[from..].find(call) {
                     let s = from + i;
                     let e = s + call.len();
+                    // The IPO engine's label "APPLY – SELL ON LISTING".
+                    if call == "SELL" && line[e..].starts_with(" ON LISTING") {
+                        from = e;
+                        continue;
+                    }
                     let before = line[..s].chars().next_back();
                     let after = line[e..].chars().next();
                     let whole = !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
@@ -1585,6 +1618,9 @@ pub(crate) mod testing {
                 for (k, val) in m {
                     if k == "action" && val.is_object() && val.get("kind").is_some() {
                         check_action(val);
+                    }
+                    if k == "verdict" && val.is_object() && val.get("methodology").is_some() {
+                        crate::ipo_verdict::testing::check_verdict(val);
                     }
                     walk(val);
                 }

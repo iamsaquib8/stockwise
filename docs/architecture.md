@@ -31,7 +31,7 @@ src/
     monitoring.rs    monitor, digest, and the monitor passes the worker runs
     bot.rs           telegram (two-way bot)
     statusbar.rs     statusbar
-    ipo.rs           ipo
+    ipo.rs           ipo, ipo review, ipo calibrate
     calendar.rs      calendar
     funds.rs         mf search, nav, history, sip, screen, overlap
     fno.rs           options chain, pcr, maxpain, oi, payoff
@@ -132,7 +132,10 @@ src/
   greeks.rs, payoff.rs  Black-Scholes and IV solver; multi-leg payoffs
   commodity.rs       Gold and silver spot in rupees, futures, ETFs, SGBs
   bonds.rs, gsec.rs  Bond math; CCIL yields, RBI benchmarks, G-sec list
-  ipo.rs             Indian IPO board, subscription, allotment odds, demand score
+  ipo.rs             Indian IPO board, subscription, allotment odds, regime; assembles the verdict
+  ipo_verdict.rs     IPO verdicts (APPLY / WAIT / AVOID / NO CALL): valuation, odds, EV, gates, plan
+  ipo_model.rs       Listing-day model: shipped fit, Huber regression, residual P(loss), regime
+  ipo_log.rs         IPO verdict log (`ipo_signal_log.json`) and `ipo review`
   technical.rs       Indicators and statistics (SMA, EMA, RSI, MACD, BB, ATR, VWAP, OBV, VaR, Sharpe, XIRR)
   backtest/          Backtesting engine (docs/backtesting.md): rules.rs, indicators.rs, costs.rs,
                      engine.rs, walkforward.rs, stats.rs, regression.rs, plugin.rs (WASM, `wasm-plugins`)

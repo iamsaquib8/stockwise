@@ -1070,9 +1070,11 @@ pub const TOOLS: &[Tool] = &[
         title: "Indian IPO board",
         description: "Indian IPOs from NSE: issues open for bidding now, upcoming issues and \
                       recently listed ones, each with price band, lot size, minimum application, \
-                      issue size, live QIB/NII/retail subscription and a quick signal, plus an \
-                      IPO-market regime (share of recent listings above issue price, NIFTY, VIX). \
-                      Mainboard and SME issues are labelled.",
+                      issue size and live QIB/NII/retail subscription. Open and upcoming issues \
+                      carry the engine's `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT with its \
+                      QIB trigger, AVOID or NO_CALL, with reasons and confidence). Recent \
+                      listings show their listing-day return; the regime is the recency-weighted \
+                      median listing-day return. Mainboard and SME issues are labelled.",
         params: &[
             opt(
                 "board",
@@ -1090,13 +1092,16 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "ipo_analyze",
         title: "Indian IPO analysis",
-        description: "Deep analysis of one Indian IPO by NSE symbol or company name: issue terms \
-                      (fresh issue vs offer for sale, anchor, lead managers), subscription by \
-                      category (QIB with mutual-fund share, bNII, sNII, retail and cut-off bids), \
-                      demand by price, SEBI allotment odds for retail, sNII and bNII (and the odds \
-                      at the `capital` amount when given), unofficial GMP from the press, and a \
-                      6-pillar score with demand and long-term profile labels. Describes the \
-                      data; not a recommendation.",
+        description: "One Indian IPO by NSE symbol or company name, led by the rule-based \
+                      `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT, AVOID, NO_CALL or LISTED) \
+                      with up to three reasons, confidence, trigger or invalidation, review date, \
+                      coverage and missing fields; the calibrated listing-day model (expected \
+                      gain, P(close below issue), fit stats); expected value per minimum \
+                      application; the listing-day plan and anchor lock-in dates; valuation at \
+                      the upper band against listed peers (from the user's RHP figures file); \
+                      subscription by category; allotment odds from application counts (and \
+                      what `capital` buys); unofficial GMP. Report the verdict as given; never \
+                      change it.",
         params: &[
             req(
                 "symbol",
