@@ -234,6 +234,20 @@ impl AlphaVantage {
         Ok(series)
     }
 
+    /// Splits of an equity (`function=SPLITS`), oldest first.
+    pub async fn splits(&self, symbol: &str) -> Result<Vec<super::adjust::SplitEvent>> {
+        let Some(Target::Equity(av)) = target(symbol) else {
+            anyhow::bail!("Alpha Vantage has no splits for {symbol}");
+        };
+        let json = self
+            .call(
+                &[("function", "SPLITS"), ("symbol", &av)],
+                Duration::from_secs(24 * 3600),
+            )
+            .await?;
+        Ok(parse_splits(&json))
+    }
+
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         let json = self
             .call(
@@ -302,6 +316,27 @@ pub fn parse_series(json: &serde_json::Value, key: &str) -> Series {
         currency: None,
     }
     .sorted()
+}
+
+/// `function=SPLITS`: `{"data": [{"effective_date": "2020-08-31",
+/// "split_factor": "4.0000"}]}`.
+pub fn parse_splits(json: &serde_json::Value) -> Vec<super::adjust::SplitEvent> {
+    let mut out: Vec<super::adjust::SplitEvent> = json["data"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    Some(super::adjust::SplitEvent {
+                        ex_date: NaiveDate::parse_from_str(r["effective_date"].as_str()?, "%Y-%m-%d")
+                            .ok()?,
+                        factor: num(&r["split_factor"]).filter(|f| *f > 0.0 && *f != 1.0)?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|e| e.ex_date);
+    out
 }
 
 pub fn parse_search(json: &serde_json::Value) -> Vec<SearchResult> {
@@ -400,6 +435,19 @@ mod tests {
         assert_eq!(s.bars[1].close, Some(236.39));
         let q = quote_from_bars(&s).unwrap();
         assert!((q.regular_market_change.unwrap() - 4.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_splits() {
+        let json = serde_json::json!({"symbol": "AAPL", "data": [
+            {"effective_date": "2020-08-31", "split_factor": "4.0000"},
+            {"effective_date": "2014-06-09", "split_factor": "7.0000"},
+            {"effective_date": "bad", "split_factor": "2"}
+        ]});
+        let s = parse_splits(&json);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].factor, 7.0);
+        assert_eq!(s[1].ex_date, NaiveDate::from_ymd_opt(2020, 8, 31).unwrap());
     }
 
     #[test]

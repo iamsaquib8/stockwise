@@ -35,6 +35,7 @@
 //! The exchange providers read the JSON endpoints behind nseindia.com and
 //! bseindia.com through one polite session per site (`session.rs`).
 
+pub mod adjust;
 pub mod alphavantage;
 pub mod bse;
 pub mod bse_bhav;
@@ -515,6 +516,25 @@ impl Provider {
             Provider::Nse(p) => Some(p),
             Provider::Exchange(p) => Some(&p.nse),
             _ => None,
+        }
+    }
+
+    /// The BSE client when the provider is BSE-backed.
+    pub fn bse(&self) -> Option<&bse::Bse> {
+        match self {
+            Provider::Bse(p) => Some(p),
+            Provider::Exchange(p) => Some(&p.bse),
+            _ => None,
+        }
+    }
+
+    /// Splits of `symbol` from the provider itself, for adjusting its own
+    /// unadjusted daily bars when Yahoo's events can't be read. Alpha
+    /// Vantage only (one request of its daily allowance).
+    pub async fn splits(&self, symbol: &str) -> Result<Vec<adjust::SplitEvent>> {
+        match self {
+            Provider::AlphaVantage(p) => p.splits(symbol).await,
+            _ => bail!("{} has no split data", self.name()),
         }
     }
 }
