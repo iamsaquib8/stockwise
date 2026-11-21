@@ -1184,14 +1184,9 @@ fn insider_events(r: &Research, cutoff: i64) -> Vec<Event> {
         .collect()
 }
 
-/// Sessions with abnormal moves that no event explains.
-fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) -> Vec<Event> {
-    let p = &r.prices;
-    let b = &r.bench;
-    if p.len() < 60 {
-        return vec![];
-    }
-    // Excess-return volatility over the past year
+/// Daily returns of `p` in excess of the benchmark `b` on the same date
+/// (0 for the benchmark when it has no bar), as `(index into p, excess)`.
+pub fn excess_returns(p: &Series, b: &Series) -> Vec<(usize, f64)> {
     let mut excess: Vec<(usize, f64)> = Vec::new();
     for i in 1..p.len() {
         let s = p.close[i] / p.close[i - 1] - 1.0;
@@ -1202,10 +1197,43 @@ fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) 
             .unwrap_or(0.0);
         excess.push((i, s - bm));
     }
+    excess
+}
+
+/// The standard deviation of the last year of excess returns.
+pub fn excess_sd(excess: &[(usize, f64)]) -> Option<f64> {
     let tail = &excess[excess.len().saturating_sub(250)..];
+    if tail.len() < 20 {
+        return None;
+    }
     let mean = tail.iter().map(|(_, e)| e).sum::<f64>() / tail.len() as f64;
-    let sd = (tail.iter().map(|(_, e)| (e - mean).powi(2)).sum::<f64>() / tail.len() as f64).sqrt();
-    let threshold = (2.5 * sd).max(0.03);
+    Some((tail.iter().map(|(_, e)| (e - mean).powi(2)).sum::<f64>() / tail.len() as f64).sqrt())
+}
+
+/// The excess move that counts as abnormal: 2.5σ, and at least 3%.
+pub fn unusual_threshold(sd: f64) -> f64 {
+    (2.5 * sd).max(0.03)
+}
+
+/// Whether a session's excess move (with its volume multiple) is the kind
+/// `events` flags as an unusual move when no news explains it.
+pub fn is_unusual_move(excess: f64, sd: f64, volume_x: Option<f64>) -> bool {
+    excess.abs() >= unusual_threshold(sd)
+        || (volume_x.is_some_and(|v| v >= 3.0) && excess.abs() >= 0.015)
+}
+
+/// Sessions with abnormal moves that no event explains.
+fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) -> Vec<Event> {
+    let p = &r.prices;
+    let b = &r.bench;
+    if p.len() < 60 {
+        return vec![];
+    }
+    // Excess-return volatility over the past year
+    let excess = excess_returns(p, b);
+    let Some(sd) = excess_sd(&excess) else {
+        return vec![];
+    };
     let cutoff_date = DateTime::from_timestamp(cutoff, 0)
         .map(|d| d.date_naive())
         .unwrap_or_default();
@@ -1217,9 +1245,7 @@ fn unexplained_moves(r: &Research, cutoff: i64, explained: &HashSet<NaiveDate>) 
         } else {
             None
         };
-        let big_move = e.abs() >= threshold;
-        let big_volume = vol_x.is_some_and(|v| v >= 3.0) && e.abs() >= 0.015;
-        if !(big_move || big_volume) || explained.contains(&p.dates[i]) {
+        if !is_unusual_move(e, sd, vol_x) || explained.contains(&p.dates[i]) {
             continue;
         }
         let ts = p.dates[i]

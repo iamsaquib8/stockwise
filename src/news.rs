@@ -122,7 +122,11 @@ pub fn collate(mut items: Vec<NewsItem>) -> Vec<NewsItem> {
                 return false;
             }
             let shared = words.iter().filter(|x| w.contains(x)).count();
-            shared as f64 / words.len().min(w.len()) as f64 > 0.6
+            // Short titles ("Board approves dividend" / "... buyback") need
+            // three shared words before they count as the same story.
+            shared >= 3.min(words.len().min(w.len()))
+                && shared as f64 / words.len().min(w.len()) as f64 > 0.6
+                && (shared >= 3 || words == *w)
         });
         let same_link = item
             .link

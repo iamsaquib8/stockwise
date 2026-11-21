@@ -620,8 +620,8 @@ mod tests {
         let mut c: Vec<f64> = (0..250).map(|i| 200.0 - i as f64 * 0.24).collect();
         c.push(130.0);
         let mut s = series(&c);
-        // Opened at 136 after a 140 close: a 2.9% gap — under 3%.
-        *s.open.last_mut().unwrap() = 136.0;
+        // Opened at 137 after a 140.24 close: a 2.3% gap — under 3%.
+        *s.open.last_mut().unwrap() = 137.0;
         let sig = price_signals("INFY.NS", &s, Some(180.0), &t);
         let k = kinds(&sig);
         assert!(k.contains(&SignalKind::NewLow));
