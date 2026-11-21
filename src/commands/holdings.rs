@@ -2575,93 +2575,133 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
 
 // ── Import from brokers ──
 
+/// One holding's dividend figures for `divcal`, in its own currency except
+/// `value_base` and `income_base`.
+struct DivRow {
+    symbol: String,
+    currency: Option<String>,
+    yield_frac: f64,
+    annual_per_share: f64,
+    income: f64,
+    value_base: f64,
+    income_base: f64,
+}
+
+/// Value-weighted dividend yield of `rows` (value and income in the base
+/// currency): total yearly income over total value. Holdings paying nothing
+/// count with a yield of 0.
+fn weighted_yield(rows: &[(f64, f64)]) -> Option<f64> {
+    let value: f64 = rows.iter().map(|r| r.0).sum();
+    let income: f64 = rows.iter().map(|r| r.1).sum();
+    (value > 0.0).then(|| income / value)
+}
+
 pub async fn cmd_divcal(market: Market) -> Result<()> {
-    let client = YahooClient::new().await?;
     let portfolio = Portfolio::load()?;
-    let wl = Watchlist::load()?;
-    let mut all: Vec<String> = portfolio
+    print_header("Dividend Dashboard");
+    if portfolio.holdings.is_empty() {
+        println!(
+            "  {}",
+            "No holdings: add them with `stockwise portfolio add`. `stockwise income upcoming` also covers the watchlist."
+                .dimmed()
+        );
+        return Ok(());
+    }
+    let client = YahooClient::new().await?;
+    // A split not yet applied to the lots: count the shares after it.
+    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    pending.print();
+    let portfolio = pending.adjusted(&portfolio);
+    let symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    for s in &wl.symbols {
-        if !all.contains(s) {
-            all.push(s.clone());
-        }
-    }
-    if all.is_empty() {
-        all = market.universe();
-    }
+    let val = value_holdings(&client, &symbols, market, None).await?;
+    let base = val.base().to_string();
 
-    let refs: Vec<&str> = all.iter().map(|s| s.as_str()).collect();
-    let quotes = client.get_quote(&refs).await?;
-
-    print_header("Dividend Dashboard");
     print_dividends_received(&portfolio);
-    let mut payers = Vec::new();
-    for q in &quotes {
-        let dy = q.trailing_annual_dividend_yield.unwrap_or(0.0);
-        if dy > 0.001 {
-            payers.push((
-                q.symbol.as_deref().unwrap_or("???").to_string(),
-                dy,
-                q.regular_market_price.unwrap_or(0.0),
-                q.currency.clone(),
-            ));
-        }
+    let mut rows: Vec<DivRow> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
+    for h in &portfolio.holdings {
+        let (Some(q), Some(price)) = (val.quote(&h.symbol), val.price(&h.symbol)) else {
+            excluded.push(format!("{} (no price)", h.symbol));
+            continue;
+        };
+        let Some(value_base) = val.to_base(&h.symbol, h.shares * price) else {
+            excluded.push(format!("{} (no exchange rate)", h.symbol));
+            continue;
+        };
+        let dy = q.dividend_yield_fraction().unwrap_or(0.0);
+        let annual_per_share = dy * price;
+        rows.push(DivRow {
+            symbol: h.symbol.clone(),
+            currency: val.currency(&h.symbol),
+            yield_frac: dy,
+            annual_per_share,
+            income: h.shares * annual_per_share,
+            value_base,
+            income_base: value_base * dy,
+        });
     }
-    payers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut payers: Vec<&DivRow> = rows.iter().filter(|r| r.yield_frac > 0.001).collect();
+    payers.sort_by(|a, b| b.yield_frac.total_cmp(&a.yield_frac));
 
     if payers.is_empty() {
-        println!("  {}", "No dividend-paying stocks found.".dimmed());
-        return Ok(());
-    }
-
-    let csym = market.currency_symbol();
-    println!(
-        "  {:<14} {:>8} {:>12} {:>14}",
-        "Symbol".bold(),
-        "Yield".bold(),
-        "Annual/Sh".bold(),
-        "Income/₹1L".bold()
-    );
-    println!("  {}", "─".repeat(52).dimmed());
-
-    let mut total_yield_weighted = 0.0;
-    for (sym, dy, price, _cur) in &payers {
-        let annual = dy * price;
-        let income_1l = 100000.0 * dy;
+        println!("  {}", "No dividend-paying holdings found.".dimmed());
+    } else {
         println!(
-            "  {:<14} {:>8} {:>12} {:>14}",
-            sym.cyan(),
-            format!("{:.2}%", dy * 100.0).green(),
-            format!("{}{:.2}", csym, annual),
-            format!("{}{:.0}/yr", csym, income_1l)
+            "  {:<14} {:>8} {:>14} {:>16}",
+            "Symbol".bold(),
+            "Yield".bold(),
+            "Annual/Sh".bold(),
+            "Income/yr".bold()
         );
-        total_yield_weighted += dy;
+        println!("  {}", "─".repeat(56).dimmed());
+        for r in &payers {
+            let cur = r.currency.as_deref();
+            println!(
+                "  {:<14} {:>8} {:>14} {:>16}",
+                r.symbol.cyan(),
+                format!("{:.2}%", r.yield_frac * 100.0).green(),
+                format_price(r.annual_per_share, cur),
+                format_price(r.income, cur),
+            );
+        }
     }
 
     print_section("Portfolio Dividend Summary");
-    let avg_yield = if !payers.is_empty() {
-        total_yield_weighted / payers.len() as f64
-    } else {
-        0.0
-    };
-    print_kv(
-        "Dividend Payers",
-        &format!("{}/{}", payers.len(), all.len()),
+    let weighted = weighted_yield(
+        &rows
+            .iter()
+            .map(|r| (r.value_base, r.income_base))
+            .collect::<Vec<_>>(),
     );
-    print_kv("Avg Yield", &format!("{:.2}%", avg_yield * 100.0));
+    let income_base: f64 = rows.iter().map(|r| r.income_base).sum();
     print_kv(
-        "Income on ₹10L",
-        &format!(
-            "{}{:.0}/year ({}{:.0}/month)",
-            csym,
-            1000000.0 * avg_yield,
-            csym,
-            1000000.0 * avg_yield / 12.0
-        ),
+        "Dividend payers",
+        &format!("{}/{}", payers.len(), portfolio.holdings.len()),
     );
+    if let Some(y) = weighted {
+        print_kv(
+            "Yield (value-weighted)",
+            &format!("{:.2}% of the priced holdings' value", y * 100.0),
+        );
+        print_kv(
+            &format!("Yearly income ({base})"),
+            &format!(
+                "{} ({} a month), at trailing yields",
+                format_price(income_base, Some(&base)),
+                format_price(income_base / 12.0, Some(&base))
+            ),
+        );
+    }
+    if !excluded.is_empty() {
+        println!("  {} Left out: {}", "!".yellow(), excluded.join(", "));
+    }
+    if let Some(note) = val.fx_note() {
+        println!("  {}", note.dimmed());
+    }
     println!();
     Ok(())
 }
@@ -2721,7 +2761,25 @@ fn print_dividends_received(portfolio: &Portfolio) {
 
 // ── Portfolio Correlation Dashboard ──
 
-pub async fn cmd_pcorr(_market: Market) -> Result<()> {
+/// Value-weighted average correlation between different holdings:
+/// Σ wᵢwⱼρᵢⱼ / Σ wᵢwⱼ over the pairs with a correlation (i ≠ j).
+fn weighted_avg_correlation(weights: &[f64], corr: &[Vec<Option<f64>>]) -> Option<f64> {
+    let (mut num, mut den) = (0.0, 0.0);
+    for (i, wi) in weights.iter().enumerate() {
+        for (j, wj) in weights.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            if let Some(c) = corr.get(i).and_then(|r| r.get(j)).copied().flatten() {
+                num += wi * wj * c;
+                den += wi * wj;
+            }
+        }
+    }
+    (den > 0.0).then(|| num / den)
+}
+
+pub async fn cmd_pcorr(market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.len() < 2 {
         println!("\n  {}", "Need 2+ holdings for correlation.".dimmed());
@@ -2729,41 +2787,69 @@ pub async fn cmd_pcorr(_market: Market) -> Result<()> {
     }
 
     let client = YahooClient::new().await?;
-    let mut all_closes: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> = Vec::new();
+    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    let portfolio = pending.adjusted(&portfolio);
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    let val = value_holdings(&client, &symbols, market, None).await?;
+    let mut all_closes: Vec<(String, Vec<(chrono::NaiveDate, f64)>, f64)> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
     for h in &portfolio.holdings {
-        if let Ok(chart) = client.get_chart(&h.symbol, "6mo", "1d").await {
-            let closes = chart.dated_closes();
-            if closes.len() > 20 {
-                all_closes.push((h.symbol.clone(), closes));
+        let Some(weight) = val
+            .price(&h.symbol)
+            .and_then(|p| val.to_base(&h.symbol, h.shares * p))
+        else {
+            excluded.push(format!("{} (no price or exchange rate)", h.symbol));
+            continue;
+        };
+        match client.get_chart(&h.symbol, "6mo", "1d").await {
+            Ok(chart) => {
+                let closes = chart.dated_closes();
+                if closes.len() > 20 {
+                    all_closes.push((h.symbol.clone(), closes, weight));
+                } else {
+                    excluded.push(format!("{} (under 20 days of prices)", h.symbol));
+                }
             }
+            Err(_) => excluded.push(format!("{} (no price history)", h.symbol)),
         }
     }
 
     if all_closes.len() < 2 {
         println!("  {}", "Not enough data.".dimmed());
+        if !excluded.is_empty() {
+            println!("  {} Left out: {}", "!".yellow(), excluded.join(", "));
+        }
         return Ok(());
     }
 
     print_header("Portfolio Correlation (6M)");
     print!("  {:<12}", "");
-    for (sym, _) in &all_closes {
+    for (sym, ..) in &all_closes {
         print!(" {:>10}", sym.cyan());
     }
     println!();
     println!("  {}", "─".repeat(12 + all_closes.len() * 11).dimmed());
 
+    let n = all_closes.len();
+    let mut matrix: Vec<Vec<Option<f64>>> = vec![vec![None; n]; n];
     let mut high_corr_pairs = Vec::new();
-    for (i, (sym_a, ca)) in all_closes.iter().enumerate() {
+    for (i, (sym_a, ca, _)) in all_closes.iter().enumerate() {
         print!("  {:<12}", sym_a.cyan());
-        for (j, (sym_b, cb)) in all_closes.iter().enumerate() {
+        for (j, (sym_b, cb, _)) in all_closes.iter().enumerate() {
             if i == j {
                 print!(" {:>10}", "1.000".bold());
             } else {
-                // Too few shared dates to compare: say so, not 0.000.
+                // Returns over the dates both traded: too few shared dates
+                // to compare is N/A, not 0.000.
                 let Some(corr) = technical::dated_correlation(ca, cb) else {
                     print!(" {:>10}", "N/A".dimmed());
                     continue;
                 };
+                matrix[i][j] = Some(corr);
                 if corr > 0.7 && i < j {
                     high_corr_pairs.push((sym_a.clone(), sym_b.clone(), corr));
                 }
@@ -2780,22 +2866,62 @@ pub async fn cmd_pcorr(_market: Market) -> Result<()> {
         println!();
     }
 
-    if !high_corr_pairs.is_empty() {
-        print_section("Diversification Warning");
-        for (a, b, c) in &high_corr_pairs {
-            println!(
-                "  {} {} + {} correlation {:.2} — consider reducing one",
-                "⚠".yellow(),
-                a.cyan(),
-                b.cyan(),
-                c
-            );
-        }
+    let weights: Vec<f64> = all_closes.iter().map(|c| c.2).collect();
+    print_section("Summary");
+    if let Some(avg) = weighted_avg_correlation(&weights, &matrix) {
+        print_kv(
+            "Average correlation (value-weighted)",
+            &format!("{:.2}", avg),
+        );
+    }
+    if high_corr_pairs.is_empty() {
+        println!("  {} No pair has a correlation above 0.7.", "·".dimmed());
     } else {
-        println!("\n  {} Portfolio is well-diversified.", "✓".green());
+        println!("  Pairs with a correlation above 0.7 (they tended to move together):");
+        for (a, b, c) in &high_corr_pairs {
+            println!("  {} {} + {}: {:.2}", "·".dimmed(), a.cyan(), b.cyan(), c);
+        }
+    }
+    if !excluded.is_empty() {
+        println!("  {} Left out: {}", "!".yellow(), excluded.join(", "));
     }
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod divcal_pcorr_tests {
+    use super::*;
+
+    #[test]
+    fn divcal_yield_is_weighted_by_value() {
+        // ₹9,00,000 at 1% and ₹1,00,000 at 5%: 1.4%, not the plain average 3%.
+        let y = weighted_yield(&[(900_000.0, 9_000.0), (100_000.0, 5_000.0)]).unwrap();
+        assert!((y - 0.014).abs() < 1e-12);
+        // A holding paying nothing still counts in the value.
+        let y = weighted_yield(&[(500_000.0, 10_000.0), (500_000.0, 0.0)]).unwrap();
+        assert!((y - 0.01).abs() < 1e-12);
+        assert_eq!(weighted_yield(&[]), None);
+    }
+
+    #[test]
+    fn pcorr_average_is_weighted_and_skips_missing_pairs() {
+        let m = vec![
+            vec![None, Some(0.9), Some(0.1)],
+            vec![Some(0.9), None, None],
+            vec![Some(0.1), None, None],
+        ];
+        // Weights 0.8 / 0.1 / 0.1: (0.8·0.1·0.9 + 0.8·0.1·0.1)·2 / (0.08+0.08)·2 = 0.5.
+        let avg = weighted_avg_correlation(&[0.8, 0.1, 0.1], &m).unwrap();
+        assert!((avg - 0.5).abs() < 1e-12);
+        // Weights tilted to the first pair pull it up.
+        let avg = weighted_avg_correlation(&[0.5, 0.45, 0.05], &m).unwrap();
+        assert!(avg > 0.8);
+        assert_eq!(
+            weighted_avg_correlation(&[1.0, 1.0], &[vec![None; 2], vec![None; 2]]),
+            None
+        );
+    }
 }
 
 // ── Returns Calculator ──

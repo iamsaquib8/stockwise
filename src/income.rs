@@ -3,7 +3,8 @@
 //! Computes:
 //! - Trailing 12-month received cashflows and forward N-month projected income.
 //! - Per-holding and per-lot Yield-on-Cost (YoC) vs Current Market Yield.
-//! - Withholding tax (WHT/TDS) and Net Spendable Income.
+//! - Withholding tax (WHT/TDS) and Net Spendable Income. Indian TDS only
+//!   above ₹10,000 per company per financial year; none on SGB interest.
 //! - Factual Dividend Sustainability & Payout Safety check (FCF coverage & payout ratio).
 //! - Semi-annual coupons for Sovereign Gold Bonds (SGB 2.5% p.a.) and fixed-coupon bonds.
 
@@ -16,9 +17,14 @@ use serde::{Deserialize, Serialize};
 /// Default projection period in months.
 pub const DEFAULT_FORECAST_MONTHS: u32 = 12;
 
-/// Standard withholding tax / TDS rate on dividend income.
-/// In India, Section 194 / 194K mandates 10% TDS on dividends above ₹5,000.
+/// TDS rate on Indian dividends (Section 194 / 194K), once a company's
+/// dividends to one shareholder in a financial year pass
+/// [`INDIA_TDS_THRESHOLD`].
 pub const DEFAULT_INDIA_TDS_RATE: f64 = 0.10;
+
+/// Dividends from one company in one financial year (April–March) up to
+/// this amount have no TDS (₹10,000 from FY 2025-26; ₹5,000 before).
+pub const INDIA_TDS_THRESHOLD: f64 = 10_000.0;
 
 /// Standard foreign withholding tax rate on US dividends (without treaty relief / default).
 pub const DEFAULT_US_WHT_RATE: f64 = 0.25;
@@ -131,6 +137,10 @@ pub struct IncomeReport {
     pub monthly_schedule: Vec<MonthlyCashflow>,
     pub holdings: Vec<IncomeHoldingSummary>,
     pub payout_warnings: Vec<String>,
+    /// Holdings left out of the report: no live price (never valued at
+    /// their purchase price).
+    #[serde(default)]
+    pub excluded: Vec<String>,
 }
 
 /// Input holding data for computing income analytics.
@@ -154,13 +164,52 @@ pub fn is_sgb(symbol: &str) -> bool {
     s.starts_with("SGB")
 }
 
+/// The SGB tranche `symbol` names (`SGBMAY29`, `SGBMAY29.NS`), from the
+/// shipped tranche table.
+pub fn sgb_tranche(symbol: &str) -> Option<&'static crate::commodity::Tranche> {
+    let clean = symbol.trim().to_uppercase();
+    let s = clean
+        .strip_suffix(".NS")
+        .or_else(|| clean.strip_suffix(".BO"))
+        .unwrap_or(&clean);
+    crate::commodity::SGB_TRANCHES
+        .iter()
+        .find(|t| t.symbol.eq_ignore_ascii_case(s))
+}
+
+/// Whether a dividend is Indian (TDS rules apply).
+fn is_indian(symbol: &str, currency: Option<&str>) -> bool {
+    currency.is_some_and(|c| c.eq_ignore_ascii_case("INR"))
+        || symbol.ends_with(".NS")
+        || symbol.ends_with(".BO")
+}
+
+/// Whether Indian TDS is deducted on a company's dividends to one
+/// shareholder that add up to `fy_total` (in rupees) in a financial year.
+pub fn india_tds_applies(fy_total: f64) -> bool {
+    fy_total > INDIA_TDS_THRESHOLD
+}
+
+/// The Indian financial year (starting year) `date` falls in: April–March.
+pub fn india_fy(date: NaiveDate) -> i32 {
+    if date.month() >= 4 {
+        date.year()
+    } else {
+        date.year() - 1
+    }
+}
+
 /// Calculate standard withholding tax rate (percentage) based on currency / symbol.
 ///
-/// Returns 10% flat TDS for Indian dividends (Section 194),
-/// 25% flat withholding tax for US foreign dividends, and 0% for other currencies.
+/// Returns 10% TDS for Indian dividends (Section 194; whether it applies
+/// depends on the ₹10,000 yearly threshold, see [`india_tds_applies`]), 0%
+/// for SGB interest (no TDS is deducted on it), 25% withholding for US
+/// dividends, and 0% for other currencies.
 pub fn standard_wht_rate(symbol: &str, currency: Option<&str>) -> f64 {
     let cur = currency.unwrap_or("");
-    if cur.eq_ignore_ascii_case("INR") || symbol.ends_with(".NS") || symbol.ends_with(".BO") {
+    if is_sgb(symbol) {
+        0.0
+    } else if is_indian(symbol, currency) {
         DEFAULT_INDIA_TDS_RATE * 100.0
     } else if cur.eq_ignore_ascii_case("USD")
         || (!symbol.contains('.') && (cur.is_empty() || cur.eq_ignore_ascii_case("USD")))
@@ -191,10 +240,14 @@ pub fn assemble_holdings_data<'a>(
             })
         });
 
-        let current_price = q_opt
+        // No live price: left out (and named in the report), never valued
+        // at its purchase price, which may be in another currency.
+        let Some(current_price) = q_opt
             .and_then(|q| q.regular_market_price)
             .filter(|p| *p > 0.0)
-            .unwrap_or(holding.avg_cost);
+        else {
+            continue;
+        };
 
         let div_yield_frac = q_opt
             .and_then(|q| q.dividend_yield_fraction())
@@ -219,6 +272,7 @@ pub fn assemble_holdings_data<'a>(
             fcf: None,
             currency: q_opt
                 .and_then(|q| q.currency.as_deref())
+                .or_else(|| crate::portfolio::symbol_currency(&holding.symbol))
                 .or(Some(base_currency)),
         });
     }
@@ -291,12 +345,12 @@ pub fn compute_holding_summary(data: &HoldingIncomeData<'_>) -> IncomeHoldingSum
     let cost_basis = holding.cost_basis();
 
     let annual_div_per_share = if is_sgb(&holding.symbol) {
-        // SGB pays 2.5% p.a. on nominal issue price (~2500 per gram or cost)
-        let nominal = if avg_cost > 0.0 {
-            avg_cost
-        } else {
-            current_price
-        };
+        // SGB interest is 2.5% a year on the issue price, whatever was paid
+        // for the bond later. Without the tranche, the purchase price (an
+        // original subscription paid the issue price); never the market price.
+        let nominal = sgb_tranche(&holding.symbol)
+            .map(|t| t.issue_price)
+            .unwrap_or(avg_cost);
         nominal * SGB_ANNUAL_COUPON_RATE
     } else {
         data.annual_dividend_per_share
@@ -314,7 +368,10 @@ pub fn compute_holding_summary(data: &HoldingIncomeData<'_>) -> IncomeHoldingSum
         0.0
     };
 
-    let wht_rate = standard_wht_rate(&holding.symbol, data.currency);
+    let mut wht_rate = standard_wht_rate(&holding.symbol, data.currency);
+    if is_indian(&holding.symbol, data.currency) && !india_tds_applies(annual_gross) {
+        wht_rate = 0.0;
+    }
     let annual_wht = annual_gross * (wht_rate / 100.0);
     let annual_net = annual_gross - annual_wht;
 
@@ -397,8 +454,30 @@ pub fn build_monthly_schedule(
 ) -> (Vec<MonthlyCashflow>, f64, f64, f64, f64, f64, f64) {
     let mut schedule: Vec<MonthlyCashflow> = Vec::new();
 
-    // 1. Trailing 12 months (actual received dividends recorded in portfolio.dividends)
-    let start_trailing = today.checked_sub_months(Months::new(12)).unwrap_or(today);
+    // 1. Trailing 12 months, the current one included (actual received
+    // dividends recorded in portfolio.dividends, up to today).
+    let start_trailing = today.checked_sub_months(Months::new(11)).unwrap_or(today);
+    let today_s = today.to_string();
+    // Indian TDS applies per company per financial year, once its dividends
+    // pass the threshold: add them up first (in rupees).
+    let mut fy_totals: std::collections::HashMap<(String, i32), f64> = Default::default();
+    for d in &portfolio.dividends {
+        let cur = d.currency.as_deref().or(Some(base_currency));
+        if let (true, Ok(day)) = (
+            is_indian(&d.symbol, cur),
+            NaiveDate::parse_from_str(&d.ex_date, "%Y-%m-%d"),
+        ) {
+            *fy_totals
+                .entry((d.symbol.clone(), india_fy(day)))
+                .or_default() += d.amount;
+        }
+    }
+    let tds_applies = |symbol: &str, ex_date: &str| {
+        NaiveDate::parse_from_str(ex_date, "%Y-%m-%d")
+            .ok()
+            .and_then(|day| fy_totals.get(&(symbol.to_string(), india_fy(day))))
+            .is_some_and(|t| india_tds_applies(*t))
+    };
 
     let mut trailing_gross = 0.0;
     let mut trailing_wht = 0.0;
@@ -417,10 +496,13 @@ pub fn build_monthly_schedule(
         let mut m_wht = 0.0;
 
         for d in &portfolio.dividends {
-            if d.ex_date.starts_with(&ym) {
+            if d.ex_date.starts_with(&ym) && d.ex_date.as_str() <= today_s.as_str() {
                 let cur = d.currency.as_deref().or(Some(base_currency));
                 if let Some(gross) = to_base(fx, d.amount, cur, base_currency) {
-                    let wht_rate = standard_wht_rate(&d.symbol, cur);
+                    let mut wht_rate = standard_wht_rate(&d.symbol, cur);
+                    if is_indian(&d.symbol, cur) && !tds_applies(&d.symbol, &d.ex_date) {
+                        wht_rate = 0.0;
+                    }
                     let wht = gross * (wht_rate / 100.0);
                     let net = gross - wht;
                     m_gross += gross;
@@ -458,7 +540,8 @@ pub fn build_monthly_schedule(
     let mut proj_total_wht = 0.0;
     let mut proj_total_net = 0.0;
 
-    for m in 0..forecast_months {
+    // The current month is in the trailing part: the forecast starts with the next.
+    for m in 1..=forecast_months {
         let fwd_date = today.checked_add_months(Months::new(m)).unwrap_or(today);
         let ym = format!("{:04}-{:02}", fwd_date.year(), fwd_date.month());
         let label = fwd_date.format("%b %Y").to_string();
@@ -476,7 +559,11 @@ pub fn build_monthly_schedule(
             // SGB pays half-yearly in May and Nov (or every 6 months);
             // General equity stocks distributed monthly (1/12th)
             let (applies, portion, kind) = if is_sgb(&h.symbol) {
-                let is_coupon_month = fwd_date.month() == 5 || fwd_date.month() == 11;
+                // Interest is paid every six months from the issue date
+                // (May and November when the tranche is unknown).
+                let first = sgb_tranche(&h.symbol).map_or(5, |t| t.issue_date().month());
+                let second = (first + 5) % 12 + 1;
+                let is_coupon_month = fwd_date.month() == first || fwd_date.month() == second;
                 (is_coupon_month, 0.5, "Coupon (SGB 2.5%)")
             } else {
                 (true, 1.0 / 12.0, "Dividend (Projected)")
@@ -541,6 +628,24 @@ pub fn generate_income_report(
 ) -> IncomeReport {
     let mut summaries = Vec::with_capacity(holdings_data.len());
     let mut payout_warnings = Vec::new();
+    let excluded: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| {
+            !holdings_data
+                .iter()
+                .any(|d| d.holding.symbol.eq_ignore_ascii_case(&h.symbol))
+        })
+        .map(|h| h.symbol.clone())
+        .collect();
+    for d in holdings_data {
+        if is_sgb(&d.holding.symbol) && sgb_tranche(&d.holding.symbol).is_none() {
+            payout_warnings.push(format!(
+                "{}: issue price not known; interest estimated on the purchase price",
+                d.holding.symbol
+            ));
+        }
+    }
 
     let mut total_market_value = 0.0;
     let mut total_cost_basis = 0.0;
@@ -635,6 +740,7 @@ pub fn generate_income_report(
         monthly_schedule,
         holdings: summaries,
         payout_warnings,
+        excluded,
     }
 }
 
@@ -747,8 +853,9 @@ mod tests {
         assert!((summary.current_yield_pct - 3.0).abs() < 1e-4);
         assert!((summary.yoc_pct - 5.0).abs() < 1e-4);
         assert_eq!(summary.annual_gross_income, 3000.0);
-        assert_eq!(summary.annual_wht_amount, 300.0); // 10% TDS
-        assert_eq!(summary.annual_net_income, 2700.0);
+        // ₹3,000 a year from one company is under the ₹10,000 TDS threshold.
+        assert_eq!(summary.annual_wht_amount, 0.0);
+        assert_eq!(summary.annual_net_income, 3000.0);
 
         assert_eq!(summary.lots_yoc.len(), 2);
         assert!((summary.lots_yoc[0].yoc_pct - 7.5).abs() < 1e-4);
@@ -773,10 +880,132 @@ mod tests {
         };
 
         let summary = compute_holding_summary(&data);
-        // SGB 2.5% on cost 5000 = 125/unit/year
+        // Unknown tranche: 2.5% on the purchase price 5000 = 125/unit/year
         assert_eq!(summary.annual_dividend_per_share, 125.0);
         assert_eq!(summary.annual_gross_income, 1250.0);
         assert!((summary.yoc_pct - 2.5).abs() < 1e-4);
+        // No TDS on SGB interest.
+        assert_eq!(summary.annual_wht_amount, 0.0);
+    }
+
+    #[test]
+    fn sgb_interest_is_on_the_issue_price_not_the_market_or_purchase_price() {
+        // SGBJUN27: 2019-20 Series I, issued 11 Jun 2019 at ₹3,196.
+        let h = make_test_holding("SGBJUN27.NS", vec![(100.0, 6000.0, "2023-01-10")]);
+        let data = HoldingIncomeData {
+            holding: &h,
+            current_price: 9000.0,
+            annual_dividend_per_share: 0.0,
+            payout_ratio: None,
+            fcf: None,
+            currency: Some("INR"),
+        };
+        let summary = compute_holding_summary(&data);
+        assert!((summary.annual_dividend_per_share - 3196.0 * 0.025).abs() < 1e-9);
+        assert!((summary.annual_gross_income - 7990.0).abs() < 1e-6);
+        assert_eq!(summary.wht_rate_pct, 0.0);
+        // Paid in June and December, the issue month and six months on.
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let report = generate_income_report(&Portfolio::default(), &[data], "INR", None, today, 12);
+        let paid: Vec<&str> = report
+            .monthly_schedule
+            .iter()
+            .filter(|m| m.is_projected && m.gross_amount > 0.0)
+            .map(|m| m.month.as_str())
+            .collect();
+        assert_eq!(paid, vec!["2026-12", "2027-06"]);
+    }
+
+    #[test]
+    fn indian_tds_only_above_ten_thousand_per_company_per_year() {
+        assert!(!india_tds_applies(10_000.0));
+        assert!(india_tds_applies(10_000.01));
+        assert_eq!(
+            india_fy(NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()),
+            2025
+        );
+        assert_eq!(india_fy(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()), 2026);
+
+        // Projected: ₹12,000 a year passes the threshold, 10% deducted.
+        let big = make_test_holding("ITC.NS", vec![(1000.0, 300.0, "2020-01-15")]);
+        let data = HoldingIncomeData {
+            holding: &big,
+            current_price: 400.0,
+            annual_dividend_per_share: 12.0,
+            payout_ratio: None,
+            fcf: None,
+            currency: Some("INR"),
+        };
+        let s = compute_holding_summary(&data);
+        assert!((s.annual_wht_amount - 1200.0).abs() < 1e-9);
+
+        // Received: two TCS dividends of ₹6,000 in one FY add up past the
+        // threshold; one INFY dividend of ₹6,000 does not.
+        let mut p = Portfolio::default();
+        for (sym, date) in [
+            ("TCS.NS", "2026-05-15"),
+            ("TCS.NS", "2026-10-15"),
+            ("INFY.NS", "2026-06-15"),
+        ] {
+            p.dividends.push(DividendReceived {
+                symbol: sym.into(),
+                ex_date: date.into(),
+                per_share: 60.0,
+                qty: 100.0,
+                amount: 6000.0,
+                currency: Some("INR".into()),
+            });
+        }
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let report = generate_income_report(&p, &[], "INR", None, today, 12);
+        assert!((report.trailing_12m_gross - 18_000.0).abs() < 1e-9);
+        assert!((report.trailing_12m_wht - 1200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_current_month_is_in_the_trailing_year_and_not_projected_twice() {
+        let mut p = Portfolio::default();
+        p.dividends.push(DividendReceived {
+            symbol: "TCS.NS".into(),
+            ex_date: "2026-11-03".into(),
+            per_share: 10.0,
+            qty: 50.0,
+            amount: 500.0,
+            currency: Some("INR".into()),
+        });
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let report = generate_income_report(&p, &[], "INR", None, today, 12);
+        assert!((report.trailing_12m_gross - 500.0).abs() < 1e-9);
+        let months: Vec<(&str, bool)> = report
+            .monthly_schedule
+            .iter()
+            .map(|m| (m.month.as_str(), m.is_projected))
+            .collect();
+        assert_eq!(months.first(), Some(&("2025-12", false)));
+        assert!(months.contains(&("2026-11", false)));
+        assert!(!months.contains(&("2026-11", true)));
+        assert_eq!(months.iter().filter(|m| m.1).count(), 12);
+        assert_eq!(months.last(), Some(&("2027-11", true)));
+    }
+
+    #[test]
+    fn a_holding_without_a_price_is_excluded_not_valued_at_cost() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", Lot::new(10.0, 150.0, "2024-01-10", "manual"));
+        p.add_lot("ITC.NS", Lot::new(100.0, 200.0, "2024-01-10", "manual"));
+        let mut q = Quote::default();
+        q.symbol = Some("ITC.NS".into());
+        q.regular_market_price = Some(400.0);
+        q.currency = Some("INR".into());
+        let quotes = vec![q];
+        let resolved = vec!["AAPL".to_string(), "ITC.NS".to_string()];
+        let data = assemble_holdings_data(&p, &quotes, &resolved, "INR");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].holding.symbol, "ITC.NS");
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let report = generate_income_report(&p, &data, "INR", None, today, 12);
+        assert_eq!(report.excluded, vec!["AAPL".to_string()]);
+        assert!((report.portfolio_cost_basis - 20_000.0).abs() < 1e-9);
     }
 
     #[test]
@@ -834,16 +1063,17 @@ mod tests {
         assert!((report.portfolio_cost_basis - 150_000.0).abs() < 1e-4);
         assert!((report.portfolio_market_value - 175_000.0).abs() < 1e-4);
         assert!((report.projected_annual_gross - 2000.0).abs() < 1e-4); // 50 * 40
-        assert!((report.projected_annual_wht - 200.0).abs() < 1e-4); // 10%
-        assert!((report.projected_annual_net - 1800.0).abs() < 1e-4);
+        // Under the ₹10,000 threshold: no TDS.
+        assert!((report.projected_annual_wht - 0.0).abs() < 1e-4);
+        assert!((report.projected_annual_net - 2000.0).abs() < 1e-4);
         assert!((report.portfolio_yoc_pct - (2000.0 / 150_000.0 * 100.0)).abs() < 1e-4);
-        assert!((report.portfolio_net_yield_pct - (1800.0 / 150_000.0 * 100.0)).abs() < 1e-4);
-        assert!((report.holdings[0].net_yield_pct - (1800.0 / 150_000.0 * 100.0)).abs() < 1e-4);
+        assert!((report.portfolio_net_yield_pct - (2000.0 / 150_000.0 * 100.0)).abs() < 1e-4);
+        assert!((report.holdings[0].net_yield_pct - (2000.0 / 150_000.0 * 100.0)).abs() < 1e-4);
 
         // Trailing 12M received should contain the May 2026 dividend
         assert!((report.trailing_12m_gross - 500.0).abs() < 1e-4);
-        assert!((report.trailing_12m_wht - 50.0).abs() < 1e-4);
-        assert!((report.trailing_12m_net - 450.0).abs() < 1e-4);
+        assert!((report.trailing_12m_wht - 0.0).abs() < 1e-4);
+        assert!((report.trailing_12m_net - 500.0).abs() < 1e-4);
     }
 
     #[test]
