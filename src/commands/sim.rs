@@ -80,6 +80,7 @@ pub async fn cmd_sim(
             let costs = crate::simulator::paper_cost_model(market.id());
             let limits = intraday::PlanLimits {
                 track_record: history.track_record(market.id()),
+                costs: Some(costs.clone()),
                 ..intraday::PlanLimits::default()
             };
             let (risk_pct, kelly) = limits.risk_pct();
@@ -387,11 +388,11 @@ fn settle_charges(
 const MIN_RATED_DAYS: usize = 20;
 
 /// A rating of the paper record from settled sessions: `high`, `moderate`
-/// or `low`. `None` until there are [`MIN_RATED_DAYS`] days and
+/// or `low`. `None` until there are [`MIN_RATED_DAYS`] distinct dates and
 /// [`crate::simulator::MIN_TRADES_FOR_KELLY`] trades: a week of results says
 /// almost nothing about an intraday system.
 fn sim_confidence(stats: &crate::simulator::SimStats) -> Option<&'static str> {
-    if stats.total_days < MIN_RATED_DAYS
+    if stats.distinct_days < MIN_RATED_DAYS
         || (stats.total_trades as usize) < crate::simulator::MIN_TRADES_FOR_KELLY
     {
         None
@@ -443,6 +444,8 @@ pub(crate) fn sim_history_json(
             "trade_win_rate_percent": round(stats.trade_win_rate, 2),
             "sharpe": round_opt(stats.sharpe, 3),
             "charges": round(stats.total_charges, 2),
+            "distinct_days": stats.distinct_days,
+            "gross_trades": stats.gross_trades,
             "max_win_streak": stats.max_win_streak,
             "max_loss_streak": stats.max_loss_streak,
         },
@@ -561,9 +564,17 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
         "Max Loss Streak",
         &format!("{} days", stats.max_loss_streak),
     );
+    let charges_note = if stats.gross_trades == 0 {
+        "P&L is after them".to_string()
+    } else {
+        format!(
+            "{} trade(s) settled before 0.9 are gross, without charges",
+            stats.gross_trades
+        )
+    };
     print_kv(
         "Charges Paid",
-        &format!("{}{:.0} (P&L is after them)", csym, stats.total_charges),
+        &format!("{}{:.0} ({})", csym, stats.total_charges, charges_note),
     );
     if let Some(s) = stats.sharpe {
         print_kv("Sharpe (ann.)", &format!("{:.2}", s));
@@ -580,7 +591,7 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
             "moderate" => "MODERATE — profitable on paper but inconsistent."
                 .yellow()
                 .to_string(),
-            _ => "LOW — the paper record is not profitable."
+            _ => "LOW — the paper record does not meet the higher rating criteria."
                 .red()
                 .to_string(),
         };
@@ -591,7 +602,7 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
             "→".dimmed(),
             MIN_RATED_DAYS,
             crate::simulator::MIN_TRADES_FOR_KELLY,
-            stats.total_days,
+            stats.distinct_days,
             stats.total_trades
         );
     }
@@ -919,6 +930,54 @@ pub fn cmd_sim_reset(yes: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rating_counts_distinct_dates_not_sessions() {
+        // Twenty settled sessions on one date (settle --now, start again):
+        // one day of evidence, no rating.
+        let mut h = SimHistory::default();
+        for _ in 0..20 {
+            h.sessions.push(SimSession {
+                date: "2026-11-20".into(),
+                market: "IN".into(),
+                capital: 25000.0,
+                target_pct: 2.0,
+                trades: vec![
+                    SimTrade {
+                        symbol: "T.NS".into(),
+                        direction: "long".into(),
+                        entry_price: 100.0,
+                        target1: 101.0,
+                        target2: 102.0,
+                        stop_loss: 98.0,
+                        qty: 1,
+                        capital: 100.0,
+                        score: 70.0,
+                        confidence: "HIGH".into(),
+                        strategies: vec![],
+                        entered_at: None,
+                        trail_distance: None,
+                        charges: Some(0.1),
+                        exit_price: Some(102.0),
+                        pnl: Some(1.9),
+                        pnl_pct: Some(1.9),
+                        hit_target: Some(true),
+                        hit_stop: Some(false),
+                    };
+                    2
+                ],
+                total_pnl: Some(3.8),
+                total_pnl_pct: Some(0.02),
+                win_count: Some(2),
+                loss_count: Some(0),
+                settled: true,
+            });
+        }
+        let stats = h.stats("IN");
+        assert_eq!((stats.total_days, stats.distinct_days), (20, 1));
+        assert_eq!(stats.total_trades, 40);
+        assert_eq!(sim_confidence(&stats), None);
+    }
 
     #[test]
     fn daily_bar_scales_to_the_biggest_day() {

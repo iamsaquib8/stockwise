@@ -235,6 +235,16 @@ impl SimHistory {
     pub fn stats(&self, market: &str) -> SimStats {
         let settled: Vec<&SimSession> = self.in_market(market).filter(|s| s.settled).collect();
         let total_days = settled.len();
+        let distinct_days = settled
+            .iter()
+            .map(|s| s.date.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let gross_trades = settled
+            .iter()
+            .flat_map(|s| &s.trades)
+            .filter(|t| t.pnl.is_some() && t.charges.is_none())
+            .count() as u32;
         let winning_days = settled
             .iter()
             .filter(|s| s.total_pnl.unwrap_or(0.0) > 0.0)
@@ -283,6 +293,8 @@ impl SimHistory {
 
         SimStats {
             total_days,
+            distinct_days,
+            gross_trades,
             winning_days,
             total_pnl,
             avg_daily_pnl,
@@ -323,6 +335,9 @@ impl SimHistory {
             .in_market(market)
             .filter(|s| s.settled)
             .flat_map(|s| &s.trades)
+            // Only net-accounted results: trades settled before 0.9 carry a
+            // gross P&L (`charges` missing) and would flatter the record.
+            .filter(|t| t.charges.is_some())
             .filter_map(|t| t.pnl)
             .filter(|p| p.is_finite())
             .collect();
@@ -448,6 +463,7 @@ pub fn replay_trade(
             None => trade.stop_loss,
         },
         trail_distance: trade.trail_distance,
+        charges: None,
         qty: trade.qty,
         t1_booked: false,
         remaining_qty: trade.qty,
@@ -554,7 +570,13 @@ fn finish(pos: &LivePosition, time: DateTime<Utc>) -> Replay {
 
 #[derive(Debug)]
 pub struct SimStats {
+    /// Settled sessions.
     pub total_days: usize,
+    /// Distinct dates among the settled sessions.
+    pub distinct_days: usize,
+    /// Settled trades whose P&L is gross: settled before 0.9, without
+    /// charges recorded.
+    pub gross_trades: u32,
     pub winning_days: usize,
     pub total_pnl: f64,
     pub avg_daily_pnl: f64,
@@ -659,6 +681,8 @@ mod tests {
         h.sessions.push(make_session("2026-04-03", 300.0, 2, 2));
         let s = h.stats("IN");
         assert_eq!(s.total_days, 3);
+        assert_eq!(s.distinct_days, 3);
+        assert_eq!(s.gross_trades, 3);
         assert_eq!(s.winning_days, 2);
         assert!((s.total_pnl - 600.0).abs() < 0.01);
         assert!(s.day_win_rate > 60.0);
@@ -779,16 +803,21 @@ mod tests {
     #[test]
     fn track_record_needs_thirty_closed_trades() {
         let mut h = SimHistory::default();
+        let net = |date: &str, pnl: f64| {
+            let mut s = make_session(date, pnl, 0, 0);
+            s.trades[0].charges = Some(1.0);
+            s
+        };
         for i in 0..29 {
-            h.sessions.push(make_session(
-                "2026-04-01",
-                if i % 3 == 0 { -10.0 } else { 20.0 },
-                0,
-                0,
-            ));
+            h.sessions
+                .push(net("2026-04-01", if i % 3 == 0 { -10.0 } else { 20.0 }));
+        }
+        // Gross results from before 0.9 never count toward the net record.
+        for _ in 0..40 {
+            h.sessions.push(make_session("2026-03-01", 20.0, 1, 0));
         }
         assert_eq!(h.track_record("IN"), None);
-        h.sessions.push(make_session("2026-04-02", -10.0, 0, 0));
+        h.sessions.push(net("2026-04-02", -10.0));
         let tr = h.track_record("IN").unwrap();
         assert_eq!(tr.trades, 30);
         // 19 wins of 20 each, 11 losses of 10 each.
