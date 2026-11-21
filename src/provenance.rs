@@ -38,6 +38,11 @@ pub struct Meta {
     /// (RFC 3339, UTC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub as_of: Option<String>,
+    /// When the price history ends, when it is older than the quote: the
+    /// oldest last bar among the histories used (RFC 3339 date). Kept apart
+    /// from `as_of` so a fresh quote does not make stale history look fresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_as_of: Option<String>,
     /// Key fields no source could supply ("ROE", "D/E", ...).
     pub missing: Vec<String>,
     /// Sources that failed or data that is stale, in plain words.
@@ -141,6 +146,9 @@ impl Meta {
         let mut parts = vec![format!("Sources: {sources}")];
         if let Some(t) = self.as_of.as_deref().and_then(local_time) {
             parts.push(format!("as of {t}"));
+        }
+        if let Some(d) = self.history_as_of.as_deref().and_then(local_time) {
+            parts.push(format!("price history to {d}"));
         }
         if !self.missing.is_empty() {
             parts.push(format!("missing: {}", self.missing.join(", ")));
@@ -431,6 +439,17 @@ mod tests {
         );
         assert_eq!(m.coverage, 50.0);
         assert_eq!(m.field_sources.get(F_ROE).map(String::as_str), Some(EDGAR));
+    }
+
+    #[test]
+    fn footer_keeps_history_time_apart_from_quote_time() {
+        let mut m = Meta::from_source(YAHOO);
+        m.as_of = Some("2026-11-21".into());
+        m.history_as_of = Some("2026-11-10".into());
+        assert_eq!(
+            m.footer(),
+            "Sources: Yahoo Finance · as of 2026-11-21 · price history to 2026-11-10"
+        );
     }
 
     #[test]

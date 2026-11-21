@@ -477,3 +477,33 @@ fn margins_never_mix_quarterly_and_annual_windows() {
     };
     assert_eq!(no_year.ratios().profit_margin, None);
 }
+
+#[test]
+fn long_term_debt_with_current_total_but_no_portion_is_not_double_counted() {
+    let mut v: Value = serde_json::from_str(&calendar_filer()).unwrap();
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    let concept =
+        |val: f64| json!({"units": {"USD": [instant("2025-09-30", val, "10-Q", "2025-10-30")]}});
+    gaap.insert("StockholdersEquity".into(), concept(400.0));
+    // LongTermDebt 100 includes current maturities; DebtCurrent 30 holds
+    // those maturities (amount not reported) plus 12 of borrowings.
+    gaap.insert("LongTermDebt".into(), concept(100.0));
+    gaap.insert("DebtCurrent".into(), concept(30.0));
+    gaap.insert("ShortTermBorrowings".into(), concept(12.0));
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(112.0));
+
+    // With the current portion known (18), the current total replaces it.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.insert("LongTermDebtCurrent".into(), concept(18.0));
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(112.0));
+
+    // LongTermDebt alone stands as reported.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.remove("DebtCurrent");
+    gaap.remove("ShortTermBorrowings");
+    gaap.remove("LongTermDebtCurrent");
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, Some(100.0));
+}
