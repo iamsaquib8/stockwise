@@ -37,6 +37,8 @@
               ./web
               # The agent skill `stockwise connect` installs, embedded with include_str!.
               ./skills/stockwise/SKILL.md
+              # The scoring methodology the MCP server serves, embedded with include_str!.
+              ./docs/methodology.md
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
