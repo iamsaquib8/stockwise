@@ -803,6 +803,16 @@ enum Span<'a> {
 /// Daily history of `symbol` from Yahoo, with splits: share counts are in
 /// today's units and Yahoo's closes are split-adjusted.
 async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Result<History> {
+    let v = chart_json(client, symbol, span).await?;
+    history_from_json(v, symbol)
+}
+
+/// The raw Yahoo chart response for `symbol` (daily bars, splits).
+async fn chart_json(
+    client: &YahooClient,
+    symbol: &str,
+    span: Span<'_>,
+) -> Result<serde_json::Value> {
     let (from, to);
     let mut query = vec![("interval", "1d"), ("events", "splits")];
     match span {
@@ -826,7 +836,10 @@ async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Re
         Some(symbol),
         &query,
     );
-    let v = client.raw_get(&url).await?;
+    client.raw_get(&url).await
+}
+
+fn history_from_json(v: serde_json::Value, symbol: &str) -> Result<History> {
     let gmtoffset = v
         .pointer("/chart/result/0/meta/gmtoffset")
         .and_then(|o| o.as_i64())
@@ -839,6 +852,107 @@ async fn daily_history(client: &YahooClient, symbol: &str, span: Span<'_>) -> Re
         .and_then(|r| r.into_iter().next())
         .with_context(|| format!("No price history for {}", symbol))?;
     Ok(history_from_chart(data, gmtoffset))
+}
+
+/// Daily closes adjusted for dividends as well as splits (Yahoo's
+/// `adjclose`), dated like [`history_from_chart`]: a total-return series
+/// for an ETF that pays its dividends out. `None` without adjusted closes.
+fn adjusted_closes(v: &serde_json::Value) -> Option<Vec<(NaiveDate, f64)>> {
+    let r = v.pointer("/chart/result/0")?;
+    let gmtoffset = r
+        .pointer("/meta/gmtoffset")
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+    let stamps = r.get("timestamp")?.as_array()?;
+    let adj = r.pointer("/indicators/adjclose/0/adjclose")?.as_array()?;
+    let mut out: Vec<(NaiveDate, f64)> = Vec::new();
+    for (ts, c) in stamps.iter().zip(adj) {
+        let (Some(ts), Some(c)) = (ts.as_i64(), c.as_f64()) else {
+            continue;
+        };
+        if !c.is_finite() || c <= 0.0 {
+            continue;
+        }
+        let Some(day) =
+            chrono::DateTime::from_timestamp(ts + gmtoffset + 3 * 3600, 0).map(|d| d.date_naive())
+        else {
+            continue;
+        };
+        match out.last_mut() {
+            Some(last) if last.0 == day => last.1 = c,
+            _ => out.push((day, c)),
+        }
+    }
+    (out.len() >= 2).then_some(out)
+}
+
+/// Where a price index's total-return series comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TotalReturn {
+    /// A total-return index Yahoo carries (`^SP500TR`).
+    Index(&'static str),
+    /// No such index on Yahoo: the dividend-adjusted closes of an ETF that
+    /// tracks it (NIFTYBEES for NIFTY 50). It trails the index by the ETF's
+    /// expense ratio (about 0.04% a year for NIFTYBEES).
+    AdjustedEtf(&'static str),
+}
+
+impl TotalReturn {
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            TotalReturn::Index(s) | TotalReturn::AdjustedEtf(s) => s,
+        }
+    }
+
+    /// "S&P 500 TR", "NIFTY 50 TR (NIFTYBEES adjusted)".
+    pub(crate) fn label(self, index_name: &str) -> String {
+        match self {
+            TotalReturn::Index(_) => format!("{index_name} TR"),
+            TotalReturn::AdjustedEtf(s) => {
+                format!("{index_name} TR ({} adjusted)", s.trim_end_matches(".NS"))
+            }
+        }
+    }
+}
+
+/// The total-return series for a price index, when one can be had.
+pub(crate) fn total_return_source(symbol: &str) -> Option<TotalReturn> {
+    match symbol {
+        "^GSPC" => Some(TotalReturn::Index("^SP500TR")),
+        "^NDX" => Some(TotalReturn::Index("^XNDX")),
+        "^DJI" => Some(TotalReturn::Index("^DJITR")),
+        "^NSEI" => Some(TotalReturn::AdjustedEtf("NIFTYBEES.NS")),
+        "^NSEBANK" => Some(TotalReturn::AdjustedEtf("BANKBEES.NS")),
+        _ => None,
+    }
+}
+
+/// Whether a total-return series reaches back to `since` (within the
+/// lookup slack of a few holidays): a series that starts later would price
+/// the early flows at its first close.
+fn covers_since(closes: &[(NaiveDate, f64)], since: NaiveDate) -> bool {
+    closes.len() >= 2 && closes[0].0 <= since + chrono::Days::new(10)
+}
+
+/// The total-return closes of `tr` from `since`, in its own currency, or
+/// `None` when they can't be fetched or don't reach back far enough.
+pub(crate) async fn total_return_closes(
+    client: &YahooClient,
+    tr: TotalReturn,
+    since: NaiveDate,
+) -> Option<(Vec<(NaiveDate, f64)>, Option<String>)> {
+    let v = chart_json(client, tr.symbol(), Span::Since(since))
+        .await
+        .ok()?;
+    let currency = v
+        .pointer("/chart/result/0/meta/currency")
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
+    let closes = match tr {
+        TotalReturn::Index(_) => history_from_json(v, tr.symbol()).ok()?.closes,
+        TotalReturn::AdjustedEtf(_) => adjusted_closes(&v)?,
+    };
+    covers_since(&closes, since).then_some((closes, currency))
 }
 
 /// A fund's NAV history from api.mfapi.in, for `MF:<code>` holdings.
@@ -1573,16 +1687,24 @@ pub async fn portfolio_pme_report(
     // A total-return index when Yahoo has one, compared with the
     // portfolio's dividends; else the price index with dividends left out
     // on both sides.
-    let tri = match total_return_symbol(&bench_symbol) {
-        Some(tr) => daily_history(client, tr, Span::Since(first_flow))
+    let tri = match total_return_source(&bench_symbol) {
+        Some(tr) => total_return_closes(client, tr, first_flow)
             .await
-            .ok()
-            .filter(|h| h.closes.len() >= 2)
-            .map(|h| (tr.to_string(), h)),
+            .map(|(closes, currency)| {
+                (
+                    tr,
+                    History {
+                        closes,
+                        splits: Vec::new(),
+                        currency,
+                    },
+                )
+            }),
         None => None,
     };
+    let tr_label = tri.as_ref().map(|(tr, _)| tr.label(&bench_name));
     let (used_symbol, bench_hist, total_return) = match tri {
-        Some((sym, h)) => (sym, h, true),
+        Some((tr, h)) => (tr.symbol().to_string(), h, true),
         None => {
             let h = daily_history(client, &bench_symbol, Span::Since(first_flow))
                 .await
@@ -1617,11 +1739,7 @@ pub async fn portfolio_pme_report(
             );
         }
     }
-    let name = if total_return {
-        format!("{} (total return)", bench_name)
-    } else {
-        bench_name
-    };
+    let name = tr_label.unwrap_or(bench_name);
     pme_report_from(
         portfolio,
         &val,
@@ -1630,16 +1748,6 @@ pub async fn portfolio_pme_report(
         (used_symbol, name),
         total_return,
     )
-}
-
-/// The total-return version of a price index Yahoo carries.
-fn total_return_symbol(symbol: &str) -> Option<&'static str> {
-    match symbol {
-        "^GSPC" => Some("^SP500TR"),
-        "^NDX" => Some("^XNDX"),
-        "^DJI" => Some("^DJITR"),
-        _ => None,
-    }
 }
 
 /// The PME report of `portfolio` (valued by `val`, base-currency
@@ -3048,6 +3156,59 @@ pub fn cmd_goal_prepay(a: PrepayArgs, market: Market, json: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nifty_compares_with_niftybees_adjusted_closes() {
+        let tr = total_return_source("^NSEI").unwrap();
+        assert_eq!(tr, TotalReturn::AdjustedEtf("NIFTYBEES.NS"));
+        assert_eq!(tr.label("NIFTY 50"), "NIFTY 50 TR (NIFTYBEES adjusted)");
+        assert_eq!(
+            total_return_source("^NSEBANK"),
+            Some(TotalReturn::AdjustedEtf("BANKBEES.NS"))
+        );
+        let sp = total_return_source("^GSPC").unwrap();
+        assert_eq!(
+            (sp.symbol(), sp.label("S&P 500").as_str()),
+            ("^SP500TR", "S&P 500 TR")
+        );
+        // SENSEX has no total-return series here: the price index is used.
+        assert_eq!(total_return_source("^BSESN"), None);
+    }
+
+    #[test]
+    fn adjusted_closes_come_from_adjclose_not_close() {
+        // Two sessions (IST, gmtoffset 19800); the second paid a dividend.
+        let v = serde_json::json!({"chart": {"result": [{
+            "meta": {"gmtoffset": 19800, "currency": "INR"},
+            "timestamp": [1704166200, 1704252600],
+            "indicators": {
+                "quote": [{"close": [240.0, 238.0]}],
+                "adjclose": [{"adjclose": [236.0, 238.0]}]
+            }
+        }]}});
+        let closes = adjusted_closes(&v).unwrap();
+        assert_eq!(closes.len(), 2);
+        assert_eq!(
+            closes[0],
+            (NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), 236.0)
+        );
+        // No adjusted closes: none (the caller falls back to the price index).
+        let bare = serde_json::json!({"chart": {"result": [{
+            "timestamp": [1704166200, 1704252600],
+            "indicators": {"quote": [{"close": [240.0, 238.0]}]}
+        }]}});
+        assert!(adjusted_closes(&bare).is_none());
+    }
+
+    #[test]
+    fn a_total_return_series_must_reach_back_to_the_first_flow() {
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let closes = vec![(d("2020-01-02"), 100.0), (d("2025-01-02"), 180.0)];
+        assert!(covers_since(&closes, d("2019-12-28")));
+        assert!(covers_since(&closes, d("2021-06-01")));
+        assert!(!covers_since(&closes, d("2019-06-01")));
+        assert!(!covers_since(&closes[..1], d("2020-01-02")));
+    }
     use crate::portfolio::Lot;
 
     #[test]

@@ -1651,13 +1651,16 @@ pub async fn cmd_portfolio_add(
     date: Option<&str>,
     force: bool,
     paid_in: Option<&str>,
-    charges: Option<f64>,
+    charges: Option<crate::trade_charges::ChargesArg>,
     market: Market,
 ) -> Result<()> {
+    use crate::trade_charges::{self as tc, ChargesArg};
     if !(shares > 0.0 && shares.is_finite()) {
         bail!("Number of shares must be positive");
     }
-    if charges.is_some_and(|c| !(c >= 0.0 && c.is_finite())) {
+    if let Some(ChargesArg::Amount(c)) = charges
+        && !(c >= 0.0 && c.is_finite())
+    {
         bail!("Charges can't be negative");
     }
     if !(cost >= 0.0 && cost.is_finite()) {
@@ -1696,6 +1699,28 @@ pub async fn cmd_portfolio_add(
     }
     let resolved = market::resolve_symbol(&symbol, market);
     check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    // `--charges auto`: an Indian delivery buy's statutory charges, in rupees.
+    let charges: Option<f64> = match charges {
+        None => None,
+        Some(ChargesArg::Amount(c)) => Some(c),
+        Some(ChargesArg::Auto) => {
+            if !tc::auto_applies(&resolved) || paid_in.is_some() {
+                bail!(
+                    "`--charges auto` estimates Indian (NSE/BSE) delivery charges in rupees; \
+                     for {} give the total charged instead (--charges 12.50)",
+                    resolved
+                );
+            }
+            let est = tc::estimate_delivery(false, shares * cost, pf::parse_date(&date)?);
+            println!(
+                "  {} Estimated charges {}: {} (brokerage not included)",
+                "·".dimmed(),
+                format_price(est.total(), Some("INR")),
+                tc::breakdown(&est)
+            );
+            Some(est.total())
+        }
+    };
     // A price paid in another currency (a US share bought with rupees):
     // convert it at that day's rate, so the cost is in the holding's own.
     // The currency the cost ends up in: the instrument's quoted currency
@@ -1880,10 +1905,13 @@ pub async fn cmd_portfolio_sell(
     shares: f64,
     price: Option<f64>,
     date: Option<&str>,
-    charges: Option<f64>,
+    charges: Option<crate::trade_charges::ChargesArg>,
     market: Market,
 ) -> Result<()> {
-    if charges.is_some_and(|c| !(c >= 0.0 && c.is_finite())) {
+    use crate::trade_charges::{self as tc, ChargesArg};
+    if let Some(ChargesArg::Amount(c)) = charges
+        && !(c >= 0.0 && c.is_finite())
+    {
         bail!("Charges can't be negative");
     }
     let portfolio = Portfolio::load()?;
@@ -1966,6 +1994,28 @@ pub async fn cmd_portfolio_sell(
                     resolved, symbol, shares
                 )
             })?
+        }
+    };
+    // `--charges auto`: an Indian delivery sell's statutory charges.
+    let charges: Option<f64> = match charges {
+        None => None,
+        Some(ChargesArg::Amount(c)) => Some(c),
+        Some(ChargesArg::Auto) => {
+            if !tc::auto_applies(&resolved) {
+                bail!(
+                    "`--charges auto` estimates Indian (NSE/BSE) delivery charges; \
+                     for {} give the total charged instead (--charges 12.50)",
+                    resolved
+                );
+            }
+            let est = tc::estimate_delivery(true, shares * price, pf::parse_date(&date)?);
+            println!(
+                "  {} Estimated charges {}: {} (brokerage not included)",
+                "·".dimmed(),
+                format_price(est.total(), Some("INR")),
+                tc::breakdown(&est)
+            );
+            Some(est.total())
         }
     };
     // The checks above ran on the portfolio as loaded; sell from the file as
