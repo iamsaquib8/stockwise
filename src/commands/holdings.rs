@@ -2320,12 +2320,17 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     }
 
     let val = tax_valuation(&views::LiveSource::new(), &portfolio, market).await?;
-    let report = tax_report(country, &portfolio, &val, today);
-    let realized = report.realized;
-    let unrealized = report.unrealized;
-    // India: gains outside Sec. 111A/112A that have rules of their own.
+    let mut report = tax_report(country, &portfolio, &val, today);
+    // India: gains outside Sec. 111A/112A that have rules of their own; a
+    // net loss among them is set off against the listed-share gains.
     let (other_rows, other_totals) =
         super::tax_season::other_gains(&portfolio, |s| val.mark(s).cloned(), today);
+    if country == Country::India {
+        report.realized.st_loss += tax::paise::to_rupees(other_totals.st_loss_for_set_off);
+        report.realized.lt_loss += tax::paise::to_rupees(other_totals.lt_loss_for_set_off);
+    }
+    let realized = report.realized;
+    let unrealized = report.unrealized;
     match fmt {
         Format::Json => {
             let mut v = tax_json(country, &report, today);

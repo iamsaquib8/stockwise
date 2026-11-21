@@ -504,6 +504,11 @@ pub struct AdvanceTaxQuarter {
     pub sec_234c_interest: f64,
     /// Status: Paid, Pending, or Upcoming.
     pub status: AdvanceTaxStatus,
+    /// What is required on the due date itself: the cumulative percentage
+    /// of the tax on gains and dividends up to that day. Differs from
+    /// `min_cumulative_tax_required` only for Q4 (15 March vs 31 March).
+    #[serde(default)]
+    pub required_at_due: f64,
 }
 
 /// Advance tax schedule for an Indian financial year.
@@ -603,25 +608,90 @@ pub fn compute_advance_tax(
     compute_advance_tax_with_income(sales, &[], fy_start, as_of, payments)
 }
 
+/// Money in paise (₹1 = 100): the filed tax figures of the tax-season
+/// commands are added up and rounded here, so totals never drift by a paisa.
+/// They are shown and serialised as rupees with two decimals.
+pub mod paise {
+    /// Rupees to paise, rounded half away from zero (the event boundary).
+    pub fn from_rupees(rupees: f64) -> i64 {
+        if rupees.is_finite() {
+            (rupees * 100.0).round() as i64
+        } else {
+            0
+        }
+    }
+
+    /// Paise to rupees, for display and JSON.
+    pub fn to_rupees(paise: i64) -> f64 {
+        paise as f64 / 100.0
+    }
+
+    /// `amount × rate`, rounded to the paisa (rates stay `f64`).
+    pub fn times(amount: i64, rate: f64) -> i64 {
+        (amount as f64 * rate).round() as i64
+    }
+
+    /// Serialise paise as rupees (`serialize_with`).
+    pub fn serialize<S: serde::Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_f64(to_rupees(*v))
+    }
+
+    /// Deserialise rupees into paise (`deserialize_with`).
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+        let r = <f64 as serde::Deserialize>::deserialize(d)?;
+        Ok(from_rupees(r))
+    }
+
+    /// The same for an array of amounts.
+    pub fn serialize_array<S: serde::Serializer, const N: usize>(
+        v: &[i64; N],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(N))?;
+        for x in v {
+            seq.serialize_element(&to_rupees(*x))?;
+        }
+        seq.end()
+    }
+}
+
 /// Income other than capital gains that advance tax is due on, taxed at the
-/// investor's slab `rate` (a fraction, before the 4% cess): dividends and
-/// interest. Dividends share the capital-gains proviso to Sec. 234C(1): no
-/// interest for a shortfall caused by a dividend received after a due date,
-/// so each one counts from the quarter it was received.
+/// investor's slab `rate` (a fraction, before the 4% cess).
+///
+/// A dividend (`deferrable`) shares the capital-gains proviso to Sec.
+/// 234C(1): no interest for a shortfall caused by a dividend received after
+/// a due date, as long as its tax is paid in the remaining instalments (or
+/// by 31 March). Interest has no such relief: its tax counts toward every
+/// instalment of the year, whenever it is received.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AdvanceIncome {
     pub date: NaiveDate,
-    pub amount: f64,
+    /// Gross income in paise.
+    #[serde(
+        serialize_with = "paise::serialize",
+        deserialize_with = "paise::deserialize"
+    )]
+    pub amount: i64,
     pub rate: f64,
+    pub deferrable: bool,
 }
 
-/// Tax with cess on the `income` received from `from` to `to`.
-fn income_tax_between(income: &[AdvanceIncome], from: NaiveDate, to: NaiveDate) -> f64 {
-    income
+/// Tax with cess on the `income` an instalment with cut-off `to` counts: a
+/// dividend from `from` to `to`, interest of the whole year (`from` to
+/// `year_end`). Worked out in paise.
+fn income_tax_between(
+    income: &[AdvanceIncome],
+    from: NaiveDate,
+    to: NaiveDate,
+    year_end: NaiveDate,
+) -> f64 {
+    let p: i64 = income
         .iter()
-        .filter(|i| i.date >= from && i.date <= to)
-        .map(|i| i.amount * i.rate * (1.0 + INDIA_CESS_RATE))
-        .sum()
+        .filter(|i| i.date >= from && i.date <= if i.deferrable { to } else { year_end })
+        .map(|i| paise::times(paise::times(i.amount, i.rate), 1.0 + INDIA_CESS_RATE))
+        .sum();
+    paise::to_rupees(p)
 }
 
 /// [`compute_advance_tax`] with dividend and interest income added at the
@@ -741,7 +811,7 @@ pub fn compute_advance_tax_with_income(
             y,
         )
         .total()
-            + income_tax_between(income, fy_start, m.cutoff_date);
+            + income_tax_between(income, fy_start, m.cutoff_date, fy_end);
 
         // What is due on the due date itself: the tax on gains up to that
         // day. It is the same as the cut-off figure except for Q4, whose
@@ -753,7 +823,7 @@ pub fn compute_advance_tax_with_income(
             y,
         )
         .total()
-            + income_tax_between(income, fy_start, m.due_date);
+            + income_tax_between(income, fy_start, m.due_date, fy_end);
         let required_at_due = tax_at_due * (m.req_pct / 100.0);
 
         let min_cumulative_tax_required = cumulative_tax_estimated * (m.req_pct / 100.0);
@@ -775,6 +845,17 @@ pub fn compute_advance_tax_with_income(
 
     let total_tax_estimated = quarters_data[3].4;
     let sec_208_applicable = total_tax_estimated >= ADVANCE_TAX_SEC_208_THRESHOLD;
+    // The Sec. 234C(1) proviso spares a shortfall caused by capital gains or
+    // dividends that arose after a due date only if their tax was paid in
+    // the remaining instalments, or by 31 March. Once the year is over and
+    // the payments by 31 March fall short of the year's tax, the relief is
+    // lost: every instalment is measured against the whole year's tax.
+    let paid_by_fy_end: f64 = payments
+        .iter()
+        .filter(|p| p.counts_by(fy_start, fy_end))
+        .map(|p| p.amount)
+        .sum();
+    let relief_lost = as_of > fy_end && paid_by_fy_end + PAISA < total_tax_estimated;
 
     let mut quarters = Vec::with_capacity(4);
 
@@ -801,17 +882,16 @@ pub fn compute_advance_tax_with_income(
             .filter(|p| p.counts_by(fy_start, m.cutoff_date))
             .map(|p| p.amount)
             .sum();
-        // Sec. 234C(1) proviso (second): for the last instalment, a shortfall
-        // caused by capital gains arising after 15 March carries no interest
-        // if the tax on them is paid by 31 March. So the 15 March requirement
-        // is the tax on gains up to 15 March, and payments up to 31 March
-        // count against the later gains. When those are not paid in full by
-        // 31 March, the whole shortfall at 15 March bears interest.
-        let late_gains_unpaid = m.cutoff_date > m.due_date
-            && as_of > m.cutoff_date
-            && paid_by_cutoff + PAISA < min_cumulative_tax_required;
-        let (basis_required, basis_tax) = if late_gains_unpaid {
-            (min_cumulative_tax_required, cumulative_tax_estimated)
+        // Sec. 234C(1) proviso: the requirement on a due date is the tax on
+        // gains and dividends up to that day (for the last instalment, gains
+        // after 15 March are paid by 31 March). When the year's tax was not
+        // paid by 31 March the relief is lost (`relief_lost`) and the whole
+        // year's tax is the basis.
+        let (basis_required, basis_tax) = if relief_lost {
+            (
+                total_tax_estimated * (m.req_pct / 100.0),
+                total_tax_estimated,
+            )
         } else {
             (required_at_due, tax_at_due)
         };
@@ -861,19 +941,15 @@ pub fn compute_advance_tax_with_income(
             shortfall,
             sec_234c_interest,
             status,
+            required_at_due,
         });
     }
 
     let total_sec_234c_interest = quarters.iter().map(|q| q.sec_234c_interest).sum();
-    let paid_by_year_end: f64 = payments
-        .iter()
-        .filter(|p| p.counts_by(fy_start, fy_end))
-        .map(|p| p.amount)
-        .sum();
     let sec_234b_applicable = sec_208_applicable
         && as_of > fy_end
         && !payments.is_empty()
-        && paid_by_year_end < 0.90 * total_tax_estimated;
+        && paid_by_fy_end < 0.90 * total_tax_estimated;
 
     AdvanceTaxSchedule {
         fy_label,
@@ -891,13 +967,14 @@ pub fn compute_advance_tax_with_income(
         ignored_before_year,
         total_sec_234c_interest,
         sec_234b_applicable,
-        other_income: income
-            .iter()
-            .filter(|i| i.date >= fy_start && i.date <= fy_end)
-            .map(|i| i.amount)
-            .sum::<f64>()
-            + 0.0,
-        other_income_tax: income_tax_between(income, fy_start, fy_end) + 0.0,
+        other_income: paise::to_rupees(
+            income
+                .iter()
+                .filter(|i| i.date >= fy_start && i.date <= fy_end)
+                .map(|i| i.amount)
+                .sum::<i64>(),
+        ) + 0.0,
+        other_income_tax: income_tax_between(income, fy_start, fy_end, fy_end) + 0.0,
         quarters,
     }
 }
@@ -912,16 +989,20 @@ pub struct NextInstalment {
     pub due_date: NaiveDate,
     /// Days from `as_of` to the due date (0 on the day itself).
     pub days_left: i64,
-    /// Cumulative minimum required by the due date (15/45/75/100% of the
-    /// tax on gains and income so far).
+    /// Cumulative minimum required on the due date (15/45/75/100% of the
+    /// tax on gains and dividends up to that day, and the year's interest).
     pub required_by_due: f64,
-    /// Paid so far that counts toward it.
+    /// Paid so far (dated payments up to today; undated ones are assumed on
+    /// time) that counts toward it.
     pub paid: f64,
-    /// Still to pay by the due date.
+    /// Still to pay by the due date. Zero when Sec. 208 does not apply
+    /// (the year's tax is under ₹10,000): nothing is payable as advance tax.
     pub amount_due: f64,
     /// Sec. 234C interest if nothing more is paid by the due date: 1% a month
     /// for three months (Q1–Q3) or one month (Q4) on the shortfall rounded
-    /// down to ₹100. Zero when Sec. 208 does not apply (tax under ₹10,000).
+    /// down to a multiple of ₹100. Zero when the payments meet the safe
+    /// harbour (12% by 15 June, 36% by 15 September) or Sec. 208 does not
+    /// apply.
     pub interest_if_missed: f64,
 }
 
@@ -935,22 +1016,28 @@ pub fn next_instalment(s: &AdvanceTaxSchedule, as_of: NaiveDate) -> Option<NextI
         "Q3" => (0.03, 0.75),
         _ => (0.01, 1.0),
     };
-    let required = q.min_cumulative_tax_required;
+    // The due date's own basis: for Q4, gains and dividends up to 15 March
+    // (later ones are paid by 31 March without interest).
+    let required = q.required_at_due;
+    // A payment dated after today has not been made yet.
     let paid = s
         .payments
         .iter()
-        .filter(|p| p.counts_by(s.fy_start, q.due_date))
+        .filter(|p| p.counts_by(s.fy_start, q.due_date.min(as_of)))
         .map(|p| p.amount)
         .sum::<f64>();
-    let amount_due = (required - paid).max(0.0);
+    let amount_due = if s.sec_208_applicable {
+        (required - paid).max(0.0)
+    } else {
+        0.0
+    };
     let pct = q.required_cumulative_pct / 100.0;
     let tax = if pct > 0.0 { required / pct } else { 0.0 };
-    let interest_if_missed =
-        if s.sec_208_applicable && amount_due > PAISA && paid + PAISA < safe_harbour * tax {
-            round_down_100(amount_due) * rate
-        } else {
-            0.0
-        };
+    let interest_if_missed = if amount_due > PAISA && paid + PAISA < safe_harbour * tax {
+        round_down_100(amount_due) * rate
+    } else {
+        0.0
+    };
     Some(NextInstalment {
         quarter: q.quarter.clone(),
         due_date: q.due_date,
@@ -1048,12 +1135,24 @@ pub enum IndiaRule {
 }
 
 impl IndiaRule {
+    /// The rule for a sale from 23 Jul 2024.
     pub fn label(self) -> &'static str {
         match self {
             Self::Sec50AA => "Sec. 50AA — short-term at slab rate",
             Self::ShortTermSlab => "short-term — slab rate",
             Self::LongTerm112 => "Sec. 112 — long-term 12.5%, no exemption",
             Self::Vda115BBH => "Sec. 115BBH — 30% flat, no set-off",
+        }
+    }
+
+    /// The rule for a sale on `sold`: before 23 Jul 2024 Sec. 112 was 20%
+    /// with indexation, which StockWise does not apply.
+    pub fn label_on(self, sold: NaiveDate) -> &'static str {
+        match self {
+            Self::LongTerm112 if sold < india_rate_change_date() => {
+                "Sec. 112 — long-term 20% with indexation (indexation not applied: estimate incomplete)"
+            }
+            other => other.label(),
         }
     }
 }
@@ -1081,15 +1180,16 @@ pub const VDA_TDS_RATE: f64 = 0.01;
 /// falls under.
 pub fn india_rule(asset: IndiaAsset, bought: NaiveDate, sold: NaiveDate) -> IndiaRule {
     let new_rates = sold >= india_rate_change_date();
-    // Listed units: 12 months from 23 Jul 2024; unlisted units 24 months
-    // (36 before that day, for everything but listed shares and units).
-    let lt_months = |listed: bool| match (listed, new_rates) {
-        (true, _) => 12,
+    // Fund units (listed or not) other than equity-oriented ones: 36 months
+    // before 23 Jul 2024; from it, 12 months listed and 24 unlisted. A
+    // listed security such as an SGB: 12 months throughout.
+    let fund_months = |listed: bool| match (listed, new_rates) {
+        (_, false) => 36,
+        (true, true) => 12,
         (false, true) => 24,
-        (false, false) => 36,
     };
-    let term = |listed: bool| {
-        if is_long_term(bought, sold, lt_months(listed)) {
+    let term = |months: u32| {
+        if is_long_term(bought, sold, months) {
             IndiaRule::LongTerm112
         } else {
             IndiaRule::ShortTermSlab
@@ -1104,56 +1204,78 @@ pub fn india_rule(asset: IndiaAsset, bought: NaiveDate, sold: NaiveDate) -> Indi
         {
             IndiaRule::Sec50AA
         }
-        IndiaAsset::DebtFund { listed } | IndiaAsset::OtherFund { listed } => term(listed),
-        IndiaAsset::GoldBond => term(true),
+        IndiaAsset::DebtFund { listed } | IndiaAsset::OtherFund { listed } => {
+            term(fund_months(listed))
+        }
+        IndiaAsset::GoldBond => term(12),
     }
 }
 
-/// One gain outside Sec. 111A/112A.
+/// One gain outside Sec. 111A/112A, in paise.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OtherGain {
     pub rule: IndiaRule,
-    pub gain: f64,
+    pub gain: i64,
     /// What the asset was sold for (Sec. 194S TDS on crypto is 1% of it).
-    pub proceeds: f64,
+    pub proceeds: i64,
     /// Sold before 23 Jul 2024 (Sec. 112 at 20% with indexation).
     pub before_rate_change: bool,
 }
 
-/// Gains outside Sec. 111A/112A, totalled by rule. Slab-rate income is not
-/// taxed here (the slab is unknown); Sec. 112 and 115BBH are.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Gains outside Sec. 111A/112A, totalled by rule, in paise (shown in
+/// rupees). Slab-rate income is not taxed here (the slab is unknown); Sec.
+/// 112 and 115BBH are. A net loss under Sec. 50AA / short-term or Sec. 112
+/// is moved out for set-off against the listed-share gains (`tax in` adds
+/// it to the Sec. 111A/112A estimate).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize)]
 pub struct OtherGains {
     /// Net Sec. 50AA gain (may be negative: a short-term loss).
-    pub sec_50aa: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub sec_50aa: i64,
     /// Net short-term gain at the slab rate on other assets.
-    pub short_term_slab: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub short_term_slab: i64,
     /// Net long-term gain under Sec. 112, after its own losses.
-    pub long_term_112: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub long_term_112: i64,
     /// Tax at 12.5% (20% for sales before 23 Jul 2024) on a positive
     /// `long_term_112`, before cess. Indexation is not applied.
-    pub long_term_112_tax: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub long_term_112_tax: i64,
+    /// A net short-term loss here (Sec. 50AA plus other short-term), for
+    /// set-off against other capital gains.
+    #[serde(serialize_with = "paise::serialize")]
+    pub st_loss_for_set_off: i64,
+    /// A net Sec. 112 loss, for set-off against other long-term gains.
+    #[serde(serialize_with = "paise::serialize")]
+    pub lt_loss_for_set_off: i64,
     /// Sum of crypto gains (losses are not netted).
-    pub vda_gains: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub vda_gains: i64,
     /// Crypto losses: ignored, never set off or carried forward.
-    pub vda_losses_ignored: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub vda_losses_ignored: i64,
     /// 30% of `vda_gains`, before cess.
-    pub vda_tax: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub vda_tax: i64,
     /// 1% TDS (Sec. 194S) on crypto sale proceeds, credited against the tax.
-    pub vda_tds: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub vda_tds: i64,
     /// Cess on the Sec. 112 and 115BBH tax.
-    pub cess: f64,
+    #[serde(serialize_with = "paise::serialize")]
+    pub cess: i64,
 }
 
 impl OtherGains {
     /// Sec. 112 and 115BBH tax with cess (the slab-rate parts are left out).
-    pub fn flat_tax(&self) -> f64 {
+    pub fn flat_tax(&self) -> i64 {
         self.long_term_112_tax + self.vda_tax + self.cess
     }
 
-    /// Income taxed at the slab rate, net (Sec. 50AA plus other short-term).
-    pub fn slab_income(&self) -> f64 {
-        self.sec_50aa + self.short_term_slab
+    /// Income taxed at the slab rate after its own losses (never negative:
+    /// a net loss is in `st_loss_for_set_off`).
+    pub fn slab_income(&self) -> i64 {
+        (self.sec_50aa + self.short_term_slab).max(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1163,38 +1285,43 @@ impl OtherGains {
 
 /// Total `gains` by rule. Each crypto gain is taxed on its own and no crypto
 /// loss is set off against anything, even another crypto gain (Sec.
-/// 115BBH(2)). Sec. 112 losses are netted with Sec. 112 gains only.
+/// 115BBH(2)). Short-term gains and losses (Sec. 50AA and others) net
+/// first, Sec. 112 gains and losses net first; a net loss of either is
+/// returned for set-off against the listed-share gains (Sec. 70/71).
 pub fn india_other_gains(gains: &[OtherGain]) -> OtherGains {
     let mut o = OtherGains::default();
     // Sec. 112 gains before and from 23 Jul 2024, and all its losses.
-    let (mut lt_new, mut lt_old, mut lt_loss) = (0.0, 0.0, 0.0);
+    let (mut lt_new, mut lt_old, mut lt_loss) = (0i64, 0i64, 0i64);
     for g in gains {
         match g.rule {
             IndiaRule::Sec50AA => o.sec_50aa += g.gain,
             IndiaRule::ShortTermSlab => o.short_term_slab += g.gain,
-            IndiaRule::LongTerm112 if g.gain < 0.0 => lt_loss -= g.gain,
+            IndiaRule::LongTerm112 if g.gain < 0 => lt_loss -= g.gain,
             IndiaRule::LongTerm112 if g.before_rate_change => lt_old += g.gain,
             IndiaRule::LongTerm112 => lt_new += g.gain,
             IndiaRule::Vda115BBH => {
-                if g.gain >= 0.0 {
+                if g.gain >= 0 {
                     o.vda_gains += g.gain;
                 } else {
                     o.vda_losses_ignored -= g.gain;
                 }
-                o.vda_tds += g.proceeds.max(0.0) * VDA_TDS_RATE;
+                o.vda_tds += paise::times(g.proceeds.max(0), VDA_TDS_RATE);
             }
         }
     }
+    o.st_loss_for_set_off = (-(o.sec_50aa + o.short_term_slab)).max(0);
     o.long_term_112 = lt_new + lt_old - lt_loss;
-    if o.long_term_112 > 0.0 {
+    if o.long_term_112 > 0 {
         // Losses go against the higher-rate (older, 20%) gains first.
         let from_old = lt_loss.min(lt_old);
         let old_g = lt_old - from_old;
         let new_g = lt_new - (lt_loss - from_old).min(lt_new);
-        o.long_term_112_tax = old_g * 0.20 + new_g * 0.125;
+        o.long_term_112_tax = paise::times(old_g, 0.20) + paise::times(new_g, 0.125);
+    } else {
+        o.lt_loss_for_set_off = -o.long_term_112;
     }
-    o.vda_tax = o.vda_gains * VDA_RATE;
-    o.cess = (o.long_term_112_tax + o.vda_tax) * INDIA_CESS_RATE;
+    o.vda_tax = paise::times(o.vda_gains, VDA_RATE);
+    o.cess = paise::times(o.long_term_112_tax + o.vda_tax, INDIA_CESS_RATE);
     o
 }
 
@@ -1536,6 +1663,8 @@ pub fn wash_sale_window_end(sold: NaiveDate) -> NaiveDate {
 }
 
 #[cfg(test)]
+// Amounts in paise are written rupees_paise: 1_200_00 is ₹1,200.00.
+#[allow(clippy::inconsistent_digit_grouping)]
 mod tests {
     use super::*;
 
@@ -2485,6 +2614,35 @@ mod tests {
             india_rule(gold, d("2023-06-01"), d("2025-07-01")),
             IndiaRule::LongTerm112
         );
+        // Fund units sold before 23 Jul 2024 needed 36 months, listed or not.
+        let gold_etf = IndiaAsset::OtherFund { listed: true };
+        assert_eq!(
+            india_rule(gold_etf, d("2022-06-01"), d("2024-06-03")),
+            IndiaRule::ShortTermSlab
+        );
+        assert_eq!(
+            india_rule(gold_etf, d("2021-01-04"), d("2024-06-03")),
+            IndiaRule::LongTerm112
+        );
+        assert_eq!(
+            india_rule(gold_etf, d("2022-06-01"), d("2024-08-01")),
+            IndiaRule::LongTerm112
+        );
+        // An SGB is a listed security: 12 months throughout.
+        assert_eq!(
+            india_rule(IndiaAsset::GoldBond, d("2023-01-02"), d("2024-03-01")),
+            IndiaRule::LongTerm112
+        );
+        assert!(
+            IndiaRule::LongTerm112
+                .label_on(d("2024-06-03"))
+                .contains("20% with indexation")
+        );
+        assert!(
+            IndiaRule::LongTerm112
+                .label_on(d("2024-08-01"))
+                .contains("12.5%")
+        );
         // Market-linked debentures: always Sec. 50AA.
         assert_eq!(
             india_rule(
@@ -2502,40 +2660,46 @@ mod tests {
 
     #[test]
     fn sec_115bbh_taxes_each_crypto_gain_and_sets_off_no_loss() {
-        let g = |rule, gain: f64, proceeds: f64| OtherGain {
+        let g = |rule, gain: i64, proceeds: i64| OtherGain {
             rule,
-            gain,
-            proceeds,
+            gain: gain * 100,
+            proceeds: proceeds * 100,
             before_rate_change: false,
         };
         let o = india_other_gains(&[
-            g(IndiaRule::Vda115BBH, 100_000.0, 300_000.0),
-            g(IndiaRule::Vda115BBH, -50_000.0, 100_000.0),
-            g(IndiaRule::Sec50AA, -10_000.0, 90_000.0),
+            g(IndiaRule::Vda115BBH, 100_000, 300_000),
+            g(IndiaRule::Vda115BBH, -50_000, 100_000),
+            g(IndiaRule::Sec50AA, -10_000, 90_000),
         ]);
-        assert_eq!(o.vda_gains, 100_000.0);
-        assert_eq!(o.vda_losses_ignored, 50_000.0);
+        assert_eq!(o.vda_gains, 100_000_00);
+        assert_eq!(o.vda_losses_ignored, 50_000_00);
         // 30% of the whole ₹1 lakh: neither loss reduces it.
-        assert!(close(o.vda_tax, 30_000.0));
-        assert!(close(o.cess, 1_200.0));
-        assert!(close(o.flat_tax(), 31_200.0));
+        assert_eq!(o.vda_tax, 30_000_00);
+        assert_eq!(o.cess, 1_200_00);
+        assert_eq!(o.flat_tax(), 31_200_00);
         // 1% TDS (Sec. 194S) on both sales' proceeds.
-        assert!(close(o.vda_tds, 4_000.0));
-        assert!(close(o.slab_income(), -10_000.0));
+        assert_eq!(o.vda_tds, 4_000_00);
+        // The Sec. 50AA loss is not slab income: it goes to set-off.
+        assert_eq!(o.slab_income(), 0);
+        assert_eq!(o.st_loss_for_set_off, 10_000_00);
     }
 
     #[test]
     fn sec_112_losses_net_against_its_own_gains_at_the_higher_rate_first() {
-        let g = |gain: f64, before: bool| OtherGain {
+        let g = |gain: i64, before: bool| OtherGain {
             rule: IndiaRule::LongTerm112,
-            gain,
-            proceeds: 0.0,
+            gain: gain * 100,
+            proceeds: 0,
             before_rate_change: before,
         };
-        let o = india_other_gains(&[g(10_000.0, true), g(20_000.0, false), g(-5_000.0, false)]);
-        assert!(close(o.long_term_112, 25_000.0));
+        let o = india_other_gains(&[g(10_000, true), g(20_000, false), g(-5_000, false)]);
+        assert_eq!(o.long_term_112, 25_000_00);
         // The ₹5,000 loss goes against the 20% gain: 5,000 × 20% + 20,000 × 12.5%.
-        assert!(close(o.long_term_112_tax, 1_000.0 + 2_500.0));
+        assert_eq!(o.long_term_112_tax, 3_500_00);
+        assert_eq!(o.lt_loss_for_set_off, 0);
+        // A net Sec. 112 loss is left for set-off against other long-term gains.
+        let o = india_other_gains(&[g(1_000, false), g(-4_000, false)]);
+        assert_eq!((o.long_term_112_tax, o.lt_loss_for_set_off), (0, 3_000_00));
     }
 
     fn schedule_with(
@@ -2601,18 +2765,13 @@ mod tests {
 
     #[test]
     fn dividend_income_counts_from_the_quarter_it_was_received() {
-        let income = [
-            AdvanceIncome {
-                date: d("2026-05-20"),
-                amount: 100_000.0,
-                rate: 0.30,
-            },
-            AdvanceIncome {
-                date: d("2027-01-10"),
-                amount: 100_000.0,
-                rate: 0.30,
-            },
-        ];
+        let div = |date: &str| AdvanceIncome {
+            date: d(date),
+            amount: 100_000_00,
+            rate: 0.30,
+            deferrable: true,
+        };
+        let income = [div("2026-05-20"), div("2027-01-10")];
         let s = schedule_with(&[], &income, &[], "2026-11-21");
         // ₹31,200 of tax a quarter-1 dividend brings; the January one only
         // counts for Q4.
@@ -2622,5 +2781,78 @@ mod tests {
         assert!(close(s.other_income, 200_000.0));
         assert!(close(s.other_income_tax, 62_400.0));
         assert!(s.sec_208_applicable);
+    }
+
+    #[test]
+    fn interest_counts_toward_every_instalment_whenever_it_is_received() {
+        let interest = [AdvanceIncome {
+            date: d("2027-01-10"),
+            amount: 100_000_00,
+            rate: 0.30,
+            deferrable: false,
+        }];
+        let s = schedule_with(&[], &interest, &[], "2026-05-01");
+        // No proviso for interest: Q1 already needs 15% of its tax.
+        assert!(close(s.quarters[0].cumulative_tax_estimated, 31_200.0));
+        assert!(close(s.quarters[0].min_cumulative_tax_required, 4_680.0));
+    }
+
+    #[test]
+    fn the_15_march_instalment_uses_the_tax_up_to_15_march() {
+        // Only a dividend on 20 March: nothing is due on 15 March.
+        let income = [AdvanceIncome {
+            date: d("2027-03-20"),
+            amount: 100_000_00,
+            rate: 0.30,
+            deferrable: true,
+        }];
+        let s = schedule_with(&[], &income, &[], "2027-03-01");
+        let n = next_instalment(&s, d("2027-03-01")).unwrap();
+        assert_eq!(n.quarter, "Q4");
+        assert_eq!(n.required_by_due, 0.0);
+        assert_eq!(n.amount_due, 0.0);
+        assert_eq!(n.interest_if_missed, 0.0);
+    }
+
+    #[test]
+    fn the_proviso_relief_is_lost_when_the_tax_is_not_paid_by_31_march() {
+        // A July gain with ₹83,200 of tax: Q1 owes nothing while the year
+        // runs, but unpaid by 31 March, Q1 is measured on the whole year.
+        let sales = [AdvanceTaxSale::new(d("2026-07-10"), 400_000.0, false)];
+        let open = schedule_with(&sales, &[], &[], "2027-02-01");
+        assert_eq!(open.quarters[0].sec_234c_interest, 0.0);
+        let after = schedule_with(&sales, &[], &[], "2027-04-10");
+        // 15% of 83,200 = 12,480, rounded down to 12,400, at 3%.
+        assert!(close(after.quarters[0].sec_234c_interest, 372.0));
+        // Paid in full by 31 March (in the later instalments): relief holds.
+        let paid = [AdvancePayment {
+            date: Some(d("2026-12-10")),
+            amount: 83_200.0,
+        }];
+        let ok = schedule_with(&sales, &[], &paid, "2027-04-10");
+        assert_eq!(ok.quarters[0].sec_234c_interest, 0.0);
+    }
+
+    #[test]
+    fn future_dated_payments_are_not_counted_as_paid_yet() {
+        let sales = [AdvanceTaxSale::new(d("2026-05-10"), 400_000.0, false)];
+        let later = [AdvancePayment {
+            date: Some(d("2026-12-12")),
+            amount: 62_400.0,
+        }];
+        let s = schedule_with(&sales, &[], &later, "2026-12-08");
+        let n = next_instalment(&s, d("2026-12-08")).unwrap();
+        assert_eq!(n.paid, 0.0);
+        assert!(close(n.amount_due, 62_400.0));
+        assert!(advance_tax_reminder(&s, d("2026-12-08"), ADVANCE_REMINDER_DAYS).is_some());
+    }
+
+    #[test]
+    fn nothing_is_payable_below_the_sec_208_threshold() {
+        let small = [AdvanceTaxSale::new(d("2026-05-10"), 20_000.0, false)];
+        let s = schedule_with(&small, &[], &[], "2026-11-21");
+        let n = next_instalment(&s, d("2026-11-21")).unwrap();
+        assert!(n.required_by_due > 0.0);
+        assert_eq!(n.amount_due, 0.0);
     }
 }

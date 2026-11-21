@@ -201,11 +201,16 @@ Two flags help:
 - `--paid 2026-12-10:62400 --record` saves the payment, so later runs (and the
   reminder) count it without `--paid`.
 - `--slab 30` adds your dividends and SGB interest (see step 6) at your slab
-  rate, each in the quarter it was received. Dividends share the capital-gains
-  proviso, so a dividend received in January raises only the March instalment.
+  rate. Dividends share the capital-gains proviso, so a dividend in January
+  raises only the March instalment (as long as its tax is paid by then); SGB
+  interest has no proviso and counts toward every instalment. Dividends are
+  placed by their ex-date, not the day they were paid: one that went ex on
+  12 December and was paid on 5 January sits in the 15 December period, so
+  check the payment dates before relying on the period totals.
 
 StockWise can remind you 7 days before a due date when something is still to
-pay, through the same notifiers as alerts.
+pay, through the same notifiers as alerts. The reminder covers capital gains
+only: it does not remind you about tax on dividends or SGB interest.
 
 ## 4. Export the schedule for your ITR
 
@@ -234,8 +239,10 @@ these before you file:
 
 - **Shares bought on or before 31 January 2018.** StockWise uses the
   grandfathered cost: the higher of the actual cost and the lower of the 31
-  January 2018 price and the sale price (Section 112A). Check the price your
-  broker used: `tax reconcile` flags a difference.
+  January 2018 price and the sale price (Section 112A). When that price cannot
+  be found, the export keeps the actual cost and says so in its notes: the gain
+  is then overstated, so look up the price and check it. Check the price your
+  broker used too: `tax reconcile` flags a difference.
 - **ISINs.** StockWise looks them up from NSE and AMFI. A blank ISIN is named
   in the summary.
 - **Same-day trades.** A buy and sell of the same share on one day is shown
@@ -259,7 +266,10 @@ their own:
   deducted on each sale is shown so you can match it with Form 26AS.
 
 StockWise tells a gold, silver, international or debt ETF from an equity ETF by
-its category in NSE's ETF list, so a new fund is recognised the day it lists.
+its category in NSE's ETF list, loaded when it can be and cached for a day.
+When the list cannot be loaded, or its category is not one StockWise knows, a
+built-in table and the fund's name decide, so a new fund may be missed: check
+how `tax in` classifies each ETF you sold.
 
 ## 5. Reconcile with your broker's tax P&L
 
@@ -292,10 +302,12 @@ stockwise tax reconcile ~/Downloads/taxpnl-FY2026-27.xlsx
 Each difference gets a likely reason: a quantity gap (a missing buy, or a split
 or bonus not applied — run `stockwise portfolio actions`), a different buy date
 or cost, grandfathering on pre-2018 shares, or the broker's charges. Sales on
-one side only are listed, and the totals compare STCG, LTCG and intraday. Only
-StockWise sales from that broker's account are compared unless you add
-`--all-accounts`. `--json` gives the same for scripts. StockWise never changes
-the portfolio here.
+one side only are listed, and the totals compare STCG, LTCG and intraday. For a
+Zerodha, Groww or Upstox file, StockWise compares its sales from that broker's
+account plus the sales saved without an account; `--all-accounts` adds the
+other accounts. For a file from another broker there is no account filter.
+`--json` and `--csv` give the same for scripts. StockWise never changes the
+portfolio here.
 
 ## 6. Dividend and interest income
 
@@ -307,9 +319,11 @@ stockwise tax income --fy 2026-27 --out schedule-os-2026-27.csv
 Dividends come from your holdings' corporate actions (run `stockwise portfolio
 actions --apply` first), SGB interest from the 2.5% coupon on the units you
 held on each payment date. Each line shows gross, TDS and net, and the ITR
-period — the same periods as advance tax. TDS is 10% once one company's
-dividends to you pass ₹10,000 in the year; SGB interest has none. Match the TDS
-with Form 26AS or AIS: a Form 15G/H or a missing PAN changes it.
+period — the same periods as advance tax, by ex-date. The TDS is an estimate:
+10% of a company's dividends once they pass ₹10,000 in the year (₹5,000 up to
+FY 2024-25); SGB interest has none. Match it with Form 26AS or AIS: a Form
+15G/H or a missing PAN changes it. For foreign dividends, pass `--withholding
+25` (or the rate on your statement) to show the tax withheld abroad.
 
 ## 7. Foreign shares: Schedule FA and Form 67
 
@@ -323,11 +337,16 @@ stockwise tax export in --schedule fa --fy 2025-26 --out schedule-fa-2025.csv
 stockwise tax export in --schedule form67 --fy 2025-26 --out form67.csv
 ```
 
-The peak value uses each trading day's close and that day's rupee rate. Form 67
-lists the US tax withheld on each dividend (25%) and the credit you can claim:
-the lower of that tax and the Indian tax on the same income at `--slab`. File
-Form 67 before the ITR. StockWise uses the ECB reference rate; the rules ask
-for the SBI TT buying rate, so expect small differences.
+The peak value uses each trading day's close and that day's rupee rate; a value
+with a missing rate is marked incomplete, not counted as zero. Form 67 lists the
+tax withheld abroad on each dividend and the credit you can claim: the lower of
+that tax and the Indian tax on the same income at `--slab`. StockWise does not
+record the withholding, so give the rate from your broker's statement
+(`--withholding 25`); without it the credit is shown as unknown. For a return
+filed by the due date or as a belated return, Form 67 is due by the end of the
+assessment year (Rule 128(9)); for an updated return, by the day you file it.
+Dividends are dated by ex-date. StockWise uses the ECB reference rate; the rules
+ask for the SBI TT buying rate, so expect small differences.
 
 ## 8. Keep an audit pack
 
@@ -335,10 +354,13 @@ for the SBI TT buying rate, so expect small differences.
 stockwise tax export in --fy 2026-27 --audit-pack ~/tax/2026-27-audit
 ```
 
-The folder gets one CSV per sale — lot, dates, cost, the 31 January 2018 fair
-market value where it applies, the gain and the rule applied — a
-`summary.csv` with totals by rule, and the Schedule CG CSV. Give it to your CA
-with your broker's statements.
+The folder gets one CSV per rupee sale — lot, dates, cost, the 31 January 2018
+fair market value where it applies, the gain and the rule applied — a
+`summary.csv` with totals by rule, and the Schedule CG CSV. Sales in another
+currency (US shares) are not in the pack: give your CA those records
+separately. The pack is written whole: a rerun into the same folder replaces
+the earlier pack, and a folder holding other files is refused. Give it to your
+CA with your broker's statements.
 
 ## Next steps
 

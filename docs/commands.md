@@ -464,11 +464,11 @@ Data lives in the directory shown by `stockwise doctor`.
 | `harvest [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale (see [below](#harvest)) |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
-| `tax export in [--schedule cg\|os\|fa\|form67] [--slab 30] [--fy 2025-26] [--out FILE] [--json]` | India: Schedule OS (dividends and interest with TDS), Schedule FA Table A3 (foreign assets, calendar year) or Form 67 (foreign tax credit) instead of Schedule CG (see [below](#dividend-and-interest-income-schedule-os) and [Schedule FA](#foreign-assets-schedule-fa-and-form-67)) |
-| `tax export in --audit-pack DIR [--fy 2025-26]` | One workpaper CSV per sale (lot, dates, cost, 31 Jan 2018 FMV, gain, rule applied), `summary.csv` and the Schedule CG CSV in `DIR` (see [below](#audit-pack)) |
-| `tax reconcile <FILE> [--broker zerodha\|groww\|upstox\|other] [--fy 2025-26] [--all-accounts] [--json]` | Compare realised gains with a broker's tax P&L (CSV or `.xlsx`) sale by sale, with the likely reason for each difference and STCG/LTCG totals (see [below](#tax-reconcile)) |
-| `tax income [--fy 2025-26] [--out FILE] [--json\|--csv]` | Dividends and SGB interest with gross, TDS and net, by advance-tax period, for ITR Schedule OS (see [below](#dividend-and-interest-income-schedule-os)) |
-| `tax foreign [--year 2025 \| --fy 2025-26] [--slab 30] [--json]` | Schedule FA (initial, peak and closing values of foreign shares in the calendar year, in rupees) and Form 67 foreign tax credit inputs (see [below](#foreign-assets-schedule-fa-and-form-67)) |
+| `tax export in [--schedule cg\|os\|fa\|form67] [--slab 30] [--withholding PCT] [--fy 2025-26] [--out FILE] [--json]` | India: Schedule OS (dividends and interest with TDS), Schedule FA Table A3 (foreign assets, calendar year) or Form 67 (foreign tax credit) instead of Schedule CG (see [below](#dividend-and-interest-income-schedule-os) and [Schedule FA](#foreign-assets-schedule-fa-and-form-67)) |
+| `tax export in --audit-pack DIR [--fy 2025-26]` | One workpaper CSV per rupee sale (lot, dates, cost, 31 Jan 2018 FMV, gain, rule applied), `summary.csv` and the Schedule CG CSV in `DIR`, written whole (see [below](#audit-pack)) |
+| `tax reconcile <FILE> [--broker zerodha\|groww\|upstox\|other] [--fy 2025-26] [--all-accounts] [--json\|--csv]` | Compare realised gains with a broker's tax P&L (CSV or `.xlsx`) sale by sale, with the likely reason for each difference and STCG/LTCG totals (see [below](#tax-reconcile)) |
+| `tax income [--fy 2025-26] [--out FILE] [--withholding PCT] [--json\|--csv]` | Dividends and SGB interest with gross, TDS and net, by advance-tax period, for ITR Schedule OS (see [below](#dividend-and-interest-income-schedule-os)) |
+| `tax foreign [--year 2025 \| --fy 2025-26] [--slab 30] [--withholding PCT] [--json]` | Schedule FA (initial, peak and closing values of foreign shares in the calendar year, in rupees) and Form 67 foreign tax credit inputs (see [below](#foreign-assets-schedule-fa-and-form-67)) |
 | `tax advance [--fy 2025-26] [--paid [DATE:]AMOUNT]... [--record] [--slab PCT] [--json]` | Advance tax quarterly schedule (15 Jun, 15 Sep, 15 Dec, 15 Mar) under Indian Income-tax Act Section 208/211 with Section 234C(1) capital-gains proviso and interest estimator, and the next instalment due with the interest if it is missed (see [below](#advance-tax-india)) |
 | `divcal` | Dividend ranking and income for portfolio + watchlist |
 | `income [--months 12] [--by-holding] [--json\|--csv]` (or `portfolio income` / `portfolio dividends`) | 12-month trailing and projected dividend, coupon and passive-income calendar, Yield-on-Cost (YoC), and dividend payout safety checks (see [below](#passive-income-and-dividend-calendar)) |
@@ -523,7 +523,9 @@ them; sold on the exchange, 12.5% after 12 months without the ₹1.25 lakh
 exemption) are left out and listed with the rule that applies (`other_rules`
 in `--json`). So are exchange-traded gold, silver and international ETFs (12.5%
 after 12 months with no exemption, slab rate before) and liquid and debt ETFs
-(slab rate at any holding period). StockWise tells them by category: the
+(slab rate at any holding period for units bought from 1 Apr 2023 under Sec.
+50AA; units bought before that day are long-term after 12 months, see below).
+StockWise tells them by category: the
 underlying of each ETF in NSE's ETF list (`eq_etfseclist.csv`, cached for a day:
 "Domestic Price of Gold", "NASDAQ 100 Index", "Nifty 1D Rate Index", a G-Sec or
 Bharat Bond index, ...). Offline, or for an ETF not in that list, a built-in
@@ -555,7 +557,11 @@ applies:
   long-term after 12 months (listed) or 24 months (unlisted; 36 before 23 Jul
   2024), taxed at 12.5% without indexation and without the ₹1.25 lakh exemption
   (20% with indexation for sales before 23 Jul 2024; indexation is not applied).
-  Losses net against Sec. 112 gains only. Short-term gains go to the slab rate.
+  Short-term gains go to the slab rate. A net short-term loss here, or a net
+  Sec. 112 loss, is set off against the listed-share gains in the estimate
+  above. Estimate limits: StockWise nets Sec. 112 gains and losses with each
+  other first and does not set a Sec. 112A loss off against a positive Sec. 112
+  gain, which the Act allows (Sec. 70/74).
 - **Sec. 115BBH** — crypto: 30% on each gain, no set-off of any loss (not even
   against another crypto gain) and no carry-forward. The 1% TDS under Sec. 194S
   on the sale value is shown so you can match it with Form 26AS.
@@ -721,6 +727,16 @@ gain by hand:
 - `summary.csv`: the same columns, one line per sale, then the totals by rule.
 - `schedule-cg.csv`: the Schedule CG / 112A export of `tax export in`.
 
+Amounts are worked in paise, so each workpaper's equation balances to the
+paisa. The cost of a grandfathered lot is shown with its figures, `max(actual
+cost, min(31 Jan 2018 FMV, sale value))`. An intraday sale's gain is net of its
+recorded charges (business income, as in the Schedule CG export's intraday
+total); capital gains are before charges. Same-day crypto sales stay under Sec.
+115BBH. Sales in another currency are not in the pack. The pack is written to
+a staging folder and moved into place only when every file is written: a rerun
+into the same folder replaces the earlier pack whole, and a folder holding
+anything else is refused.
+
 ```bash
 stockwise tax export in --fy 2026-27 --audit-pack ~/tax/2026-27-audit
 ```
@@ -754,10 +770,20 @@ matched sale that differs gets a likely reason:
 | short/long-term differs | the holding period is counted differently |
 
 Sales on one side only are listed, and the totals compare STCG, LTCG and
-intraday on both sides. By default only StockWise sales from that broker's
-demat account (and sales saved without an account) are compared;
-`--all-accounts` compares them all. Without `--fy` the year is the one most
-of the file's sales fall in. Read-only: the portfolio is not changed.
+intraday on both sides (a broker row matched by ISIN is totalled under the
+StockWise ticker). Cost, sale value and gain are each compared, so equal gains
+over a different cost and sale value still differ. An exact-date group that
+does not cover the whole quantity waits for the sale-date pass. Terms are
+compared by quantity per term, whatever the row order. A row with no readable
+profit, taxable profit or buy and sell value is listed as not compared, never
+read as a zero gain. Each sheet of a workbook is read on its own. A company
+name with no ISIN (some Groww rows) is not matched to a ticker: it shows on
+both sides. For a Zerodha, Groww or Upstox file, StockWise compares its sales
+from that broker's account plus those saved without an account;
+`--all-accounts` compares them all; a file from another broker has no account
+filter. Without `--fy` the year is the one most of the file's sales fall in.
+`--json` and `--csv` give the results for scripts. Read-only: the portfolio is
+not changed.
 
 ```bash
 stockwise tax reconcile ~/Downloads/taxpnl-AB0000-2026_2027.xlsx
@@ -775,18 +801,26 @@ Sep–15 Dec, 16 Dec–15 Mar, 16 Mar–31 Mar), which is also the Sec. 234C spl
 (a dividend received after a due date carries no interest for the earlier
 instalments).
 
-- **TDS** (estimate): 10% on a company's or fund's dividends once its payments
-  to you in the year pass ₹10,000 (₹5,000 up to FY 2024-25), under Sec.
+- **TDS** (estimate): once a company's or fund's dividends to you in the year
+  pass ₹10,000 (₹5,000 up to FY 2024-25), 10% of all of them, under Sec.
   194/194K. A Form 15G/H, a lower-deduction certificate or a missing PAN
   changes it: match it with Form 26AS / AIS.
 - **SGB interest**: no TDS.
-- **Foreign dividends**: converted to rupees at the day's ECB reference rate,
-  with US withholding at the 25% treaty rate for Form 67 (`tax foreign`).
+- **Foreign dividends**: converted to rupees at the day's ECB reference rate
+  (an amount recorded in pence is converted as pounds). The tax withheld abroad
+  is not recorded: `--withholding 25` (or the rate on your statement) shows it;
+  without it the withholding is "unknown".
+- **Dates**: a dividend is placed by its ex-date, as the payment date is not
+  recorded; one paid after a period's end can sit in the earlier period.
+
+When a dividend has no rupee rate or an SGB tranche is not known, it is left
+out and named, and the CSV ends with an `incomplete` block listing them.
 
 `--csv` (or `tax export in --schedule os`) prints the Schedule OS CSV: one row
 per dividend or coupon, then the quarterly breakup. `--out FILE` also writes
 it while showing the table. `tax advance --slab 30` adds this income to the
-advance-tax schedule at your slab rate, in the quarter received.
+advance-tax schedule at your slab rate: dividends in their quarter, SGB
+interest in every quarter (it has no Sec. 234C proviso).
 
 ### Foreign assets (Schedule FA and Form 67)
 
@@ -798,10 +832,21 @@ advance-tax schedule at your slab rate, in the quarter received.
   date acquired, initial value (cost at the purchase day's rate), peak value
   (the highest of units held × close × that day's rate over the year's trading
   days), closing value on 31 December, dividends credited and sale proceeds.
-- **Form 67**: each foreign dividend of the financial year with the tax
-  withheld abroad (US 25%), converted at the rate of the last day of the month
-  before (Rule 128), and the credit — the lower of that tax and the Indian tax
-  on the same income at `--slab` (default 30%) plus cess.
+- **Form 67**: each foreign dividend of the financial year, converted at the
+  rate of the last day of the month before (Rule 128), with the tax withheld
+  abroad at the `--withholding` rate from your broker's statement and the
+  credit — the lower of that tax and the Indian tax on the same income at
+  `--slab` (default 30%, 0 to 50) plus cess. Without `--withholding` the tax
+  and the credit are "unknown". Dates are ex-dates (`date_basis` column), as
+  payment and withholding dates are not recorded. For a return under Sec.
+  139(1) or 139(4), Form 67 is due by the end of the assessment year (Rule
+  128(9)); for an updated return, by the day it is filed.
+
+A purchase made with rupees at a recorded rate (`portfolio add --currency
+INR`) uses that rate for its initial value. A value missing a rupee rate for
+some day is marked in `missing_rates` (not shown as zero), holdings left out
+are listed, and the CSVs end with an `incomplete` block. `--year` must be a
+calendar year whose financial year (from April) has started.
 
 Rupee values use the ECB reference rate for the day (Frankfurter); the rules
 ask for the SBI telegraphic-transfer buying rate, which differs slightly.
@@ -841,13 +886,13 @@ stockwise tax advance --json                      # programmatic JSON output
 
 - **Section 208 Check**: Automatically flags whether advance tax is mandatory (total liability ≥ ₹10,000) or exempt.
 - **Status**: A quarter is `Paid` only when payments dated on or before its due date cover the minimum. With no `--paid`, a quarter past its due date is `Overdue`, because StockWise has no record of any payment.
-- **Section 234C Deferment Interest**: Section 234C looks at what was paid by each due date, so pass each payment with its date (`--paid 2025-06-14:3000`, repeated). It then charges 1% a month (3% for Q1–Q3, 1% for Q4) on each shortfall, rounded down to ₹100, when the payments by that date are below the safe-harbour level (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4). For Q4 the requirement on 15 March is the tax on gains up to 15 March; tax on gains after it carries no interest when paid by 31 March (the proviso). A payment dated before the financial year began is ignored (it was made for an earlier year) and the output says so. A payment without a date is assumed to have been made before every due date, which can understate the interest.
+- **Section 234C Deferment Interest**: Section 234C looks at what was paid by each due date, so pass each payment with its date (`--paid 2025-06-14:3000`, repeated). It then charges 1% a month (3% for Q1–Q3, 1% for Q4) on each shortfall, with the shortfall rounded down to a multiple of ₹100 first (Rule 119A: a ₹1,000 shortfall at 3% is ₹30), when the payments by that date are below the safe-harbour level (12% in Q1, 36% in Q2, 75% in Q3, 100% in Q4). The capital-gains and dividend proviso holds only if their tax is paid in the later instalments or by 31 March: once the year is over and the payments by 31 March fall short, every instalment is measured against the whole year's tax. Interest income (SGB coupons) has no proviso and counts toward every instalment. For Q4 the requirement on 15 March is the tax on gains up to 15 March; tax on gains after it carries no interest when paid by 31 March (the proviso). A payment dated before the financial year began is ignored (it was made for an earlier year) and the output says so. A payment without a date is assumed to have been made before every due date, which can understate the interest.
 - **Cess**: The tax and the instalments include the 4% health and education cess; surcharge is left out.
 - **Section 234B Note**: Flags potential Section 234B liability if assessed after 31 March and cumulative advance tax paid is below 90% of total liability.
-- **Next instalment**: The next due date with the cumulative amount required by it, what has been paid, what is left, and the Section 234C interest if it is missed (3% of the shortfall for Q1–Q3, 1% for Q4, rounded down to ₹100); `next_instalment` in `--json`.
-- **Recorded payments**: `--paid 2026-12-10:25000 --record` saves dated payments in `advance_tax.json` in the data directory; later runs count them without `--paid`.
+- **Next instalment**: The next due date with the cumulative amount required on it (for 15 March, the tax on gains and dividends up to 15 March), what has been paid up to today (dated payments after today are not counted yet), what is left, and the Section 234C interest if nothing more is paid: 3% (Q1–Q3) or 1% (Q4) of the shortfall rounded down to a multiple of ₹100 — none when the payments already meet the safe harbour (12% by 15 June, 36% by 15 September). Under ₹10,000 of tax for the year nothing is shown as payable. `next_instalment` in `--json`.
+- **Recorded payments**: `--paid 2026-12-10:25000 --record` saves dated payments in `advance_tax.json` in the data directory, each for one financial year (`--fy`, or the year of its date; a late payment recorded with `--fy 2025-26` counts for that year). Later runs for that year count them without `--paid`; `--paid` without `--record` counts for the year asked for, this run only. An unreadable `advance_tax.json` is an error and is left untouched.
 - **Dividends and interest**: `--slab 30` adds the year's dividends and SGB interest (see `tax income`) at your slab rate, each in the quarter it was received.
-- **Reminder**: notifiers can call the advance-tax reminder hook, which fires within 7 days of a due date when something is still to pay (capital gains and recorded payments).
+- **Reminder**: notifiers can call the advance-tax reminder hook, which fires within 7 days of a due date when something is still to pay. It covers capital gains and recorded payments only: tax on dividends and SGB interest is not in it, and a portfolio with income but no sales gets no reminder.
 
 
 ### Plain-text accounting export

@@ -1086,7 +1086,10 @@ pub fn us_csv(s: &UsSchedule) -> String {
 
 // ── India: audit pack (one workpaper per sale) ──
 
-/// One sale's workpaper: how its gain was worked out and which rule taxes it.
+/// One sale's workpaper: how its gain was worked out and which rule taxes
+/// it. Amounts are in paise, so the workpaper's equation balances to the
+/// paisa (they are shown and serialised as rupees); per-unit prices keep
+/// four decimals.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AuditRow {
     /// 1-based, in sale-date order; the workpaper file is numbered by it.
@@ -1104,20 +1107,41 @@ pub struct AuditRow {
     /// `short`, `long` or `intraday`.
     pub term: &'static str,
     pub purchase_price: f64,
-    pub actual_cost: f64,
+    #[serde(serialize_with = "tax::paise::serialize")]
+    pub actual_cost: i64,
     /// Fair market value per unit on 31 Jan 2018, where grandfathering applies.
     pub fmv_31_jan_2018: Option<f64>,
-    pub fmv_value: Option<f64>,
+    #[serde(serialize_with = "opt_paise")]
+    pub fmv_value: Option<i64>,
     /// The cost the gain is worked out with.
-    pub cost_used: f64,
-    /// How `cost_used` was chosen.
+    #[serde(serialize_with = "tax::paise::serialize")]
+    pub cost_used: i64,
+    /// How `cost_used` was chosen, with the figures.
     pub cost_rule: String,
     pub sale_price: f64,
-    pub sale_value: f64,
-    pub gain: f64,
+    #[serde(serialize_with = "tax::paise::serialize")]
+    pub sale_value: i64,
+    /// Charges taken off the gain: the recorded charges of an intraday sale
+    /// (business income, as in the Schedule CG export's intraday total);
+    /// zero for capital gains, which are before charges.
+    #[serde(serialize_with = "tax::paise::serialize")]
+    pub charges_deducted: i64,
+    #[serde(serialize_with = "tax::paise::serialize")]
+    pub gain: i64,
     /// The section and rate that tax the gain.
     pub rule: String,
     pub file: String,
+}
+
+fn opt_paise<S: serde::Serializer>(v: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(p) => s.serialize_f64(tax::paise::to_rupees(*p)),
+        None => s.serialize_none(),
+    }
+}
+
+fn paise_str(p: i64) -> String {
+    format!("{:.2}", tax::paise::to_rupees(p) + 0.0)
 }
 
 /// The columns of `summary.csv`, also the order of a workpaper's fields.
@@ -1142,14 +1166,14 @@ pub const AUDIT_COLUMNS: &[&str] = &[
     "cost_rule",
     "sale_price",
     "sale_value",
+    "charges_deducted",
     "gain",
     "rule_applied",
 ];
 
 impl AuditRow {
     fn fields(&self) -> Vec<String> {
-        let m = |x: f64| format!("{x:.2}");
-        let opt = |x: Option<f64>| x.map(m).unwrap_or_default();
+        let price = |x: f64| format!("{x:.4}");
         vec![
             self.n.to_string(),
             self.file.clone(),
@@ -1163,15 +1187,16 @@ impl AuditRow {
             self.sale_date.clone(),
             self.holding_days.map(|d| d.to_string()).unwrap_or_default(),
             self.term.to_string(),
-            m(self.purchase_price),
-            m(self.actual_cost),
-            opt(self.fmv_31_jan_2018),
-            opt(self.fmv_value),
-            m(self.cost_used),
+            price(self.purchase_price),
+            paise_str(self.actual_cost),
+            self.fmv_31_jan_2018.map(price).unwrap_or_default(),
+            self.fmv_value.map(paise_str).unwrap_or_default(),
+            paise_str(self.cost_used),
             self.cost_rule.clone(),
-            m(self.sale_price),
-            m(self.sale_value),
-            m(self.gain),
+            price(self.sale_price),
+            paise_str(self.sale_value),
+            paise_str(self.charges_deducted),
+            paise_str(self.gain),
             self.rule.clone(),
         ]
     }
@@ -1184,13 +1209,23 @@ impl AuditRow {
         for (k, v) in AUDIT_COLUMNS.iter().zip(self.fields()) {
             out.push_str(&csv_line(&[k.to_string(), v]));
         }
-        out.push_str(&csv_line(&[
-            "computation".to_string(),
+        let computation = if self.charges_deducted != 0 {
             format!(
-                "gain = sale_value {:.2} - cost_used {:.2} = {:.2}",
-                self.sale_value, self.cost_used, self.gain
-            ),
-        ]));
+                "gain = sale_value {} - cost_used {} - charges {} = {}",
+                paise_str(self.sale_value),
+                paise_str(self.cost_used),
+                paise_str(self.charges_deducted),
+                paise_str(self.gain)
+            )
+        } else {
+            format!(
+                "gain = sale_value {} - cost_used {} = {}",
+                paise_str(self.sale_value),
+                paise_str(self.cost_used),
+                paise_str(self.gain)
+            )
+        };
+        out.push_str(&csv_line(&["computation".to_string(), computation]));
         out.push_str(&csv_line(&["disclaimer", DISCLAIMER]));
         out
     }
@@ -1205,6 +1240,18 @@ fn india_rule_of(
 ) -> (String, &'static str) {
     use crate::offmarket::{IndiaClass, india_asset, india_class};
     let before = date(&s.sell_date).is_some_and(|d| d < ymd(INDIA_RATE_CHANGE));
+    let class = india_class(&s.symbol, marks.mark(&s.symbol));
+    // Crypto is Sec. 115BBH even when bought and sold the same day.
+    if class == IndiaClass::Vda {
+        let term = if s.is_intraday() {
+            "intraday"
+        } else if long {
+            "long"
+        } else {
+            "short"
+        };
+        return (tax::IndiaRule::Vda115BBH.label().to_string(), term);
+    }
     if s.is_intraday() {
         return (
             "Sec. 43(5) speculative business income — slab rate".into(),
@@ -1212,7 +1259,7 @@ fn india_rule_of(
         );
     }
     let term = if long { "long" } else { "short" };
-    match india_class(&s.symbol, marks.mark(&s.symbol)) {
+    match class {
         IndiaClass::Listed | IndiaClass::EquityFund if long => {
             let mut r = format!(
                 "Sec. 112A — LTCG {} above the yearly exemption",
@@ -1238,7 +1285,7 @@ fn india_rule_of(
                         tax::IndiaRule::Vda115BBH => term,
                         _ => "short",
                     };
-                    (rule.label().to_string(), term)
+                    (rule.label_on(d).to_string(), term)
                 }
                 _ => (reason, term),
             }
@@ -1248,7 +1295,8 @@ fn india_rule_of(
 
 /// One workpaper per rupee sale of the financial year starting `start`
 /// (every rule: Sec. 111A/112A, 50AA, 112, 115BBH and intraday), in sale
-/// order. `isin` and `fmv` look up a symbol's ISIN and 31 Jan 2018 price.
+/// order. Sales in another currency are not included. `isin` and `fmv`
+/// look up a symbol's ISIN and 31 Jan 2018 price.
 pub fn india_audit_rows(
     sales: &[Sale],
     start: NaiveDate,
@@ -1256,33 +1304,46 @@ pub fn india_audit_rows(
     marks: &crate::offmarket::OffMarket,
     fmv: impl Fn(&str) -> Option<f64>,
 ) -> Vec<AuditRow> {
+    use tax::paise;
     let c = Country::India;
     let gf = ymd(GRANDFATHER_DATE);
     let (kept, _) = sales_in_year(c, sales, start);
     let mut rows = Vec::new();
     for (i, (s, scale)) in kept.into_iter().enumerate() {
+        let class = crate::offmarket::india_class(&s.symbol, marks.mark(&s.symbol));
+        let vda = class == crate::offmarket::IndiaClass::Vda;
+        let intraday = s.is_intraday() && !vda;
         let long = !s.is_intraday() && is_long_term(c, s);
         let equity = matches!(
-            crate::offmarket::india_class(&s.symbol, marks.mark(&s.symbol)),
+            class,
             crate::offmarket::IndiaClass::Listed | crate::offmarket::IndiaClass::EquityFund
         );
         let old = long && equity && date(&s.buy_date).is_some_and(|d| d <= gf);
         let fmv_unit = if old { fmv(&s.symbol) } else { None };
-        let unit_cost = match fmv_unit {
-            Some(f) => grandfathered_unit_cost(s.buy_price, f, s.sell_price),
-            None => s.buy_price,
+        let actual_cost = paise::from_rupees(s.qty * s.buy_price * scale);
+        let sale_value = paise::from_rupees(s.qty * s.sell_price * scale);
+        let fmv_value = fmv_unit.map(|f| paise::from_rupees(s.qty * f * scale));
+        // Sec. 55(2)(ac) on the totals: max(cost, min(FMV, sale value)).
+        let cost_used = match fmv_value {
+            Some(f) => actual_cost.max(f.min(sale_value)),
+            None => actual_cost,
         };
-        let actual_cost = s.qty * s.buy_price * scale;
-        let cost_used = s.qty * unit_cost * scale;
-        let sale_value = s.qty * s.sell_price * scale;
-        let raised = unit_cost != s.buy_price;
-        let cost_rule = match fmv_unit {
-            Some(_) if raised => {
-                "max(actual cost, min(31 Jan 2018 FMV, sale value)) — Sec. 55(2)(ac)".into()
-            }
-            Some(_) => "actual cost — not below the 31 Jan 2018 FMV (Sec. 55(2)(ac))".into(),
+        let raised = cost_used != actual_cost;
+        let cost_rule = match fmv_value {
+            Some(f) => format!(
+                "max(actual cost {}, min(31 Jan 2018 FMV {}, sale value {})) = {} — Sec. 55(2)(ac)",
+                paise_str(actual_cost),
+                paise_str(f),
+                paise_str(sale_value),
+                paise_str(cost_used)
+            ),
             None if old => "actual cost — the 31 Jan 2018 price could not be found".into(),
             None => "actual cost".to_string(),
+        };
+        let charges_deducted = if intraday {
+            paise::from_rupees(s.charges() * scale)
+        } else {
+            0
         };
         let (rule, term) = india_rule_of(s, long, raised, marks);
         let n = i + 1;
@@ -1309,14 +1370,15 @@ pub fn india_audit_rows(
             holding_days: holding_days(s),
             term,
             purchase_price: round(s.buy_price * scale, 4),
-            actual_cost: round(actual_cost, 2),
+            actual_cost,
             fmv_31_jan_2018: fmv_unit.map(|f| round(f * scale, 4)),
-            fmv_value: fmv_unit.map(|f| round(s.qty * f * scale, 2)),
-            cost_used: round(cost_used, 2),
+            fmv_value,
+            cost_used,
             cost_rule,
             sale_price: round(s.sell_price * scale, 4),
-            sale_value: round(sale_value, 2),
-            gain: round(sale_value - cost_used, 2),
+            sale_value,
+            charges_deducted,
+            gain: sale_value - cost_used - charges_deducted,
             rule,
         });
     }
@@ -1328,6 +1390,10 @@ pub fn india_audit_rows(
 pub fn audit_summary_csv(rows: &[AuditRow], tax_year: &str) -> String {
     let mut out = csv_line(&["StockWise audit pack", tax_year]);
     out.push_str(&csv_line(&["Note", DISCLAIMER]));
+    out.push_str(&csv_line(&[
+        "Scope",
+        "rupee sales only: sales in another currency (US shares) are not in this pack",
+    ]));
     out.push('\n');
     out.push_str(&csv_line(AUDIT_COLUMNS));
     for r in rows {
@@ -1339,6 +1405,7 @@ pub fn audit_summary_csv(rows: &[AuditRow], tax_year: &str) -> String {
         "sales",
         "sale_value",
         "cost_used",
+        "charges_deducted",
         "gain",
     ]));
     let mut rules: Vec<&str> = rows.iter().map(|r| r.rule.as_str()).collect();
@@ -1346,13 +1413,13 @@ pub fn audit_summary_csv(rows: &[AuditRow], tax_year: &str) -> String {
     rules.dedup();
     for rule in rules {
         let these: Vec<&AuditRow> = rows.iter().filter(|r| r.rule == rule).collect();
-        let total =
-            |f: fn(&AuditRow) -> f64| format!("{:.2}", these.iter().map(|r| f(r)).sum::<f64>());
+        let total = |f: fn(&AuditRow) -> i64| paise_str(these.iter().map(|r| f(r)).sum::<i64>());
         out.push_str(&csv_line(&[
             rule.to_string(),
             these.len().to_string(),
             total(|r| r.sale_value),
             total(|r| r.cost_used),
+            total(|r| r.charges_deducted),
             total(|r| r.gain),
         ]));
     }
@@ -1388,6 +1455,8 @@ pub fn parse_nse_equity_list(text: &str) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
+// Amounts in paise are written rupees_paise: 1_200_00 is ₹1,200.00.
+#[allow(clippy::inconsistent_digit_grouping)]
 mod tests {
     use super::*;
 
@@ -1415,6 +1484,66 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn audit_workpapers_balance_and_name_the_bound_and_the_vda_rule() {
+        let mut intraday = sale(
+            "SBIN.NS",
+            100.0,
+            ("2026-07-10", 800.0),
+            ("2026-07-10", 805.0),
+        );
+        intraday.charges = Some(42.5);
+        let sales = vec![
+            // Same-day crypto: still Sec. 115BBH, not Sec. 43(5).
+            sale(
+                "BTC-INR",
+                0.01,
+                ("2026-06-01", 5_000_000.0),
+                ("2026-06-01", 5_100_000.0),
+            ),
+            intraday,
+            // FMV ₹1,000 above cost ₹800 but the sale (₹700) caps it: cost stays.
+            sale("ITC.NS", 1.0, ("2017-01-02", 800.0), ("2026-08-01", 700.0)),
+            // Sub-paisa prices: the equation still balances to the paisa.
+            sale(
+                "YESBANK.NS",
+                1.0,
+                ("2026-01-02", 100.004),
+                ("2026-08-02", 100.006),
+            ),
+        ];
+        let rows = india_audit_rows(
+            &sales,
+            d("2026-04-01"),
+            |_| None,
+            &Default::default(),
+            |s| (s == "ITC.NS").then_some(1_000.0),
+        );
+        let by = |s: &str| rows.iter().find(|r| r.symbol == s).unwrap();
+        assert!(by("BTC-INR").rule.contains("115BBH"));
+        assert_eq!(by("BTC-INR").term, "intraday");
+        let sbin = by("SBIN.NS");
+        assert_eq!(sbin.charges_deducted, 42_50);
+        assert_eq!(sbin.gain, 500_00 - 42_50);
+        assert!(
+            sbin.workpaper_csv("FY")
+                .contains("- charges 42.50 = 457.50")
+        );
+        let itc = by("ITC.NS");
+        assert_eq!(itc.cost_used, 800_00);
+        assert!(
+            itc.cost_rule.contains(
+                "max(actual cost 800.00, min(31 Jan 2018 FMV 1000.00, sale value 700.00)) = 800.00"
+            ),
+            "{}",
+            itc.cost_rule
+        );
+        assert!(!itc.rule.contains("grandfathered"));
+        for r in &rows {
+            assert_eq!(r.gain, r.sale_value - r.cost_used - r.charges_deducted);
+        }
     }
 
     #[test]
@@ -1477,10 +1606,10 @@ mod tests {
         let hdfc = by("HDFCBANK.NS");
         assert_eq!(hdfc.isin, "INE040A01034");
         assert_eq!(hdfc.fmv_31_jan_2018, Some(948.0));
-        assert_eq!(hdfc.fmv_value, Some(9_480.0));
-        assert_eq!(hdfc.actual_cost, 7_000.0);
-        assert_eq!(hdfc.cost_used, 9_480.0);
-        assert_eq!(hdfc.gain, 8_520.0);
+        assert_eq!(hdfc.fmv_value, Some(9_480_00));
+        assert_eq!(hdfc.actual_cost, 7_000_00);
+        assert_eq!(hdfc.cost_used, 9_480_00);
+        assert_eq!(hdfc.gain, 8_520_00);
         assert!(hdfc.rule.contains("112A") && hdfc.rule.contains("grandfathered"));
         assert!(by("INFY.NS").rule.contains("111A"));
         assert_eq!(by("INFY.NS").fmv_31_jan_2018, None);
@@ -1505,12 +1634,12 @@ mod tests {
         for col in AUDIT_COLUMNS {
             assert!(fields.contains(col), "workpaper lacks {col}");
         }
-        assert!(wp.contains("fmv_31_jan_2018_per_unit,948.00"));
+        assert!(wp.contains("fmv_31_jan_2018_per_unit,948.0000"));
         assert!(wp.contains("gain = sale_value 18000.00 - cost_used 9480.00 = 8520.00"));
 
         let summary = audit_summary_csv(&rows, "FY 2026-27");
         assert!(summary.contains(&AUDIT_COLUMNS.join(",")));
-        assert!(summary.contains("rule_applied,sales,sale_value,cost_used,gain"));
+        assert!(summary.contains("rule_applied,sales,sale_value,cost_used,charges_deducted,gain"));
     }
 
     #[test]
