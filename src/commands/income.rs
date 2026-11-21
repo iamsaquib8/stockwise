@@ -68,7 +68,10 @@ pub async fn cmd_income(
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let resolved = resolve_symbols(&raw_symbols, market);
+    // Held symbols are stored as Yahoo symbols already (`AAPL`,
+    // `RELIANCE.NS`): resolving them again for `-m in` would ask for
+    // `AAPL.NS`, and a US holding would have no price.
+    let resolved = raw_symbols;
 
     let val = crate::commands::value_holdings(&client, &resolved, market, base)
         .await
