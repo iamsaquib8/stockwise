@@ -1376,8 +1376,9 @@ enum PortfolioCmd {
         preview: bool,
         /// Brokerage, taxes and fees paid on the sale, in total; realized P&L is net of them.
         /// `auto` estimates an NSE/BSE delivery sell's STT, exchange, SEBI,
-        /// GST and DP charges (no brokerage)
-        #[arg(long, value_parser = trade_charges::parse)]
+        /// GST and DP charges (no brokerage). Not with --preview, whose
+        /// figures are before charges
+        #[arg(long, value_parser = trade_charges::parse, conflicts_with = "preview")]
         charges: Option<trade_charges::ChargesArg>,
     },
     /// A holding's lots, sales and dividends; --lot N fixes or deletes a lot, --undo-sale N puts a sale back

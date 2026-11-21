@@ -1665,7 +1665,8 @@ pub async fn portfolio_pme_report(
     // Splits not yet applied would show as a fake loss; closed positions
     // may be in a currency no open holding uses; each flow at its own
     // day's exchange rate.
-    let pending = crate::corp_actions::pending_splits_live(portfolio).await;
+    let mut pending = crate::corp_actions::pending_splits_live(portfolio).await;
+    pending.align_to_quotes(|s| val.priced_on(s));
     let portfolio = &pending.adjusted(portfolio);
     let mut currencies: Vec<String> = symbols.iter().filter_map(|s| val.currency(s)).collect();
     currencies.sort();
@@ -1780,15 +1781,15 @@ pub(crate) fn pme_report_from(
             },
             None => 0.0,
         };
-        let Some(items) = val.flow_items_base(portfolio, &sym) else {
+        // Price-only: dividends are dropped before conversion, so a dividend
+        // without an exchange rate does not take its holding out.
+        let Some(items) = val.flow_items_base_where(portfolio, &sym, |f| {
+            total_return || f.kind != pf::FlowKind::Dividend
+        }) else {
             excluded.push(sym);
             continue;
         };
-        let flows: Vec<(NaiveDate, f64)> = items
-            .into_iter()
-            .filter(|(_, _, k)| total_return || *k != pf::FlowKind::Dividend)
-            .map(|(d, a, _)| (d, a))
-            .collect();
+        let flows: Vec<(NaiveDate, f64)> = items.into_iter().map(|(d, a, _)| (d, a)).collect();
         actual_portfolio_value += value;
         all_flows.extend(flows.iter().copied());
         holding_flows.push((sym, flows, value));
@@ -1796,8 +1797,23 @@ pub(crate) fn pme_report_from(
     all_flows.sort_by_key(|f| f.0);
     let start_date = all_flows.first().map_or(today, |f| f.0);
 
-    let pme_res = crate::pme::compute_pme(&all_flows, actual_portfolio_value, bench_closes, today)
-        .context("Could not compute PME for portfolio")?;
+    // Nothing left to compare (every holding excluded): report the
+    // exclusions with no metrics instead of failing.
+    let pme_res = if all_flows.is_empty() {
+        crate::pme::PmeResult {
+            actual_value: actual_portfolio_value,
+            twin_value: 0.0,
+            value_added: 0.0,
+            pme_ratio: None,
+            direct_alpha_percent: None,
+            actual_xirr_percent: None,
+            twin_xirr_percent: None,
+            twin_capped_sales: 0,
+        }
+    } else {
+        crate::pme::compute_pme(&all_flows, actual_portfolio_value, bench_closes, today)
+            .context("Could not compute PME for portfolio")?
+    };
     let (twin_shares, _) =
         crate::pme::twin_shares_and_value(&all_flows, bench_closes, today).unwrap_or((0.0, 0.0));
     let bench_end_price = crate::pme::benchmark_price_on(bench_closes, today).unwrap_or(0.0);
@@ -1901,6 +1917,16 @@ pub async fn cmd_portfolio_pme(
         Format::Table => {}
     }
 
+    if report.holdings.is_empty() && s.actual_value == 0.0 && !s.excluded.is_empty() {
+        println!(
+            "\n  {} No holding could be compared with {}: {} left out for want of a price or exchange rate ({}).",
+            "!".yellow(),
+            s.benchmark_name,
+            s.excluded.len(),
+            s.excluded.join(", ")
+        );
+        return Ok(());
+    }
     if report.holdings.is_empty() && s.actual_value == 0.0 {
         println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
         return Ok(());
@@ -2025,7 +2051,7 @@ pub async fn cmd_portfolio_pme(
     }
     if s.flows_before_index > 0 {
         println!(
-            "  {} {} cash flow(s) dated before the index history (starts {}) are priced at its first close.",
+            "  {} {} cash flow(s) dated more than a week before the index history (starts {}) are priced at its first close.",
             "!".yellow(),
             s.flows_before_index,
             s.index_start_date
@@ -2033,7 +2059,7 @@ pub async fn cmd_portfolio_pme(
     }
     if s.twin_capped_sales > 0 {
         println!(
-            "  {} {} sale(s) were larger than the Index Twin's holding: the twin sold only what it held.",
+            "  {} {} sale(s) or dividend(s) were larger than the Index Twin's holding: the twin paid out only what it held.",
             "·".dimmed(),
             s.twin_capped_sales
         );
@@ -2583,6 +2609,22 @@ fn names_holding(h: &pf::Holding, symbol: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('.'))
 }
 
+/// The portfolio holdings a goal link selects (as [`linked_value`] matches
+/// them); the link's own key when it selects none.
+fn goal_link_holdings(portfolio: &Portfolio, link: &str) -> Vec<String> {
+    let found: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| names_holding(h, link))
+        .map(|h| h.symbol.clone())
+        .collect();
+    if found.is_empty() {
+        vec![goals::holding_key(link)]
+    } else {
+        found
+    }
+}
+
 /// What linked holdings are worth, and what they cost.
 pub struct Linked {
     pub value: f64,
@@ -2739,7 +2781,9 @@ pub(crate) async fn goal_rows(
     let mut rows = Vec::new();
     // One goal per holding: a holding linked to several goals counts
     // towards the first only.
-    let allocation = store.allocate();
+    // Links resolved to the holdings they select, as `linked_value` does.
+    let held = Portfolio::load().unwrap_or_default();
+    let allocation = store.allocate_by(|link| goal_link_holdings(&held, link));
     for (g, (holdings, dropped)) in store.goals.iter().zip(allocation) {
         for (h, first) in &dropped {
             eprintln!(
@@ -2819,13 +2863,15 @@ pub fn cmd_goal_add(a: GoalAdd) -> Result<()> {
         return_pct: a.return_pct,
         created: today.to_string(),
     };
+    let portfolio = Portfolio::load().unwrap_or_default();
+    let resolve = |link: &str| goal_link_holdings(&portfolio, link);
     store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
         if s.find(&saved.name).is_some() {
             bail!("A goal named `{}` exists: remove it first", saved.name);
         }
         // One goal per holding, so no holding's value is counted twice.
         for h in &saved.holdings {
-            if let Some(other) = s.linked_elsewhere(h, &saved.name) {
+            if let Some(other) = s.linked_elsewhere_by(h, &saved.name, resolve) {
                 bail!(
                     "{} already counts towards goal `{}`: a holding can be linked to one goal only",
                     h,
@@ -3301,6 +3347,38 @@ mod tests {
             "2025-01-01",
             "2025-12-31"
         ));
+    }
+
+    #[test]
+    fn goal_links_resolve_to_the_holdings_they_select() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(1.0, 1.0, "2024-01-02", "manual"));
+        p.add_lot("TCS.BO", pf::Lot::new(1.0, 1.0, "2024-01-02", "manual"));
+        p.add_lot("VOD.L", pf::Lot::new(1.0, 1.0, "2024-01-02", "manual"));
+        let mut store = goals::GoalStore::default();
+        let goal = |name: &str, h: &[&str]| goals::SavedGoal {
+            name: name.into(),
+            target: 1.0,
+            by: "2030-01-01".into(),
+            inflation_pct: None,
+            holdings: h.iter().map(|s| s.to_string()).collect(),
+            return_pct: None,
+            created: "2026-01-01".into(),
+        };
+        store.goals.push(goal("a", &["TCS.NS", "VOD"]));
+        store.goals.push(goal("b", &["TCS.BO", "VOD.L"]));
+        let resolve = |l: &str| goal_link_holdings(&p, l);
+        // TCS.BO is another listing; VOD.L is the holding VOD selects.
+        assert!(store.linked_elsewhere_by("TCS.BO", "b", resolve).is_none());
+        assert_eq!(
+            store
+                .linked_elsewhere_by("VOD.L", "b", resolve)
+                .map(|g| g.name.as_str()),
+            Some("a")
+        );
+        let alloc = store.allocate_by(resolve);
+        assert_eq!(alloc[1].0, vec!["TCS.BO".to_string()]);
+        assert_eq!(alloc[1].1, vec![("VOD.L".to_string(), "a".to_string())]);
     }
 
     #[test]
