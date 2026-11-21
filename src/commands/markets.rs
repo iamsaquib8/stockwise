@@ -454,7 +454,7 @@ fn cached_cap_quotes(
 /// NSE index scan uses the bulk snapshot (`prefer_bulk`, for scans that need
 /// only price and change) or falls back to it when Yahoo can't answer;
 /// everything else is a live Yahoo scan. The result is cut to `cap`.
-async fn scan_quotes(
+pub(super) async fn scan_quotes(
     client: &YahooClient,
     market: Market,
     scan: &Scan,

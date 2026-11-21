@@ -596,8 +596,11 @@ async fn report_triggers(
             reading
         );
     }
+    crate::digest::log_alerts(&triggers.iter().map(Trigger::text).collect::<Vec<_>>());
     if let Some(msg) = trigger_message(triggers)
-        && !notifier.send_logged(&msg).await
+        && !notifier
+            .send_logged(&msg.with_priority(crate::notify::Priority::High))
+            .await
     {
         for t in triggers {
             state.undo(&t.key, t.previous);

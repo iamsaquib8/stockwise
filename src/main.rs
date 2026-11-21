@@ -37,6 +37,7 @@ mod daemon;
 mod daemon_status;
 mod db;
 mod derivatives;
+mod digest;
 mod display;
 mod events;
 mod funds;
@@ -510,6 +511,48 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// History used to fit the trend (needs at least 30 trading days)
         #[arg(short, long, default_value = "6mo", value_parser = PERIODS)]
         period: String,
+    },
+
+    /// What changed in your portfolio today and why, the market backdrop and a news feed
+    #[command(after_help = "Examples:\n  \
+stockwise today                 holdings by day impact, watchlist, news feed\n  \
+stockwise today --days 3        news from the last three days\n  \
+stockwise today --json")]
+    Today {
+        /// News and filings from the last N days
+        #[arg(long, default_value = "2", value_parser = clap::value_parser!(u32).range(1..=14))]
+        days: u32,
+        /// Skip headlines and filings (faster)
+        #[arg(long)]
+        no_news: bool,
+        /// Most feed items to show
+        #[arg(long, default_value = "15")]
+        limit: usize,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+
+    /// What's hot: your hottest holdings and watchlist names, then the market
+    #[command(after_help = "Examples:\n  \
+stockwise hot                   your investments ranked by heat, then market lists\n  \
+stockwise hot --cap small       small caps only\n  \
+stockwise hot -m us --json\n\n\
+Heat = |excess move| in σ + volume surge + fresh news/filing importance + a date\n\
+within 3 days, scaled up by portfolio weight. Market lists: biggest moves, unusual\n\
+volume (RVOL), gaps, 52-week highs/lows, news mentions, sectors, themes, FII/DII\n\
+flows, bulk/block deals, F&O ban list, OI build-up and cross-market movers.")]
+    Hot {
+        /// Only this market-cap tier: all, mega, large, mid, small or micro
+        #[arg(long, value_enum, ignore_case = true)]
+        cap: Option<market::CapFilter>,
+        /// India: an NSE index (nifty50 ... smallcap250) instead of the default list
+        #[arg(long, value_enum, ignore_case = true)]
+        universe: Option<market::Universe>,
+        /// Rows per list
+        #[arg(long, default_value = "8")]
+        limit: usize,
+        #[command(flatten)]
+        out: JsonOutput,
     },
 
     // ── Market ──
@@ -1191,6 +1234,28 @@ STOCKWISE_BACKUP_PASSPHRASE. Broker tokens, caches and notification secrets are 
     Notify {
         #[command(subcommand)]
         action: Option<NotifyCmd>,
+    },
+
+    /// Automatic monitoring of every holding: big drops, 52-week lows, gaps, dates tomorrow, ...
+    Monitor {
+        #[command(subcommand)]
+        action: Option<MonitorCmd>,
+    },
+
+    /// The after-close digest: day P&L, contributors with reasons, alerts, dates coming up
+    Digest {
+        /// Send it to the notification channels too
+        #[arg(long)]
+        send: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+
+    /// Two-way Telegram bot: /hot, /today, /review, /digest, plus scheduled digests
+    Bot {
+        /// Answer pending messages once and exit
+        #[arg(long)]
+        once: bool,
     },
 
     /// Check for a new release and update this binary (or print the package manager's command)
@@ -2898,6 +2963,24 @@ impl From<StrategyArg> for payoff::Preset {
 }
 
 #[derive(Subcommand)]
+enum MonitorCmd {
+    /// Thresholds, the worker and recent signals
+    #[command(alias = "show")]
+    Status {
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+    /// One pass over every holding now
+    Run {
+        /// Send new signals to the notification channels
+        #[arg(long)]
+        notify: bool,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
+}
+
+#[derive(Subcommand)]
 enum NotifyCmd {
     /// Show which channels are configured
     #[command(alias = "show")]
@@ -3367,6 +3450,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "deep",
             "markets",
             "dashboard",
+            "today",
+            "hot",
             "search",
             "doctor",
             "cache",
@@ -3438,6 +3523,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "portfolio",
             "watch",
             "alert",
+            "monitor",
+            "digest",
             "calendar",
             "export",
             "import",
@@ -3459,6 +3546,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         &[
             "profile",
             "notify",
+            "bot",
             "config",
             "backup",
             "update",
@@ -5558,6 +5646,27 @@ async fn dispatch(
                 } => backup::cmd_restore(&path, dry_run, src(passphrase_fd)),
             }
         }
+        Commands::Today {
+            days,
+            no_news,
+            limit,
+            out,
+        } => commands::cmd_today(m, days, no_news, limit, out.json).await,
+        Commands::Hot {
+            cap,
+            universe,
+            limit,
+            out,
+        } => commands::cmd_hot(m, cap, universe, limit, out.json).await,
+        Commands::Monitor { action } => match action {
+            None => commands::cmd_monitor("status", false, false, m).await,
+            Some(MonitorCmd::Status { out }) => commands::cmd_monitor("status", false, out.json, m).await,
+            Some(MonitorCmd::Run { notify, out }) => {
+                commands::cmd_monitor("run", notify, out.json, m).await
+            }
+        },
+        Commands::Digest { send, out } => commands::cmd_digest(send, out.json, m).await,
+        Commands::Bot { once } => commands::cmd_bot(once, m).await,
         Commands::Notify { action } => match action {
             Some(NotifyCmd::Test) => commands::cmd_notify("test").await,
             Some(NotifyCmd::Status) | None => commands::cmd_notify("status").await,
