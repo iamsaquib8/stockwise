@@ -15,7 +15,7 @@
 //! | DP charge (per sell)    | ₹15.93              | —                   |
 
 use crate::market::AssetClass;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -26,7 +26,7 @@ pub enum Side {
 
 /// Brokerage per order: a flat amount, a percent of turnover, or the lower
 /// of the two (how most Indian discount brokers price it).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Brokerage {
     pub flat: Option<f64>,
     #[serde(rename = "percent")]
@@ -111,7 +111,7 @@ impl Charges {
 }
 
 /// Rates are percents of turnover; JSON spells `_pct` as `_percent`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostModel {
     /// Preset name: none, in-delivery, in-intraday, us
     pub name: String,

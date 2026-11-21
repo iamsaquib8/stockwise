@@ -2,12 +2,18 @@
 
 ## Intraday Bot
 
-9-strategy multi-signal engine for day trading.
+9-strategy multi-signal scanner for day trading. The scanner shows signals
+only: no sizes, no price levels, no orders.
 
 ```bash
-stockwise bot 25000 2       # ₹25K capital, 2% daily target
-stockwise -m us bot 5000 1  # US market, $5K, 1% target
+stockwise intraday          # NSE
+stockwise -m us intraday    # US market
 ```
+
+`bot` is an alias of `intraday`. It still accepts a capital and a target
+(`stockwise bot 25000 2`) so older scripts run, but it ignores them. To size
+paper trades with a capital, use [`sim`](#paper-trading-simulator) or the
+[daemon](#intraday-daemon).
 
 ### Strategies
 
@@ -15,7 +21,7 @@ stockwise -m us bot 5000 1  # US market, $5K, 1% target
 |---|----------|--------|---------|
 | 1 | Dip | Long | One vote for any oversold reading: RSI <40 (<30 strongly), price at the lower Bollinger Band, price >3% below the 20-day average, or OBV rising while price is flat or down |
 | 2 | Overextended | Short | One vote for RSI >70 or price at the upper Bollinger Band |
-| 3 | VWAP Reclaim | Long/Short | Price just above (or just below) today's session VWAP |
+| 3 | VWAP Reclaim / Rejection | Long/Short | Price within 0.5% above (or below) today's session VWAP |
 | 4 | BB Squeeze | Long | Tight Bollinger bands + price above middle |
 | 5 | MACD Cross | Long/Short | Histogram sign change (fresh crossover) |
 | 6 | Volume Breakout | Long | Today's volume 2x+ the usual pace for this time of day, with positive price action |
@@ -56,16 +62,21 @@ readings.
   the trend 0.75x, or 0.6x against a strong trend
 - Confidence: HIGH (score >=75, net 3+ votes), MEDIUM (>=60, net 2+), LOW (others)
 
-### Position Sizing
+### Position Sizing (paper trading: `sim` and the daemon)
 
 - Exit level at least 1 × ATR from the price. The prior session's S1 (R1
   for a short) is used only when it lies 1–2 ATR away. A level closer than
   that would be hit by ordinary noise and would inflate the size.
-- Each trade risks **0.5% of capital** if its exit level is hit.
-- After **30 or more closed paper trades** in `sim_history.json`, half-Kelly
-  from the measured win rate and average win/loss replaces the 0.5%, capped
-  at 1% per trade. If the record shows no edge, the risk is 0.25%. There are
-  no assumed win rates.
+- The default sizing budget is **0.5% of capital** per trade: the size is
+  the largest whose loss at the exact exit level, charges and slippage
+  included, stays within it. The 30% position cap can make a position
+  smaller, so its actual loss at the exit level depends on its size and how
+  far the level is.
+- After **30 or more closed paper trades** in `sim_history.json` (counting
+  only trades settled with charges, from 0.9 on), half-Kelly from the
+  measured win rate and average win/loss replaces the 0.5% budget, capped at
+  1%. If the record shows no edge, the budget is 0.25%. There are no assumed
+  win rates.
 - Plans are ranked by score alone. A high reward-to-risk ratio from a tight
   level says nothing about the odds, so it doesn't lift a plan.
 - Never more than 30% of capital in one position
@@ -196,9 +207,13 @@ purchase. Override the defaults with environment variables:
 | `STOCKWISE_SIM_BROKERAGE` | `20` (flat), `0.03%`, or `20,0.03%` (the lower) |
 | `STOCKWISE_SIM_SLIPPAGE_BPS` | e.g. `5` |
 
-Sessions settled before 0.9 keep their gross P&L.
+A daemon session keeps the cost model it started with, and each closed
+position keeps the charges it closed with, so changing these settings later
+never rewrites a finished result. Sessions settled before 0.9 keep their
+gross P&L; `sim history` says how many trades are gross, and they don't count
+toward the 30 trades for Kelly sizing.
 
-### Paper Record Rating (after 20+ days and 30+ trades)
+### Paper Record Rating (after 20+ dates and 30+ trades)
 
 | Rating | Criteria |
 |--------|----------|
@@ -206,7 +221,8 @@ Sessions settled before 0.9 keep their gross P&L.
 | MODERATE | >50% day win rate + profitable |
 | LOW | Below moderate threshold |
 
-A rating describes the paper record only. A few days of results say almost
+Several sessions on one date count as one day. A rating describes the paper
+record only. A few days of results say almost
 nothing about an intraday system. Paper fills are also optimistic: real
 orders queue and move the price.
 
@@ -245,8 +261,8 @@ status 0 (for example from cron or a systemd timer).
 Lifecycle (NSE; NYSE uses the same offsets from 09:30–16:00 ET):
 ```
 9:00 AM   Pre-market scan (sectors, gaps)
-9:15 AM   Enter up to 5 positions (0.5% risk each, or half-Kelly after 30 paper
-          trades; ≤ capital in total)
+9:15 AM   Enter up to 5 positions (0.5% sizing budget each, or half-Kelly
+          after 30 paper trades; ≤ capital in total)
 9:30–3:15 Monitor every 60 seconds:
           - Level 1 reached → book 50%, move the exit level to the opening price
           - Level 2 reached → close fully
@@ -264,8 +280,10 @@ closed all day; the daemon prints the reason and the next session, then
 sleeps until 15 minutes before it.
 
 Risk controls:
-- 0.5% risk per trade (half-Kelly capped at 1% after 30 closed paper
-  trades), 30% max per position, total allocation ≤ capital
+- 0.5% sizing budget per trade (half-Kelly capped at 1% after 30 closed
+  paper trades), 30% max per position, total allocation ≤ capital. A
+  position held smaller by the 30% cap can lose less than the budget at its
+  exit level.
 - 3% daily loss kill switch (closes everything; counts every realised exit,
   including level 2 exits, after charges and slippage)
 - Max 5 concurrent positions

@@ -41,13 +41,21 @@ pub struct LivePosition {
     /// entry. State files from before 0.9 have none and trail by 1.5%.
     #[serde(default)]
     pub trail_distance: Option<f64>,
+    /// Charges and slippage fixed when the position closed, so a later
+    /// change to the cost settings never rewrites a finished result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
 }
 
 impl LivePosition {
-    /// Charges and slippage of the round trip if it closed at the current
-    /// price: the opening order, the half booked at level 1 (if any) and the
-    /// rest at `current_price`.
+    /// Charges and slippage of the round trip: the amount recorded at the
+    /// close, or for an open position the estimate if it closed at the
+    /// current price (the opening order, the half booked at level 1 if any,
+    /// and the rest at `current_price`).
     pub fn charges(&self, model: &crate::backtest::costs::CostModel) -> f64 {
+        if let Some(c) = self.charges {
+            return c;
+        }
         let long = crate::intraday::Direction::is_long_str(&self.direction);
         let fills = crate::simulator::exit_fills(
             self.qty,
@@ -304,6 +312,7 @@ pub fn plans_to_positions(
             entered_at: Some(entered_at),
             initial_stop: Some(p.stop_loss),
             trail_distance: Some((p.entry - p.trailing_stop).abs()),
+            charges: None,
         })
         .collect()
 }
@@ -463,6 +472,10 @@ pub struct DaemonState {
     /// The day is over: results are in the simulator history.
     pub settled: bool,
     pub updated_at: DateTime<Utc>,
+    /// The cost model fixed for this session when it started. State files
+    /// from before it was saved read the settings instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_model: Option<crate::backtest::costs::CostModel>,
 }
 
 impl DaemonState {
@@ -484,6 +497,7 @@ impl DaemonState {
             tick_count: 0,
             settled: false,
             updated_at: now,
+            cost_model: Some(crate::simulator::paper_cost_model(market)),
         }
     }
 
@@ -509,9 +523,12 @@ impl DaemonState {
             .collect()
     }
 
-    /// The charges and slippage this day's paper results pay.
+    /// The charges and slippage this day's paper results pay: the model
+    /// saved with the session, else the current settings.
     pub fn costs(&self) -> crate::backtest::costs::CostModel {
-        crate::simulator::paper_cost_model(&self.market)
+        self.cost_model
+            .clone()
+            .unwrap_or_else(|| crate::simulator::paper_cost_model(&self.market))
     }
 
     /// One position's P&L after charges and slippage.
@@ -574,6 +591,7 @@ impl DaemonState {
                 });
             }
             if pos.status.is_closed() {
+                pos.charges = Some(pos.charges(&model));
                 let net = pos.net_pnl(&model);
                 self.risk.record_exit(net);
                 events.push(Event::Closed {
@@ -610,6 +628,7 @@ impl DaemonState {
         let mut events = Vec::new();
         for pos in self.positions.iter_mut().filter(|p| p.is_open()) {
             pos.status = PositionStatus::SquaredOff;
+            pos.charges = Some(pos.charges(&model));
             let net = pos.net_pnl(&model);
             self.risk.record_exit(net);
             events.push(Event::Closed {
@@ -795,6 +814,7 @@ mod tests {
             entered_at: None,
             initial_stop: None,
             trail_distance: None,
+            charges: None,
         }
     }
 
@@ -1311,6 +1331,26 @@ mod tests {
         assert!((t.pnl.unwrap() - (200.0 - charges)).abs() < 1e-9);
         assert!((session.total_pnl.unwrap() - (200.0 - charges)).abs() < 1e-9);
         assert!((t.pnl_pct.unwrap() - (200.0 - charges) / 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn closed_results_keep_the_costs_they_were_closed_with() {
+        // Closed with costs off: ₹70. Changing the settings later (here the
+        // saved model, as a resumed session with new settings would) must
+        // not turn it into ₹68.
+        let mut s = state_with(vec![make_position(100.0, 103.0, 106.0, 97.0)]);
+        s.cost_model = Some(crate::backtest::costs::CostModel::none());
+        s.apply_prices(&prices(&[("TEST.NS", 107.0)]), Phase::Active);
+        assert!((s.risk.realized_pnl - 70.0).abs() < 1e-9);
+        let mut flat = crate::backtest::costs::CostModel::none();
+        flat.brokerage.flat = Some(1.0);
+        s.cost_model = Some(flat);
+        assert!((s.total_pnl() - 70.0).abs() < 1e-9);
+        assert_eq!(s.to_sim_session(true).trades[0].pnl, Some(70.0));
+        // The session's model survives a save and load.
+        let back: DaemonState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.cost_model, s.cost_model);
+        assert_eq!(back.positions[0].charges, Some(0.0));
     }
 
     #[test]
