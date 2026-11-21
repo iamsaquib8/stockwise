@@ -925,7 +925,7 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Value {
-        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/src/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -1176,7 +1176,7 @@ mod tests {
 
     fn read(name: &str) -> String {
         std::fs::read_to_string(format!(
-            "{}/tests/fixtures/{name}",
+            "{}/src/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         ))
         .unwrap()
