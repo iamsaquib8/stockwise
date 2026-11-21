@@ -161,7 +161,24 @@ type Builtin = (
     f64,
     [f64; QUANTILES],
 );
-const BUILTIN: Option<Builtin> = None;
+/// Fitted 2026-11-21 on 192 NSE mainboard issues listed 19 Feb 2025 – 5 Nov
+/// 2026 (final consolidated subscription from NSE's issue detail,
+/// listing-day close from Yahoo); 6 of 198 had no Yahoo listing bar.
+/// OLS on the same rows: −25.53, +11.69, −5.46, +4.97, +0.487 (R² 0.433).
+const BUILTIN: Option<Builtin> = Some((
+    [-19.9809, 10.1698, -6.5413, 6.7332, 0.2728],
+    8.7013,
+    "2026-11-21",
+    192,
+    "2025-02-19",
+    "2026-11-05",
+    0.4175,
+    20.3710,
+    [
+        -89.08, -25.24, -19.58, -15.93, -12.97, -10.28, -7.81, -4.88, -3.07, -1.14, 0.16, 2.01,
+        3.65, 4.90, 6.51, 8.92, 12.15, 17.52, 23.72, 32.05, 80.12,
+    ],
+));
 
 /// The model in use: the user's `ipo_model.json` when present and valid,
 /// else the shipped one.
@@ -818,6 +835,34 @@ mod tests {
         assert_eq!(errors, ["line 3: not a usable row"]);
         let (_, e) = samples_from_csv("symbol,issue_price\n");
         assert_eq!(e, ["missing column listing_date"]);
+    }
+
+    #[test]
+    fn shipped_fit_is_loaded_and_sane() {
+        let m = builtin().expect("a shipped fit");
+        assert_eq!(m.n, 192);
+        assert_eq!(m.residual_quantiles.len(), QUANTILES);
+        assert!(m.residual_quantiles.windows(2).all(|w| w[0] <= w[1]));
+        assert!(m.b_qib > 0.0, "QIB demand must raise the expected listing");
+        // More institutional demand: higher expected gain, lower P(loss).
+        let at = |q: f64| {
+            m.predict(&Features {
+                qib_x: q,
+                nii_x: 10.0,
+                retail_x: 5.0,
+                regime_pct: Some(10.0),
+            })
+        };
+        assert!(at(100.0) > at(10.0) && at(10.0) > at(1.0));
+        assert!(m.p_loss(at(100.0)) < m.p_loss(at(1.0)));
+        // A cold book (1x everywhere, flat regime) is more likely than not to list below issue.
+        let cold = m.predict(&Features {
+            qib_x: 1.0,
+            nii_x: 1.0,
+            retail_x: 1.0,
+            regime_pct: Some(0.0),
+        });
+        assert!(m.p_loss(cold) > 0.5, "{cold}");
     }
 
     #[test]

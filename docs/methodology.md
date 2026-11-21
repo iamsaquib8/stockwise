@@ -327,10 +327,20 @@ expected listing-day return % = b0 + b1·ln(1+QIB x) + b2·ln(1+NII x) + b3·ln(
   prints n, R², residual sd and an in-sample check of P(loss), and with
   `--save` keeps the fit as `ipo_model.json`, which then takes precedence.
 
-**Shipped fit.** None yet: NSE refused the machine the 0.9 fit was to be
-made on, so this release ships without built-in coefficients and mainboard
-issues get NO CALL until `stockwise ipo calibrate --save` has run. The fit
-date, n, R² and residual sd are printed with every verdict.
+**Shipped fit** (2026-11-21, 192 NSE mainboard issues listed 19 Feb 2025 –
+5 Nov 2026; 6 of 198 read had no Yahoo listing bar):
+
+```text
+listing % = −19.98 + 10.17·ln(1+QIB) − 6.54·ln(1+NII) + 6.73·ln(1+retail) + 0.273·regime
+R² 0.42 · residual sd 20.4 points · regime training mean +8.7%
+```
+
+OLS on the same rows gives −25.53, +11.69, −5.46, +4.97, +0.487 (R² 0.43).
+NII's negative weight is the overlap with QIB and retail demand (the three
+move together), not a sign that NII demand hurts on its own. In-sample
+check of P(loss): of the issues given under 10%, 7% closed below issue;
+10–25%: 19%; 25–50%: 27%; over 50%: 68%. The fit date, n, R² and residual
+sd are printed with every verdict.
 
 ### 5. Allotment odds and expected value
 
