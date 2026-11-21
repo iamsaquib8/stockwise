@@ -1,7 +1,8 @@
 # Commands Reference
 
-`stockwise --help` lists every command by group; `stockwise <command> --help`
-shows its arguments. This page adds detail.
+`stockwise --help` lists the core commands; `stockwise --help-all` lists every
+command by group. `stockwise <command> --help` shows a command's arguments.
+This page adds detail.
 
 Looking for a walkthrough instead? [What do you want to do?](guides.md) lists
 task-based guides, and each section below links to its guide.
@@ -17,6 +18,9 @@ task-based guides, and each section below links to its guide.
 | `--no-ai` | | Turn the AI section off for one run, even if `STOCKWISE_AI` or the config file turn it on |
 | `--portfolio <NAME>` | `STOCKWISE_PORTFOLIO` | Use a named portfolio (`portfolios/NAME.json`) instead of the default `portfolio.json`. Applies to `portfolio`, `import`, `tax`, `wealth`, `dashboard`, `trade holdings` and every other command that reads holdings |
 | `--profile <MODE[:RISK]>` | `STOCKWISE_PROFILE` | Investor profile mode (`passive`, `active`, `active:low`, `active:med`, `active:high`, `ultra`) and personal guardrails |
+| `--verbose` | `STOCKWISE_LOG` | Network diagnostics on stderr: each request's host, status, time and whether the cache answered. `STOCKWISE_LOG=debug\|info\|warn` gives the same output with finer control. Standard output is unchanged, so `--json` stays parseable. See [troubleshooting.md](troubleshooting.md) |
+| `--help-all` | | List every command by group (`--help` lists the core commands) |
+| `-V, --version` | | Print the version |
 
 Other environment variables: `STOCKWISE_HOME` (data directory),
 `STOCKWISE_REDIS_URL` (cache server, or `off`), `STOCKWISE_DATA_PROVIDER`
@@ -71,6 +75,10 @@ Value names (`screen growth`, `tax in`, `-s macd`) are case-insensitive.
 **Exit codes**: `0` success, `1` runtime error (unknown symbol, no data,
 network, invalid config file), `2` invalid arguments.
 
+**Errors with `--json`**: the error prints as one JSON object on stderr,
+`{"error":{"message":"...","exit_code":N}}`, with the same exit code. Standard
+output stays empty, so a script can tell an error from a result.
+
 **Machine-readable output**: commands marked `[--json]` print JSON, and
 `[--json\|--csv]` print JSON or CSV, instead of a table. See
 [Scripting](#scripting-with---json-and---csv).
@@ -100,7 +108,15 @@ Without `-m`, a symbol that says where it trades is looked up there: see
 | `today [--days N] [--no-news] [--limit N] [--json]` | What changed in your portfolio today: each holding's day move and P&L with why it moved (the most important fresh headline or exchange/SEC filing, "with the market", or "unexplained" for a move of 2.5σ or more against the benchmark with no news found), σ and volume multiple, dates in the next 3 days; the watchlist; the market backdrop; and one news feed for holdings and watchlist ranked by portfolio weight × importance (`--days`, default 2). See [What's hot and today](#whats-hot-and-today) |
 | `hot [--cap TIER] [--universe INDEX] [--limit N] [--json]` | What's hot: your holdings and watchlist ranked by heat, then the market (biggest moves, unusual volume, gaps, 52-week highs/lows, most-mentioned in news, sectors, theme baskets, FII/DII flows, bulk/block deals, F&O ban list, OI build-up, cross-market movers). India and US. See [What's hot and today](#whats-hot-and-today) |
 | `search <QUERY> [--json\|--csv]` | Find a ticker by company name |
-| `doctor` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Exits 1 if market data is unreachable or the config file is invalid |
+| `doctor [--json]` | Check the config file, market and language, data directory, Yahoo reachability, the data provider that answered, Redis, AI provider and model (never the key), broker config, notification channels, the worker login service (launchd / systemd), the MCP config of each AI app, the tax residence and investor profile, and whether a newer StockWise release exists (checked at most once a week; the answer is cached in `update-check.json` in the data directory). Each failed check prints a fix hint. `--json` prints the checks as an array. Exits 1 if market data is unreachable or the config file is invalid. See [troubleshooting.md](troubleshooting.md) |
+| `cache status` | Entries, size and location of `cache.db` |
+| `cache clear [http\|quotes\|snapshots\|bars\|results\|members\|bhavcopy\|all]` | Delete cached data (default `http`). Your portfolio and settings are untouched |
+| `cache warm [--background]` | Fill `market_snapshots` in `cache.db` with the market's universe and your holdings. `--background` queues it for the worker |
+| `cache snapshots [--cap TIER] [--sector NAME] [--min-pe N] [--max-pe N] [--min-roe PCT] [--min-div-yield PCT] [--min-rvol X] [--sort FIELD] [--asc] [--limit 25] [--json]` | Filter the cached snapshots offline. Sort by `symbol`, `mcap` (default), `price`, `change_1d`, `rvol`, `pe`, `roe` or `div_yield`, largest first unless `--asc` |
+| `tasks` / `tasks list [--limit 30] [--json]` | Recent background tasks and their progress |
+| `tasks show <ID> [--json]` / `tasks cancel <ID>` | One task with its result / cancel a queued or running task |
+| `tasks add <warm\|eod\|run> [-- ARGS...]` | Queue a task for the worker: `warm` the cache, the post-close `eod` notices, or `run` any stockwise command (`tasks add run -- backtest TCS`) |
+| `init [--import SOURCE:FILE]... [--no-mcp]` | First run: pick a market, import holdings (`--import groww:holdings.csv`, repeatable; sources `kite`, `groww`, `upstox`, `indmoney`, `cas`) and optionally connect an AI app (`--no-mcp` skips that step) |
 | `use [MARKET\|PORTFOLIO]... [--bind\|--unbind] [--json]` | Show the market and portfolio in use, or switch them: `use us`, `use long-term`, `use us-tech us --bind`. See [Market and portfolio context](#market-and-portfolio-context) |
 
 ### Background worker
@@ -111,7 +127,7 @@ market is open, queued tasks, alerts, the post-close sync) detached until
 
 | Command | Description |
 |---------|-------------|
-| `worker start` / `stop` / `status` / `run` | Start it detached / stop it / show whether it runs and what is queued / run it in this terminal |
+| `worker start` / `worker stop` / `worker status` / `worker run` | Start it detached / stop it / show whether it runs and what is queued / run it in this terminal |
 | `worker install [--dry-run] [--interval MIN]` | Run the worker at login as a per-user service: a launchd agent on macOS (`~/Library/LaunchAgents/com.stockwise.worker.plist`, output in `worker.log` in the data directory), a systemd user service on Linux (`~/.config/systemd/user/stockwise-worker.service`, output in `journalctl --user -u stockwise-worker`). It runs this executable as `stockwise -m MARKET worker run` and is restarted `--interval` minutes (default 1) after it exits with an error, never after a clean `worker stop`. Reinstalling replaces the unit and restarts it. `--dry-run` prints the unit file and the commands and changes nothing. Other systems get an error: start the worker yourself at login |
 | `worker uninstall [--dry-run]` | Stop the service and remove its unit file |
 | `worker service-status` | Whether the unit file exists, whether launchd / systemd has it loaded, and whether a worker is running |
@@ -163,7 +179,7 @@ while it runs and retries after `--interval`.
 | `fibs <SYMBOL>` | Fibonacci retracement with a "you are here" marker, for the last 21, 63 and 126 trading days (1, 3 and 6 months of daily bars). Always reads a year of daily bars; `-p` is accepted but ignored |
 | `volume <SYMBOL> [-p]` (`vol`) | OBV, A/D line, volume ratio, volume bars |
 | `gaps <SYMBOL> [-p]` | Filled and unfilled price gaps |
-| `stoploss <SYMBOL> [-e PRICE] [--capital AMT] [--risk-pct PCT] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, position sizing (shares and position value for risk budget) and R:R targets |
+| `stoploss <SYMBOL> [-e, --entry PRICE] [--capital AMT] [--risk-pct PCT] [-p]` | ATR (1.5x/2x/3x), percentage and Chandelier stops, position sizing (shares and position value for risk budget) and R:R targets |
 | `forecast <SYMBOL> [-d DAYS] [-p]` | Linear trend projection with 95% bands — a projection, not a prediction |
 
 `--explain` on `verdict`, `technical`, `score` and `options oi` adds plain-English notes for beginners.
@@ -307,7 +323,7 @@ so `--cap` has nothing to filter there.
 | `mf screen [CATEGORY...] [--plan direct\|regular\|all] [-s 1y\|3y\|5y\|ter] [--max-ter PERCENT] [-n N] [--max N] [--json]` | Bare: list categories with their active scheme counts. With words (`flexi cap`, `elss`, `liquid`, `equity etf`): rank the category's growth-option schemes by return (default 3Y CAGR, direct plans) or by expense ratio (`-s ter`, lowest first — with more matches than `--max`, the cheapest are screened), with a TER column. `--max-ter 1.0` keeps only funds whose disclosed TER is at most 1% |
 | `mf bleed [--return PERCENT] [--json]` | Held Regular-plan funds vs their Direct growth twin: TER gap (AMFI disclosure), yearly rupee cost, 10-year compounded cost at a stated gross return, units that redeem tax-free inside the unused Sec. 112A exemption, and breakeven months for younger units |
 | `mf overlap <A> <B> [--json]` | Shared top holdings, holdings and sector overlap, and expense ratios of two funds or ETFs, e.g. `mf overlap SPY QQQ -m us` |
-| `options chain <SYMBOL> [-e DATE] [-n STRIKES] [--rate %] [--div-yield %] [--json]` | Calls and puts around the money: last price, open interest (and change on NSE/BSE), volume, IV, delta, gamma, theta, vega, rho, and the lot size. Default: nearest expiry, 10 strikes each side (`-n 0` for all) |
+| `options chain <SYMBOL> [-e, --expiry DATE] [-n, --strikes N] [--rate %] [--div-yield %] [--json]` | Calls and puts around the money: last price, open interest (and change on NSE/BSE), volume, IV, delta, gamma, theta, vega, rho, and the lot size. Default: nearest expiry, 10 strikes each side (`-n 0` for all) |
 | `options pcr <SYMBOL> [-e DATE] [--json]` | Put/call ratio by open interest and by volume, and the three strikes with the most call and put open interest |
 | `options oi <SYMBOL> [-e DATE] [-n N] [--json] [--explain]` (`open-interest`, `fno oi`) | Open-interest analytics: PCR, Max Pain, top call resistance and put support walls with institutional build-up classification (`LB`, `SC`, `SB`, `LU`), and aggregate volume breakdown. Sentiment is read for the underlying: put buying (`LB` on a put) is bearish and put writing (`SB`) is bullish; `--json` carries `calls_sentiment` and `puts_sentiment` |
 | `options maxpain <SYMBOL> [-e DATE] [--json]` (`max-pain`) | The settlement strike at which open options pay their holders least, with the payout curve around it |
@@ -473,11 +489,11 @@ MF periods (`-p`) are `<n>mo`, `<n>y` or `max`, e.g. `6mo`, `3y`, `10y`. Expirie
 | `sim replay list [--json]` (`scenarios`) | Built-in historical replays: `covid-crash-2020`, `gfc-2008`, `adani-2023`, `dotcom-2000`, `bull-run-2021`, `rate-hikes-2022`. See [simulator.md](simulator.md) |
 | `sim replay start SCENARIO\|file:PATH.toml [--capital] [--costs] [--json]` | Start a replay: daily history is fetched once, then you trade day by day and only ever see bars up to the replay date |
 | `sim replay start --from DATE --to DATE --symbols A,B,... [--benchmark SYM]` | Your own replay window in the active market (`-m in`/`-m us`); benchmark NIFTY 50 / S&P 500 by default |
-| `sim replay buy SYMBOL QTY [--stop P] [--target P]` / `sell SYMBOL [QTY]` | Queue an order for the next day's open (backtest cost models; long only). `sell` without a quantity sells the whole position |
-| `sim replay next [N]` / `status` / `chart SYMBOL\|index [--days]` | Move N trading days (stops and targets on each day's range); account, positions, orders and the market on the replay date; a chart up to it |
-| `sim replay cancel [ID]` / `set SYMBOL [--stop P] [--target P]` | Cancel pending orders; move a position's stop or target |
+| `sim replay buy SYMBOL QTY [--stop P] [--target P]` / `sim replay sell SYMBOL [QTY]` | Queue an order for the next day's open (backtest cost models; long only). `sell` without a quantity sells the whole position |
+| `sim replay next [N]` / `sim replay status` / `sim replay chart SYMBOL\|index [--days]` | Move N trading days (stops and targets on each day's range); account, positions, orders and the market on the replay date; a chart up to it |
+| `sim replay cancel [ID]` / `sim replay set SYMBOL [--stop P] [--target P]` | Cancel pending orders; move a position's stop or target |
 | `sim replay end [--json]` | Finish: 0–100 score and grade, badges, streaks, and what actually happened |
-| `sim challenge list\|start NAME\|status\|end [--json]` | Goal-based challenges with hard and soft rules over the running replay or your live paper sessions: `beat-the-index`, `steady-hands`, `position-limit`, `stop-loss`, `sip-discipline`, `crash-survivor`, or `file:PATH.toml` |
+| `sim challenge list` / `sim challenge start NAME` / `sim challenge status` / `sim challenge end` `[--json]` | Goal-based challenges with hard and soft rules over the running replay or your live paper sessions: `beat-the-index`, `steady-hands`, `position-limit`, `stop-loss`, `sip-discipline`, `crash-survivor`, or `file:PATH.toml` |
 | `sim profile [--json]` | Badges (earned and how to earn the rest), streaks, best score per scenario, recent runs |
 | `sim card [--svg FILE] [--text]` | Your last run as a text card, or a 640 × 360 SVG image — with the paper-trading disclaimer |
 | `report <intraday\|longterm\|portfolio\|SYMBOL>` | Educational AI notes (signals, risks, what to watch) via local Ollama or an opt-in cloud model — see [ai.md](ai.md) |
@@ -506,9 +522,9 @@ Data lives in the directory shown by `stockwise doctor`.
 
 | Command | Description |
 |---------|-------------|
-| `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency). An Action column shows each stock's [action](#actions) (`HOLD (med)`, `NO CALL`) |
-| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
-| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD] [--lots N,N]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots. `--lots 3,1` sells from those lots (numbers from `portfolio lots`) in that order — specific identification for US and UK shares; Indian shares and funds always sell oldest first |
+| `portfolio` / `portfolio show [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency). An Action column shows each stock's [action](#actions) (`HOLD (med)`, `NO CALL`) |
+| `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--charges AMT\|auto] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `--charges` records brokerage, taxes and fees paid, in total; `auto` estimates an NSE/BSE delivery buy's STT, stamp duty, exchange, SEBI and GST charges (not brokerage). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
+| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD] [--lots N,N] [--charges AMT\|auto] [--preview]` | Record a sale, oldest lots first (FIFO). `--preview` shows the lots, tax and LTCG countdown and records nothing. `--charges` makes realized P&L net of the sale's costs (`auto` estimates them for an NSE/BSE delivery sell; not with `--preview`). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots. `--lots 3,1` sells from those lots (numbers from `portfolio lots`) in that order — specific identification for US and UK shares; Indian shares and funds always sell oldest first |
 | `portfolio lots <SYMBOL> [--lot N [--date YYYY-MM-DD] [--qty Q] [--price P] \| --delete] [--undo-sale N]` | Lots, sales, dividends and XIRR of one holding, each numbered. `--lot N` corrects a lot's date, quantity or price, or `--delete`s it without recording a sale; `--undo-sale N` drops sale N from the realised gains and puts its shares back as the lot they came from |
 | `portfolio restore [N]` | Lists the last five saved versions of the portfolio (`portfolio.json.1` is the newest), or brings version N back. The version it replaces becomes backup 1, so a restore can be undone |
 | `portfolio actions [SYMBOL] [--apply] [--undo] [--journal]` | Splits, reverse splits, bonuses, demergers and spin-offs (built-in table: Indian demergers, US spin-offs from Form 8937), cash for fractional merger shares, rights issues (reported only) and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares, adds lots of a demerged company at the official share of cost, records the cash for a merger fraction as a sale, records dividends, and is safe to repeat. Every `--apply` is journalled: `--journal` lists the entries, `--undo` takes back the newest |
@@ -520,17 +536,17 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio benchmark [NIFTY\|SENSEX\|SP500\|...] [-p 1y] [--base inr\|usd] [--json\|--csv]` | Time-weighted return against an index over the period, from the lots held each day: alpha, beta, tracking error, and attribution by holding and sector (see [below](#benchmark-and-attribution)) |
 | `portfolio pme [NIFTY\|SPY\|VOO\|VWCE\|NIFTYBEES\|...] [--base inr\|usd] [--json\|--csv]` | Public Market Equivalent (Index Twin): mirror exact tradebook cash flows into a passive benchmark; computes Kaplan-Schoar PME, Direct Alpha, twin value, and net currency value added vs the index (see [below](#public-market-equivalent-index-twin)) |
 | `portfolio remove <SYMBOL> [--yes]` | Remove a holding and its lots without recording a sale; asks first when it has more than one lot |
-| `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift [<PCT>] [--json]` | Target weights by symbol (held or not yet held), sector, or asset class (`equity`, `debt`, `gold`, `international`, `cash`). A symbol target is carved out of its sector and asset-class targets, so nested targets never count twice; keys that match nothing are reported. `target drift` with no percentage shows current vs target per key with the 5/25 band (5 points or 25% of the target, whichever is smaller); with one, saves the drift tolerance band (the default is the profile's `default_drift_pct`, which `target show` prints) |
+| `portfolio target` / `portfolio target show [--json]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target clear` / `portfolio target drift [<PCT>] [--json]` | Target weights by symbol (held or not yet held), sector, or asset class (`equity`, `debt`, `gold`, `international`, `cash`). A symbol target is carved out of its sector and asset-class targets, so nested targets never count twice; keys that match nothing are reported. `target clear` removes every target. `target drift` with no percentage shows current vs target per key with the 5/25 band (5 points or 25% of the target, whichever is smaller); with one, saves the drift tolerance band (the default is the profile's `default_drift_pct`, which `target show` prints) |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
 | `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it, with an Action column per holding (see [below](#portfolio-checkup)) |
 | `portfolio review [--horizon short\|long] [--json]` | Each holding's [action](#actions), sorted EXIT, TRIM, ADD, HOLD, then NO CALL, with its reasons, invalidation price, review date, size hint and tax note (see [below](#portfolio-review)) |
 | `portfolio wrap [--year YYYY \| --fy YYYY-YY] [--redact] [--offline] [--json]` | Year in review: return against the benchmark, top contributors and detractors, money deployed, dividends, realised gains, diversification, checkup pass count and a tax footer. `--redact` hides every amount (see [below](#portfolio-wrap)) |
 | `portfolio xray [--json]` (or `portfolio x-ray`) | Portfolio X-Ray: look-through overlap across direct stocks, ETFs and mutual funds, combined effective company exposures, 10% concentration risk alerts, broad asset-class split, market-cap breakdown, and sector concentration |
-| `watch [show] [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
+| `watch` / `watch show [--json\|--csv]` / `watch add <SYMBOLS...> [--force]` / `watch remove <SYMBOLS...>` (`w`) | Watchlist |
 | `alert [list] [--json\|--csv]` / `alert add <SYMBOL> <CONDITION> <NUMBER> [--period N] [--on-close] [--cross] [--force]` / `alert check [--json\|--csv]` / `alert remove <N>` | Price and technical alerts — conditions below; `alert list` shows each condition in words |
 | `alert watch [--interval 60] [--once]` | Check alerts while their market is open and notify each trigger once (see [notifications](bots.md#notifications)). `--once` checks every alert once and exits, for cron |
 | `calendar [SYMBOLS...] [--days 30] [--holdings\|--watchlist] [--json\|--csv]` | Upcoming results, ex-dividend and dividend payment dates, splits and bonus issues for your holdings and watchlist (or the named symbols), sorted by date, with today and the next 7 days marked. See [the calendar](#results-and-corporate-calendar) |
-| `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
+| `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME] [--account NAME] [--password PW]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)). `--account` names the demat account the file belongs to, so two accounts at one broker keep separate lots. `--password` opens a password-protected CAS PDF (needs casparser on `PATH`; else `STOCKWISE_CAS_PASSWORD` or a hidden prompt) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
 | `rebalance [--inflow N [--with-sells]] [--raise N] [--cash-buffer N] [--drift N] [--min-trade N] [--brokerage N] [--fx-spread PCT] [--json]` (or `portfolio rebalance`) | Whole-share trades back to targets (or equal weight) whose cash balances: sells pay for buys, and what is left goes to the holdings furthest below target. `--inflow` invests new cash without selling (`--with-sells` adds it to a full rebalance); `--raise` sells only, to raise that much cash at the lowest tax; `--cash-buffer` keeps cash uninvested. Each sell shows its lots, STCG/LTCG and tax; each trade its costs (see [below](#rebalance)) |
@@ -1017,7 +1033,7 @@ stockwise tax advance --json                      # programmatic JSON output
 
 ### Plain-text accounting export
 
-`portfolio export --format beancount|hledger` writes the active portfolio as
+`portfolio export --format beancount|hledger [-o, --output FILE]` writes the active portfolio as
 a double-entry journal for [beancount](https://beancount.github.io/) or
 [hledger](https://hledger.org/), to standard output or to `-o FILE`:
 
@@ -1427,8 +1443,8 @@ a price level. See [ai.md](ai.md).
 
 | Command | Description |
 |---------|-------------|
-| `ask [QUESTION] [-i] [-c \| --resume ID] [--sessions] [--playbook checkup\|tax-season\|earnings] [--auto] [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers, knowing your investor profile. Needs a model with tool calling. `-i` keeps asking until `exit`; `-c` carries on the newest saved conversation, `--resume ID` a given one, `--sessions` lists them (the newest 50, in `cache.db`). `--playbook` runs a prepared task. `--auto` lets the model change your watchlist, alerts, goals, targets, notes and profile (undo with `undo`). `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage, conversation id). The last request runs without tools, so the model must answer. Educational, not financial advice |
-| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--allow-writes] [--allow-portfolio] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude, Codex, Gemini, Antigravity, Cursor, VS Code and other assistants: 66 tools that read, the portfolio, watchlist and alerts as resources, and four prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-writes` adds 11 workspace tools (watchlist, alerts, goals, targets, notes, profile and profile onboarding); `--allow-portfolio` also adds `portfolio_add` and `portfolio_sell`, which record lots. Each change is journalled for `undo`; neither works with `--allow-remote`. `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
+| `ask [QUESTION] [-i, --interactive] [-c, --continue \| --resume ID] [--sessions] [--playbook checkup\|tax-season\|earnings] [--auto] [--verbose] [--max-steps 6] [--max-tokens 100000] [--json]` | Ask in plain English; the configured model (local Ollama by default, or the cloud provider in `STOCKWISE_AI_PROVIDER`) calls the tools and answers, knowing your investor profile. Needs a model with tool calling. `-i` keeps asking until `exit`; `-c` carries on the newest saved conversation, `--resume ID` a given one, `--sessions` lists them (the newest 50, in `cache.db`). `--playbook` runs a prepared task. `--auto` lets the model change your watchlist, alerts, goals, targets, notes and profile (undo with `undo`). `--verbose` prints each tool call on stderr; `--json` prints the transcript (answer, tool calls with arguments, token usage, conversation id). The last request runs without tools, so the model must answer. Educational, not financial advice |
+| `mcp [--http ADDR] [--allow-remote] [--allow-orders] [--allow-writes] [--allow-portfolio] [--list-tools]` | [Model Context Protocol](https://modelcontextprotocol.io) server for Claude, Codex, Gemini, Antigravity, Cursor, VS Code and other assistants: 71 tools that read, seven resources (portfolio, watchlist, alerts, profile, latest picks, track record, methodology) plus a quote template, and twelve prompts. Stdio by default; `--http 127.0.0.1:8788` serves Streamable HTTP at `/mcp` (other addresses need `--allow-remote` and `STOCKWISE_API_TOKEN`). `--allow-writes` adds 11 workspace tools (watchlist, alerts, goals, targets, notes, profile and profile onboarding); `--allow-portfolio` also adds `portfolio_add` and `portfolio_sell`, which record lots. Each change is journalled for `undo`; neither works with `--allow-remote`. `--allow-orders` adds a dry-run `order_preview` that returns the `stockwise trade` command for you to run — it never places orders. `--list-tools` prints the tools and their input schemas as JSON. Cargo feature `mcp` (on by default) |
 | `connect [APP...] [--all] [--list] [--remove] [--allow-writes] [--allow-portfolio] [--no-skill] [--dry-run] [--json]` | Add the MCP server to AI apps: Claude Desktop and Code, Cursor, Windsurf, VS Code, Cline, Gemini CLI, Antigravity, Codex, Zed, LM Studio and opencode (Goose and Continue get lines to paste). With no app named, every app found on this computer. Only the `stockwise` entry changes and each config is backed up to `<file>.stockwise.bak`; the agent skill is installed for Claude Code and Antigravity. `--remove` takes it out again |
 | `undo [ID] [--list] [--force] [--json]` | Reverse a change an assistant made (`mcp --allow-writes`, `ask --auto`): the newest by default, or change `ID`. `--list` shows the journal. It refuses when a later change or your own edit touched the same file; `--force` undoes anyway |
 
@@ -1544,11 +1560,11 @@ untested against a live account.
 |---------|-------------|
 | `trade setup` / `trade config [--keyring]` | How to connect / create the owner-only credentials file, move secrets into the OS keyring |
 | `trade login` | Daily login (Zerodha, Upstox, Fyers) or paste a Dhan token |
-| `trade holdings` / `positions` / `orders` | Live holdings (synced into `portfolio`, keeping your lots), open positions, order book |
+| `trade holdings` / `trade positions` / `trade orders` | Live holdings (synced into `portfolio`, keeping your lots), open positions, order book |
 | `trade buy <SYMBOL> <QTY> [--limit P] [--trigger T] [--dry-run] [--yes]` | Buy on NSE: MARKET, LIMIT, SL-M (`--trigger`) or SL (both) |
 | `trade sell <SYMBOL> <QTY> [--limit P] [--trigger T] [--dry-run] [--yes]` | Sell on NSE, same order types |
 | `trade limit <SYMBOL> <QTY> <PRICE> [--dry-run] [--yes]` | Limit buy on NSE |
-| `trade gtt <buy\|sell> <SYMBOL> <QTY> --trigger T --limit P [--dry-run] [--yes]` | Single-leg GTT (not Upstox) |
+| `trade gtt buy` / `trade gtt sell` `<SYMBOL> <QTY> --trigger T --limit P [--dry-run] [--yes]` | Single-leg GTT (not Upstox) |
 | `trade gtt list [--notify] [--json]` / `trade gtt cancel <ID>` | List GTTs with status changes since the last look (triggered, cancelled, expired, gone; `--notify` sends them) / cancel one (asks for confirmation) |
 | `trade sync [--since DATE] [--apply] [--notify] [--json]` | Today's executed delivery trades into the portfolio — buys become dated lots, sells come out FIFO — idempotent by broker trade id; previews unless `--apply`. Dhan also reads older fills with `--since`. See [brokers.md](brokers.md#syncing-trades-and-gtts-into-the-portfolio) |
 | `trade selftest [--redact-amounts] [--json]` | Read-only check of the integration against your account (session, profile, holdings, positions, orders, trades, GTTs, instrument lookup, a dry-run order, response shapes); prints a redacted report for a [broker test report](brokers.md#help-verify-a-broker). Exits 1 if a check failed |
@@ -1557,7 +1573,7 @@ untested against a live account.
 
 | Command | Description |
 |---------|-------------|
-| `profile [show] [--json]` | Show active investor profile mode (`passive`, `active:low\|med\|high`, `ultra`), effective tax parameters and personal guardrails |
+| `profile` / `profile show [--json]` | Show active investor profile mode (`passive`, `active:low\|med\|high`, `ultra`), effective tax parameters and personal guardrails |
 | `profile set [MODE[:RISK]] [--risk low\|med\|high] [--tax-slab PCT] [--tax-regime new\|old] [--horizon-years N] [--max-stock-weight PCT] [--max-smallcap-weight PCT] [--risk-per-trade PCT] [--json]` | Save investor profile mode and personal guardrails to `config.toml` |
 | `profile reset` | Reset profile mode and guardrails in `config.toml` to defaults (`active:med`) |
 | `config [show] [--json]` | Effective settings and where each comes from (flag, env, config file, default), plus the config file's status |
@@ -1565,8 +1581,8 @@ untested against a live account.
 | `config init [--force]` | Write a commented template to the config file path; refuses to replace an existing file without `--force` |
 | `backup export [PATH.swbak] [--passphrase-fd N]` | Write your data to one passphrase-encrypted file (default `stockwise-YYYY-MM-DD.swbak`). See [Backups](#backups) |
 | `backup restore <PATH.swbak> [--dry-run] [--passphrase-fd N]` | Check a backup, list the files it would add or replace, copy each replaced file to `<file>.bak`, then write each file atomically |
-| `notify [status]` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, ntfy, Pushover, desktop), their routes and quiet hours / send a test message. See [notifications](bots.md#notifications) |
-| `monitor [status\|run] [--notify] [--json]` | The automatic holding monitor: thresholds, worker state, recent signals; `run` does one pass now (`--notify` sends what is new). See [Holding monitor and digest](#holding-monitor-and-digest) |
+| `notify` / `notify status` / `notify test` | Show the configured notification channels (Telegram, Slack, Discord, email, ntfy, Pushover, desktop), their routes and quiet hours / send a test message. See [notifications](bots.md#notifications) |
+| `monitor` / `monitor status [--json]` / `monitor run [--notify] [--json]` | The automatic holding monitor: thresholds, worker state, recent signals; `run` does one pass now (`--notify` sends what is new). See [Holding monitor and digest](#holding-monitor-and-digest) |
 | `digest [--send] [--json]` | Today's after-close digest: day P&L, top contributors and detractors with reasons, monitor signals, triggered alerts, notices, dates coming up. `--send` sends it now |
 | `telegram [--once]` | Two-way Telegram bot: answers `/today`, `/hot`, `/review` and `/digest` from `STOCKWISE_TELEGRAM_CHAT_ID` only, and sends the digest every trading day at `STOCKWISE_DIGEST_TIME` (local `HH:MM`) unless the worker already has |
 | `update [--check]` (`self-update`) | Check GitHub Releases for a newer version. A binary from install.sh or a release archive is replaced in place: the archive for this platform and its `.sha256` are downloaded, the checksum must match (a missing or wrong checksum stops the update and changes nothing), then the binary is swapped atomically (on Windows the old one is kept as `stockwise.exe.old`). Installs from Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv, pip, `.deb`/`.rpm` or Docker are never changed; the command prints that package manager's upgrade command instead. `--check` only reports the installed version, the latest release and the install channel |
@@ -1854,8 +1870,7 @@ removes duplicates, and ranks them by portfolio weight × importance
 move| in σ (capped at 6) + volume surge (multiple − 1, capped at 4) + the
 importance of fresh news (up to 4) + 1.5 for a date within three days,
 multiplied by 1 + 5 × portfolio weight. Names with no heat are left out. Each
-row shows the move, the why and, once the rule-based actions engine is
-available, the action.
+row shows the move, the why and the holding's [action](#actions).
 
 The market part scans the universe's quotes (India: the liquid NIFTY 500
 stocks or `--universe`; US: the S&P 1500) with a liquidity floor: biggest

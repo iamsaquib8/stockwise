@@ -291,7 +291,7 @@ the data directory. Add them to `args` or the client's `env`.
 
 ### Tools
 
-There are 66 tools that read, and 13 more that change your files when you
+There are 71 tools that read, and 13 more that change your files when you
 turn them on ([below](#changes-the-assistant-can-make)). Each result is JSON
 with the data, a short "not financial advice" `note`, and `truncated` when long
 lists were shortened.
@@ -300,7 +300,7 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 
 | Tool | What it returns | Same as |
 |------|-----------------|---------|
-| `quote` | Price, change, day and 52-week range, volume, market cap, P/E for up to 20 tickers | `quote --json` |
+| `quote` | Price, change, day and 52-week range, volume, market cap, P/E for up to 25 tickers | `quote --json` |
 | `history` | OHLCV bars (most recent `limit`, default 60) with the period's change, high and low | `history --json` |
 | `technical` | SMAs, EMAs, RSI, MACD, Bollinger Bands, ATR, VWAP and a signal tally | `technical --json` |
 | `risk` | Volatility, Sharpe, Sortino, Calmar, max drawdown, value at risk | `risk --json` |
@@ -344,6 +344,20 @@ Tools that take tickers accept `market` (`in`, `us`, `crypto`, `fx`,
 | `goal_emergency` | Emergency reserve size against your liquid money, and the build-up plan | `goal emergency --json` |
 | `fit_check` | Whether a stock fits **your own** rules: `yes`, `no` or `unclear`, with each rule passed, failed or unknown (weight of one stock and small caps against your profile, risk tier against your risk level, P/E and ROE limits from your note). It checks your rules; the action comes from `stock_action` | — |
 | `changes_list` | The changes assistants made, newest first, with their undo command | `undo --list` |
+| `picks_review` | How past `picks` lists did since each stock was first listed, against the benchmark's total return (`since`, `horizon`) | `picks review --json` |
+| `verdicts` | The 6-pillar scores of up to 25 tickers in one call, compact, with `low_coverage` under 60% | `verdict --json`, per ticker |
+| `bonds_yields` / `bonds_list` / `bonds_calc` | India's G-sec and T-bill yields by tenor; RBI's list of outstanding securities; price ↔ yield, accrued interest and duration | `bonds yields` / `bonds list` / `bonds calc` |
+| `commodity` | Gold and silver spot, futures, ETFs and SGBs | `commodity --json` |
+| `compare` | Stocks side by side on valuation, growth and risk | `compare --json` |
+| `fx_history` | A currency against the rupee (or another base) over a period: change, high, low and recent daily rates | — |
+| `returns` | Trailing price returns from 1 week to 5 years, annualized beyond a year | `returns --json` |
+| `correlate` | Correlation of daily returns for 2 to 10 tickers over the last year | `correlate --json` |
+| `portfolio_wrap` | The year in review (`year` or `fy`, optional `redact`) | `portfolio wrap --json` |
+| `whats_hot` | Holdings and watchlist ranked by heat, then the market lists (`cap`, `limit`) | `hot --json` |
+| `today` | Each holding's and watchlist name's day move, day P&L, σ, volume multiple and why (`days`) | `today --json` |
+| `news_feed` | Merged headlines and filings for `symbols`, or for holdings and watchlist ranked by weight × importance | `news --json` |
+| `monitor_status` | The holding monitor's thresholds, whether the worker runs it, and recent signals | `monitor status --json` |
+| `digest` | Today's after-close digest: day P&L, contributors with reasons, monitor signals, alerts, dates coming up | `digest --json` |
 
 Hosts see each tool's read-only and open-world hints; the portfolio tools are
 marked as not reaching outside your machine.
@@ -389,9 +403,25 @@ stockwise connect --allow-writes   # write the flag into every app's config
 | `stockwise://portfolio` | The portfolio as `portfolio --json` prints it |
 | `stockwise://watchlist` | The watchlist with prices |
 | `stockwise://alerts` | Alerts with their live status |
+| `stockwise://profile` | The investor profile: mode, risk level, horizon and guardrails |
+| `stockwise://picks/latest` | The newest logged picks list for each market and horizon |
+| `stockwise://track-record` | How the last 90 days of picks did against the benchmark |
+| `stockwise://methodology` | `docs/methodology.md`: how actions, verdicts and picks are computed |
+| `stockwise://quote/{symbol}` | A quote for any ticker (a resource template) |
+
+Over stdio, a host can subscribe to the portfolio, watchlist, alerts, profile,
+picks and track-record resources and is told when the file changes.
 
 | Prompt | What it asks for |
 |--------|------------------|
+| `daily_briefing` | Market conditions, the portfolio's day, triggered alerts and watchlist movers |
+| `should_i_buy` (`symbol`, optional `amount`) | The stock's action, scores, coverage, risk and fit with your rules, without inventing a call |
+| `exit_check` | Each holding's action, concentration and checkup findings |
+| `smallcap_short_scan` (optional `market`) | `picks` with `cap` small and `horizon` short, with the track record and risks |
+| `tax_aware_rebalance` | Drift from target weights and the tax each trim costs; `rebalance` with `raise` |
+| `weekly_review` | The portfolio and past picks against the benchmark, with this week's changes |
+| `mf_review` | Regular-plan cost against Direct, overlap with your stocks, recent NAVs (India) |
+| `advance_tax_check` | Gains so far this financial year and the advance-tax instalments due (India) |
 | `review_portfolio` (optional `focus`) | Value, P&L, concentration and risk of your holdings |
 | `tax_harvest_check` | Unrealized gains and losses by lot before 31 March, the LTCG exemption left and the set-off rules |
 | `onboard_profile` | Asks the onboarding questions one at a time and saves the profile (needs `--allow-writes`) |

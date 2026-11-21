@@ -65,23 +65,48 @@ prompt back.
 
 ## Endpoints
 
-All responses are JSON except `/metrics`. Bare tickers follow the server's
-market (`-m`, default India: `TCS` → `TCS.NS`); `quote`, `history`,
-`markets` and `portfolio` accept `?market=in|us|crypto|fx` to override it per
-request.
+All responses are JSON except `/metrics` and `/api/events`. Every endpoint
+answers `GET` only.
 
 | Endpoint | Returns | Same as |
 |----------|---------|---------|
 | `GET /api/quote?symbols=RELIANCE,TCS` | Array of Yahoo quote objects (camelCase fields). Up to 50 symbols. Unknown symbols are listed in the `X-Stockwise-Missing` header; 404 if none are known | `quote --json` |
 | `GET /api/history/{symbol}?period=1mo` | `{symbol, currency, period, interval, bars: [{time, open, high, low, close, volume}]}`. Periods as in the CLI; default `1mo` | `history --json` |
-| `GET /api/markets?crypto=true&fx=true` | Array of `{region, symbol, name, price, change, change_percent, currency}`, your market first; `crypto` / `fx` add those sections | `markets --json` |
+| `GET /api/research/{symbol}?days=90` | `{symbol, name, currency, price, sector, industry, verdict, scorecard, insights, shareholding, events, upcoming, digest, warnings}`: the action and 6-pillar score, the Piotroski and Altman scorecards, insight cards, the shareholding pattern and the event timeline. `verdict` carries the `action` object | `verdict --json`, `score --json`, `insights`, `events` |
+| `GET /api/markets?crypto=true&fx=true&global=true` | Array of `{region, symbol, name, price, change, change_percent, currency}`, your market first; `crypto`, `fx` and `global` add those sections | `markets --json` |
 | `GET /api/search?q=tata motors` | Array of `{symbol, shortname, longname, quoteType, exchange}` | `search --json` |
-| `GET /api/portfolio?base=usd` | Holdings (lots, FIFO cost) valued at live prices, totals in one currency (below); `base` is `inr` or `usd` | `portfolio --json` |
+| `GET /api/portfolio?base=usd&portfolio=NAME` | Holdings (lots, FIFO cost) valued at live prices, totals in one currency (below) | `portfolio --json` |
+| `GET /api/portfolios` | `{"active": "default", "portfolios": ["default", "long-term", ...]}`: the active portfolio and every named one | `portfolio list` |
 | `GET /api/watchlist` | Array of `{symbol, price, change, change_percent, volume, currency}` in watchlist order | `watch --json` |
 | `GET /api/alerts` | Array of `{index, symbol, condition, target, price, currency, status, period, description, value, reference}`; `status` is `triggered`, `waiting`, `no_price` or `no_data` (technical alert with too little history) | `alert check --json` |
 | `GET /api/events` | Server-sent events: `quotes` (`{type, quotes:[{symbol, price, change_percent}]}`) when held or watched prices move, `task` (`{type, task:{id, title, status, progress_pct}}`) when a background task changes. Keep-alive comments every 15 s | — |
 | `GET /healthz` | `{"status": "ok", "version": "..."}` — never needs a token | |
 | `GET /metrics` | Prometheus text format (below) | |
+
+### Query parameters
+
+| Endpoint | Parameter | Values | Default |
+|----------|-----------|--------|---------|
+| `/api/quote` | `symbols` | Comma-separated tickers, 1 to 50. Required | — |
+| | `market` | A market code (see below) | the server's `-m` |
+| `/api/history/{symbol}` | `period` | `1d`, `5d`, `1w`, `1mo`, `3mo`, `6mo`, `ytd`, `1y`, `2y`, `5y`, `10y`, `max` | `1mo` |
+| | `market` | A market code | the server's `-m` |
+| `/api/research/{symbol}` | `days` | Days of events and filings to read, 1 to 365 (values outside are clamped) | `90` |
+| | `market` | A market code | the server's `-m` |
+| `/api/markets` | `crypto` | `true` adds the largest coins | `false` |
+| | `fx` | `true` adds major currency pairs | `false` |
+| | `global` | `true` adds one row per exchange's main index | `false` |
+| | `market` | A market code; its section comes first | the server's `-m` |
+| `/api/search` | `q` | Company name or ticker, 1 to 100 characters. Required | — |
+| `/api/portfolio` | `base` | A 3-letter currency code for the totals (`inr`, `usd`, `eur`, ...) | the market's currency |
+| | `portfolio` | A named portfolio (as in `--portfolio NAME`); empty or `default` is `portfolio.json` | the active portfolio |
+| | `market` | A market code for bare tickers | the server's `-m` |
+| `/api/portfolios`, `/api/watchlist`, `/api/alerts`, `/api/events`, `/healthz`, `/metrics` | none | | |
+
+A market code is a `-m` value: `in`, `us`, `crypto`, `fx`, `commodity`, `uk`,
+`de`, `jp`, `hk`, `sg`, `ca` or `au`. Bare tickers follow it (India by
+default: `TCS` → `TCS.NS`). A symbol in a path or in `symbols` is at most 32
+characters of letters, digits and `.^=-&_`; anything else is a 400.
 
 `/api/portfolio`:
 
@@ -112,7 +137,7 @@ holding without a live price has `null` price, value, P&L and weight, is
 listed in `unpriced`, and is left out of the totals — it is never valued at 0.
 One whose currency couldn't be converted is listed in `unconverted`. The
 server uses the active portfolio (`--portfolio` / `STOCKWISE_PORTFOLIO` when
-it was started).
+it was started) unless the request names one with `?portfolio=`.
 Likewise an alert without a price has `"price": null, "status": "no_price"`
 and never counts as triggered; a technical alert without enough daily bars
 reads `"status": "no_data"`.
@@ -129,6 +154,9 @@ server's log), or 502 (market data could not be fetched). Responses carry
 curl -s 'localhost:8787/api/quote?symbols=RELIANCE,TCS' | jq '.[] | {symbol, regularMarketPrice}'
 curl -s 'localhost:8787/api/history/INFY?period=6mo' | jq '.bars | map(.close) | max'
 curl -s localhost:8787/api/portfolio | jq '.totals | {value, pnl_percent}'
+curl -s 'localhost:8787/api/portfolio?portfolio=long-term&base=usd' | jq '.totals.value'
+curl -s localhost:8787/api/portfolios | jq '.portfolios'
+curl -s 'localhost:8787/api/research/TCS?days=30' | jq '.verdict.action'
 curl -s localhost:8787/api/alerts | jq '.[] | select(.status == "triggered")'
 ```
 
