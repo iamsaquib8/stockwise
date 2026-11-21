@@ -57,7 +57,7 @@ impl Why {
             Why::Unexplained { sigma } => {
                 format!("unexplained — {sigma:.1}σ move, no news or filing found")
             }
-            Why::Quiet => "no news".into(),
+            Why::Quiet => "little changed, no news".into(),
         }
     }
 }
@@ -229,11 +229,15 @@ pub fn explain(
     volume_x: Option<f64>,
     news: &[NewsItem],
 ) -> Why {
-    // A filing first, then any headline of some weight.
+    // A filing first, then any headline of some weight — a headline only
+    // for a move worth explaining (1% or 1σ), so a flat day isn't pinned on
+    // whatever was published.
+    let notable =
+        change_pct.is_some_and(|c| c.abs() >= 1.0) || sigma.is_some_and(|z| z.abs() >= 1.0);
     let best = news
         .iter()
         .find(|n| n.official && n.importance >= 1.5)
-        .or_else(|| news.iter().find(|n| n.importance >= 2.0));
+        .or_else(|| news.iter().find(|n| notable && n.importance >= 2.0));
     if let Some(n) = best {
         return Why::News {
             title: n.title.clone(),
@@ -268,6 +272,7 @@ pub fn explain(
         }
         _ => news
             .first()
+            .filter(|_| notable)
             .map(|n| Why::News {
                 title: n.title.clone(),
                 source: n.publisher.clone(),

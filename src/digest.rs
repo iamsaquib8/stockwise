@@ -111,8 +111,8 @@ fn money(v: f64, base: &str) -> String {
 }
 
 /// Thousands separators, no decimals above 100.
-fn group(v: f64) -> String {
-    if v < 100.0 {
+pub fn group(v: f64) -> String {
+    if v < 10.0 {
         return format!("{v:.2}");
     }
     let s = format!("{v:.0}");
@@ -354,6 +354,7 @@ mod tests {
         assert!(!digest().is_empty());
         assert_eq!(group(1234567.0), "1,234,567");
         assert_eq!(group(999.4), "999");
-        assert_eq!(group(12.5), "12.50");
+        assert_eq!(group(12.5), "12");
+        assert_eq!(group(7.25), "7.25");
     }
 }

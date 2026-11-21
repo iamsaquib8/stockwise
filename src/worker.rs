@@ -1193,13 +1193,34 @@ fn held_market_open(now: chrono::DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
-/// The session date whose post-close sync is due, if any: the market closed
-/// today and the sync has not run for this date yet.
+/// The latest session whose close has passed at `now`: today after the
+/// close, else (on a weekend or holiday) the last trading day before it.
+/// `None` during today's session and before it.
+pub(crate) fn last_closed_session(
+    market: Market,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::NaiveDate> {
+    let today = clock::session_date(market, now);
+    if let Some(close) = clock::close_at(market, today) {
+        return (now >= close).then_some(today);
+    }
+    let mut d = today;
+    for _ in 0..10 {
+        d = d.pred_opt()?;
+        if clock::close_at(market, d).is_some() {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// The session date whose post-close sync is due, if any: the latest closed
+/// session (today after the close, or the last trading day on a weekend or
+/// holiday, so a worker started on Saturday still does Friday's) whose sync
+/// has not run yet.
 fn eod_due(market: Market, now: chrono::DateTime<Utc>, state: &WorkerState) -> Option<String> {
-    let date = clock::session_date(market, now);
-    let close = clock::close_at(market, date)?;
-    let key = date.to_string();
-    (now >= close && state.last_eod.as_deref() != Some(&key)).then_some(key)
+    let key = last_closed_session(market, now)?.to_string();
+    (state.last_eod.as_deref() != Some(&key)).then_some(key)
 }
 
 // ── Service: ownership lock, pid file, run loop, status ──
@@ -1469,6 +1490,70 @@ async fn stop_requested() {
     }
 }
 
+/// One worker pass and exit, for cron: alert checks, the intraday holding
+/// monitor while a held market is open, notices held for quiet hours, and
+/// the post-close sync with its digest when it is due. Refuses to run next to
+/// a running worker (it would double-send).
+pub async fn run_once(market: Market) -> Result<()> {
+    let Some(_owner) = try_own()? else {
+        bail!("The background worker is running; it already does this every few seconds");
+    };
+    let now = Utc::now();
+    let mut state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
+    let notifier = crate::notify::Notifier::from_env();
+    let channels: Vec<String> = notifier
+        .config()
+        .channels()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    println!(
+        "worker pass, market {}, notifications: {}",
+        market.label(),
+        if channels.is_empty() {
+            "none configured".to_string()
+        } else {
+            channels.join(", ")
+        }
+    );
+    match crate::commands::AlertWatcher::load() {
+        Ok(mut w) => match w.pass(market).await {
+            Ok(n) => println!("  alerts: {n} new trigger(s)"),
+            Err(e) => println!("  alerts: check failed: {e:#}"),
+        },
+        Err(e) => println!("  alerts: not loaded: {e:#}"),
+    }
+    state.last_alert_pass = Some(now.timestamp());
+    let client = YahooClient::new().await?;
+    if held_market_open(now) {
+        match crate::commands::intraday_pass(&client, &notifier).await {
+            Ok(n) => println!("  monitor: {n} new signal(s)"),
+            Err(e) => println!("  monitor: failed: {e:#}"),
+        }
+        state.last_monitor_pass = Some(now.timestamp());
+    } else {
+        println!("  monitor: no held market is open (price signals run during the session)");
+    }
+    notifier.flush_held().await;
+    crate::store::save(STATE_FILE, &state, false)?;
+    match eod_due(market, now, &state) {
+        Some(date) => {
+            println!("  post-close sync for {date}…");
+            let summary = eod_sync(&client, market, |_| true).await?;
+            println!("  post-close sync: {summary}");
+            let mut latest: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
+            latest.last_eod = Some(date);
+            latest.last_alert_pass = state.last_alert_pass;
+            latest.last_monitor_pass = state.last_monitor_pass;
+            crate::store::save(STATE_FILE, &latest, false)?;
+        }
+        None => println!(
+            "  post-close sync: not due (already done for this session, or the market has not closed)"
+        ),
+    }
+    Ok(())
+}
+
 /// The foreground worker: ticker, task executor, alert checks, post-close
 /// sync. Runs until Ctrl+C or SIGTERM.
 pub async fn run_worker(market: Market) -> Result<()> {
@@ -1721,6 +1806,30 @@ mod tests {
         assert_eq!(due.as_deref(), Some("2026-03-04"));
         state.last_eod = due;
         assert_eq!(eod_due(Market::In, after, &state), None);
+    }
+
+    #[test]
+    fn a_weekend_start_still_runs_the_last_sessions_sync() {
+        // Saturday 21 Nov 2026, noon IST: Friday's sync is due once.
+        let sat = chrono::NaiveDate::from_ymd_opt(2026, 11, 21)
+            .unwrap()
+            .and_hms_opt(6, 30, 0)
+            .unwrap()
+            .and_utc();
+        let mut state = WorkerState::default();
+        assert_eq!(
+            eod_due(Market::In, sat, &state).as_deref(),
+            Some("2026-11-20")
+        );
+        state.last_eod = Some("2026-11-20".into());
+        assert_eq!(eod_due(Market::In, sat, &state), None);
+        // During Monday's session: nothing (Friday's done, Monday's not closed).
+        let mon = chrono::NaiveDate::from_ymd_opt(2026, 11, 23)
+            .unwrap()
+            .and_hms_opt(6, 0, 0)
+            .unwrap()
+            .and_utc();
+        assert_eq!(eod_due(Market::In, mon, &state), None);
     }
 
     #[test]

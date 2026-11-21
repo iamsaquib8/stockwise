@@ -16,8 +16,12 @@ fn pct_colored(v: Option<f64>) -> String {
 fn money_colored(v: Option<f64>, base: &str) -> String {
     let sym = market::currency_symbol(Some(base));
     match v {
-        Some(p) if p >= 0.0 => format!("+{sym}{:.0}", p).green().to_string(),
-        Some(p) => format!("-{sym}{:.0}", p.abs()).red().to_string(),
+        Some(p) if p >= 0.0 => format!("+{sym}{}", crate::digest::group(p))
+            .green()
+            .to_string(),
+        Some(p) => format!("-{sym}{}", crate::digest::group(p.abs()))
+            .red()
+            .to_string(),
         None => "—".dimmed().to_string(),
     }
 }
@@ -213,7 +217,11 @@ pub async fn cmd_today(
             "  Portfolio {}  day {} ({})",
             pulse
                 .value
-                .map(|v| format!("{}{:.0}", market::currency_symbol(Some(&base)), v))
+                .map(|v| format!(
+                    "{}{}",
+                    market::currency_symbol(Some(&base)),
+                    crate::digest::group(v)
+                ))
                 .unwrap_or_else(|| "—".into())
                 .bold(),
             money_colored(pulse.day_pnl, &base),

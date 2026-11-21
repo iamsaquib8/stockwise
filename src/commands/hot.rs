@@ -6,7 +6,7 @@ use crate::hot::{Deal, Flows, Group, Heat, Mover, OiMove};
 use std::time::Duration;
 
 /// Per-source timeout for the market sections.
-const SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
+const SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Large caps for cross-market movers.
 const US_LEADERS: &[&str] = &[
@@ -208,7 +208,25 @@ pub(crate) async fn build_hot(
         Ok(scan) => {
             r.scope = super::markets::cap_scope(&scan.scope, cap);
             match super::markets::scan_quotes(client, market, &scan, cap, false).await {
-                Ok(quotes) => {
+                Ok(mut quotes) => {
+                    // Cached snapshots (used for `--cap`) carry price and change
+                    // but not the volume averages, opens and 52-week range the
+                    // scanners read: ask Yahoo for those live.
+                    let thin = quotes
+                        .iter()
+                        .filter(|q| q.average_daily_volume_3_month.is_none())
+                        .count();
+                    if thin * 2 > quotes.len() {
+                        let syms: Vec<String> =
+                            quotes.iter().filter_map(|q| q.symbol.clone()).collect();
+                        let refs: Vec<&str> = syms.iter().map(String::as_str).collect();
+                        if let Some(live) =
+                            timed("Live quotes", client.get_quote(&refs), &mut warnings).await
+                            && !live.is_empty()
+                        {
+                            quotes = live;
+                        }
+                    }
                     r.top_movers = crate::hot::top_movers(&quotes, elapsed, min_value, limit);
                     r.unusual_volume =
                         crate::hot::unusual_volume(&quotes, elapsed, min_value, limit);

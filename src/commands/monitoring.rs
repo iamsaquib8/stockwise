@@ -184,7 +184,9 @@ pub(crate) async fn build_digest(
         },
     )
     .await?;
-    let date = crate::clock::session_date(market, Utc::now());
+    let now = Utc::now();
+    let date = crate::worker::last_closed_session(market, now)
+        .unwrap_or_else(|| crate::clock::session_date(market, now));
     let mut d = crate::digest::Digest::from_pulse(&pulse, &date.to_string(), 3);
     let signals = full_pass(client, market, state).await.unwrap_or_default();
     d.signals = signals.clone();

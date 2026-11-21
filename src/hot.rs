@@ -127,7 +127,11 @@ pub fn gap_pct(q: &Quote) -> Option<f64> {
 /// illiquid name don't count as "unusual volume".
 fn liquid(q: &Quote, min_value: f64) -> bool {
     let p = q.regular_market_price.unwrap_or(0.0);
-    let v = q.average_daily_volume_3_month.unwrap_or(0) as f64;
+    // Without the 3-month average, today's volume stands in.
+    let v = q
+        .average_daily_volume_3_month
+        .or(q.regular_market_volume)
+        .unwrap_or(0) as f64;
     p * v >= min_value
 }
 
@@ -260,7 +264,8 @@ pub fn most_mentioned(titles: &[String], quotes: &[Quote], n: usize) -> Vec<(Str
                 .or(q.long_name.as_deref())
                 .map(crate::research::clean_company_name)
                 .map(|n| normalize(&n))
-                .filter(|n| n.len() >= 4);
+                .filter(|n| n.len() >= 4 && !COMMON_WORDS.contains(&n.as_str()))
+                .filter(|n| !n.contains("stock exchange"));
             let needles: Vec<String> = std::iter::once(base)
                 .filter(|b| b.len() >= 3 && !COMMON_WORDS.contains(&b.as_str()))
                 .chain(name)
@@ -280,8 +285,48 @@ pub fn most_mentioned(titles: &[String], quotes: &[Quote], n: usize) -> Vec<(Str
 
 /// Tickers that are also English words would match everything.
 const COMMON_WORDS: &[&str] = &[
-    "all", "any", "are", "can", "for", "has", "now", "one", "the", "big", "new", "low", "key",
-    "ups", "car", "fast", "gold", "life", "real", "well", "good", "safe", "bank", "info",
+    "all",
+    "any",
+    "are",
+    "can",
+    "for",
+    "has",
+    "now",
+    "one",
+    "the",
+    "big",
+    "new",
+    "low",
+    "key",
+    "ups",
+    "car",
+    "fast",
+    "gold",
+    "life",
+    "real",
+    "well",
+    "good",
+    "safe",
+    "bank",
+    "info",
+    // Market words that are also listed companies' tickers.
+    "nse",
+    "bse",
+    "sensex",
+    "nifty",
+    "benchmark",
+    "market",
+    "india",
+    "stock",
+    "stocks",
+    "share",
+    "shares",
+    "apollo",
+    "index",
+    "trade",
+    "money",
+    "first",
+    "best",
 ];
 
 fn normalize(s: &str) -> String {

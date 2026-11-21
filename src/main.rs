@@ -1320,7 +1320,12 @@ enum WorkerAction {
     /// Is it running, and what is queued
     Status,
     /// Run it in this terminal (what `start` launches)
-    Run,
+    Run {
+        /// One pass and exit (for cron): alerts, the holding monitor, held
+        /// notices, and the post-close digest when it is due
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4603,7 +4608,8 @@ async fn dispatch(
                 WorkerAction::Start => "start",
                 WorkerAction::Stop => "stop",
                 WorkerAction::Status => "status",
-                WorkerAction::Run => "run",
+                WorkerAction::Run { once: false } => "run",
+                WorkerAction::Run { once: true } => "once",
             };
             commands::cmd_worker(name, m).await
         }

@@ -250,16 +250,75 @@ pub fn google_news_url(company: &str, india: bool, days: u32) -> String {
 async fn google(
     client: &YahooClient,
     company: &str,
+    base: &str,
     india: bool,
     days: u32,
 ) -> anyhow::Result<Vec<NewsItem>> {
     let xml = client
         .raw_get_text(&google_news_url(company, india, days))
         .await?;
+    // Google matches the name anywhere in the article; keep headlines that
+    // name the company (or its ticker) themselves.
+    let aliases = crate::research::company_aliases(company, base);
     Ok(crate::research::parse_rss(&xml, "Google News")
         .into_iter()
+        .filter(|h| crate::research::mentions_company(h, &aliases))
         .map(|h| NewsItem::from_headline(h, "Google News"))
         .collect())
+}
+
+/// Machine-written fund-holding updates ("… Shares Acquired by X LLC",
+/// "… Stake Raised by …", "X Asset Management Reduces Stake") that say
+/// nothing about the company: a fund-like name plus a holding verb.
+pub fn is_noise(title: &str) -> bool {
+    let t = format!(" {} ", title.to_lowercase());
+    const HOLDING: &[&str] = &["stake", "position", "shares", "holdings"];
+    const MOVE: &[&str] = &[
+        "acquired by",
+        "sold by",
+        "bought by",
+        "purchased by",
+        "raised by",
+        "lowered by",
+        "cut by",
+        "trimmed by",
+        "boosts",
+        "raises",
+        "lowers",
+        "trims",
+        "cuts",
+        "reduces",
+        "increases",
+        "grows",
+        "decreases",
+        "sells",
+        "buys",
+        "acquires",
+        "takes",
+        "adds",
+        "has ",
+        "holds",
+    ];
+    const FUND: &[&str] = &[
+        " llc",
+        " l.l.c",
+        " lp ",
+        "asset management",
+        "advisors",
+        "advisory",
+        "wealth",
+        "capital management",
+        "investment board",
+        "investment management",
+        "financial group",
+        "retirement system",
+        "pension",
+        "trust co",
+        "partners",
+    ];
+    HOLDING.iter().any(|w| t.contains(w))
+        && MOVE.iter().any(|w| t.contains(w))
+        && FUND.iter().any(|w| t.contains(w))
 }
 
 /// Exchange or regulator filings of `symbol` over `days` days: NSE for
@@ -326,9 +385,9 @@ pub async fn fetch(client: &YahooClient, q: &Query) -> Fetched {
         timed(yahoo_rss(client, &q.symbol)),
         async {
             match &company {
-                Some(c) => Some(timed(google(client, c, india, q.days.max(1))).await),
+                Some(c) => Some(timed(google(client, c, &base, india, q.days.max(1))).await),
                 // No name: the bare ticker with "stock" is still better than nothing.
-                None => Some(timed(google(client, &base, india, q.days.max(1))).await),
+                None => Some(timed(google(client, &base, &base, india, q.days.max(1))).await),
             }
         },
         async {
@@ -372,7 +431,8 @@ pub async fn fetch(client: &YahooClient, q: &Query) -> Fetched {
         item.symbol = Some(q.symbol.clone());
         item.importance = importance(item, now);
     }
-    out.items.retain(|i| i.ts.is_none_or(|t| t >= cutoff));
+    out.items
+        .retain(|i| i.ts.is_none_or(|t| t >= cutoff) && !is_noise(&i.title));
     out.items = collate(std::mem::take(&mut out.items));
     out
 }
@@ -475,6 +535,27 @@ mod tests {
         assert!(u.contains("when%3A2d"), "{u}");
         assert!(u.ends_with("hl=en-IN&gl=IN&ceid=IN:en"));
         assert!(google_news_url("Apple", false, 1).contains("gl=US"));
+    }
+
+    #[test]
+    fn fund_holding_spam_is_noise_but_real_deals_are_not() {
+        assert!(is_noise(
+            "5,349 Apple Inc. $AAPL Shares Acquired by Sage Rhino Capital LLC"
+        ));
+        assert!(is_noise(
+            "Apple Inc. $AAPL Stake Raised by True Link Financial Advisors LLC"
+        ));
+        assert!(is_noise(
+            "Apple Stock: North Dakota State Investment Board Boosts Stake"
+        ));
+        assert!(is_noise(
+            "Apple Inc. $AAPL Stock: Motley Fool Asset Management LLC Reduces Stake"
+        ));
+        assert!(!is_noise(
+            "Reliance promoters buy 4.26 lakh shares in open market"
+        ));
+        assert!(!is_noise("Infosys buyback opens this week"));
+        assert!(!is_noise("Tata Motors acquires stake in EV maker"));
     }
 
     #[test]
