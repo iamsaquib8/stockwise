@@ -293,7 +293,7 @@ fn max_drawdown(closes: &[f64]) -> Option<f64> {
 }
 
 /// Closes of the sessions both series have, in date order.
-fn join(a: &[(NaiveDate, f64)], b: &[(NaiveDate, f64)]) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn join(a: &[(NaiveDate, f64)], b: &[(NaiveDate, f64)]) -> (Vec<f64>, Vec<f64>) {
     let theirs: std::collections::HashMap<NaiveDate, f64> = b.iter().copied().collect();
     a.iter()
         .filter_map(|(d, x)| theirs.get(d).map(|y| (*x, *y)))

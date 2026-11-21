@@ -46,6 +46,7 @@ mod greeks;
 mod gsec;
 mod i18n;
 mod income;
+mod index_weights;
 mod insights;
 mod intraday;
 mod ipo;

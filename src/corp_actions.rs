@@ -122,23 +122,31 @@ pub fn pending_of(h: &Holding, splits: Vec<Split>) -> Vec<Split> {
 /// to its lots. Funds and SGBs (`MF:`, off-market) have none. A symbol whose
 /// actions cannot be fetched is listed in `unchecked`, never an error.
 pub async fn pending_splits(client: &YahooClient, portfolio: &Portfolio) -> PendingSplits {
-    let jobs: Vec<&Holding> = portfolio
+    // Owned jobs: a stream over borrowed holdings trips the `Send` bound of
+    // the HTTP and MCP handlers that call this.
+    let jobs: Vec<(String, Option<String>, Holding)> = portfolio
         .holdings
         .iter()
         .filter(|h| !crate::market::is_namespaced(&h.symbol))
         .filter(|h| !crate::offmarket::is_off_market(&h.symbol))
+        .map(|h| {
+            let since = h.lots.iter().map(|l| l.units_date().to_string()).min();
+            (h.symbol.clone(), since, h.clone())
+        })
         .collect();
     let results: Vec<(String, Option<Vec<Split>>)> = futures_util::stream::iter(jobs)
-        .map(|h| async move {
-            let Some(since) = h.lots.iter().map(|l| l.units_date()).min() else {
-                return (h.symbol.clone(), Some(Vec::new()));
-            };
-            let found = crate::commands::portfolio::fetch_actions(client, &h.symbol, since)
-                .await
-                .ok()
-                .map(|(splits, _, _)| pending_of(h, splits));
-            (h.symbol.clone(), found)
-        })
+        .map(
+            |(sym, since, h): (String, Option<String>, Holding)| async move {
+                let Some(since) = since else {
+                    return (sym, Some(Vec::new()));
+                };
+                let found = crate::commands::portfolio::fetch_actions(client, &sym, &since)
+                    .await
+                    .ok()
+                    .map(|(splits, _, _)| pending_of(&h, splits));
+                (sym, found)
+            },
+        )
         .buffer_unordered(CONCURRENCY)
         .collect()
         .await;

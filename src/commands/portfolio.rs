@@ -2818,12 +2818,16 @@ pub async fn cmd_portfolio_xray(
         return Ok(());
     }
 
+    let client = YahooClient::new().await?;
+    // A split or bonus not yet applied to the lots: value the share count
+    // after it, so the look-through is not halved.
+    let pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    let portfolio = pending.adjusted(&portfolio);
     let symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let client = YahooClient::new().await?;
     let val = value_holdings(&client, &symbols, market, base).await?;
 
     let mut fund_profiles = std::collections::HashMap::new();
@@ -2844,45 +2848,41 @@ pub async fn cmd_portfolio_xray(
         if is_fund || is_etf || (!offmarket::is_sgb(&h.symbol) && quote_type.is_none()) {
             if let Some(fp) = funds::load_fund_disclosure(&h.symbol) {
                 fund_profiles.insert(h.symbol.clone(), fp);
-            } else if let Ok(fp) = funds::fetch_fund_profile(&client, &h.symbol, market).await {
-                fund_profiles.insert(h.symbol.clone(), fp);
-            } else if let Some(index) = xray::index_for_etf(&h.symbol)
-                && let Ok(constituents) = client.index_constituents(index).await
-                && !constituents.is_empty()
+            } else if let Ok(fp) = funds::fetch_fund_profile(&client, &h.symbol, market).await
+                && (!fp.holdings.is_empty()
+                    || (!fp.sectors.is_empty()
+                        && crate::index_weights::for_fund(&h.symbol, fp.name.as_deref()).is_none()))
             {
-                let weight = 1.0 / constituents.len() as f64;
-                let holdings = constituents
-                    .into_iter()
-                    .map(|sym| funds::Holding {
-                        symbol: Some(sym),
-                        name: None,
-                        weight,
-                    })
-                    .collect();
-                let fp = funds::FundProfile {
-                    symbol: h.symbol.clone(),
-                    name: val
-                        .name(&h.symbol)
-                        .or_else(|| {
-                            quote.and_then(|q| q.long_name.clone().or_else(|| q.short_name.clone()))
-                        })
-                        .or_else(|| xray::default_etf_name(&h.symbol).map(str::to_string)),
-                    family: None,
-                    category: Some(index.to_string()),
-                    expense_ratio: None,
-                    currency: val.currency(&h.symbol),
-                    holdings,
-                    sectors: Vec::new(),
-                };
                 fund_profiles.insert(h.symbol.clone(), fp);
             }
+            // Otherwise an index ETF or index fund is looked through with the
+            // shipped index weights (`index_weights`), inside `compute_xray`.
         }
     }
 
     let mut input_holdings = Vec::with_capacity(portfolio.holdings.len());
+    let mut excluded: Vec<xray::ExcludedHolding> = Vec::new();
     for h in &portfolio.holdings {
-        let price = val.price(&h.symbol).unwrap_or(0.0);
-        let price_base = val.to_base(&h.symbol, price).unwrap_or(price);
+        // No price, or no rate into the base: left out and named, never
+        // valued at 0 or added in its own currency as if it were the base.
+        let Some(price) = val.price(&h.symbol) else {
+            excluded.push(xray::ExcludedHolding {
+                symbol: h.symbol.clone(),
+                reason: "no price".into(),
+            });
+            continue;
+        };
+        let Some(price_base) = val.to_base(&h.symbol, price) else {
+            excluded.push(xray::ExcludedHolding {
+                symbol: h.symbol.clone(),
+                reason: format!(
+                    "no {} to {} exchange rate",
+                    val.currency(&h.symbol).unwrap_or_else(|| "?".into()),
+                    val.base()
+                ),
+            });
+            continue;
+        };
         let value = h.shares * price_base;
 
         let quote = val.quote(&h.symbol);
@@ -2965,13 +2965,14 @@ pub async fn cmd_portfolio_xray(
 
     let p_name = active_name.unwrap_or("default");
     let prof = crate::config::effective_profile();
-    let report = xray::compute_xray_with_threshold(
+    let mut report = xray::compute_xray_with_threshold(
         p_name,
         val.base(),
         &input_holdings,
         &fund_profiles,
         prof.max_stock_weight,
     );
+    report.excluded = excluded;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2989,6 +2990,22 @@ pub async fn cmd_portfolio_xray(
         prof.spec.cyan()
     );
     println!();
+    pending.print();
+    if !report.excluded.is_empty() {
+        let names: Vec<String> = report
+            .excluded
+            .iter()
+            .map(|e| format!("{} ({})", e.symbol, e.reason))
+            .collect();
+        println!(
+            "  {} Left out of the X-Ray: {}.",
+            "!".yellow(),
+            names.join(", ")
+        );
+    }
+    if !pending.is_empty() || !report.excluded.is_empty() {
+        println!();
+    }
 
     // Concentration Alerts
     if !report.concentrations_above_10pct.is_empty() {
@@ -3251,18 +3268,26 @@ pub async fn cmd_portfolio_xray(
         print_section("Funds & ETFs Analyzed");
         for f in &report.funds_analyzed {
             if f.look_through_available {
+                let shipped = !fund_profiles.contains_key(&f.symbol)
+                    && crate::index_weights::for_fund(&f.symbol, f.name.as_deref()).is_some();
+                let source = if shipped {
+                    format!(", index weights as of {}", crate::index_weights::AS_OF)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  • {:<12} {:<30} (look-through: {} holdings, {:.1}% coverage)",
+                    "  • {:<12} {:<30} (look-through: {} holdings, {:.1}% coverage{})",
                     f.symbol.cyan(),
                     truncate(f.name.as_deref().unwrap_or("—"), 30),
                     f.holdings_count,
-                    f.coverage_pct
+                    f.coverage_pct,
+                    source
                 );
             } else {
                 let note = if xray::is_known_etf(&f.symbol) {
-                    "(categorized by ETF profile)"
+                    "(no holdings known: categorized by ETF profile)"
                 } else {
-                    "(categorized by scheme profile)"
+                    "(no holdings known: categorized by scheme category)"
                 };
                 println!(
                     "  • {:<12} {:<30} {}",
