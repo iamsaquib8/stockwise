@@ -477,6 +477,26 @@ pub fn access(name: &str) -> Access {
     }
 }
 
+/// `(destructive, idempotent)` of a write tool. Destructive: it removes or
+/// replaces something the user saved (every change is still undoable with
+/// `stockwise undo`). Idempotent: calling it twice with the same arguments
+/// leaves the same files as calling it once.
+pub fn write_effect(name: &str) -> (bool, bool) {
+    match name {
+        // Adding to a set: a second call finds the tickers already there.
+        "watchlist_add" => (false, true),
+        // Each call adds another alert or lot.
+        "alert_add" | "portfolio_add" => (false, false),
+        // Indexes shift after a removal; a sale uses up lots each time.
+        "alert_remove" | "portfolio_sell" => (true, false),
+        // Removals, and saves that replace by name or key.
+        "watchlist_remove" | "goal_save" | "goal_remove" | "target_set" | "target_remove"
+        | "profile_set" | "profile_onboard" | "note_set" => (true, true),
+        // Unknown writes: the cautious answer.
+        _ => (true, false),
+    }
+}
+
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }

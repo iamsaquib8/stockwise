@@ -60,24 +60,34 @@ gives value, P&L, XIRR, split by market, currency, cap tier and sector, tax
 terms, risk and observations. Add `portfolio_summary` for live P&L, and
 `tax_estimate` or `harvest` for tax questions.
 
-**"Should I buy X?" or "Is X good for me?"** Do not answer buy, sell or hold.
-Run `fit_check` with the symbol (and `amount` if the user named one). It
-answers `fits_your_rules`: yes, no or unclear, against the user's own limits
-(largest weight of one stock, small-cap share, risk level, and the P/E and ROE
-limits in their note for that stock). Present it as "by your own rules", list
-the failed and unknown rules, and add `verdict`, `scorecard`, `risk` or
-`technical` for the facts behind it. Offer `note_set` to record the user's
-thesis and limits for next time.
+**"Should I buy X?" or "Is X good for me?"** Never make up a buy, sell or
+hold call yourself: actions (BUY/WATCH/AVOID, ADD/HOLD/TRIM/EXIT) come only
+from StockWise's rule-based engine, and this version has no action tool yet
+(`stock_action` and `portfolio_review` are coming). Run `verdict` for the
+6-pillar scores and their data coverage, `fit_check` with the symbol (and
+`amount` if the user named one), and `risk`. `fit_check` answers
+`fits_your_rules`: yes, no or unclear, against the user's own limits (largest
+weight of one stock, small-cap share, risk level, and the P/E and ROE limits
+in their note for that stock). Present it as "by your own rules", list the
+failed and unknown rules, and lay out what the data shows for and against.
+When the verdict's `data_coverage` is under 60, say there is not enough data
+for a call (NO CALL). Offer `note_set` to record the user's thesis and limits
+for next time. The MCP prompt `should_i_buy` does all of this.
 
 **"Is it a good time to invest?"** `market_conditions` (or `stockwise conditions --json`)
 shows trend, volatility, breadth and valuation with their history. These are
 readings, not a timing signal; say so.
 
-**Ideas to research.** `picks` ranks stocks on value, quality, growth and
-trend among the stocks scanned (the whole default universe unless the user
-names one, such as `nifty50` or `smallcap250`). `screen`, `movers` and
-`ipo_board` help too. Each is a starting list for research, not a
-recommendation.
+**Ideas to research.** `picks` ranks stocks that clear size and liquidity
+floors on five pillars (value, quality, growth, trend, risk) among the stocks
+scanned. Options: `universe` (such as `nifty50` or `smallcap250`), `cap`
+(`small` ranks small caps against each other), `horizon` (`long`, the
+default, or `short` for weeks to months), `min_mcap` and `min_adv`. Leave out
+picks whose `coverage` is under 0.6. Every list is logged, and `picks_review`
+shows how earlier lists did against the index: cite it, misses included.
+`verdicts` scores up to 25 tickers in one call, and `quote` prices up to 25.
+`screen`, `movers` and `ipo_board` help too. Each is a starting list for
+research, not a recommendation.
 
 **Watchlist and alerts upkeep.** `watchlist` and `alerts_list` read;
 `watchlist_add`, `alert_add` (price levels or conditions such as RSI below 30)
@@ -91,8 +101,24 @@ and their `_remove` pairs change them.
 the advance-tax schedule, `harvest` for loss and 112A harvesting. With the CLI,
 `stockwise tax export in --fy 2025-26 --json` gives Schedule CG rows.
 
+**Indian fixed income, gold and currency.** `bonds_yields` (G-sec curve),
+`bonds_list` and `bonds_calc` (price, yield, duration of a G-sec or T-bill),
+`commodity` (gold and silver in rupees; `view: sgb` for Sovereign Gold Bonds
+against gold), `fx_history` (USD/INR and other pairs). `returns`, `correlate`
+and `compare` work for any ticker; `portfolio_wrap` with `fy: 2025-26`
+reviews an Indian financial year. Prompts `mf_review` and
+`advance_tax_check` cover funds and advance tax.
+
 **Results season.** `calendar` and `income_calendar` for dates,
 `quarterly_results` and `events` for what was reported.
+
+**MCP extras.** Built-in prompts: `daily_briefing`, `should_i_buy`,
+`exit_check`, `smallcap_short_scan`, `tax_aware_rebalance`, `weekly_review`,
+`mf_review`, `advance_tax_check`, `review_portfolio`, `tax_harvest_check`,
+`explain_option_chain`, `onboard_profile`. Resources: `stockwise://portfolio`, `watchlist`, `alerts`,
+`profile`, `picks/latest`, `track-record`, `methodology`, and
+`stockwise://quote/{symbol}`. The main tools also return `structuredContent`
+that follows their `outputSchema`.
 
 ## CLI quick reference
 
@@ -115,7 +141,8 @@ the advance-tax schedule, `harvest` for loss and 112A harvesting. With the CLI,
 | Volatility, Sharpe, drawdown | `stockwise risk HDFCBANK -p 1y --json` |
 | 6-pillar score (not a rating) | `stockwise verdict TCS --json` |
 | Piotroski and Altman | `stockwise scorecard TCS --json` |
-| Ranked ideas | `stockwise picks --json` · `stockwise picks --universe nifty50 --json` |
+| Ranked ideas | `stockwise picks --json` · `stockwise picks --cap small --horizon short --json` |
+| Track record of picks | `stockwise picks review --json` |
 | Gainers and losers | `stockwise movers --json` |
 | Preset screen | `stockwise screen growth --json` |
 | Backtest | `stockwise backtest INFY -s macd -p 2y --json` |
@@ -137,11 +164,16 @@ to a cloud model.
 
 ## Rules
 
-- **Not financial advice.** Describe what the numbers show and their risks.
-  Never tell the user to buy, sell or hold, and never give price targets.
-  `verdict`, `scorecard`, `picks` and `fit_check` describe data or the user's
-  own rules; they are not ratings. Say that quotes can be delayed (NSE quotes
-  from Yahoo are about 15 minutes behind).
+- **Recommendations policy.** Actions come only from StockWise's
+  deterministic engine; never invent, upgrade or soften one, and never turn
+  scores into one. Explain with the reasons and figures a tool returned, and
+  never invent price levels (entry, stop, target, invalidation). When data
+  coverage is under 60%, say there is not enough data for a call. `verdict`,
+  `scorecard`, `picks` and `fit_check` describe data or the user's own rules;
+  they are not ratings.
+- **Not personalised advice.** Say the information is educational, StockWise
+  is not a SEBI-registered adviser, and quotes can be delayed (NSE quotes from
+  Yahoo are about 15 minutes behind).
 - **Tax figures are estimates.** They cover only the sales and lots
   StockWise has recorded. Tell the user to check them against their broker's
   tax P&L before filing.

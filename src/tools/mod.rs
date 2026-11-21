@@ -12,8 +12,10 @@
 //! advice" note and kept small enough for a model's context.
 
 mod args;
-mod extra;
+pub(crate) mod extra;
 mod handlers;
+mod more;
+pub mod schema;
 mod workspace;
 
 pub use args::Args;
@@ -111,9 +113,73 @@ const fn opt(name: &'static str, kind: Kind, description: &'static str) -> Param
     }
 }
 
-/// Personal tools that also fetch public market data on their default path
-/// (prices, statements, fund holdings), so hosts see them as open-world.
-pub const PERSONAL_OPEN_WORLD: &[&str] = &["portfolio_checkup"];
+/// Read tools that never leave the machine: calculators and local files.
+/// Every other tool fetches market data (quotes, NAVs, statements) on its
+/// default path, so hosts see it as open-world, personal or not.
+pub const CLOSED_WORLD: &[&str] = &[
+    "holdings_lots",
+    "profile",
+    "profile_questions",
+    "changes_list",
+    "goal_sip",
+    "goal_retire",
+    "goal_education",
+    "goal_swp",
+    "goal_prepay",
+    "goal_emergency",
+];
+
+/// MCP tool annotations: what a host may assume before calling a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hints {
+    /// Changes nothing (`readOnlyHint`).
+    pub read_only: bool,
+    /// May overwrite or remove the user's data (`destructiveHint`).
+    pub destructive: bool,
+    /// Calling it again with the same arguments changes nothing more
+    /// (`idempotentHint`).
+    pub idempotent: bool,
+    /// Reaches outside the machine (`openWorldHint`).
+    pub open_world: bool,
+}
+
+/// The annotations of `tool`. Read tools are read-only and idempotent
+/// (`picks` also appends its list to the local track record, once a day per
+/// list, the same bookkeeping as `stockwise picks`). Write tools only touch
+/// local files, so they are closed-world; see [`workspace::write_effect`]
+/// for which overwrite or remove and which repeat safely.
+pub fn hints(tool: &Tool) -> Hints {
+    match access(tool.name) {
+        Access::Read => Hints {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: !CLOSED_WORLD.contains(&tool.name),
+        },
+        Access::Workspace | Access::Portfolio => {
+            let (destructive, idempotent) = workspace::write_effect(tool.name);
+            Hints {
+                read_only: false,
+                destructive,
+                idempotent,
+                open_world: false,
+            }
+        }
+    }
+}
+
+/// How long a read tool may run before it is stopped: the market scans and
+/// portfolio analyses get longer. Writes are never cut off half-way.
+pub fn default_timeout(name: &str) -> std::time::Duration {
+    let secs = match name {
+        "picks" | "picks_review" | "market_conditions" | "portfolio_analyze"
+        | "portfolio_checkup" | "portfolio_pme" | "backtest" | "screen" | "verdicts" | "movers"
+        | "ipo_analyze" | "mf_bleed" | "income_calendar" | "compare" | "returns" | "correlate"
+        | "portfolio_wrap" => 180,
+        _ => 60,
+    };
+    std::time::Duration::from_secs(secs)
+}
 
 /// One tool: its name (`^[a-z_]+$`), a title for people, a description for
 /// the model, and its parameters.
@@ -292,12 +358,13 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "quote",
         title: "Stock quotes",
-        description: "Live (often delayed) quotes for up to 20 tickers: price, change, day range, \
-                      volume, 52-week range, market cap, P/E. Unknown tickers are listed in `missing`.",
+        description: "Live (often delayed) quotes for up to 25 tickers in one call: price, change, \
+                      day range, volume, 52-week range, market cap, P/E. Unknown tickers are listed \
+                      in `missing`.",
         params: &[
             req(
                 "symbols",
-                Kind::StrList { max: 20 },
+                Kind::StrList { max: 25 },
                 "Tickers, e.g. [\"RELIANCE\", \"TCS\"]",
             ),
             MARKET,
@@ -1341,6 +1408,39 @@ pub const TOOLS: &[Tool] = &[
         personal: false,
     },
     Tool {
+        name: "picks_review",
+        title: "Track record of picks",
+        description: "How past `picks` lists did: every list (from the CLI or this tool) is logged, and each stock is measured from the day it was first listed against NIFTY 50 or the S&P 500 total return, with hit rate, share that beat the index and mean and median return and excess. Price return, dividends not included; past lists do not predict future ones.",
+        params: &[
+            opt(
+                "since",
+                Kind::Str,
+                "Look-back window: 90d (default), 12w, 6m, 1y or a number of days",
+            ),
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "Which lists: long (default) or short",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "verdicts",
+        title: "6-pillar scores for several stocks",
+        description: "The verdict tool's 6-pillar scores for up to 25 tickers in one call, compact: composite (0-100), data coverage (percent of inputs with data), `low_coverage` when under 60%, and each pillar's score and band. Stocks that fail are listed in `failed`. Describes data; it is not a recommendation.",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 25 },
+                "Tickers, e.g. [\"TCS\", \"INFY\", \"HDFCBANK\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
         name: "movers",
         title: "Top gainers and losers",
         description: "Today's biggest gainers and losers among the market's large stocks (NIFTY 500, the S&P 1500, or the exchange's main index), with price, change and volume.",
@@ -1433,6 +1533,163 @@ pub const TOOLS: &[Tool] = &[
         )],
         personal: true,
     },
+    // India-first extras; handlers in more.rs.
+    Tool {
+        name: "bonds_yields",
+        title: "Indian government bond yields",
+        description: "India's government securities yield curve: T-bill and G-sec yields by tenor (91 days to 40 years) with the benchmark security, its yield to maturity and the date, from CCIL (RBI's list when CCIL is down).",
+        params: &[],
+        personal: false,
+    },
+    Tool {
+        name: "bonds_list",
+        title: "Find an Indian government security",
+        description: "RBI's list of outstanding central government securities: ISIN, name (e.g. 7.18% GS 2033), coupon, maturity, the NSE symbol and the amount outstanding in crore. Filter by words of the name, an ISIN or a maturity year.",
+        params: &[opt(
+            "query",
+            Kind::Str,
+            "Words, an ISIN or a maturity year, e.g. \"2033\", \"718GS2033\"",
+        )],
+        personal: false,
+    },
+    Tool {
+        name: "bonds_calc",
+        title: "G-sec price and yield calculator",
+        description: "Price to yield or yield to price for an Indian government security (semi-annual coupons, 30/360) or a T-bill: clean and dirty price, accrued interest, yield to maturity, modified duration, convexity and the cash flows. Give a security (its name or ISIN, looked up in RBI's list) or a coupon and maturity, and a price or a yield.",
+        params: &[
+            opt(
+                "security",
+                Kind::Str,
+                "Name or ISIN, e.g. 718GS2033 or IN0020230036",
+            ),
+            opt(
+                "coupon",
+                Kind::Number {
+                    min: 0.0,
+                    max: 30.0,
+                },
+                "Coupon, percent a year (with maturity, instead of a security)",
+            ),
+            opt("maturity", Kind::Str, "Maturity date YYYY-MM-DD"),
+            opt(
+                "price",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1000.0,
+                },
+                "Price per ₹100 face value",
+            ),
+            opt(
+                "ytm",
+                Kind::Number {
+                    min: 0.0,
+                    max: 50.0,
+                },
+                "Yield to maturity, percent (instead of a price)",
+            ),
+            opt(
+                "settle",
+                Kind::Str,
+                "Settlement date YYYY-MM-DD (default: today's session)",
+            ),
+            opt("tbill", Kind::Bool, "A Treasury bill (discount, no coupon)"),
+            opt(
+                "dirty",
+                Kind::Bool,
+                "The price includes accrued interest (NSE quotes G-secs dirty)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "commodity",
+        title: "Gold, silver and Sovereign Gold Bonds",
+        description: "Gold and silver for Indian investors. spot: international gold and silver in rupees per 10 g and per kg, with USD/INR. futures: MCX-style futures quotes. etfs: gold and silver ETFs on NSE. sgb: every Sovereign Gold Bond series on NSE with its price, the gold value of one unit, the premium or discount to gold, coupon and maturity.",
+        params: &[opt(
+            "view",
+            Kind::Enum(&["spot", "futures", "etfs", "sgb"]),
+            "Which view (default spot)",
+        )],
+        personal: false,
+    },
+    Tool {
+        name: "fx_history",
+        title: "Currency against the rupee",
+        description: "History of a currency against the rupee (or another base): first and last rate, change, high and low over a period and the recent daily rates. Useful for US holdings of an Indian investor (USD/INR moves change their rupee value).",
+        params: &[
+            opt(
+                "currency",
+                Kind::Str,
+                "3-letter code, e.g. USD (default), EUR, GBP, AED, SGD, JPY",
+            ),
+            opt("base", Kind::Str, "Base currency (default INR)"),
+            opt(
+                "period",
+                Kind::Enum(&["1mo", "3mo", "6mo", "ytd", "1y", "2y", "5y", "10y"]),
+                "Period (default 1y)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "returns",
+        title: "Trailing returns",
+        description: "A stock's, ETF's or index's trailing price returns over 1 week, 1, 3 and 6 months and 1, 2 and 5 years, annualized beyond a year, and what ₹1 lakh (or 100,000 of its currency) became. Price returns: dividends not included.",
+        params: &[
+            req("symbol", Kind::Str, "Ticker, e.g. NIFTYBEES, ^NSEI, TCS"),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "correlate",
+        title: "Correlation of stocks",
+        description: "How closely 2 to 10 tickers moved together over the last year: the correlation matrix of daily returns on common trading days (1 moves together, 0 unrelated, -1 opposite). Useful to see whether holdings diversify each other.",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 10 },
+                "2 to 10 tickers, e.g. [\"HDFCBANK\", \"ICICIBANK\", \"TCS\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "compare",
+        title: "Compare stocks side by side",
+        description: "Up to 6 stocks side by side: price, market cap and cap tier, P/E (trailing and forward), P/B, EPS, ROE, margins, debt to equity, revenue and earnings growth, dividend yield, beta and the 52-week range. Ratios are fractions (0.012 = 1.2%).",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 6 },
+                "2 to 6 tickers, e.g. [\"TCS\", \"INFY\", \"HCLTECH\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "portfolio_wrap",
+        title: "Portfolio year in review",
+        description: "The portfolio's year in review: return over the year (or an Indian financial year), money in and out, dividends, realized gains, best and worst holdings, and the checkup's main findings. Pass fy for an April-March year such as 2025-26.",
+        params: &[
+            opt("year", Kind::Str, "Calendar year, e.g. 2025"),
+            opt("fy", Kind::Str, "Indian financial year, e.g. 2025-26"),
+            opt(
+                "redact",
+                Kind::Bool,
+                "Leave out amounts, keeping percentages (to share)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
 ];
 
 /// Only with `stockwise mcp --allow-orders`: previews an order without
@@ -1495,6 +1752,8 @@ pub struct ToolContext<D> {
     pub workspace: Option<Workspace>,
     /// Results are cut to this size (small local models get less).
     pub max_result_bytes: usize,
+    /// Longest a read tool may run; `None`: [`default_timeout`] per tool.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl<D: DataSource> ToolContext<D> {
@@ -1505,6 +1764,7 @@ impl<D: DataSource> ToolContext<D> {
             allow_orders: false,
             workspace: None,
             max_result_bytes: MAX_RESULT_BYTES,
+            timeout: None,
         }
     }
 
@@ -1549,7 +1809,19 @@ impl<D: DataSource> ToolContext<D> {
                 let m = args.market(self.market);
                 workspace::run(w, &self.source, tool.name, &args, m).await?
             }
-            _ => handlers::run(self, tool.name, &args).await?,
+            _ => {
+                let limit = self.timeout.unwrap_or_else(|| default_timeout(tool.name));
+                match tokio::time::timeout(limit, handlers::run(self, tool.name, &args)).await {
+                    Ok(r) => r?,
+                    Err(_) => bail!(
+                        "{} did not finish within {} seconds and was stopped. Data sources \
+                         may be slow; try again, or ask for less (fewer symbols, a smaller \
+                         universe or period).",
+                        tool.name,
+                        limit.as_secs()
+                    ),
+                }
+            }
         };
         Ok(envelope(data, self.max_result_bytes))
     }
