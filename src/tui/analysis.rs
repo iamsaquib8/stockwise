@@ -742,7 +742,7 @@ mod tests {
         assert!(tcs.contains('●'), "{tcs}");
         let compact = draw(&app, 60, 20);
         assert!(compact.contains("observations"), "{compact}");
-        crate::verdict::testing::assert_neutral(&wide);
+        crate::action::testing::assert_action_well_formed(&wide);
     }
 
     #[test]
@@ -764,7 +764,7 @@ mod tests {
         ] {
             assert!(screen.contains(part), "{part} missing\n{screen}");
         }
-        crate::verdict::testing::assert_neutral(&screen);
+        crate::action::testing::assert_action_well_formed(&screen);
         app.update(key(KeyCode::Esc));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.screen, Screen::Analysis);

@@ -1,10 +1,14 @@
 ---
-description: Regulatory compliance and non-advisory boundary rules
+description: Recommendations policy for rule-based actions
 globs: ["*"]
 ---
 
-# Regulatory Compliance & Non-Advisory Rules
+# Recommendations Policy
 
-- **Zero Stock Tips**: Never generate or recommend specific buy/sell orders, price targets, or claims of guaranteed returns.
-- **Educational Framing**: All CLI outputs, assistant responses, and docstrings must frame data as diagnostic observations, mathematical calculations, or backtested simulations.
-- **Disclaimer**: Always respect `DISCLAIMER.md`. StockWise is an educational research and accounting tool, not a registered investment advisor.
+- **One source**: Actions (BUY / WATCH / AVOID, ADD / HOLD / TRIM / EXIT, NO CALL) are rule-based and deterministic, computed only by `src/action.rs`.
+- **Always complete**: Every action carries its reasons (at most 3), a confidence level, an invalidation price (BUY, ADD, HOLD, TRIM), a review date and the disclaimer.
+- **No guessing**: NO CALL when data coverage is below 60%.
+- **Published rules**: The rules live in `docs/methodology.md` ("Actions"). Any rule or threshold change bumps `METHODOLOGY` in `src/action.rs`.
+- **AI explains, never decides**: The `ask`/`ai` layer, MCP hosts and coding agents explain the computed action. They never invent, upgrade or change one, and never invent price levels.
+- **Tests**: Output that can show an action is checked with `crate::action::testing::assert_action_well_formed`.
+- **Disclaimer**: Rule-based educational signals. StockWise is not a SEBI-registered investment adviser or research analyst, and losses are possible. Respect `DISCLAIMER.md`.

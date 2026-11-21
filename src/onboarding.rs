@@ -213,7 +213,7 @@ mod tests {
     fn questions_are_complete_and_neutral() {
         let v = questions_json();
         let text = v.to_string();
-        crate::verdict::testing::assert_neutral(&text);
+        crate::action::testing::assert_action_well_formed(&text);
         for q in QUESTIONS {
             assert!(q.number.is_some() || !q.choices.is_empty(), "{}", q.id);
         }

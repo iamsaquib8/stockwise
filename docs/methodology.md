@@ -1,9 +1,238 @@
 # Methodology
 
-How StockWise turns market data into scores. Every rule here is applied the
-same way to every stock, and you can check it yourself. When a rule changes,
-its version number changes, so the track record can tell old lists from new
-ones.
+How StockWise turns market data into scores and actions. Every rule here is
+applied the same way to every stock, and you can check it yourself. When a
+rule changes, its version number changes, so the track record can tell old
+lists from new ones.
+
+## Actions (methodology 1)
+
+`stockwise verdict`, `deep`, a bare `stockwise SYMBOL`, `portfolio review`,
+the Action columns of `portfolio`, `portfolio checkup` and `picks`, and the
+MCP tools `stock_action` and `portfolio_review` all show the same action. It
+comes from one module, `src/action.rs`, and nothing else decides it. The
+rules are deterministic: the same data always gives the same action. When a
+rule or threshold below changes, `METHODOLOGY` in `src/action.rs` goes up.
+
+| You don't hold it | You hold it | Not enough data |
+|---|---|---|
+| BUY, WATCH, AVOID | ADD, HOLD, TRIM, EXIT | NO CALL |
+
+Every action carries:
+
+- **reasons**: up to three, most important first;
+- **confidence**: high, medium or low (below);
+- **invalidation price**: a daily close below it invalidates the action. It
+  is set for BUY, ADD, HOLD and TRIM; WATCH, AVOID and EXIT have none;
+- **review by**: the date to look again;
+- **size hint** (BUY, ADD, TRIM) and **tax note** (TRIM, EXIT), when the
+  data allows;
+- the methodology version, the horizon and the disclaimer.
+
+An action is a rule-based educational signal, not personalised advice. See
+[DISCLAIMER.md](../DISCLAIMER.md).
+
+### 1. When there is no call
+
+The engine says NO CALL, with the reason or the missing fields
+(`ACTION: NO CALL — missing: ROE, D/E`), when:
+
+- the instrument is not a listed stock: funds, ETFs, Sovereign Gold Bonds,
+  indices, FX and crypto get NO CALL;
+- there is no price;
+- **data coverage is below 60%**. It never guesses;
+- there is no composite score.
+
+Coverage is the share of key fields the data sources supplied (the
+`coverage` figure in each command's data footer, 0 to 100).
+
+### 2. The composite score
+
+- `verdict`, `deep` and a bare `stockwise SYMBOL` use the **6-pillar
+  composite** of `verdict`. Safety is its Balance Sheet pillar; valuation is
+  its Valuation pillar.
+- `portfolio review`, the portfolio Action columns and `picks` work from a
+  quote, not a full research fetch. They use the **quote-based long-term
+  score** (`longterm`) as the composite, with its safety and valuation
+  pillars.
+
+A pillar of 65 or more is **Strong**; below 45 is **Weak**.
+
+### 3. Hard gates
+
+Any one of these makes a stock you don't hold **AVOID** and one you hold
+**EXIT**:
+
+- Altman Z (or Z'') in the distress zone;
+- negative shareholders' equity (book value below zero);
+- loss-making (negative EPS or profit margin) with debt to equity above 1.5×
+  (not for banks and other financials);
+- promoter pledge above 25% of the promoter holding;
+- composite below 45 (stocks you don't hold only).
+
+### 4. Small-cap gates
+
+A small cap has a market cap below **₹5,000 crore** (Indian rupee quotes) or
+**$2 billion** (US-dollar equivalent, other currencies). A stock with no market
+cap is not treated as a small cap. On both horizons, any one of these makes a
+small cap AVOID, or EXIT if you hold it:
+
+- promoter pledge above 10%;
+- average value traded per session over the last 20 sessions (close × volume)
+  below the `picks` floor for its tier: ₹1 crore a day for a small cap and
+  ₹50 lakh for a micro cap in India, $2 million and $0.5 million in the US
+  (other markets have no floor);
+- more than 2 price-band (circuit) hits in the last 20 sessions, NSE/BSE only
+  (see the heuristic below);
+- an auditor resignation, or a qualified, adverse or disclaimer of opinion, in
+  the filing titles;
+- exchange surveillance (an NSE ASM/GSM stage), a trading suspension or a
+  delisting among the data warnings.
+
+**Circuit heuristic.** Daily bars don't say whether a stock hit its price
+band. A session counts as a hit when the close moved 5% or more from the
+previous close and closed at the day's high or low (within 0.1%). Only NSE
+and BSE listings are counted.
+
+A small cap's size hint is capped at half of `max_stock_weight`.
+
+### 5. A stock you don't hold: BUY, WATCH, AVOID
+
+After the gates, the stock is **BUY** when all of these hold:
+
+- composite 65 or more;
+- the safety pillar is not Weak (a missing safety pillar does not block);
+- the last close is above the 200-day average;
+- a positive P/E no more than **1.2×** a reference P/E. The reference is the
+  stock's own median P/E or the sector P/E, whichever is higher. The own
+  median is the trailing P/E (four quarters of EPS over that day's close) at
+  each quarter end inside the price history available, up to 5 years; it
+  needs at least three quarter ends. The sector P/E is the NSE sector index
+  P/E or, in `picks`, the median P/E of the scan's stocks in the same sector
+  (at least 3). When there is neither, `picks` falls back to the median P/E
+  of every profitable stock scanned (at least 10). The quote-based views have
+  no quarter history, so they have no own median. A missing P/E or reference
+  fails this rule;
+- the invalidation price is below the last close.
+
+Short horizon adds two more: the close is above the **50-day average**, and
+the 20-day average volume is at least **1.2×** the 60-day average.
+
+If any rule fails, the action is **WATCH**, and the failed rules come first
+in the reasons. If every rule holds but results are due within **5 days**,
+the action is WATCH until they are out.
+
+### 6. A stock you hold: EXIT, TRIM, ADD, HOLD
+
+The rules run in this order; the first that fires decides.
+
+**EXIT** when any of these hold:
+
+- a hard gate or small-cap gate (above);
+- composite below 40;
+- a limit in your note for the stock is broken (`notes.json`: maximum P/E,
+  minimum ROE, maximum weight);
+- the last close is below the invalidation price.
+
+**TRIM** when any of these hold:
+
+- the holding's weight is above `max_stock_weight` (half of it for a small
+  cap);
+- the valuation is stretched **and** the gain on the holding is above 50%.
+  Stretched means a P/E above **1.5×** the reference P/E (as for BUY), or,
+  when there is no reference, a valuation pillar below 35;
+- counting what your funds and ETFs hold of the same company (`xray`), the
+  company is above the cap while the direct holding is not.
+
+**ADD** when all of these hold:
+
+- composite 65 or more;
+- the trend is up. Long horizon: close above the 200-day average and the
+  50-day average above the 200-day. Short horizon: close above the 50-day
+  average and the 20/60-day volume ratio at least 1.2;
+- the weight is known and below the cap (and below your `portfolio target`
+  for it, if you set one).
+
+If results are due within 5 days, ADD becomes **HOLD** until they are out.
+
+**HOLD** otherwise.
+
+### 7. Invalidation price
+
+- **Long horizon:** the higher of the 200-day average and
+  reference − 2.5 × ATR(14).
+- **Short horizon:** the higher of reference − 1.5 × ATR(14) and the lowest
+  low of the 20 sessions before the last one.
+
+If one input is missing, the other is used. ATR(14) is the 14-session average
+true range. The reference is the last close for a stock you don't hold. For a
+holding it is the **highest close of the last 20 sessions**, so the level
+trails the price up instead of moving with each day's close. A holding that
+closes below its invalidation price is an EXIT.
+
+### 8. Review date
+
+- **Long horizon:** the next results date if it falls within 90 days, else
+  90 days from today.
+- **Short horizon:** 10 trading sessions from today (weekends skipped,
+  exchange holidays not).
+
+### 9. Size hint
+
+For BUY and ADD, the largest position the rules allow is
+
+    risk_per_trade ÷ ((price − invalidation) ÷ price)
+
+as a percent of the portfolio, so a close at the invalidation price would cost
+about `risk_per_trade` percent of the portfolio. It is capped by
+`max_stock_weight`, or half of it for a small cap. `risk_per_trade` and
+`max_stock_weight` come from your investor profile. When the portfolio value
+is known, the hint also gives the number of shares to buy to reach that
+weight (less any you hold). The hint names the limit that set it:
+`risk_per_trade`, `max_stock_weight` or `small_cap_half_cap`.
+
+For TRIM, the hint is the cap. When the holding is above it, the hint gives
+the shares to sell to get back under it: shares × (1 − cap ÷ weight), rounded
+up.
+
+### 10. Tax note
+
+For TRIM and EXIT (except an EXIT forced by a hard or small-cap gate): when a
+lot turns long-term within 30 days and waiting would save tax, the note says
+so: "a lot turns long-term on 14 Dec 2026 — waiting 23 days saves about
+₹4,120 in tax".
+
+### 11. Confidence
+
+- **Low:** coverage below 70%, or the pillars are mixed (at least two Strong
+  and at least two Weak).
+- **High:** coverage 85% or more and the pillars agree with the action. For
+  BUY and ADD, no pillar is Weak. For AVOID, EXIT and TRIM, no pillar is
+  Strong or Weak pillars outnumber Strong ones. For WATCH and HOLD, the
+  pillars are not split between Strong and Weak. An action forced by a hard
+  or small-cap gate always agrees.
+- **Medium:** otherwise.
+
+NO CALL is always low confidence.
+
+### 12. Data limits
+
+- **Pledge.** The data sources often give only whether promoter shares are
+  pledged, not the percentage. Without the percentage, the pledge gates
+  (25%, and 10% for small caps) cannot fire.
+- **Results dates.** A plain quote carries no results date. `portfolio
+  review` and the Action columns therefore review in 90 days on the long
+  horizon, and their 5-day results rule cannot fire.
+- **Auditor flags** come from filing titles, which only the single-stock views
+  (`verdict`, `deep`, bare `stockwise SYMBOL`) fetch.
+- **Composite.** `portfolio review` uses the quote-based long-term score; the
+  single-stock views use the 6-pillar composite. The two can differ for the
+  same stock.
+
+**Honest limit.** Fundamentals have no point-in-time history: the P/E, ROE or
+debt a stock had on a past date isn't available, only today's. So the actions
+can't be properly backtested without look-ahead bias, and no backtest is
+claimed.
 
 ## Picks (methodology version 2)
 

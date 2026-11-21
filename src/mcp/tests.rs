@@ -613,6 +613,7 @@ async fn structured_results_follow_their_output_schemas() {
         coverage: 0.8,
         flags: Vec::new(),
         quoted_at: None,
+        action: None,
     };
     let mut flagged = pick.clone();
     flagged.flags = vec!["P/E below 3".into()];
@@ -917,7 +918,8 @@ fn instructions_state_the_recommendations_policy() {
     assert!(INSTRUCTIONS.contains("NO CALL"));
     assert!(INSTRUCTIONS.contains("below 60%"));
     assert!(INSTRUCTIONS.contains("not personalised investment advice"));
-    assert!(INSTRUCTIONS.contains("TODO(0.9 workstream C)"));
+    assert!(!INSTRUCTIONS.contains("TODO(0.9 workstream C)"));
+    assert!(INSTRUCTIONS.contains("stock_action") && INSTRUCTIONS.contains("portfolio_review"));
     for (name, _, _, args) in PROMPTS {
         for (arg, _, required) in *args {
             assert!(!arg.is_empty() && (*required || !arg.is_empty()), "{name}");
@@ -931,8 +933,15 @@ fn new_prompts_render_with_the_policy() {
     a.insert("symbol".into(), json!("TCS"));
     a.insert("amount".into(), json!("50000"));
     let buy = prompt_text("should_i_buy", &a).unwrap();
-    assert!(buy.contains("verdict for TCS") && buy.contains("fit_check for TCS with amount 50000"));
-    assert!(buy.contains("stock_action"), "TODO for C: {buy}");
+    assert!(
+        buy.contains("stock_action for TCS") && buy.contains("fit_check for TCS with amount 50000")
+    );
+    assert!(!buy.contains("TODO"), "{buy}");
+    let exit = prompt_text("exit_check", &Map::new()).unwrap();
+    assert!(
+        exit.contains("portfolio_review") && !exit.contains("TODO"),
+        "{exit}"
+    );
     assert!(prompt_text("should_i_buy", &Map::new()).is_err());
 
     let scan = prompt_text("smallcap_short_scan", &Map::new()).unwrap();
@@ -952,7 +961,11 @@ fn new_prompts_render_with_the_policy() {
         assert!(t.contains("not personalised investment advice"), "{name}");
         assert!(!t.to_lowercase().contains("you should buy"), "{name}");
     }
-    assert!(prompt_text("exit_check", &a).unwrap().contains("verdicts"));
+    assert!(
+        prompt_text("exit_check", &a)
+            .unwrap()
+            .contains("portfolio_review")
+    );
     assert!(
         prompt_text("weekly_review", &a)
             .unwrap()

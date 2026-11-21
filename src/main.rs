@@ -10,6 +10,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::if_same_then_else)]
 
+mod action;
 mod ai;
 mod alerts;
 mod api;
@@ -341,12 +342,17 @@ stockwise use us-tech us --bind   bind a portfolio to a market\n\n\
         out: JsonOutput,
     },
 
-    /// 6-pillar score (0-100) from valuation, growth, balance sheet, ownership, analysts and trend
+    /// Rule-based action (BUY / WATCH / AVOID, or ADD / HOLD / TRIM / EXIT for a holding) and
+    /// the 6-pillar score (0-100) behind it
     Verdict {
         symbol: String,
         /// Explain each of the 6 scoring pillars and how the composite score works
         #[arg(long)]
         explain: bool,
+        /// long (years) or short (weeks to months: tighter invalidation, 10-session review,
+        /// BUY also needs the 50-day average and rising volume)
+        #[arg(long, value_enum, ignore_case = true, default_value = "long")]
+        horizon: picks::Horizon,
         #[command(flatten)]
         out: JsonOutput,
     },
@@ -1487,6 +1493,16 @@ enum PortfolioCmd {
         #[arg(long, requires = "csv")]
         groups: bool,
         /// `--csv` prints the holdings table (or, with --groups, the breakdowns); `--json` everything
+        #[command(flatten)]
+        out: TableOutput,
+    },
+    /// Rule-based action for every holding, sorted EXIT, TRIM, ADD, HOLD, with reasons,
+    /// invalidation level, review date, size and tax notes
+    Review {
+        /// long (years) or short (weeks to months)
+        #[arg(long, value_enum, ignore_case = true, default_value = "long")]
+        horizon: picks::Horizon,
+        /// `--json` prints every holding with its `action`, `--csv` one row per holding
         #[command(flatten)]
         out: TableOutput,
     },
@@ -4628,8 +4644,9 @@ async fn dispatch(
         Commands::Verdict {
             symbol,
             explain,
+            horizon,
             out,
-        } => commands::cmd_verdict(&symbol, m, out.json, explain).await,
+        } => commands::cmd_verdict(&symbol, m, out.json, explain, horizon.into()).await,
         Commands::Fundamental {
             action,
             symbol,
@@ -5218,6 +5235,9 @@ async fn dispatch(
             }
             Some(PortfolioCmd::Analyze { quick, groups, out }) => {
                 commands::cmd_portfolio_analyze(m, base.as_deref(), quick, groups, out.into()).await
+            }
+            Some(PortfolioCmd::Review { horizon, out }) => {
+                commands::cmd_portfolio_review(m, base.as_deref(), horizon.into(), out.into()).await
             }
             Some(PortfolioCmd::Checkup { offline, out }) => {
                 commands::cmd_portfolio_checkup(m, base.as_deref(), offline, out.into()).await
@@ -8358,13 +8378,13 @@ mod tests {
         let verdict = cmd.find_subcommand_mut("verdict").unwrap();
         let about = verdict.get_about().unwrap().to_string();
         assert!(about.contains("6-pillar score"), "{about}");
-        crate::verdict::testing::assert_neutral(&about);
+        crate::action::testing::assert_action_well_formed(&about);
         assert_eq!(
             verdict.get_all_aliases().count(),
             0,
             "verdict has no aliases"
         );
-        crate::verdict::testing::assert_neutral(&curated_quickstart_help(false));
+        crate::action::testing::assert_action_well_formed(&curated_quickstart_help(false));
     }
 
     #[test]
@@ -8372,7 +8392,7 @@ mod tests {
         let new = curated_quickstart_help(true);
         assert!(new.contains("New here?") && new.contains("stockwise init"));
         assert!(!curated_quickstart_help(false).contains("New here?"));
-        crate::verdict::testing::assert_neutral(&new);
+        crate::action::testing::assert_action_well_formed(&new);
     }
 
     #[test]

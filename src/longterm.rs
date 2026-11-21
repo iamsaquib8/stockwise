@@ -1211,10 +1211,11 @@ mod tests {
         out
     }
 
-    /// `assert_neutral` plus the words a call or a level would use.
+    /// No call outside the action engine, and no levels: `longterm` is a
+    /// score view; actions come only from `crate::action`.
     fn assert_no_advice(text: &str) {
         let plain = strip_ansi(text);
-        crate::verdict::testing::assert_neutral(&plain);
+        crate::action::testing::assert_action_well_formed(&plain);
         let lower = plain.to_lowercase();
         for word in [
             "avoid",
@@ -1510,7 +1511,7 @@ mod tests {
             "not a forecast",
             "90th percentile",
             "10th percentile",
-            "not a recommendation",
+            "not a SEBI-registered",
         ] {
             assert!(text.contains(part), "missing {part:?} in {text}");
         }

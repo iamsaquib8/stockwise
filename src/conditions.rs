@@ -520,7 +520,7 @@ mod tests {
         let lines = describe(&report);
         assert_eq!(lines.len(), 5, "{lines:?}");
         for line in &lines {
-            crate::verdict::testing::assert_neutral(line);
+            crate::action::testing::assert_action_well_formed(line);
         }
     }
 }

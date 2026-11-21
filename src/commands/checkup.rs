@@ -679,8 +679,40 @@ pub(crate) async fn run_checkup(
         max_stock_weight: g.ctx.max_stock_weight,
         max_smallcap_weight: g.ctx.max_smallcap_weight,
     };
+    let mut checkup = ck::evaluate(&input, skipped);
+    let enriched = match client {
+        Some(c) => super::actions::enriched_quotes(c, &g.portfolio, &g.val).await,
+        None => Default::default(),
+    };
+    let mut actions: Vec<ck::HoldingAction> =
+        super::actions::quick_actions(&g.portfolio, &g.val, &enriched)
+            .into_iter()
+            .map(|(symbol, action)| ck::HoldingAction {
+                weight_pct: analysis
+                    .positions
+                    .iter()
+                    .find(|p| p.symbol == symbol)
+                    .and_then(|p| p.weight_pct)
+                    .map(|w| round(w, 2)),
+                symbol,
+                action,
+            })
+            .collect();
+    actions.sort_by(|a, b| {
+        a.action
+            .kind
+            .review_rank()
+            .cmp(&b.action.kind.review_rank())
+            .then(
+                b.weight_pct
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.weight_pct.unwrap_or(0.0)),
+            )
+            .then(a.symbol.cmp(&b.symbol))
+    });
+    checkup.actions = actions;
     Ok(CheckupRun {
-        checkup: ck::evaluate(&input, skipped),
+        checkup,
         analysis,
         tax,
     })
@@ -763,6 +795,22 @@ fn print_checkup(c: &Checkup) {
                 stake,
                 "inspect".dimmed(),
                 f.inspect.cyan()
+            );
+        }
+    }
+    if !c.actions.is_empty() {
+        print_section(
+            "Actions (quote-based rules; `stockwise portfolio review` for the full ones)",
+        );
+        for a in &c.actions {
+            let weight = a.weight_pct.map_or(String::new(), |w| format!("{w:.1}%"));
+            let why = a.action.reasons.first().cloned().unwrap_or_default();
+            println!(
+                "  {:<14} {} {:>6}  {}",
+                a.symbol.cyan().bold(),
+                super::portfolio::action_cell(Some(&a.action)),
+                weight,
+                why.dimmed()
             );
         }
     }

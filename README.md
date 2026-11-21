@@ -142,7 +142,7 @@ ChatGPT Codex, Gemini CLI, Google Antigravity, Cursor, VS Code and other
 assistants can look up quotes, technicals, risk, scorecards, events, mutual
 funds, option chains, IPOs, screens, picks, market conditions and backtests,
 and read your portfolio dashboard, lots, tax estimate, advance tax, harvest and
-rebalance plans, calendar, goals, watchlist and alerts — 52 tools that read,
+rebalance plans, calendar, goals, watchlist and alerts — 66 tools that read,
 three resources and four ready-made prompts. `fit_check` answers "does this
 stock fit my own rules?" with yes, no or unclear. With `--allow-writes` the
 assistant can also set up your profile and change your watchlist, alerts,

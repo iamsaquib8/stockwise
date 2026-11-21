@@ -86,7 +86,9 @@ pub(super) async fn run<D: DataSource>(
         "profile_questions" => Ok(crate::onboarding::questions_json()),
         "portfolio_analyze" | "portfolio_checkup" | "market_conditions" | "picks"
         | "picks_review" | "verdicts" | "movers" | "dividends" | "goal_emergency" | "fit_check"
-        | "changes_list" => super::extra::run(ctx, name, a, m).await,
+        | "changes_list" | "stock_action" | "portfolio_review" => {
+            super::extra::run(ctx, name, a, m).await
+        }
         "bonds_yields" | "bonds_list" | "bonds_calc" | "commodity" | "fx_history" | "returns"
         | "correlate" | "compare" | "portfolio_wrap" => {
             super::more::run(src, name, a, m, budget).await
@@ -275,8 +277,8 @@ async fn verdict(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     verdict_value(&r)
 }
 
-/// The tool result: pillar scores, coverage and the facts behind them. No
-/// rating, entry, stop or target is ever added here.
+/// The tool result: pillar scores, coverage, the facts behind them and the
+/// engine's `action`. No other rating or level is ever added here.
 pub(super) fn verdict_value(r: &crate::research::Research) -> Result<Value> {
     let cards = crate::insights::generate_rich_insights(r);
     let v = crate::verdict::generate_verdict(r, &cards);

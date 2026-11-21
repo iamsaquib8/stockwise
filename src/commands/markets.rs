@@ -1706,7 +1706,7 @@ pub async fn cmd_picks(
     }
     println!();
     println!(
-        "  {:<14} {:>10} {:>8} {:>6} {:>6} {:>8} {:>7} {:>6} {:>5} {:>5}  {}",
+        "  {:<14} {:>10} {:>8} {:>6} {:>6} {:>8} {:>7} {:>6} {:>5} {:>5}  {:<12} {}",
         "Symbol".bold(),
         "Price".bold(),
         "Chg%".bold(),
@@ -1717,9 +1717,10 @@ pub async fn cmd_picks(
         "Trend".bold(),
         "Risk".bold(),
         "Data".bold(),
+        "Action".bold(),
         "Top fifth on".bold()
     );
-    println!("  {}", "─".repeat(102).dimmed());
+    println!("  {}", "─".repeat(115).dimmed());
 
     let pillar = |v: Option<f64>| v.map_or("–".to_string(), |v| format!("{:.0}", v));
     for p in &run.picks {
@@ -1740,7 +1741,7 @@ pub async fn cmd_picks(
             score.dimmed().to_string()
         };
         println!(
-            "  {:<14} {:>10} {} {} {:>6} {:>8} {:>7} {:>6} {:>5} {:>4.0}%  {}",
+            "  {:<14} {:>10} {} {} {:>6} {:>8} {:>7} {:>6} {:>5} {:>4.0}%  {} {}",
             p.symbol.cyan(),
             format_price(p.price.unwrap_or(0.0), p.currency.as_deref()),
             pct_str,
@@ -1751,6 +1752,7 @@ pub async fn cmd_picks(
             pillar(p.trend),
             pillar(p.risk),
             p.coverage * 100.0,
+            super::portfolio::action_cell(p.action.as_ref()),
             p.strongest().join(", ").dimmed()
         );
     }
@@ -1786,6 +1788,8 @@ pub async fn cmd_picks(
         trend_lines[1],
         "Losses and negative book value rank last. Data: share of the score that had data; the rest pulls",
         "the score toward 50. With a positive --top, at most 3 stocks per known sector. `picks review`: past lists.",
+        "Action: rule-based (methodology 1), as if not held: BUY / WATCH / AVOID or NO CALL on thin data. The rank",
+        "is relative to this scan; the action applies fixed rules. `stockwise verdict SYM` shows the reasons.",
     ] {
         println!("  {}", line.dimmed().italic());
     }
@@ -1797,6 +1801,7 @@ pub async fn cmd_picks(
                 .italic()
         );
     }
+    println!("  {}", crate::action::DISCLAIMER.dimmed().italic());
     println!("  {}", run.meta.footer().dimmed());
     println!();
     Ok(())

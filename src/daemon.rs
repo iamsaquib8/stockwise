@@ -895,7 +895,7 @@ mod tests {
         ] {
             text.push_str(&format!("\n{s}"));
         }
-        crate::verdict::testing::assert_neutral(&text);
+        crate::action::testing::assert_action_well_formed(&text);
         for banned in ["ENTRY", "SL ", "T1", "T2", "STOPPED", "TARGET"] {
             assert!(!text.contains(banned), "{banned:?} in {text}");
         }

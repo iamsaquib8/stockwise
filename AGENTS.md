@@ -9,11 +9,12 @@
 You are working on **StockWise** — an institutional-grade, local-first financial terminal, quantitative backtest engine, multi-currency portfolio tracker, and AI terminal platform built in **100% pure Rust 1.97**.
 
 The codebase includes:
-- Command-line interface (`cli`)
-- Interactive Terminal UI (`tui`)
-- Model Context Protocol server (`mcp`)
-- Background live data worker & OS service (`worker`)
-- Multi-currency portfolio accounting & tax engines (`portfolio`, `tax`)
+- Command-line interface (`src/main.rs`, `src/commands/`)
+- Interactive Terminal UI (`src/tui/`)
+- Model Context Protocol server (`src/mcp.rs`, `src/tools/`)
+- Background live data worker & OS service (`src/worker.rs`)
+- Multi-currency portfolio accounting & tax engines (`src/portfolio.rs`, `src/tax.rs`)
+- Rule-based actions (`src/action.rs`)
 
 ---
 
@@ -33,15 +34,21 @@ The codebase includes:
 
 ---
 
-## 3. Mandatory Compliance & Non-Advisory Rules
+## 3. Recommendations Policy
 
-- **Zero Stock Tips**: Never generate or recommend specific buy/sell decisions, price targets, or claims of guaranteed returns.
-- **Compliance Wording**: Always frame outputs as *historical observations*, *tax calculations*, *diagnostic checkups*, or *empirical backtests*.
-- If a user asks *"Should I buy NVDA?"*, refuse the advisory request and instead show them how to run neutral diagnostic commands:
+StockWise ships rule-based actions by default: BUY / WATCH / AVOID for a stock not held, ADD / HOLD / TRIM / EXIT for a holding, and NO CALL when the data is too thin.
+
+- **One source**: Actions are rule-based and deterministic, computed only by `src/action.rs`. No other module, prompt or tool decides an action.
+- **Always complete**: Every action carries its reasons (at most 3), a confidence level, an invalidation price (BUY, ADD, HOLD, TRIM), a review date and the disclaimer.
+- **No guessing**: NO CALL when data coverage is below 60%.
+- **Published rules**: The rules live in `docs/methodology.md` ("Actions"). Any rule or threshold change bumps `METHODOLOGY` in `src/action.rs`.
+- **AI explains, never decides**: The `ask`/`ai` layer, MCP hosts and coding agents explain the computed action. They never invent, upgrade or change one, and never invent price levels (entry, stop, target, invalidation).
+- **Disclaimer**: Rule-based educational signals. StockWise is not a SEBI-registered investment adviser or research analyst. Losses are possible. See `DISCLAIMER.md`.
+- **Tests**: Output that can show an action is checked with `crate::action::testing::assert_action_well_formed`.
+- If a user asks *"Should I buy NVDA?"*, run the engine and present its action with its reasons, invalidation price, review date and disclaimer:
   ```bash
-  stockwise quote NVDA
-  stockwise verdict NVDA
-  stockwise checkup --for-holding NVDA
+  stockwise verdict NVDA -m us
+  stockwise portfolio review
   ```
 
 ---
@@ -50,14 +57,17 @@ The codebase includes:
 
 | Component | Responsibility & Path |
 | :--- | :--- |
-| CLI commands & arguments | `src/cli/` |
-| Exchange quotes & live data | `src/data/`, `src/providers/` |
-| Broker CSV & JSON importers | `src/brokers/`, `src/importers/` |
-| Technical analysis & indicators | `src/analysis/`, `src/indicators/` |
-| Portfolio, lots & accounting | `src/portfolio/` |
-| Tax calculations & workpapers | `src/tax/` |
-| MCP tools & protocol | `src/mcp/` |
-| Local database & caching | `src/db/`, `src/cache/` |
+| CLI entry point & clap definitions | `src/main.rs` |
+| Command handlers | `src/commands/*.rs` |
+| Rule-based actions | `src/action.rs` |
+| 6-pillar score, picks | `src/verdict.rs`, `src/picks.rs` |
+| Data sources & coverage | `src/provenance.rs`, `src/providers/` |
+| Broker connections | `src/brokers/` |
+| Portfolio, lots & accounting | `src/portfolio.rs` |
+| Tax calculations | `src/tax.rs` |
+| MCP server & tools | `src/mcp.rs`, `src/mcp/`, `src/tools/` |
+| Terminal UI | `src/tui/` |
+| Local SQLite cache & background worker | `src/db.rs`, `src/worker.rs` |
 
 ---
 
@@ -65,7 +75,7 @@ The codebase includes:
 
 Before concluding any work, always verify formatting, lints, and tests:
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo +stable fmt --all -- --check
+cargo +stable clippy --all-targets --all-features -- -D warnings
+cargo +stable test
 ```
