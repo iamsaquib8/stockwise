@@ -1576,6 +1576,8 @@ enum PortfolioCmd {
         /// Undo sale N (from the list): drop it from realised gains and put the shares back as their lot
         #[arg(long, value_name = "N", conflicts_with = "lot")]
         undo_sale: Option<usize>,
+        #[command(flatten)]
+        out: JsonOutput,
     },
     /// Splits, reverse splits, bonuses, demergers/spin-offs, merger fractions, rights issues and
     /// dividends since you bought; --apply records them (journalled, --undo takes them back)
@@ -5624,6 +5626,7 @@ async fn dispatch(
                 price,
                 delete,
                 undo_sale,
+                out,
             }) => {
                 let change = commands::LotChange {
                     lot,
@@ -5633,7 +5636,7 @@ async fn dispatch(
                     delete,
                     undo_sale,
                 };
-                commands::cmd_portfolio_lots(&symbol, change, m).await
+                commands::cmd_portfolio_lots(&symbol, change, m, out.json).await
             }
             Some(PortfolioCmd::Actions { undo: true, .. }) => commands::cmd_portfolio_undo_action(),
             Some(PortfolioCmd::Actions { journal: true, .. }) => commands::cmd_portfolio_journal(),

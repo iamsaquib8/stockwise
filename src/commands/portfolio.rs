@@ -2505,7 +2505,12 @@ fn apply_lot_change_inner(resolved: &str, change: &LotChange) -> Result<Option<P
     Ok(Some(p))
 }
 
-pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market) -> Result<()> {
+pub async fn cmd_portfolio_lots(
+    symbol: &str,
+    change: LotChange,
+    market: Market,
+    json: bool,
+) -> Result<()> {
     let mut portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
     if let Some(p) = apply_lot_change(&resolved, &change)? {
@@ -2529,6 +2534,15 @@ pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market)
         .collect();
     if holding.is_none() && sales.is_empty() {
         bail!("{} is not in your portfolio", resolved);
+    }
+    if json {
+        // The ledger as stored: open lots, sales and dividends, no live price.
+        return output::print_json(&serde_json::json!({
+            "symbol": resolved,
+            "lots": holding.map(|h| &h.lots),
+            "sales": sales,
+            "dividends": dividends,
+        }));
     }
 
     // The live price is a nice-to-have here; lots still show without it.
