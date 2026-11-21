@@ -102,6 +102,7 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
+            "meta": r_opt.as_ref().map(|r| &r.meta),
         });
         return output::print_json(&out);
     }
@@ -880,11 +881,29 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     // ── 1. Quote + Fundamentals ──
     let mut quotes = client.get_quote(&[cur_ref.as_str()]).await?;
     let q = quotes.first_mut().context("Symbol not found")?;
-    crate::research::enrich_quote(&client, q, false).await;
+    let mut meta = crate::provenance::Meta::default();
+    crate::research::enrich_quote_with(&client, q, false, &mut meta).await;
     let q = &*q;
-    let r_opt = crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::ALL)
-        .await
-        .ok();
+    let r_opt = match crate::research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        crate::research::Needs::ALL,
+    )
+    .await
+    {
+        Ok(r) => {
+            let mut m = r.meta.clone();
+            m.merge(&meta);
+            meta = m;
+            Some(r)
+        }
+        Err(e) => {
+            meta.warn(format!("Research data unavailable ({e:#})"));
+            None
+        }
+    };
 
     if json {
         let cards = r_opt
@@ -902,6 +921,7 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
+            "meta": meta,
         });
         return output::print_json(&out);
     }
@@ -1244,6 +1264,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     print_hint(&format!(
         "Drill down: stockwise verdict {bare} · stockwise score {bare} · stockwise insights {bare} · stockwise events {bare}"
     ));
+    for w in &meta.warnings {
+        println!("  {} {}", "!".yellow(), w.dimmed());
+    }
+    println!("\n  {}", meta.footer().dimmed());
     println!(
         "\n  {}",
         "Not financial advice. Do your own research."

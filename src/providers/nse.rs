@@ -278,10 +278,23 @@ pub fn parse_results(json: &Value) -> Vec<ResultRow> {
                         .find_map(|k| r[*k].as_str().and_then(parse_date))?;
                     Some(ResultRow {
                         end,
-                        revenue: first_of(r, &["re_net_sale", "re_rev_frm_ops", "re_total_inc", "re_tot_inc"]),
+                        revenue: first_of(
+                            r,
+                            &[
+                                "re_net_sale",
+                                "re_rev_frm_ops",
+                                "re_total_inc",
+                                "re_tot_inc",
+                            ],
+                        ),
                         net_profit: first_of(
                             r,
-                            &["re_net_profit", "re_pro_loss_aft_tax", "re_con_pro_loss", "re_proloss_ord_act"],
+                            &[
+                                "re_net_profit",
+                                "re_pro_loss_aft_tax",
+                                "re_con_pro_loss",
+                                "re_proloss_ord_act",
+                            ],
                         ),
                         eps: first_of(
                             r,
@@ -876,7 +889,11 @@ impl Nse {
         };
         let json = self
             .session
-            .get_json("/api/quote-equity", &[("symbol", &nse)], Duration::from_secs(300))
+            .get_json(
+                "/api/quote-equity",
+                &[("symbol", &nse)],
+                Duration::from_secs(300),
+            )
             .await
             .map_err(|e| self.fail(e))?;
         Ok(parse_equity_info(&json))
@@ -1193,7 +1210,10 @@ mod tests {
         assert_eq!(info.issued_shares, Some(13_532_472_634.0));
         assert!((info.market_cap().unwrap() - 13_532_472_634.0 * 1451.6).abs() < 1.0);
         assert_eq!(info.updated, Some(d("2025-10-24")));
-        assert_eq!(parse_equity_info(&serde_json::json!({"msg": "no data"})), None);
+        assert_eq!(
+            parse_equity_info(&serde_json::json!({"msg": "no data"})),
+            None
+        );
     }
 
     #[test]

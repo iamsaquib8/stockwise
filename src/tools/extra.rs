@@ -81,6 +81,7 @@ pub(super) async fn run<D: DataSource>(
             Ok(json!({
                 "scanned": scanned,
                 "picks": picks,
+                "meta": crate::provenance::for_picks(&quotes),
                 "method": "Percentile ranks among the stocks scanned: value 30%, quality 25%, growth 20%, trend 25%; a pillar without data pulls the score toward 50.",
             }))
         }

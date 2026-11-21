@@ -736,7 +736,10 @@ mod tests {
         assert!((r.roe.unwrap() - 0.084).abs() < 1e-12);
         assert_eq!(r.pb, Some(2.1));
         assert_eq!(r.industry.as_deref(), Some("Refineries & Marketing"));
-        assert_eq!(parse_com_header(&json(r#"{"FaceVal":"10","PE":"-"}"#)), None);
+        assert_eq!(
+            parse_com_header(&json(r#"{"FaceVal":"10","PE":"-"}"#)),
+            None
+        );
     }
 
     #[test]

@@ -240,7 +240,16 @@ impl Ratios {
         macro_rules! keep {
             ($($f:ident),*) => { $( if self.$f.is_none() { self.$f = other.$f; } )* };
         }
-        keep!(roe, debt_to_equity, profit_margin, revenue_growth, beta, eps_ttm, pe, pb);
+        keep!(
+            roe,
+            debt_to_equity,
+            profit_margin,
+            revenue_growth,
+            beta,
+            eps_ttm,
+            pe,
+            pb
+        );
     }
 }
 

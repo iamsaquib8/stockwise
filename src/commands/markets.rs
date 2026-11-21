@@ -1672,11 +1672,12 @@ pub async fn cmd_picks(
     if top > 0 {
         picks.truncate(top);
     }
+    let meta = crate::provenance::for_picks(&quotes);
 
     if !fmt.is_table() {
         return match fmt {
             Format::Csv => output::print_csv(&picks),
-            _ => output::print_json(&picks),
+            _ => output::print_json(&serde_json::json!({ "picks": picks, "meta": meta })),
         };
     }
 
@@ -1760,6 +1761,7 @@ pub async fn cmd_picks(
             .dimmed()
             .italic()
     );
+    println!("  {}", meta.footer().dimmed());
     println!();
     Ok(())
 }

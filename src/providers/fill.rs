@@ -79,9 +79,27 @@ async fn fill_us(client: &YahooClient, symbol: &str, q: &mut Quote, meta: &mut M
             let r = st.ratios();
             put(&mut q.return_on_equity, r.roe, F_ROE, EDGAR, meta);
             put(&mut q.debt_to_equity, r.debt_to_equity, F_DE, EDGAR, meta);
-            put(&mut q.profit_margins, r.profit_margin, F_MARGIN, EDGAR, meta);
-            put(&mut q.revenue_growth, r.revenue_growth, F_GROWTH, EDGAR, meta);
-            put(&mut q.eps_trailing_twelve_months, r.eps_ttm, F_EPS, EDGAR, meta);
+            put(
+                &mut q.profit_margins,
+                r.profit_margin,
+                F_MARGIN,
+                EDGAR,
+                meta,
+            );
+            put(
+                &mut q.revenue_growth,
+                r.revenue_growth,
+                F_GROWTH,
+                EDGAR,
+                meta,
+            );
+            put(
+                &mut q.eps_trailing_twelve_months,
+                r.eps_ttm,
+                F_EPS,
+                EDGAR,
+                meta,
+            );
             if q.trailing_pe.is_none()
                 && let (Some(p), Some(e)) = (q.regular_market_price, q.eps_trailing_twelve_months)
                 && e > 0.0
@@ -112,7 +130,13 @@ async fn fill_india(client: &YahooClient, symbol: &str, q: &mut Quote, meta: &mu
                 if q.sector_pe.is_none() {
                     q.sector_pe = info.sector_pe;
                 }
-                put(&mut q.market_cap, info.market_cap(), F_MARKET_CAP, NSE, meta);
+                put(
+                    &mut q.market_cap,
+                    info.market_cap(),
+                    F_MARKET_CAP,
+                    NSE,
+                    meta,
+                );
                 if q.sector.is_none()
                     && let Some(s) = info.sector_index.clone().or(info.industry.clone())
                 {
@@ -135,9 +159,27 @@ async fn fill_india(client: &YahooClient, symbol: &str, q: &mut Quote, meta: &mu
         match client.nse_results(&ns).await {
             Ok(rows) if !rows.is_empty() => {
                 let r = super::nse::result_ratios(&rows);
-                put(&mut q.eps_trailing_twelve_months, r.eps_ttm, F_EPS, NSE_RESULTS, meta);
-                put(&mut q.profit_margins, r.profit_margin, F_MARGIN, NSE_RESULTS, meta);
-                put(&mut q.revenue_growth, r.revenue_growth, F_GROWTH, NSE_RESULTS, meta);
+                put(
+                    &mut q.eps_trailing_twelve_months,
+                    r.eps_ttm,
+                    F_EPS,
+                    NSE_RESULTS,
+                    meta,
+                );
+                put(
+                    &mut q.profit_margins,
+                    r.profit_margin,
+                    F_MARGIN,
+                    NSE_RESULTS,
+                    meta,
+                );
+                put(
+                    &mut q.revenue_growth,
+                    r.revenue_growth,
+                    F_GROWTH,
+                    NSE_RESULTS,
+                    meta,
+                );
             }
             Ok(_) => {}
             Err(e) => meta.warn(format!("{NSE_RESULTS} unavailable ({e:#})")),
@@ -257,7 +299,9 @@ mod tests {
         assert_eq!(q.eps_trailing_twelve_months, Some(9.0));
         assert_eq!(meta.sources, vec![provenance::YAHOO, provenance::EDGAR]);
         assert_eq!(
-            meta.field_sources.get(provenance::F_ROE).map(String::as_str),
+            meta.field_sources
+                .get(provenance::F_ROE)
+                .map(String::as_str),
             Some(provenance::EDGAR)
         );
         // Beta and sector have no source here: listed, not defaulted.
@@ -285,7 +329,9 @@ mod tests {
         let mut meta = Meta::default();
         complete_fundamentals(&client, &mut q, &mut meta).await;
         assert!(
-            meta.warnings.iter().any(|w| w.starts_with("SEC EDGAR unavailable")),
+            meta.warnings
+                .iter()
+                .any(|w| w.starts_with("SEC EDGAR unavailable")),
             "{:?}",
             meta.warnings
         );
@@ -339,7 +385,9 @@ mod tests {
         assert_eq!(q.trailing_pe, Some(24.5));
         assert!((q.return_on_equity.unwrap() - 0.084).abs() < 1e-12);
         assert_eq!(
-            meta.field_sources.get(provenance::F_ROE).map(String::as_str),
+            meta.field_sources
+                .get(provenance::F_ROE)
+                .map(String::as_str),
             Some(provenance::BSE)
         );
 
@@ -361,7 +409,12 @@ mod tests {
         assert_eq!(q.price_to_book, Some(2.1));
         assert_eq!(
             meta.sources,
-            vec![provenance::YAHOO, provenance::NSE, provenance::NSE_RESULTS, provenance::BSE]
+            vec![
+                provenance::YAHOO,
+                provenance::NSE,
+                provenance::NSE_RESULTS,
+                provenance::BSE
+            ]
         );
         assert_eq!(meta.missing, vec![provenance::F_DE, provenance::F_BETA]);
     }

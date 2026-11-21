@@ -115,7 +115,11 @@ fn chart_from_bars(symbol: &str, bars: &[crate::db::Bar]) -> ChartData {
                 high: Some(bars.iter().map(|b| Some(b.high)).collect()),
                 low: Some(bars.iter().map(|b| Some(b.low)).collect()),
                 close: Some(bars.iter().map(|b| Some(b.close)).collect()),
-                volume: Some(bars.iter().map(|b| (b.volume >= 0.0).then_some(b.volume as u64)).collect()),
+                volume: Some(
+                    bars.iter()
+                        .map(|b| (b.volume >= 0.0).then_some(b.volume as u64))
+                        .collect(),
+                ),
             }],
             adjclose: None,
         },
@@ -1266,14 +1270,18 @@ impl YahooClient {
         use providers::session::{DiskCache, Session};
         let mut nse_site = providers::nse::site(base);
         nse_site.home = None;
-        let _ = self.nse.set(providers::nse::Nse::new(Arc::new(Session::for_tests(
-            nse_site,
-            DiskCache::Off,
-        ))));
-        let _ = self.bse.set(providers::bse::Bse::new(Arc::new(Session::for_tests(
-            providers::bse::site(base),
-            DiskCache::Off,
-        ))));
+        let _ = self
+            .nse
+            .set(providers::nse::Nse::new(Arc::new(Session::for_tests(
+                nse_site,
+                DiskCache::Off,
+            ))));
+        let _ = self
+            .bse
+            .set(providers::bse::Bse::new(Arc::new(Session::for_tests(
+                providers::bse::site(base),
+                DiskCache::Off,
+            ))));
     }
 
     /// Back the client with router members, as `FINNHUB_API_KEY` /
@@ -1535,8 +1543,16 @@ impl YahooClient {
             // The configured exchange provider was asked already.
             return have;
         }
-        let ns: Vec<&str> = missing.iter().copied().filter(|s| s.ends_with(".NS")).collect();
-        let bo: Vec<&str> = missing.iter().copied().filter(|s| s.ends_with(".BO")).collect();
+        let ns: Vec<&str> = missing
+            .iter()
+            .copied()
+            .filter(|s| s.ends_with(".NS"))
+            .collect();
+        let bo: Vec<&str> = missing
+            .iter()
+            .copied()
+            .filter(|s| s.ends_with(".BO"))
+            .collect();
         let mut got = Vec::new();
         if !ns.is_empty()
             && let Ok(q) = self.nse_client().quotes(&ns).await
@@ -1555,13 +1571,9 @@ impl YahooClient {
                 .unwrap_or_else(|| crate::provenance::NSE.to_string());
             let meta = q.meta.get_or_insert_with(QuoteMeta::default);
             meta.add_source(&source);
-            meta.warn(format!(
-                "Yahoo Finance had no quote; price from {source}."
-            ));
+            meta.warn(format!("Yahoo Finance had no quote; price from {source}."));
             // Drop the unusable row Yahoo may have sent for the symbol.
-            have.retain(|h| {
-                !(h.symbol.is_some() && h.symbol == q.symbol && !h.is_usable())
-            });
+            have.retain(|h| !(h.symbol.is_some() && h.symbol == q.symbol && !h.is_usable()));
             have.push(q);
         }
         have
@@ -1811,18 +1823,29 @@ impl YahooClient {
     /// Indian stock or NSE index history from the exchange, for when Yahoo
     /// failed: NSE for `.NS` and indices, BSE for `.BO`. Stocks are adjusted
     /// for splits and bonuses.
-    async fn exchange_history(&self, symbol: &str, range: &str, interval: &str) -> Option<ChartData> {
+    async fn exchange_history(
+        &self,
+        symbol: &str,
+        range: &str,
+        interval: &str,
+    ) -> Option<ChartData> {
         if !self.exchange_backup_on() {
             return None;
         }
         let (mut chart, source) = if providers::nse::target(symbol).is_some() {
             (
-                self.nse_client().chart(symbol, range, interval).await.ok()?,
+                self.nse_client()
+                    .chart(symbol, range, interval)
+                    .await
+                    .ok()?,
                 crate::provenance::NSE,
             )
         } else if providers::bse::target(symbol).is_some() {
             (
-                self.bse_client().chart(symbol, range, interval).await.ok()?,
+                self.bse_client()
+                    .chart(symbol, range, interval)
+                    .await
+                    .ok()?,
                 crate::provenance::BSE,
             )
         } else {
@@ -1929,15 +1952,16 @@ impl YahooClient {
             .nse_get_json(&url, Duration::from_secs(6 * 3600))
             .await
             .ok()?;
-        let mut out: Vec<providers::adjust::SplitEvent> = crate::research::parse_nse_corp_actions(&v)
-            .into_iter()
-            .filter_map(|a| {
-                Some(providers::adjust::SplitEvent {
-                    ex_date: a.ex_date,
-                    factor: providers::adjust::nse_action_factor(&a.subject)?,
+        let mut out: Vec<providers::adjust::SplitEvent> =
+            crate::research::parse_nse_corp_actions(&v)
+                .into_iter()
+                .filter_map(|a| {
+                    Some(providers::adjust::SplitEvent {
+                        ex_date: a.ex_date,
+                        factor: providers::adjust::nse_action_factor(&a.subject)?,
+                    })
                 })
-            })
-            .collect();
+                .collect();
         out.sort_by_key(|e| e.ex_date);
         Some(out)
     }
@@ -3606,7 +3630,10 @@ mod fallback_tests {
         let chart = resp.chart.result.unwrap().remove(0);
         assert!(chart.has_adjclose());
         assert_eq!(chart.return_closes(), vec![98.0, 100.0]);
-        assert_eq!(chart.return_close_series(), vec![Some(98.0), Some(100.0), None]);
+        assert_eq!(
+            chart.return_close_series(),
+            vec![Some(98.0), Some(100.0), None]
+        );
         // Intraday charts carry no adjclose: close stands.
         let body = r#"{"chart":{"result":[{"meta":null,"timestamp":[100000,200000],
             "indicators":{"quote":[{"close":[100.0,101.0]}]}}],"error":null}}"#;
@@ -3630,7 +3657,10 @@ mod fallback_tests {
         ])
         .to_string();
         let server = crate::testutil::MockServer::start_routed(vec![
-            ("/api/historical/cm/equity", nse_history_with_bonus(today, ex)),
+            (
+                "/api/historical/cm/equity",
+                nse_history_with_bonus(today, ex),
+            ),
             ("/api/corporates-corporateActions", actions),
         ])
         .await;
@@ -3644,13 +3674,23 @@ mod fallback_tests {
         let chart = client.get_chart("RELIANCE.NS", "1mo", "1d").await.unwrap();
         let meta = chart.meta.as_ref().unwrap();
         assert_eq!(meta.data_source.as_deref(), Some("NSE"));
-        assert!(closes(&chart).iter().all(|c| (*c - 1500.0).abs() < 1e-9), "{:?}", closes(&chart));
         assert!(
-            meta.warnings.iter().any(|w| w.contains("Adjusted for 1 split or bonus issue")),
+            closes(&chart).iter().all(|c| (*c - 1500.0).abs() < 1e-9),
+            "{:?}",
+            closes(&chart)
+        );
+        assert!(
+            meta.warnings
+                .iter()
+                .any(|w| w.contains("Adjusted for 1 split or bonus issue")),
             "{:?}",
             meta.warnings
         );
-        assert!(meta.warnings.iter().any(|w| w.contains("using NSE daily history")));
+        assert!(
+            meta.warnings
+                .iter()
+                .any(|w| w.contains("using NSE daily history"))
+        );
     }
 
     #[tokio::test]

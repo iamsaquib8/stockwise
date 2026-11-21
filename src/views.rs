@@ -515,7 +515,10 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
-        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s], ..Default::default() }),
+        meta: source.map(|s| crate::api::QuoteMeta {
+            sources: vec![s],
+            ..Default::default()
+        }),
     }
 }
 

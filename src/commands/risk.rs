@@ -84,7 +84,11 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     // Returns, volatility and drawdowns from closes that include dividends
     // (Yahoo's adjclose) when the chart has them; prices stay as traded.
     let rc = chart.return_closes();
-    let rc = if rc.len() == closes.len() { rc } else { closes.clone() };
+    let rc = if rc.len() == closes.len() {
+        rc
+    } else {
+        closes.clone()
+    };
 
     let source = chart.meta.as_ref().and_then(|m| m.data_source.clone());
     if fmt == Format::Json {
@@ -485,8 +489,16 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     let window = 90.min(n);
     let recent = &closes[n - window..];
     let (slope, intercept) = linear_regression(recent);
-    let vol = technical::annualized_volatility(recent).unwrap_or(0.3);
-    let daily_vol = vol / (252.0_f64).sqrt();
+    // Volatility from the same window of closes, dividends included when
+    // Yahoo sent adjclose. Measured or missing, never assumed.
+    let rc = chart.return_closes();
+    let vol_window = if rc.len() == n {
+        &rc[n - window..]
+    } else {
+        recent
+    };
+    let vol = technical::annualized_volatility(vol_window);
+    let daily_vol = vol.map(|v| v / (252.0_f64).sqrt());
 
     // Project forward
     let mut forecast = closes.clone();
@@ -494,10 +506,12 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     let mut lower = Vec::new();
     for d in 0..days {
         let projected = slope * (window + d) as f64 + intercept;
-        let band = daily_vol * projected * ((d + 1) as f64).sqrt();
         forecast.push(projected);
-        upper.push(projected + 1.96 * band);
-        lower.push(projected - 1.96 * band);
+        if let Some(dv) = daily_vol {
+            let band = dv * projected * ((d + 1) as f64).sqrt();
+            upper.push(projected + 1.96 * band);
+            lower.push(projected - 1.96 * band);
+        }
     }
 
     let current = *closes.last().unwrap();
@@ -533,13 +547,16 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
     } else {
         format!("{:.2}%", change_pct).red().to_string()
     };
-    print_kv("Expected Change", &chg);
+    print_kv("Trend-line projection", &chg);
     print_kv(
         "Daily Trend",
         &format!("{}{:.4}/day", if slope >= 0.0 { "+" } else { "" }, slope),
     );
 
-    print_section("Confidence Bands (95%)");
+    print_section("Volatility Bands (95%)");
+    if vol.is_none() {
+        print_kv("Bands", "missing (volatility could not be measured)");
+    }
     if let (Some(u), Some(l)) = (upper.last(), lower.last()) {
         print_kv(
             "Upper Band",
@@ -552,11 +569,29 @@ pub async fn cmd_forecast(symbol: &str, days: usize, period: &str, market: Marke
             &format!("{:.2}%", ((u - l) / projected_end) * 100.0),
         );
     }
-    print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
+    print_kv(
+        "Annualized Vol",
+        &vol.map_or("missing".to_string(), |v| format!("{:.1}%", v * 100.0)),
+    );
 
+    let mut meta = crate::provenance::Meta::from_source(
+        chart
+            .meta
+            .as_ref()
+            .and_then(|m| m.data_source.as_deref())
+            .unwrap_or(crate::provenance::YAHOO),
+    );
+    if let Some(ts) = chart.timestamp.as_ref().and_then(|t| t.last()) {
+        meta.set_as_of_unix(*ts);
+    }
+    meta.set_fields(&[("volatility", vol.is_some())]);
+    for w in chart.meta.iter().flat_map(|m| m.warnings.iter()) {
+        println!("  {} {}", "!".yellow(), w.dimmed());
+    }
+    println!("\n  {}", meta.footer().dimmed());
     println!(
         "\n  {}",
-        "Forecast based on linear trend extrapolation. NOT a prediction."
+        "A straight line fitted to the last 90 closes and extended. It describes the past trend; it is NOT a prediction."
             .dimmed()
             .italic()
     );

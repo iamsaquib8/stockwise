@@ -218,7 +218,10 @@ mod tests {
         // Without adjclose the raw prices stand.
         let mut raw = chart;
         raw.indicators.adjclose = None;
-        assert_eq!(Bars::from_chart_total_return(&raw).close, vec![100.0, 100.0]);
+        assert_eq!(
+            Bars::from_chart_total_return(&raw).close,
+            vec![100.0, 100.0]
+        );
     }
 
     #[test]

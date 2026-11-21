@@ -193,7 +193,10 @@ pub fn stock_field_checks(q: &Quote) -> Vec<(&'static str, bool)> {
     let ok = |v: Option<f64>| v.is_some_and(f64::is_finite);
     vec![
         (F_MARKET_CAP, ok(q.market_cap)),
-        (F_PE, ok(q.trailing_pe) || q.eps_trailing_twelve_months.is_some_and(|e| e <= 0.0)),
+        (
+            F_PE,
+            ok(q.trailing_pe) || q.eps_trailing_twelve_months.is_some_and(|e| e <= 0.0),
+        ),
         (F_EPS, ok(q.eps_trailing_twelve_months)),
         (F_PB, ok(q.price_to_book)),
         (F_ROE, ok(q.return_on_equity)),
@@ -257,9 +260,103 @@ pub fn for_fundamentals(q: &Quote) -> Meta {
     m
 }
 
+/// The meta of a scan over many stocks (`picks`, `longterm`): every source
+/// named on a row, the newest quote time, and per key field how many rows
+/// have it. A field fewer than half the rows have is listed in `missing`;
+/// any field some rows lack gets a warning with the count. `coverage` is
+/// the mean of the rows' coverage.
+pub fn for_scan<'a>(quotes: impl IntoIterator<Item = &'a Quote>) -> Meta {
+    let mut m = Meta::default();
+    let mut rows = 0usize;
+    let mut present: Vec<(&'static str, usize)> = Vec::new();
+    let mut coverage_sum = 0.0;
+    for q in quotes {
+        rows += 1;
+        for s in quote_sources(q) {
+            m.add_source(&s);
+        }
+        if let Some(ts) = q.regular_market_time {
+            m.set_as_of_unix(ts);
+        }
+        if let Some(qm) = &q.meta {
+            for w in &qm.warnings {
+                m.warn(w.clone());
+            }
+        }
+        let checks = stock_field_checks(q);
+        coverage_sum += coverage_pct(checks.iter().filter(|(_, ok)| *ok).count(), checks.len());
+        for (name, ok) in checks {
+            match present.iter_mut().find(|(n, _)| *n == name) {
+                Some(slot) => slot.1 += ok as usize,
+                None => present.push((name, ok as usize)),
+            }
+        }
+    }
+    if rows == 0 {
+        return m;
+    }
+    for (name, have) in &present {
+        if have * 2 < rows {
+            m.missing.push(name.to_string());
+        }
+        if *have < rows {
+            m.warn(format!(
+                "{name} missing for {} of {rows} stocks",
+                rows - have
+            ));
+        }
+    }
+    m.coverage = (coverage_sum / rows as f64 * 10.0).round() / 10.0;
+    m
+}
+
+/// The meta for `picks --json` and the picks footer: [`for_scan`] over the
+/// quotes the ranking used.
+pub fn for_picks(quotes: &[Quote]) -> Meta {
+    for_scan(quotes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scan_lists_fields_most_rows_lack_and_counts_the_rest() {
+        let full = Quote {
+            symbol: Some("A.NS".into()),
+            market_cap: Some(1.0),
+            trailing_pe: Some(10.0),
+            eps_trailing_twelve_months: Some(1.0),
+            price_to_book: Some(1.0),
+            return_on_equity: Some(0.1),
+            debt_to_equity: Some(10.0),
+            profit_margins: Some(0.1),
+            revenue_growth: Some(0.1),
+            beta: Some(1.0),
+            sector: Some("X".into()),
+            ..Default::default()
+        };
+        let v7 = Quote {
+            symbol: Some("B.NS".into()),
+            market_cap: Some(1.0),
+            trailing_pe: Some(10.0),
+            eps_trailing_twelve_months: Some(1.0),
+            price_to_book: Some(1.0),
+            ..Default::default()
+        };
+        let m = for_picks(&[full, v7.clone(), v7]);
+        assert_eq!(m.sources, vec![YAHOO]);
+        assert_eq!(
+            m.missing,
+            vec![F_ROE, F_DE, F_MARGIN, F_GROWTH, F_BETA, F_SECTOR]
+        );
+        assert!(
+            m.warnings
+                .contains(&"ROE missing for 2 of 3 stocks".to_string())
+        );
+        assert_eq!(m.coverage, 60.0);
+        assert_eq!(for_picks(&[]).coverage, 0.0);
+    }
 
     #[test]
     fn footer_names_sources_time_and_missing_fields() {
@@ -293,7 +390,10 @@ mod tests {
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d %H:%M")
             .to_string();
-        assert_eq!(m.footer(), format!("Sources: Yahoo Finance · as of {expected}"));
+        assert_eq!(
+            m.footer(),
+            format!("Sources: Yahoo Finance · as of {expected}")
+        );
     }
 
     #[test]

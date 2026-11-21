@@ -327,8 +327,11 @@ pub fn parse_splits(json: &serde_json::Value) -> Vec<super::adjust::SplitEvent> 
             rows.iter()
                 .filter_map(|r| {
                     Some(super::adjust::SplitEvent {
-                        ex_date: NaiveDate::parse_from_str(r["effective_date"].as_str()?, "%Y-%m-%d")
-                            .ok()?,
+                        ex_date: NaiveDate::parse_from_str(
+                            r["effective_date"].as_str()?,
+                            "%Y-%m-%d",
+                        )
+                        .ok()?,
                         factor: num(&r["split_factor"]).filter(|f| *f > 0.0 && *f != 1.0)?,
                     })
                 })

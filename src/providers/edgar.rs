@@ -175,9 +175,12 @@ impl Statements {
         let equity = self.equity.map(|(_, e)| e).filter(|e| *e > 0.0);
         let revenue_growth = self.quarterly.last().and_then(|last| {
             let now = last.revenue?;
-            let before = self.quarterly.iter().rev().skip(1).find(|p| {
-                (340..=390).contains(&(last.end - p.end).num_days())
-            })?;
+            let before = self
+                .quarterly
+                .iter()
+                .rev()
+                .skip(1)
+                .find(|p| (340..=390).contains(&(last.end - p.end).num_days()))?;
             let then = before.revenue.filter(|r| *r > 0.0)?;
             Some(now / then - 1.0)
         });

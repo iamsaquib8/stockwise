@@ -244,10 +244,45 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     if quotes.is_empty() {
         return Err(missing_err());
     }
+    // Provenance per quote; a short request also fills a missing market
+    // cap, P/E or EPS from the other sources (`providers::fill`).
+    let mut quotes = quotes;
+    let mut metas = Vec::with_capacity(quotes.len());
+    for q in quotes.iter_mut() {
+        let lacks = crate::provenance::quote_field_checks(q)
+            .iter()
+            .any(|(_, ok)| !ok);
+        if lacks
+            && resolved.len() <= 3
+            && market::AssetClass::of(q.symbol.as_deref().unwrap_or_default())
+                == market::AssetClass::Stock
+        {
+            let mut filled = crate::provenance::Meta::default();
+            crate::providers::fill::complete_fundamentals(&client, q, &mut filled).await;
+            let mut m = crate::provenance::for_quote(q);
+            m.merge(&filled);
+            metas.push(m);
+        } else {
+            metas.push(crate::provenance::for_quote(q));
+        }
+    }
 
     if !fmt.is_table() {
         if fmt == Format::Json {
-            let items: Vec<_> = quotes.iter().map(market::quote_json).collect();
+            let items: Vec<_> = quotes
+                .iter()
+                .zip(&metas)
+                .map(|(q, m)| {
+                    let mut v = market::quote_json(q);
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert(
+                            "meta".into(),
+                            serde_json::to_value(m).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    v
+                })
+                .collect();
             output::print_json(&items)?;
         } else {
             let rows: Vec<QuoteRow> = quotes.iter().map(QuoteRow::from).collect();
@@ -261,7 +296,7 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     }
 
     let now = chrono::Utc::now();
-    for q in &quotes {
+    for (q, meta) in quotes.iter().zip(&metas) {
         let symbol = q.symbol.as_deref().unwrap_or("???");
         let name = q
             .long_name
@@ -348,6 +383,10 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
         if let Some(source) = &q.data_source {
             println!("\n  {}", crate::providers::source_footer(source).dimmed());
         }
+        for w in &meta.warnings {
+            println!("  {} {}", "!".yellow(), w.dimmed());
+        }
+        println!("\n  {}", meta.footer().dimmed());
     }
     if quotes.len() == 1
         && let Some(sym) = quotes[0].symbol.as_deref()
@@ -727,6 +766,7 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
     };
     println!("  Delivery %: {}  |  {}", deliv_str.bold(), holding_str);
     println!("  Insider Flow: {}", insider_str);
+    println!("  {}", bundle.meta.footer().dimmed());
     println!();
     Ok(())
 }

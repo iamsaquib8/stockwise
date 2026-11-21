@@ -1060,7 +1060,10 @@ pub async fn enrich_quote(client: &YahooClient, q: &mut Quote, profile_only: boo
     let Some(sym) = q.symbol.clone() else {
         return Vec::new();
     };
-    match client.quote_summary(&sym, summary_modules(profile_only)).await {
+    match client
+        .quote_summary(&sym, summary_modules(profile_only))
+        .await
+    {
         Ok(summary) => {
             apply_summary(q, &summary);
             Vec::new()

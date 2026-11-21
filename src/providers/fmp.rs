@@ -243,7 +243,12 @@ pub fn parse_profile(json: &Value) -> Option<Profile> {
 /// `/ratios-ttm` and `/key-metrics-ttm` (one-row arrays): fractions, and
 /// debt/equity as a ratio, converted to Yahoo's percent.
 pub fn parse_ratios(ratios: &Value, metrics: &Value) -> Option<super::router::Ratios> {
-    let first = |v: &Value| v.as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+    let first = |v: &Value| {
+        v.as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
     let (r, m) = (first(ratios), first(metrics));
     let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
     let out = super::router::Ratios {

@@ -105,7 +105,12 @@ fn bar_dates(chart: &ChartData) -> Vec<Option<NaiveDate>> {
 }
 
 /// Whether the closes around `ex` still jump by about `factor`.
-fn shows_jump(dates: &[Option<NaiveDate>], closes: &[Option<f64>], ex: NaiveDate, factor: f64) -> bool {
+fn shows_jump(
+    dates: &[Option<NaiveDate>],
+    closes: &[Option<f64>],
+    ex: NaiveDate,
+    factor: f64,
+) -> bool {
     let before = (0..dates.len())
         .rev()
         .find(|&i| dates[i].is_some_and(|d| d < ex) && closes.get(i).copied().flatten().is_some());
@@ -138,7 +143,13 @@ pub fn adjust_chart(chart: &mut ChartData, events: &[SplitEvent]) -> usize {
             continue;
         }
         applied += 1;
-        let before = |i: usize| dates.get(i).copied().flatten().is_some_and(|d| d < e.ex_date);
+        let before = |i: usize| {
+            dates
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(|d| d < e.ex_date)
+        };
         for series in [&mut q.open, &mut q.high, &mut q.low, &mut q.close] {
             if let Some(v) = series.as_mut() {
                 for (i, p) in v.iter_mut().enumerate() {
@@ -212,12 +223,17 @@ mod tests {
             Some(5.0)
         );
         assert_eq!(
-            nse_action_factor("Face Value Split (Sub-Division) - From Rs 2/- Per Share To Re 1/- Per Share"),
+            nse_action_factor(
+                "Face Value Split (Sub-Division) - From Rs 2/- Per Share To Re 1/- Per Share"
+            ),
             Some(2.0)
         );
         assert_eq!(nse_action_factor("Bonus 1:1"), Some(2.0));
         assert_eq!(nse_action_factor("Bonus 3:2"), Some(2.5));
-        assert_eq!(nse_action_factor("Interim Dividend - Rs 10 Per Share"), None);
+        assert_eq!(
+            nse_action_factor("Interim Dividend - Rs 10 Per Share"),
+            None
+        );
         assert_eq!(nse_action_factor("Rights 1:5 @ Premium Rs 1247/-"), None);
     }
 
@@ -270,7 +286,11 @@ mod tests {
         ev.splits.insert(
             "1".into(),
             crate::api::SplitEvent {
-                date: d("2024-10-28").and_hms_opt(3, 45, 0).unwrap().and_utc().timestamp(),
+                date: d("2024-10-28")
+                    .and_hms_opt(3, 45, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp(),
                 numerator: 2.0,
                 denominator: 1.0,
             },
