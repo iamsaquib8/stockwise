@@ -1114,14 +1114,23 @@ ITC Hotels (6 Jan 2025, 1 for 10, 13.51%) and Tata Motors (`TATAMOTORS` or
 `TMPV`) → `TMCV` (14 Oct 2025, 1 for 1, 31.15%). Each figure is from the
 company's own filing with the exchanges. For every lot bought before the record
 date, `--apply` adds a lot of the new company with the same purchase date
-(Sec. 2(42A)) and that share of the lot's cost and charges (Sec. 49(2C)); the
-parent lot keeps its quantity and the rest of the cost (Sec. 49(2D)). The
-company issues whole shares per demat account and pays for fractions in cash,
-so each account's new shares are rounded down; the cash is not recorded. Until
-it is applied, `portfolio`, `analyze`, `checkup`, `income`, `xray` and `wrap`
-value a copy with the demerger in it and print "demerger pending". If a broker
-import already added the new shares, `--apply` warns that they are now counted
-twice.
+(Sec. 2(42A)) and that share of the lot's cost and charges, rounded to the
+paisa (Sec. 49(2C)); the parent lot keeps its quantity and the rest of the cost
+(Sec. 49(2D)). The new shares count as held only from the record date, so they
+cannot be sold, or counted for a dividend, before it. Shares sold after the
+record date but before `--apply` received the new shares too: their sale's cost
+is split the same way and their new shares are added. Splits and bonuses before
+the record date are applied first, so the entitlement is the record date's
+share count. The company issues whole shares per demat account and pays for
+fractions in cash, so each account's new shares are rounded down once across
+`.NS` and `.BO`; the cash is not recorded. New-company shares already in an
+account with no tradebook, broker order or `portfolio add` behind them (a
+broker holdings snapshot) are taken as the demerger's shares when they cover
+it; when they cover only part, that account is left unchanged and the output
+says why. A tradebook import applies the demerger as it replays, and
+re-importing it leaves both holdings as they were. Until it is applied,
+`portfolio` (online or offline), `analyze`, `checkup`, `income`, `xray` and
+`wrap` value a copy with the demerger in it and print "demerger pending".
 
 **Imports.** A holdings export (Kite, INDmoney) has no purchase dates: existing
 lots are kept and only the quantity is matched — more shares add a lot dated

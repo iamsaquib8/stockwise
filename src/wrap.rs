@@ -268,7 +268,8 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
         {
             return ex.to_string().min(l.date.clone());
         }
-        l.date.clone()
+        // Demerged shares count from the record date, not their tax date.
+        l.held_from().to_string()
     };
     let open: f64 = p.holding(symbol).map_or(0.0, |h| {
         h.lots
@@ -288,7 +289,7 @@ pub fn shares_at(p: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| s.buy_date.clone())
             } else {
-                s.buy_date.clone()
+                s.held_from().to_string()
             };
             from.as_str() <= day && s.sell_date.as_str() > day
         })
@@ -1155,6 +1156,7 @@ mod tests {
             unchecked: vec![],
             not_in_price: vec![],
             demergers: vec![],
+            demerger_conflicts: vec![],
         };
         let adj = pending.adjusted(&p);
         // In today's share count before and after the split: 20, never 40.
