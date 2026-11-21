@@ -1615,7 +1615,8 @@ pub async fn portfolio_pme_report(
     base: Option<&str>,
 ) -> Result<crate::pme::PmeReport> {
     let (bench_symbol, bench_name) = resolve_benchmark(bench, market);
-    let symbols = portfolio.symbols_with_history();
+    let symbols =
+        crate::corp_actions::with_demerger_children(portfolio, portfolio.symbols_with_history());
     let base = match base {
         Some(b) => b.to_uppercase(),
         None => {
