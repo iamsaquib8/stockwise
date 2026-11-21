@@ -60,6 +60,7 @@ mod output;
 mod pagecache;
 mod payoff;
 mod picks;
+mod picks_log;
 mod pme;
 mod portfolio;
 mod portfolio_analysis;
@@ -589,9 +590,11 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[arg(long, value_enum, ignore_case = true)]
         universe: Option<market::Universe>,
     },
-    /// Stocks ranked against each other on value, quality, growth and trend (a score, not a
-    /// recommendation)
+    /// Stocks ranked against each other on value, quality, growth, trend and risk; `picks
+    /// review` shows how past lists did
     Picks {
+        #[command(subcommand)]
+        action: Option<PicksCmd>,
         /// India: an NSE index (nifty50 ... smallcap250), `bse` (main board) or `all` (every
         /// BSE stock) instead of the liquid stocks of BSE
         #[arg(long, value_enum, ignore_case = true)]
@@ -602,6 +605,18 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         /// How many of the highest scores to show (0 for all)
         #[arg(long, default_value_t = 15)]
         top: usize,
+        /// Least market cap, in crore in India (default 500) and millions elsewhere (US
+        /// default 1000); 0 turns the floor off
+        #[arg(long)]
+        min_mcap: Option<f64>,
+        /// Least average value traded a day over three months, in crore in India (default 2)
+        /// and millions elsewhere (US default 5); 0 turns the floor off
+        #[arg(long)]
+        min_adv: Option<f64>,
+        /// long (years: value, quality, growth lead) or short (weeks to months: momentum,
+        /// volume and risk lead)
+        #[arg(long, value_enum, ignore_case = true, default_value = "long")]
+        horizon: picks::Horizon,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -2455,6 +2470,22 @@ Examples:
   stockwise bonds calc \"6.94% GS 2036\" --ytm 7.4  price for a yield
   stockwise bonds calc --coupon 7.1 --maturity 2034-04-08 --price 99.5
   stockwise bonds calc --tbill --maturity 2027-01-14 --price 98.6";
+
+#[derive(Subcommand, Debug, Clone)]
+enum PicksCmd {
+    /// How past lists did: each logged pick since it was first listed, against the benchmark
+    Review {
+        /// How far back: 90d, 12w, 6m, 1y
+        #[arg(long, default_value = "90d", value_parser = picks_log::parse_days)]
+        since: u32,
+        /// Which lists: long or short
+        #[arg(long, value_enum, ignore_case = true, default_value = "long")]
+        horizon: picks::Horizon,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+}
 
 #[derive(Subcommand, Debug, Clone)]
 enum FundamentalCmd {
@@ -4599,11 +4630,27 @@ async fn dispatch(
         Commands::Surprise { universe } => commands::cmd_surprise(m, universe).await,
         Commands::Matrix { universe } => commands::cmd_matrix(m, universe).await,
         Commands::Picks {
+            action:
+                Some(PicksCmd::Review {
+                    since,
+                    horizon,
+                    json,
+                }),
+            ..
+        } => commands::cmd_picks_review(m, since, horizon, json).await,
+        Commands::Picks {
+            action: None,
             universe,
             cap,
             top,
+            min_mcap,
+            min_adv,
+            horizon,
             out,
-        } => commands::cmd_picks(m, universe, cap, top, out.into()).await,
+        } => {
+            let floors = picks::Floors::for_market(m, cap, min_mcap, min_adv);
+            commands::cmd_picks(m, universe, cap, floors, horizon, top, out.into()).await
+        }
         Commands::Screen {
             category,
             universe,

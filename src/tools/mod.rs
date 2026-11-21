@@ -1308,7 +1308,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "picks",
         title: "Highest-scoring stocks",
-        description: "Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data. A score of the data, not a recommendation.",
+        description: "Stocks of the market that clear size and liquidity floors, ranked against each other on five pillars (value, quality, growth, trend, risk), each a percentile among the stocks scanned, with the share of the score that had data. Losses and negative book value rank last; implausible figures are listed separately to check; at most 3 per sector.",
         params: &[
             UNIVERSE,
             opt(
@@ -1320,6 +1320,21 @@ pub const TOOLS: &[Tool] = &[
                 "top",
                 Kind::Integer { min: 1, max: 50 },
                 "How many of the highest scores (default 10)",
+            ),
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "long (years: value, quality, growth lead; default) or short (weeks to months: momentum, volume, risk lead)",
+            ),
+            opt(
+                "min_mcap",
+                Kind::Number { min: 0.0, max: 1e7 },
+                "Least market cap: crore in India (default 500), millions elsewhere (US default 1000); 0 for none",
+            ),
+            opt(
+                "min_adv",
+                Kind::Number { min: 0.0, max: 1e6 },
+                "Least average value traded a day: crore in India (default 2), millions elsewhere (US default 5); 0 for none",
             ),
             MARKET,
         ],

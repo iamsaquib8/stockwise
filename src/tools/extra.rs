@@ -71,18 +71,32 @@ pub(super) async fn run<D: DataSource>(
                 }
                 None => None,
             };
-            let quotes = market::filter_by_cap(
-                crate::commands::universe_quotes(&client, m, universe(a, m)?).await?,
+            let floors =
+                crate::picks::Floors::for_market(m, cap, a.f64("min_mcap"), a.f64("min_adv"));
+            let horizon = match a.str("horizon") {
+                Some("short") => crate::picks::Horizon::Short,
+                _ => crate::picks::Horizon::Long,
+            };
+            let run = crate::picks::run(
+                &client,
+                m,
+                universe(a, m)?,
                 cap,
-            );
-            let scanned = quotes.len();
-            let mut picks = crate::picks::score(&quotes);
-            picks.truncate(a.usize_or("top", 10));
+                floors,
+                horizon,
+                a.usize_or("top", 10),
+            )
+            .await?;
             Ok(json!({
-                "scanned": scanned,
-                "picks": picks,
-                "meta": crate::provenance::for_picks(&quotes),
-                "method": "Percentile ranks among the stocks scanned: value 30%, quality 25%, growth 20%, trend 25%; a pillar without data pulls the score toward 50.",
+                "scanned": run.scanned,
+                "below_floor": run.below_floor,
+                "thin_data": run.thin_data,
+                "flagged_check_data": run.flagged.iter().map(|p| json!({"symbol": p.symbol, "flags": p.flags})).collect::<Vec<_>>(),
+                "picks": run.picks,
+                "meta": run.meta,
+                "methodology": run.methodology,
+                "horizon": horizon,
+                "method": "Percentile ranks among the stocks that clear the size and liquidity floors: value 25%, quality 25%, growth 15%, trend 20%, risk 15%. Losses and negative book value rank last; implausible figures are left out to check; at most 3 per sector; a pillar without data pulls the score toward 50.",
             }))
         }
         "movers" => {
