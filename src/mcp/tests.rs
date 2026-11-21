@@ -623,6 +623,7 @@ async fn structured_results_follow_their_output_schemas() {
         floors: None,
         horizon: crate::picks::Horizon::Short,
         methodology: crate::picks::METHODOLOGY,
+        meta: crate::provenance::Meta::default(),
     };
     assert_follows_schema("picks", &wrapped(crate::tools::extra::picks_value(&run)));
 
