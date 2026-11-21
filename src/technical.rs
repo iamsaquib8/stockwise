@@ -74,29 +74,12 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
 }
 
 /// Calculate MACD (Moving Average Convergence Divergence)
-/// Returns (macd_line, signal_line, histogram)
+/// Returns (macd_line, signal_line, histogram), or `None` until the signal
+/// line exists (34 bars).
 pub fn macd(data: &[f64]) -> Option<(f64, f64, f64)> {
-    // For signal line, we need MACD history
-    if data.len() < 35 {
-        let ema26 = ema(data, 26)?;
-        let ema12 = ema(data, 12)?;
-        let macd_line = ema12 - ema26;
-        return Some((macd_line, 0.0, macd_line));
-    }
-
-    let ema26_iter = ema_iter(data, 26)?;
-    let ema12_iter = ema_iter(data, 12)?.skip(26 - 12);
-
-    let macd_history: Vec<f64> = ema12_iter
-        .zip(ema26_iter)
-        .map(|(ema12, ema26)| ema12 - ema26)
-        .collect();
-
-    let signal = ema(&macd_history, 9).unwrap_or(0.0);
-    let macd_line = macd_history.last().copied().expect("shouldn't be empty");
-    let histogram = macd_line - signal;
-
-    Some((macd_line, signal, histogram))
+    let mut m = fin_primitives::signals::float::MacdF64::new(12, 26, 9).ok()?;
+    let out = data.iter().map(|&c| m.update(c)).last()??;
+    Some((out.macd, out.signal, out.histogram))
 }
 
 /// Calculate Bollinger Bands
@@ -772,6 +755,19 @@ mod tests {
         assert!(result.is_some());
         let (line, _signal, _hist) = result.unwrap();
         assert!(line > 0.0); // uptrend = positive MACD
+    }
+
+    #[test]
+    fn macd_has_no_signal_line_before_34_bars() {
+        let data: Vec<f64> = (0..40)
+            .map(|i| 100.0 + (i as f64 * 0.7).sin() * 5.0)
+            .collect();
+        // No fabricated 0.0 signal line during warm-up.
+        assert!(macd(&data[..33]).is_none());
+        // The signal line is the EMA(9) of the first 9 MACD values from bar 34.
+        let (line, signal, hist) = macd(&data[..34]).unwrap();
+        assert!(signal != 0.0);
+        assert!((hist - (line - signal)).abs() < 1e-12);
     }
 
     #[test]

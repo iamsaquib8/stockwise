@@ -78,6 +78,8 @@ anyhow = "1"
 redis = { version = "1.7", features = ["tokio-comp"] }
 # `cache.db`: statically linked SQLite (WAL) for the persistent L2 cache.
 rusqlite = { version = "0.41", features = ["bundled"] }
+# Streaming MACD that stays `None` until the signal line has warmed up.
+fin-primitives = { version = "4.0.1", default-features = false, features = ["indicators"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 clap_mangen = { version = "0.3", features = ["env"] }
 # Email notifications over SMTP (rustls, no OpenSSL).

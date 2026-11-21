@@ -230,8 +230,7 @@ mod tests {
     fn macd_matches_technical_rs_once_the_signal_line_exists() {
         let (c, ..) = prices();
         let (line, sig, hist) = macd(&c, 12, 26, 9);
-        // technical::macd reports a zero signal line below 35 bars.
-        for i in 34..c.len() {
+        for i in 33..c.len() {
             let (l, s, h) = technical::macd(&c[..=i]).unwrap();
             assert!((line[i].unwrap() - l).abs() < 1e-9, "line[{i}]");
             assert!((sig[i].unwrap() - s).abs() < 1e-9, "signal[{i}]");
@@ -239,6 +238,7 @@ mod tests {
         }
         assert!(line[24].is_none() && line[25].is_some());
         assert!(sig[32].is_none() && sig[33].is_some());
+        assert!(technical::macd(&c[..=32]).is_none());
     }
 
     #[test]
