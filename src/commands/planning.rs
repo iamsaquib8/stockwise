@@ -1042,10 +1042,11 @@ async fn sector_of(client: &YahooClient, symbol: &str) -> String {
 fn held_between(portfolio: &Portfolio, symbol: &str, start: &str, end: &str) -> bool {
     portfolio
         .holding(symbol)
-        .is_some_and(|h| h.lots.iter().any(|l| l.date.as_str() <= end))
-        || portfolio.realized.iter().any(|s| {
-            s.symbol == symbol && s.buy_date.as_str() <= end && s.sell_date.as_str() > start
-        })
+        .is_some_and(|h| h.lots.iter().any(|l| l.held_from() <= end))
+        || portfolio
+            .realized
+            .iter()
+            .any(|s| s.symbol == symbol && s.held_from() <= end && s.sell_date.as_str() > start)
 }
 
 /// The first purchase date of `symbol` among its open lots and sales.

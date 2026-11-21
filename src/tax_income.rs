@@ -188,14 +188,14 @@ fn units_held_on(portfolio: &Portfolio, symbol: &str, day: NaiveDate) -> f64 {
         .iter()
         .filter(|h| h.symbol == symbol)
         .flat_map(|h| &h.lots)
-        .filter(|l| date(&l.date).is_some_and(|d| d < day))
+        .filter(|l| date(l.held_from()).is_some_and(|d| d < day))
         .map(|l| l.qty)
         .sum();
     let sold_later: f64 = portfolio
         .realized
         .iter()
         .filter(|s| s.symbol == symbol)
-        .filter(|s| date(&s.buy_date).is_some_and(|d| d < day))
+        .filter(|s| date(s.held_from()).is_some_and(|d| d < day))
         .filter(|s| date(&s.sell_date).is_some_and(|d| d >= day))
         .map(|s| s.qty)
         .sum();
