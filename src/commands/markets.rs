@@ -2083,7 +2083,7 @@ pub(crate) async fn picks_review_report(
 ) -> Result<crate::picks_log::Review> {
     use futures_util::StreamExt;
     market.require_stocks("picks review")?;
-    let today = chrono::Local::now().date_naive();
+    let today = crate::clock::session_date(market, chrono::Utc::now());
     let since = today
         .checked_sub_days(chrono::Days::new(since_days as u64))
         .ok_or_else(|| anyhow::anyhow!("--since {since_days} days reaches before any date"))?;
@@ -3709,5 +3709,16 @@ mod tests {
             "No growth in exports",
         ]);
         assert_eq!((p, n), (1, 2));
+    }
+
+    #[test]
+    fn session_date_does_not_trail_east_asia_or_india_from_west() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-21T04:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            crate::clock::session_date(Market::In, at),
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap()
+        );
     }
 }

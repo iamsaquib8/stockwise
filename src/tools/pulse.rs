@@ -10,6 +10,17 @@ use serde_json::{Value, json};
 
 /// Run one of this module's tools.
 pub(super) async fn run<D: DataSource>(src: &D, name: &str, a: &Args, m: Market) -> Result<Value> {
+    if name == "monitor_status" {
+        let state: crate::monitor::MonitorState =
+            crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+        return Ok(json!({
+            "thresholds": crate::monitor::Thresholds::from_config(),
+            "worker_running": crate::worker::running_pid().is_some(),
+            "last_pass": state.last_pass,
+            "last_digest": state.last_digest,
+            "recent": state.recent,
+        }));
+    }
     let client = src.yahoo().await?;
     match name {
         "whats_hot" => {
@@ -86,17 +97,6 @@ pub(super) async fn run<D: DataSource>(src: &D, name: &str, a: &Args, m: Market)
                 "symbols": entries.iter().map(|e| e.symbol.clone()).collect::<Vec<_>>(),
                 "items": items.into_iter().take(limit).collect::<Vec<_>>(),
                 "failures": failures,
-            }))
-        }
-        "monitor_status" => {
-            let state: crate::monitor::MonitorState =
-                crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
-            Ok(json!({
-                "thresholds": crate::monitor::Thresholds::from_config(),
-                "worker_running": crate::worker::running_pid().is_some(),
-                "last_pass": state.last_pass,
-                "last_digest": state.last_digest,
-                "recent": state.recent,
             }))
         }
         "digest" => {

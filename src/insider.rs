@@ -122,7 +122,8 @@ pub fn parse_nse_pit(v: &Value) -> Vec<Trade> {
                 Side::Other
             };
             let ml = mode.to_lowercase();
-            let open_market = ml.contains("market") && !ml.contains("off market");
+            let open_market =
+                ml.contains("market") && !ml.contains("off market") && !ml.contains("off-market");
             let action = match (kind.is_empty(), mode.is_empty()) {
                 (false, false) => format!("{kind} ({mode})"),
                 (false, true) => kind,
@@ -612,5 +613,26 @@ mod tests {
         assert_eq!(t[1].side, Side::Disposed);
         assert_eq!(t[1].price, Some(100.0));
         assert!(t.iter().all(|x| x.source == Source::Yahoo));
+    }
+
+    #[test]
+    fn nse_pit_treats_hyphenated_off_market_as_not_open_market() {
+        let v = serde_json::json!({
+            "data": [{
+                "symbol": "TCS",
+                "acqName": "Promoter Co",
+                "personCategory": "Promoter",
+                "tdpTransactionType": "Sell",
+                "acqMode": "Off-Market",
+                "secAcq": "1000",
+                "secVal": "5000000",
+                "date": "20-Nov-2026"
+            }]
+        });
+        let trades = parse_nse_pit(&v);
+        assert_eq!(trades.len(), 1);
+        assert!(!trades[0].open_market);
+        let ((nb, _), (ns, vs)) = open_market_totals(&trades);
+        assert_eq!((nb, ns, vs), (0, 0, 0.0));
     }
 }

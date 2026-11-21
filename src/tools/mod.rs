@@ -128,6 +128,7 @@ pub const CLOSED_WORLD: &[&str] = &[
     "goal_swp",
     "goal_prepay",
     "goal_emergency",
+    "monitor_status",
 ];
 
 /// MCP tool annotations: what a host may assume before calling a tool.
@@ -144,11 +145,11 @@ pub struct Hints {
     pub open_world: bool,
 }
 
-/// Read tools that also write a local record: `picks` appends its list to
-/// the track record (`signal_log.json`), once a day per list, like
-/// `stockwise picks`. Not read-only and not idempotent (a repeat can log new
-/// picks when market data moves), and never destructive.
-pub const LOGGING_READS: &[&str] = &["picks"];
+/// Read tools that also append a local record (`picks`, `ipo_board`, and
+/// `ipo_analyze` log lists/verdicts to the track record). Neither read-only
+/// nor idempotent (a repeat can append new records when market data moves),
+/// and never destructive.
+pub const LOGGING_READS: &[&str] = &["picks", "ipo_board", "ipo_analyze"];
 
 /// The annotations of `tool`. Read tools are read-only and idempotent (except
 /// [`LOGGING_READS`], which append to the track record and are neither

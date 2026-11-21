@@ -508,7 +508,11 @@ pub fn render(snap: &Snapshot, format: StatusbarFormat, view: &View) -> String {
 /// percentage change: what it was worth at the previous close is
 /// `value / (1 + pct/100)`. Same rule as `portfolio analyze`.
 pub fn day_change(value: f64, change_pct: f64) -> f64 {
-    value - value / (1.0 + change_pct / 100.0)
+    let denom = 1.0 + change_pct / 100.0;
+    if !value.is_finite() || !change_pct.is_finite() || denom <= 0.0 {
+        return 0.0;
+    }
+    value - value / denom
 }
 
 /// The portfolio line from each priced holding's (value in base, % change).
@@ -1106,5 +1110,15 @@ mod tests {
         let c = cache_key(Market::In, &[], 5);
         assert_ne!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn day_change_guards_minus_100_percent_or_worse() {
+        assert_eq!(day_change(10_000.0, -100.0), 0.0);
+        assert_eq!(day_change(10_000.0, -101.0), 0.0);
+        let line = portfolio_line("INR", &[(10_000.0, Some(-100.0))]);
+        assert!(line.day_change.is_finite());
+        assert_eq!(line.day_change, 0.0);
+        assert_eq!(line.day_change_pct, Some(0.0));
     }
 }

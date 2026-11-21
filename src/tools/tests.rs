@@ -1230,8 +1230,20 @@ async fn batch_tools_research_each_symbol_once() {
 
 #[test]
 fn picks_is_not_read_only_because_it_logs_its_list() {
-    let h = hints(tool("picks"));
-    // Repeating it can log new symbols when the data moved: not idempotent.
-    assert!(!h.read_only && !h.destructive && !h.idempotent && h.open_world);
+    for name in ["picks", "ipo_board", "ipo_analyze"] {
+        let h = hints(tool(name));
+        // Repeating it can log new records when the data moved: not idempotent.
+        assert!(
+            !h.read_only && !h.destructive && !h.idempotent && h.open_world,
+            "{name}"
+        );
+    }
     assert!(hints(tool("quote")).read_only);
+    assert!(!hints(tool("monitor_status")).open_world);
+}
+
+#[tokio::test]
+async fn monitor_status_runs_offline_on_fixtures() {
+    let v = ctx().call("monitor_status", &json!({})).await.unwrap();
+    assert!(v["data"]["thresholds"].is_object(), "{v}");
 }

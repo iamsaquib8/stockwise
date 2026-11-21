@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The browser-like User-Agent StockWise already uses for NSE option chains.
@@ -211,7 +211,7 @@ pub struct Session {
     disk: DiskCache,
     blocked_until: Mutex<Option<Instant>>,
     /// Whether a refusal remembered on disk was looked for yet.
-    refusal_checked: std::sync::atomic::AtomicBool,
+    refusal_checked: Once,
     /// Endpoints that refused us while the session itself works (NSE refuses `quote-equity` but serves the option chain): only
     /// that path is left alone, until the time given.
     blocked_paths: Mutex<std::collections::HashMap<String, Instant>>,
@@ -236,7 +236,7 @@ impl Session {
             cache: OnceLock::new(),
             disk: DiskCache::DataDir,
             blocked_until: Mutex::new(None),
-            refusal_checked: std::sync::atomic::AtomicBool::new(false),
+            refusal_checked: Once::new(),
             blocked_paths: Mutex::new(std::collections::HashMap::new()),
             noticed: Mutex::new(HashSet::new()),
             retry_base: Duration::from_millis(500),
@@ -286,11 +286,10 @@ impl Session {
     }
 
     fn block_path(&self, path: &str) {
-        self.blocked_paths
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(path.to_string(), Instant::now() + BLOCK_FOR);
+        let mut paths = self.blocked_paths.lock().unwrap_or_else(|e| e.into_inner());
+        paths.insert(path.to_string(), Instant::now() + BLOCK_FOR);
         // Remember it for the next runs: `<unix seconds> <path>` per line.
+        // Hold the lock across the read-modify-write so concurrent callers don't clobber each other.
         if let Some(file) = self.refused_paths_file() {
             let now = crate::selfupdate::now_secs();
             let mut lines: Vec<String> = std::fs::read_to_string(&file)
@@ -365,24 +364,23 @@ impl Session {
         }
     }
 
-    /// Once per process: pick up a refusal an earlier run remembered.
+    /// Once per session: pick up a refusal an earlier run remembered.
     fn load_refusal(&self) {
-        if self.refusal_checked.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        self.load_path_refusals();
-        let Some(at) = self
-            .refusal_file()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| t.trim().parse::<u64>().ok())
-        else {
-            return;
-        };
-        let age = Duration::from_secs(crate::selfupdate::now_secs().saturating_sub(at));
-        if age < BLOCK_FOR {
-            *self.blocked_until.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(Instant::now() + (BLOCK_FOR - age));
-        }
+        self.refusal_checked.call_once(|| {
+            self.load_path_refusals();
+            let Some(at) = self
+                .refusal_file()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|t| t.trim().parse::<u64>().ok())
+            else {
+                return;
+            };
+            let age = Duration::from_secs(crate::selfupdate::now_secs().saturating_sub(at));
+            if age < BLOCK_FOR {
+                *self.blocked_until.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Instant::now() + (BLOCK_FOR - age));
+            }
+        });
     }
 
     /// Say once per process and problem, on stderr, why the site isn't
@@ -1127,5 +1125,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FetchError::Format(_)), "{err:?}");
+    }
+
+    #[test]
+    fn concurrent_load_refusal_and_block_path_do_not_drop_disk_refusals() {
+        let dir = std::env::temp_dir().join(format!(
+            "sw-session-refusal-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server_url = "http://127.0.0.1:9".to_string();
+        let s1 = Session::for_tests(site(&server_url, false), DiskCache::Dir(dir.clone()));
+        s1.block();
+        s1.remember_refusal();
+        s1.block_path("/api/a");
+        s1.block_path("/api/b");
+
+        let s2 = std::sync::Arc::new(Session::for_tests(
+            site(&server_url, false),
+            DiskCache::Dir(dir.clone()),
+        ));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = std::sync::Arc::clone(&s2);
+            handles.push(std::thread::spawn(move || {
+                assert!(s.is_blocked());
+                assert!(s.path_blocked("/api/a"));
+                assert!(s.path_blocked("/api/b"));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

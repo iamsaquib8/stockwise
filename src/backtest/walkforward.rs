@@ -217,7 +217,7 @@ fn test_window(
             .map(|t| {
                 if t.entry_date < first {
                     let bars_held = exit_bar(&t.exit_date) + 1 - test.start;
-                    rebase_carried(t, ref_close, &first, bars_held)
+                    rebase_carried(t, ref_close, &first, bars_held, cfg.execution.is_short())
                 } else {
                     t
                 }
@@ -230,13 +230,16 @@ fn test_window(
 /// inside it, counted from the window's start: entry at the close before
 /// the window, P&L from there, and only the exit leg's costs. So the
 /// out-of-sample trade statistics hold no in-sample gain or cost.
-fn rebase_carried(mut t: Trade, ref_close: f64, first: &str, bars_held: usize) -> Trade {
+fn rebase_carried(
+    mut t: Trade,
+    ref_close: f64,
+    first: &str,
+    bars_held: usize,
+    short: bool,
+) -> Trade {
     if !ref_close.is_finite() || ref_close <= 0.0 || t.qty <= 0.0 {
         return t;
     }
-    // A short gains when the price falls: its gross P&L and the price move
-    // have opposite signs.
-    let short = t.gross_pnl * (t.exit_price - t.entry_price) < 0.0;
     let sign = if short { -1.0 } else { 1.0 };
     let entry_value = t.qty * t.entry_price;
     let exit_value = t.qty * t.exit_price;
@@ -245,11 +248,17 @@ fn rebase_carried(mut t: Trade, ref_close: f64, first: &str, bars_held: usize) -
     } else {
         t.costs
     };
+    let orig_net = t.net_pnl;
     t.entry_date = first.to_string();
     t.entry_price = ref_close;
     t.gross_pnl = sign * t.qty * (t.exit_price - ref_close);
     t.costs = exit_costs;
     t.net_pnl = t.gross_pnl - t.costs;
+    if t.net_pnl <= 0.0 {
+        t.tax = 0.0;
+    } else if orig_net > 0.0 && t.net_pnl < orig_net {
+        t.tax *= t.net_pnl / orig_net;
+    }
     t.return_pct = t.net_pnl / (t.qty * ref_close) * 100.0;
     t.bars_held = bars_held;
     t
@@ -638,7 +647,7 @@ mod tests {
             exit_reason: engine::ExitReason::Signal,
             tax: 0.0,
         };
-        let r = rebase_carried(t.clone(), 150.0, "2025-06-01", 7);
+        let r = rebase_carried(t.clone(), 150.0, "2025-06-01", 7, false);
         assert_eq!(r.entry_date, "2025-06-01");
         assert_eq!(r.entry_price, 150.0);
         assert!((r.gross_pnl - 100.0).abs() < 1e-9);
@@ -648,7 +657,7 @@ mod tests {
         let mut c = t.clone();
         c.costs = 26.0;
         c.net_pnl = 574.0;
-        let r = rebase_carried(c, 150.0, "2025-06-01", 7);
+        let r = rebase_carried(c, 150.0, "2025-06-01", 7, false);
         assert!((r.costs - 26.0 * 1600.0 / 2600.0).abs() < 1e-9);
         assert!((r.net_pnl - (100.0 - r.costs)).abs() < 1e-9);
         // A short: sold at 160 in train, 150 before the window, covered at 100.
@@ -656,7 +665,7 @@ mod tests {
         sh.entry_price = 160.0;
         sh.exit_price = 100.0;
         sh.gross_pnl = 600.0;
-        let r = rebase_carried(sh, 150.0, "2025-06-01", 7);
+        let r = rebase_carried(sh, 150.0, "2025-06-01", 7, true);
         assert!((r.gross_pnl - 500.0).abs() < 1e-9);
     }
 
@@ -693,5 +702,46 @@ mod tests {
             judge(1, 10, Some(5.0), Some(5.0), None, None, Some(1.0)).0,
             Verdict::Inconclusive
         );
+    }
+
+    #[test]
+    fn rebase_carried_keeps_short_sign_when_entry_equals_exit_and_clears_loss_tax() {
+        let t = Trade {
+            symbol: "TCS.NS".into(),
+            entry_date: "2025-01-02".into(),
+            exit_date: "2025-02-10".into(),
+            entry_price: 100.0,
+            exit_price: 100.0,
+            qty: 10.0,
+            gross_pnl: 0.0,
+            costs: 20.0,
+            tax: 0.0,
+            net_pnl: -20.0,
+            return_pct: -2.0,
+            bars_held: 25,
+            exit_reason: engine::ExitReason::Signal,
+        };
+        let rebased = rebase_carried(t, 120.0, "2025-02-01", 6, true);
+        assert_eq!(rebased.gross_pnl, 200.0);
+        assert_eq!(rebased.tax, 0.0);
+
+        let loser = Trade {
+            symbol: "TCS.NS".into(),
+            entry_date: "2025-01-02".into(),
+            exit_date: "2025-02-10".into(),
+            entry_price: 100.0,
+            exit_price: 140.0,
+            qty: 10.0,
+            gross_pnl: 400.0,
+            costs: 0.0,
+            tax: 80.0,
+            net_pnl: 400.0,
+            return_pct: 40.0,
+            bars_held: 25,
+            exit_reason: engine::ExitReason::Signal,
+        };
+        let rebased_loss = rebase_carried(loser, 150.0, "2025-02-01", 6, false);
+        assert_eq!(rebased_loss.gross_pnl, -100.0);
+        assert_eq!(rebased_loss.tax, 0.0);
     }
 }
