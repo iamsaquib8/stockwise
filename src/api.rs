@@ -1998,6 +1998,25 @@ impl YahooClient {
             age,
             if age == 1 { "" } else { "s" }
         ));
+        // Bars stored on different days can sit on different split bases (a
+        // short refresh after a split next to older pre-split rows). Adjust
+        // them where the corporate actions can be read, and name any jump
+        // that is left.
+        if crate::market::AssetClass::of(symbol) == crate::market::AssetClass::Stock
+            && providers::adjust::split_like_jump(&chart).is_some()
+        {
+            self.adjust_for_splits(symbol, &mut chart, None).await;
+            if let Some((day, ratio)) = providers::adjust::split_like_jump(&chart) {
+                chart
+                    .meta
+                    .get_or_insert_with(ChartMeta::default)
+                    .warnings
+                    .push(format!(
+                        "Cached bars change {:+.0}% on {day}: the bars before it may predate a split or bonus and not be adjusted.",
+                        (ratio - 1.0) * 100.0
+                    ));
+            }
+        }
         Some(chart)
     }
 
@@ -3915,6 +3934,40 @@ mod fallback_tests {
             qm.sources
                 .contains(&"Yahoo Finance (RELIANCE.BO)".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn cached_bars_on_two_split_bases_are_named() {
+        let server = crate::testutil::MockServer::start_routed(vec![]).await;
+        let db: crate::db::L2 = Box::leak(Box::new(Mutex::new(
+            crate::db::CacheDb::open_in_memory().unwrap(),
+        )));
+        let day = 86_400;
+        let now = chrono::Utc::now().timestamp() / day * day;
+        // Older rows stored before a 2:1 split, newer ones after it.
+        let bars: Vec<crate::db::Bar> = [200.0, 202.0, 101.0, 102.0]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| crate::db::Bar {
+                ts: now - (6 - i as i64) * day,
+                open: *c,
+                high: *c,
+                low: *c,
+                close: *c,
+                volume: 100.0,
+            })
+            .collect();
+        db.lock().unwrap().put_bars("MSFT", "1d", &bars).unwrap();
+        let mut client = YahooClient::for_tests_with_rewrite(
+            reqwest::Client::new(),
+            "crumb",
+            to_server(&server.url),
+        );
+        client.cache = Arc::new(tokio::sync::Mutex::new(HybridCache::with_l2(db)));
+        let chart = client.get_chart("MSFT", "1mo", "1d").await.unwrap();
+        let w = chart.meta.as_ref().unwrap().warnings.join(" ");
+        assert!(w.contains("Cached bars change -50%"), "{w}");
+        assert!(w.contains("may predate a split"), "{w}");
     }
 
     #[tokio::test]

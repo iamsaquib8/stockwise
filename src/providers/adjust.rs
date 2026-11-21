@@ -131,6 +131,28 @@ fn shows_jump(
     (jump - factor.ln()).abs() < jump.abs()
 }
 
+/// The first bar whose close is less than 55% or more than 180% of the
+/// previous one: in daily stock bars, the mark of a split or bonus left
+/// unadjusted (bars stored before and after it on different bases).
+pub fn split_like_jump(chart: &ChartData) -> Option<(NaiveDate, f64)> {
+    let dates = bar_dates(chart);
+    let closes = chart.indicators.quote.first()?.close.as_deref()?;
+    let mut prev: Option<f64> = None;
+    for (i, c) in closes.iter().enumerate() {
+        let Some(c) = c.filter(|v| *v > 0.0) else {
+            continue;
+        };
+        if let Some(p) = prev {
+            let ratio = c / p;
+            if !(0.55..=1.8).contains(&ratio) {
+                return Some((dates.get(i).copied().flatten()?, ratio));
+            }
+        }
+        prev = Some(c);
+    }
+    None
+}
+
 /// Adjust the bars before each event's ex-date. Returns the events applied.
 pub fn adjust_chart(chart: &mut ChartData, events: &[SplitEvent]) -> usize {
     let dates = bar_dates(chart);
@@ -279,6 +301,19 @@ mod tests {
         );
         assert_eq!(n, 0);
         assert_eq!(closes(&c), vec![3000.0, 3010.0]);
+    }
+
+    #[test]
+    fn a_split_sized_jump_is_found() {
+        let c = chart(
+            &["2024-10-25", "2024-10-28", "2024-10-29"],
+            &[3000.0, 3010.0, 1510.0],
+        );
+        let (day, ratio) = split_like_jump(&c).unwrap();
+        assert_eq!(day, d("2024-10-29"));
+        assert!((ratio - 1510.0 / 3010.0).abs() < 1e-12);
+        let calm = chart(&["2024-10-25", "2024-10-28"], &[3000.0, 2900.0]);
+        assert_eq!(split_like_jump(&calm), None);
     }
 
     #[test]

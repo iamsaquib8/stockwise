@@ -369,16 +369,17 @@ fn balance_sheet(gaap: &HashMap<String, Concept>) -> (Option<(NaiveDate, f64)>, 
             }
         }
     };
-    // `LongTermDebt` includes its current portion, which `current` holds.
-    let noncurrent = at(DEBT_NONCURRENT).or_else(|| {
-        at(DEBT_TOTAL).map(|total| match current {
-            Some(_) => total - ltd_current.unwrap_or(0.0),
-            None => total,
-        })
-    });
-    let debt = match (noncurrent, current) {
-        (None, None) => None,
-        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    let debt = match (at(DEBT_NONCURRENT), at(DEBT_TOTAL)) {
+        (Some(noncurrent), _) => Some(noncurrent + current.unwrap_or(0.0)),
+        // `LongTermDebt` already includes its current maturities. Take the
+        // current total on top only when that portion is known and can be
+        // taken out; otherwise add just the short-term borrowings, which
+        // never overlap it.
+        (None, Some(total)) => match (at(&["DebtCurrent"]), ltd_current) {
+            (Some(debt_current), Some(portion)) => Some(total - portion + debt_current),
+            _ => Some(total + at(SHORT_BORROWINGS).or(at(COMMERCIAL_PAPER)).unwrap_or(0.0)),
+        },
+        (None, None) => current,
     };
     (Some((date, equity)), debt)
 }

@@ -513,10 +513,22 @@ pub(super) async fn longterm_scores(
 /// [`longterm_scores`] plus the quotes the scores were computed from (the
 /// finalists' enriched copies, a failed lookup kept as a warning on each),
 /// for the provenance of the run.
+/// Where one finalist's price history came from: its source when not
+/// Yahoo, the date of its last bar, and the chart's warnings.
+#[derive(Default)]
+struct HistoryInfo {
+    source: Option<String>,
+    last: Option<chrono::NaiveDate>,
+    warnings: Vec<String>,
+}
+
 async fn longterm_scan(
     client: &YahooClient,
     quotes: &[crate::api::Quote],
-) -> (Vec<longterm::LongTermScore>, Vec<crate::api::Quote>) {
+) -> (
+    Vec<longterm::LongTermScore>,
+    Vec<(crate::api::Quote, HistoryInfo)>,
+) {
     use futures_util::StreamExt;
     let mut first: Vec<(&crate::api::Quote, Option<f64>)> = quotes
         .iter()
@@ -539,14 +551,24 @@ async fn longterm_scan(
             q.meta.get_or_insert_with(Default::default).warn(w);
         }
         let sym = q.symbol.as_deref().unwrap_or("");
-        let hist = client
-            .get_chart(sym, "1y", "1d")
-            .await
-            .ok()
-            .map(|c| c.return_closes())
-            .filter(|c| !c.is_empty());
+        let mut info = HistoryInfo::default();
+        let hist = match client.get_chart(sym, "1y", "1d").await {
+            Ok(c) => {
+                if let Some(m) = &c.meta {
+                    info.source = m.data_source.clone();
+                    info.warnings = m.warnings.clone();
+                }
+                info.last = c.dated_closes().last().map(|(d, _)| *d);
+                Some(c.return_closes()).filter(|c| !c.is_empty())
+            }
+            Err(e) => {
+                info.warnings
+                    .push(format!("{sym}: price history unavailable ({e:#})"));
+                None
+            }
+        };
         let score = longterm::score_for_longterm(&q, hist.as_deref());
-        (score, q)
+        (score, (q, info))
     }))
     .buffered(8)
     .collect::<Vec<_>>()
@@ -594,10 +616,22 @@ pub async fn cmd_longterm(
 /// Provenance of a `longterm` run: the scan's fundamentals, plus how many
 /// scored stocks had no price history for their volatility.
 fn longterm_meta(
-    quotes: &[crate::api::Quote],
+    scored: &[(crate::api::Quote, HistoryInfo)],
     scores: &[longterm::LongTermScore],
 ) -> crate::provenance::Meta {
-    let mut meta = crate::provenance::for_scan(quotes);
+    let mut meta = crate::provenance::for_scan(scored.iter().map(|(q, _)| q));
+    for (_, h) in scored {
+        if let Some(s) = &h.source {
+            meta.add_source(s);
+        }
+        for w in &h.warnings {
+            meta.warn(w.clone());
+        }
+    }
+    // The oldest history behind any score, apart from the quote time.
+    if let Some(oldest) = scored.iter().filter_map(|(_, h)| h.last).min() {
+        meta.history_as_of = Some(oldest.to_string());
+    }
     let no_vol = scores
         .iter()
         .filter(|s| s.monte_carlo_median.is_none())

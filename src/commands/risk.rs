@@ -91,6 +91,11 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
     };
 
     let source = chart.meta.as_ref().and_then(|m| m.data_source.clone());
+    let chart_warnings: Vec<String> = chart
+        .meta
+        .as_ref()
+        .map(|m| m.warnings.clone())
+        .unwrap_or_default();
     if fmt == Format::Json {
         let mut json = risk_json(&resolved, cur, period, &rc);
         json["price"] = serde_json::json!(closes.last().copied());
@@ -102,8 +107,16 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
             dd.insert("peak_price".into(), serde_json::json!(closes[peak]));
             dd.insert("trough_price".into(), serde_json::json!(closes[trough]));
         }
-        if let Some(s) = &source {
-            json["meta"] = serde_json::json!({ "sources": [s] });
+        // A fallback source or a warning about the bars (cache age, splits
+        // not adjusted) goes into `meta`; a plain Yahoo answer has none.
+        if source.is_some() || !chart_warnings.is_empty() {
+            let mut meta = crate::provenance::Meta::from_source(
+                source.as_deref().unwrap_or(crate::provenance::YAHOO),
+            );
+            for w in &chart_warnings {
+                meta.warn(w.clone());
+            }
+            json["meta"] = serde_json::to_value(&meta).unwrap_or_default();
         }
         return output::print_json(&json);
     }
@@ -122,6 +135,9 @@ pub async fn cmd_risk(symbol: &str, period: &str, market: Market, fmt: Format) -
             format!("{:.2}%", total_return).red().to_string()
         }
     );
+    for w in &chart_warnings {
+        println!("  {} {}", "!".yellow(), w.dimmed());
+    }
 
     print_section("Volatility Metrics");
     if let Some(vol) = technical::annualized_volatility_with(&rc, ppy) {
