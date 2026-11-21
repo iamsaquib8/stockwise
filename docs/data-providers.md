@@ -117,6 +117,12 @@ symbols to BSE, and US stocks, crypto, FX and SENSEX to Yahoo — so a
 portfolio holding both `TCS` and `AAPL` gets each price from its own market.
 `search` lists NSE matches first, then BSE's.
 
+**IPOs** (`ipo`, MCP `ipo_board` / `ipo_analyze`) come from NSE's IPO pages
+whichever provider is set. When NSE refuses or leaves a field empty (lot size,
+issue size, fresh/OFS split, the category book), BSE's public-issue pages fill
+it, and the answer's `meta` names the source of each filled field. A field
+neither exchange has stays empty and lowers the verdict's data coverage.
+
 **Index members** (`--universe` on `movers`, `heatmap` and `screen`) come from
 NSE whichever provider is set; see [commands.md](commands.md#market). Offline,
 the built-in lists stand in.

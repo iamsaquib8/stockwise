@@ -313,6 +313,7 @@ pub fn print_ipo_board(v: &IpoBoardView) {
     for n in &v.notes {
         println!("\n  {} {}", "ⓘ".dimmed(), n.dimmed());
     }
+    print_sources(&v.meta);
     let methodology = v
         .ongoing
         .iter()
@@ -715,9 +716,29 @@ pub fn print_ipo_analysis(a: &IpoAnalysis, stock_action: Option<&str>) {
     for n in &a.notes {
         println!("\n  {} {}", "ⓘ".dimmed(), n.dimmed());
     }
+    print_sources(&a.meta);
 
     println!("\n  {}", v.disclaimer.dimmed().italic());
     println!("  {}\n", a.disclaimer.dimmed().italic());
+}
+
+/// Where the figures came from: the sources footer, the fields each
+/// fallback source filled, and what failed on the way.
+fn print_sources(meta: &crate::provenance::Meta) {
+    println!("\n  {} {}", "ⓘ".dimmed(), meta.footer().dimmed());
+    let mut by_source: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (field, source) in &meta.field_sources {
+        by_source.entry(source).or_default().push(field);
+    }
+    for (source, fields) in by_source {
+        println!(
+            "    {}",
+            format!("From {source}: {}", fields.join(", ")).dimmed()
+        );
+    }
+    for w in &meta.warnings {
+        println!("    {}", w.dimmed());
+    }
 }
 
 // ── ipo review ──

@@ -9,14 +9,18 @@
 //! (`/api/ipo-current-issue`, `/api/all-upcoming-issues?category=ipo`,
 //! `/api/public-past-issues`, and `/api/ipo-detail?symbol=X&series=EQ|SME`),
 //! enriched with live quotes for post-listing performance and Indian financial
-//! news RSS for street consensus / unofficial GMP chatter.
+//! news RSS for street consensus / unofficial GMP chatter. Fields NSE does not
+//! supply (or all of them, when NSE refuses) come from BSE's public-issue
+//! pages, merged field by field with provenance (`crate::ipo_fallback`).
 
 use crate::api::{Quote, YahooClient};
+use crate::ipo_fallback::{self as fallback, BseFallback};
 use crate::ipo_model::ListingModel;
 use crate::ipo_verdict::{
     self as verdict, CategoryBook, CategoryOdds, PeerQuote, RhpFigures, Valuation, Verdict,
 };
 use crate::output::round;
+use crate::provenance::{self, Meta};
 use crate::providers::nse;
 use crate::providers::session::FetchError;
 use anyhow::{Result, bail};
@@ -214,6 +218,10 @@ pub struct IpoBoardView {
     pub recent: Vec<IpoSummaryRow>,
     pub headlines: Vec<IpoHeadline>,
     pub notes: Vec<String>,
+    /// Sources, the fields BSE filled (`field_sources`, keyed `SYMBOL field`),
+    /// what no source had, and the key-field coverage of the open and
+    /// upcoming rows.
+    pub meta: Meta,
 }
 
 /// Subscription row for one investor category (`QIB`, `Mutual funds`, `bNII`, `sNII`, `RII`, ...).
@@ -353,6 +361,9 @@ pub struct IpoAnalysis {
     pub regime: IpoRegime,
     /// Data gaps and file problems worth knowing.
     pub notes: Vec<String>,
+    /// Sources, the fields BSE filled, what no source had, and coverage of
+    /// the issue's key fields (terms and category book).
+    pub meta: Meta,
     pub disclaimer: String,
 }
 
@@ -381,12 +392,17 @@ pub async fn fetch_board(
     );
 
     let mut notes = Vec::new();
-    // NSE's IPO pages are the only source for the board. When it refuses or is
-    // down, say so once and still show the press headlines.
+    let mut meta = Meta::default();
+    let nse_board_failed = curr_res.is_err() || up_res.is_err();
+    if curr_res.is_ok() || up_res.is_ok() || past_res.is_ok() {
+        meta.add_source(provenance::NSE);
+    }
+    // When NSE refuses or is down, say so once; BSE fills in below.
     if let (Err(e), Err(_), Err(_)) = (&curr_res, &up_res, &past_res) {
         notes.push(format!(
-            "NSE's IPO pages are not answering ({e}); showing news headlines only. Try again later."
+            "NSE's IPO pages are not answering ({e}); open and upcoming issues come from BSE where it answers."
         ));
+        meta.warn(format!("NSE IPO pages unavailable ({e})"));
     }
     let feed = |res: Result<Value, FetchError>, what: &str, notes: &mut Vec<String>| match res {
         Ok(v) => v,
@@ -403,36 +419,83 @@ pub async fn fetch_board(
 
     let (mut ongoing, mut upcoming) = merge_current_and_upcoming(&curr_val, &up_val, today);
     let mut recent = parse_past_issues(&past_val, today, REGIME_PAST_ROWS);
+
+    // BSE fills the terms NSE left empty, and the whole board when NSE's
+    // feeds failed.
+    let mut bse = BseFallback::default();
+    if nse_board_failed
+        || ongoing
+            .iter()
+            .chain(upcoming.iter())
+            .any(fallback::row_has_gaps)
+    {
+        let issues = bse.issues(&mut meta).await;
+        fallback::merge_board(
+            &mut ongoing,
+            &mut upcoming,
+            &recent,
+            &issues,
+            today,
+            &mut meta,
+        );
+        sort_board(&mut ongoing, &mut upcoming);
+    }
+
     let regime = recent_regime(yahoo, &mut recent, today).await;
+    if regime.sample_size > 0 {
+        meta.add_source(provenance::YAHOO);
+    }
 
     let model = crate::ipo_model::active();
     let hour = ist_hour();
     // Enrich ongoing issues (up to 6) with the category book from
-    // `/api/ipo-detail` and decide each; upcoming issues are decided on
-    // their terms and any RHP figures.
+    // `/api/ipo-detail` (BSE's pages for what NSE lacks) and decide each;
+    // upcoming issues are decided on their terms and any RHP figures.
     for row in ongoing.iter_mut().take(6) {
-        let detail = session
-            .get_json(
-                "/api/ipo-detail",
-                &[
-                    ("symbol", row.symbol.as_str()),
-                    ("series", row.board.series_code()),
-                ],
-                DETAIL_TTL,
-            )
-            .await
-            .ok();
+        let detail = if fallback::bse_only(row, &meta) {
+            None
+        } else {
+            session
+                .get_json(
+                    "/api/ipo-detail",
+                    &[
+                        ("symbol", row.symbol.as_str()),
+                        ("series", row.board.series_code()),
+                    ],
+                    DETAIL_TTL,
+                )
+                .await
+                .ok()
+        };
         if let Some(d) = &detail {
             apply_detail_to_row(row, d, today);
         }
-        let ctx = RowContext::load(yahoo, &row.symbol, None).await;
-        let (sub, structure) = match &detail {
+        let (mut sub, mut structure) = match &detail {
             Some(d) => (
                 parse_subscription(d),
                 parse_issue_info(d, &row.price_band).2,
             ),
             None => (board_subscription(row), IssueStructure::default()),
         };
+        let no_book = sub.qib_x.is_none() && sub.nii_x.is_none() && sub.retail_x.is_none();
+        if no_book || structure.fresh_pct.is_none() || fallback::row_has_gaps(row) {
+            let issues = bse.issues(&mut meta).await;
+            if let Some(issue) = fallback::find_issue(&issues, &row.company_name) {
+                let (det, book) = bse.pages(&issue.ipo_no, no_book, &mut meta).await;
+                let prefix = row.symbol.clone();
+                fallback::fill_from_detail(
+                    row,
+                    &mut structure,
+                    &mut sub,
+                    det.as_ref(),
+                    book.as_ref(),
+                    &prefix,
+                    &mut meta,
+                );
+                refresh_row(row, today);
+            }
+        }
+        let ctx = RowContext::load(yahoo, &row.symbol, None).await;
         let (v, _) = decide_row(
             row,
             &structure,
@@ -447,10 +510,28 @@ pub async fn fetch_board(
         row.verdict = Some(v);
     }
     for row in upcoming.iter_mut() {
+        let mut structure = IssueStructure::default();
+        if fallback::row_has_gaps(row) {
+            let issues = bse.issues(&mut meta).await;
+            if let Some(issue) = fallback::find_issue(&issues, &row.company_name) {
+                let (det, _) = bse.pages(&issue.ipo_no, false, &mut meta).await;
+                let prefix = row.symbol.clone();
+                fallback::fill_from_detail(
+                    row,
+                    &mut structure,
+                    &mut SubscriptionBreakdown::default(),
+                    det.as_ref(),
+                    None,
+                    &prefix,
+                    &mut meta,
+                );
+                refresh_row(row, today);
+            }
+        }
         let ctx = RowContext::load(yahoo, &row.symbol, None).await;
         let (v, _) = decide_row(
             row,
-            &IssueStructure::default(),
+            &structure,
             &board_subscription(row),
             &StreetBuzz::default(),
             &regime,
@@ -477,6 +558,10 @@ pub async fn fetch_board(
         .collect();
 
     let headlines = parse_rss_headlines(&rss_xml, 6);
+    if !headlines.is_empty() {
+        meta.add_source(GOOGLE_NEWS);
+    }
+    board_coverage(&mut meta, &ongoing, &upcoming);
     if model.is_none() {
         notes.push(
             "No calibrated listing-day model is installed, so mainboard issues get NO CALL; run `stockwise ipo calibrate`."
@@ -493,7 +578,31 @@ pub async fn fetch_board(
         recent,
         headlines,
         notes,
+        meta,
     })
+}
+
+/// Source name of the press headlines.
+const GOOGLE_NEWS: &str = "Google News";
+
+/// `meta.missing` and `meta.coverage` over the key fields of the open and
+/// upcoming rows (`SYMBOL field`).
+pub fn board_coverage(meta: &mut Meta, ongoing: &[IpoSummaryRow], upcoming: &[IpoSummaryRow]) {
+    let mut names: Vec<(String, bool)> = Vec::new();
+    for row in ongoing.iter().chain(upcoming) {
+        for (field, ok) in fallback::field_checks(row, None) {
+            names.push((format!("{} {field}", row.symbol), ok));
+        }
+    }
+    let checks: Vec<(&str, bool)> = names.iter().map(|(n, ok)| (n.as_str(), *ok)).collect();
+    meta.set_fields(&checks);
+    let answered = meta
+        .sources
+        .iter()
+        .any(|s| s == provenance::NSE || s == provenance::BSE);
+    if checks.is_empty() && !answered {
+        meta.coverage = 0.0;
+    }
 }
 
 /// Past issues read for the regime (the board shows fewer).
@@ -682,7 +791,28 @@ pub async fn fetch_analysis(
     let (ongoing, upcoming) = merge_current_and_upcoming(&curr_val, &up_val, today);
     let all_past = parse_past_issues(&past_val, today, 400);
 
-    let matched = resolve_ipo_target(query, forced_series, &ongoing, &upcoming, &all_past);
+    let mut meta = Meta::default();
+    match &nse_note {
+        None => meta.add_source(provenance::NSE),
+        Some(n) => meta.warn(n.clone()),
+    }
+    let mut bse = BseFallback::default();
+    let mut bse_issue: Option<fallback::BseIssue> = None;
+    let mut matched = resolve_ipo_target(query, forced_series, &ongoing, &upcoming, &all_past);
+    if matched.is_none() {
+        // Not on NSE's board (or NSE is down): look on BSE's list.
+        let issues = bse.issues(&mut meta).await;
+        let (bse_on, bse_up): (Vec<_>, Vec<_>) = issues
+            .iter()
+            .map(|i| fallback::row_from_issue(i, today))
+            .partition(|r| r.status == IpoStatus::Ongoing);
+        matched = resolve_ipo_target(query, forced_series, &bse_on, &bse_up, &[]);
+        if let Some((_, r)) = &matched {
+            bse_issue = fallback::find_issue(&issues, &r.company_name).cloned();
+            meta.record(fallback::F_BOARD_ROW, provenance::BSE);
+        }
+    }
+    let from_bse = bse_issue.is_some();
     let (symbol, mut base_row) = match matched {
         Some(pair) => pair,
         None => {
@@ -737,7 +867,7 @@ pub async fn fetch_analysis(
         });
 
     let mut detail_json: Option<Value> = None;
-    for ser in &series_try {
+    for ser in series_try.iter().filter(|_| !from_bse) {
         if let Ok(v) = session
             .get_json(
                 "/api/ipo-detail",
@@ -750,6 +880,46 @@ pub async fn fetch_analysis(
             base_row.board = BoardKind::from_series(ser);
             detail_json = Some(v);
             break;
+        }
+    }
+
+    // BSE fills what NSE's answer lacks: terms, dates and the category book.
+    let nse_detail = detail_json.is_some();
+    let has_book = detail_json.as_ref().is_some_and(|d| {
+        let s = parse_subscription(d);
+        s.qib_x.is_some() || s.nii_x.is_some() || s.retail_x.is_some()
+    });
+    let terms = detail_json
+        .as_ref()
+        .map(|d| parse_issue_info(d, &base_row.price_band));
+    let has_split = terms.as_ref().is_some_and(|t| t.2.fresh_pct.is_some());
+    let mut with_terms = base_row.clone();
+    if let Some((lot, band, st)) = &terms {
+        with_terms.lot_size = with_terms.lot_size.or(*lot);
+        if with_terms.price_band.cap_price().is_none()
+            && let Some(b) = band
+        {
+            with_terms.price_band = b.clone();
+        }
+        with_terms.issue_size_cr = with_terms.issue_size_cr.or(st.total_issue_cr);
+    }
+    let book_expected = base_row.status != IpoStatus::Upcoming;
+    if (book_expected && !has_book) || !has_split || fallback::row_has_gaps(&with_terms) {
+        if bse_issue.is_none() {
+            let issues = bse.issues(&mut meta).await;
+            bse_issue = fallback::find_issue(&issues, &base_row.company_name).cloned();
+        }
+        if let Some(issue) = &bse_issue {
+            fallback::fill_from_issue(&mut base_row, issue, "", &mut meta);
+            let wants_book = book_expected && !has_book;
+            let (det, book) = bse.pages(&issue.ipo_no, wants_book, &mut meta).await;
+            fallback::merge_detail_json(
+                &mut detail_json,
+                &mut base_row,
+                det.as_ref(),
+                book.as_ref(),
+                &mut meta,
+            );
         }
     }
 
@@ -797,8 +967,11 @@ pub async fn fetch_analysis(
         }
     }
 
+    if regime.sample_size > 0 || base_row.ltp.is_some() {
+        meta.add_source(provenance::YAHOO);
+    }
     let model = crate::ipo_model::active();
-    Ok(build_analysis_from_parts(
+    let mut analysis = build_analysis_from_parts(
         base_row,
         detail_json.as_ref(),
         &rss_xml,
@@ -808,7 +981,19 @@ pub async fn fetch_analysis(
         model.as_ref(),
         today,
         ist_hour(),
-    ))
+    );
+    if !nse_detail && detail_json.is_some() {
+        analysis.notes.push(
+            "NSE's issue detail is unavailable; the terms and category book shown come from BSE (no application counts, so allotment odds are a lower bound)."
+                .to_string(),
+        );
+    }
+    if !analysis.street_buzz.headlines.is_empty() || analysis.street_buzz.gmp_readings > 0 {
+        meta.add_source(GOOGLE_NEWS);
+    }
+    meta.set_fields(&fallback::analysis_checks(&analysis));
+    analysis.meta = meta;
+    Ok(analysis)
 }
 
 async fn fetch_india_news_rss(yahoo: &YahooClient, query: &str) -> String {
@@ -995,6 +1180,7 @@ pub fn build_analysis_from_parts(
         regime,
         notes,
         verdict,
+        meta: Meta::default(),
         disclaimer: "Figures from public NSE/BSE filings, the RHP figures you saved, live peer quotes and press reports. The verdict is a rule-based educational signal, not SEBI-registered investment advice; the Red Herring Prospectus (RHP) is the source document.".to_string(),
     }
 }
@@ -1122,8 +1308,12 @@ pub fn merge_current_and_upcoming(
         .into_iter()
         .filter_map(|k| ongoing_map.remove(&k))
         .collect();
+    sort_board(&mut ongoing, &mut upcoming);
+    (ongoing, upcoming)
+}
 
-    // Mainboard first, then closing soonest.
+/// Mainboard first; open issues closing soonest, upcoming opening soonest.
+pub fn sort_board(ongoing: &mut [IpoSummaryRow], upcoming: &mut [IpoSummaryRow]) {
     ongoing.sort_by(|a, b| {
         (a.board == BoardKind::Sme)
             .cmp(&(b.board == BoardKind::Sme))
@@ -1140,8 +1330,6 @@ pub fn merge_current_and_upcoming(
             .cmp(&(b.board == BoardKind::Sme))
             .then_with(|| a.open_date.cmp(&b.open_date))
     });
-
-    (ongoing, upcoming)
 }
 
 fn parse_board_item(
@@ -2319,6 +2507,17 @@ fn derive_quick_signal(row: &IpoSummaryRow, today: NaiveDate) -> String {
     }
 }
 
+/// Recompute a row's derived fields after values were filled in: window
+/// note, minimum investment and quick signal.
+pub fn refresh_row(row: &mut IpoSummaryRow, today: NaiveDate) {
+    row.window_note = compute_window_note(row.status, row.open_date, row.close_date, today);
+    if let (Some(lot), Some(cap)) = (row.lot_size, row.price_band.cap_price()) {
+        let min_lots = if row.board == BoardKind::Sme { 2 } else { 1 };
+        row.min_investment_inr = Some(round((lot * min_lots) as f64 * cap, 0));
+    }
+    row.quick_signal = derive_quick_signal(row, today);
+}
+
 fn compute_window_note(
     status: IpoStatus,
     open: Option<NaiveDate>,
@@ -2889,6 +3088,7 @@ pub fn fixture_board(filter: BoardFilter, past_limit: usize) -> IpoBoardView {
             source: "Economic Times".into(),
         }],
         notes: Vec::new(),
+        meta: Meta::from_source(provenance::NSE),
     }
 }
 

@@ -55,6 +55,7 @@ mod insider;
 mod insights;
 mod intraday;
 mod ipo;
+mod ipo_fallback;
 mod ipo_log;
 mod ipo_model;
 mod ipo_verdict;
