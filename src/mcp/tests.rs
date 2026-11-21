@@ -982,7 +982,18 @@ fn search_completions_put_the_users_market_first() {
 
 #[test]
 fn instructions_cover_the_indian_market() {
-    for needle in ["TCS.NS", "lakh", "crore", "IST", "1.25 lakh", "April to March", "bonds_", "commodity", "fx_history", "mf_bleed"] {
+    for needle in [
+        "TCS.NS",
+        "lakh",
+        "crore",
+        "IST",
+        "1.25 lakh",
+        "April to March",
+        "bonds_",
+        "commodity",
+        "fx_history",
+        "mf_bleed",
+    ] {
         assert!(INSTRUCTIONS.contains(needle), "{needle}");
     }
     let t = prompt_text("advance_tax_check", &Map::new()).unwrap();

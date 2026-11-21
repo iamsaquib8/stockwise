@@ -113,7 +113,11 @@ async fn commodity<D: DataSource>(src: &D, view: &str) -> Result<Value> {
     use crate::commodity as cm;
     Ok(match view {
         "futures" | "etfs" => {
-            let list = if view == "futures" { cm::FUTURES } else { cm::ETFS };
+            let list = if view == "futures" {
+                cm::FUTURES
+            } else {
+                cm::ETFS
+            };
             let symbols: Vec<&str> = list.iter().map(|(s, ..)| *s).collect();
             let quotes = src.quotes(&symbols).await?;
             json!({ "view": view, "rows": cm::instrument_rows(list, &quotes) })
@@ -276,13 +280,19 @@ async fn compare<D: DataSource>(src: &D, a: &Args, m: Market) -> Result<Value> {
     let refs: Vec<&str> = syms.iter().map(String::as_str).collect();
     let mut quotes = client.get_quote(&refs).await?;
     if quotes.is_empty() {
-        bail!("No quotes for {}{}", syms.join(", "), market::not_found_hint(m));
+        bail!(
+            "No quotes for {}{}",
+            syms.join(", "),
+            market::not_found_hint(m)
+        );
     }
     for q in &mut quotes {
         let _ = crate::research::enrich_quote(client, q, false).await;
     }
-    let rows: Vec<crate::commands::CompareRow> =
-        quotes.iter().map(crate::commands::CompareRow::from).collect();
+    let rows: Vec<crate::commands::CompareRow> = quotes
+        .iter()
+        .map(crate::commands::CompareRow::from)
+        .collect();
     let found: Vec<String> = quotes.iter().filter_map(|q| q.symbol.clone()).collect();
     let missing: Vec<&String> = syms.iter().filter(|s| !found.contains(s)).collect();
     Ok(json!({ "stocks": rows, "missing": missing }))

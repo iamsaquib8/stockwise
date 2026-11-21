@@ -1163,7 +1163,11 @@ async fn returns_and_correlation_run_on_charts() {
     assert_eq!(m.len(), 2);
     assert!((m[0][0].as_f64().unwrap() - 1.0).abs() < 1e-9);
 
-    assert!(c.call("correlate", &json!({"symbols": ["TCS"]})).await.is_err());
+    assert!(
+        c.call("correlate", &json!({"symbols": ["TCS"]}))
+            .await
+            .is_err()
+    );
     assert!(
         c.call("fx_history", &json!({"currency": "DOLLARS"}))
             .await
