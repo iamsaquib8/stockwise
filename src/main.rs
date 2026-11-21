@@ -2084,6 +2084,12 @@ enum AlertCmd {
         /// Save even if Yahoo Finance does not know the ticker
         #[arg(long)]
         force: bool,
+        /// Crosses and breakouts: judge completed sessions only, not the intraday price
+        #[arg(long)]
+        on_close: bool,
+        /// Price levels: notify only when the price crosses the level (not while it stays beyond)
+        #[arg(long)]
+        cross: bool,
     },
     /// Remove an alert by its number from `alert list`
     #[command(alias = "rm")]
@@ -5186,10 +5192,17 @@ async fn dispatch(
                 target,
                 period,
                 force,
+                on_close,
+                cross,
             }) => {
                 let condition = value_name(condition);
                 let period = period.map(|p| p as usize);
-                commands::cmd_alert_add(&symbol, &condition, target, period, force, m).await
+                let opts = crate::alerts::AddOptions {
+                    force,
+                    on_close,
+                    cross,
+                };
+                commands::cmd_alert_add(&symbol, &condition, target, period, opts, m).await
             }
             Some(AlertCmd::Remove { index }) => commands::cmd_alert_remove(index),
             Some(AlertCmd::Check { out: check }) => commands::cmd_alert_check(out.or(check)).await,

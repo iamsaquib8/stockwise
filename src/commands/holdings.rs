@@ -170,9 +170,10 @@ pub async fn cmd_alert_add(
     condition: &str,
     target: f64,
     period: Option<usize>,
-    force: bool,
+    opts: crate::alerts::AddOptions,
     market: Market,
 ) -> Result<()> {
+    let force = opts.force;
     let resolved = market::resolve_symbol(symbol, market);
     let Some(cond) = AlertCondition::parse(condition) else {
         bail!(
@@ -182,9 +183,30 @@ pub async fn cmd_alert_add(
         );
     };
     let (target, period) = crate::alerts::validate(cond, target, period)?;
-    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    if opts.on_close && !cond.is_cross() {
+        bail!(
+            "--on-close applies to moving-average crosses and breakouts (cross-above-sma, ..., breakout-high, breakdown-low)"
+        );
+    }
+    if opts.cross && !cond.is_level() {
+        bail!("--cross applies to price levels (above, below)");
+    }
+    let mut alert = crate::alerts::Alert::new(&resolved, cond, target, period);
+    alert.on_close = opts.on_close;
+    if opts.cross {
+        alert.mode = crate::alerts::AlertMode::Cross;
+    }
     let mut store = AlertStore::load()?;
-    store.add_with_period(&resolved, cond, target, period);
+    if let Some((i, _)) = store.duplicate_of(&alert) {
+        bail!(
+            "Alert #{} already watches {} {} — nothing added",
+            i,
+            resolved,
+            alert.describe(crate::i18n::lang())
+        );
+    }
+    check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    store.push(alert);
     store.save()?;
     let alert = store.alerts.last().expect("alert was just added");
     println!(
@@ -201,7 +223,13 @@ pub async fn cmd_alert_add(
         );
     } else if !cond.is_price() {
         println!(
-            "  {} Checked on daily bars by `stockwise alert check` and `alert watch`.",
+            "  {} Checked on daily bars by `stockwise alert check` and `alert watch`{}.",
+            "→".dimmed(),
+            if opts.on_close { ", on completed sessions only" } else { "" }
+        );
+    } else if opts.cross {
+        println!(
+            "  {} Notifies only when the price crosses the level, not while it stays beyond it.",
             "→".dimmed()
         );
     }

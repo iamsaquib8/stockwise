@@ -558,6 +558,11 @@ pub struct Config {
     /// `us-tech = "us"`). Set with `stockwise use PORTFOLIO MARKET --bind`.
     #[serde(default)]
     pub portfolio_markets: BTreeMap<String, String>,
+    /// Holding-monitor thresholds (`[monitor]`), keyed like
+    /// `STOCKWISE_MONITOR_<KEY>` without the prefix: `day_drop_pct = "5"`.
+    /// Environment variables win.
+    #[serde(default)]
+    pub monitor: BTreeMap<String, String>,
 }
 
 static EMPTY: Config = Config {
@@ -585,6 +590,7 @@ static EMPTY: Config = Config {
     periods: BTreeMap::new(),
     notify: BTreeMap::new(),
     portfolio_markets: BTreeMap::new(),
+    monitor: BTreeMap::new(),
 };
 
 /// The `[notify]` key for a `STOCKWISE_*` notification variable.
@@ -601,12 +607,26 @@ pub fn notify_setting(env: &str) -> Option<String> {
         .or_else(|| notify_key(env).and_then(|k| get().notify.get(&k).cloned()))
 }
 
+/// A holding-monitor setting: `STOCKWISE_MONITOR_<KEY>`, else `key` in
+/// `[monitor]` in the config file.
+pub fn monitor_setting(key: &str) -> Option<String> {
+    let env = format!("STOCKWISE_MONITOR_{}", key.to_ascii_uppercase());
+    std::env::var(&env)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| get().monitor.get(key).cloned())
+}
+
 /// `[notify]` keys that hold secrets.
 const SECRET_NOTIFY_KEYS: &[&str] = &[
     "telegram_token",
     "slack_webhook",
     "discord_webhook",
     "smtp_password",
+    "ntfy_topic",
+    "ntfy_token",
+    "pushover_token",
+    "pushover_user",
 ];
 
 /// Where the config file was looked for and what came of it.
@@ -1070,7 +1090,26 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # smtp_password = ""
 # email_from = ""
 # email_to = ""
+# ntfy_topic = ""
+# ntfy_server = "https://ntfy.sh"
+# ntfy_token = ""
+# pushover_token = ""
+# pushover_user = ""
 # desktop_notify = "1"
+# notify_routes = "desktop=high,telegram=low"
+# quiet_hours = "22:00-07:00"
+# digest_time = "16:15"
+
+# Automatic monitoring of every holding (`stockwise monitor`). Env:
+# STOCKWISE_MONITOR_<KEY>, e.g. STOCKWISE_MONITOR_DAY_DROP_PCT=4.
+[monitor]
+# enabled = "true"
+# day_drop_pct = "5"
+# day_drop_sigma = "2"
+# from_cost_pct = "20"
+# from_peak_pct = "25"
+# gap_pct = "3"
+# digest = "true"
 
 # Investor profile and personal guardrails (`stockwise profile`).
 # Env: STOCKWISE_PROFILE (e.g. "passive", "active:low", "active:med", "active:high", "ultra").
