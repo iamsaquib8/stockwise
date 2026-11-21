@@ -1120,6 +1120,7 @@ mod tests {
         let pending = crate::corp_actions::PendingSplits {
             by_symbol: vec![("BBB.NS".into(), vec![Split::new("2026-06-02", 2.0, 1.0)])],
             unchecked: vec![],
+            demergers: vec![],
         };
         let adj = pending.adjusted(&p);
         // In today's share count before and after the split: 20, never 40.
