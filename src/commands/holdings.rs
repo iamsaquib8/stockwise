@@ -665,6 +665,7 @@ pub async fn cmd_import(
     file: &str,
     replace: bool,
     sheet: Option<&str>,
+    account: Option<&str>,
     market: Market,
 ) -> Result<()> {
     let path = std::path::Path::new(file);
@@ -766,6 +767,7 @@ pub async fn cmd_import(
                 "groww",
                 file,
                 replace,
+                account,
                 // Groww and Upstox list Indian stocks, whatever -m says.
                 super::imports::parse_groww(&content, Market::In)?,
             )
@@ -776,6 +778,7 @@ pub async fn cmd_import(
                 "upstox",
                 file,
                 replace,
+                account,
                 super::imports::parse_upstox(&content, Market::In)?,
             )
             .await;
@@ -785,6 +788,7 @@ pub async fn cmd_import(
                 "cas",
                 file,
                 replace,
+                account,
                 super::imports::parse_cas(&content)?,
             )
             .await;
@@ -929,7 +933,7 @@ pub async fn cmd_import(
             m.old_shares
         );
     }
-    apply_import_rows(source, file, rows, side_col.is_some(), replace).await
+    apply_import_rows(source, file, rows, side_col.is_some(), replace, account).await
 }
 
 /// Splits and bonuses for each dated symbol, from its first trade. A symbol
@@ -966,6 +970,26 @@ pub(super) async fn fetch_import_splits(
     Ok((found, unchecked))
 }
 
+/// `import --account NAME` checked and lower-cased: letters, digits, `-`,
+/// `_` and `.`, up to 40 characters. `None` stays `None` (the broker's name).
+pub fn account_name(name: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = name else {
+        return Ok(None);
+    };
+    let name = raw.trim().to_lowercase();
+    if name.is_empty()
+        || name.len() > 40
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bail!(
+            "--account {raw:?}: use letters, digits, '-', '_' or '.' (up to 40), e.g. `--account spouse`"
+        );
+    }
+    Ok(Some(name))
+}
+
 /// Apply parsed import rows (from any source) to the portfolio and report
 /// what changed: dated rows rebuild a symbol's lots, undated rows sync its
 /// quantity and keep existing lots. Re-importing the same rows changes
@@ -976,8 +1000,16 @@ pub(super) async fn apply_import_rows(
     rows: Vec<ImportRow>,
     tradebook: bool,
     replace: bool,
+    account: Option<&str>,
 ) -> Result<()> {
     let portfolio = Portfolio::load()?;
+    if let Some(a) = account {
+        println!(
+            "  {} Account: {} (lots and sales from this file are kept apart from other accounts)",
+            "·".dimmed(),
+            a.cyan()
+        );
+    }
     let dated = |sym: &str| {
         rows.iter()
             .any(|r| r.symbol == sym && (r.date.is_some() || r.sell))
@@ -1047,7 +1079,7 @@ pub(super) async fn apply_import_rows(
                 replace,
                 tradebook,
                 splits: &splits,
-                account: None,
+                account,
             },
         );
         Ok((outcomes, p.clone()))
@@ -3198,6 +3230,20 @@ mod divcal_pcorr_tests {
             None
         );
     }
-}
 
-// ── Returns Calculator ──
+    #[test]
+    fn account_names_are_checked_and_lower_cased() {
+        assert_eq!(account_name(None).unwrap(), None);
+        assert_eq!(
+            account_name(Some(" Spouse ")).unwrap().as_deref(),
+            Some("spouse")
+        );
+        assert_eq!(
+            account_name(Some("huf-2")).unwrap().as_deref(),
+            Some("huf-2")
+        );
+        assert!(account_name(Some("")).is_err());
+        assert!(account_name(Some("my account")).is_err());
+        assert!(account_name(Some("a:b")).is_err());
+    }
+}

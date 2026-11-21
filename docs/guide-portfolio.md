@@ -168,6 +168,93 @@ ETFs and mutual funds, and flags any company above 10% of the portfolio.
   `stockwise portfolio actions --apply`. It is safe to repeat.
 - Rebuild one symbol from a dated file, replacing lots recorded another way:
   `stockwise import kite tradebook.csv --replace`.
+- Two demat accounts at one broker (yours and a family member's): name each
+  file's account, so the lots stay apart and re-importing either file changes
+  nothing:
+
+  ```bash
+  stockwise import kite me-tradebook.csv --account me
+  stockwise import kite spouse-tradebook.csv --account spouse
+  ```
+
+## 8. Corporate actions
+
+`stockwise portfolio actions` lists what happened to your holdings since you
+bought them and shows how each lot would change. Nothing is written until you
+add `--apply`.
+
+| Event | What `--apply` does |
+|---|---|
+| Split or reverse split (from Yahoo) | Multiplies (or divides) the quantity and divides (or multiplies) the price. Cost and purchase date stay the same. |
+| Indian bonus issue (checked against NSE) | Adds the bonus shares as a new lot at zero cost, dated on the allotment date. |
+| Demerger or spin-off (built-in table) | Each lot held on the record date keeps its quantity, its date and part of its cost. A new lot of the new company gets the rest, with the same purchase date. |
+| Merger with a fractional share (HDFC → HDFC Bank, Mindtree → LTIMindtree) | Keeps the whole shares and records the cash paid for the fraction as a sale at the record date's close, with its own gain. |
+| Rights issue (built-in table) | Only reports the entitlement. If you subscribed, add the shares with `portfolio add`. |
+| Dividend | Records it on the shares held at the ex-date. |
+
+The built-in demerger table has Reliance → Jio Financial, ITC → ITC Hotels and
+Tata Motors → TMCV, with the cost split from each company's filing. It also
+has these US spin-offs, with the split from each company's Form 8937: GE →
+GEHC and GEV, 3M → Solventum, Danaher → Veralto, Merck → Organon and IBM →
+Kyndryl. A Form 8937 split is the company's suggested method, and you may use
+another.
+
+Every `--apply` is written to a journal. List it, or take back the newest
+change:
+
+```bash
+stockwise portfolio actions --journal
+stockwise portfolio actions --undo
+```
+
+The undo is refused if you changed the same holdings afterwards. In that case
+use `stockwise portfolio restore` instead.
+
+For an event that is not in the tables, record it yourself. Each of these
+commands is also journalled, and running it twice changes nothing:
+
+```bash
+# A demerger: 1 new share for every 1 held, 4.68% of the cost moves to the new company
+stockwise portfolio demerger RELIANCE JIOFIN --ratio 1:1 --cost-split 4.68 --date 2023-07-20
+
+# A new ticker for the same company: lots, sales and dividends move with it
+stockwise portfolio rename TATAMOTORS TMPV
+
+# A return of capital: cuts the cost of the lots held on the ex-date
+stockwise portfolio return-of-capital EMBASSY 5.20 --date 2025-02-10
+```
+
+- `--ratio A:B` means A new shares for every B shares held.
+- Without `--date`, `demerger` applies to every lot you hold now.
+- A return of capital never takes a lot's cost below zero. StockWise prints any
+  excess, which is a capital gain you report yourself.
+
+## 9. Check your lots against your broker
+
+If you are logged in to a broker (`stockwise trade login --broker zerodha`),
+compare your lots with the broker's holdings:
+
+```bash
+stockwise portfolio sync zerodha
+```
+
+The broker session is read-only. The report lists each symbol where the
+quantities differ and suggests a fix:
+
+- A split or demerger not yet applied: run `portfolio actions --apply`.
+- A buy that is not recorded: import the tradebook, or use `portfolio add`.
+- A sale that is not recorded: use `portfolio sell`.
+
+Nothing is changed unless you add `--apply`. Even then, only the missing buys
+are added, as lots dated today and marked as estimated.
+
+While the background worker runs (`stockwise worker start`), it makes the same
+read-only comparison every day after the close for each broker with a saved
+session. It never changes your lots. To see the latest reports:
+
+```bash
+stockwise portfolio sync
+```
 
 ## Next steps
 

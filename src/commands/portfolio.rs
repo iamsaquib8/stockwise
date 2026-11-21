@@ -2744,6 +2744,10 @@ pub async fn cmd_portfolio_actions(
     // `portfolio` is a working copy for the report; `--apply` re-applies the
     // fetched actions to the saved file under a lock (see `plan`).
     let mut portfolio = Portfolio::load()?;
+    // Accounts whose merger fraction was paid in cash, with the price
+    // (today's share count) the sale is recorded at.
+    let mut merger_plan: Vec<(pf::MergerFraction, f64)> = Vec::new();
+    let mut rights_lines: Vec<String> = Vec::new();
     // Fully sold symbols too: dividends received before the sale count.
     let history = portfolio.symbols_with_history();
     let targets: Vec<String> = match symbol {
@@ -2859,6 +2863,72 @@ pub async fn cmd_portfolio_actions(
             &mut demerger_lots,
         );
         demerger_plan.extend(pending_demergers.iter().map(|d| (sym.clone(), *d)));
+        for f in portfolio
+            .merger_fractions()
+            .into_iter()
+            .filter(|f| &f.symbol == sym)
+        {
+            let m = f.merger;
+            let day = pf::parse_date(m.through)?;
+            match rate_on(&client, sym, day).await {
+                Ok((price, on)) => {
+                    lines.push(format!(
+                        "  {} Cash for a fractional share — {} → {} ({} for {}, record date {}){}: \
+                         {} share(s) became {} whole; {} sold at {} (close on {}), a sale with its own gain",
+                        if apply { "✓".green() } else { "+".yellow() },
+                        m.old,
+                        m.new,
+                        m.new_shares,
+                        m.old_shares,
+                        m.through,
+                        f.account
+                            .as_deref()
+                            .map(|a| format!(" in {a}"))
+                            .unwrap_or_default(),
+                        (f.shares * 1e6).round() / 1e6,
+                        f.shares.floor(),
+                        (f.fraction * 1e6).round() / 1e6,
+                        format_price(price, cur),
+                        on
+                    ));
+                    if apply {
+                        portfolio.settle_merger_fraction(&f, price);
+                    }
+                    merger_plan.push((f, price));
+                }
+                Err(e) => failed.push(format!(
+                    "{}: no price for the fractional share's cash on {} ({e:#})",
+                    sym, m.through
+                )),
+            }
+        }
+        for r in crate::corp_actions::rights_entitlements(&portfolio)
+            .into_iter()
+            .filter(|r| &r.symbol == sym)
+        {
+            rights_lines.push(format!(
+                "{}: entitled to {} rights share(s) at {} ({} for {}, record date {}){}{}. Not recorded: \
+                 if you subscribed, add them with `stockwise portfolio add {} {} {} --date <allotment date>`.",
+                sym,
+                r.shares,
+                format_price(r.issue.price, cur),
+                r.issue.rights_shares,
+                r.issue.held_shares,
+                r.issue.record_date,
+                r.account
+                    .as_deref()
+                    .map(|a| format!(" in {a}"))
+                    .unwrap_or_default(),
+                if r.issue.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", r.issue.note)
+                },
+                sym,
+                r.shares,
+                r.issue.price
+            ));
+        }
         for split in &splits {
             let Some(h) = portfolio.holding(sym) else {
                 continue;
@@ -2973,7 +3043,7 @@ pub async fn cmd_portfolio_actions(
     if failed.len() == targets.len() {
         bail!("Could not fetch corporate actions: {}", failed.join("; "));
     }
-    let pending = split_lots + bonus_lots + new_divs + demerger_lots;
+    let pending = split_lots + bonus_lots + new_divs + demerger_lots + merger_plan.len();
     println!();
     let totals: Vec<String> = div_total
         .iter()
@@ -3001,13 +3071,32 @@ pub async fn cmd_portfolio_actions(
     } else if apply {
         // The network work is done: apply it to the file as it is now. Every
         // step is idempotent, so a lot already adjusted is skipped.
+        let summary = format!(
+            "{} split lot(s), {} bonus lot(s), {} demerger lot(s), {} merger fraction(s), {} dividend(s)",
+            split_lots,
+            bonus_lots,
+            demerger_lots,
+            merger_plan.len(),
+            new_divs
+        );
         Portfolio::update(|p| {
-            for (sym, splits, divs, currency, demergers) in &plan {
-                p.apply_in_order(sym, splits, demergers);
-                for ev in divs {
-                    p.record_dividend(sym, ev, splits, currency.as_deref());
+            p.journalled("actions", &summary, |p| {
+                for (sym, splits, divs, currency, demergers) in &plan {
+                    p.apply_in_order(sym, splits, demergers);
+                    for ev in divs {
+                        p.record_dividend(sym, ev, splits, currency.as_deref());
+                    }
                 }
-            }
+                for (f, price) in &merger_plan {
+                    // Found again on the file as it is now: settled ones are gone.
+                    let now = p.merger_fractions().into_iter().find(|g| {
+                        g.symbol == f.symbol && g.account == f.account && g.merger == f.merger
+                    });
+                    if let Some(g) = now {
+                        p.settle_merger_fraction(&g, *price);
+                    }
+                }
+            });
             Ok(())
         })?;
         let mut bonus = if bonus_lots > 0 {
@@ -3019,6 +3108,12 @@ pub async fn cmd_portfolio_actions(
             bonus.push_str(&format!(
                 ", split the cost of {} lot(s) and sale(s) for demergers",
                 demerger_lots
+            ));
+        }
+        if !merger_plan.is_empty() {
+            bonus.push_str(&format!(
+                ", recorded the cash for {} fractional merger share(s) as sales",
+                merger_plan.len()
             ));
         }
         println!(
@@ -3033,8 +3128,12 @@ pub async fn cmd_portfolio_actions(
                 format!(" ({})", totals.join(", "))
             }
         );
+        println!(
+            "  {}",
+            "Journalled: `stockwise portfolio actions --undo` takes it back.".dimmed()
+        );
     } else {
-        let demergers = if demerger_lots > 0 {
+        let mut demergers = if demerger_lots > 0 {
             format!(
                 ", {} lot(s) and sale(s) to split for demergers",
                 demerger_lots
@@ -3042,6 +3141,12 @@ pub async fn cmd_portfolio_actions(
         } else {
             String::new()
         };
+        if !merger_plan.is_empty() {
+            demergers.push_str(&format!(
+                ", {} fractional merger share(s) to record as cash sales",
+                merger_plan.len()
+            ));
+        }
         println!(
             "  {} lot(s) to adjust for splits/bonuses, {} lot(s) to receive bonus shares{}, {} dividend(s) to record. Nothing changed yet —",
             split_lots, bonus_lots, demergers, new_divs
@@ -3079,12 +3184,13 @@ pub async fn cmd_portfolio_actions(
     if demerger_lots > 0 {
         println!(
             "  {}",
-            "Demergers: each parent lot held on the record date keeps its quantity and purchase \
-             date and gives the company's published share of its cost (to the paisa) to a new lot \
-             of the resulting company, dated on the same purchase date for tax (Income-tax Act \
-             Sec. 49(2C), 49(2D) and 2(42A)) but held only from the record date. Shares sold \
-             after the record date get the same split. Fractions of a share, paid in cash by \
-             the company, are not recorded."
+            "Demergers and spin-offs: each parent lot held on the record date keeps its quantity \
+             and purchase date and gives the company's published share of its cost (to the \
+             paisa or cent) to a new lot of the resulting company, dated on the same purchase \
+             date for tax (India: Income-tax Act Sec. 49(2C), 49(2D) and 2(42A); US: the \
+             company's Form 8937 allocation, IRC 1223) but held only from the record date. \
+             Shares sold after the record date get the same split. Fractions of a share, paid \
+             in cash by the company, are not recorded."
                 .dimmed()
         );
         let mut sources: Vec<&str> = demerger_plan.iter().map(|(_, d)| d.source).collect();
@@ -3096,7 +3202,357 @@ pub async fn cmd_portfolio_actions(
     for n in &demerger_notes {
         println!("  {} {}", "!".yellow(), n.dimmed());
     }
+    if !merger_plan.is_empty() {
+        println!(
+            "  {}",
+            "Mergers deliver whole shares and pay cash for the fraction: the fraction is sold out \
+             of the newest swapped lot at the record date's close, so the shares left keep the \
+             rest of the cost and the sale carries its own gain."
+                .dimmed()
+        );
+    }
+    for r in &rights_lines {
+        println!("  {} {}", "·".dimmed(), r.dimmed());
+    }
     println!();
+    Ok(())
+}
+
+/// `portfolio actions --journal`: the journalled changes, newest last.
+pub fn cmd_portfolio_journal() -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    print_header(&portfolio_title("Corporate-action journal"));
+    if portfolio.journal.is_empty() {
+        println!(
+            "\n  {}\n",
+            "Nothing recorded yet. `portfolio actions --apply`, `demerger`, `rename`, \
+             `return-of-capital` and `sync --apply` add an entry each."
+                .dimmed()
+        );
+        return Ok(());
+    }
+    println!();
+    for (i, e) in portfolio.journal.iter().enumerate() {
+        let symbols: Vec<&str> = e.before.iter().map(|s| s.symbol.as_str()).collect();
+        println!(
+            "  {:>3}  {}  {:<18} {} — {}",
+            i + 1,
+            e.at.dimmed(),
+            e.action.cyan(),
+            e.summary,
+            symbols.join(", ").dimmed()
+        );
+    }
+    println!(
+        "\n  {}\n",
+        "`stockwise portfolio actions --undo` takes back the newest entry.".dimmed()
+    );
+    Ok(())
+}
+
+/// `portfolio actions --undo`: take back the newest journalled change.
+pub fn cmd_portfolio_undo_action() -> Result<()> {
+    let entry = Portfolio::update(|p| p.undo_last_action())?;
+    let symbols: Vec<&str> = entry.before.iter().map(|s| s.symbol.as_str()).collect();
+    println!(
+        "\n  {} Undid `{}` from {} ({}): {} back as before.\n",
+        "✓".green().bold(),
+        entry.action,
+        entry.at,
+        entry.summary,
+        symbols.join(", ")
+    );
+    Ok(())
+}
+
+/// A symbol as the user typed it, matched to one the file holds or held:
+/// exactly, with `.NS`/`.BO`, or as resolved for the market. `None` when
+/// none matches.
+fn find_held(portfolio: &Portfolio, symbol: &str, market: Market) -> Option<String> {
+    let raw = symbol.trim().to_uppercase();
+    let in_file = |s: &str| {
+        portfolio.holding(s).is_some()
+            || portfolio.realized.iter().any(|r| r.symbol == s)
+            || portfolio.dividends.iter().any(|d| d.symbol == s)
+            || portfolio.imported.iter().any(|t| t.symbol == s)
+    };
+    [
+        raw.clone(),
+        format!("{raw}.NS"),
+        format!("{raw}.BO"),
+        market::resolve_symbol(symbol, market),
+    ]
+    .into_iter()
+    .find(|s| in_file(s))
+}
+
+/// `A:B` → (A, B), both positive.
+fn parse_ratio(s: &str) -> Result<(f64, f64)> {
+    let (a, b) = s
+        .split_once(':')
+        .with_context(|| format!("Ratio {s:?} should look like A:B, e.g. 1:10"))?;
+    let (a, b): (f64, f64) = (
+        a.trim()
+            .parse()
+            .with_context(|| format!("Bad ratio {s:?}"))?,
+        b.trim()
+            .parse()
+            .with_context(|| format!("Bad ratio {s:?}"))?,
+    );
+    if !(a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0) {
+        bail!("Both sides of the ratio {s:?} must be above zero");
+    }
+    Ok((a, b))
+}
+
+/// `portfolio demerger PARENT CHILD --ratio A:B --cost-split PCT`: every
+/// lot of PARENT bought before the record date keeps its quantity, date
+/// and `100 − PCT`% of its cost; a lot of CHILD with the same date gets
+/// A new shares per B held and the rest of the cost. Journalled.
+pub async fn cmd_portfolio_demerger(
+    parent: &str,
+    child: &str,
+    ratio: Option<&str>,
+    cost_split: Option<f64>,
+    date: Option<&str>,
+    market: Market,
+) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let parent = find_held(&portfolio, parent, market)
+        .filter(|s| portfolio.holding(s).is_some())
+        .with_context(|| format!("{} is not held in your portfolio", parent.to_uppercase()))?;
+    let child = {
+        let raw = child.trim().to_uppercase();
+        if raw.contains('.') || !parent.contains('.') {
+            raw
+        } else {
+            // The child lists where the parent does.
+            format!(
+                "{}{}",
+                raw,
+                &parent[parent.rfind('.').unwrap_or(parent.len())..]
+            )
+        }
+    };
+    if child == parent {
+        bail!("The new company must differ from {parent}; use `portfolio rename` for a rename");
+    }
+    let known = pf::demergers_for(&parent)
+        .into_iter()
+        .find(|d| d.child_symbol(&parent) == child);
+    let (child_shares, parent_shares) = match (ratio, known) {
+        (Some(r), _) => parse_ratio(r)?,
+        (None, Some(d)) => (d.child_shares, d.parent_shares),
+        (None, None) => bail!(
+            "Give the ratio, --ratio A:B (A new {child} shares for every B {parent} held), from the company's notice"
+        ),
+    };
+    let child_cost_pct = match (cost_split, known) {
+        (Some(p), _) => p,
+        (None, Some(d)) => d.child_cost_pct,
+        (None, None) => bail!(
+            "Give --cost-split PCT: the percent of {parent}'s cost that moves to {child} \
+             (India: the company's cost-apportionment notice; US: Form 8937)"
+        ),
+    };
+    if !(child_cost_pct > 0.0 && child_cost_pct < 100.0) {
+        bail!(
+            "--cost-split must be above 0 and below 100 (the percent of the cost the new shares take)"
+        );
+    }
+    let record_date = match (date, known) {
+        (Some(d), _) => pf::parse_date(d)?.to_string(),
+        (None, Some(d)) => d.record_date.to_string(),
+        // Every lot held now.
+        (None, None) => (chrono::Local::now().date_naive() + chrono::Days::new(1)).to_string(),
+    };
+    let d: &'static pf::Demerger = match known {
+        Some(k)
+            if k.child_shares == child_shares
+                && k.parent_shares == parent_shares
+                && k.record_date == record_date
+                && k.child_cost_pct == child_cost_pct =>
+        {
+            k
+        }
+        _ => pf::Demerger::custom(
+            &parent,
+            &child,
+            (child_shares, parent_shares),
+            &record_date,
+            child_cost_pct,
+        ),
+    };
+    let summary = format!(
+        "{parent} → {child} {}:{} on {record_date}, {child_cost_pct}% of cost",
+        child_shares, parent_shares
+    );
+    let out = Portfolio::update(|p| {
+        Ok(p.journalled("demerger", &summary, |p| p.apply_demerger(&parent, d)))
+    })?;
+    let cur = pf::symbol_currency(&parent);
+    print_header(&portfolio_title("Demerger"));
+    for c in &out.conflicts {
+        println!("  {} {}", "!".yellow(), c);
+    }
+    if out.lots == 0 && out.sales == 0 {
+        println!(
+            "\n  {} Nothing to do: no {} lot bought before {} is waiting for this demerger \
+             (already recorded?).\n",
+            "·".dimmed(),
+            parent,
+            record_date
+        );
+        return Ok(());
+    }
+    println!(
+        "\n  {} {} lot(s) and {} sale(s) of {} keep their quantity and purchase date and {}% of their cost.",
+        "✓".green(),
+        out.lots,
+        out.sales,
+        parent.cyan(),
+        ((100.0 - child_cost_pct) * 100.0).round() / 100.0
+    );
+    println!(
+        "  {} +{} {} at {} ({}% of cost), dated on each parent lot's purchase date.",
+        "✓".green(),
+        (out.child_shares() * 1e6).round() / 1e6,
+        child.cyan(),
+        format_price(out.child_cost(), cur),
+        child_cost_pct
+    );
+    if out.reconciled > 1e-9 {
+        println!(
+            "  {} {} {} share(s) already in your portfolio were taken as this demerger's shares, not added again.",
+            "·".dimmed(),
+            (out.reconciled * 1e6).round() / 1e6,
+            child
+        );
+    }
+    if out.fraction_dropped > 1e-9 {
+        println!(
+            "  {} {} fractional share(s) of {} the company paid in cash are not recorded.",
+            "·".dimmed(),
+            (out.fraction_dropped * 1e6).round() / 1e6,
+            child
+        );
+    }
+    println!(
+        "\n  {}\n",
+        "Recorded in the journal: `stockwise portfolio actions --undo` takes it back. Running \
+         the same demerger again changes nothing."
+            .dimmed()
+    );
+    Ok(())
+}
+
+/// `portfolio rename OLD NEW`: the same company under a new ticker.
+pub fn cmd_portfolio_rename(old: &str, new: &str, market: Market) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let Some(from) = find_held(&portfolio, old, market) else {
+        println!(
+            "\n  {} Nothing to rename: {} is not in your portfolio (already renamed?).\n",
+            "·".dimmed(),
+            old.trim().to_uppercase()
+        );
+        return Ok(());
+    };
+    let to = {
+        let raw = new.trim().to_uppercase();
+        match from.rfind('.') {
+            Some(i) if !raw.contains('.') => format!("{}{}", raw, &from[i..]),
+            _ => raw,
+        }
+    };
+    if from == to {
+        println!(
+            "\n  {} Nothing to rename: {} is already held as {}.\n",
+            "·".dimmed(),
+            old.trim().to_uppercase(),
+            to
+        );
+        return Ok(());
+    }
+    let summary = format!("{from} → {to}");
+    let out =
+        Portfolio::update(|p| p.journalled("rename", &summary, |p| p.rename_symbol(&from, &to)))?;
+    println!(
+        "\n  {} {} is now {}: {} lot(s){}, {} sale(s) and {} dividend(s) moved with their dates and cost.",
+        "✓".green().bold(),
+        from,
+        to.cyan(),
+        out.lots,
+        if out.merged {
+            format!(" (joined the {to} lots you had)")
+        } else {
+            String::new()
+        },
+        out.sales,
+        out.dividends
+    );
+    println!(
+        "  {}\n",
+        "Recorded in the journal: `stockwise portfolio actions --undo` takes it back.".dimmed()
+    );
+    Ok(())
+}
+
+/// `portfolio return-of-capital SYMBOL PER_SHARE --date EX_DATE`.
+pub fn cmd_portfolio_return_of_capital(
+    symbol: &str,
+    per_share: f64,
+    date: &str,
+    market: Market,
+) -> Result<()> {
+    let date = pf::parse_date(date)?.to_string();
+    if !(per_share.is_finite() && per_share > 0.0) {
+        bail!("The amount per share must be above zero");
+    }
+    let portfolio = Portfolio::load()?;
+    let sym = find_held(&portfolio, symbol, market)
+        .filter(|s| portfolio.holding(s).is_some())
+        .with_context(|| format!("{} is not held in your portfolio", symbol.to_uppercase()))?;
+    let cur = pf::symbol_currency(&sym);
+    let summary = format!(
+        "{sym}: {} per share on {date}",
+        format_price(per_share, cur)
+    );
+    let out = Portfolio::update(|p| {
+        Ok(p.journalled("return-of-capital", &summary, |p| {
+            p.return_capital(&sym, &date, per_share)
+        }))
+    })?;
+    if out.lots == 0 {
+        println!(
+            "\n  {} Nothing to do: no {} lot bought before {} is waiting for this payment \
+             (already recorded?).\n",
+            "·".dimmed(),
+            sym,
+            date
+        );
+        return Ok(());
+    }
+    println!(
+        "\n  {} {}: cost of {} lot(s) reduced by {} in total; purchase dates unchanged.",
+        "✓".green().bold(),
+        sym.cyan(),
+        out.lots,
+        format_price(out.reduced, cur)
+    );
+    if out.excess > 1e-9 {
+        println!(
+            "  {} {} more than the lots' remaining cost: their cost stops at zero and the excess \
+             is a capital gain to report yourself (not recorded).",
+            "!".yellow(),
+            format_price(out.excess, cur)
+        );
+    }
+    println!(
+        "  {}\n",
+        "A return of capital is not income: if `portfolio actions` recorded the same payment as \
+         a dividend, it is counted twice. Journalled: `portfolio actions --undo` takes it back."
+            .dimmed()
+    );
     Ok(())
 }
 

@@ -569,6 +569,13 @@ pub async fn eod_sync(
         }
     }
     let notices = notify_after_close(client, market, || progress(97.0)).await?;
+    // Read-only broker holdings vs the lots (`portfolio sync` shows it);
+    // never writes the portfolio.
+    let holdings_drift = if market == Market::In && progress(98.0) {
+        crate::commands::daily_holdings_drift().await
+    } else {
+        0
+    };
     progress(100.0);
     Ok(serde_json::json!({
         "snapshots": snapshots,
@@ -576,6 +583,7 @@ pub async fn eod_sync(
         "wealth_snapshot": wealth,
         "notifications": notices.total,
         "filings": notices.filings,
+        "holdings_drift": holdings_drift,
     })
     .to_string())
 }
