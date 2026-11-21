@@ -362,7 +362,7 @@ pub(crate) async fn run_checkup(
     // it, so the holding is not shown at half its value.
     let pending = match client {
         Some(c) => crate::corp_actions::pending_splits(c, &g.portfolio).await,
-        None => crate::corp_actions::PendingSplits::default(),
+        None => crate::corp_actions::PendingSplits::offline(&g.portfolio),
     };
     adjust_for_pending_splits(&mut g.inputs, &g.portfolio, &pending);
     skipped.extend(pending.warnings());
@@ -976,7 +976,7 @@ pub(crate) async fn wrap_report(
     // A split Yahoo reports but the lots have not taken yet: value a copy
     // with it applied (closes are in today's share count).
     let pending = if offline {
-        Default::default()
+        crate::corp_actions::PendingSplits::offline(&portfolio)
     } else {
         crate::corp_actions::pending_splits_live(&portfolio).await
     };

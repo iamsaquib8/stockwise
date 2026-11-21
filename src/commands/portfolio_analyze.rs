@@ -462,7 +462,7 @@ pub(crate) async fn gather_inputs(
     // loss: analyse a copy with it applied, and say so.
     let pending = match client {
         Some(c) if !cfg!(test) => crate::corp_actions::pending_splits(c, &loaded).await,
-        _ => crate::corp_actions::PendingSplits::default(),
+        _ => crate::corp_actions::PendingSplits::offline(&loaded),
     };
     let portfolio = pending.adjusted(&loaded);
     let today = chrono::Local::now().date_naive();

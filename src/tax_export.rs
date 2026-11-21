@@ -1084,6 +1084,281 @@ pub fn us_csv(s: &UsSchedule) -> String {
     out
 }
 
+// ── India: audit pack (one workpaper per sale) ──
+
+/// One sale's workpaper: how its gain was worked out and which rule taxes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AuditRow {
+    /// 1-based, in sale-date order; the workpaper file is numbered by it.
+    pub n: usize,
+    pub symbol: String,
+    pub isin: String,
+    pub account: String,
+    /// Where the lot came from (`manual`, `import:kite`, `bonus`, ...).
+    pub lot_source: String,
+    pub quantity: f64,
+    pub purchase_date: String,
+    pub purchase_date_estimated: bool,
+    pub sale_date: String,
+    pub holding_days: Option<i64>,
+    /// `short`, `long` or `intraday`.
+    pub term: &'static str,
+    pub purchase_price: f64,
+    pub actual_cost: f64,
+    /// Fair market value per unit on 31 Jan 2018, where grandfathering applies.
+    pub fmv_31_jan_2018: Option<f64>,
+    pub fmv_value: Option<f64>,
+    /// The cost the gain is worked out with.
+    pub cost_used: f64,
+    /// How `cost_used` was chosen.
+    pub cost_rule: String,
+    pub sale_price: f64,
+    pub sale_value: f64,
+    pub gain: f64,
+    /// The section and rate that tax the gain.
+    pub rule: String,
+    pub file: String,
+}
+
+/// The columns of `summary.csv`, also the order of a workpaper's fields.
+pub const AUDIT_COLUMNS: &[&str] = &[
+    "n",
+    "file",
+    "symbol",
+    "isin",
+    "account",
+    "lot_source",
+    "quantity",
+    "purchase_date",
+    "purchase_date_estimated",
+    "sale_date",
+    "holding_days",
+    "term",
+    "purchase_price",
+    "actual_cost",
+    "fmv_31_jan_2018_per_unit",
+    "fmv_31_jan_2018_value",
+    "cost_used",
+    "cost_rule",
+    "sale_price",
+    "sale_value",
+    "gain",
+    "rule_applied",
+];
+
+impl AuditRow {
+    fn fields(&self) -> Vec<String> {
+        let m = |x: f64| format!("{x:.2}");
+        let opt = |x: Option<f64>| x.map(m).unwrap_or_default();
+        vec![
+            self.n.to_string(),
+            self.file.clone(),
+            self.symbol.clone(),
+            self.isin.clone(),
+            self.account.clone(),
+            self.lot_source.clone(),
+            qty(self.quantity),
+            self.purchase_date.clone(),
+            yes_no(self.purchase_date_estimated).to_string(),
+            self.sale_date.clone(),
+            self.holding_days.map(|d| d.to_string()).unwrap_or_default(),
+            self.term.to_string(),
+            m(self.purchase_price),
+            m(self.actual_cost),
+            opt(self.fmv_31_jan_2018),
+            opt(self.fmv_value),
+            m(self.cost_used),
+            self.cost_rule.clone(),
+            m(self.sale_price),
+            m(self.sale_value),
+            m(self.gain),
+            self.rule.clone(),
+        ]
+    }
+
+    /// The workpaper: one `field,value` line per column, then the
+    /// computation in words and the disclaimer.
+    pub fn workpaper_csv(&self, tax_year: &str) -> String {
+        let mut out = csv_line(&["field", "value"]);
+        out.push_str(&csv_line(&["tax_year", tax_year]));
+        for (k, v) in AUDIT_COLUMNS.iter().zip(self.fields()) {
+            out.push_str(&csv_line(&[k.to_string(), v]));
+        }
+        out.push_str(&csv_line(&[
+            "computation".to_string(),
+            format!(
+                "gain = sale_value {:.2} - cost_used {:.2} = {:.2}",
+                self.sale_value, self.cost_used, self.gain
+            ),
+        ]));
+        out.push_str(&csv_line(&["disclaimer", DISCLAIMER]));
+        out
+    }
+}
+
+/// How an Indian sale is taxed, in words, and its term.
+fn india_rule_of(
+    s: &Sale,
+    long: bool,
+    grandfathered: bool,
+    marks: &crate::offmarket::OffMarket,
+) -> (String, &'static str) {
+    use crate::offmarket::{IndiaClass, india_asset, india_class};
+    let before = date(&s.sell_date).is_some_and(|d| d < ymd(INDIA_RATE_CHANGE));
+    if s.is_intraday() {
+        return (
+            "Sec. 43(5) speculative business income — slab rate".into(),
+            "intraday",
+        );
+    }
+    let term = if long { "long" } else { "short" };
+    match india_class(&s.symbol, marks.mark(&s.symbol)) {
+        IndiaClass::Listed | IndiaClass::EquityFund if long => {
+            let mut r = format!(
+                "Sec. 112A — LTCG {} above the yearly exemption",
+                if before { "10%" } else { "12.5%" }
+            );
+            if grandfathered {
+                r.push_str("; cost grandfathered to 31 Jan 2018 (Sec. 55(2)(ac))");
+            }
+            (r, term)
+        }
+        IndiaClass::Listed | IndiaClass::EquityFund => (
+            format!("Sec. 111A — STCG {}", if before { "15%" } else { "20%" }),
+            term,
+        ),
+        IndiaClass::Vda => (tax::IndiaRule::Vda115BBH.label().to_string(), term),
+        IndiaClass::Other(reason) => {
+            let asset = india_asset(&s.symbol, marks.mark(&s.symbol));
+            match (asset, date(&s.buy_date), date(&s.sell_date)) {
+                (Some(a), Some(b), Some(d)) => {
+                    let rule = tax::india_rule(a, b, d);
+                    let term = match rule {
+                        tax::IndiaRule::LongTerm112 => "long",
+                        tax::IndiaRule::Vda115BBH => term,
+                        _ => "short",
+                    };
+                    (rule.label().to_string(), term)
+                }
+                _ => (reason, term),
+            }
+        }
+    }
+}
+
+/// One workpaper per rupee sale of the financial year starting `start`
+/// (every rule: Sec. 111A/112A, 50AA, 112, 115BBH and intraday), in sale
+/// order. `isin` and `fmv` look up a symbol's ISIN and 31 Jan 2018 price.
+pub fn india_audit_rows(
+    sales: &[Sale],
+    start: NaiveDate,
+    isin: impl Fn(&str) -> Option<String>,
+    marks: &crate::offmarket::OffMarket,
+    fmv: impl Fn(&str) -> Option<f64>,
+) -> Vec<AuditRow> {
+    let c = Country::India;
+    let gf = ymd(GRANDFATHER_DATE);
+    let (kept, _) = sales_in_year(c, sales, start);
+    let mut rows = Vec::new();
+    for (i, (s, scale)) in kept.into_iter().enumerate() {
+        let long = !s.is_intraday() && is_long_term(c, s);
+        let equity = matches!(
+            crate::offmarket::india_class(&s.symbol, marks.mark(&s.symbol)),
+            crate::offmarket::IndiaClass::Listed | crate::offmarket::IndiaClass::EquityFund
+        );
+        let old = long && equity && date(&s.buy_date).is_some_and(|d| d <= gf);
+        let fmv_unit = if old { fmv(&s.symbol) } else { None };
+        let unit_cost = match fmv_unit {
+            Some(f) => grandfathered_unit_cost(s.buy_price, f, s.sell_price),
+            None => s.buy_price,
+        };
+        let actual_cost = s.qty * s.buy_price * scale;
+        let cost_used = s.qty * unit_cost * scale;
+        let sale_value = s.qty * s.sell_price * scale;
+        let raised = unit_cost != s.buy_price;
+        let cost_rule = match fmv_unit {
+            Some(_) if raised => {
+                "max(actual cost, min(31 Jan 2018 FMV, sale value)) — Sec. 55(2)(ac)".into()
+            }
+            Some(_) => "actual cost — not below the 31 Jan 2018 FMV (Sec. 55(2)(ac))".into(),
+            None if old => "actual cost — the 31 Jan 2018 price could not be found".into(),
+            None => "actual cost".to_string(),
+        };
+        let (rule, term) = india_rule_of(s, long, raised, marks);
+        let n = i + 1;
+        let sym = scrip(&s.symbol);
+        let file_sym: String = sym
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        rows.push(AuditRow {
+            n,
+            file: format!("sale-{n:03}-{file_sym}-{}.csv", s.sell_date),
+            symbol: s.symbol.clone(),
+            isin: isin(&s.symbol).unwrap_or_default(),
+            account: s.account_key().unwrap_or("").to_string(),
+            lot_source: s
+                .origin
+                .as_ref()
+                .map(|o| o.source.clone())
+                .unwrap_or_else(|| s.source.clone()),
+            quantity: s.qty,
+            purchase_date: s.buy_date.clone(),
+            purchase_date_estimated: s.buy_date_estimated,
+            sale_date: s.sell_date.clone(),
+            holding_days: holding_days(s),
+            term,
+            purchase_price: round(s.buy_price * scale, 4),
+            actual_cost: round(actual_cost, 2),
+            fmv_31_jan_2018: fmv_unit.map(|f| round(f * scale, 4)),
+            fmv_value: fmv_unit.map(|f| round(s.qty * f * scale, 2)),
+            cost_used: round(cost_used, 2),
+            cost_rule,
+            sale_price: round(s.sell_price * scale, 4),
+            sale_value: round(sale_value, 2),
+            gain: round(sale_value - cost_used, 2),
+            rule,
+        });
+    }
+    rows
+}
+
+/// `summary.csv` of an audit pack: one line per workpaper, then the totals
+/// of each rule.
+pub fn audit_summary_csv(rows: &[AuditRow], tax_year: &str) -> String {
+    let mut out = csv_line(&["StockWise audit pack", tax_year]);
+    out.push_str(&csv_line(&["Note", DISCLAIMER]));
+    out.push('\n');
+    out.push_str(&csv_line(AUDIT_COLUMNS));
+    for r in rows {
+        out.push_str(&csv_line(&r.fields()));
+    }
+    out.push('\n');
+    out.push_str(&csv_line(&[
+        "rule_applied",
+        "sales",
+        "sale_value",
+        "cost_used",
+        "gain",
+    ]));
+    let mut rules: Vec<&str> = rows.iter().map(|r| r.rule.as_str()).collect();
+    rules.sort();
+    rules.dedup();
+    for rule in rules {
+        let these: Vec<&AuditRow> = rows.iter().filter(|r| r.rule == rule).collect();
+        let total =
+            |f: fn(&AuditRow) -> f64| format!("{:.2}", these.iter().map(|r| f(r)).sum::<f64>());
+        out.push_str(&csv_line(&[
+            rule.to_string(),
+            these.len().to_string(),
+            total(|r| r.sale_value),
+            total(|r| r.cost_used),
+            total(|r| r.gain),
+        ]));
+    }
+    out
+}
+
 /// Parse the NSE equity list (`EQUITY_L.csv`: SYMBOL, NAME OF COMPANY,
 /// SERIES, ..., ISIN NUMBER, ...) into (symbol, ISIN) pairs.
 pub fn parse_nse_equity_list(text: &str) -> Vec<(String, String)> {
@@ -1140,6 +1415,102 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn audit_pack_has_one_workpaper_per_sale_with_the_rule_applied() {
+        let sales = vec![
+            // Grandfathered: bought 2017, sold 2026 (FMV ₹948 on 31 Jan 2018).
+            sale(
+                "HDFCBANK.NS",
+                10.0,
+                ("2017-03-01", 700.0),
+                ("2026-07-20", 1_800.0),
+            ),
+            sale(
+                "INFY.NS",
+                5.0,
+                ("2026-01-10", 1_500.0),
+                ("2026-05-12", 1_650.0),
+            ),
+            sale(
+                "SBIN.NS",
+                100.0,
+                ("2026-07-10", 800.0),
+                ("2026-07-10", 805.0),
+            ),
+            sale(
+                "BTC-INR",
+                0.01,
+                ("2025-01-01", 5_000_000.0),
+                ("2026-06-01", 6_000_000.0),
+            ),
+            sale(
+                "LIQUIDBEES.NS",
+                10.0,
+                ("2023-01-02", 1_000.0),
+                ("2026-06-01", 1_000.5),
+            ),
+            sale(
+                "LIQUIDCASE.NS",
+                10.0,
+                ("2024-01-02", 1_000.0),
+                ("2026-06-01", 1_000.5),
+            ),
+            // Another year: no workpaper.
+            sale(
+                "TCS.NS",
+                1.0,
+                ("2024-01-10", 3_000.0),
+                ("2025-05-12", 3_500.0),
+            ),
+        ];
+        let rows = india_audit_rows(
+            &sales,
+            d("2026-04-01"),
+            |s| (s == "HDFCBANK.NS").then(|| "INE040A01034".into()),
+            &Default::default(),
+            |s| (s == "HDFCBANK.NS").then_some(948.0),
+        );
+        assert_eq!(rows.len(), 6);
+        let by = |s: &str| rows.iter().find(|r| r.symbol == s).unwrap();
+        let hdfc = by("HDFCBANK.NS");
+        assert_eq!(hdfc.isin, "INE040A01034");
+        assert_eq!(hdfc.fmv_31_jan_2018, Some(948.0));
+        assert_eq!(hdfc.fmv_value, Some(9_480.0));
+        assert_eq!(hdfc.actual_cost, 7_000.0);
+        assert_eq!(hdfc.cost_used, 9_480.0);
+        assert_eq!(hdfc.gain, 8_520.0);
+        assert!(hdfc.rule.contains("112A") && hdfc.rule.contains("grandfathered"));
+        assert!(by("INFY.NS").rule.contains("111A"));
+        assert_eq!(by("INFY.NS").fmv_31_jan_2018, None);
+        assert_eq!(by("SBIN.NS").term, "intraday");
+        assert!(by("BTC-INR").rule.contains("115BBH"));
+        // A liquid ETF bought before 1 Apr 2023, held over 12 months: Sec. 112.
+        assert!(
+            by("LIQUIDBEES.NS").rule.contains("Sec. 112 "),
+            "{}",
+            by("LIQUIDBEES.NS").rule
+        );
+        assert_eq!(by("LIQUIDBEES.NS").term, "long");
+        // Bought from 1 Apr 2023: Sec. 50AA, short-term however long it is held.
+        assert!(by("LIQUIDCASE.NS").rule.contains("50AA"));
+        assert_eq!(by("LIQUIDCASE.NS").term, "short");
+        assert!(rows.windows(2).all(|w| w[0].sale_date <= w[1].sale_date));
+        assert_eq!(rows[0].n, 1);
+        assert!(rows[0].file.starts_with("sale-001-"));
+
+        let wp = hdfc.workpaper_csv("FY 2026-27");
+        let fields: Vec<&str> = wp.lines().filter_map(|l| l.split(',').next()).collect();
+        for col in AUDIT_COLUMNS {
+            assert!(fields.contains(col), "workpaper lacks {col}");
+        }
+        assert!(wp.contains("fmv_31_jan_2018_per_unit,948.00"));
+        assert!(wp.contains("gain = sale_value 18000.00 - cost_used 9480.00 = 8520.00"));
+
+        let summary = audit_summary_csv(&rows, "FY 2026-27");
+        assert!(summary.contains(&AUDIT_COLUMNS.join(",")));
+        assert!(summary.contains("rule_applied,sales,sale_value,cost_used,gain"));
     }
 
     #[test]

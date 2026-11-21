@@ -1,0 +1,7 @@
+Groww - Capital Gains Report
+Financial Year,2026-27
+Anonymised sample for StockWise tests: names and amounts are illustrative.
+
+Stock name,ISIN,Quantity,Buy date,Buy price,Buy value,Sell date,Sell price,Sell value,Realised P&L,Remark
+Tata Motors,INE155A01022,15,10-01-2026,900,13500,15-06-2026,950,14250,750,Short term
+Asian Paints,INE021A01026,4,03-03-2025,3000,12000,20-05-2026,2700,10800,-1200,Long term
