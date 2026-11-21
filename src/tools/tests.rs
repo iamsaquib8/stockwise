@@ -1230,6 +1230,7 @@ async fn batch_tools_research_each_symbol_once() {
 #[test]
 fn picks_is_not_read_only_because_it_logs_its_list() {
     let h = hints(tool("picks"));
-    assert!(!h.read_only && !h.destructive && h.idempotent && h.open_world);
+    // Repeating it can log new symbols when the data moved: not idempotent.
+    assert!(!h.read_only && !h.destructive && !h.idempotent && h.open_world);
     assert!(hints(tool("quote")).read_only);
 }

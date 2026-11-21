@@ -322,7 +322,7 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
             "stockwise://profile" => {
                 serde_json::to_value(crate::tools::current_profile(&self.ctx))?
             }
-            "stockwise://picks/latest" => latest_picks(&self.picks_log()),
+            "stockwise://picks/latest" => latest_picks(&self.picks_log()?),
             "stockwise://track-record" => {
                 let mut out = json!({ "market": m.code(), "since_days": 90 });
                 for (key, horizon) in [
@@ -348,10 +348,11 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
     }
 
     /// The picks log: from the session's data directory when it has one.
-    fn picks_log(&self) -> Vec<crate::picks_log::Entry> {
+    /// A missing log is empty; an unreadable one is an error, never "no picks".
+    fn picks_log(&self) -> anyhow::Result<Vec<crate::picks_log::Entry>> {
         match &self.files {
-            Some(f) => crate::store::load_from(&f.data_dir.join(PICKS_LOG)).unwrap_or_default(),
-            None => crate::picks_log::load().unwrap_or_default(),
+            Some(f) => crate::store::load_from(&f.data_dir.join(PICKS_LOG)),
+            None => crate::picks_log::load(),
         }
     }
 
@@ -698,7 +699,10 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
              would cost (short- or long-term, by lot), and cheaper ways to get there: using \
              new money instead of selling, waiting for lots about to turn long-term, or \
              pairing with harvestable losses. Present it as options and their costs, and \
-             remind me to check the figures against my broker's tax P&L. If I need cash, call \
+             remind me to check the figures against my broker's tax P&L. For each sale \
+             rebalance proposes, call portfolio_sell_preview with its symbol and quantity and \
+             show the tax that preview returns; say so when a preview has no estimate, and do \
+             not add independent previews into one combined tax figure. If I need cash, call \
              rebalance with `raise` for the sells that raise it at the lowest tax.{POLICY}"
         ),
         "weekly_review" => format!(

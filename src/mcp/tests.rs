@@ -515,7 +515,8 @@ async fn every_tool_has_annotations_and_the_main_ones_an_output_schema() {
             assert_eq!(a["openWorldHint"], false, "{}", t["name"]);
         } else {
             assert_eq!(a["destructiveHint"], false, "{}", t["name"]);
-            assert_eq!(a["idempotentHint"], true, "{}", t["name"]);
+            // A logging read can append new picks: not idempotent.
+            assert_eq!(a["idempotentHint"], !logs, "{}", t["name"]);
         }
     }
     for (name, destructive, idempotent) in [

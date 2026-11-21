@@ -150,7 +150,7 @@ pub struct Hints {
 pub const LOGGING_READS: &[&str] = &["picks"];
 
 /// The annotations of `tool`. Read tools are read-only (except
-/// [`LOGGING_READS`]) and idempotent. Write tools only touch
+/// [`LOGGING_READS`], which append to the track record) and idempotent. Write tools only touch
 /// local files, so they are closed-world; see [`workspace::write_effect`]
 /// for which overwrite or remove and which repeat safely.
 pub fn hints(tool: &Tool) -> Hints {
@@ -158,7 +158,8 @@ pub fn hints(tool: &Tool) -> Hints {
         Access::Read => Hints {
             read_only: !LOGGING_READS.contains(&tool.name),
             destructive: false,
-            idempotent: true,
+            // A logging read can append new picks when market data moves.
+            idempotent: !LOGGING_READS.contains(&tool.name),
             open_world: !CLOSED_WORLD.contains(&tool.name),
         },
         Access::Workspace | Access::Portfolio => {

@@ -871,6 +871,15 @@ pub async fn enrich_finalists_with_bars(
             let mut series = crate::research::Series::default();
             let history = match client.get_chart(&sym, "1y", "1d").await {
                 Ok(chart) => {
+                    // A history from a fallback, a twin listing or cache
+                    // says so in the list's data notes.
+                    if let Some(meta) = &chart.meta {
+                        for w in &meta.warnings {
+                            q.meta
+                                .get_or_insert_with(Default::default)
+                                .warn(format!("{sym}: {w}"));
+                        }
+                    }
                     series = crate::research::Series::from_chart(&chart);
                     let closes: Vec<f64> =
                         chart.dated_closes().into_iter().map(|(_, c)| c).collect();

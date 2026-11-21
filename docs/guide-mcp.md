@@ -225,7 +225,7 @@ seconds), for example when the background worker marks an alert triggered.
 
 - Every tool has `readOnlyHint`, `destructiveHint`, `idempotentHint` and
   `openWorldHint`. Read tools are read-only, except `picks`, which appends
-  its list to the local track record (idempotent, never destructive); write tools touch only local
+  its list to the local track record (not idempotent, since a repeat can log new picks; never destructive); write tools touch only local
   files (closed-world), and the ones that remove or replace saved data are
   marked destructive.
 - `quote`, `history`, `verdict`, `verdicts`, `picks`, `picks_review`,
