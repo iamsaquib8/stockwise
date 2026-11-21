@@ -47,6 +47,64 @@ pub struct TaxIfSold {
     pub other_rules: Vec<OtherRuleRow>,
     /// Holdings without a live price: not in the totals above.
     pub unpriced: Vec<String>,
+    /// ELSS units still in their three-year lock-in: in the figure above,
+    /// but they cannot be redeemed before `unlocks_on`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locked: Vec<LockedRow>,
+}
+
+/// ELSS units bought less than three years ago (each purchase, SIP
+/// instalments too, is locked for three years from its own date).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LockedRow {
+    pub symbol: String,
+    pub units: f64,
+    /// The day the earliest of these units can be redeemed.
+    pub unlocks_on: String,
+    /// The day the last of them can.
+    pub all_unlocked_on: String,
+}
+
+/// An ELSS (tax-saver) fund, by its scheme name.
+pub(crate) fn is_elss(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("elss") || n.contains("tax saver") || n.contains("taxsaver")
+}
+
+/// The ELSS lots of `portfolio` still in their three-year lock-in on `today`.
+pub(crate) fn elss_locked(
+    portfolio: &Portfolio,
+    name_of: impl Fn(&str) -> Option<String>,
+    today: chrono::NaiveDate,
+) -> Vec<LockedRow> {
+    let mut out = Vec::new();
+    for h in &portfolio.holdings {
+        if !name_of(&h.symbol).is_some_and(|n| is_elss(&n)) {
+            continue;
+        }
+        let unlocks: Vec<(chrono::NaiveDate, f64)> = h
+            .lots
+            .iter()
+            .filter_map(|l| {
+                let d = pf::parse_date(&l.date).ok()?;
+                let free = d.checked_add_months(chrono::Months::new(36))?;
+                (free > today).then_some((free, l.qty))
+            })
+            .collect();
+        let (Some(first), Some(last)) = (
+            unlocks.iter().map(|u| u.0).min(),
+            unlocks.iter().map(|u| u.0).max(),
+        ) else {
+            continue;
+        };
+        out.push(LockedRow {
+            symbol: h.symbol.clone(),
+            units: unlocks.iter().map(|u| u.1).sum(),
+            unlocks_on: first.to_string(),
+            all_unlocked_on: last.to_string(),
+        });
+    }
+    out
 }
 
 /// A foreign holding in "tax if sold": its gain in the tax currency (cost
@@ -564,6 +622,9 @@ pub(crate) async fn gather_inputs(
                 two_hundred_day_average: q.and_then(|q| q.two_hundred_day_average),
                 fifty_two_week_low: q.and_then(|q| q.fifty_two_week_low),
                 fifty_two_week_high: q.and_then(|q| q.fifty_two_week_high),
+                pe: q.and_then(|q| q.trailing_pe),
+                pb: q.and_then(|q| q.price_to_book),
+                dividend_yield: q.and_then(|q| q.dividend_yield_fraction()),
                 // In the base currency, each flow at its own day's rate. Not
                 // shown when a purchase date is a guess.
                 xirr_pct: value
@@ -733,6 +794,11 @@ pub(crate) fn analysis_report(g: &Gathered, _market: Market) -> AnalyzeReport {
                 })
                 .collect(),
             unpriced: report.unpriced,
+            locked: if country == Country::India {
+                elss_locked(portfolio, |s| val.name(s), today)
+            } else {
+                Vec::new()
+            },
         }
     });
     let mut warnings = g.pending.warnings();
@@ -881,6 +947,26 @@ fn print_tax_left_out(tx: &TaxIfSold) {
             tx.unpriced.join(", ")
         );
     }
+    if !tx.locked.is_empty() {
+        println!(
+            "  {}",
+            "ELSS units in the three-year lock-in (in the figure above, but not redeemable yet):"
+                .dimmed()
+        );
+        for l in &tx.locked {
+            let when = if l.unlocks_on == l.all_unlocked_on {
+                format!("from {}", l.unlocks_on)
+            } else {
+                format!("from {} (all by {})", l.unlocks_on, l.all_unlocked_on)
+            };
+            println!(
+                "    {} {:.3} units, redeemable {}",
+                pad_end(&l.symbol, 14).cyan(),
+                l.units,
+                when
+            );
+        }
+    }
 }
 
 /// A bar of `width` cells for `pct` of 100.
@@ -1016,6 +1102,34 @@ pub(crate) fn print_analysis(report: &AnalyzeReport) {
         "Effective holdings".dimmed(),
         a.concentration.effective_holdings
     );
+    let v = &a.valuation;
+    if v.pe.is_some() || v.pb.is_some() {
+        let cell = |x: Option<f64>, cover: f64| {
+            x.map_or("–".to_string(), |x| {
+                format!("{x:.1} ({cover:.0}% of value)")
+            })
+        };
+        println!(
+            "  {}  {}    {}  {}    {}  {}",
+            "P/E".dimmed(),
+            cell(v.pe, v.pe_coverage_pct),
+            "P/B".dimmed(),
+            cell(v.pb, v.pb_coverage_pct),
+            "Dividend yield".dimmed(),
+            v.dividend_yield_pct
+                .map_or("–".to_string(), |y| format!("{y:.2}%"))
+        );
+        if !v.without_pe.is_empty() {
+            println!(
+                "  {}",
+                format!(
+                    "No trailing P/E (a trailing loss, usually) for {}: left out of the P/E.",
+                    v.without_pe.join(", ")
+                )
+                .dimmed()
+            );
+        }
+    }
 
     // Holdings.
     print_section("Holdings");
@@ -1260,6 +1374,33 @@ pub async fn cmd_portfolio_analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elss_units_stay_locked_for_three_years_from_each_purchase() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "MF:120503",
+            pf::Lot::new(10.0, 50.0, "2022-06-01", "manual"),
+        );
+        p.add_lot("MF:120503", pf::Lot::new(5.0, 60.0, "2024-01-10", "manual"));
+        p.add_lot("MF:120503", pf::Lot::new(4.0, 70.0, "2025-03-05", "manual"));
+        p.add_lot("MF:999999", pf::Lot::new(4.0, 70.0, "2025-03-05", "manual"));
+        let names = |s: &str| {
+            Some(if s == "MF:120503" {
+                "Axis ELSS Tax Saver Fund - Direct Growth".to_string()
+            } else {
+                "Parag Parikh Flexi Cap Fund".to_string()
+            })
+        };
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let locked = elss_locked(&p, names, today);
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].units, 9.0);
+        assert_eq!(locked[0].unlocks_on, "2027-01-10");
+        assert_eq!(locked[0].all_unlocked_on, "2028-03-05");
+        assert!(is_elss("Mirae Asset Tax Saver Fund"));
+        assert!(!is_elss("Nippon India Small Cap"));
+    }
     use crate::api::Quote;
 
     fn quote(symbol: &str, price: f64, currency: &str) -> Quote {

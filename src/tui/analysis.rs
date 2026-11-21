@@ -638,6 +638,7 @@ mod tests {
                 foreign: Vec::new(),
                 other_rules: Vec::new(),
                 unpriced: Vec::new(),
+                locked: Vec::new(),
             }),
             warnings: Vec::new(),
             disclaimer: crate::verdict::DISCLAIMER,

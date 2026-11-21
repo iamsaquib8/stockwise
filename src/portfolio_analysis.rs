@@ -126,6 +126,11 @@ pub struct PositionInput {
     pub risk_tier: Option<String>,
     /// Whose holding-period rules apply (`None`: no long-term rate).
     pub tax_country: Option<Country>,
+    /// Trailing P/E, price to book, and dividend yield (a fraction) from the
+    /// quote; `None` when the quote has none (funds, loss-makers' P/E).
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    pub dividend_yield: Option<f64>,
     /// The holding period for the investor's residence (see [`TermRule`]).
     pub term_rule: TermRule,
     /// Cost in the base currency at each purchase's own exchange rate (or
@@ -326,6 +331,65 @@ pub struct Analysis {
     pub observations: Vec<Observation>,
     /// Holdings with no price or no exchange rate, left out of totals.
     pub left_out: Vec<String>,
+    /// Value-weighted P/E, P/B and dividend yield of the holdings that have them.
+    pub valuation: ValuationSnapshot,
+}
+
+/// The portfolio's valuation multiples, weighted by value. P/E and P/B are
+/// harmonic means (the portfolio's price over its share of earnings or
+/// book), so one very expensive stock does not swamp the figure. Holdings
+/// with a loss (no trailing P/E) are counted apart.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ValuationSnapshot {
+    pub pe: Option<f64>,
+    /// Share of the value the P/E covers, percent.
+    pub pe_coverage_pct: f64,
+    pub pb: Option<f64>,
+    pub pb_coverage_pct: f64,
+    /// Percent.
+    pub dividend_yield_pct: Option<f64>,
+    pub dividend_coverage_pct: f64,
+    /// Holdings with a quote but no trailing P/E (usually a trailing loss).
+    pub without_pe: Vec<String>,
+}
+
+/// [`ValuationSnapshot`] of `inputs`, valued by `positions`.
+pub fn valuation_snapshot(inputs: &[PositionInput], positions: &[Position]) -> ValuationSnapshot {
+    let total: f64 = positions.iter().filter_map(|p| p.value_base).sum();
+    let mut out = ValuationSnapshot::default();
+    if total <= 0.0 {
+        return out;
+    }
+    let (mut pe_w, mut pe_inv, mut pb_w, mut pb_inv, mut dy_w, mut dy) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (i, p) in inputs.iter().zip(positions) {
+        let Some(v) = p.value_base.filter(|v| *v > 0.0) else {
+            continue;
+        };
+        match i.pe.filter(|x| x.is_finite() && *x > 0.0) {
+            Some(pe) => {
+                pe_w += v;
+                pe_inv += v / pe;
+            }
+            None if i.pb.is_some() => out.without_pe.push(i.symbol.clone()),
+            None => {}
+        }
+        if let Some(pb) = i.pb.filter(|x| x.is_finite() && *x > 0.0) {
+            pb_w += v;
+            pb_inv += v / pb;
+        }
+        if let Some(y) = i.dividend_yield.filter(|x| x.is_finite() && *x >= 0.0) {
+            dy_w += v;
+            dy += v * y;
+        }
+    }
+    out.pe = (pe_inv > 0.0).then(|| pe_w / pe_inv);
+    out.pe_coverage_pct = pct(pe_w, total);
+    out.pb = (pb_inv > 0.0).then(|| pb_w / pb_inv);
+    out.pb_coverage_pct = pct(pb_w, total);
+    out.dividend_yield_pct = (dy_w > 0.0).then(|| dy / dy_w * 100.0);
+    out.dividend_coverage_pct = pct(dy_w, total);
+    out
 }
 
 fn pct(part: f64, whole: f64) -> f64 {
@@ -827,6 +891,29 @@ fn observations(a: &Analysis, ctx: &Context) -> Vec<Observation> {
             );
         }
     }
+    // One promoter behind several holdings (Tata, Adani, ...).
+    let held: Vec<(String, f64)> = a
+        .positions
+        .iter()
+        .filter_map(|p| Some((p.symbol.clone(), p.value_base?)))
+        .collect();
+    let total: f64 = held.iter().map(|h| h.1).sum();
+    for g in crate::business_groups::group_exposure(&held, total)
+        .iter()
+        .filter(|g| g.is_concentrated && g.companies.len() > 1)
+    {
+        add(
+            "group_concentration",
+            Level::Notice,
+            None,
+            format!(
+                "{} group companies ({}) are {:.1}% of the portfolio; group-level news moves them together.",
+                g.group,
+                g.companies.join(", "),
+                g.weight_pct
+            ),
+        );
+    }
     if a.by_currency.len() > 1
         && let Some(g) = a.by_currency.iter().find(|g| g.name != a.base_currency)
     {
@@ -942,6 +1029,7 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
         risk: risk(inputs, &positions, ctx, total),
         observations: Vec::new(),
         left_out,
+        valuation: valuation_snapshot(inputs, &positions),
         positions,
     };
     a.observations = observations(&a, ctx);
@@ -951,6 +1039,35 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valuation_multiples_are_value_weighted_harmonic_means() {
+        let mk = |sym: &str, pe: Option<f64>, pb: Option<f64>, dy: Option<f64>| PositionInput {
+            symbol: sym.into(),
+            pe,
+            pb,
+            dividend_yield: dy,
+            ..Default::default()
+        };
+        let pos = |sym: &str, v: f64| Position {
+            value_base: Some(v),
+            ..position(&holding(sym, 1.0, v, v), &ctx(), v)
+        };
+        let inputs = vec![
+            mk("A", Some(10.0), Some(2.0), Some(0.02)),
+            mk("B", Some(40.0), Some(8.0), Some(0.0)),
+            mk("C", None, Some(1.0), None),
+        ];
+        let positions = vec![pos("A", 500.0), pos("B", 500.0), pos("C", 1000.0)];
+        let v = valuation_snapshot(&inputs, &positions);
+        // 1000 / (500/10 + 500/40) = 16.
+        assert!((v.pe.unwrap() - 16.0).abs() < 1e-9);
+        assert!((v.pe_coverage_pct - 50.0).abs() < 1e-9);
+        assert_eq!(v.without_pe, ["C"]);
+        // 2000 / (250 + 62.5 + 1000).
+        assert!((v.pb.unwrap() - 2000.0 / 1312.5).abs() < 1e-9);
+        assert!((v.dividend_yield_pct.unwrap() - 1.0).abs() < 1e-9);
+    }
 
     fn day(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
