@@ -13,7 +13,7 @@ use crate::market::{self, Market};
 use crate::views::{self, DataSource};
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use axum::extract::{MatchedPath, Path, Query, Request, State};
+use axum::extract::{FromRequestParts, MatchedPath, Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -97,6 +97,28 @@ impl IntoResponse for ApiError {
 
 type ApiResult = std::result::Result<Response, ApiError>;
 
+/// `Query`, but a query string that does not parse (`days=abc`,
+/// `crypto=yes`) is the usual JSON 400, not axum's plain-text one.
+struct ApiQuery<T>(T);
+
+impl<T, S> FromRequestParts<S> for ApiQuery<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(v)| Self(v))
+            .map_err(|r| ApiError::BadRequest(r.body_text()))
+    }
+}
+
 fn json<T: serde::Serialize>(v: T) -> ApiResult {
     Ok(axum::Json(v).into_response())
 }
@@ -148,7 +170,10 @@ struct QuoteParams {
 /// `GET /api/quote?symbols=RELIANCE,TCS` — the `quote --json` array.
 /// Symbols Yahoo doesn't know are listed in the `X-Stockwise-Missing` header;
 /// 404 if none are known.
-async fn quote<D: DataSource>(State(st): Shared<D>, Query(p): Query<QuoteParams>) -> ApiResult {
+async fn quote<D: DataSource>(
+    State(st): Shared<D>,
+    ApiQuery(p): ApiQuery<QuoteParams>,
+) -> ApiResult {
     let market = st.market_for(p.market.as_deref())?;
     let raw: Vec<&str> = p
         .symbols
@@ -204,7 +229,7 @@ struct HistoryParams {
 async fn history<D: DataSource>(
     State(st): Shared<D>,
     Path(symbol): Path<String>,
-    Query(p): Query<HistoryParams>,
+    ApiQuery(p): ApiQuery<HistoryParams>,
 ) -> ApiResult {
     let market = st.market_for(p.market.as_deref())?;
     check_symbol(&symbol)?;
@@ -218,7 +243,10 @@ async fn history<D: DataSource>(
 }
 
 /// `GET /api/markets?crypto=true&fx=true&global=true` — the `markets --json` array.
-async fn markets<D: DataSource>(State(st): Shared<D>, Query(p): Query<MarketsParams>) -> ApiResult {
+async fn markets<D: DataSource>(
+    State(st): Shared<D>,
+    ApiQuery(p): ApiQuery<MarketsParams>,
+) -> ApiResult {
     let market = st.market_for(p.market.as_deref())?;
     json(
         views::markets(&st.source, market, p.crypto, p.fx, p.global)
@@ -233,7 +261,10 @@ struct SearchParams {
 }
 
 /// `GET /api/search?q=tata motors` — the `search --json` array.
-async fn search<D: DataSource>(State(st): Shared<D>, Query(p): Query<SearchParams>) -> ApiResult {
+async fn search<D: DataSource>(
+    State(st): Shared<D>,
+    ApiQuery(p): ApiQuery<SearchParams>,
+) -> ApiResult {
     let q = p.q.as_deref().unwrap_or("").trim();
     if q.is_empty() || q.len() > 100 {
         return Err(ApiError::BadRequest(
@@ -248,14 +279,16 @@ struct PortfolioParams {
     market: Option<String>,
     /// Currency for the totals (`portfolio --base`): a 3-letter currency code.
     base: Option<String>,
-    /// Named portfolio (`--portfolio NAME`), or empty/default.
+    /// A named portfolio; `default` is `portfolio.json`. Absent or empty:
+    /// the active portfolio (`--portfolio` when the server started). An
+    /// unknown name is a 404.
     portfolio: Option<String>,
 }
 
 /// `GET /api/portfolio?base=usd&portfolio=retirement` — the `portfolio --json` object.
 async fn portfolio<D: DataSource>(
     State(st): Shared<D>,
-    Query(p): Query<PortfolioParams>,
+    ApiQuery(p): ApiQuery<PortfolioParams>,
 ) -> ApiResult {
     let market = st.market_for(p.market.as_deref())?;
     let base = match p.base.as_deref().map(str::trim) {
@@ -289,11 +322,11 @@ async fn portfolio<D: DataSource>(
 async fn portfolios() -> ApiResult {
     let active = crate::portfolio::active().unwrap_or("default");
     let mut names = vec!["default".to_string()];
-    if let Ok(extra) = crate::portfolio::list_names() {
-        for n in extra {
-            if !names.iter().any(|x| x.eq_ignore_ascii_case(&n)) {
-                names.push(n);
-            }
+    let extra = crate::portfolio::list_names().unwrap_or_default();
+    // The active one is listed even before its file is first saved.
+    for n in extra.into_iter().chain([active.to_string()]) {
+        if !names.iter().any(|x| x.eq_ignore_ascii_case(&n)) {
+            names.push(n);
         }
     }
     json(serde_json::json!({
@@ -313,7 +346,7 @@ struct ResearchParams {
 async fn research<D: DataSource>(
     State(st): Shared<D>,
     Path(symbol): Path<String>,
-    Query(p): Query<ResearchParams>,
+    ApiQuery(p): ApiQuery<ResearchParams>,
 ) -> ApiResult {
     let market = st.market_for(p.market.as_deref())?;
     check_symbol(&symbol)?;
@@ -458,6 +491,16 @@ async fn prometheus<D: DataSource>(State(st): Shared<D>) -> Response {
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         body,
+    )
+        .into_response()
+}
+
+/// Any method but GET (or HEAD) on a known route. axum adds the `Allow`
+/// header.
+async fn method_not_allowed() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(serde_json::json!({ "error": "Only GET is supported" })),
     )
         .into_response()
 }
@@ -618,6 +661,8 @@ pub fn router<D: DataSource + 'static>(state: Arc<AppState<D>>) -> Router {
         .route("/healthz", get(healthz))
         .merge(web::routes())
         .merge(protected)
+        // Applies to the routes added above, so it comes after them.
+        .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1176,6 +1221,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(resp.headers()[header::ALLOW], "GET,HEAD");
+        let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+        assert_eq!(v["error"], "Only GET is supported");
+    }
+
+    #[tokio::test]
+    async fn bad_query_strings_are_json_400s() {
+        let app = app();
+        for (uri, field) in [
+            ("/api/research/TCS?days=abc", "days"),
+            ("/api/markets?crypto=yes", "crypto"),
+        ] {
+            let (status, resp) = get_with(&app, uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(
+                resp.headers()[header::CONTENT_TYPE],
+                "application/json",
+                "{uri}"
+            );
+            let v: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+            let error = v["error"].as_str().unwrap();
+            assert!(error.contains(field), "{uri}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_portfolio_names_are_404s() {
+        let app = app();
+        let (s, v) = get_json(&app, "/api/portfolio?portfolio=no-such-book-404").await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        assert!(
+            v["error"].as_str().unwrap().contains("no-such-book-404"),
+            "{v}"
+        );
+        // Without another active portfolio, `default` is the active one.
+        let (s, v) = get_json(&app, "/api/portfolio?portfolio=default").await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["totals"]["pnl"], 5500.0);
+    }
+
+    #[test]
+    fn portfolio_names_map_to_the_right_file() {
+        use crate::commands::{PortfolioPick, pick_portfolio};
+        // No name: the active portfolio, whichever it is.
+        assert_eq!(pick_portfolio(None, None).unwrap(), PortfolioPick::Active);
+        assert_eq!(
+            pick_portfolio(Some(" "), Some("retirement")).unwrap(),
+            PortfolioPick::Active
+        );
+        // `default` is portfolio.json, even with another one active.
+        assert_eq!(
+            pick_portfolio(Some("default"), None).unwrap(),
+            PortfolioPick::Active
+        );
+        assert_eq!(
+            pick_portfolio(Some("Default"), Some("retirement")).unwrap(),
+            PortfolioPick::File(None)
+        );
+        // A name is that portfolio; the active one's name is the active one.
+        assert_eq!(
+            pick_portfolio(Some("Retirement"), Some("retirement")).unwrap(),
+            PortfolioPick::Active
+        );
+        assert_eq!(
+            pick_portfolio(Some("kids"), Some("retirement")).unwrap(),
+            PortfolioPick::File(Some("kids".into()))
+        );
+        assert_eq!(
+            pick_portfolio(Some("kids"), None).unwrap(),
+            PortfolioPick::File(Some("kids".into()))
+        );
+        assert!(pick_portfolio(Some("../etc"), None).is_err());
     }
 
     #[tokio::test]

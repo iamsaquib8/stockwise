@@ -960,22 +960,53 @@ pub(crate) async fn load_portfolio_report(
     load_portfolio_report_named(src, market, base, None).await
 }
 
+/// The portfolio a `portfolio=NAME` request reads.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PortfolioPick {
+    /// The active portfolio (`--portfolio` / `STOCKWISE_PORTFOLIO`), read
+    /// through the data source.
+    Active,
+    /// Another one from disk: `None` is the default `portfolio.json`.
+    File(Option<String>),
+}
+
+/// No name means the active portfolio. `default` means `portfolio.json`
+/// even when another portfolio is active; a name equal to the active one
+/// is the active portfolio.
+pub(crate) fn pick_portfolio(
+    requested: Option<&str>,
+    active: Option<&str>,
+) -> Result<PortfolioPick> {
+    let Some(requested) = requested.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(PortfolioPick::Active);
+    };
+    let name = pf::normalize_name(Some(requested))?;
+    Ok(if name.as_deref() == active {
+        PortfolioPick::Active
+    } else {
+        PortfolioPick::File(name)
+    })
+}
+
 pub(crate) async fn load_portfolio_report_named(
     src: &impl views::DataSource,
     market: Market,
     base: Option<&str>,
     portfolio_name: Option<&str>,
 ) -> Result<PortfolioReport> {
-    let portfolio = match portfolio_name {
-        None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
-        Some(name) => {
-            let norm = pf::normalize_name(Some(name))?;
-            match norm {
-                None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
-                Some(n) => {
-                    Portfolio::load_named(Some(&n)).map_err(|e| e.context(views::LocalData))?
-                }
+    let portfolio = match pick_portfolio(portfolio_name, pf::active())? {
+        PortfolioPick::Active => src.portfolio().map_err(|e| e.context(views::LocalData))?,
+        PortfolioPick::File(name) => {
+            // A missing file loads as an empty portfolio: refuse a name
+            // that was never saved rather than show an empty book.
+            if let Some(n) = &name
+                && !pf::list_names()
+                    .map_err(|e| e.context(views::LocalData))?
+                    .contains(n)
+            {
+                return Err(views::NotFound(format!("No portfolio named '{}'", n)).into());
             }
+            Portfolio::load_named(name.as_deref()).map_err(|e| e.context(views::LocalData))?
         }
     };
     let symbols: Vec<String> = portfolio
