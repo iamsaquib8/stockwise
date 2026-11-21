@@ -192,6 +192,7 @@ from the prompt menu:
 |---|---|
 | `daily_briefing` | Market conditions, your portfolio's day, triggered alerts and watchlist moves |
 | `should_i_buy` | A stock's action from `stock_action` with its reasons and invalidation, plus its scores, risk and fit with your rules (argument: `symbol`, optional `amount`) |
+| `should_i_apply_ipo` | An IPO's verdict from `ipo_analyze` (APPLY, APPLY – SELL ON LISTING, WAIT with its QIB trigger, AVOID or NO CALL) with the listing model, expected value, valuation, plan and lock-ins (argument: `symbol`, optional `capital`) |
 | `exit_check` | Each holding's action from `portfolio_review` (EXIT and TRIM first), with concentration and checkup findings |
 | `smallcap_short_scan` | Small caps ranked for weeks to months, with the short-horizon track record |
 | `tax_aware_rebalance` | Drift from your targets and the tax each trim would cost |

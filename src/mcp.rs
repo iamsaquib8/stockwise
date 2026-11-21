@@ -559,6 +559,15 @@ const PROMPTS: &[(&str, &str, &str, &[PromptArg])] = &[
         ],
     ),
     (
+        "should_i_apply_ipo",
+        "Should I apply to this IPO?",
+        "The IPO engine's verdict (APPLY, APPLY – SELL ON LISTING, WAIT, AVOID or NO CALL) with its listing model, valuation, allotment odds and plan, explained without changing it",
+        &[
+            ("symbol", "NSE IPO symbol or company name, e.g. BCSSL", true),
+            ("capital", "Rupees you could apply with, e.g. 250000", false),
+        ],
+    ),
+    (
         "exit_check",
         "Exit check across my holdings",
         "Each holding's scores and coverage, concentration and checkup findings, to see which deserve a closer look",
@@ -669,6 +678,28 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
                  me through the pillar scores behind it, the volatility and drawdown, and which \
                  of my own rules it passes or fails. Do not change the action or add levels of \
                  your own.{POLICY}"
+            )
+        }
+        "should_i_apply_ipo" => {
+            let symbol = arg("symbol")
+                .ok_or_else(|| anyhow::anyhow!("should_i_apply_ipo needs a symbol"))?;
+            let capital = arg("capital")
+                .map(|c| format!(" with capital {c}"))
+                .unwrap_or_default();
+            format!(
+                "I'm deciding whether to apply to the {symbol} IPO. Call ipo_analyze for \
+                 {symbol}{capital}. Lead with the verdict exactly as returned (APPLY, \
+                 APPLY_SELL_ON_LISTING, WAIT, AVOID, NO_CALL or LISTED), its confidence and \
+                 reasons, and the trigger (for WAIT: the QIB level by 3 PM IST on the closing \
+                 day) or the invalidation and review date. Then explain the listing model's \
+                 expected gain and probability of listing below the issue price with its fit \
+                 (issues, R², residual sd), the expected value of the minimum application in \
+                 each category and what my capital buys, the valuation against listed peers, \
+                 the listing-day plan and the anchor lock-in dates. For NO_CALL, list the \
+                 missing fields and say that saving the RHP figures (`stockwise ipo {symbol} \
+                 --rhp-template`) fills most of them. For LISTED, call stock_action for \
+                 {symbol}. Treat GMP as unofficial press chatter. Do not change the verdict or \
+                 add price levels of your own.{POLICY}"
             )
         }
         "exit_check" => format!(

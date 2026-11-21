@@ -126,8 +126,13 @@ one category with `stockwise mf screen flexi cap`.
 ```bash
 stockwise options chain NIFTY     # strikes with open interest, IV and greeks
 stockwise options oi NIFTY        # open-interest walls, put/call ratio, max pain
-stockwise ipo                     # open and upcoming IPOs from NSE
+stockwise ipo                     # open and upcoming IPOs from NSE, a verdict each
+stockwise ipo BCSSL               # APPLY / WAIT / AVOID / NO CALL with reasons and plan
 ```
+
+An IPO verdict needs the RHP figures for its valuation: `stockwise ipo SYMBOL
+--rhp-template` prints the file to fill in. Without them most issues get NO
+CALL, with the missing fields listed.
 
 Add `--explain` to `options oi` for plain-English notes.
 
