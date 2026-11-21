@@ -301,7 +301,12 @@ pub fn for_fundamentals(q: &Quote) -> Meta {
 pub fn for_scan<'a>(quotes: impl IntoIterator<Item = &'a Quote>) -> Meta {
     let mut m = Meta::default();
     let mut rows = 0usize;
-    let mut present: Vec<(&'static str, usize)> = Vec::new();
+    // Per field: rows that have it, and rows it applies to (a bank's D/E
+    // does not), in the canonical field order.
+    let mut present: Vec<(&'static str, usize, usize)> = stock_field_checks(&Quote::default())
+        .into_iter()
+        .map(|(f, _)| (f, 0, 0))
+        .collect();
     let mut coverage_sum = 0.0;
     for q in quotes {
         rows += 1;
@@ -319,23 +324,29 @@ pub fn for_scan<'a>(quotes: impl IntoIterator<Item = &'a Quote>) -> Meta {
         let checks = stock_field_checks(q);
         coverage_sum += coverage_pct(checks.iter().filter(|(_, ok)| *ok).count(), checks.len());
         for (name, ok) in checks {
-            match present.iter_mut().find(|(n, _)| *n == name) {
-                Some(slot) => slot.1 += ok as usize,
-                None => present.push((name, ok as usize)),
+            match present.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(slot) => {
+                    slot.1 += ok as usize;
+                    slot.2 += 1;
+                }
+                None => present.push((name, ok as usize, 1)),
             }
         }
     }
     if rows == 0 {
         return m;
     }
-    for (name, have) in &present {
-        if have * 2 < rows {
+    for (name, have, applies) in &present {
+        if *applies == 0 {
+            continue;
+        }
+        if have * 2 < *applies {
             m.missing.push(name.to_string());
         }
-        if *have < rows {
+        if have < applies {
             m.warn(format!(
-                "{name} missing for {} of {rows} stocks",
-                rows - have
+                "{name} missing for {} of {applies} stocks",
+                applies - have
             ));
         }
     }
@@ -389,6 +400,23 @@ mod tests {
         );
         assert_eq!(m.coverage, 60.0);
         assert_eq!(for_picks(&[]).coverage, 0.0);
+
+        // Two banks without D/E and one industrial with it: D/E is complete.
+        let bank = Quote {
+            sector: Some("Financial Services".into()),
+            ..Default::default()
+        };
+        let industrial = Quote {
+            debt_to_equity: Some(50.0),
+            ..Default::default()
+        };
+        let m = for_scan([&bank, &bank, &industrial]);
+        assert!(!m.missing.contains(&F_DE.to_string()), "{:?}", m.missing);
+        assert!(
+            !m.warnings.iter().any(|w| w.starts_with("D/E")),
+            "{:?}",
+            m.warnings
+        );
     }
 
     #[test]
