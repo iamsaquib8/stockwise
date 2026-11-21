@@ -812,7 +812,10 @@ fn observations(a: &Analysis, ctx: &Context) -> Vec<Observation> {
         );
     }
     for g in &a.by_sector {
-        if g.name != UNKNOWN_SECTOR && g.weight_pct > SECTOR_LIMIT_PCT {
+        if g.name != UNKNOWN_SECTOR
+            && !crate::xray::is_fund_sector_label(&g.name)
+            && g.weight_pct > SECTOR_LIMIT_PCT
+        {
             add(
                 "sector_concentration",
                 Level::Notice,
