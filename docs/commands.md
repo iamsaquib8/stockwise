@@ -472,7 +472,7 @@ Data lives in the directory shown by `stockwise doctor`.
 |---------|-------------|
 | `portfolio [show] [--base inr\|usd] [--json\|--csv]` (`p`) | Holdings with live P&L, XIRR and allocation; mutual funds at AMFI's NAV and SGBs from NSE ([below](#mutual-funds-and-sgbs)); holdings without a price show N/A. Mixed INR/USD holdings are totalled in `--base` (default: the market's currency). An Action column shows each stock's [action](#actions) (`HOLD (med)`, `NO CALL`) |
 | `portfolio add <SYMBOL> <SHARES> <COST> [--date YYYY-MM-DD] [--currency CODE] [--force] [-m MARKET]` | Add a purchase as a new lot (default date: today). `-m` picks the market for a bare ticker (`portfolio add VOD 300 70 -m uk` → `VOD.L`), and the confirmation names the market and its currency. `--currency INR` takes a price paid in another currency and converts it at that day's exchange rate (the pair's close on or before the purchase date) into the currency the instrument is quoted in; the rate used is printed, and the purchase is refused when Yahoo Finance gives no quote currency. A ticker Yahoo does not know is refused with "did you mean" names; `--force` saves it anyway (also on `watch add` and `alert add`). A mutual fund is `MF:<AMFI code>` or `MF:<ISIN>` (units and NAV per unit), kept as typed in every market |
-| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots |
+| `portfolio sell <SYMBOL> <SHARES> [PRICE] [--date YYYY-MM-DD] [--lots N,N]` | Record a sale, oldest lots first (FIFO). Price defaults to the live price (a fund's latest NAV); a past `--date` needs a price. Refused while a split or bonus before the sale isn't applied to your lots. `--lots 3,1` sells from those lots (numbers from `portfolio lots`) in that order — specific identification for US and UK shares; Indian shares and funds always sell oldest first |
 | `portfolio lots <SYMBOL> [--lot N [--date YYYY-MM-DD] [--qty Q] [--price P] \| --delete] [--undo-sale N]` | Lots, sales, dividends and XIRR of one holding, each numbered. `--lot N` corrects a lot's date, quantity or price, or `--delete`s it without recording a sale; `--undo-sale N` drops sale N from the realised gains and puts its shares back as the lot they came from |
 | `portfolio restore [N]` | Lists the last five saved versions of the portfolio (`portfolio.json.1` is the newest), or brings version N back. The version it replaces becomes backup 1, so a restore can be undone |
 | `portfolio actions [SYMBOL] [--apply]` | Splits, bonuses, Indian demergers and dividends since your purchases, including positions you have sold (from Yahoo; Indian bonus issues checked against NSE). Shows them; `--apply` adjusts lots, adds zero-cost lots for Indian bonus shares, adds lots of a demerged company at the official share of cost, records dividends, and is safe to repeat |
@@ -480,7 +480,7 @@ Data lives in the directory shown by `stockwise doctor`.
 | `portfolio benchmark [NIFTY\|SENSEX\|SP500\|...] [-p 1y] [--base inr\|usd] [--json\|--csv]` | Time-weighted return against an index over the period, from the lots held each day: alpha, beta, tracking error, and attribution by holding and sector (see [below](#benchmark-and-attribution)) |
 | `portfolio pme [NIFTY\|SPY\|VOO\|VWCE\|NIFTYBEES\|...] [--base inr\|usd] [--json\|--csv]` | Public Market Equivalent (Index Twin): mirror exact tradebook cash flows into a passive benchmark; computes Kaplan-Schoar PME, Direct Alpha, twin value, and net currency value added vs the index (see [below](#public-market-equivalent-index-twin)) |
 | `portfolio remove <SYMBOL> [--yes]` | Remove a holding and its lots without recording a sale; asks first when it has more than one lot |
-| `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift <PCT>` | Custom target weights by symbol or sector and configurable drift tolerance band |
+| `portfolio target [show]` / `portfolio target set <KEY> <PCT>` / `portfolio target remove <KEY>` / `portfolio target drift [<PCT>] [--json]` | Target weights by symbol (held or not yet held), sector, or asset class (`equity`, `debt`, `gold`, `international`, `cash`). A symbol target is carved out of its sector and asset-class targets, so nested targets never count twice; keys that match nothing are reported. `target drift` with no percentage shows current vs target per key with the 5/25 band (5 points or 25% of the target, whichever is smaller); with one, saves the drift tolerance band (the default is the profile's `default_drift_pct`, which `target show` prints) |
 | `portfolio analyze [--quick] [--json\|--csv]` (or `portfolio dash`) | Dashboard of the whole portfolio in the base currency (see [below](#portfolio-analysis)). `--quick` skips the price history and sector lookups (no risk figures); `--csv` prints the holdings table (`--csv --groups`: the market, currency, cap-tier and sector tables), `--json` everything |
 | `portfolio checkup [--offline] [--json\|--csv]` | Scan of the whole portfolio in six lenses, ranked by the money at stake: each finding says what was observed, the amount or weight at stake and the command to inspect it, with an Action column per holding (see [below](#portfolio-checkup)) |
 | `portfolio review [--horizon short\|long] [--json]` | Each holding's [action](#actions), sorted EXIT, TRIM, ADD, HOLD, then NO CALL, with its reasons, invalidation price, review date, size hint and tax note (see [below](#portfolio-review)) |
@@ -493,8 +493,8 @@ Data lives in the directory shown by `stockwise doctor`.
 | `import <kite\|indmoney\|groww\|upstox\|cas\|csv> <FILE> [--replace] [--sheet NAME]` | Import broker holdings, a lot list, a tradebook (CSV or `.xlsx`: one sheet is read, the first whose header fits, or `--sheet NAME`; Excel date cells included) or a CAS (casparser JSON/CSV); re-importing updates instead of doubling (see below and [brokers.md](brokers.md#importing-holdings)) |
 | `export <portfolio\|watchlist>` | Write a CSV to the current directory |
 | `wealth` | Save today's portfolio value and show growth (run daily) |
-| `rebalance [--inflow N] [--drift N] [--json]` (or `portfolio rebalance`) | Trades to rebalance to targets (or equal weight); `--inflow` buys underweight assets with new cash without selling; `--drift` ignores minor deviations |
-| `harvest [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale (see [below](#harvest)) |
+| `rebalance [--inflow N [--with-sells]] [--raise N] [--cash-buffer N] [--drift N] [--min-trade N] [--brokerage N] [--fx-spread PCT] [--json]` (or `portfolio rebalance`) | Whole-share trades back to targets (or equal weight) whose cash balances: sells pay for buys, and what is left goes to the holdings furthest below target. `--inflow` invests new cash without selling (`--with-sells` adds it to a full rebalance); `--raise` sells only, to raise that much cash at the lowest tax; `--cash-buffer` keeps cash uninvested. Each sell shows its lots, STCG/LTCG and tax; each trade its costs (see [below](#rebalance)) |
+| `harvest [--carry-st N] [--carry-lt N] [--json\|--csv]` | Tax-loss and LTCG-exemption harvesting candidates, by FIFO sale in India and by lot in the US (see [below](#harvest)) |
 | `tax <in\|us\|uk> [--json\|--csv]` | Capital-gains estimate for the current tax year: realized sales and unrealized lots, each with its own holding period (see below) |
 | `tax export [in\|us] [--fy 2025-26] [--out FILE] [--json]` | Capital-gains schedule of a tax year's sales: an ITR Schedule CG / 112A CSV for India, a Form 8949 worksheet for the US (see [below](#tax-export)) |
 | `tax export in [--schedule cg\|os\|fa\|form67] [--slab 30] [--withholding PCT] [--fy 2025-26] [--out FILE] [--json]` | India: Schedule OS (dividends and interest with TDS), Schedule FA Table A3 (foreign assets, calendar year) or Form 67 (foreign tax credit) instead of Schedule CG (see [below](#dividend-and-interest-income-schedule-os) and [Schedule FA](#foreign-assets-schedule-fa-and-form-67)) |
@@ -666,6 +666,18 @@ holding is not offered as a loss; `fifo_blocked` (and a note on screen) says how
 many shares you would sell and what the sale books. For the US you can choose lots,
 so only the losing lots are offered.
 
+For the US the row's `lots` names the lots sold, and the screen prints the
+command that records the sale exactly (`portfolio sell AAPL 8 --lots 2`), so the
+ledger books the same loss as the broker. For India a note says to buy back on
+the next trading day: a same-day sell and buy nets out as an intraday trade.
+
+The LTCG step-up row is the exact share count, oldest lots first and long-term
+lots only, whose gain fits in what is left of the exemption (`tax_free_gain_room`:
+the exemption plus any losses that would set off against the gain first), and
+`estimated_tax_saved` is that gain at 13% (12.5% plus 4% cess). `--carry-st` and
+`--carry-lt` add capital losses brought forward from earlier years; they set off
+like this year's losses and are echoed in `carried_forward`.
+
 For the US, `harvest -m us` also checks the 30-day wash-sale rule (IRS
 Publication 550): a loss is disallowed when the same shares are bought within 30
 days before or after the sale. A loss candidate with a purchase in the last 30
@@ -682,6 +694,41 @@ remaining exemption is shared: each winner takes its part of it, biggest first,
 and the saving counts only that part. Holdings in another currency (US shares for
 `in`) are listed under `other_currency` and not counted; holdings taxed under
 other rules (crypto, debt funds, SGBs, gold and similar ETFs) under `other_rules`.
+
+### Rebalance
+
+> **Guide:** [Rebalance to target weights](guide-rebalance.md).
+
+`rebalance` turns targets into whole-share orders (fund units to three decimals).
+Holdings without a price or exchange rate are left out with a warning, and the
+weights are of the rest. A target for a symbol not held yet gives a buy line
+(`held: false`).
+
+- **Cash balances.** Sells come first; buys are paid from them plus any
+  `--inflow`, less `--cash-buffer`. Short of cash, holdings over target inside the
+  drift band are trimmed, then the lowest-priority buys; cash left over buys more
+  of the holdings furthest below target while a share brings one closer.
+  `net_cash` is what the trades free (positive) or need (negative) after costs;
+  `cash_left` is what stays uninvested. `--inflow` alone never sells, and splits
+  the cash the way that minimizes the squared deviation from target.
+- **Projected weights** (`projected_pct`) come from the rounded orders, of the
+  holdings plus the cash left. The profile's `max_stock_weight` is a hard limit
+  for single stocks (not ETFs, funds or gold bonds): a target above it is capped
+  and the excess goes to the other holdings.
+- **Lots and tax.** Indian shares and funds sell oldest first. Elsewhere a sell
+  takes losing lots first, then the lots with the lowest tax, and leaves lots that
+  turn long-term within 45 days for last; `record` gives the `portfolio sell
+  --lots` command. Each sell has its `st_gain`, `lt_gain` and `tax` (added to this
+  tax year's estimate, cess included); `tax.saved_vs_fifo` is what the lot choice
+  saves. Gains taxed under other rules (an Indian resident's foreign shares, debt
+  funds) are shown but not taxed (`untaxed_gain`).
+- **Costs.** NSE/BSE trades: STT, stamp duty, exchange and SEBI fees with GST,
+  and the DP charge on sells; Indian fund purchases: stamp duty; trades in
+  another currency: an FX spread (`--fx-spread`, 0.5% by default); `--brokerage`
+  per share order. Orders under `--min-trade` (₹1,000 / $20 by default) are left
+  out.
+- **`--raise N`** sells only, lowest tax first (losses, then gains inside the
+  exemption, then long-term, then short-term), most overweight first among equals.
 
 ### Tax export
 
@@ -1276,7 +1323,8 @@ at two brokers is two sets of lots in one holding (`portfolio lots` shows the
 account). Lots entered by hand or saved by an older version, with no account of
 their own, count as the account of their `source`, or — for manual lots — join
 the first broker that syncs the symbol. Totals and tax span all accounts.
-`portfolio sell` works on the whole holding, oldest lot first.
+`portfolio sell` works on the whole holding, oldest lot first (or the lots
+`--lots` names, for US and UK shares).
 
 **Groww, Upstox, CAS.** Groww and Upstox exports are snapshots (quantity
 sync, like Kite). A CAS whose transactions cover a fund's whole balance
@@ -1578,8 +1626,9 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 | `portfolio pme` | `{summary: {benchmark_symbol, benchmark_name, base_currency, start_date, end_date, total_invested, total_distributed, actual_value, twin_value, value_added, kaplan_schoar_pme, direct_alpha_percent, portfolio_xirr_percent, twin_xirr_percent, twin_shares, benchmark_end_price}, holdings: [{symbol, actual_value, twin_value, value_added, pme_ratio, direct_alpha_percent, actual_xirr_percent, twin_xirr_percent, cashflows_count}]}` — Public Market Equivalent (Index Twin) analysis; `kaplan_schoar_pme` is the KS-PME ratio (> 1.0 indicates outperformance); `direct_alpha_percent` is the annualized excess return rate (%) | holding row |
 | `portfolio xray` | `{portfolio_name, base_currency, total_value, effective_holdings: [{symbol, name, direct_value, direct_weight_pct, fund_value, fund_weight_pct, total_value, effective_weight_pct, is_concentrated, via_funds: [{fund_symbol, value, weight_in_fund_pct, effective_weight_pct}]}], concentrations_above_10pct: [effective_holding], market_cap_breakdown: {large_cap_value, large_cap_pct, mid_cap_value, mid_cap_pct, small_cap_value, small_cap_pct, unclassified_value, unclassified_pct}, sector_allocation: [{sector, value, weight_pct}], asset_class_split: {equity_value, equity_pct, debt_value, debt_pct, commodity_value, commodity_pct, cash_value, cash_pct}, funds_analyzed: [{symbol, name, look_through_available, holdings_count, coverage_pct}]}` | effective holding |
 | `tax export` | `{country, tax_year, period_start, period_end, currency, disclaimer, sales: [sale], summary, other_currency: [symbol], virtual_digital_assets: [symbol], intraday_sales, intraday_gain, other_rules: [symbol], notes: [text]}` (`virtual_digital_assets`, `intraday_sales`, `intraday_gain` and `other_rules` for India only) — India: sale = `{section, term, isin, scrip, symbol, quantity, sale_date, sale_price, sale_value, purchase_date, purchase_price, cost, actual_cost, fmv_31_jan_2018, holding_days, gain, grandfathered, purchase_date_estimated}`, summary = `{stcg_111a_sale_value, stcg_111a_cost, stcg_gains, stcg_losses, ltcg_112a_sale_value, ltcg_112a_cost, ltcg_gains, ltcg_losses, st_loss_set_off_against_ltcg, taxable_stcg, ltcg_after_set_off, ltcg_exemption, taxable_ltcg, taxable_stcg_before_23_jul_2024, taxable_ltcg_before_23_jul_2024, stcg_tax, ltcg_tax, cess, total_tax, st_loss_carried_forward, lt_loss_carried_forward}`; US: sale = `{part, description, symbol, quantity, date_acquired, date_sold, proceeds, cost_basis, code, adjustment, gain_or_loss, date_acquired_estimated, holding_days_added}` (`code` is `W` for a wash sale, `adjustment` the disallowed loss, `holding_days_added` the days carried over from washed shares), summary = `{short_term_proceeds, short_term_cost, short_term_adjustment, short_term_gain, long_term_proceeds, long_term_cost, long_term_adjustment, long_term_gain, net_gain, taxable_short_term, taxable_long_term, loss_deductible_this_year, loss_carryover, short_term_tax, long_term_tax, total_tax}`, and after `summary` the US adds `wash_sales: [{sale, part, symbol, sell_date, qty, loss, replacement_qty, disallowed, replacements: [{date, date_estimated, qty, basis_added, days_added, sale}]}]` (`sale` is the index in the portfolio's realized sales and `part` the row of that sale; a replacement's `sale` is null while it is still held) | — (the CSV is the schedule itself, see [Tax export](#tax-export)) |
-| `harvest` | `{country, currency, total_st_loss_harvestable, total_lt_loss_harvestable, estimated_loss_tax_saved, ltcg_exemption_limit, ltcg_exemption_remaining, loss_candidates: [row], gain_harvest_candidates: [row], fifo_blocked: [{symbol, shares_to_sell, net_result, lot_loss}], unpriced: [symbol], other_rules: [{symbol, reason}], other_currency: [symbol]}`, row = `{symbol, shares, avg_cost, price, pnl, pnl_pct, st_pnl, lt_pnl, estimated_tax_saved, harvest_type, recent_buy, wash_sale_window_end}` — `harvest_type` is `tax_loss` or `ltcg_exemption_step_up`; `recent_buy` and `wash_sale_window_end` are set for US loss candidates only (see [harvest](#harvest)); for India `shares`, `st_pnl` and `lt_pnl` describe the whole FIFO sale that reaches the losing lot; `fifo_blocked` holdings would book a net gain (`net_result` > 0) if sold up to the losing lot, so they are not offered as losses; `other_currency` and `other_rules` holdings are left out | row |
-| `rebalance` | `{total_value, projected_value, currency, inflow, drift_tolerance, items: [{symbol, current_value, current_pct, target_pct, projected_value, projected_pct, price, diff_value, diff_shares, action_type, action_display, is_fund}]}` — `action_type` is `buy`, `sell` or `ok`; with `--inflow` nothing is sold | item |
+| `harvest` | `{country, currency, total_st_loss_harvestable, total_lt_loss_harvestable, estimated_loss_tax_saved, ltcg_exemption_limit, ltcg_exemption_remaining, loss_candidates: [row], gain_harvest_candidates: [row], fifo_blocked: [{symbol, shares_to_sell, net_result, lot_loss}], unpriced: [symbol], other_rules: [{symbol, reason}], other_currency: [symbol], carried_forward: {short_term, long_term}, tax_free_gain_room, notes: [string]}`, row = `{symbol, shares, avg_cost, price, pnl, pnl_pct, st_pnl, lt_pnl, estimated_tax_saved, harvest_type, recent_buy, wash_sale_window_end, lots}` — `harvest_type` is `tax_loss` or `ltcg_exemption_step_up`; `recent_buy` and `wash_sale_window_end` are set for US loss candidates only (see [harvest](#harvest)); for India `shares`, `st_pnl` and `lt_pnl` describe the whole FIFO sale that reaches the losing lot; `fifo_blocked` holdings would book a net gain (`net_result` > 0) if sold up to the losing lot, so they are not offered as losses; `lots` is set when a US loss sells other lots than the oldest (record it with `portfolio sell --lots`); a step-up row's `shares` is the exact count whose gain fits `tax_free_gain_room`; `other_currency` and `other_rules` holdings are left out | row |
+| `rebalance` | `{total_value, projected_value, currency, inflow, drift_tolerance, mode, raise, cash_buffer, sell_proceeds, buy_cost, costs, net_cash, cash_left, tax: {st_gain, lt_gain, tax, fifo_tax, saved_vs_fifo, untaxed_gain}, excluded: [symbol], max_stock_weight, warnings: [string], items: [{symbol, current_value, current_pct, target_pct, projected_value, projected_pct, price, diff_value, diff_shares, action_type, action_display, is_fund, is_etf, held, asset_class, sector, lots: [{lot_no, qty, bought, unit_cost, gain, long_term, long_term_on}], st_gain, lt_gain, tax, costs: {stt, stamp, exchange, brokerage, dp, fx_spread, total}, record, notes}]}` — `mode` is `rebalance`, `buy_only` or `raise`; `action_type` is `buy`, `sell` or `ok`; `diff_value` is negative for sells; with `--inflow` alone nothing is sold; empty and zero fields are left out | item |
+| `portfolio target drift` | `{currency, total_value, absolute_band_pct, relative_band_pct, rows: [{key, kind, current_pct, target_pct, drift_pct, relative_drift_pct, band_pct, status}], warnings, excluded}` — `kind` is `symbol`, `sector`, `asset_class` or `untargeted`; `status` is `ok`, `over` or `under` | — |
 | `verdict` | `{symbol, name, price, currency, overall_score, data_coverage, pillar_bands: {strong, moderate, weak, no_data}, pillars: [{name, score, weight, band, inputs_present, inputs_possible, summary}], note, bull_points: [text], bear_points: [text], next_catalyst, warnings: [text], disclaimer}` — `score` and `overall_score` are 0–100 and `null` when there is no data (then `band` is `no_data` and the pillar is left out of the composite); `band` is `strong` (65+), `moderate` (45–64), `weak` or `no_data`; `weight` is a share of 1; `data_coverage` is the share of input data present, in percent; `note` says why there is no composite | — |
 | `score` / `scorecard` | `{symbol, name, currency, price, market_cap, sector, industry, piotroski: {score, max_score, evaluated, rating, rating_label, profitability_score, leverage_score, efficiency_score, criteria: [{id, category, name, formula, formatted_value, passed, points, explanation, evaluated}]}, altman: {z_score, zone, zone_label, formula_str, is_financial, note, missing_factors, components, z_double_prime, z_double_prime_zone, z_double_prime_components, z_double_prime_formula_str}, evaluation_date}` — `evaluated` counts the signals that had data (`score` out of `evaluated`, not always out of 9); `rating` is `null` unless all nine ran; `z_score` is `null` with the missing ratios in `missing_factors` | — |
 | `options oi` | `{symbol, source, underlying, currency, expiry, expiries, lot_size, pcr: {call_oi, put_oi, call_volume, put_volume, oi_ratio, volume_ratio}, pcr_sentiment, max_pain, top_calls: [wall], top_puts: [wall], breakdown: {calls: {long_buildup_oi, short_covering_oi, short_buildup_oi, long_unwinding_oi, neutral_oi, long_buildup_count, ...}, puts: {...}}, calls_sentiment, puts_sentiment}`, wall = `{strike, open_interest, share_pct, oi_change, price_change, last_price, buildup}` — `buildup` is `long_buildup`, `short_covering`, `short_buildup`, `long_unwinding` or `null` (on screen `LB`, `SC`, `SB`, `LU`); `calls_sentiment` and `puts_sentiment` read each side for the underlying (put buying is bearish, put writing bullish); `pcr_sentiment`, `calls_sentiment` and `puts_sentiment` are words such as `Bullish` | — |

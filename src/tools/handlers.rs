@@ -693,8 +693,15 @@ async fn rebalance(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> 
         let plan = crate::rebalance::RebalancePlan::empty(commands::market_currency(m));
         return Ok(serde_json::to_value(plan)?);
     }
-    let (plan, _) =
-        commands::rebalance_plan(src, &p, &[], a.f64("inflow"), a.f64("drift"), m).await?;
+    let args = commands::RebalanceArgs {
+        inflow: a.f64("inflow"),
+        with_sells: a.bool("with_sells"),
+        raise: a.f64("raise"),
+        cash_buffer: a.f64("cash_buffer"),
+        drift: a.f64("drift"),
+        ..Default::default()
+    };
+    let (plan, _) = commands::rebalance_plan(src, &p, &args, m, None).await?;
     Ok(serde_json::to_value(plan)?)
 }
 

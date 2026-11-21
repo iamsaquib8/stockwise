@@ -916,21 +916,17 @@ stockwise options TCS                     expected moves (same as `options moves
     Wealth,
     /// Trades to rebalance your portfolio to targets or equal weight
     Rebalance {
-        /// Cash inflow for buy-only rebalancing without selling
-        #[arg(long)]
-        inflow: Option<f64>,
-        /// Drift tolerance band percentage (e.g. 2.0 for +/-2%)
-        #[arg(long)]
-        drift: Option<f64>,
-        /// One-off target weights (e.g. TCS:25 RELIANCE:35 or TCS=25,INFY=25)
-        #[arg(num_args = 0..)]
-        targets: Vec<String>,
-        /// Print rebalance plan as JSON
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        opts: RebalanceOpts,
     },
     /// Tax-loss and LTCG exemption harvesting opportunities
     Harvest {
+        /// Short-term capital loss brought forward from earlier years
+        #[arg(long, value_name = "AMOUNT")]
+        carry_st: Option<f64>,
+        /// Long-term capital loss brought forward from earlier years
+        #[arg(long, value_name = "AMOUNT")]
+        carry_lt: Option<f64>,
         #[command(flatten)]
         out: TableOutput,
     },
@@ -1380,6 +1376,16 @@ enum PortfolioCmd {
         /// Show the FIFO lots, tax and LTCG countdown without recording the sale
         #[arg(long, alias = "dry-run")]
         preview: bool,
+        /// Sell from these lots, in this order (numbers from `portfolio lots`;
+        /// e.g. 3,1): specific identification for US/UK shares. Indian shares
+        /// and funds always sell oldest first
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "N,N",
+            conflicts_with = "preview"
+        )]
+        lots: Vec<usize>,
         /// Brokerage, taxes and fees paid on the sale, in total; realized P&L is net of them.
         /// `auto` estimates an NSE/BSE delivery sell's STT, exchange, SEBI,
         /// GST and DP charges (no brokerage). Not with --preview, whose
@@ -1469,18 +1475,8 @@ enum PortfolioCmd {
     },
     /// Trades to rebalance your portfolio to targets or equal weight
     Rebalance {
-        /// Cash inflow for buy-only rebalancing without selling
-        #[arg(long)]
-        inflow: Option<f64>,
-        /// Drift tolerance band percentage (e.g. 2.0 for +/-2%)
-        #[arg(long)]
-        drift: Option<f64>,
-        /// One-off target weights (e.g. TCS:25 RELIANCE:35 or TCS=25,INFY=25)
-        #[arg(num_args = 0..)]
-        targets: Vec<String>,
-        /// Print rebalance plan as JSON
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        opts: RebalanceOpts,
     },
     /// Dashboard: holdings by market, currency, cap tier and sector, tax terms, risk and
     /// observations (readings, not recommendations)
@@ -1567,6 +1563,74 @@ enum PortfolioCmd {
     },
 }
 
+/// `rebalance` options (top level and under `portfolio`).
+#[derive(clap::Args, Debug)]
+struct RebalanceOpts {
+    /// New cash to invest: buy-only, never sells (add --with-sells for a full rebalance)
+    #[arg(long, conflicts_with = "raise")]
+    inflow: Option<f64>,
+    /// With --inflow: also sell overweight holdings (full rebalance on the larger total)
+    #[arg(long, requires = "inflow")]
+    with_sells: bool,
+    /// Sell only, to raise this much cash (after costs) at the lowest tax
+    #[arg(long, value_name = "AMOUNT")]
+    raise: Option<f64>,
+    /// Cash to keep uninvested (taken from the new cash, or raised as well)
+    #[arg(long, value_name = "AMOUNT")]
+    cash_buffer: Option<f64>,
+    /// Drift tolerance band percentage (e.g. 2.0 for +/-2%)
+    #[arg(long)]
+    drift: Option<f64>,
+    /// Skip orders worth less than this [default: ₹1,000 / $20]
+    #[arg(long, value_name = "AMOUNT")]
+    min_trade: Option<f64>,
+    /// Brokerage per share order, in the base currency [default: 0]
+    #[arg(long, value_name = "AMOUNT")]
+    brokerage: Option<f64>,
+    /// FX spread on trades in another currency, in percent [default: 0.5]
+    #[arg(long, value_name = "PCT")]
+    fx_spread: Option<f64>,
+    /// One-off target weights (e.g. TCS:25 RELIANCE:35 or TCS=25,INFY=25)
+    #[arg(num_args = 0..)]
+    targets: Vec<String>,
+    /// Print rebalance plan as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+impl RebalanceOpts {
+    fn into_args(self) -> anyhow::Result<(commands::RebalanceArgs, bool)> {
+        for (name, v) in [
+            ("--inflow", self.inflow),
+            ("--raise", self.raise),
+            ("--cash-buffer", self.cash_buffer),
+            ("--min-trade", self.min_trade),
+            ("--brokerage", self.brokerage),
+            ("--fx-spread", self.fx_spread),
+        ] {
+            if let Some(x) = v
+                && !(x >= 0.0 && x.is_finite())
+            {
+                anyhow::bail!("{name} must be a positive amount, got {x}");
+            }
+        }
+        Ok((
+            commands::RebalanceArgs {
+                targets: crate::rebalance::parse_targets(&self.targets)?,
+                inflow: self.inflow,
+                with_sells: self.with_sells,
+                raise: self.raise,
+                cash_buffer: self.cash_buffer,
+                drift: self.drift,
+                min_trade: self.min_trade,
+                brokerage: self.brokerage,
+                fx_spread: self.fx_spread,
+            },
+            self.json,
+        ))
+    }
+}
+
 #[derive(Subcommand)]
 enum TargetCmd {
     /// Set a target weight for a symbol or sector
@@ -1590,10 +1654,14 @@ enum TargetCmd {
     },
     /// Clear all target weights
     Clear,
-    /// Set default drift tolerance percentage (e.g. 2.0 for +/-2%)
+    /// Where each target stands against its 5/25 band; with PERCENT, set the
+    /// default drift tolerance instead (e.g. 2.0 for +/-2%)
     Drift {
-        /// Drift tolerance percentage
-        percentage: f64,
+        /// Drift tolerance percentage to save
+        percentage: Option<f64>,
+        /// Output the report as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -5141,10 +5209,19 @@ async fn dispatch(
                 price,
                 date,
                 charges,
+                lots,
                 ..
             }) => {
-                commands::cmd_portfolio_sell(&symbol, shares, price, date.as_deref(), charges, m)
-                    .await
+                commands::cmd_portfolio_sell(
+                    &symbol,
+                    shares,
+                    price,
+                    date.as_deref(),
+                    charges,
+                    &lots,
+                    m,
+                )
+                .await
             }
             Some(PortfolioCmd::Lots {
                 symbol,
@@ -5217,21 +5294,21 @@ async fn dispatch(
                     commands::cmd_portfolio_target_set(&key, percentage, m)
                 }
                 Some(TargetCmd::Show { json }) => commands::cmd_portfolio_target_show(m, json),
-                Some(TargetCmd::Remove { key }) => commands::cmd_portfolio_target_remove(&key),
+                Some(TargetCmd::Remove { key }) => commands::cmd_portfolio_target_remove(&key, m),
                 Some(TargetCmd::Clear) => commands::cmd_portfolio_target_clear(),
-                Some(TargetCmd::Drift { percentage }) => {
-                    commands::cmd_portfolio_target_drift(percentage)
-                }
+                Some(TargetCmd::Drift {
+                    percentage: Some(percentage),
+                    ..
+                }) => commands::cmd_portfolio_target_drift(percentage),
+                Some(TargetCmd::Drift {
+                    percentage: None,
+                    json,
+                }) => commands::cmd_portfolio_target_drift_report(m, json).await,
                 None => commands::cmd_portfolio_target_show(m, false),
             },
-            Some(PortfolioCmd::Rebalance {
-                inflow,
-                drift,
-                targets,
-                json,
-            }) => {
-                let parsed = crate::rebalance::parse_targets(&targets)?;
-                commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
+            Some(PortfolioCmd::Rebalance { opts }) => {
+                let (args, json) = opts.into_args()?;
+                commands::cmd_rebalance(&args, json, m).await
             }
             Some(PortfolioCmd::Analyze { quick, groups, out }) => {
                 commands::cmd_portfolio_analyze(m, base.as_deref(), quick, groups, out.into()).await
@@ -5351,22 +5428,30 @@ async fn dispatch(
             }
         }
         Commands::Wealth => commands::cmd_wealth(m).await,
-        Commands::Rebalance {
-            inflow,
-            drift,
-            targets,
-            json,
-        } => {
-            let parsed = crate::rebalance::parse_targets(&targets)?;
-            commands::cmd_rebalance(&parsed, inflow, drift, json, m).await
+        Commands::Rebalance { opts } => {
+            let (args, json) = opts.into_args()?;
+            commands::cmd_rebalance(&args, json, m).await
         }
-        Commands::Harvest { out } => {
+        Commands::Harvest {
+            carry_st,
+            carry_lt,
+            out,
+        } => {
+            for v in [carry_st, carry_lt].into_iter().flatten() {
+                if !(v >= 0.0 && v.is_finite()) {
+                    anyhow::bail!("Losses brought forward must be positive amounts, got {v}");
+                }
+            }
+            let carry = commands::CarriedForward {
+                short_term: carry_st.unwrap_or(0.0),
+                long_term: carry_lt.unwrap_or(0.0),
+            };
             // Gold, silver, international and debt ETFs by NSE category
             // (cached); only Indian tax rules need it.
             if m == Market::In {
                 crate::offmarket::load_etf_categories().await;
             }
-            commands::cmd_harvest(m, out.into()).await
+            commands::cmd_harvest(m, out.into(), carry).await
         }
         Commands::Tax {
             action,
