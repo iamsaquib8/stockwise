@@ -2,11 +2,22 @@
 //! (Claude Desktop, Claude Code, Cursor, ChatGPT and others), built on the
 //! official Rust SDK (`rmcp`).
 //!
-//! - Tools: the read-only tool layer in `crate::tools`, the same one
-//!   `stockwise ask` uses.
-//! - Resources: the portfolio, watchlist and alerts as JSON.
-//! - Prompts: portfolio review, a tax-harvest check before 31 March, and an
-//!   option-chain explainer.
+//! - Tools: the tool layer in `crate::tools`, the same one `stockwise ask`
+//!   uses. Every tool carries annotations (read-only, destructive,
+//!   idempotent, open-world); the main ones also publish an `outputSchema`
+//!   that their `structuredContent` follows, next to the same JSON as text
+//!   for older hosts.
+//! - Resources: the portfolio, watchlist, alerts and profile as JSON, the
+//!   latest logged picks, their track record, the scoring methodology, and a
+//!   `stockwise://quote/{symbol}` template. Over stdio a client can
+//!   subscribe to the local ones and gets `notifications/resources/updated`
+//!   when their files change.
+//! - Prompts: a daily briefing, "should I buy X", an exit check across the
+//!   holdings, a small-cap short-term scan, a tax-aware rebalance, a weekly
+//!   review against the track record, and the earlier portfolio review,
+//!   tax-harvest check, option-chain explainer and profile onboarding.
+//! - Completion: symbol arguments complete from the holdings, the watchlist
+//!   and ticker search.
 //!
 //! Nothing here places orders. `--allow-orders` adds an `order_preview` tool
 //! that estimates an order and returns the `stockwise trade` command for the
@@ -22,71 +33,226 @@ use crate::tools::{ToolContext, client_error};
 use crate::views::{self, DataSource};
 use anyhow::{Context, Result};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams,
-    GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult,
+    CallToolRequestParams, CallToolResponse, CallToolResult, CompleteRequestParams, CompleteResult,
+    CompletionInfo, ContentBlock, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
+    Implementation, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
     ListToolsResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
-    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, Role, ServerCapabilities, ServerConfig, ToolAnnotations,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Reference, Resource,
+    ResourceContents, ResourceTemplate, ResourceUpdatedNotificationParam, Role, ServerCapabilities,
+    ServerConfig, SubscribeRequestParams, SubscriptionFilter, ToolAnnotations,
+    UnsubscribeRequestParams,
 };
-use rmcp::service::RequestContext;
-use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
-use serde_json::{Map, Value};
-use std::sync::Arc;
+use rmcp::service::{RequestContext, SubscriptionContext};
+use rmcp::{ErrorData as McpError, Peer, RoleServer, ServerHandler, ServiceExt};
+use serde_json::{Map, Value, json};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 /// Told to the client at `initialize`; hosts show it to the model.
 const INSTRUCTIONS: &str = "StockWise gives market data and the user's own portfolio from a \
 local command-line tool: quotes, history, technicals, risk, Indian mutual funds, F&O option \
-chains, screens, backtests, the portfolio and its analysis and tax, market conditions, \
-calendars and goal calculators. Bare tickers use the user's default market (India/NSE unless \
-configured); pass `market` for US (`us`), crypto, fx, commodity or another exchange. When the \
-user turned them on, tools also change the local workspace (watchlist, alerts, goals, target \
-weights, the investor profile, notes) and, separately, record purchases and sales in the \
-portfolio; every change is journalled and `stockwise undo` reverts it, so say what changed and \
-give the change id. Ask before changing anything the user did not ask for. Present results as \
-educational information, not personalised advice or buy/sell recommendations, and say that \
-prices can be delayed. Scores from the `verdict` and `picks` tools describe data; never turn \
-them into a rating, price target, or entry or exit level. `fit_check` says whether a stock \
-meets the user's own rules; it is not a recommendation. These tools never place orders.";
+chains, screens, backtests, the portfolio and its analysis and tax, market conditions, ranked \
+picks and their track record, calendars and goal calculators. Bare tickers use the user's \
+default market (India/NSE unless configured); pass `market` for US (`us`), crypto, fx, \
+commodity or another exchange. `quote` and `verdicts` take up to 25 tickers in one call.
 
-const RESOURCES: &[(&str, &str, &str)] = &[
+Recommendations policy:
+1. Actions (BUY, WATCH or AVOID for a stock; ADD, HOLD, TRIM or EXIT for a holding) come only \
+from StockWise's deterministic, rule-based engine. Never make one up, never upgrade, soften or \
+reverse one, and never turn scores into one yourself. TODO(0.9 workstream C): name the \
+`stock_action` and `portfolio_review` tools here once they land. Until then no tool returns an \
+action, so give none: describe the scores and readings instead.
+2. Explain an action or a score with the reasons and figures the tool returned. Never invent \
+price levels: give an entry, stop, target or invalidation price only when a tool returned it, \
+exactly as returned.
+3. NO CALL: when a result's data coverage is below 60% (verdict `data_coverage` under 60, \
+verdicts `low_coverage`, a pick's `coverage` under 0.6), say there is not enough data for a \
+call and offer none.
+4. Keep the disclaimer: the information is educational, not personalised investment advice; \
+StockWise is not a SEBI-registered investment adviser or research analyst; prices can be \
+delayed, so verify before acting.
+
+Scores from `verdict`, `verdicts` and `picks` describe data. Every `picks` list is logged; when \
+presenting picks, cite how earlier lists did (`picks_review`, or the stockwise://track-record \
+resource), including when they lagged the index. `fit_check` says whether a stock meets the \
+user's own rules; it is not a recommendation.
+
+When the user turned them on, tools also change the local workspace (watchlist, alerts, goals, \
+target weights, the investor profile, notes) and, separately, record purchases and sales in the \
+portfolio; every change is journalled and `stockwise undo` reverts it, so say what changed and \
+give the change id. Ask before changing anything the user did not ask for. These tools never \
+place orders.";
+
+/// A resource: (uri, title, description, MIME type).
+type ResourceDef = (&'static str, &'static str, &'static str, &'static str);
+
+const JSON: &str = "application/json";
+
+const RESOURCES: &[ResourceDef] = &[
     (
         "stockwise://portfolio",
         "Portfolio",
         "Holdings with lots, cost, live value, P&L and totals (the default portfolio, or the one picked with --portfolio)",
+        JSON,
     ),
     (
         "stockwise://watchlist",
         "Watchlist",
         "Watched tickers with live prices",
+        JSON,
     ),
     (
         "stockwise://alerts",
         "Alerts",
         "Price and technical alerts with their live status",
+        JSON,
     ),
     (
         "stockwise://profile",
         "Investor Profile",
         "Active investor profile mode, risk level, horizon and guardrails",
+        JSON,
+    ),
+    (
+        "stockwise://picks/latest",
+        "Latest Picks",
+        "The most recent logged picks list for each market and horizon (from signal_log.json): rank, score, price when listed",
+        JSON,
+    ),
+    (
+        "stockwise://track-record",
+        "Picks Track Record",
+        "How the long- and short-horizon picks of the last 90 days did since each was first listed, against the market's benchmark",
+        JSON,
+    ),
+    (
+        "stockwise://methodology",
+        "Scoring Methodology",
+        "How picks and verdicts are scored: pillars, weights, floors, coverage and the track record",
+        "text/markdown",
     ),
 ];
+
+/// A quote for any ticker, by URI; `{symbol}` completes like a prompt's.
+const QUOTE_TEMPLATE: &str = "stockwise://quote/{symbol}";
+const QUOTE_PREFIX: &str = "stockwise://quote/";
+
+/// The scoring methodology, shipped inside the binary.
+const METHODOLOGY: &str = include_str!("../docs/methodology.md");
+
+/// Resources whose content lives in local files a client can subscribe to.
+const SUBSCRIBABLE: &[&str] = &[
+    "stockwise://portfolio",
+    "stockwise://watchlist",
+    "stockwise://alerts",
+    "stockwise://profile",
+    "stockwise://picks/latest",
+    "stockwise://track-record",
+];
+
+/// How often subscribed files are checked for changes.
+const POLL_EVERY: Duration = Duration::from_secs(2);
+
+/// The local files behind the subscribable resources.
+#[derive(Debug, Clone)]
+pub struct Files {
+    /// The data directory (watchlist, alerts, the picks log).
+    pub data_dir: PathBuf,
+    /// The active portfolio's file.
+    pub portfolio: PathBuf,
+    /// `config.toml` (the investor profile).
+    pub config: PathBuf,
+}
+
+impl Files {
+    /// The user's own data directory, active portfolio and config file.
+    pub fn for_user() -> Result<Self> {
+        let w = crate::tools::Workspace::for_user("mcp", false)?;
+        Ok(Self {
+            data_dir: w.dir,
+            portfolio: w.portfolio,
+            config: w.config,
+        })
+    }
+
+    /// The files whose change updates `uri`.
+    fn behind(&self, uri: &str) -> Vec<PathBuf> {
+        match uri {
+            "stockwise://portfolio" => vec![self.portfolio.clone()],
+            "stockwise://watchlist" => vec![self.data_dir.join("watchlist.json")],
+            "stockwise://alerts" => vec![self.data_dir.join("alerts.json")],
+            "stockwise://profile" => vec![self.config.clone()],
+            "stockwise://picks/latest" | "stockwise://track-record" => {
+                vec![self.data_dir.join(PICKS_LOG)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// What the files behind `uri` look like now: modification time and
+    /// length of each (`None` while a file is missing).
+    fn stamp(&self, uri: &str) -> Vec<Option<(SystemTime, u64)>> {
+        self.behind(uri)
+            .iter()
+            .map(|p| {
+                std::fs::metadata(p)
+                    .ok()
+                    .and_then(|m| Some((m.modified().ok()?, m.len())))
+            })
+            .collect()
+    }
+}
+
+const PICKS_LOG: &str = "signal_log.json";
+
+/// One subscribed URI and how its files looked when last checked.
+type Stamps = HashMap<String, Vec<Option<(SystemTime, u64)>>>;
+
+/// Legacy `resources/subscribe` state of one stdio session: the subscribed
+/// URIs and whether the polling task runs.
+#[derive(Default)]
+struct Subscriptions {
+    uris: Stamps,
+    polling: bool,
+}
 
 /// The MCP server: tools, resources and prompts over one [`ToolContext`].
 pub struct StockwiseMcp<D> {
     ctx: Arc<ToolContext<D>>,
+    /// Local files for subscriptions and the picks log; `None` turns
+    /// subscriptions off (stateless HTTP cannot push notifications).
+    files: Option<Arc<Files>>,
+    subs: Arc<Mutex<Subscriptions>>,
+    poll_every: Duration,
 }
 
 impl<D> Clone for StockwiseMcp<D> {
     fn clone(&self) -> Self {
         Self {
             ctx: self.ctx.clone(),
+            files: self.files.clone(),
+            subs: self.subs.clone(),
+            poll_every: self.poll_every,
         }
     }
 }
 
 impl<D: DataSource + 'static> StockwiseMcp<D> {
     pub fn new(ctx: ToolContext<D>) -> Self {
-        Self { ctx: Arc::new(ctx) }
+        Self {
+            ctx: Arc::new(ctx),
+            files: None,
+            subs: Arc::default(),
+            poll_every: POLL_EVERY,
+        }
+    }
+
+    /// Serve resource subscriptions for these files.
+    pub fn with_files(mut self, files: Files) -> Self {
+        self.files = Some(Arc::new(files));
+        self
     }
 
     fn tool_list(&self) -> Vec<rmcp::model::Tool> {
@@ -98,32 +264,29 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
                     Value::Object(m) => m,
                     _ => Map::new(),
                 };
-                rmcp::model::Tool::new(t.name, t.description, Arc::new(schema))
+                let h = crate::tools::hints(t);
+                let mut tool = rmcp::model::Tool::new(t.name, t.description, Arc::new(schema))
                     .with_title(t.title)
-                    .with_annotations({
-                        let access = crate::tools::access(t.name);
-                        let read = access == crate::tools::Access::Read;
+                    .with_annotations(
                         ToolAnnotations::with_title(t.title)
-                            .read_only(read)
-                            // Removals and lot changes are undoable, but a
-                            // host should still confirm them.
-                            .destructive(
-                                t.name.ends_with("_remove")
-                                    || access == crate::tools::Access::Portfolio,
-                            )
-                            .idempotent(read)
-                            // Market data comes from outside; the portfolio does not.
-                            .open_world(
-                                !t.personal || crate::tools::PERSONAL_OPEN_WORLD.contains(&t.name),
-                            )
-                    })
+                            .read_only(h.read_only)
+                            .destructive(h.destructive)
+                            .idempotent(h.idempotent)
+                            .open_world(h.open_world),
+                    );
+                if let Some(Value::Object(out)) = crate::tools::schema::output_schema(t.name) {
+                    tool = tool.with_raw_output_schema(Arc::new(out));
+                }
+                tool
             })
             .collect()
     }
 
     /// Run a tool. Failures the model can act on (bad arguments, unknown
     /// symbol, Yahoo unreachable) come back as an error result it can read,
-    /// not as a protocol error.
+    /// not as a protocol error. Results carry the same JSON twice: as
+    /// `structuredContent` (following the tool's `outputSchema` when it has
+    /// one) and as text, for hosts that ignore structured content.
     pub async fn call(&self, name: &str, args: &Value) -> CallToolResult {
         match self.ctx.call(name, args).await {
             Ok(v) => CallToolResult::structured(v),
@@ -133,20 +296,248 @@ impl<D: DataSource + 'static> StockwiseMcp<D> {
 
     async fn read(&self, uri: &str) -> Result<Value> {
         let src = &self.ctx.source;
+        let m = self.ctx.market;
+        if let Some(sym) = uri.strip_prefix(QUOTE_PREFIX) {
+            return self
+                .ctx
+                .call("quote", &json!({ "symbols": [sym] }))
+                .await
+                .map(|v| v["data"].clone());
+        }
         Ok(match uri {
-            "stockwise://portfolio" => {
-                serde_json::to_value(views::portfolio(src, self.ctx.market, None).await?)?
-            }
+            "stockwise://portfolio" => serde_json::to_value(views::portfolio(src, m, None).await?)?,
             "stockwise://watchlist" => serde_json::to_value(views::watchlist(src).await?)?,
             "stockwise://alerts" => serde_json::to_value(views::alerts(src).await?)?,
-            "stockwise://profile" => serde_json::to_value(crate::config::effective_profile())?,
+            "stockwise://profile" => {
+                serde_json::to_value(crate::tools::current_profile(&self.ctx))?
+            }
+            "stockwise://picks/latest" => latest_picks(&self.picks_log()),
+            "stockwise://track-record" => {
+                let mut out = json!({ "market": m.code(), "since_days": 90 });
+                for (key, horizon) in [
+                    ("long", crate::picks::Horizon::Long),
+                    ("short", crate::picks::Horizon::Short),
+                ] {
+                    out[key] = match self
+                        .ctx
+                        .call(
+                            "picks_review",
+                            &json!({ "since": "90d", "horizon": horizon.as_str() }),
+                        )
+                        .await
+                    {
+                        Ok(v) => v["data"].clone(),
+                        Err(e) => json!({ "error": client_error(&e) }),
+                    };
+                }
+                out
+            }
             other => anyhow::bail!("Unknown resource {}", other),
         })
     }
+
+    /// The picks log: from the session's data directory when it has one.
+    fn picks_log(&self) -> Vec<crate::picks_log::Entry> {
+        match &self.files {
+            Some(f) => crate::store::load_from(&f.data_dir.join(PICKS_LOG)).unwrap_or_default(),
+            None => crate::picks_log::load(),
+        }
+    }
+
+    /// Ticker completions for `typed`: holdings first, then the watchlist,
+    /// then ticker search when those leave room (and the text is long
+    /// enough to search for).
+    async fn complete_symbol(&self, typed: &str) -> Vec<String> {
+        const MAX: usize = 20;
+        let q = typed.trim().to_ascii_uppercase();
+        let src = &self.ctx.source;
+        let mut local: Vec<String> = src
+            .portfolio()
+            .map(|p| p.holdings.iter().map(|h| h.symbol.clone()).collect())
+            .unwrap_or_default();
+        local.extend(src.watchlist().map(|w| w.symbols).unwrap_or_default());
+        let mut out: Vec<String> = Vec::new();
+        for s in local {
+            let up = s.to_ascii_uppercase();
+            let bare = up.split('.').next().unwrap_or(&up);
+            if (up.starts_with(&q) || bare.starts_with(&q)) && !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        if out.len() < MAX && q.chars().count() >= 2 {
+            let found = tokio::time::timeout(Duration::from_secs(4), src.search(typed.trim()))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            for r in found {
+                if let Some(sym) = r.symbol
+                    && !out.contains(&sym)
+                {
+                    out.push(sym);
+                }
+            }
+        }
+        out.truncate(MAX);
+        out
+    }
+
+    /// Start the polling task of a legacy subscription, once per session.
+    fn start_polling(&self, peer: Peer<RoleServer>) {
+        let (Some(files), Ok(mut subs)) = (self.files.clone(), self.subs.lock()) else {
+            return;
+        };
+        if subs.polling {
+            return;
+        }
+        subs.polling = true;
+        let state = self.subs.clone();
+        let every = self.poll_every;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let changed: Vec<String> = match state.lock() {
+                    Ok(mut s) => {
+                        if s.uris.is_empty() {
+                            s.polling = false;
+                            return;
+                        }
+                        changes(&files, &mut s.uris)
+                    }
+                    Err(_) => return,
+                };
+                for uri in changed {
+                    if peer
+                        .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri))
+                        .await
+                        .is_err()
+                    {
+                        // The client went away.
+                        if let Ok(mut s) = state.lock() {
+                            s.polling = false;
+                            s.uris.clear();
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+    }
 }
 
-/// The prompts: (name, title, description, arguments as (name, description, required)).
-const PROMPTS: &[(&str, &str, &str, &[(&str, &str, bool)])] = &[
+/// The URIs in `stamps` whose files changed since the last look, with the
+/// stamps brought up to date.
+fn changes(files: &Files, stamps: &mut Stamps) -> Vec<String> {
+    let mut out = Vec::new();
+    for (uri, old) in stamps.iter_mut() {
+        let now = files.stamp(uri);
+        if now != *old {
+            *old = now;
+            out.push(uri.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The newest logged list of each market and horizon, newest first.
+fn latest_picks(log: &[crate::picks_log::Entry]) -> Value {
+    let mut keys: Vec<(&str, &str)> = Vec::new();
+    for e in log.iter().rev().filter(|e| e.kind == "pick") {
+        if !keys.contains(&(e.market.as_str(), e.horizon.as_str())) {
+            keys.push((e.market.as_str(), e.horizon.as_str()));
+        }
+    }
+    let lists: Vec<Value> = keys
+        .iter()
+        .filter_map(|(market, horizon)| {
+            let newest = log
+                .iter()
+                .rev()
+                .find(|e| e.kind == "pick" && e.market == *market && e.horizon == *horizon)?;
+            let mut run: Vec<&crate::picks_log::Entry> = log
+                .iter()
+                .filter(|e| {
+                    e.kind == "pick"
+                        && e.market == newest.market
+                        && e.horizon == newest.horizon
+                        && e.universe == newest.universe
+                        && e.date == newest.date
+                })
+                .collect();
+            run.sort_by_key(|e| e.rank);
+            Some(json!({
+                "date": newest.date,
+                "market": newest.market,
+                "horizon": newest.horizon,
+                "universe": newest.universe,
+                "methodology": newest.methodology,
+                "picks": run.iter().map(|e| json!({
+                    "rank": e.rank,
+                    "symbol": e.symbol,
+                    "score": e.score,
+                    "price_when_listed": e.price,
+                    "currency": e.currency,
+                })).collect::<Vec<_>>(),
+            }))
+        })
+        .collect();
+    let note = if lists.is_empty() {
+        "No picks logged yet: run the picks tool or `stockwise picks`; every list is logged."
+    } else {
+        "Logged lists as they were scored on their date; prices are when listed. picks_review shows how they did since."
+    };
+    json!({ "lists": lists, "note": note })
+}
+
+/// A prompt argument: (name, description, required).
+type PromptArg = (&'static str, &'static str, bool);
+
+/// The prompts: (name, title, description, arguments).
+const PROMPTS: &[(&str, &str, &str, &[PromptArg])] = &[
+    (
+        "daily_briefing",
+        "Daily briefing",
+        "Market conditions, the portfolio's day, triggered alerts and watchlist movers in one short briefing",
+        &[],
+    ),
+    (
+        "should_i_buy",
+        "Should I buy this stock?",
+        "The stock's scores, data coverage, risk and fit with your own rules, explained without inventing a call",
+        &[
+            ("symbol", "Ticker, e.g. TCS, RELIANCE, AAPL", true),
+            (
+                "amount",
+                "Amount you are considering, in the portfolio's currency",
+                false,
+            ),
+        ],
+    ),
+    (
+        "exit_check",
+        "Exit check across my holdings",
+        "Each holding's scores and coverage, concentration and checkup findings, to see which deserve a closer look",
+        &[],
+    ),
+    (
+        "smallcap_short_scan",
+        "Small-cap short-term scan",
+        "Small caps ranked for weeks-to-months (picks with cap small, horizon short), with their track record and risks",
+        &[("market", "in (default) or us", false)],
+    ),
+    (
+        "tax_aware_rebalance",
+        "Tax-aware rebalance",
+        "Drift from your target weights, with the tax each trim would cost and ways to rebalance with less tax",
+        &[],
+    ),
+    (
+        "weekly_review",
+        "Weekly review against the track record",
+        "How the portfolio and the past picks lists did, against the benchmark, with the changes made this week",
+        &[],
+    ),
     (
         "review_portfolio",
         "Review my portfolio",
@@ -184,6 +575,12 @@ const PROMPTS: &[(&str, &str, &str, &[(&str, &str, bool)])] = &[
     ),
 ];
 
+/// Said at the end of every prompt that discusses stocks.
+const POLICY: &str = " Follow StockWise's recommendations policy: actions come only from its \
+rule-based engine and you never invent one or any price level; when data coverage is under 60% \
+say there is not enough data for a call; end with the disclaimer that this is educational \
+information, not personalised investment advice, and prices can be delayed.";
+
 /// The text of a prompt, with its arguments filled in.
 pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
     let arg = |k: &str| {
@@ -193,6 +590,74 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
             .filter(|s| !s.is_empty())
     };
     Ok(match name {
+        "daily_briefing" => format!(
+            "Give me my StockWise daily briefing, short enough to read in two minutes. Call \
+             market_conditions and markets for where the market stands, portfolio_summary for \
+             my portfolio's value and day change (largest movers among my holdings), \
+             alerts_list for any alert that triggered, and watchlist for my watched stocks' \
+             moves. Then: the market in two lines (trend, volatility, breadth, valuation as \
+             readings), my portfolio's day, triggered alerts, and anything unusual. Leave out \
+             what has no news. TODO(0.9 workstream H): call `today` instead once it lands.{POLICY}"
+        ),
+        "should_i_buy" => {
+            let symbol =
+                arg("symbol").ok_or_else(|| anyhow::anyhow!("should_i_buy needs a symbol"))?;
+            let amount = arg("amount")
+                .map(|a| format!(" with amount {a}"))
+                .unwrap_or_default();
+            format!(
+                "I'm thinking about buying {symbol}. Call verdict for {symbol}, quote and risk for \
+                 it, and fit_check for {symbol}{amount}. Walk me through each pillar's score and \
+                 the facts behind it, the composite and the data coverage, the volatility and \
+                 drawdown, and which of my own rules it passes or fails. StockWise has no \
+                 action engine in this version, so do not answer buy or don't buy yourself: \
+                 lay out what the data shows for and against, and what to check next. TODO(0.9 \
+                 workstream C): call `stock_action` and present its action, reasons and \
+                 invalidation instead.{POLICY}"
+            )
+        }
+        "exit_check" => format!(
+            "Run an exit check across my StockWise holdings. Call portfolio_summary, then \
+             verdicts with my holdings' symbols (25 at a time), and portfolio_checkup. For each \
+             holding show its weight, P&L, composite score, data coverage and weakest pillar; \
+             then list the holdings that deserve a closer look (weak or falling scores, \
+             concentration over my profile's limit, checkup findings), with the reason for \
+             each. Do not tell me to sell: StockWise has no action engine in this version. \
+             TODO(0.9 workstream C): call `portfolio_review` for ADD/HOLD/TRIM/EXIT actions \
+             instead.{POLICY}"
+        ),
+        "smallcap_short_scan" => {
+            let market = arg("market").unwrap_or("in");
+            format!(
+                "Scan small caps for the short term. Call picks with market {market}, cap small \
+                 and horizon short, then picks_review with market {market} and horizon short. \
+                 Show the list with each stock's score, its pillars and data coverage, and say \
+                 how earlier short-horizon lists did against the index (sample size and \
+                 period too). Explain the risks that come with small caps held for weeks: \
+                 volatility, thin trading and gaps. Leave out any stock whose coverage is under \
+                 0.6, saying so.{POLICY}"
+            )
+        }
+        "tax_aware_rebalance" => format!(
+            "Help me rebalance my StockWise portfolio with tax in mind. Call rebalance for the \
+             drift from my target weights, tax_estimate for realized gains and the exemption \
+             left, holdings_lots for each lot's holding period, and harvest for losses that \
+             could offset gains. For each holding over its target show the trim, the tax it \
+             would cost (short- or long-term, by lot), and cheaper ways to get there: using \
+             new money instead of selling, waiting for lots about to turn long-term, or \
+             pairing with harvestable losses. Present it as options and their costs, and \
+             remind me to check the figures against my broker's tax P&L. TODO(0.9 workstream \
+             G): call `rebalance_plan` with `raise` once it lands.{POLICY}"
+        ),
+        "weekly_review" => format!(
+            "Review my week with StockWise. Call portfolio_summary and portfolio_pme for how the \
+             portfolio did against its benchmark, picks_review for the long and the short \
+             horizon over the last 90 days, and changes_list for what assistants changed this \
+             week. Report the portfolio's return against the benchmark, how past picks lists \
+             did (hit rate, share that beat the index, mean and median excess, and how many \
+             picks that is: say plainly when the sample is too small to mean much), and the \
+             changes made. Be as clear about misses as about hits.{POLICY}"
+        ),
         "onboard_profile" => "Help me set up my StockWise investor profile. Call \
              profile_questions and ask me its questions one at a time, in plain words, with the \
              choices; accept my own words and map them to a choice, asking again if unsure. \
@@ -208,12 +673,13 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
                  and risk for the two or three largest holdings. Cover: total value and P&L, \
                  XIRR if available, the weight of each holding and sector concentration, \
                  holdings that are not priced, and the volatility and drawdown of the biggest \
-                 positions. Keep it factual and educational: describe what the numbers show and \
-                 the risks to be aware of, without telling me what to buy or sell.",
+                 positions. Keep it factual: describe what the numbers show and the risks to be \
+                 aware of.",
             );
             if let Some(f) = arg("focus") {
                 s.push_str(&format!(" Pay particular attention to: {f}."));
             }
+            s.push_str(POLICY);
             s
         }
         "tax_harvest_check" => "It's tax-planning time before 31 March. Using StockWise, call \
@@ -246,19 +712,37 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
     })
 }
 
+/// Whether argument `arg` of `reference` is a ticker.
+fn is_symbol_argument(reference: &Reference, arg: &str) -> bool {
+    match reference {
+        Reference::Prompt(p) => {
+            arg == "symbol"
+                && PROMPTS
+                    .iter()
+                    .any(|(name, _, _, args)| *name == p.name && args.iter().any(|a| a.0 == arg))
+        }
+        Reference::Resource(r) => r.uri == QUOTE_TEMPLATE && arg == "symbol",
+        _ => false,
+    }
+}
+
 impl<D: DataSource + 'static> ServerHandler for StockwiseMcp<D> {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .enable_prompts()
-                .build(),
-        )
-        .with_server_info(
-            Implementation::new("stockwise", env!("CARGO_PKG_VERSION")).with_title("StockWise"),
-        )
-        .with_instructions(INSTRUCTIONS)
+        let caps = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_prompts()
+            .enable_completions();
+        let caps = if self.files.is_some() {
+            caps.enable_resources_subscribe().build()
+        } else {
+            caps.build()
+        };
+        ServerConfig::new(caps)
+            .with_server_info(
+                Implementation::new("stockwise", env!("CARGO_PKG_VERSION")).with_title("StockWise"),
+            )
+            .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -296,14 +780,27 @@ impl<D: DataSource + 'static> ServerHandler for StockwiseMcp<D> {
         Ok(ListResourcesResult::with_all_items(
             RESOURCES
                 .iter()
-                .map(|(uri, name, desc)| {
+                .map(|(uri, name, desc, mime)| {
                     Resource::new(*uri, name.to_ascii_lowercase())
                         .with_title(*name)
                         .with_description(*desc)
-                        .with_mime_type("application/json")
+                        .with_mime_type(*mime)
                 })
                 .collect(),
         ))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult::with_all_items(vec![
+            ResourceTemplate::new(QUOTE_TEMPLATE, "quote")
+                .with_title("Quote")
+                .with_description("A live (often delayed) quote for one ticker")
+                .with_mime_type(JSON),
+        ]))
     }
 
     async fn read_resource(
@@ -311,22 +808,141 @@ impl<D: DataSource + 'static> ServerHandler for StockwiseMcp<D> {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        if !RESOURCES.iter().any(|(uri, _, _)| *uri == request.uri) {
+        let uri = request.uri;
+        if uri == "stockwise://methodology" {
+            return Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(METHODOLOGY, uri).with_mime_type("text/markdown"),
+            ])
+            .into());
+        }
+        let quote = uri
+            .strip_prefix(QUOTE_PREFIX)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !quote && !RESOURCES.iter().any(|r| r.0 == uri) {
             return Err(McpError::resource_not_found(
-                format!("Unknown resource {}", request.uri),
+                format!("Unknown resource {}", uri),
                 None,
             ));
         }
         let value = self
-            .read(&request.uri)
+            .read(&uri)
             .await
             .map_err(|e| McpError::internal_error(client_error(&e), None))?;
         let text = serde_json::to_string(&value)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(text, request.uri).with_mime_type("application/json"),
-        ])
-        .into())
+        Ok(
+            ReadResourceResult::new(vec![ResourceContents::text(text, uri).with_mime_type(JSON)])
+                .into(),
+        )
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        let Some(files) = &self.files else {
+            return Err(McpError::invalid_request(
+                "Resource subscriptions need the stdio transport",
+                None,
+            ));
+        };
+        if !SUBSCRIBABLE.contains(&request.uri.as_str()) {
+            return Err(McpError::resource_not_found(
+                format!(
+                    "{} cannot be subscribed to; these can: {}",
+                    request.uri,
+                    SUBSCRIBABLE.join(", ")
+                ),
+                None,
+            ));
+        }
+        let stamp = files.stamp(&request.uri);
+        if let Ok(mut s) = self.subs.lock() {
+            s.uris.insert(request.uri, stamp);
+        }
+        self.start_polling(context.peer);
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        if let Ok(mut s) = self.subs.lock() {
+            s.uris.remove(&request.uri);
+        }
+        Ok(())
+    }
+
+    /// Protocol 2026-07-28 and later: `subscriptions/listen` with the
+    /// subscribable resources the client asked for.
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        self.files.as_ref()?;
+        let uris: Vec<String> = requested
+            .resource_subscriptions
+            .iter()
+            .flatten()
+            .filter(|u| SUBSCRIBABLE.contains(&u.as_str()))
+            .cloned()
+            .collect();
+        let mut filter = SubscriptionFilter::new();
+        filter.resource_subscriptions = Some(uris);
+        Some(filter)
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        let Some(files) = self.files.clone() else {
+            return Ok(());
+        };
+        let mut stamps: Stamps = context
+            .accepted()
+            .resource_subscriptions
+            .iter()
+            .flatten()
+            .map(|u| (u.clone(), files.stamp(u)))
+            .collect();
+        if stamps.is_empty() {
+            context.cancelled().await;
+            return Ok(());
+        }
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(self.poll_every) => {
+                    for uri in changes(&files, &mut stamps) {
+                        if context.sink().notify_resource_updated(uri).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn complete(
+        &self,
+        request: CompleteRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CompleteResult, McpError> {
+        let arg = &request.argument;
+        let values = if is_symbol_argument(&request.r#ref, &arg.name) {
+            self.complete_symbol(&arg.value).await
+        } else if arg.name == "market" {
+            ["in", "us"]
+                .iter()
+                .filter(|m| m.starts_with(arg.value.trim()))
+                .map(|m| m.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let info = CompletionInfo::new(values).map_err(|e| McpError::internal_error(e, None))?;
+        Ok(CompleteResult::new(info))
     }
 
     async fn list_prompts(
@@ -385,6 +1001,13 @@ pub async fn run(
 ) -> Result<()> {
     let mut ctx = ToolContext::new(views::LiveSource::new(), market);
     ctx.allow_orders = access.orders;
+    // STOCKWISE_MCP_TIMEOUT=SECONDS caps every read tool (default: 60 s, 180 s
+    // for market scans and portfolio analyses).
+    ctx.timeout = std::env::var("STOCKWISE_MCP_TIMEOUT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs);
     if access.writes || access.portfolio {
         ctx.workspace = Some(crate::tools::Workspace::for_user("mcp", access.portfolio)?);
     }
@@ -397,6 +1020,15 @@ pub async fn run(
     let server = StockwiseMcp::new(ctx);
     match http {
         None => {
+            // Subscriptions push notifications, which only stdio carries here
+            // (the HTTP transport answers each request statelessly).
+            let server = match Files::for_user() {
+                Ok(files) => server.with_files(files),
+                Err(e) => {
+                    eprintln!("stockwise: resource subscriptions are off: {e:#}");
+                    server
+                }
+            };
             // stdout belongs to the protocol: notes go to stderr.
             eprintln!(
                 "StockWise MCP server {} on stdio ({} tools, {}{}). Ctrl+C to stop.",

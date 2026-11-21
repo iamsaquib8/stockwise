@@ -251,7 +251,7 @@ fn args_check_ranges_types_and_enums() {
         ("quote", json!({"symbols": []})),
         (
             "quote",
-            json!({"symbols": (0..25).map(|i| format!("S{i}")).collect::<Vec<_>>()}),
+            json!({"symbols": (0..26).map(|i| format!("S{i}")).collect::<Vec<_>>()}),
         ),
         ("quote", json!({"symbols": ["TCS"], "market": "mars"})),
         ("markets", json!({"crypto": "maybe"})),

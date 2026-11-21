@@ -15,11 +15,19 @@ or another.
 
 ## What the assistant can and cannot do
 
-- **It can read.** The 52 read tools cover quotes, history, technicals, risk,
-  scorecards, events, mutual funds, option chains, IPOs, screens, picks,
-  market conditions, backtests, your portfolio dashboard and lots, tax
-  estimate, advance tax, harvest and rebalance plans, calendar, goals,
-  watchlist and alerts.
+- **It can read.** The read tools cover quotes (up to 25 tickers a call),
+  history, technicals, risk, scorecards and 6-pillar scores (one stock with
+  `verdict`, up to 25 with `verdicts`), events, mutual funds, option chains,
+  IPOs, screens, picks and their track record, market conditions, backtests,
+  your portfolio dashboard and lots, tax estimate, advance tax, harvest and
+  rebalance plans, calendar, goals, watchlist and alerts.
+- **It follows a recommendations policy.** Buy or sell actions come only from
+  StockWise's own rule-based engine, never from the assistant; the assistant
+  explains them and never invents price levels. When less than 60% of the data
+  behind a score is there, it says there is not enough data for a call. Every
+  answer keeps the "educational, not advice" note. (The action engine itself,
+  `stock_action` and `portfolio_review`, arrives in a later 0.9 build; until
+  then the assistant describes scores and readings only.)
 - **It can check a stock against your own rules.** Ask "does TCS fit my
   rules?" and `fit_check` answers yes, no or unclear from your profile's
   limits and your notes, rule by rule. It is not a recommendation: it never
@@ -146,6 +154,9 @@ Questions that work well, grouped by what they use:
 | "Is the market expensive or stretched right now?" | `market_conditions` (readings, not a timing call) |
 | "Does INFY fit my rules if I put ₹50,000 in?" | `fit_check` |
 | "Which NIFTY 50 stocks score best on value and quality?" | `picks` |
+| "Rank small caps for the next few weeks." | `picks` with `cap: small`, `horizon: short` |
+| "How did the picks lists of the last 3 months do against NIFTY?" | `picks_review` |
+| "Score TCS, INFY, HCLTECH, WIPRO and TECHM side by side." | `verdicts` |
 
 With `--allow-writes`:
 
@@ -160,15 +171,52 @@ With `--allow-writes`:
 Ready-made prompts are built in. In clients that support MCP prompts, pick one
 from the prompt menu:
 
-- `review_portfolio` for value, P&L, concentration and risk, with no buy or
-  sell calls.
-- `tax_harvest_check` for unrealised gains and losses by lot before 31 March.
-- `explain_option_chain` for an option chain in plain words.
-- `onboard_profile` asks a few plain questions and saves your profile (needs
-  `--allow-writes`).
+| Prompt | What it does |
+|---|---|
+| `daily_briefing` | Market conditions, your portfolio's day, triggered alerts and watchlist moves |
+| `should_i_buy` | A stock's scores, coverage, risk and fit with your rules (argument: `symbol`, optional `amount`) |
+| `exit_check` | Each holding's scores and coverage, concentration and checkup findings |
+| `smallcap_short_scan` | Small caps ranked for weeks to months, with the short-horizon track record |
+| `tax_aware_rebalance` | Drift from your targets and the tax each trim would cost |
+| `weekly_review` | The portfolio against its benchmark, past picks lists, and this week's changes |
+| `review_portfolio` | Value, P&L, concentration and risk |
+| `tax_harvest_check` | Unrealised gains and losses by lot before 31 March |
+| `explain_option_chain` | An option chain in plain words |
+| `onboard_profile` | A few plain questions, then your profile is saved (needs `--allow-writes`) |
 
-The server also offers three resources: `stockwise://portfolio`,
-`stockwise://watchlist` and `stockwise://alerts`.
+Where a prompt asks for a ticker, clients that support completion suggest
+your holdings and watchlist first, then search results.
+
+The server also offers resources:
+
+| Resource | What it holds |
+|---|---|
+| `stockwise://portfolio`, `stockwise://watchlist`, `stockwise://alerts`, `stockwise://profile` | Your data, live-priced |
+| `stockwise://picks/latest` | The newest logged picks list for each market and horizon |
+| `stockwise://track-record` | How the last 90 days of picks did against the index |
+| `stockwise://methodology` | How picks and verdicts are scored |
+| `stockwise://quote/{symbol}` | A quote for any ticker |
+
+Over stdio a client can subscribe to the portfolio, watchlist, alerts,
+profile and picks resources; the server then sends
+`notifications/resources/updated` when their files change (checked every two
+seconds), for example when the background worker marks an alert triggered.
+
+### For client authors
+
+- Every tool has `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint`. Read tools are read-only; write tools touch only local
+  files (closed-world), and the ones that remove or replace saved data are
+  marked destructive.
+- `quote`, `history`, `verdict`, `verdicts`, `picks`, `picks_review`,
+  `portfolio_summary`, `portfolio_analyze`, `portfolio_checkup`, `rebalance`,
+  `tax_estimate` and `market_conditions` publish an `outputSchema`. Their
+  `structuredContent` follows it (an envelope of `data`, `note` and, when
+  lists were shortened, `truncated`); the same JSON is also sent as text for
+  older clients.
+- A read tool stops after 60 seconds (180 for market scans and portfolio
+  analyses). Set `STOCKWISE_MCP_TIMEOUT=SECONDS` in the client's `env` to
+  change it. Writes are never cut off.
 
 ## 4. Check the answer
 

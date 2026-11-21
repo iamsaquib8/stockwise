@@ -84,10 +84,9 @@ pub(super) async fn run<D: DataSource>(
         "watchlist" => Ok(json!({ "watchlist": views::watchlist(src).await? })),
         "profile" => Ok(serde_json::to_value(super::current_profile(ctx))?),
         "profile_questions" => Ok(crate::onboarding::questions_json()),
-        "portfolio_analyze" | "portfolio_checkup" | "market_conditions" | "picks" | "movers"
-        | "dividends" | "goal_emergency" | "fit_check" | "changes_list" => {
-            super::extra::run(ctx, name, a, m).await
-        }
+        "portfolio_analyze" | "portfolio_checkup" | "market_conditions" | "picks"
+        | "picks_review" | "verdicts" | "movers" | "dividends" | "goal_emergency" | "fit_check"
+        | "changes_list" => super::extra::run(ctx, name, a, m).await,
         "order_preview" => order_preview(src, a).await,
         other => bail!("Tool '{}' has no handler", other),
     }

@@ -614,7 +614,7 @@ async fn screener_quotes(
 }
 
 /// Scan title with the `--cap` tier appended: `NIFTY 500 (mid cap)`.
-fn cap_scope(scope: &str, cap: Option<market::CapFilter>) -> String {
+pub(crate) fn cap_scope(scope: &str, cap: Option<market::CapFilter>) -> String {
     match cap.and_then(market::CapFilter::tier) {
         Some(t) => format!("{scope} ({} cap)", t.as_str()),
         None => scope.to_string(),
@@ -1801,7 +1801,7 @@ pub async fn cmd_picks(
 }
 
 /// Append a list to the track record; a failure to save never fails the scan.
-fn log_picks(
+pub(crate) fn log_picks(
     market: Market,
     scope: &str,
     horizon: crate::picks::Horizon,
@@ -1835,14 +1835,15 @@ fn log_picks(
     }
 }
 
-/// `picks review`: every pick logged in the last `since_days`, measured from
-/// its first listing against the market's benchmark.
-pub async fn cmd_picks_review(
+/// The track record of `market`'s `horizon` lists logged in the last
+/// `since_days`: each pick measured from its first listing against the
+/// market's benchmark. Shared by `picks review` and the MCP tool.
+pub(crate) async fn picks_review_report(
+    client: &YahooClient,
     market: Market,
     since_days: u32,
     horizon: crate::picks::Horizon,
-    json: bool,
-) -> Result<()> {
+) -> Result<crate::picks_log::Review> {
     market.require_stocks("picks review")?;
     let today = chrono::Local::now().date_naive();
     let since = today - chrono::Duration::days(since_days as i64);
@@ -1869,7 +1870,6 @@ pub async fn cmd_picks_review(
             since_days
         );
     }
-    let client = YahooClient::new().await?;
     let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
     let prices: std::collections::HashMap<String, f64> = client
         .get_quote(&refs)
@@ -1889,7 +1889,7 @@ pub async fn cmd_picks_review(
         }
         None => None,
     };
-    let review = crate::picks_log::review(
+    Ok(crate::picks_log::review(
         &log,
         market.code(),
         horizon.as_str(),
@@ -1897,7 +1897,21 @@ pub async fn cmd_picks_review(
         today,
         &prices,
         bench.as_ref().map(|(n, s)| (*n, s.as_slice())),
-    );
+    ))
+}
+
+/// `picks review`: every pick logged in the last `since_days`, measured from
+/// its first listing against the market's benchmark.
+pub async fn cmd_picks_review(
+    market: Market,
+    since_days: u32,
+    horizon: crate::picks::Horizon,
+    json: bool,
+) -> Result<()> {
+    market.require_stocks("picks review")?;
+    let client = YahooClient::new().await?;
+    let review = picks_review_report(&client, market, since_days, horizon).await?;
+    let since = review.since;
     if json {
         return output::print_json(&review);
     }

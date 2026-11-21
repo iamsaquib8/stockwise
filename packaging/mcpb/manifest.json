@@ -32,7 +32,7 @@
   "tools": [
     {
       "name": "quote",
-      "description": "Stock quotes. Live (often delayed) quotes for up to 20 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
+      "description": "Stock quotes. Live (often delayed) quotes for up to 25 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
     },
     {
       "name": "history",
@@ -220,7 +220,15 @@
     },
     {
       "name": "picks",
-      "description": "Highest-scoring stocks. Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data."
+      "description": "Highest-scoring stocks. Stocks of the market that clear size and liquidity floors, ranked against each other on five pillars (value, quality, growth, trend, risk), each a percentile among the stocks scanned, with the share of the score that had data."
+    },
+    {
+      "name": "picks_review",
+      "description": "Track record of picks. How past picks lists did since each stock was first listed, against NIFTY 50 or the S&P 500 total return: hit rate, share that beat the index, mean and median return and excess."
+    },
+    {
+      "name": "verdicts",
+      "description": "6-pillar scores for several stocks. The verdict tool's composite, data coverage and pillar scores for up to 25 tickers in one call."
     },
     {
       "name": "movers",
