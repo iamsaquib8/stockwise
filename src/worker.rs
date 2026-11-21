@@ -627,32 +627,48 @@ fn trim_notified(notified: &mut Vec<String>) {
 
 /// Notices for lots about to turn long-term (within [`LTCG_HEADS_UP_DAYS`])
 /// and for lots that have turned since a heads-up, skipping what `notified`
-/// already holds (`SYMBOL#lot:bought:long_term_on:kind`). The countdown skips
-/// a lot once it is long-term, so the "now" notice comes from a remembered
-/// heads-up. Pure: the caller records each notice's keys after delivery.
-/// Facts and dates only; what to do about them is the holder's call.
-fn ltcg_notices(
+/// already holds (`SYMBOL#bought:qty:long_term_on:kind`). A lot is named by
+/// its purchase date and quantity, not its position: a FIFO sale of an older
+/// lot renumbers the rest, and the notice must still find its lot. The
+/// countdown skips a lot once it is long-term, so the "now" notice comes from
+/// a remembered heads-up. Only symbols `include` accepts are looked at (the
+/// caller runs this once per tax country held). Pure: the caller records each
+/// notice's keys after delivery. Facts and dates only.
+fn ltcg_notices_for(
     portfolio: &Portfolio,
     country: crate::tax::Country,
     today: chrono::NaiveDate,
     notified: &[String],
+    include: impl Fn(&str) -> bool,
 ) -> Vec<Pending> {
     let mut out = Vec::new();
-    for c in crate::sellpreview::ltcg_countdown(portfolio, country, today, LTCG_HEADS_UP_DAYS) {
+    let countdown = crate::sellpreview::ltcg_countdown_with(
+        portfolio,
+        country,
+        today,
+        LTCG_HEADS_UP_DAYS,
+        |s| include(s) && crate::sellpreview::counts_for_countdown(country, s),
+    );
+    for c in countdown {
         let key = format!(
+            "{}#{}:{}:{}:soon",
+            c.symbol, c.bought, c.qty, c.long_term_on
+        );
+        // A heads-up sent under the old position-based key counts too.
+        let legacy = format!(
             "{}#{}:{}:{}:soon",
             c.symbol, c.lot_no, c.bought, c.long_term_on
         );
-        if notified.contains(&key) {
+        if notified.contains(&key) || notified.contains(&legacy) {
             continue;
         }
         out.push(Pending {
             msg: crate::notify::Message::new(
                 format!("Lot turns long-term soon: {}", c.symbol),
                 format!(
-                    "Lot #{} of {} ({} units, bought {}, held {} days) turns long-term on {} (in {} days). \
+                    "The {} lot of {} ({} units, held {} days) turns long-term on {} (in {} days). \
                      `stockwise portfolio sell {} <QTY> --preview` shows the tax on a sale.",
-                    c.lot_no, c.symbol, c.qty, c.bought, c.days_held, c.long_term_on,
+                    c.bought, c.symbol, c.qty, c.days_held, c.long_term_on,
                     c.days_to_long_term, c.symbol
                 ),
             ),
@@ -666,14 +682,20 @@ fn ltcg_notices(
         let Some((head, rest)) = key.split_once('#') else {
             continue;
         };
+        if !include(head) {
+            continue;
+        }
         let parts: Vec<&str> = rest.trim_end_matches(":soon").split(':').collect();
-        let [lot_no, bought, on] = parts[..] else {
+        let [first, second, on] = parts[..] else {
             continue;
         };
-        let (Ok(lot_no), Ok(on_date)) = (
-            lot_no.parse::<usize>(),
-            chrono::NaiveDate::parse_from_str(on, "%Y-%m-%d"),
-        ) else {
+        // New keys: bought:qty:on. Old keys: lot_no:bought:on.
+        let (bought, qty) = if chrono::NaiveDate::parse_from_str(first, "%Y-%m-%d").is_ok() {
+            (first, second.parse::<f64>().ok())
+        } else {
+            (second, None)
+        };
+        let Ok(on_date) = chrono::NaiveDate::parse_from_str(on, "%Y-%m-%d") else {
             continue;
         };
         if on_date > today {
@@ -683,17 +705,19 @@ fn ltcg_notices(
         if notified.contains(&done) {
             continue;
         }
-        // Only if that very lot is still held.
-        let still_held = portfolio
-            .holding(head)
-            .and_then(|h| h.lots.get(lot_no - 1))
-            .filter(|l| l.date == bought);
+        // Only if a lot bought that day is still held: the same quantity
+        // first, else one partly sold since.
+        let lots = portfolio.holding(head).map(|h| h.lots.as_slice()).unwrap_or_default();
+        let still_held = lots
+            .iter()
+            .find(|l| l.date == bought && qty.is_some_and(|q| (l.qty - q).abs() < 1e-9))
+            .or_else(|| lots.iter().find(|l| l.date == bought));
         match still_held {
             Some(l) => out.push(Pending {
                 msg: crate::notify::Message::new(
                     format!("Lot is now long-term: {head}"),
                     format!(
-                        "Lot #{lot_no} of {head} ({} units, bought {bought}) is long-term from {on}. \
+                        "The {bought} lot of {head} ({} units) is long-term from {on}. \
                          `stockwise portfolio sell {head} <QTY> --preview` shows the tax on a sale.",
                         l.qty
                     ),
@@ -710,6 +734,54 @@ fn ltcg_notices(
                 filings: None,
             }),
         }
+    }
+    out
+}
+
+/// [`ltcg_notices_for`] over every symbol.
+#[cfg(test)]
+fn ltcg_notices(
+    portfolio: &Portfolio,
+    country: crate::tax::Country,
+    today: chrono::NaiveDate,
+    notified: &[String],
+) -> Vec<Pending> {
+    ltcg_notices_for(portfolio, country, today, notified, |_| true)
+}
+
+/// The exchange market whose tax rule applies to a held symbol (funds and
+/// Indian off-market holdings count as India).
+fn symbol_tax_market(symbol: &str) -> Option<Market> {
+    crate::alerts::alert_market(symbol).or_else(|| {
+        crate::portfolio::symbol_currency(symbol)
+            .filter(|c| c.eq_ignore_ascii_case("INR"))
+            .map(|_| Market::In)
+    })
+}
+
+/// LTCG notices for every market the portfolio holds, each on its own
+/// exchange's date.
+fn ltcg_notices_all(
+    portfolio: &Portfolio,
+    now: chrono::DateTime<Utc>,
+    notified: &[String],
+) -> Vec<Pending> {
+    let mut markets: Vec<Market> = portfolio
+        .holdings
+        .iter()
+        .filter_map(|h| symbol_tax_market(&h.symbol))
+        .collect();
+    markets.sort_by_key(|m| m.id());
+    markets.dedup();
+    let mut out = Vec::new();
+    for m in markets {
+        let Some(country) = tax_country(m) else {
+            continue;
+        };
+        let today = clock::session_date(m, now);
+        out.extend(ltcg_notices_for(portfolio, country, today, notified, |s| {
+            symbol_tax_market(s) == Some(m)
+        }));
     }
     out
 }
@@ -931,15 +1003,12 @@ async fn notify_after_close(
     let mut state: WorkerState = crate::store::load(STATE_FILE).unwrap_or_default();
     let mut pending: Vec<Pending> = Vec::new();
 
-    if let Some(country) = tax_country(market) {
-        let today = clock::session_date(market, Utc::now());
-        pending.extend(ltcg_notices(
-            &portfolio,
-            country,
-            today,
-            &state.ltcg_notified,
-        ));
-    }
+    let _ = market;
+    pending.extend(ltcg_notices_all(
+        &portfolio,
+        Utc::now(),
+        &state.ltcg_notified,
+    ));
 
     let store = crate::results::default_store();
     let mut held: Vec<String> = tracked_symbols()
@@ -1668,6 +1737,49 @@ mod tests {
             .is_empty()
         );
         assert!(seen.iter().any(|k| k.ends_with(":now")));
+    }
+
+    #[test]
+    fn the_ltcg_notice_survives_a_fifo_sale() {
+        let india = crate::tax::Country::India;
+        // Two lots; the newer one (bought 2025-12-20) turns on 2026-12-21.
+        let mut p = held("TCS.NS", "2024-01-10");
+        p.add_lot(
+            "TCS.NS",
+            crate::portfolio::Lot::new(5.0, 120.0, "2025-12-20", "manual"),
+        );
+        let mut seen = Vec::new();
+        let soon = deliver(ltcg_notices(&p, india, day("2026-12-15"), &seen), &mut seen);
+        assert_eq!(soon.len(), 1);
+        assert!(soon[0].body.contains("2025-12-20"), "{}", soon[0].body);
+        // A FIFO sale of the older lot: the 2025 lot is now lot #1.
+        let mut after = Portfolio::default();
+        after.add_lot(
+            "TCS.NS",
+            crate::portfolio::Lot::new(5.0, 120.0, "2025-12-20", "manual"),
+        );
+        // No second heads-up for the renumbered lot...
+        assert!(deliver(ltcg_notices(&after, india, day("2026-12-16"), &seen), &mut seen).is_empty());
+        // ...and the "now long-term" notice still finds it.
+        let now = deliver(ltcg_notices(&after, india, day("2026-12-21"), &seen), &mut seen);
+        assert_eq!(now.len(), 1, "{now:?}");
+        assert!(now[0].body.contains("5 units"), "{}", now[0].body);
+    }
+
+    #[test]
+    fn ltcg_notices_cover_every_market_held() {
+        let mut p = held("TCS.NS", "2025-12-20");
+        // US: long-term after a year; bought 2025-12-18 turns on 2026-12-19.
+        p.add_lot("AAPL", crate::portfolio::Lot::new(3.0, 200.0, "2025-12-18", "manual"));
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 12, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        let notices = ltcg_notices_all(&p, now, &[]);
+        let titles: Vec<&str> = notices.iter().map(|n| n.msg.title.as_str()).collect();
+        assert!(titles.iter().any(|t| t.ends_with("TCS.NS")), "{titles:?}");
+        assert!(titles.iter().any(|t| t.ends_with("AAPL")), "{titles:?}");
     }
 
     #[test]

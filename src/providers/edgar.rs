@@ -555,5 +555,7 @@ pub async fn fetch(client: &YahooClient, symbol: &str) -> Result<Option<Statemen
     Ok((!st.quarterly.is_empty() || !st.annual.is_empty() || st.equity.is_some()).then_some(st))
 }
 
+pub mod filings;
+
 #[cfg(test)]
 pub(crate) mod tests;

@@ -53,8 +53,10 @@ mod intraday;
 mod ipo;
 mod longterm;
 mod market;
+mod monitor;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod news;
 mod nifty500;
 mod notes;
 mod notify;
@@ -552,8 +554,18 @@ stockwise score AAPL -m us               US equities support with SEC / Yahoo st
         #[command(flatten)]
         out: JsonOutput,
     },
-    /// Recent news headlines for a stock
-    News { symbol: String },
+    /// Recent news headlines and exchange/SEC filings for a stock
+    News {
+        symbol: String,
+        /// Only items from the last N days
+        #[arg(long, default_value = "3", value_parser = clap::value_parser!(u32).range(1..=30))]
+        days: u32,
+        /// Most items to show
+        #[arg(long, default_value = "15")]
+        limit: usize,
+        #[command(flatten)]
+        out: JsonOutput,
+    },
     /// Sector rotation — which sectors lead and lag
     Rotation,
     /// Compare two sectors head to head (e.g. IT Bank)
@@ -4625,7 +4637,12 @@ async fn dispatch(
         Commands::Conditions { universe, out } => {
             commands::cmd_conditions(m, universe, out.json).await
         }
-        Commands::News { symbol } => commands::cmd_news(&symbol, m).await,
+        Commands::News {
+            symbol,
+            days,
+            limit,
+            out: news_out,
+        } => commands::cmd_news(&symbol, m, days, limit, news_out.json).await,
         Commands::Rotation => commands::cmd_rotation(m).await,
         Commands::Sectorcmp { sector1, sector2 } => {
             commands::cmd_sectorcmp(&sector1, &sector2, m).await

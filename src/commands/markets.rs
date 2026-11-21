@@ -1257,27 +1257,85 @@ pub(super) fn print_news_items(items: &[NewsItem], limit: usize) {
 
 // ───────────────────────────────────────────────────────────────
 
-pub async fn cmd_news(symbol: &str, market: Market) -> Result<()> {
+
+/// `news SYMBOL`: headlines and filings from every source, merged and
+/// de-duplicated, newest first, in local time with links.
+pub async fn cmd_news(symbol: &str, market: Market, days: u32, limit: usize, json: bool) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
-
-    // Fetch from 3 sources concurrently
-    let company_query = resolved.split('.').next().unwrap_or(&resolved);
-    let google_query = format!("{} stock", company_query);
-
-    let (yahoo_json, yahoo_rss, google) = tokio::join!(
-        fetch_yahoo_json_news(&client, &resolved, 10),
-        fetch_yahoo_rss(&client, &resolved),
-        fetch_google_news_rss(&client, &google_query),
-    );
-
-    let all: Vec<NewsItem> = [yahoo_json, yahoo_rss, google].concat();
-    let collated = collate_news(all);
-
-    print_header(&format!("News: {} — {} sources", resolved, 3));
-    print_news_items(&collated, 15);
+    // The company name makes Google News match the company, not the ticker.
+    let company = client
+        .get_quote(&[resolved.as_str()])
+        .await
+        .ok()
+        .and_then(|q| q.into_iter().next())
+        .and_then(|q| q.long_name.or(q.short_name));
+    let fetched = crate::news::fetch(
+        &client,
+        &crate::news::Query {
+            symbol: resolved.clone(),
+            company: company.clone(),
+            days: days.max(1),
+            filings: true,
+        },
+    )
+    .await;
+    if json {
+        return output::print_json(&serde_json::json!({
+            "symbol": resolved,
+            "company": company,
+            "days": days,
+            "sources_ok": fetched.sources_ok,
+            "sources_tried": fetched.sources_tried,
+            "failures": fetched.failures,
+            "items": fetched.items.iter().take(limit).collect::<Vec<_>>(),
+        }));
+    }
+    let name = company
+        .as_deref()
+        .map(|c| format!(" ({})", crate::research::clean_company_name(c)))
+        .unwrap_or_default();
+    print_header(&format!(
+        "News: {}{} — last {} day{}, {} of {} sources",
+        resolved,
+        name,
+        days,
+        if days == 1 { "" } else { "s" },
+        fetched.sources_ok,
+        fetched.sources_tried
+    ));
+    print_feed_items(&fetched.items, limit);
+    for f in &fetched.failures {
+        println!("  {} {}", "!".yellow(), f.dimmed());
+    }
     println!();
     Ok(())
+}
+
+pub(super) fn print_feed_items(items: &[crate::news::NewsItem], limit: usize) {
+    if items.is_empty() {
+        println!("  {}", "No recent news found.".dimmed());
+        return;
+    }
+    for item in items.iter().take(limit) {
+        let tag = if item.official {
+            format!("[{}]", item.source).yellow().bold().to_string()
+        } else {
+            format!("[{}]", item.source).cyan().to_string()
+        };
+        println!();
+        println!("  {} {}", "●".cyan(), item.title.bold());
+        println!(
+            "    {} {} · {} · {}",
+            "└".dimmed(),
+            item.publisher.dimmed(),
+            item.local_time().unwrap_or_default().dimmed(),
+            tag
+        );
+        if let Some(link) = &item.link {
+            println!("      {}", link.dimmed());
+        }
+    }
 }
 
 // ── Risk Analysis ──
