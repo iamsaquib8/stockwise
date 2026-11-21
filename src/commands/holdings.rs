@@ -2323,8 +2323,17 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     let report = tax_report(country, &portfolio, &val, today);
     let realized = report.realized;
     let unrealized = report.unrealized;
+    // India: gains outside Sec. 111A/112A that have rules of their own.
+    let (other_rows, other_totals) =
+        super::tax_season::other_gains(&portfolio, |s| val.mark(s).cloned(), today);
     match fmt {
-        Format::Json => return output::print_json(&tax_json(country, &report, today)),
+        Format::Json => {
+            let mut v = tax_json(country, &report, today);
+            if country == Country::India {
+                v["other_heads"] = serde_json::json!({"sales": other_rows, "totals": other_totals});
+            }
+            return output::print_json(&v);
+        }
         Format::Csv => return output::print_csv(&report.holdings),
         Format::Table => {}
     }
@@ -2470,6 +2479,7 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     }
 
     if country == Country::India {
+        super::tax_season::print_other_gains(&other_rows, &other_totals);
         let used = tax::estimate(country, realized).exemption_used;
         let left = country.exemption() - used;
         if left > 0.0 && unrealized.lt_gain > 0.0 {
