@@ -1027,20 +1027,30 @@ pub(crate) async fn wrap_report(
     };
     // A total-return index when Yahoo has one; else the price index,
     // compared with the return without dividends.
-    let tri = match bench_symbol {
-        "^GSPC" => Some("^SP500TR"),
-        "^NDX" => Some("^XNDX"),
-        "^DJI" => Some("^DJITR"),
-        _ => None,
-    };
+    let tri = super::planning::total_return_source(bench_symbol);
     let mut bench_total_return = false;
     let mut bench = Vec::new();
-    if let Some(tr) = tri {
-        bench = src
-            .chart(tr, range, "1d")
-            .await
-            .map(|c| closes_of(&c))
-            .unwrap_or_default();
+    match tri {
+        // An ETF's dividend-adjusted closes (NIFTYBEES for NIFTY 50) need
+        // Yahoo's raw chart; offline there are none.
+        Some(tr @ super::planning::TotalReturn::AdjustedEtf(_)) if !offline => {
+            if let Ok(client) = src.yahoo().await
+                && let Some((closes, _)) =
+                    super::planning::total_return_closes(client, tr, period.opening()).await
+            {
+                bench = closes;
+            }
+        }
+        Some(super::planning::TotalReturn::Index(sym)) => {
+            bench = src
+                .chart(sym, range, "1d")
+                .await
+                .map(|c| closes_of(&c))
+                .unwrap_or_default();
+        }
+        _ => {}
+    }
+    if tri.is_some() {
         bench_total_return = wrap::benchmark_return(&bench, &period, as_of).is_some();
     }
     if !bench_total_return {
@@ -1095,10 +1105,9 @@ pub(crate) async fn wrap_report(
         base_currency: val.base().to_string(),
         redacted: false,
         return_pct: t.return_pct,
-        benchmark: if bench_total_return {
-            format!("{} TR", bench_name)
-        } else {
-            bench_name.to_string()
+        benchmark: match tri.filter(|_| bench_total_return) {
+            Some(tr) => tr.label(bench_name),
+            None => bench_name.to_string(),
         },
         benchmark_return_pct,
         alpha_bps: compared
