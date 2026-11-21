@@ -2512,6 +2512,36 @@ fn backup_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_0_8_portfolio_file_loads_without_the_new_lot_and_sale_fields() {
+        // Written by 0.8.1: no fx_currency, fx_rate or charges anywhere.
+        let json = r#"{
+            "version": 2,
+            "holdings": [{"symbol": "AAPL", "shares": 10.0, "avg_cost": 100.0,
+                "added_at": "2024-01-02",
+                "lots": [{"qty": 10.0, "price": 100.0, "date": "2024-01-02", "source": "manual"}]}],
+            "realized": [{"symbol": "MSFT", "qty": 1.0, "buy_date": "2024-01-02",
+                "buy_price": 100.0, "sell_date": "2025-01-02", "sell_price": 120.0,
+                "source": "manual"}]
+        }"#;
+        let path = temp_dir("old-0.8-file").join("portfolio.json");
+        std::fs::write(&path, json).unwrap();
+        let p = Portfolio::read_only(&path).unwrap();
+        let lot = &p.holding("AAPL").unwrap().lots[0];
+        assert_eq!(
+            (lot.fx_currency.as_deref(), lot.fx_rate, lot.charges),
+            (None, None, None)
+        );
+        assert_eq!(p.realized[0].charges, None);
+        assert_eq!(p.realized[0].gain(), 20.0);
+        // Saved again, the new fields stay out of the file while unset.
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(
+            !out.contains("fx_rate") && !out.contains("charges"),
+            "{out}"
+        );
+    }
+
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
     }

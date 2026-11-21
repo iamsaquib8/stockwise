@@ -758,6 +758,12 @@ pub(crate) struct HoldingRow {
     pub(crate) nav_date: Option<chrono::NaiveDate>,
     /// `mega|large|mid|small|micro`, `unknown` for funds and anything without a market cap.
     pub(crate) cap_tier: &'static str,
+    /// Cost in the base currency at each purchase date's exchange rate.
+    pub(crate) cost_basis_base: Option<f64>,
+    pub(crate) value_base: Option<f64>,
+    /// What exchange-rate moves since the purchases added, in the base
+    /// currency (0 for a holding in the base currency).
+    pub(crate) fx_effect: Option<f64>,
 }
 
 impl CsvRow for HoldingRow {
@@ -777,17 +783,25 @@ impl CsvRow for HoldingRow {
         "price_source",
         "nav_date",
         "cap_tier",
+        "cost_basis_base",
+        "value_base",
+        "fx_effect",
     ];
 }
 
 /// Totals over the priced holdings, converted to the base currency.
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct PortfolioTotals {
+    /// At each purchase date's exchange rate.
     pub(crate) cost_basis: f64,
     pub(crate) value: f64,
     pub(crate) pnl: f64,
     pub(crate) pnl_percent: f64,
     pub(crate) currency: Option<String>,
+    /// The part of `pnl` from exchange-rate moves since the purchases.
+    pub(crate) fx_effect: f64,
+    /// Holdings whose purchase-date rate was not found (cost at today's rate).
+    pub(crate) cost_at_today_fx: Vec<String>,
 }
 
 /// `portfolio --json`: every holding, totals in one currency, and the
@@ -801,6 +815,8 @@ pub(crate) struct PortfolioReport {
     pub(crate) unpriced: Vec<String>,
     pub(crate) unconverted: Vec<String>,
     pub(crate) notes: Vec<String>,
+    /// Splits and bonuses not yet applied to the lots (valued as if applied).
+    pub(crate) warnings: Vec<String>,
 }
 
 fn pct_of(part: f64, whole: f64) -> f64 {
@@ -824,6 +840,11 @@ pub(crate) fn portfolio_report(
             let price = val.price(&h.symbol);
             let cost = h.cost_basis();
             let value = price.map(|p| h.shares * p);
+            let cost_base = val.holding_cost_base(h).map(|c| c.0);
+            let value_base = value.and_then(|v| val.to_base(&h.symbol, v));
+            let fx_effect = cost_base
+                .zip(val.to_base(&h.symbol, cost))
+                .map(|(hist, now)| round(now - hist, 2));
             HoldingRow {
                 symbol: h.symbol.clone(),
                 shares: h.shares,
@@ -836,7 +857,9 @@ pub(crate) fn portfolio_report(
                 weight_percent: value
                     .and_then(|v| val.to_base(&h.symbol, v))
                     .map(|v| round(pct_of(v, totals.value), 2)),
+                // No annual return from guessed purchase dates.
                 xirr_percent: value
+                    .filter(|_| !h.has_estimated_dates())
                     .and_then(|v| pf::xirr(&portfolio.cash_flows(&h.symbol), v, today))
                     .map(|r| round(r * 100.0, 2)),
                 currency: val.currency(&h.symbol),
@@ -844,6 +867,9 @@ pub(crate) fn portfolio_report(
                 price_source: val.price_source(&h.symbol),
                 nav_date: val.nav_date(&h.symbol),
                 cap_tier: val.cap_tier(&h.symbol).as_str(),
+                cost_basis_base: round_opt(cost_base, 2),
+                value_base: round_opt(value_base, 2),
+                fx_effect,
             }
         })
         .collect();
@@ -855,10 +881,13 @@ pub(crate) fn portfolio_report(
             pnl: round(totals.value - totals.cost, 2),
             pnl_percent: round(totals.pnl_pct(), 2),
             currency: Some(val.base().to_string()),
+            fx_effect: round(totals.fx_effect(), 2),
+            cost_at_today_fx: totals.cost_at_today_fx,
         },
         unpriced: totals.unpriced,
         unconverted: totals.unconverted,
         notes: val.off.notes.iter().map(offmarket::Note::line).collect(),
+        warnings: Vec::new(),
     }
 }
 
@@ -895,12 +924,15 @@ pub(crate) async fn load_portfolio_report_named(
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let val = value_holdings(src, &symbols, market, base).await?;
-    Ok(portfolio_report(
-        &portfolio,
-        &val,
-        chrono::Local::now().date_naive(),
-    ))
+    let mut val = value_holdings(src, &symbols, market, base).await?;
+    let pending = crate::corp_actions::pending_splits_live(&portfolio).await;
+    let portfolio = pending.adjusted(&portfolio);
+    if !cfg!(test) {
+        val.load_history(&portfolio).await;
+    }
+    let mut report = portfolio_report(&portfolio, &val, chrono::Local::now().date_naive());
+    report.warnings = pending.warnings();
+    Ok(report)
 }
 
 /// Said once when prices cannot be fetched.
@@ -1000,35 +1032,69 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 .map(|h| h.symbol.clone())
                 .collect();
             let client = YahooClient::new().await.ok();
-            let (val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
+            let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
             if !live {
                 eprintln!("  {OFFLINE_NOTE}");
             }
-            portfolio_report(&portfolio, &val, chrono::Local::now().date_naive())
+            let pending = match client.as_ref().filter(|_| live) {
+                Some(c) => crate::corp_actions::pending_splits(c, &portfolio).await,
+                None => Default::default(),
+            };
+            let portfolio = pending.adjusted(&portfolio);
+            if live {
+                val.load_history(&portfolio).await;
+            }
+            let mut report = portfolio_report(&portfolio, &val, chrono::Local::now().date_naive());
+            report.warnings = pending.warnings();
+            report
         };
         return match fmt {
             Format::Csv => output::print_csv(&report.holdings),
             _ => output::print_json(&report),
         };
     }
-    let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() {
+    let loaded = Portfolio::load()?;
+    if loaded.holdings.is_empty() {
         println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
         return Ok(());
     }
 
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
+    let symbols: Vec<String> = loaded.holdings.iter().map(|h| h.symbol.clone()).collect();
     let client = YahooClient::new().await.ok();
     let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
     let Some(client) = client.filter(|_| live) else {
-        print_offline_portfolio(&portfolio);
+        print_offline_portfolio(&loaded);
         return Ok(());
     };
     let today = chrono::Local::now().date_naive();
+    // A split or bonus Yahoo reports but the lots have not taken yet would
+    // show as a fake loss: value a copy with it applied, and say so.
+    let pending = crate::corp_actions::pending_splits(&client, &loaded).await;
+    let portfolio = pending.adjusted(&loaded);
+    // Rates for closed positions and dividends in currencies no open
+    // holding uses, before anything is totalled; then each day's rate.
+    let mut history_currencies: Vec<String> = portfolio
+        .symbols_with_history()
+        .iter()
+        .filter_map(|sym| val.currency(sym))
+        .chain(
+            portfolio
+                .dividends
+                .iter()
+                .filter_map(|d| d.currency.clone()),
+        )
+        .collect();
+    history_currencies.sort();
+    history_currencies.dedup();
+    val.add_rates(&client, &history_currencies).await;
+    val.load_history(&portfolio).await;
+
+    let base_currency = val.base().to_string();
+    let base = Some(base_currency.as_str());
+    let any_foreign = portfolio
+        .holdings
+        .iter()
+        .any(|h| val.currency(&h.symbol).is_some_and(|c| c != base_currency));
 
     print_header(&portfolio_title(t(Msg::YourPortfolio)));
     // Wide enough for `MF:<ISIN>` (and the `*` of estimated dates).
@@ -1039,10 +1105,16 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .max()
         .unwrap_or(0)
         .max(12);
-    let rule = "─".repeat(81 + sw);
+    let fx_w = if any_foreign { 12 } else { 0 };
+    let rule = "─".repeat(81 + sw + fx_w);
+    let fx_head = if any_foreign {
+        format!(" {}", pad_start("FX effect", 11).bold())
+    } else {
+        String::new()
+    };
     // Width-aware padding: translated labels (e.g. Hindi) aren't one column per char.
     println!(
-        "  {} {} {} {} {} {} {} {} {}",
+        "  {} {} {} {} {} {} {}{} {} {}",
         pad_end(t(Msg::Symbol), sw).bold(),
         pad_start(t(Msg::Shares), 8).bold(),
         pad_start(t(Msg::AvgCost), 10).bold(),
@@ -1050,6 +1122,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         pad_start(t(Msg::Value), 12).bold(),
         pad_start(t(Msg::PnL), 11).bold(),
         pad_start(t(Msg::PnLPct), 8).bold(),
+        fx_head,
         pad_start("XIRR", 8).bold(),
         pad_start("Cap", 6).bold(),
     );
@@ -1060,15 +1133,23 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let cur = val.currency(&h.symbol);
         let cur = cur.as_deref();
         let mut label = h.symbol.clone();
+        if pending.for_symbol(&h.symbol).first().is_some() {
+            label.push('†');
+        }
         if h.has_estimated_dates() {
             label.push('*');
             any_estimated = true;
         }
+        let fx_blank = if any_foreign {
+            format!(" {:>11}", "—")
+        } else {
+            String::new()
+        };
         // No live price (delisted, renamed, or a bad symbol): show N/A and
         // leave it out of the totals rather than valuing it at 0.
         let Some(price) = val.price(&h.symbol) else {
             println!(
-                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
+                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6}",
                 label.yellow(),
                 h.shares,
                 format_price(h.avg_cost, cur),
@@ -1076,6 +1157,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 "N/A",
                 "—",
                 "—",
+                fx_blank,
                 "—",
                 "",
             );
@@ -1085,9 +1167,29 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let cost = h.cost_basis();
         let pnl = value - cost;
         let pnl_pct = if cost > 0.0 { pnl / cost * 100.0 } else { 0.0 };
-        let xirr = pf::xirr(&portfolio.cash_flows(&h.symbol), value, today);
+        // An annual return from guessed purchase dates would be made up.
+        let xirr = if h.has_estimated_dates() {
+            None
+        } else {
+            pf::xirr(&portfolio.cash_flows(&h.symbol), value, today)
+        };
+        let fx_cell = if !any_foreign {
+            String::new()
+        } else if cur == base {
+            fx_blank.clone()
+        } else {
+            match (
+                val.holding_cost_base(h),
+                val.to_base(&h.symbol, h.cost_basis()),
+            ) {
+                (Some((hist, true)), Some(now)) => {
+                    format!(" {:>11}", signed_money(now - hist, base))
+                }
+                _ => fx_blank.clone(),
+            }
+        };
         println!(
-            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
+            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6}",
             label.cyan(),
             h.shares,
             format_price(h.avg_cost, cur),
@@ -1095,90 +1197,52 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             format_price(value, cur),
             signed_money(pnl, cur),
             signed_pct(pnl_pct),
+            fx_cell,
             xirr_cell(xirr),
             val.cap_tier(&h.symbol).badge().dimmed(),
         );
     }
 
     let totals = val.totals(&portfolio);
-    let base_currency = val.base().to_string();
-    let base = Some(base_currency.as_str());
-    let portfolio_xirr = {
-        // Money-weighted return across everything ever held (closed
-        // positions too), converted at today's rates. Holdings left out of
-        // the totals are left out here as well.
-        let excluded: Vec<&String> = totals.unpriced.iter().chain(&totals.unconverted).collect();
-        let mut flows = Vec::new();
-        for sym in portfolio.symbols_with_history() {
-            if excluded.contains(&&sym) {
-                continue;
-            }
-            for (d, amount) in portfolio.cash_flows(&sym) {
-                match val.to_base(&sym, amount) {
-                    Some(a) => flows.push((d, a)),
-                    None => continue,
-                }
-            }
-        }
-        pf::xirr(&flows, totals.value, today)
+    let (portfolio_xirr, xirr_left_out) = portfolio_xirr(&portfolio, &val, &totals, today);
+    let fx_total = if any_foreign {
+        format!(" {:>11}", signed_money(totals.fx_effect(), base))
+    } else {
+        String::new()
     };
     println!("  {}", rule.dimmed());
+    // The Avg Cost column has no meaning for a mix of holdings: the total
+    // cost is printed below instead.
     println!(
-        "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
+        "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6}",
         pad_end(t(Msg::Total), sw).bold(),
         "",
-        format_price(totals.cost, base),
+        "",
         "",
         format_price(totals.value, base).bold(),
         signed_money(totals.value - totals.cost, base),
         signed_pct(totals.pnl_pct()),
+        fx_total,
         xirr_cell(portfolio_xirr),
         "",
     );
+    print_kv("Cost basis", &format_price(totals.cost, base));
     if let Some(note) = val.fx_note() {
         println!("  {}", note.dimmed());
     }
-
-    // Realized P&L and dividends, all time, in the base currency. Closed
-    // positions may be in a currency no open holding uses.
-    let mut history_currencies: Vec<String> = portfolio
-        .realized
-        .iter()
-        .map(|s| &s.symbol)
-        .chain(portfolio.dividends.iter().map(|d| &d.symbol))
-        .filter_map(|sym| val.currency(sym))
-        .collect();
-    history_currencies.sort();
-    history_currencies.dedup();
-    val.add_rates(&client, &history_currencies).await;
-    let mut unconverted: Vec<&str> = portfolio
-        .realized
-        .iter()
-        .map(|s| s.symbol.as_str())
-        .chain(portfolio.dividends.iter().map(|d| d.symbol.as_str()))
-        .filter(|sym| val.to_base(sym, 1.0).is_none())
-        .collect();
-    unconverted.sort();
-    unconverted.dedup();
-    let realized: f64 = portfolio
-        .realized
-        .iter()
-        .filter_map(|s| val.to_base(&s.symbol, s.gain()))
-        .sum();
-    let dividends: f64 = portfolio
-        .dividends
-        .iter()
-        .filter_map(|d| val.to_base(&d.symbol, d.amount))
-        .sum();
-    if !portfolio.realized.is_empty() {
-        print_kv(
-            &format!("Realized P&L ({} sale lots)", portfolio.realized.len()),
-            &signed_money(realized, base),
+    if any_foreign {
+        println!(
+            "  {}",
+            format!(
+                "Cost in {} at each purchase date's exchange rate. FX effect: what exchange-rate moves since then added (P&L and P&L % on the right of the total include it).",
+                base_currency
+            )
+            .dimmed()
         );
     }
-    if !portfolio.dividends.is_empty() {
-        print_kv("Dividends received", &format_price(dividends, base));
-    }
+
+    print_total_return(&client, &portfolio, &val, &totals, today).await;
+
     let prof = crate::config::effective_profile();
     if prof.mode == crate::config::ProfileMode::Ultra && totals.value > 0.0 {
         let heat_per_pos = prof.risk_per_trade;
@@ -1195,6 +1259,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         );
     }
     println!();
+    pending.print();
     totals.print_exclusions();
     val.print_price_notes();
     let regular_funds = portfolio
@@ -1216,15 +1281,19 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             regular_funds
         );
     }
-    if !unconverted.is_empty() {
+    if !xirr_left_out.is_empty() {
         println!(
-            "  {} No exchange rate for {} — left out of realized P&L and dividends.",
+            "  {} No exchange rate for {} — left out of realized P&L, dividends and XIRR.",
             "!".yellow(),
-            unconverted.join(", ")
+            xirr_left_out.join(", ")
         );
     }
     if any_estimated {
         println!("  {}", ESTIMATED_DATE_HINT.dimmed());
+        println!(
+            "  {}",
+            "XIRR is not shown for holdings with an unknown purchase date.".dimmed()
+        );
     }
 
     if portfolio.holdings.len() > 1 {
@@ -1246,6 +1315,280 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         "By market, sector and tax term, with risk and observations: stockwise portfolio analyze",
     );
     Ok(())
+}
+
+/// Money-weighted return across everything ever held (closed positions in
+/// any currency too), each flow at its own date's exchange rate. Open
+/// holdings left out of the totals are left out here as well. Returns the
+/// rate and the symbols that had no exchange rate.
+pub(crate) fn portfolio_xirr(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    totals: &Totals,
+    today: chrono::NaiveDate,
+) -> (Option<f64>, Vec<String>) {
+    let excluded: Vec<&String> = totals.unpriced.iter().chain(&totals.unconverted).collect();
+    let mut flows = Vec::new();
+    let mut left_out = Vec::new();
+    for sym in portfolio.symbols_with_history() {
+        if excluded.contains(&&sym) {
+            continue;
+        }
+        match val.flows_base(portfolio, &sym) {
+            Some(f) => flows.extend(f),
+            None => left_out.push(sym),
+        }
+    }
+    flows.sort_by_key(|f| f.0);
+    (pf::xirr(&flows, totals.value, today), left_out)
+}
+
+/// The first day of the financial year holding `today`: 1 April in India
+/// (an INR base), else 1 January.
+pub(crate) fn fy_start(today: chrono::NaiveDate, base: &str) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let ymd = |y, m| chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(today);
+    if base.eq_ignore_ascii_case("INR") {
+        if today.month() >= 4 {
+            ymd(today.year(), 4)
+        } else {
+            ymd(today.year() - 1, 4)
+        }
+    } else {
+        ymd(today.year(), 1)
+    }
+}
+
+/// "FY 2026-27" for an INR base, "2026" otherwise.
+fn fy_label(start: chrono::NaiveDate, base: &str) -> String {
+    use chrono::Datelike;
+    if base.eq_ignore_ascii_case("INR") {
+        format!("FY {}-{:02}", start.year(), (start.year() + 1) % 100)
+    } else {
+        start.year().to_string()
+    }
+}
+
+/// Realized P&L and dividends in the base currency, all time and since
+/// `since`, each at its own date's exchange rate.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub(crate) struct Income {
+    pub realized: f64,
+    pub realized_since: f64,
+    pub sales: usize,
+    pub sales_since: usize,
+    pub dividends: f64,
+    pub dividends_since: f64,
+    pub charges: f64,
+}
+
+pub(crate) fn income_since(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    since: chrono::NaiveDate,
+) -> Income {
+    let mut out = Income::default();
+    let after = |d: &str| pf::parse_date(d).is_ok_and(|d| d >= since);
+    for s in &portfolio.realized {
+        let Some(g) = val.sale_gain_base(s) else {
+            continue;
+        };
+        out.realized += g;
+        out.sales += 1;
+        if s.charges() > 0.0
+            && let Some(c) = val.to_base(&s.symbol, s.charges())
+        {
+            out.charges += c;
+        }
+        if after(&s.sell_date) {
+            out.realized_since += g;
+            out.sales_since += 1;
+        }
+    }
+    for d in &portfolio.dividends {
+        let Some(a) = val.dividend_base(d) else {
+            continue;
+        };
+        out.dividends += a;
+        if after(&d.ex_date) {
+            out.dividends_since += a;
+        }
+    }
+    out
+}
+
+/// How much the holdings now held moved over a period, at today's rates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PeriodChange {
+    pub label: &'static str,
+    pub change: f64,
+    pub pct: f64,
+    /// Holdings with a price at the period's start, of those priced now.
+    pub covered: usize,
+    pub of: usize,
+}
+
+/// Change of each holding's value since a past close, at today's share
+/// count and exchange rate. `then(symbol)` is the holding's price at the
+/// period start.
+pub(crate) fn period_change(
+    label: &'static str,
+    portfolio: &Portfolio,
+    val: &Valuation,
+    then: impl Fn(&str) -> Option<f64>,
+) -> Option<PeriodChange> {
+    let (mut change, mut before, mut covered, mut of) = (0.0, 0.0, 0, 0);
+    for h in &portfolio.holdings {
+        let Some(now) = val.price(&h.symbol) else {
+            continue;
+        };
+        of += 1;
+        let Some(past) = then(&h.symbol).filter(|p| *p > 0.0) else {
+            continue;
+        };
+        let (Some(v_now), Some(v_then)) = (
+            val.to_base(&h.symbol, h.shares * now),
+            val.to_base(&h.symbol, h.shares * past),
+        ) else {
+            continue;
+        };
+        change += v_now - v_then;
+        before += v_then;
+        covered += 1;
+    }
+    (covered > 0 && before > 0.0).then(|| PeriodChange {
+        label,
+        change,
+        pct: change / before * 100.0,
+        covered,
+        of,
+    })
+}
+
+/// The close on or before `date` in `closes` (oldest first).
+fn close_on_or_before(closes: &[(chrono::NaiveDate, f64)], date: chrono::NaiveDate) -> Option<f64> {
+    let idx = closes.partition_point(|(d, _)| *d <= date);
+    closes.get(idx.checked_sub(1)?).map(|c| c.1)
+}
+
+/// Unrealized, realized (this financial year and all time) and dividends,
+/// then how the current holdings moved over a day, a week, a month and
+/// the year to date.
+async fn print_total_return(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    val: &Valuation,
+    totals: &Totals,
+    today: chrono::NaiveDate,
+) {
+    use futures_util::StreamExt;
+    let base_currency = val.base().to_string();
+    let base = Some(base_currency.as_str());
+    let since = fy_start(today, &base_currency);
+    let fy = fy_label(since, &base_currency);
+    let inc = income_since(portfolio, val, since);
+    let unrealized = totals.value - totals.cost;
+    print_section(&format!("Total return ({})", base_currency));
+    print_kv("Unrealized", &signed_money(unrealized, base));
+    if inc.sales > 0 {
+        print_kv(
+            &format!("Realized, {} ({} sale lots)", fy, inc.sales_since),
+            &signed_money(inc.realized_since, base),
+        );
+        print_kv(
+            &format!("Realized, all time ({} sale lots)", inc.sales),
+            &signed_money(inc.realized, base),
+        );
+        if inc.charges > 0.0 {
+            print_kv(
+                "  of which charges",
+                &format!("-{}", format_price(inc.charges, base)),
+            );
+        }
+    }
+    if !portfolio.dividends.is_empty() {
+        print_kv(
+            &format!("Dividends, {}", fy),
+            &format_price(inc.dividends_since, base),
+        );
+        print_kv("Dividends, all time", &format_price(inc.dividends, base));
+    }
+    print_kv(
+        "Total, all time",
+        &signed_money(unrealized + inc.realized + inc.dividends, base),
+    );
+
+    // Past closes of the holdings priced by Yahoo (funds and SGBs have none).
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| val.price(&h.symbol).is_some() && val.mark(&h.symbol).is_none())
+        .map(|h| h.symbol.clone())
+        .collect();
+    let histories: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> =
+        futures_util::stream::iter(symbols)
+            .map(|sym| async move {
+                let closes = client
+                    .get_chart(&sym, "1y", "1d")
+                    .await
+                    .map(|c| c.dated_closes())
+                    .unwrap_or_default();
+                (sym, closes)
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+    let past = |sym: &str, date: chrono::NaiveDate| {
+        histories
+            .iter()
+            .find(|(s, _)| s == sym)
+            .and_then(|(_, c)| close_on_or_before(c, date))
+    };
+    let ytd_start = {
+        use chrono::Datelike;
+        chrono::NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today)
+            - chrono::Duration::days(1)
+    };
+    let changes: Vec<PeriodChange> = [
+        period_change("1 day", portfolio, val, |s| {
+            val.quote(s).and_then(|q| q.regular_market_previous_close)
+        }),
+        period_change("1 week", portfolio, val, |s| {
+            past(s, today - chrono::Duration::days(7))
+        }),
+        period_change("1 month", portfolio, val, |s| {
+            past(s, today - chrono::Months::new(1))
+        }),
+        period_change("Year to date", portfolio, val, |s| past(s, ytd_start)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !changes.is_empty() {
+        let cells: Vec<String> = changes
+            .iter()
+            .map(|c| {
+                let cover = if c.covered < c.of {
+                    format!(" [{}/{}]", c.covered, c.of)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} {} ({}){}",
+                    c.label,
+                    signed_money(c.change, base),
+                    signed_pct(c.pct),
+                    cover
+                )
+            })
+            .collect();
+        print_kv("Change of current holdings", &cells.join("  "));
+        println!(
+            "  {}",
+            "At today's share count and exchange rate; [n/m]: holdings with a price at the start."
+                .dimmed()
+        );
+    }
 }
 
 /// A price paid in `paid` expressed in the holding's quote unit
@@ -1298,10 +1641,14 @@ pub async fn cmd_portfolio_add(
     date: Option<&str>,
     force: bool,
     paid_in: Option<&str>,
+    charges: Option<f64>,
     market: Market,
 ) -> Result<()> {
     if !(shares > 0.0 && shares.is_finite()) {
         bail!("Number of shares must be positive");
+    }
+    if charges.is_some_and(|c| !(c >= 0.0 && c.is_finite())) {
+        bail!("Charges can't be negative");
     }
     if !(cost >= 0.0 && cost.is_finite()) {
         bail!("Cost per share can't be negative");
@@ -1344,6 +1691,10 @@ pub async fn cmd_portfolio_add(
     // The currency the cost ends up in: the instrument's quoted currency
     // when `--currency` looked it up, else the one its suffix implies.
     let mut cost_currency: Option<String> = None;
+    // What was paid in the other currency, per unit of the holding's: kept
+    // on the lot so its cost in that currency is exact, not re-converted.
+    let mut paid_fx: Option<(String, f64)> = None;
+    let mut charges = charges;
     if let Some(paid) = paid_in {
         // The currency the instrument is quoted in, from its quote (a few
         // London listings trade in USD), else from its suffix.
@@ -1369,11 +1720,18 @@ pub async fn cmd_portfolio_add(
         let paid_cost = cost;
         if paid.eq_ignore_ascii_case(&major) {
             cost = convert_paid(cost, 1.0, false, quote);
+            charges = charges.map(|c| convert_paid(c, 1.0, false, quote));
         } else {
             let (pair, inverted) = fx_pair(paid, &major);
             let day = pf::parse_date(&date)?;
             let (rate, on) = rate_on(&client, &pair, day).await?;
             cost = convert_paid(cost, rate, inverted, quote);
+            let (major_cost, _) = market::to_major(cost, quote);
+            if major_cost > 0.0 {
+                paid_fx = Some((paid.to_uppercase(), paid_cost / major_cost));
+            }
+            // Charges are kept in the holding's quote unit, like its price.
+            charges = charges.map(|c| convert_paid(c, rate, inverted, quote));
             let per = if inverted { rate } else { 1.0 / rate };
             println!(
                 "  {} {} {:.2} a share is {} at {:.4} {} per {} ({} close of {})",
@@ -1392,6 +1750,11 @@ pub async fn cmd_portfolio_add(
     let holding = Portfolio::update(|p| {
         let mut lot = Lot::new(shares, cost, &date, "manual");
         lot.units_as_of = units_as_of;
+        if let Some((cur, rate)) = &paid_fx {
+            lot.fx_currency = Some(cur.clone());
+            lot.fx_rate = Some(*rate);
+        }
+        lot.charges = charges.filter(|c| *c > 0.0);
         p.add_lot(&resolved, lot);
         Ok(p.holding(&resolved).cloned())
     })?;
@@ -1507,8 +1870,12 @@ pub async fn cmd_portfolio_sell(
     shares: f64,
     price: Option<f64>,
     date: Option<&str>,
+    charges: Option<f64>,
     market: Market,
 ) -> Result<()> {
+    if charges.is_some_and(|c| !(c >= 0.0 && c.is_finite())) {
+        bail!("Charges can't be negative");
+    }
     let portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
     if portfolio.holding(&resolved).is_none() {
@@ -1594,7 +1961,19 @@ pub async fn cmd_portfolio_sell(
     // The checks above ran on the portfolio as loaded; sell from the file as
     // it is now, so a change made meanwhile is kept (and a sale that no
     // longer fits is refused).
-    let sales = Portfolio::update(|p| p.sell_fifo(&resolved, shares, price, &date, "manual"))?;
+    let sales = Portfolio::update(|p| {
+        let n = p.realized.len();
+        let mut sales = p.sell_fifo(&resolved, shares, price, &date, "manual")?;
+        // The sale's own charges, shared by the lots it sold from.
+        if let Some(c) = charges.filter(|c| *c > 0.0) {
+            for (s, saved) in sales.iter_mut().zip(p.realized[n..].iter_mut()) {
+                let part = c * s.qty / shares;
+                s.add_charges(part);
+                saved.add_charges(part);
+            }
+        }
+        Ok(sales)
+    })?;
 
     let cur = cur.as_deref();
     println!(
@@ -3336,6 +3715,194 @@ mod tests {
             let json = serde_json::to_value(&r).unwrap();
             assert!(json["holdings"][0]["price"].is_null());
         }
+    }
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn usd_quote(symbol: &str, price: f64) -> Quote {
+        Quote {
+            symbol: Some(symbol.into()),
+            regular_market_price: Some(price),
+            currency: Some("USD".into()),
+            ..Default::default()
+        }
+    }
+
+    /// AAPL in an INR portfolio: USDINR 75 on the purchase date, 84 today.
+    fn usd_valuation(p: &Portfolio) -> Valuation {
+        let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+        let mut v = Valuation::new(
+            vec![usd_quote("AAPL", 100.0)],
+            &symbols,
+            Market::In,
+            Some("INR"),
+        );
+        v.fx.set_rate("USD", 84.0);
+        v.hist.insert(
+            "USD",
+            vec![
+                (day("2024-01-02"), 75.0),
+                (day("2025-06-02"), 80.0),
+                (day("2026-11-19"), 84.0),
+            ],
+        );
+        v
+    }
+
+    #[test]
+    fn a_usd_lot_at_the_same_price_gains_the_rupee_fall() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        let v = usd_valuation(&p);
+        let t = v.totals(&p);
+        assert!((t.value - 84_000.0).abs() < 1e-6);
+        assert!((t.cost - 75_000.0).abs() < 1e-6);
+        // About +12% in rupees with the dollar price unchanged.
+        assert!((t.pnl_pct() - 12.0).abs() < 1e-9, "{}", t.pnl_pct());
+        assert!((t.fx_effect() - 9_000.0).abs() < 1e-6);
+        assert!(t.cost_at_today_fx.is_empty());
+        let r = portfolio_report(&p, &v, day("2026-11-21"));
+        assert_eq!(r.totals.fx_effect, 9_000.0);
+        assert_eq!(r.holdings[0].cost_basis_base, Some(75_000.0));
+        assert_eq!(r.holdings[0].fx_effect, Some(9_000.0));
+    }
+
+    #[test]
+    fn a_lot_paid_in_rupees_keeps_what_was_paid() {
+        let mut p = Portfolio::default();
+        let mut lot = pf::Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        // Paid ₹76 per dollar (the bank's rate, not the reference rate).
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(76.0);
+        p.add_lot("AAPL", lot);
+        let v = usd_valuation(&p);
+        assert!((v.totals(&p).cost - 76_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn without_history_cost_falls_back_to_today_and_says_so() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2010-01-04", "manual"));
+        let v = usd_valuation(&p);
+        let t = v.totals(&p);
+        assert!((t.cost - 84_000.0).abs() < 1e-6);
+        assert_eq!(t.cost_at_today_fx, vec!["AAPL".to_string()]);
+    }
+
+    #[test]
+    fn realized_dividends_and_xirr_use_each_dates_rate_and_keep_closed_positions() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        // A closed position: bought at 75, sold at 80 (same dollar price),
+        // with $5 of charges on the sale.
+        p.add_lot("MSFT", pf::Lot::new(1.0, 100.0, "2024-01-02", "manual"));
+        p.sell_fifo("MSFT", 1.0, 100.0, "2025-06-02", "manual")
+            .unwrap();
+        p.realized[0].add_charges(5.0);
+        let mut v = usd_valuation(&p);
+        v.quotes.push(usd_quote("MSFT", 100.0));
+        let sale = p.realized[0].clone();
+        // 95 × 80 − 100 × 75.
+        assert!((v.sale_gain_base(&sale).unwrap() - 100.0).abs() < 1e-6);
+        assert!((sale.gain() + 5.0).abs() < 1e-9);
+        let inc = income_since(&p, &v, day("2025-04-01"));
+        assert_eq!((inc.sales, inc.sales_since), (1, 1));
+        assert!((inc.charges - 5.0 * 84.0).abs() < 1e-6);
+        let today = day("2026-11-21");
+        let t = v.totals(&p);
+        let (x, left_out) = portfolio_xirr(&p, &v, &t, today);
+        assert!(left_out.is_empty());
+        // Rupee XIRR includes the rupee fall on both positions.
+        assert!(x.unwrap() > 0.03, "{x:?}");
+    }
+
+    #[test]
+    fn financial_year_starts_in_april_for_rupees() {
+        assert_eq!(fy_start(day("2026-11-21"), "INR"), day("2026-04-01"));
+        assert_eq!(fy_start(day("2026-02-10"), "INR"), day("2025-04-01"));
+        assert_eq!(fy_start(day("2026-02-10"), "USD"), day("2026-01-01"));
+        assert_eq!(fy_label(day("2026-04-01"), "INR"), "FY 2026-27");
+    }
+
+    #[test]
+    fn period_change_counts_only_holdings_with_a_past_price() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        p.add_lot("MSFT", pf::Lot::new(1.0, 100.0, "2024-01-02", "manual"));
+        let mut v = usd_valuation(&p);
+        v.quotes.push(usd_quote("MSFT", 100.0));
+        let c = period_change("1 week", &p, &v, |s| (s == "AAPL").then_some(80.0)).unwrap();
+        assert_eq!((c.covered, c.of), (1, 2));
+        assert!((c.pct - 25.0).abs() < 1e-9);
+        assert!((c.change - 20.0 * 10.0 * 84.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn xirr_is_hidden_for_estimated_dates() {
+        let mut p = one_holding();
+        p.holdings[0].lots[0].date_estimated = true;
+        let symbols = vec!["TCS.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(4000.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let r = portfolio_report(&p, &v, day("2026-11-21"));
+        assert!(r.holdings[0].xirr_percent.is_none());
+    }
+
+    #[test]
+    fn a_pending_split_shows_no_fake_loss() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "RELIANCE.NS",
+            pf::Lot::new(10.0, 2800.0, "2024-01-10", "manual"),
+        );
+        let pending = crate::corp_actions::PendingSplits {
+            by_symbol: vec![(
+                "RELIANCE.NS".into(),
+                vec![Split::new("2024-10-28", 2.0, 1.0)],
+            )],
+            unchecked: vec![],
+        };
+        let q = Quote {
+            symbol: Some("RELIANCE.NS".into()),
+            regular_market_price: Some(1400.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let symbols = vec!["RELIANCE.NS".to_string()];
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        // Unadjusted: a fake 50% loss.
+        assert!((v.totals(&p).pnl_pct() + 50.0).abs() < 1e-9);
+        let adjusted = pending.adjusted(&p);
+        assert!(v.totals(&adjusted).pnl_pct().abs() < 1e-9);
+        let mut r = portfolio_report(&adjusted, &v, day("2026-11-21"));
+        r.warnings = pending.warnings();
+        assert!(r.warnings[0].contains("split pending"));
+        assert_eq!(r.holdings[0].shares, 20.0);
+    }
+
+    #[test]
+    fn a_partial_sale_takes_its_share_of_the_lot_charges() {
+        let mut p = Portfolio::default();
+        let mut lot = pf::Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        lot.charges = Some(20.0);
+        p.add_lot("TCS.NS", lot);
+        let sales = p
+            .sell_fifo("TCS.NS", 4.0, 110.0, "2025-01-02", "manual")
+            .unwrap();
+        assert!((sales[0].charges() - 8.0).abs() < 1e-9);
+        // 4 × 10 − 8.
+        assert!((sales[0].gain() - 32.0).abs() < 1e-9);
+        let left = &p.holding("TCS.NS").unwrap().lots[0];
+        assert!((left.charges.unwrap() - 12.0).abs() < 1e-9);
+        // Undoing the sale gives the charges back to a lot.
+        assert_eq!(sales[0].to_lot().charges, Some(8.0));
     }
 
     use super::fx_pair;
