@@ -1699,7 +1699,11 @@ stockwise mf screen flexi cap -s ter --json | jq '.[] | {name, ter, return_3y}'
 - A value that isn't available is `null` in JSON and an empty cell in CSV —
   never `0`. A holding without a live price keeps its row but is left out of
   totals and listed in `unpriced`.
-- Fields ending in `_percent` are percentages (`12.5` = 12.5%). `dividend_yield`
+- Fields ending in `_percent` are percentages (`12.5` = 12.5%). Older keys
+  that end in `_pct` (as in the shapes below) are percentages too, and every
+  one also appears as its `_percent` twin right after it (`weight_pct` and
+  `weight_percent`); use the `_percent` name in new scripts, as the `_pct`
+  names go in 1.0. `dividend_yield`
   in `quote`, `compare` and `screen` is a fraction as Yahoo reports it (`0.012`
   = 1.2%). Prices are as Yahoo returns them; derived money values are rounded
   to 2 decimals, indicators to 4.
