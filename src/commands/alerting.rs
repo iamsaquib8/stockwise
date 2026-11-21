@@ -622,7 +622,13 @@ pub async fn cmd_notify(action: &str) -> Result<()> {
                     .get(&channel)
                     .map(|p| format!(" ({} priority and up)", p.label()))
                     .unwrap_or_default();
-                println!("  {} {:<9} {}{}", "✓".green(), channel, dest, route.dimmed())
+                println!(
+                    "  {} {:<9} {}{}",
+                    "✓".green(),
+                    channel,
+                    dest,
+                    route.dimmed()
+                )
             }
             _ => println!(
                 "  {} {:<9} {}",
@@ -940,7 +946,8 @@ mod tests {
 
     #[test]
     fn notified_state_moves_from_the_old_key_to_the_id() {
-        let mut a = crate::alerts::Alert::new("TCS.NS", crate::alerts::AlertCondition::Above, 10.0, None);
+        let mut a =
+            crate::alerts::Alert::new("TCS.NS", crate::alerts::AlertCondition::Above, 10.0, None);
         a.id = "a000000000001".into();
         let mut s = WatchState::default();
         s.fired.insert(

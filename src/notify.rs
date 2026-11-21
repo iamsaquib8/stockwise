@@ -26,7 +26,16 @@ const TELEGRAM_MAX: usize = 4096;
 
 /// How urgent a notice is. Routing and quiet hours compare against it.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
@@ -223,7 +232,12 @@ impl QuietHours {
 
 impl std::fmt::Display for QuietHours {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}", self.start.format("%H:%M"), self.end.format("%H:%M"))
+        write!(
+            f,
+            "{}-{}",
+            self.start.format("%H:%M"),
+            self.end.format("%H:%M")
+        )
     }
 }
 
@@ -279,7 +293,10 @@ pub const ENV_VARS: &[(&str, &str)] = &[
         "STOCKWISE_NTFY_SERVER",
         "ntfy server (default https://ntfy.sh)",
     ),
-    ("STOCKWISE_NTFY_TOKEN", "ntfy access token, if the topic needs one"),
+    (
+        "STOCKWISE_NTFY_TOKEN",
+        "ntfy access token, if the topic needs one",
+    ),
     ("STOCKWISE_PUSHOVER_TOKEN", "Pushover application token"),
     ("STOCKWISE_PUSHOVER_USER", "Pushover user key"),
     (
@@ -373,9 +390,8 @@ impl NotifyConfig {
                         token: get("STOCKWISE_NTFY_TOKEN"),
                     });
                 } else {
-                    cfg.problems.push(
-                        "ntfy: STOCKWISE_NTFY_SERVER must be an https:// URL".into(),
-                    );
+                    cfg.problems
+                        .push("ntfy: STOCKWISE_NTFY_SERVER must be an https:// URL".into());
                 }
             }
             (None, Some(_)) => cfg
@@ -406,9 +422,9 @@ impl NotifyConfig {
 
         if let Some(routes) = get("STOCKWISE_NOTIFY_ROUTES") {
             for part in routes.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                let parsed = part.split_once(['=', ':']).and_then(|(c, p)| {
-                    Some((Channel::parse(c)?, Priority::parse(p)?))
-                });
+                let parsed = part
+                    .split_once(['=', ':'])
+                    .and_then(|(c, p)| Some((Channel::parse(c)?, Priority::parse(p)?)));
                 match parsed {
                     Some((c, p)) => {
                         cfg.routes.insert(c, p);
@@ -705,7 +721,10 @@ impl Notifier {
     /// Send what quiet hours held, if they are over. Called before every
     /// send and by the worker loop; a failed send keeps the notices held.
     pub async fn flush_held(&self) {
-        if !self.is_enabled() || self.config.holds(Priority::Normal, chrono::Local::now().time())
+        if !self.is_enabled()
+            || self
+                .config
+                .holds(Priority::Normal, chrono::Local::now().time())
         {
             return;
         }
@@ -1237,7 +1256,10 @@ mod tests {
     #[test]
     fn routes_send_each_channel_its_priorities() {
         let cfg = NotifyConfig::from_lookup(lookup(&[
-            ("STOCKWISE_NOTIFY_ROUTES", "desktop=high, telegram:low, fax=high"),
+            (
+                "STOCKWISE_NOTIFY_ROUTES",
+                "desktop=high, telegram:low, fax=high",
+            ),
             ("STOCKWISE_DESKTOP_NOTIFY", "1"),
         ]));
         assert!(!cfg.routes_to(Channel::Desktop, Priority::Normal));
@@ -1253,7 +1275,8 @@ mod tests {
         let held = Held {
             messages: vec![
                 Message::new("TCS: results tomorrow", "").with_priority(Priority::Low),
-                Message::new("INFY fell 6.1%", "Below 2σ of its usual day").with_priority(Priority::High),
+                Message::new("INFY fell 6.1%", "Below 2σ of its usual day")
+                    .with_priority(Priority::High),
             ],
         };
         let m = held.combined().unwrap();

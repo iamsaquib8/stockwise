@@ -226,12 +226,22 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                 let notice = Message::new("Long-term daily run", summary.join("\n"));
                 let mut st: crate::monitor::MonitorState =
                     crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
-                let msg = match super::monitoring::build_digest(&client, market, vec![notice.clone()], &mut st).await {
+                let msg = match super::monitoring::build_digest(
+                    &client,
+                    market,
+                    vec![notice.clone()],
+                    &mut st,
+                )
+                .await
+                {
                     Ok((d, _)) => crate::digest::render(&d),
                     Err(_) => Message::new("StockWise long-term daily run", summary.join("\n")),
                 };
                 if notifier.send_logged(&msg).await {
-                    println!("  {} Summary sent to your notification channels.", "✓".green());
+                    println!(
+                        "  {} Summary sent to your notification channels.",
+                        "✓".green()
+                    );
                 }
             } else {
                 println!(

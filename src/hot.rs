@@ -49,12 +49,7 @@ pub fn heat(row: &Row) -> Heat {
         .volume_x
         .map(|v| (v - 1.0).clamp(0.0, 4.0))
         .unwrap_or(0.0);
-    let news = row
-        .news
-        .iter()
-        .map(|n| n.importance)
-        .fold(0.0, f64::max)
-        / 2.5;
+    let news = row.news.iter().map(|n| n.importance).fold(0.0, f64::max) / 2.5;
     let news = news.min(4.0);
     let event = if row.events.is_empty() { 0.0 } else { 1.5 };
     let raw = moved + volume + news + event;
@@ -137,7 +132,12 @@ fn liquid(q: &Quote, min_value: f64) -> bool {
 }
 
 /// Unusual volume (RVOL ≥ 2), highest first.
-pub fn unusual_volume(quotes: &[Quote], session_elapsed: f64, min_value: f64, n: usize) -> Vec<Mover> {
+pub fn unusual_volume(
+    quotes: &[Quote],
+    session_elapsed: f64,
+    min_value: f64,
+    n: usize,
+) -> Vec<Mover> {
     let mut v: Vec<(f64, &Quote)> = quotes
         .iter()
         .filter(|q| liquid(q, min_value))
@@ -166,7 +166,11 @@ pub fn gaps(quotes: &[Quote], min_pct: f64, min_value: f64, n: usize) -> Vec<Mov
             mover(
                 q,
                 None,
-                format!("gapped {} {:.1}%", if g > 0.0 { "up" } else { "down" }, g.abs()),
+                format!(
+                    "gapped {} {:.1}%",
+                    if g > 0.0 { "up" } else { "down" },
+                    g.abs()
+                ),
             )
         })
         .collect()
@@ -182,9 +186,11 @@ pub fn range_breaks(quotes: &[Quote], up: bool, min_value: f64, n: usize) -> Vec
                 return false;
             };
             if up {
-                q.fifty_two_week_high.is_some_and(|h| h > 0.0 && p >= h * 0.998)
+                q.fifty_two_week_high
+                    .is_some_and(|h| h > 0.0 && p >= h * 0.998)
             } else {
-                q.fifty_two_week_low.is_some_and(|l| l > 0.0 && p <= l * 1.002)
+                q.fifty_two_week_low
+                    .is_some_and(|l| l > 0.0 && p <= l * 1.002)
             }
         })
         .collect();
@@ -202,7 +208,12 @@ pub fn range_breaks(quotes: &[Quote], up: bool, min_value: f64, n: usize) -> Vec
             mover(
                 q,
                 None,
-                if up { "at a 52-week high" } else { "at a 52-week low" }.into(),
+                if up {
+                    "at a 52-week high"
+                } else {
+                    "at a 52-week low"
+                }
+                .into(),
             )
         })
         .collect()
@@ -234,7 +245,10 @@ pub fn top_movers(quotes: &[Quote], session_elapsed: f64, min_value: f64, n: usi
 /// Stocks named most often in `titles`, by company name or ticker, as
 /// `(symbol, mentions)`. Names are matched as whole words.
 pub fn most_mentioned(titles: &[String], quotes: &[Quote], n: usize) -> Vec<(String, usize)> {
-    let lower: Vec<String> = titles.iter().map(|t| format!(" {} ", normalize(t))).collect();
+    let lower: Vec<String> = titles
+        .iter()
+        .map(|t| format!(" {} ", normalize(t)))
+        .collect();
     let mut counts: Vec<(String, usize)> = quotes
         .iter()
         .filter_map(|q| {
@@ -273,7 +287,13 @@ const COMMON_WORDS: &[&str] = &[
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '&' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '&' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -339,8 +359,17 @@ pub const THEMES: &[Theme] = &[
     },
     Theme {
         name: "Semiconductors",
-        india: &["DIXON.NS", "KAYNES.NS", "CGPOWER.NS", "SYRMA.NS", "AVALON.NS", "MOSCHIP.NS"],
-        us: &["NVDA", "AVGO", "TSM", "ASML", "AMD", "MU", "QCOM", "AMAT", "LRCX", "INTC"],
+        india: &[
+            "DIXON.NS",
+            "KAYNES.NS",
+            "CGPOWER.NS",
+            "SYRMA.NS",
+            "AVALON.NS",
+            "MOSCHIP.NS",
+        ],
+        us: &[
+            "NVDA", "AVGO", "TSM", "ASML", "AMD", "MU", "QCOM", "AMAT", "LRCX", "INTC",
+        ],
     },
     Theme {
         name: "Defence",
@@ -358,7 +387,13 @@ pub const THEMES: &[Theme] = &[
     },
     Theme {
         name: "Battery & EV",
-        india: &["EXIDEIND.NS", "ARE&M.NS", "OLAELEC.NS", "HBLENGINE.NS", "AMARAJABAT.NS"],
+        india: &[
+            "EXIDEIND.NS",
+            "ARE&M.NS",
+            "OLAELEC.NS",
+            "HBLENGINE.NS",
+            "AMARAJABAT.NS",
+        ],
         us: &["TSLA", "ALB", "QS", "ENVX", "EOSE", "RIVN"],
     },
     Theme {
@@ -405,7 +440,8 @@ pub fn theme_moves(quotes: &[Quote], india: bool) -> Vec<Group> {
                     Some((m.to_string(), c))
                 })
                 .collect();
-            let avg = (!moves.is_empty()).then(|| moves.iter().map(|(_, c)| c).sum::<f64>() / moves.len() as f64);
+            let avg = (!moves.is_empty())
+                .then(|| moves.iter().map(|(_, c)| c).sum::<f64>() / moves.len() as f64);
             let best = moves.iter().max_by(|a, b| a.1.total_cmp(&b.1)).cloned();
             let worst = moves.iter().min_by(|a, b| a.1.total_cmp(&b.1)).cloned();
             Group {
@@ -498,10 +534,9 @@ pub fn parse_large_deals(v: &Value) -> Vec<Deal> {
     let mut out = Vec::new();
     for (key, kind) in [("BULK_DEALS_DATA", "bulk"), ("BLOCK_DEALS_DATA", "block")] {
         for d in v.get(key).and_then(Value::as_array).into_iter().flatten() {
-            let (Some(qty), Some(price)) = (
-                d.get("qty").and_then(num),
-                d.get("watp").and_then(num),
-            ) else {
+            let (Some(qty), Some(price)) =
+                (d.get("qty").and_then(num), d.get("watp").and_then(num))
+            else {
                 continue;
             };
             let side = text(d, "buySell").to_ascii_uppercase();
@@ -563,8 +598,11 @@ pub fn parse_fo_ban(csv: &str) -> Vec<String> {
         .skip(1)
         .filter_map(|l| {
             let sym = l.split(',').nth(1)?.trim();
-            (!sym.is_empty() && sym.chars().all(|c| c.is_ascii_alphanumeric() || "&-_".contains(c)))
-                .then(|| sym.to_string())
+            (!sym.is_empty()
+                && sym
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "&-_".contains(c)))
+            .then(|| sym.to_string())
         })
         .collect()
 }
@@ -776,7 +814,13 @@ mod tests {
         assert!(t.last().unwrap().change_pct.is_none());
         let s = sector_moves(&qs, true);
         assert_eq!(s[0].name, "IT");
-        assert!(s.iter().find(|g| g.name == "Auto").unwrap().change_pct.is_none());
+        assert!(
+            s.iter()
+                .find(|g| g.name == "Auto")
+                .unwrap()
+                .change_pct
+                .is_none()
+        );
     }
 
     #[test]
@@ -792,7 +836,10 @@ mod tests {
         });
         let d = parse_large_deals(&deals);
         assert_eq!(d.len(), 3);
-        assert_eq!((d[0].symbol.as_str(), d[0].kind, d[0].buy), ("BIG", "block", false));
+        assert_eq!(
+            (d[0].symbol.as_str(), d[0].kind, d[0].buy),
+            ("BIG", "block", false)
+        );
         assert_eq!(d[1].qty, 100_000.0);
 
         let flows = serde_json::json!([
@@ -811,7 +858,10 @@ mod tests {
             {"symbol": "AAA", "latestOI": 1300, "prevOI": 1000},
             {"symbol": "BBB", "latestOI": 900, "prevOI": 1000}
         ]});
-        let qs = vec![quote("AAA.NS", 1.0, -2.0, 0, 0), quote("BBB.NS", 1.0, 1.0, 0, 0)];
+        let qs = vec![
+            quote("AAA.NS", 1.0, -2.0, 0, 0),
+            quote("BBB.NS", 1.0, 1.0, 0, 0),
+        ];
         let o = parse_oi_spurts(&oi, &qs, 5);
         assert_eq!(o[0].symbol, "AAA");
         assert_eq!(o[0].reading, "short build-up");

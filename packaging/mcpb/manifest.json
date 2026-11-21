@@ -285,6 +285,26 @@
     {
       "name": "portfolio_wrap",
       "description": "Portfolio year in review. Return over a calendar or Indian financial year, flows, dividends, realized gains, best and worst holdings."
+    },
+    {
+      "name": "whats_hot",
+      "description": "What's hot. Your holdings and watchlist ranked by heat (excess move, volume, fresh news, dates soon, weighted by portfolio weight), then market lists: unusual volume, gaps, 52-week breaks, news mentions, sectors, themes, FII/DII, deals, F&O ban, OI build-up."
+    },
+    {
+      "name": "today",
+      "description": "Today in my portfolio. Each holding's day move and why (headline, filing, with the market, or unexplained), day P&L, market backdrop and a news feed ranked by weight and importance."
+    },
+    {
+      "name": "news_feed",
+      "description": "News feed. Merged, de-duplicated headlines and exchange/SEC filings for symbols, or for holdings and the watchlist ranked by weight and importance."
+    },
+    {
+      "name": "monitor_status",
+      "description": "Holding monitor status. Thresholds, whether the worker runs it, and the signals it sent recently."
+    },
+    {
+      "name": "digest",
+      "description": "Daily digest. Day P&L, top contributors and detractors with reasons, monitor signals, triggered alerts and dates coming up."
     }
   ],
   "tools_generated": false,

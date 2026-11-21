@@ -38,7 +38,11 @@ fn stats(r: &Row) -> String {
         parts.push(format!("52w {b}"));
     }
     for e in r.events.iter().take(1) {
-        parts.push(format!("{} {}", e.kind.label().to_lowercase(), e.date.format("%d %b")));
+        parts.push(format!(
+            "{} {}",
+            e.kind.label().to_lowercase(),
+            e.date.format("%d %b")
+        ));
     }
     parts.join(", ")
 }
@@ -70,7 +74,9 @@ pub(crate) fn plain_today(p: &Pulse, feed_limit: usize) -> String {
             "Portfolio {sym}{v:.0} · day {}{sym}{:.0}{}",
             if d >= 0.0 { "+" } else { "-" },
             d.abs(),
-            p.day_pnl_pct.map(|x| format!(" ({x:+.2}%)")).unwrap_or_default()
+            p.day_pnl_pct
+                .map(|x| format!(" ({x:+.2}%)"))
+                .unwrap_or_default()
         ));
     }
     let b = backdrop_line(p);
@@ -93,9 +99,14 @@ pub(crate) fn plain_today(p: &Pulse, feed_limit: usize) -> String {
             out.push(format!(
                 "• {} {} — {}{}",
                 r.symbol,
-                r.change_pct.map(|c| format!("{c:+.1}%")).unwrap_or_else(|| "—".into()),
+                r.change_pct
+                    .map(|c| format!("{c:+.1}%"))
+                    .unwrap_or_else(|| "—".into()),
                 r.why.line(),
-                r.action.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default()
+                r.action
+                    .as_ref()
+                    .map(|a| format!(" [{a}]"))
+                    .unwrap_or_default()
             ));
         }
     }
@@ -107,7 +118,9 @@ pub(crate) fn plain_today(p: &Pulse, feed_limit: usize) -> String {
             out.push(format!(
                 "• {} {} — {}",
                 r.symbol,
-                r.change_pct.map(|c| format!("{c:+.1}%")).unwrap_or_else(|| "—".into()),
+                r.change_pct
+                    .map(|c| format!("{c:+.1}%"))
+                    .unwrap_or_else(|| "—".into()),
                 r.why.line()
             ));
         }
@@ -128,12 +141,26 @@ pub(crate) fn plain_today(p: &Pulse, feed_limit: usize) -> String {
     out.join("\n")
 }
 
+/// [`feed`] under a name the MCP tools can import from `commands`.
+pub(crate) fn today_feed(p: &Pulse) -> Vec<crate::news::NewsItem> {
+    feed(p)
+}
+
 /// The merged news feed: every row's items, ranked by weight × importance.
 pub(crate) fn feed(p: &Pulse) -> Vec<crate::news::NewsItem> {
     let weights: Vec<(String, f64)> = p
         .rows
         .iter()
-        .map(|r| (r.symbol.clone(), if r.held { r.weight } else { crate::news::WATCHLIST_WEIGHT }))
+        .map(|r| {
+            (
+                r.symbol.clone(),
+                if r.held {
+                    r.weight
+                } else {
+                    crate::news::WATCHLIST_WEIGHT
+                },
+            )
+        })
         .collect();
     crate::news::rank_feed(
         p.rows.iter().flat_map(|r| r.news.iter().cloned()).collect(),
@@ -141,7 +168,13 @@ pub(crate) fn feed(p: &Pulse) -> Vec<crate::news::NewsItem> {
     )
 }
 
-pub async fn cmd_today(market: Market, days: u32, no_news: bool, limit: usize, json: bool) -> Result<()> {
+pub async fn cmd_today(
+    market: Market,
+    days: u32,
+    no_news: bool,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
     let client = YahooClient::new().await?;
     let pulse = crate::pulse::gather(
         &client,
@@ -209,8 +242,15 @@ pub async fn cmd_today(market: Market, days: u32, no_news: bool, limit: usize, j
                 pct_colored(r.change_pct),
                 money_colored(r.day_pnl, &base),
                 r.why.line(),
-                if st.is_empty() { String::new() } else { format!("  {}", format!("({st})").dimmed()) },
-                r.action.as_ref().map(|a| format!("  [{a}]").bold().to_string()).unwrap_or_default()
+                if st.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", format!("({st})").dimmed())
+                },
+                r.action
+                    .as_ref()
+                    .map(|a| format!("  [{a}]").bold().to_string())
+                    .unwrap_or_default()
             );
         }
     }
@@ -224,7 +264,11 @@ pub async fn cmd_today(market: Market, days: u32, no_news: bool, limit: usize, j
                 r.symbol.cyan(),
                 pct_colored(r.change_pct),
                 r.why.line(),
-                if st.is_empty() { String::new() } else { format!("  {}", format!("({st})").dimmed()) }
+                if st.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", format!("({st})").dimmed())
+                }
             );
         }
     }

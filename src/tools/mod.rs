@@ -15,6 +15,7 @@ mod args;
 pub(crate) mod extra;
 mod handlers;
 mod more;
+mod pulse;
 pub mod schema;
 mod workspace;
 
@@ -175,7 +176,7 @@ pub fn default_timeout(name: &str) -> std::time::Duration {
         "picks" | "picks_review" | "market_conditions" | "portfolio_analyze"
         | "portfolio_checkup" | "portfolio_pme" | "backtest" | "screen" | "verdicts" | "movers"
         | "ipo_analyze" | "mf_bleed" | "income_calendar" | "compare" | "returns" | "correlate"
-        | "portfolio_wrap" => 180,
+        | "portfolio_wrap" | "whats_hot" | "today" | "news_feed" | "digest" => 180,
         _ => 60,
     };
     std::time::Duration::from_secs(secs)
@@ -1688,6 +1689,77 @@ pub const TOOLS: &[Tool] = &[
             ),
             MARKET,
         ],
+        personal: true,
+    },
+    Tool {
+        name: "whats_hot",
+        title: "What's hot",
+        description: "Your holdings and watchlist ranked by heat (|excess move| in σ + volume surge + fresh news/filing importance + a date within 3 days, scaled by portfolio weight), each with its move and one-line why; then the market: biggest moves, unusual volume (RVOL), gaps, 52-week highs and lows, most-mentioned stocks in news, sectors, theme baskets (AI, semis, defence, battery, minerals), and for India FII/DII flows, bulk/block deals, the F&O ban list and OI build-up; plus cross-market movers. Data, not recommendations.",
+        params: &[
+            opt(
+                "cap",
+                Kind::Enum(&["all", "mega", "large", "mid", "small", "micro"]),
+                "Only this market-cap tier for the market lists",
+            ),
+            opt(
+                "limit",
+                Kind::Integer { min: 1, max: 25 },
+                "Rows per list (default 8)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "today",
+        title: "Today in my portfolio",
+        description: "What changed in the portfolio today: per holding and watchlist name the day move, day P&L in the base currency, σ of the excess move, volume multiple and why (the most important fresh headline or exchange/SEC filing, \"with the market\", or \"unexplained\" for an unusual move with no news); the portfolio's day P&L, the market backdrop, dates in the next 3 days, and a merged news feed ranked by weight × importance.",
+        params: &[
+            opt(
+                "days",
+                Kind::Integer { min: 1, max: 14 },
+                "News window in days (default 2)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "news_feed",
+        title: "News feed",
+        description: "Merged, de-duplicated headlines and filings (Yahoo, Google News by company name in the stock's locale, NSE/BSE announcements, SEC EDGAR) for the given symbols, or for holdings and the watchlist ranked by portfolio weight × importance. Each item has its title, source, link, time and category.",
+        params: &[
+            opt(
+                "symbols",
+                Kind::StrList { max: 25 },
+                "Tickers (default: holdings and watchlist)",
+            ),
+            opt(
+                "days",
+                Kind::Integer { min: 1, max: 14 },
+                "Only items from the last N days (default 2)",
+            ),
+            opt(
+                "limit",
+                Kind::Integer { min: 1, max: 60 },
+                "Most items (default 20)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "monitor_status",
+        title: "Holding monitor status",
+        description: "The automatic holding monitor: its thresholds (day drop %, σ, fall from cost and from peak, gap), whether the background worker runs it, when it last ran, and the signals it sent recently (big drops, 52-week lows, gaps, dates tomorrow, pledge and shareholding changes, rating changes, insider trades).",
+        params: &[],
+        personal: true,
+    },
+    Tool {
+        name: "digest",
+        title: "Daily digest",
+        description: "Today's digest as the worker sends it after the close: day P&L, top contributors and detractors with the news or filing behind each move (or flagged unexplained), monitor signals not yet sent, alerts that triggered today and dates in the next week. Does not send anything.",
+        params: &[MARKET],
         personal: true,
     },
 ];

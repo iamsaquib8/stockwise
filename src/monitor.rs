@@ -210,7 +210,8 @@ pub fn price_signals(
 
     // Day drop: a fixed percentage, or an unusual fall for this stock.
     let big = ret * 100.0 <= -t.day_drop_pct;
-    let unusual = sigma.is_some_and(|sd| sd > 0.0 && ret <= -t.day_drop_sigma * sd && ret <= -0.015);
+    let unusual =
+        sigma.is_some_and(|sd| sd > 0.0 && ret <= -t.day_drop_sigma * sd && ret <= -0.015);
     if big || unusual {
         let z = sigma
             .filter(|sd| *sd > 0.0)
@@ -219,8 +220,16 @@ pub fn price_signals(
         out.push(Signal {
             symbol: symbol.into(),
             kind: SignalKind::DayDrop,
-            priority: if big { Priority::High } else { Priority::Normal },
-            title: format!("{symbol} fell {:.1}% on {}", ret.abs() * 100.0, day.format("%d %b")),
+            priority: if big {
+                Priority::High
+            } else {
+                Priority::Normal
+            },
+            title: format!(
+                "{symbol} fell {:.1}% on {}",
+                ret.abs() * 100.0,
+                day.format("%d %b")
+            ),
             detail: format!("{prev:.2} → {price:.2}{z}."),
             key: format!("{symbol}:drop:{day}"),
         });
@@ -270,13 +279,17 @@ pub fn price_signals(
         if let Some(b) = bucket(fall, t.from_peak_pct) {
             // A new step re-notifies; recovering above the threshold and
             // falling again inside a year is the same step (same peak).
-            let peak_day = s.dates[from + s.close[from..].iter().position(|c| *c == peak).unwrap_or(0)];
+            let peak_day =
+                s.dates[from + s.close[from..].iter().position(|c| *c == peak).unwrap_or(0)];
             out.push(Signal {
                 symbol: symbol.into(),
                 kind: SignalKind::FromPeak,
                 priority: Priority::Normal,
                 title: format!("{symbol} is {fall:.0}% off its 52-week high"),
-                detail: format!("{price:.2} against a closing high of {peak:.2} ({}).", peak_day.format("%d %b %Y")),
+                detail: format!(
+                    "{price:.2} against a closing high of {peak:.2} ({}).",
+                    peak_day.format("%d %b %Y")
+                ),
                 key: format!("{symbol}:peak:{peak_day}:{b}"),
             });
         }
@@ -290,8 +303,16 @@ pub fn price_signals(
             let down = gap < 0.0;
             out.push(Signal {
                 symbol: symbol.into(),
-                kind: if down { SignalKind::GapDown } else { SignalKind::GapUp },
-                priority: if down { Priority::Normal } else { Priority::Low },
+                kind: if down {
+                    SignalKind::GapDown
+                } else {
+                    SignalKind::GapUp
+                },
+                priority: if down {
+                    Priority::Normal
+                } else {
+                    Priority::Low
+                },
                 title: format!(
                     "{symbol} opened {:.1}% {}",
                     gap.abs(),
@@ -327,7 +348,12 @@ pub fn event_signals(events: &[crate::calendar::Event], tomorrow: NaiveDate) -> 
             let detail = if e.detail.is_empty() {
                 format!("{} ({}).", e.date.format("%a %d %b"), e.source)
             } else {
-                format!("{} — {} ({}).", e.date.format("%a %d %b"), e.detail, e.source)
+                format!(
+                    "{} — {} ({}).",
+                    e.date.format("%a %d %b"),
+                    e.detail,
+                    e.source
+                )
             };
             Some(Signal {
                 symbol: e.symbol.clone(),
@@ -374,7 +400,11 @@ pub fn ownership_signals(symbol: &str, holdings: &[crate::research::Holding]) ->
         out.push(Signal {
             symbol: symbol.into(),
             kind: SignalKind::Shareholding,
-            priority: if b < a { Priority::Normal } else { Priority::Low },
+            priority: if b < a {
+                Priority::Normal
+            } else {
+                Priority::Low
+            },
             title: format!(
                 "{symbol}: promoter stake {} {:.1} points",
                 if b < a { "down" } else { "up" },
@@ -400,7 +430,10 @@ pub fn ownership_signals(symbol: &str, holdings: &[crate::research::Holding]) ->
                 if b < a { "sold down" } else { "added" },
                 (b - a).abs()
             ),
-            detail: format!("FII + DII {a:.2}% → {b:.2}% (quarter ended {}).", q.format("%b %Y")),
+            detail: format!(
+                "FII + DII {a:.2}% → {b:.2}% (quarter ended {}).",
+                q.format("%b %Y")
+            ),
             key: format!("{symbol}:inst:{q}"),
         });
     }
@@ -435,7 +468,11 @@ pub fn rating_signals(
                 ),
                 detail: format!(
                     "{} → {}{target} ({day}).",
-                    if a.from_grade.is_empty() { "—" } else { &a.from_grade },
+                    if a.from_grade.is_empty() {
+                        "—"
+                    } else {
+                        &a.from_grade
+                    },
                     a.to_grade
                 ),
                 key: format!("{symbol}:rating:{}:{}", a.ts, a.firm),
@@ -456,14 +493,21 @@ pub fn insider_signals(
         .filter(|t| t.ts >= since && t.shares > 0.0)
         .map(|t| {
             let value = if t.value > 0.0 {
-                format!(" worth {}", crate::display::format_large_number(t.value, currency))
+                format!(
+                    " worth {}",
+                    crate::display::format_large_number(t.value, currency)
+                )
             } else {
                 String::new()
             };
             Signal {
                 symbol: symbol.into(),
                 kind: SignalKind::Insider,
-                priority: if t.is_buy { Priority::Low } else { Priority::Normal },
+                priority: if t.is_buy {
+                    Priority::Low
+                } else {
+                    Priority::Normal
+                },
                 title: format!(
                     "{symbol}: insider {} {} shares",
                     if t.is_buy { "bought" } else { "sold" },
@@ -472,7 +516,11 @@ pub fn insider_signals(
                 detail: format!(
                     "{} ({}){value}, {}.",
                     t.name,
-                    if t.relation.is_empty() { "insider" } else { &t.relation },
+                    if t.relation.is_empty() {
+                        "insider"
+                    } else {
+                        &t.relation
+                    },
                     crate::events::format_date(t.ts)
                 ),
                 key: format!("{symbol}:insider:{}:{}:{}", t.ts, t.name, t.shares),
@@ -628,7 +676,10 @@ mod tests {
         assert!(k.contains(&SignalKind::BelowCost));
         assert!(k.contains(&SignalKind::FromPeak));
         assert!(!k.contains(&SignalKind::GapDown));
-        let cost = sig.iter().find(|s| s.kind == SignalKind::BelowCost).unwrap();
+        let cost = sig
+            .iter()
+            .find(|s| s.kind == SignalKind::BelowCost)
+            .unwrap();
         // 27.8% below cost → the 20% step.
         assert!(cost.key.ends_with(":cost:20"), "{}", cost.key);
         let peak = sig.iter().find(|s| s.kind == SignalKind::FromPeak).unwrap();
@@ -662,7 +713,11 @@ mod tests {
         };
         let events = vec![
             ev(EventKind::Results, tomorrow, "Financial Results"),
-            ev(EventKind::ExDividend, tomorrow, "Interim Dividend - Rs 6.50"),
+            ev(
+                EventKind::ExDividend,
+                tomorrow,
+                "Interim Dividend - Rs 6.50",
+            ),
             ev(EventKind::Other, tomorrow, "Record date for bonus"),
             ev(EventKind::DividendPaid, tomorrow, ""),
             ev(EventKind::Results, tomorrow + chrono::Duration::days(1), ""),
@@ -690,9 +745,19 @@ mod tests {
             pledged: Some(pledged),
             ..Default::default()
         };
-        let s = ownership_signals("ADANI.NS", &[q(6, 72.0, false, 15.0, 5.0), q(9, 70.5, true, 12.0, 5.5)]);
+        let s = ownership_signals(
+            "ADANI.NS",
+            &[q(6, 72.0, false, 15.0, 5.0), q(9, 70.5, true, 12.0, 5.5)],
+        );
         let k = kinds(&s);
-        assert_eq!(k, [SignalKind::Pledge, SignalKind::Shareholding, SignalKind::Shareholding]);
+        assert_eq!(
+            k,
+            [
+                SignalKind::Pledge,
+                SignalKind::Shareholding,
+                SignalKind::Shareholding
+            ]
+        );
         assert_eq!(s[0].priority, Priority::High);
         assert!(s[1].title.contains("down 1.5 points"), "{}", s[1].title);
         assert!(ownership_signals("X", &[q(9, 70.0, false, 1.0, 1.0)]).is_empty());
@@ -707,7 +772,11 @@ mod tests {
             target: Some(1500.0),
             prior_target: None,
         };
-        let r = rating_signals("TCS.NS", &[act(2_000, "up"), act(2_000, "main"), act(10, "down")], 1_000);
+        let r = rating_signals(
+            "TCS.NS",
+            &[act(2_000, "up"), act(2_000, "main"), act(10, "down")],
+            1_000,
+        );
         assert_eq!(r.len(), 1);
         assert!(r[0].title.contains("upgraded"));
 

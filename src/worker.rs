@@ -671,8 +671,13 @@ fn ltcg_notices_for(
                 format!(
                     "The {} lot of {} ({} units, held {} days) turns long-term on {} (in {} days). \
                      `stockwise portfolio sell {} <QTY> --preview` shows the tax on a sale.",
-                    c.bought, c.symbol, c.qty, c.days_held, c.long_term_on,
-                    c.days_to_long_term, c.symbol
+                    c.bought,
+                    c.symbol,
+                    c.qty,
+                    c.days_held,
+                    c.long_term_on,
+                    c.days_to_long_term,
+                    c.symbol
                 ),
             ),
             ltcg_keys: vec![key],
@@ -710,7 +715,10 @@ fn ltcg_notices_for(
         }
         // Only if a lot bought that day is still held: the same quantity
         // first, else one partly sold since.
-        let lots = portfolio.holding(head).map(|h| h.lots.as_slice()).unwrap_or_default();
+        let lots = portfolio
+            .holding(head)
+            .map(|h| h.lots.as_slice())
+            .unwrap_or_default();
         let still_held = lots
             .iter()
             .find(|l| l.date == bought && qty.is_some_and(|q| (l.qty - q).abs() < 1e-9))
@@ -1139,9 +1147,7 @@ async fn deliver_after_close(
             if digest.is_empty() {
                 return true;
             }
-            let delivered = notifier
-                .send_logged(&crate::digest::render(&digest))
-                .await;
+            let delivered = notifier.send_logged(&crate::digest::render(&digest)).await;
             if delivered {
                 let cursor = mst.cursor;
                 let _ = crate::store::update::<crate::monitor::MonitorState, ()>(
@@ -1861,9 +1867,18 @@ mod tests {
             crate::portfolio::Lot::new(5.0, 120.0, "2025-12-20", "manual"),
         );
         // No second heads-up for the renumbered lot...
-        assert!(deliver(ltcg_notices(&after, india, day("2026-12-16"), &seen), &mut seen).is_empty());
+        assert!(
+            deliver(
+                ltcg_notices(&after, india, day("2026-12-16"), &seen),
+                &mut seen
+            )
+            .is_empty()
+        );
         // ...and the "now long-term" notice still finds it.
-        let now = deliver(ltcg_notices(&after, india, day("2026-12-21"), &seen), &mut seen);
+        let now = deliver(
+            ltcg_notices(&after, india, day("2026-12-21"), &seen),
+            &mut seen,
+        );
         assert_eq!(now.len(), 1, "{now:?}");
         assert!(now[0].body.contains("5 units"), "{}", now[0].body);
     }
@@ -1872,7 +1887,10 @@ mod tests {
     fn ltcg_notices_cover_every_market_held() {
         let mut p = held("TCS.NS", "2025-12-20");
         // US: long-term after a year; bought 2025-12-18 turns on 2026-12-19.
-        p.add_lot("AAPL", crate::portfolio::Lot::new(3.0, 200.0, "2025-12-18", "manual"));
+        p.add_lot(
+            "AAPL",
+            crate::portfolio::Lot::new(3.0, 200.0, "2025-12-18", "manual"),
+        );
         let now = chrono::NaiveDate::from_ymd_opt(2026, 12, 15)
             .unwrap()
             .and_hms_opt(12, 0, 0)

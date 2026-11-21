@@ -93,9 +93,7 @@ fn kind_weight(k: crate::events::Kind) -> f64 {
 /// that halves every 24 hours.
 pub fn importance(item: &NewsItem, now: i64) -> f64 {
     let base = kind_weight(item.kind) + if item.official { 1.5 } else { 0.0 } + 1.0;
-    let recency = item
-        .age_hours(now)
-        .map_or(0.3, |h| 0.5f64.powf(h / 24.0));
+    let recency = item.age_hours(now).map_or(0.3, |h| 0.5f64.powf(h / 24.0));
     (base * recency * 2.0).min(10.0)
 }
 
@@ -169,9 +167,7 @@ pub struct Fetched {
     pub failures: Vec<String>,
 }
 
-async fn timed<T>(
-    f: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> anyhow::Result<T> {
+async fn timed<T>(f: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
     tokio::time::timeout(SOURCE_TIMEOUT, f)
         .await
         .map_err(|_| anyhow::anyhow!("timed out"))?
@@ -192,7 +188,10 @@ async fn yahoo_json(client: &YahooClient, symbol: &str) -> anyhow::Result<Vec<Ne
                 .filter_map(|n| {
                     let title = n.get("title")?.as_str()?.to_string();
                     let h = Headline {
-                        ts: n.get("providerPublishTime").and_then(|t| t.as_i64()).unwrap_or(0),
+                        ts: n
+                            .get("providerPublishTime")
+                            .and_then(|t| t.as_i64())
+                            .unwrap_or(0),
                         title,
                         summary: None,
                         publisher: n
@@ -320,7 +319,8 @@ pub async fn fetch(client: &YahooClient, q: &Query) -> Fetched {
         .filter(|c| !c.is_empty());
     let india = is_india(&q.symbol);
     let base = q.symbol.split('.').next().unwrap_or(&q.symbol).to_string();
-    let wants_filings = q.filings && (india || crate::alerts::alert_market(&q.symbol) == Some(crate::market::Market::Us));
+    let wants_filings = q.filings
+        && (india || crate::alerts::alert_market(&q.symbol) == Some(crate::market::Market::Us));
     let (yj, yr, gn, fl) = tokio::join!(
         timed(yahoo_json(client, &q.symbol)),
         timed(yahoo_rss(client, &q.symbol)),
@@ -468,7 +468,10 @@ mod tests {
     #[test]
     fn google_news_uses_the_company_name_locale_and_window() {
         let u = google_news_url("Reliance Industries", true, 2);
-        assert!(u.contains("%22Reliance%20Industries%22") || u.contains("%22Reliance+Industries%22"), "{u}");
+        assert!(
+            u.contains("%22Reliance%20Industries%22") || u.contains("%22Reliance+Industries%22"),
+            "{u}"
+        );
         assert!(u.contains("when%3A2d"), "{u}");
         assert!(u.ends_with("hl=en-IN&gl=IN&ceid=IN:en"));
         assert!(google_news_url("Apple", false, 1).contains("gl=US"));
@@ -477,9 +480,24 @@ mod tests {
     #[test]
     fn duplicates_merge_and_filings_win() {
         let items = vec![
-            item("Reliance Q2 profit rises 9% on retail strength", 100, false, "R"),
-            item("Reliance Q2 profit rises 9%, retail strength helps", 90, false, "R"),
-            item("Outcome of Board Meeting: Reliance Q2 profit rises 9% retail strength", 80, true, "R"),
+            item(
+                "Reliance Q2 profit rises 9% on retail strength",
+                100,
+                false,
+                "R",
+            ),
+            item(
+                "Reliance Q2 profit rises 9%, retail strength helps",
+                90,
+                false,
+                "R",
+            ),
+            item(
+                "Outcome of Board Meeting: Reliance Q2 profit rises 9% retail strength",
+                80,
+                true,
+                "R",
+            ),
             item("Unrelated headline about telecom tariffs", 70, false, "R"),
         ];
         let out = collate(items);
@@ -511,7 +529,10 @@ mod tests {
             vec![small, watch, big],
             &[("BIG.NS".into(), 0.30), ("SMALL.NS".into(), 0.01)],
         );
-        let order: Vec<&str> = ranked.iter().map(|i| i.symbol.as_deref().unwrap()).collect();
+        let order: Vec<&str> = ranked
+            .iter()
+            .map(|i| i.symbol.as_deref().unwrap())
+            .collect();
         assert_eq!(order, ["BIG.NS", "WATCH.NS", "SMALL.NS"]);
     }
 }

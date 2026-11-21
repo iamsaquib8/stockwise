@@ -1257,10 +1257,15 @@ pub(super) fn print_news_items(items: &[NewsItem], limit: usize) {
 
 // ───────────────────────────────────────────────────────────────
 
-
 /// `news SYMBOL`: headlines and filings from every source, merged and
 /// de-duplicated, newest first, in local time with links.
-pub async fn cmd_news(symbol: &str, market: Market, days: u32, limit: usize, json: bool) -> Result<()> {
+pub async fn cmd_news(
+    symbol: &str,
+    market: Market,
+    days: u32,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
     // The company name makes Google News match the company, not the ticker.

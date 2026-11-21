@@ -729,8 +729,7 @@ pub async fn alert_data(
             today: Some(today),
             traded,
             quote_time: quote.and_then(|q| q.regular_market_time),
-            market_open: crate::alerts::alert_market(symbol)
-                .map(|m| crate::clock::is_open(m, now)),
+            market_open: crate::alerts::alert_market(symbol).map(|m| crate::clock::is_open(m, now)),
             ..Default::default()
         };
         let bars_needed = on_symbol().map(Alert::bars_needed).max().unwrap_or(0);

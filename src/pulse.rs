@@ -205,11 +205,9 @@ pub fn backdrop_symbols(market: Market) -> &'static [(&'static str, &'static str
 pub fn move_stats(p: &Series, b: &Series) -> (Option<f64>, Option<f64>) {
     let excess = crate::events::excess_returns(p, b);
     let sigma = match (excess.split_last(), crate::events::excess_sd(&excess)) {
-        (Some(((_, last), prior)), Some(_)) if !prior.is_empty() => {
-            crate::events::excess_sd(prior)
-                .filter(|sd| *sd > 0.0)
-                .map(|sd| last / sd)
-        }
+        (Some(((_, last), prior)), Some(_)) if !prior.is_empty() => crate::events::excess_sd(prior)
+            .filter(|sd| *sd > 0.0)
+            .map(|sd| last / sd),
         _ => None,
     };
     let n = p.volume.len();
@@ -224,7 +222,13 @@ pub fn move_stats(p: &Series, b: &Series) -> (Option<f64>, Option<f64>) {
 
 /// The one-line reason for a move. Pure: `news` are fresh items for the
 /// symbol, most important first.
-pub fn explain(change_pct: Option<f64>, bench_pct: Option<f64>, sigma: Option<f64>, volume_x: Option<f64>, news: &[NewsItem]) -> Why {
+pub fn explain(
+    change_pct: Option<f64>,
+    bench_pct: Option<f64>,
+    sigma: Option<f64>,
+    volume_x: Option<f64>,
+    news: &[NewsItem],
+) -> Why {
     // A filing first, then any headline of some weight.
     let best = news
         .iter()
@@ -310,20 +314,28 @@ pub fn action_for(_symbol: &str) -> Option<String> {
 }
 
 fn quote_for<'a>(quotes: &'a [Quote], symbol: &str) -> Option<&'a Quote> {
-    quotes
-        .iter()
-        .find(|q| q.symbol.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(symbol)))
+    quotes.iter().find(|q| {
+        q.symbol
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case(symbol))
+    })
 }
 
 /// Gather the pulse for the portfolio (and watchlist).
 pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyhow::Result<Pulse> {
     let portfolio = crate::portfolio::Portfolio::load()?;
     let watchlist = if opts.watchlist {
-        crate::watchlist::Watchlist::load().map(|w| w.symbols).unwrap_or_default()
+        crate::watchlist::Watchlist::load()
+            .map(|w| w.symbols)
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
-    let held: Vec<String> = portfolio.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let held: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
     let mut symbols = held.clone();
     for w in watchlist {
         if !symbols.contains(&w) {
@@ -469,7 +481,10 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             }
             _ => 0.0,
         };
-        let series = bars.iter().find(|(x, _)| x == s).and_then(|(_, b)| b.as_ref());
+        let series = bars
+            .iter()
+            .find(|(x, _)| x == s)
+            .and_then(|(_, b)| b.as_ref());
         let bench = bench_bars
             .iter()
             .find(|(b, _)| *b == benchmark(s))
@@ -563,7 +578,10 @@ mod tests {
 
     #[test]
     fn a_filing_explains_a_move_before_any_headline() {
-        let items = [news("Analyst note", false, 3.0), news("Outcome of Board Meeting", true, 2.0)];
+        let items = [
+            news("Analyst note", false, 3.0),
+            news("Outcome of Board Meeting", true, 2.0),
+        ];
         let w = explain(Some(-4.0), Some(0.2), Some(-3.0), None, &items);
         assert!(matches!(&w, Why::News { official: true, .. }), "{w:?}");
         assert!(w.line().starts_with("[NSE] Outcome"));
@@ -581,7 +599,10 @@ mod tests {
     fn an_ordinary_move_with_the_market_says_so() {
         let w = explain(Some(-1.1), Some(-0.9), Some(-0.2), None, &[]);
         assert_eq!(w, Why::Market { bench_pct: -0.9 });
-        assert_eq!(explain(Some(0.1), Some(-0.9), Some(0.5), None, &[]), Why::Quiet);
+        assert_eq!(
+            explain(Some(0.1), Some(-0.9), Some(0.5), None, &[]),
+            Why::Quiet
+        );
     }
 
     #[test]

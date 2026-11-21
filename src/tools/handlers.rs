@@ -91,6 +91,9 @@ pub(super) async fn run<D: DataSource>(
         | "correlate" | "compare" | "portfolio_wrap" => {
             super::more::run(src, name, a, m, budget).await
         }
+        "whats_hot" | "today" | "news_feed" | "monitor_status" | "digest" => {
+            super::pulse::run(src, name, a, m).await
+        }
         "order_preview" => order_preview(src, a).await,
         other => bail!("Tool '{}' has no handler", other),
     }

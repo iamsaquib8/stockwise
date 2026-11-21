@@ -225,7 +225,11 @@ pub async fn cmd_alert_add(
         println!(
             "  {} Checked on daily bars by `stockwise alert check` and `alert watch`{}.",
             "→".dimmed(),
-            if opts.on_close { ", on completed sessions only" } else { "" }
+            if opts.on_close {
+                ", on completed sessions only"
+            } else {
+                ""
+            }
         );
     } else if opts.cross {
         println!(

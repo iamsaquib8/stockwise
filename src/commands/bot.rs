@@ -143,9 +143,15 @@ fn review_text(p: &crate::pulse::Pulse, portfolio: &Portfolio) -> String {
             "• {} {:.1}% of portfolio, {} vs cost, day {}{}{}",
             r.symbol,
             r.weight * 100.0,
-            gain.map(|g| format!("{g:+.1}%")).unwrap_or_else(|| "—".into()),
-            r.change_pct.map(|c| format!("{c:+.1}%")).unwrap_or_else(|| "—".into()),
-            r.action.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default(),
+            gain.map(|g| format!("{g:+.1}%"))
+                .unwrap_or_else(|| "—".into()),
+            r.change_pct
+                .map(|c| format!("{c:+.1}%"))
+                .unwrap_or_else(|| "—".into()),
+            r.action
+                .as_ref()
+                .map(|a| format!(" [{a}]"))
+                .unwrap_or_default(),
             if signals.is_empty() {
                 String::new()
             } else {
@@ -162,7 +168,8 @@ async fn answer(cmd: BotCmd, client: &YahooClient, market: Market) -> String {
         Ok(match cmd {
             BotCmd::Help => HELP.to_string(),
             BotCmd::Today => {
-                let p = crate::pulse::gather(client, market, crate::pulse::Options::default()).await?;
+                let p =
+                    crate::pulse::gather(client, market, crate::pulse::Options::default()).await?;
                 format!("Today\n{}", super::today::plain_today(&p, 8))
             }
             BotCmd::Hot => {
@@ -185,7 +192,8 @@ async fn answer(cmd: BotCmd, client: &YahooClient, market: Market) -> String {
             BotCmd::Digest => {
                 let mut st: crate::monitor::MonitorState =
                     crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
-                let (d, _) = super::monitoring::build_digest(client, market, Vec::new(), &mut st).await?;
+                let (d, _) =
+                    super::monitoring::build_digest(client, market, Vec::new(), &mut st).await?;
                 let m = crate::digest::render(&d);
                 format!("{}\n{}", m.title, m.body)
             }
@@ -240,7 +248,10 @@ pub async fn cmd_bot(once: bool, market: Market) -> Result<()> {
             tg.chat_id
         );
         match digest_time() {
-            Some(t) => println!("  Digest every trading day at {} (local time).", t.format("%H:%M")),
+            Some(t) => println!(
+                "  Digest every trading day at {} (local time).",
+                t.format("%H:%M")
+            ),
             None => println!(
                 "  {} Set STOCKWISE_DIGEST_TIME=16:15 for a scheduled digest.",
                 "→".dimmed()
@@ -293,7 +304,10 @@ pub async fn cmd_bot(once: bool, market: Market) -> Result<()> {
             state.offset = state.offset.max(id);
             if chat != tg.chat_id {
                 if !ignored_note {
-                    eprintln!("  · Ignoring messages from chats other than {}.", tg.chat_id);
+                    eprintln!(
+                        "  · Ignoring messages from chats other than {}.",
+                        tg.chat_id
+                    );
                     ignored_note = true;
                 }
                 continue;
@@ -346,7 +360,10 @@ mod tests {
 
     #[test]
     fn long_replies_split_on_lines() {
-        let text = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let c = chunks(&text, 20);
         assert!(c.iter().all(|p| p.chars().count() <= 20), "{c:?}");
         assert_eq!(c.join("\n"), text);

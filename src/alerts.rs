@@ -268,8 +268,8 @@ impl MarketData {
     /// when the last is today's still-trading session.
     pub fn completed_bars(&self) -> Option<Bars> {
         let bars = self.bars.as_ref()?;
-        let live = self.market_open == Some(true)
-            && bars.time.last().map(|&t| bar_date(t)) == self.today;
+        let live =
+            self.market_open == Some(true) && bars.time.last().map(|&t| bar_date(t)) == self.today;
         if !live {
             return Some(bars.clone());
         }
@@ -310,7 +310,12 @@ fn fnv1a(s: &str) -> u64 {
 
 impl Alert {
     /// A new alert (no id until it is added to a store).
-    pub fn new(symbol: &str, condition: AlertCondition, target: f64, period: Option<usize>) -> Self {
+    pub fn new(
+        symbol: &str,
+        condition: AlertCondition,
+        target: f64,
+        period: Option<usize>,
+    ) -> Self {
         Alert {
             id: String::new(),
             symbol: symbol.to_uppercase(),
@@ -852,7 +857,10 @@ impl AlertStore {
             let mut n = 1;
             while taken.contains(&id) {
                 n += 1;
-                id = format!("a{:012x}", fnv1a(&format!("{}#{n}", a.legacy_key())) & 0xffff_ffff_ffff);
+                id = format!(
+                    "a{:012x}",
+                    fnv1a(&format!("{}#{n}", a.legacy_key())) & 0xffff_ffff_ffff
+                );
             }
             taken.push(id.clone());
             a.id = id;
@@ -907,7 +915,10 @@ impl AlertStore {
     /// Add `alert`, giving it a fresh id.
     pub fn push(&mut self, mut alert: Alert) {
         let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let mut id = format!("a{:012x}", fnv1a(&format!("{}{stamp}", alert.legacy_key())) & 0xffff_ffff_ffff);
+        let mut id = format!(
+            "a{:012x}",
+            fnv1a(&format!("{}{stamp}", alert.legacy_key())) & 0xffff_ffff_ffff
+        );
         while self.alerts.iter().any(|a| a.id == id) {
             id.push('x');
         }
@@ -1486,9 +1497,15 @@ mod tests {
         c.push(110.0);
         let mut a = alert(AlertCondition::CrossAboveSma, 5.0);
         let live = intraday(&c);
-        assert!(a.evaluate_now(&live).unwrap().hit, "intraday alert fires live");
+        assert!(
+            a.evaluate_now(&live).unwrap().hit,
+            "intraday alert fires live"
+        );
         a.on_close = true;
-        assert!(!a.evaluate_now(&live).unwrap().hit, "on-close waits for the close");
+        assert!(
+            !a.evaluate_now(&live).unwrap().hit,
+            "on-close waits for the close"
+        );
         // After the close the same bar is complete: now it fires.
         let closed = MarketData {
             market_open: Some(false),
@@ -1513,7 +1530,11 @@ mod tests {
         // Checked through the cross already: nothing to catch up.
         assert!(a.missed_cross(&d, day, 10).is_none());
         // Not for price levels.
-        assert!(alert(AlertCondition::Above, 50.0).missed_cross(&d, since, 10).is_none());
+        assert!(
+            alert(AlertCondition::Above, 50.0)
+                .missed_cross(&d, since, 10)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1551,11 +1572,22 @@ mod tests {
         assert!(ids.iter().all(|i| i.starts_with('a') && i.len() == 13));
         assert_ne!(ids[0], ids[1], "identical alerts still get distinct ids");
         let mut again = AlertStore {
-            alerts: store.alerts.iter().map(|a| Alert { id: String::new(), ..a.clone() }).collect(),
+            alerts: store
+                .alerts
+                .iter()
+                .map(|a| Alert {
+                    id: String::new(),
+                    ..a.clone()
+                })
+                .collect(),
         };
         again.assign_ids();
         assert_eq!(
-            again.alerts.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+            again
+                .alerts
+                .iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>(),
             ids,
             "ids are the same on every load"
         );
@@ -1575,6 +1607,9 @@ mod tests {
         let a: Alert = serde_json::from_str(json).unwrap();
         assert!(!a.on_close && a.mode == AlertMode::Level && a.id.is_empty());
         let back = serde_json::to_string(&a).unwrap();
-        assert!(!back.contains("on_close") && !back.contains("mode") && !back.contains("\"id\""), "{back}");
+        assert!(
+            !back.contains("on_close") && !back.contains("mode") && !back.contains("\"id\""),
+            "{back}"
+        );
     }
 }

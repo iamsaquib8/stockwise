@@ -140,7 +140,11 @@ pub fn render(d: &Digest) -> Message {
             d.date,
             money(p, &d.base_currency)
         ),
-        (Some(p), None) => format!("StockWise digest {}: {}", d.date, money(p, &d.base_currency)),
+        (Some(p), None) => format!(
+            "StockWise digest {}: {}",
+            d.date,
+            money(p, &d.base_currency)
+        ),
         _ => format!("StockWise digest {}", d.date),
     };
     let mut body: Vec<String> = Vec::new();
@@ -166,7 +170,9 @@ pub fn render(d: &Digest) -> Message {
             "{} {} {} — {}",
             l.symbol,
             pct(l.change_pct),
-            l.pnl.map(|p| money(p, &d.base_currency)).unwrap_or_default(),
+            l.pnl
+                .map(|p| money(p, &d.base_currency))
+                .unwrap_or_default(),
             l.why
         );
         if let Some(a) = &l.action {
@@ -303,8 +309,14 @@ mod tests {
             }],
             alerts: vec!["INFY.NS below 1,400.00 — now ₹1,392.10".into()],
             notices: vec![
-                Message::new("Lot turns long-term soon: HDFCBANK.NS", "The 2025-11-27 lot ... turns long-term on 2026-11-28."),
-                Message::new("New filing: ITC.NS", "ITC.NS filed on 20 Nov: Outcome of Board Meeting [RESULTS]."),
+                Message::new(
+                    "Lot turns long-term soon: HDFCBANK.NS",
+                    "The 2025-11-27 lot ... turns long-term on 2026-11-28.",
+                ),
+                Message::new(
+                    "New filing: ITC.NS",
+                    "ITC.NS filed on 20 Nov: Outcome of Board Meeting [RESULTS].",
+                ),
                 Message::new("", ""),
             ],
             upcoming: vec!["Tue 24 Nov: ITC.NS ex-dividend".into()],
@@ -330,7 +342,10 @@ mod tests {
             assert!(m.body.contains(needle), "missing {needle:?} in\n{}", m.body);
         }
         // The silent record (empty title) is not a line.
-        assert_eq!(m.body.matches("\n• ").count() + usize::from(m.body.starts_with("• ")), 7);
+        assert_eq!(
+            m.body.matches("\n• ").count() + usize::from(m.body.starts_with("• ")),
+            7
+        );
     }
 
     #[test]

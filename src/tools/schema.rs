@@ -422,8 +422,135 @@ pub fn data_schema(tool: &str) -> Option<Value> {
                 ("history", nullable("object")),
             ],
         ),
+        "whats_hot" => {
+            let mover = obj(
+                &[("symbol", string()), ("note", string())],
+                &[
+                    ("change_pct", num()),
+                    ("price", num()),
+                    ("rvol", num()),
+                    ("gap_pct", num()),
+                ],
+            );
+            let group = obj(
+                &[("name", string()), ("priced", int()), ("members", int())],
+                &[("change_pct", num())],
+            );
+            obj(
+                &[
+                    ("as_of", int()),
+                    ("market", string()),
+                    (
+                        "yours",
+                        arr(obj(
+                            &[
+                                ("symbol", string()),
+                                ("held", boolean()),
+                                ("weight", num()),
+                                ("why", string()),
+                                ("heat", obj(&[("score", num()), ("raw", num())], &[])),
+                            ],
+                            &[("change_pct", num()), ("sigma", num()), ("volume_x", num())],
+                        )),
+                    ),
+                    ("top_movers", arr(mover.clone())),
+                    ("unusual_volume", arr(mover.clone())),
+                    ("gaps", arr(mover.clone())),
+                    ("new_highs", arr(mover.clone())),
+                    ("new_lows", arr(mover.clone())),
+                    ("sectors", arr(group.clone())),
+                    ("themes", arr(group)),
+                    ("cross_market", arr(mover)),
+                    ("warnings", strings()),
+                ],
+                &[("flows", nullable("object")), ("fo_ban", strings())],
+            )
+        }
+        "today" => obj(
+            &[
+                (
+                    "pulse",
+                    obj(
+                        &[
+                            ("as_of", int()),
+                            ("base_currency", string()),
+                            (
+                                "rows",
+                                arr(obj(
+                                    &[
+                                        ("symbol", string()),
+                                        ("held", boolean()),
+                                        ("weight", num()),
+                                        ("why", object()),
+                                    ],
+                                    &[
+                                        ("change_pct", num()),
+                                        ("day_pnl", num()),
+                                        ("sigma", num()),
+                                        ("volume_x", num()),
+                                    ],
+                                )),
+                            ),
+                            ("backdrop", arr(object())),
+                        ],
+                        &[("value", num()), ("day_pnl", num()), ("day_pnl_pct", num())],
+                    ),
+                ),
+                ("feed", arr(news_item())),
+            ],
+            &[],
+        ),
+        "news_feed" => obj(
+            &[
+                ("days", int()),
+                ("symbols", strings()),
+                ("items", arr(news_item())),
+                ("failures", strings()),
+            ],
+            &[],
+        ),
+        "digest" => obj(
+            &[
+                (
+                    "digest",
+                    obj(
+                        &[
+                            ("date", string()),
+                            ("base_currency", string()),
+                            ("up", arr(object())),
+                            ("down", arr(object())),
+                            ("signals", arr(object())),
+                            ("alerts", strings()),
+                            ("upcoming", strings()),
+                        ],
+                        &[("day_pnl", num()), ("day_pnl_pct", num()), ("value", num())],
+                    ),
+                ),
+                ("text", string()),
+            ],
+            &[],
+        ),
         _ => return None,
     })
+}
+
+/// One headline or filing (`news::NewsItem`).
+fn news_item() -> Value {
+    obj(
+        &[
+            ("title", string()),
+            ("publisher", string()),
+            ("source", string()),
+            ("official", boolean()),
+            ("importance", num()),
+        ],
+        &[
+            ("symbol", nullable("string")),
+            ("link", nullable("string")),
+            ("ts", nullable("integer")),
+            ("kind", string()),
+        ],
+    )
 }
 
 /// The whole `outputSchema` of a tool: the envelope every tool returns

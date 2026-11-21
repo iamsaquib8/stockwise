@@ -287,14 +287,20 @@ pub async fn cmd_monitor(action: &str, notify: bool, json: bool, market: Market)
     print_header("Monitor");
     println!(
         "  {} every holding, no setup — {}",
-        if t.enabled { "On:".green().to_string() } else { "Off:".red().to_string() },
+        if t.enabled {
+            "On:".green().to_string()
+        } else {
+            "Off:".red().to_string()
+        },
         "set [monitor] in the config file or STOCKWISE_MONITOR_<KEY>".dimmed()
     );
     println!(
         "  Day drop ≥ {:.1}% or ≥ {:.1}σ · new 52-week low · {:.0}% below cost · {:.0}% off the high · gap ≥ {:.1}%",
         t.day_drop_pct, t.day_drop_sigma, t.from_cost_pct, t.from_peak_pct, t.gap_pct
     );
-    println!("  Dates tomorrow · promoter pledge and shareholding · rating changes · insider trades");
+    println!(
+        "  Dates tomorrow · promoter pledge and shareholding · rating changes · insider trades"
+    );
     println!(
         "  Digest after the close: {}",
         if t.digest { "on" } else { "off" }
@@ -308,7 +314,10 @@ pub async fn cmd_monitor(action: &str, notify: bool, json: bool, market: Market)
             "stockwise worker install".cyan()
         ),
     }
-    if let Some(ts) = state.last_pass.and_then(|t| chrono::DateTime::from_timestamp(t, 0)) {
+    if let Some(ts) = state
+        .last_pass
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+    {
         println!(
             "  Last pass {}",
             ts.with_timezone(&chrono::Local).format("%d %b %H:%M")
@@ -331,7 +340,8 @@ pub async fn cmd_monitor(action: &str, notify: bool, json: bool, market: Market)
 /// `stockwise digest [--send] [--json]`.
 pub async fn cmd_digest(send: bool, json: bool, market: Market) -> Result<()> {
     let client = YahooClient::new().await?;
-    let mut state: MonitorState = crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+    let mut state: MonitorState =
+        crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
     let (digest, signals) = build_digest(&client, market, Vec::new(), &mut state).await?;
     if json {
         return output::print_json(&digest);

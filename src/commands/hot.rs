@@ -14,10 +14,31 @@ const US_LEADERS: &[&str] = &[
     "UNH", "XOM", "MA", "COST", "HD", "PG", "NFLX", "AMD", "ORCL", "CRM", "ADBE", "WMT", "BAC",
 ];
 const IN_LEADERS: &[&str] = &[
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "BHARTIARTL.NS", "SBIN.NS",
-    "ITC.NS", "LT.NS", "HINDUNILVR.NS", "KOTAKBANK.NS", "AXISBANK.NS", "BAJFINANCE.NS",
-    "MARUTI.NS", "SUNPHARMA.NS", "HCLTECH.NS", "M&M.NS", "TITAN.NS", "NTPC.NS", "ULTRACEMCO.NS",
-    "ONGC.NS", "TATASTEEL.NS", "POWERGRID.NS", "ADANIENT.NS", "WIPRO.NS",
+    "RELIANCE.NS",
+    "TCS.NS",
+    "HDFCBANK.NS",
+    "ICICIBANK.NS",
+    "INFY.NS",
+    "BHARTIARTL.NS",
+    "SBIN.NS",
+    "ITC.NS",
+    "LT.NS",
+    "HINDUNILVR.NS",
+    "KOTAKBANK.NS",
+    "AXISBANK.NS",
+    "BAJFINANCE.NS",
+    "MARUTI.NS",
+    "SUNPHARMA.NS",
+    "HCLTECH.NS",
+    "M&M.NS",
+    "TITAN.NS",
+    "NTPC.NS",
+    "ULTRACEMCO.NS",
+    "ONGC.NS",
+    "TATASTEEL.NS",
+    "POWERGRID.NS",
+    "ADANIENT.NS",
+    "WIPRO.NS",
 ];
 
 /// One of your names, with its heat.
@@ -61,7 +82,11 @@ pub struct HotReport {
     pub warnings: Vec<String>,
 }
 
-async fn timed<T>(what: &str, f: impl std::future::Future<Output = Result<T>>, warnings: &mut Vec<String>) -> Option<T> {
+async fn timed<T>(
+    what: &str,
+    f: impl std::future::Future<Output = Result<T>>,
+    warnings: &mut Vec<String>,
+) -> Option<T> {
     match tokio::time::timeout(SOURCE_TIMEOUT, f).await {
         Ok(Ok(v)) => Some(v),
         Ok(Err(e)) => {
@@ -150,7 +175,13 @@ pub(crate) async fn build_hot(
                         events: row
                             .events
                             .iter()
-                            .map(|e| format!("{} {}", e.kind.label().to_lowercase(), e.date.format("%a %d %b")))
+                            .map(|e| {
+                                format!(
+                                    "{} {}",
+                                    e.kind.label().to_lowercase(),
+                                    e.date.format("%a %d %b")
+                                )
+                            })
                             .collect(),
                         action: row.action.clone(),
                     })
@@ -179,12 +210,17 @@ pub(crate) async fn build_hot(
             match super::markets::scan_quotes(client, market, &scan, cap, false).await {
                 Ok(quotes) => {
                     r.top_movers = crate::hot::top_movers(&quotes, elapsed, min_value, limit);
-                    r.unusual_volume = crate::hot::unusual_volume(&quotes, elapsed, min_value, limit);
-                    r.gaps = crate::hot::gaps(&quotes, if small { 4.0 } else { 3.0 }, min_value, limit);
+                    r.unusual_volume =
+                        crate::hot::unusual_volume(&quotes, elapsed, min_value, limit);
+                    r.gaps =
+                        crate::hot::gaps(&quotes, if small { 4.0 } else { 3.0 }, min_value, limit);
                     r.new_highs = crate::hot::range_breaks(&quotes, true, min_value, limit);
                     r.new_lows = crate::hot::range_breaks(&quotes, false, min_value, limit);
-                    if let Some(titles) = timed("News mentions", market_titles(client, india), &mut warnings).await {
-                        r.most_mentioned = crate::hot::most_mentioned(&titles, &quotes, limit.min(8));
+                    if let Some(titles) =
+                        timed("News mentions", market_titles(client, india), &mut warnings).await
+                    {
+                        r.most_mentioned =
+                            crate::hot::most_mentioned(&titles, &quotes, limit.min(8));
                     }
                     if india {
                         // OI build-up needs the day changes of F&O stocks.
@@ -209,7 +245,10 @@ pub(crate) async fn build_hot(
     }
 
     // Sectors and themes in one quote request.
-    let mut syms: Vec<&str> = crate::hot::sector_symbols(india).iter().map(|(s, _)| *s).collect();
+    let mut syms: Vec<&str> = crate::hot::sector_symbols(india)
+        .iter()
+        .map(|(s, _)| *s)
+        .collect();
     for t in crate::hot::THEMES {
         syms.extend(if india { t.india } else { t.us });
     }
@@ -230,7 +269,11 @@ pub(crate) async fn build_hot(
             .iter()
             .filter_map(|q| {
                 let sym = q.symbol.as_deref()?;
-                let el = if sym.ends_with(".NS") { in_elapsed } else { us_elapsed };
+                let el = if sym.ends_with(".NS") {
+                    in_elapsed
+                } else {
+                    us_elapsed
+                };
                 let rv = crate::hot::rvol(q, el);
                 Some(Mover {
                     symbol: sym.to_string(),
@@ -339,7 +382,12 @@ fn print_groups(title: &str, list: &[Group]) {
             ),
             _ => String::new(),
         };
-        println!("  {:<20} {:>8}{}", g.name, pct(g.change_pct), extra.dimmed());
+        println!(
+            "  {:<20} {:>8}{}",
+            g.name,
+            pct(g.change_pct),
+            extra.dimmed()
+        );
     }
 }
 
@@ -355,7 +403,10 @@ pub(crate) fn plain_hot(r: &HotReport, n: usize) -> String {
                 h.symbol,
                 p(h.change_pct),
                 h.why,
-                h.action.as_ref().map(|a| format!(" [{a}]")).unwrap_or_default()
+                h.action
+                    .as_ref()
+                    .map(|a| format!(" [{a}]"))
+                    .unwrap_or_default()
             ));
         }
     }
@@ -377,8 +428,12 @@ pub(crate) fn plain_hot(r: &HotReport, n: usize) -> String {
         out.push(format!(
             "FII/DII {}: FII {} cr, DII {} cr",
             f.date,
-            f.fii_net.map(|v| format!("{v:+.0}")).unwrap_or_else(|| "—".into()),
-            f.dii_net.map(|v| format!("{v:+.0}")).unwrap_or_else(|| "—".into())
+            f.fii_net
+                .map(|v| format!("{v:+.0}"))
+                .unwrap_or_else(|| "—".into()),
+            f.dii_net
+                .map(|v| format!("{v:+.0}"))
+                .unwrap_or_else(|| "—".into())
         ));
     }
     if !r.themes.is_empty() {
@@ -424,7 +479,11 @@ pub async fn cmd_hot(
     print_header(&format!(
         "What's hot — {} · {}",
         crate::clock::format_local(market, now),
-        if r.scope.is_empty() { market.label().to_string() } else { r.scope.clone() }
+        if r.scope.is_empty() {
+            market.label().to_string()
+        } else {
+            r.scope.clone()
+        }
     ));
 
     print_section("Your investments — hottest first");
@@ -454,13 +513,19 @@ pub async fn cmd_hot(
             pct(h.change_pct),
             h.heat.score,
             h.why,
-            h.action.as_ref().map(|a| format!("  [{a}]").bold().to_string()).unwrap_or_default()
+            h.action
+                .as_ref()
+                .map(|a| format!("  [{a}]").bold().to_string())
+                .unwrap_or_default()
         );
         println!("  {:<14} {}", "", detail.join(" · ").dimmed());
     }
 
     print_movers("Biggest moves", &r.top_movers);
-    print_movers("Unusual volume (RVOL, paced for the time of day)", &r.unusual_volume);
+    print_movers(
+        "Unusual volume (RVOL, paced for the time of day)",
+        &r.unusual_volume,
+    );
     print_movers("Gaps at the open", &r.gaps);
     print_movers("52-week highs", &r.new_highs);
     print_movers("52-week lows", &r.new_lows);
@@ -493,7 +558,11 @@ pub async fn cmd_hot(
                 "  {:<12} {:<5} {:<4} {:>12} @ {:<9.2} {}",
                 d.symbol.cyan(),
                 d.kind,
-                if d.buy { "buy".green().to_string() } else { "sell".red().to_string() },
+                if d.buy {
+                    "buy".green().to_string()
+                } else {
+                    "sell".red().to_string()
+                },
                 format!("{:.0}", d.qty),
                 d.price,
                 crate::pulse::clip(&d.client, 40).dimmed()
@@ -516,7 +585,10 @@ pub async fn cmd_hot(
             );
         }
     }
-    print_movers("Cross-market movers (India and US large caps)", &r.cross_market);
+    print_movers(
+        "Cross-market movers (India and US large caps)",
+        &r.cross_market,
+    );
     for w in &r.warnings {
         println!("  {} {}", "!".yellow(), w.dimmed());
     }

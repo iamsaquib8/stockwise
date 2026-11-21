@@ -55,9 +55,9 @@ mod intraday;
 mod ipo;
 mod longterm;
 mod market;
-mod monitor;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod monitor;
 mod news;
 mod nifty500;
 mod notes;
@@ -74,9 +74,9 @@ mod portfolio;
 mod portfolio_analysis;
 mod practice;
 mod provenance;
-mod pulse;
 mod providers;
 mod pta_export;
+mod pulse;
 mod rebalance;
 mod research;
 mod results;
@@ -5660,7 +5660,9 @@ async fn dispatch(
         } => commands::cmd_hot(m, cap, universe, limit, out.json).await,
         Commands::Monitor { action } => match action {
             None => commands::cmd_monitor("status", false, false, m).await,
-            Some(MonitorCmd::Status { out }) => commands::cmd_monitor("status", false, out.json, m).await,
+            Some(MonitorCmd::Status { out }) => {
+                commands::cmd_monitor("status", false, out.json, m).await
+            }
             Some(MonitorCmd::Run { notify, out }) => {
                 commands::cmd_monitor("run", notify, out.json, m).await
             }
