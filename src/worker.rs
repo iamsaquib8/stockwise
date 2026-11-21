@@ -1082,6 +1082,22 @@ async fn notify_after_close(
     if !keep_going() {
         bail!("cancelled");
     }
+    // Target drift outside its band, and an advance-tax instalment due
+    // within a week: they ride in the same after-close message.
+    let reminder = |title: &str, body: String| Pending {
+        msg: crate::notify::Message::new(title, body),
+        ltcg_keys: Vec::new(),
+        result: None,
+        filings: None,
+    };
+    if let Ok(Some(drift)) = crate::commands::drift_notice_today(market).await {
+        pending.push(reminder("Target drift", drift));
+    }
+    if market == Market::In
+        && let Some(r) = crate::commands::advance_tax_reminder_today().await
+    {
+        pending.push(reminder("Advance tax due soon", r.message));
+    }
     // Silent records (first sight, a lot sold before it turned) carry no
     // message: remember them straight away. Everything else goes out as one
     // message — the digest when it is on, else a batch.

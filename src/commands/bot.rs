@@ -106,17 +106,24 @@ pub fn chunks(text: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// `/review`: each holding's weight, gain over cost, day move and the
-/// monitor's recent signals for it.
-///
-/// HOOK(0.9 workstream C): with `crate::action`, lead with the portfolio
-/// review (EXIT, TRIM, ADD, HOLD with reasons); `pulse::action_for` already
-/// adds the action to each row.
+/// `/review`: each holding's action (EXIT and TRIM first), weight, gain over
+/// cost, day move and the monitor's recent signals for it.
 fn review_text(p: &crate::pulse::Pulse, portfolio: &Portfolio) -> String {
     let state: crate::monitor::MonitorState =
         crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
     let mut rows: Vec<&crate::pulse::Row> = p.held().collect();
-    rows.sort_by(|a, b| b.weight.total_cmp(&a.weight));
+    // Most urgent action first (EXIT, TRIM, ADD, HOLD, no call), then weight.
+    let urgency = |r: &crate::pulse::Row| {
+        r.action
+            .as_deref()
+            .and_then(|a| crate::action::Kind::parse(a.split(" — ").next().unwrap_or(a)))
+            .map_or(u8::MAX, |k| k.review_rank())
+    };
+    rows.sort_by(|a, b| {
+        urgency(a)
+            .cmp(&urgency(b))
+            .then_with(|| b.weight.total_cmp(&a.weight))
+    });
     let mut out = vec![format!(
         "Holdings review ({} positions){}",
         rows.len(),

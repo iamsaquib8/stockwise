@@ -647,12 +647,12 @@ pub fn prompt_text(name: &str, args: &Map<String, Value>) -> Result<String> {
     Ok(match name {
         "daily_briefing" => format!(
             "Give me my StockWise daily briefing, short enough to read in two minutes. Call \
-             market_conditions and markets for where the market stands, portfolio_summary for \
-             my portfolio's value and day change (largest movers among my holdings), \
-             alerts_list for any alert that triggered, and watchlist for my watched stocks' \
-             moves. Then: the market in two lines (trend, volatility, breadth, valuation as \
-             readings), my portfolio's day, triggered alerts, and anything unusual. Leave out \
-             what has no news. TODO(0.9 workstream H): call `today` instead once it lands.{POLICY}"
+             market_conditions and markets for where the market stands, today for my \
+             portfolio's day (each holding's move and why, with its action), alerts_list for \
+             any alert that triggered, and whats_hot for what is moving in my holdings and the \
+             market. Then: the market in two lines (trend, volatility, breadth, valuation as \
+             readings), my portfolio's day with the actions that changed, triggered alerts, \
+             and anything unusual. Leave out what has no news.{POLICY}"
         ),
         "should_i_buy" => {
             let symbol =

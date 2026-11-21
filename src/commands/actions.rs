@@ -106,6 +106,38 @@ pub(crate) fn apply_holding(
     }
 }
 
+/// The one-line action `today`, `hot`, the digest and the Telegram bot show:
+/// the quote-only rules (see [`quick_holding_action`]) for a holding, or for
+/// a watched stock not held, as "TRIM — weight 14% above the 12% cap".
+pub(crate) fn action_line(
+    q: &Quote,
+    h: Option<&pf::Holding>,
+    weight_pct: Option<f64>,
+    target_weight_pct: Option<f64>,
+    notes: &NoteStore,
+    profile: &crate::config::EffectiveProfile,
+    today: NaiveDate,
+) -> String {
+    let a = match h {
+        Some(h) => quick_holding_action(q, h, weight_pct, target_weight_pct, notes, profile, today),
+        None => {
+            let score = crate::longterm::score_for_longterm(q, None);
+            let i = action::inputs_from_quote(q, &Series::default(), &score, Horizon::Long, today)
+                .with_profile(profile);
+            action::decide(&i)
+        }
+    };
+    match a.reasons.first() {
+        Some(r) if a.kind != Kind::NoCall => format!("{} — {}", a.label, r),
+        _ => a.headline().trim_start_matches("ACTION: ").to_string(),
+    }
+}
+
+/// The user's notes (thesis limits), for callers outside this module.
+pub(crate) fn load_notes() -> NoteStore {
+    notes()
+}
+
 /// A quick, quote-only action for a holding (no price history: the 50- and
 /// 200-day averages come from the quote and there is no ATR). For the
 /// Action column of `portfolio` and `checkup`; `portfolio review` fetches

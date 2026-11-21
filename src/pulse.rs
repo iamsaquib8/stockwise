@@ -308,16 +308,6 @@ impl Default for Options {
     }
 }
 
-/// The action line for a symbol from the rule-based actions engine.
-///
-/// HOOK(0.9 workstream C): once `crate::action` lands, return its action
-/// kind and first reason here (e.g. `TRIM — weight 14% above the 12% cap`),
-/// so `today`, `hot`, the digest and the bot show it. Until then there is no
-/// action to show.
-pub fn action_for(_symbol: &str) -> Option<String> {
-    None
-}
-
 fn quote_for<'a>(quotes: &'a [Quote], symbol: &str) -> Option<&'a Quote> {
     quotes.iter().find(|q| {
         q.symbol
@@ -348,6 +338,11 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
         }
     }
     let mut warnings = Vec::new();
+    // Actions (`crate::action`) for each row: quote-only rules, the same as
+    // the Action column of `portfolio`.
+    let notes = crate::commands::load_notes();
+    let profile = crate::config::effective_profile();
+    let today = chrono::Local::now().date_naive();
     let base = crate::commands::market_currency(market);
     let val = crate::commands::value_holdings(client, &symbols, market, Some(base)).await?;
     let totals = val.totals(&portfolio);
@@ -540,7 +535,17 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             why,
             news,
             events: events.iter().filter(|e| &e.symbol == s).cloned().collect(),
-            action: action_for(s),
+            action: q.map(|q| {
+                crate::commands::action_line(
+                    q,
+                    h,
+                    is_held.then_some(weight * 100.0),
+                    portfolio.targets.get(s).copied(),
+                    &notes,
+                    &profile,
+                    today,
+                )
+            }),
         });
     }
     let day_pnl: Option<f64> = {
