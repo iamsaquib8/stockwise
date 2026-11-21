@@ -3880,7 +3880,9 @@ pub fn scoped_file(file: &str) -> String {
 
 /// Named portfolios saved on disk, sorted.
 pub fn list_names() -> Result<Vec<String>> {
-    let dir = crate::store::path("portfolios")?;
+    // Listing must not create the data directory: a read-only home (a
+    // sandboxed build, a fresh machine) simply has no named portfolios.
+    let dir = crate::store::data_dir_location()?.join("portfolios");
     let mut names = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {

@@ -7072,7 +7072,12 @@ mod tests {
     #[test]
     fn commands_reference_covers_every_command_and_flag() {
         run_on_large_stack(|| {
-            let doc = std::fs::read_to_string("docs/commands.md").expect("docs/commands.md");
+            // Packaging builds (nix, the crate tarball) ship without docs/.
+            let Ok(doc) =
+                std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/commands.md"))
+            else {
+                return;
+            };
             let mut missing = Vec::new();
             fn walk(cmd: &clap::Command, path: &str, doc: &str, missing: &mut Vec<String>) {
                 for arg in cmd.get_arguments() {
