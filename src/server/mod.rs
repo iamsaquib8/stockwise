@@ -142,7 +142,11 @@ impl<D> AppState<D> {
         match param {
             None | Some("") => Ok(self.market),
             Some(m) => Market::from_str(m, true).map_err(|_| {
-                ApiError::BadRequest(format!("Unknown market '{}' (use in, us, crypto or fx)", m))
+                ApiError::BadRequest(format!(
+                    "Unknown market '{}' (use in, us, crypto, fx, commodity, or an exchange: \
+                     uk, de, jp, hk, sg, ca, au)",
+                    m
+                ))
             }),
         }
     }
