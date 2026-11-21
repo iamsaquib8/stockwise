@@ -901,6 +901,10 @@ stockwise options TCS                     expected moves (same as `options moves
         /// else a hidden prompt). Needs casparser on PATH. Use `-` as FILE to read casparser output from stdin
         #[arg(long, value_name = "PASSWORD")]
         password: Option<String>,
+        /// Name the demat account the file belongs to (default: the broker's name), so two
+        /// accounts at one broker keep separate lots
+        #[arg(long, value_name = "NAME")]
+        account: Option<String>,
     },
 
     /// Snapshot portfolio value over time (run daily)
@@ -1400,13 +1404,64 @@ enum PortfolioCmd {
         #[arg(long, value_name = "N", conflicts_with = "lot")]
         undo_sale: Option<usize>,
     },
-    /// Splits, bonuses and dividends since you bought; --apply records them
+    /// Splits, reverse splits, bonuses, demergers/spin-offs, merger fractions, rights issues and
+    /// dividends since you bought; --apply records them (journalled, --undo takes them back)
     Actions {
         /// Only this holding (default: all)
         symbol: Option<String>,
         /// Adjust lots and record dividends (otherwise only shows them)
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["undo", "journal"])]
         apply: bool,
+        /// Take back the newest journalled change (actions --apply, demerger, rename,
+        /// return-of-capital, sync --apply)
+        #[arg(long, conflicts_with_all = ["symbol", "journal"])]
+        undo: bool,
+        /// List the journalled changes
+        #[arg(long, conflicts_with = "symbol")]
+        journal: bool,
+    },
+    /// Record a demerger or spin-off: PARENT lots keep their dates and part of their cost,
+    /// new CHILD lots get the rest with the same purchase dates
+    #[command(alias = "spinoff")]
+    Demerger {
+        parent: String,
+        child: String,
+        /// A:B — A new CHILD shares for every B PARENT shares held (default: the built-in table)
+        #[arg(long, value_name = "A:B")]
+        ratio: Option<String>,
+        /// Percent of PARENT's cost that moves to CHILD (India: the company's cost
+        /// apportionment notice; US: Form 8937)
+        #[arg(long, value_name = "PCT")]
+        cost_split: Option<f64>,
+        /// Record date: lots bought before it are entitled (default: every lot held now)
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        date: Option<String>,
+        /// Cash paid per CHILD share for fractions: record the fractions as a sale (cash in lieu)
+        #[arg(long, value_name = "PRICE")]
+        cash_price: Option<f64>,
+    },
+    /// Rename a holding (a new ticker for the same company), keeping lots, sales and dividends
+    Rename { old: String, new: String },
+    /// Record a return of capital: cuts the cost of the lots held on the ex-date
+    #[command(alias = "roc")]
+    ReturnOfCapital {
+        symbol: String,
+        /// Amount returned per share
+        per_share: f64,
+        /// Ex-date, YYYY-MM-DD
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        date: String,
+    },
+    /// Compare your lots with a broker's holdings (read-only) and report the drift with
+    /// suggested fixes; --apply adds missing buys. Without BROKER: the last daily report
+    Sync {
+        #[arg(value_enum, ignore_case = true)]
+        broker: Option<brokers::BrokerKind>,
+        /// Add the missing buys as lots (estimated dates); nothing else is written
+        #[arg(long, requires = "broker")]
+        apply: bool,
+        #[command(flatten)]
+        out: JsonOutput,
     },
     /// Remove a holding and its lots without recording a sale
     #[command(alias = "rm")]
@@ -5058,9 +5113,43 @@ async fn dispatch(
                 };
                 commands::cmd_portfolio_lots(&symbol, change, m).await
             }
-            Some(PortfolioCmd::Actions { symbol, apply }) => {
+            Some(PortfolioCmd::Actions { undo: true, .. }) => commands::cmd_portfolio_undo_action(),
+            Some(PortfolioCmd::Actions { journal: true, .. }) => commands::cmd_portfolio_journal(),
+            Some(PortfolioCmd::Actions { symbol, apply, .. }) => {
                 commands::cmd_portfolio_actions(symbol.as_deref(), apply, m).await
             }
+            Some(PortfolioCmd::Demerger {
+                parent,
+                child,
+                ratio,
+                cost_split,
+                date,
+                cash_price,
+            }) => {
+                commands::cmd_portfolio_demerger(
+                    &parent,
+                    &child,
+                    ratio.as_deref(),
+                    cost_split,
+                    date.as_deref(),
+                    cash_price,
+                    m,
+                )
+                .await
+            }
+            Some(PortfolioCmd::Rename { old, new }) => {
+                commands::cmd_portfolio_rename(&old, &new, m)
+            }
+            Some(PortfolioCmd::ReturnOfCapital {
+                symbol,
+                per_share,
+                date,
+            }) => commands::cmd_portfolio_return_of_capital(&symbol, per_share, &date, m),
+            Some(PortfolioCmd::Sync {
+                broker,
+                apply,
+                out: sync_out,
+            }) => commands::cmd_portfolio_sync(broker, apply, sync_out.into()).await,
             Some(PortfolioCmd::Remove { symbol, yes }) => {
                 commands::cmd_portfolio_remove(&symbol, yes, m).await
             }
@@ -5232,12 +5321,29 @@ async fn dispatch(
             replace,
             sheet,
             password,
+            account,
         } => {
+            let account = commands::account_name(account.as_deref())?;
             if matches!(source, ImportSource::Cas) {
-                commands::cmd_import_cas(&file, password.as_deref(), replace, sheet.as_deref(), m)
-                    .await
+                commands::cmd_import_cas(
+                    &file,
+                    password.as_deref(),
+                    replace,
+                    sheet.as_deref(),
+                    account.as_deref(),
+                    m,
+                )
+                .await
             } else {
-                commands::cmd_import(&value_name(source), &file, replace, sheet.as_deref(), m).await
+                commands::cmd_import(
+                    &value_name(source),
+                    &file,
+                    replace,
+                    sheet.as_deref(),
+                    account.as_deref(),
+                    m,
+                )
+                .await
             }
         }
         Commands::Wealth => commands::cmd_wealth(m).await,

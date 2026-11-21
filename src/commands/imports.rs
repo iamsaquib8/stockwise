@@ -878,6 +878,7 @@ pub(super) async fn import_rows(
     source: &str,
     file: &str,
     replace: bool,
+    account: Option<&str>,
     parsed: Parsed,
 ) -> Result<()> {
     let Parsed {
@@ -941,7 +942,7 @@ pub(super) async fn import_rows(
         );
     }
     // CAS rows are already split-free units; nothing to replay.
-    super::holdings::apply_import_rows(source, file, import, false, replace).await
+    super::holdings::apply_import_rows(source, file, import, false, replace, account).await
 }
 
 #[cfg(test)]

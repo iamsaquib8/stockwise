@@ -117,6 +117,7 @@ pub async fn cmd_import_cas(
     password: Option<&str>,
     replace: bool,
     sheet: Option<&str>,
+    account: Option<&str>,
     market: Market,
 ) -> Result<()> {
     let path = Path::new(file);
@@ -133,12 +134,13 @@ pub async fn cmd_import_cas(
             "cas",
             "stdin",
             replace,
+            account,
             super::imports::parse_cas(&content)?,
         )
         .await;
     }
     if !path.exists() || !is_pdf(path) {
-        return cmd_import("cas", file, replace, sheet, market).await;
+        return cmd_import("cas", file, replace, sheet, account, market).await;
     }
     let Some(path_var) = std::env::var_os("PATH") else {
         bail!("{}", install_hint(file));
@@ -157,7 +159,14 @@ pub async fn cmd_import_cas(
     };
     println!("  {} Converting {} with casparser…", "·".dimmed(), file);
     let json = run_casparser(&bin, path, &password)?;
-    super::imports::import_rows("cas", file, replace, super::imports::parse_cas(&json)?).await
+    super::imports::import_rows(
+        "cas",
+        file,
+        replace,
+        account,
+        super::imports::parse_cas(&json)?,
+    )
+    .await
 }
 
 #[cfg(test)]
