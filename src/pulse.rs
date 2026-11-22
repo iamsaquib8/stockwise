@@ -379,8 +379,15 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
     }
     let mut warnings = Vec::new();
     // Actions (`crate::action`) for each row: quote-only rules, the same as
-    // the Action column of `portfolio`.
+    // the Action column of `portfolio`. Only a missing notes file is empty
+    // notes: an unreadable one is a warning, and holdings then get no call
+    // rather than an action that skips their thesis limits.
     let notes = crate::commands::load_notes();
+    if let Err(e) = &notes {
+        warnings.push(format!(
+            "Notes file could not be read ({e}); holdings get no call until it is fixed"
+        ));
+    }
     let profile = crate::config::effective_profile();
     let today = chrono::Local::now().date_naive();
     let base = crate::commands::market_currency(market);
@@ -622,7 +629,7 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
                     h,
                     is_held.then_some(weight * 100.0),
                     portfolio.targets.get(s).copied(),
-                    &notes,
+                    notes.as_ref(),
                     &profile,
                     today,
                 )

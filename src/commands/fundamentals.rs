@@ -1064,8 +1064,13 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         .as_ref()
         .map(insights::generate_rich_insights)
         .unwrap_or_default();
+    // The rule-based action before the holding is applied: the only one the
+    // AI prompt gets, so thesis limits, holding weights and other
+    // portfolio-derived reasons stay on this machine.
+    let mut public_action = None;
     let deep_verdict = r_opt.as_ref().map(|r| {
         let mut v = crate::verdict::generate_verdict(r, &cards);
+        public_action = Some(v.action.clone());
         super::actions::apply_holding(&mut v, r, market);
         v
     });
@@ -1417,8 +1422,8 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     if ai.auto_available().await {
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
         let mut stock_data = crate::ai::StockData::from_quote(q);
-        if let Some(v) = &deep_verdict {
-            stock_data = stock_data.with_action(&v.action);
+        if let Some(a) = &public_action {
+            stock_data = stock_data.with_action(a);
         }
         match ai.analyze_stock(&stock_data).await {
             Ok(analysis) => print_ai_answer(&analysis),

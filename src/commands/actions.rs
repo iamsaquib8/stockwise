@@ -17,8 +17,27 @@ use futures_util::StreamExt;
 /// Price-chart requests at a time while reviewing holdings.
 const CHART_CONCURRENCY: usize = 6;
 
-fn notes() -> NoteStore {
-    crate::store::load(crate::notes::FILE).unwrap_or_default()
+/// The user's notes (thesis limits). Only a missing notes file is an empty
+/// store: one that cannot be read or is not valid JSON is an error, so no
+/// action is decided as if the saved limits did not exist. Reading never
+/// creates the data directory.
+fn notes() -> Result<NoteStore> {
+    crate::store::load_from(&crate::store::data_dir_location()?.join(crate::notes::FILE))
+}
+
+/// The action shown in place of a holding's when the notes file could not be
+/// read: no call, with the reason, rather than one that skips the thesis
+/// limits.
+fn notes_unreadable(currency: &str, e: &anyhow::Error) -> Action {
+    let mut a = Action::undecided(currency);
+    a.held = true;
+    a.reasons = vec![notes_problem(e)];
+    a
+}
+
+/// The warning for an unreadable notes file.
+fn notes_problem(e: &anyhow::Error) -> String {
+    format!("Notes file could not be read ({e}); thesis limits unknown, so no call")
 }
 
 /// The next lot of `h` to turn long-term after `today`, under the tax rules
@@ -61,34 +80,45 @@ fn next_long_term(
     best
 }
 
-/// The holding context for `symbol` in the active portfolio, or `None` when
-/// it is not held. Weight is left unknown: the single-stock views do not
-/// value the whole portfolio (`portfolio review` does).
+/// The holding context for `r` in the active portfolio, or `None` when it
+/// is not held. See [`holding_context_in`].
 pub(crate) fn holding_context_for(
-    symbol: &str,
-    price: Option<f64>,
-    currency: Option<&str>,
-    pe: Option<f64>,
-    roe: Option<f64>,
+    r: &crate::research::Research,
     market: Market,
 ) -> Result<Option<HoldingContext>> {
-    let portfolio = Portfolio::load()?;
-    let Some(h) = portfolio.holding(symbol) else {
+    holding_context_in(&Portfolio::load()?, notes, r, market)
+}
+
+/// The holding context for `r` in `portfolio`, or `None` when it is not
+/// held. `notes` is read only for a holding; its error is returned. Weight
+/// is left unknown: the single-stock views do not value the whole portfolio
+/// (`portfolio review` does).
+pub(crate) fn holding_context_in(
+    portfolio: &Portfolio,
+    notes: impl FnOnce() -> Result<NoteStore>,
+    r: &crate::research::Research,
+    market: Market,
+) -> Result<Option<HoldingContext>> {
+    let Some(h) = portfolio.holding(&r.symbol) else {
         return Ok(None);
     };
     if h.shares <= 0.0 {
         return Ok(None);
     }
+    let notes = notes()?;
     let today = chrono::Local::now().date_naive();
-    let notes = notes();
+    let pe = r.fin.trailing_pe.or(r.quote.trailing_pe);
+    let currency = r.currency.as_deref();
     Ok(Some(HoldingContext {
         shares: h.shares,
         avg_cost: h.avg_cost,
         weight_pct: None,
         lookthrough_weight_pct: None,
         target_weight_pct: portfolio.targets.get(&h.symbol).copied(),
-        thesis_breaches: action::thesis_breaches(notes.get(symbol), pe, roe, None),
-        next_long_term: price.and_then(|p| next_long_term(h, p, currency, market, today)),
+        thesis_breaches: action::thesis_breaches(notes.get(&r.symbol), pe, r.fin.roe, None),
+        next_long_term: r
+            .price()
+            .and_then(|p| next_long_term(h, p, currency, market, today)),
     }))
 }
 
@@ -102,20 +132,37 @@ pub(crate) fn apply_holding(
     if cfg!(test) {
         return;
     }
-    match holding_context_for(
-        &r.symbol,
-        r.price(),
-        r.currency.as_deref(),
-        r.fin.trailing_pe.or(r.quote.trailing_pe),
-        r.fin.roe,
-        market,
-    ) {
-        Ok(Some(h)) => {
-            crate::verdict::set_holding(v, r, &crate::config::effective_profile(), h);
-        }
+    let held = holding_context_for(r, market);
+    set_holding_or_unknown(v, r, &crate::config::effective_profile(), held);
+}
+
+/// [`apply_holding`] against a given portfolio and notes (the MCP caller's
+/// workspace) instead of the active ones.
+pub(crate) fn apply_holding_in(
+    v: &mut crate::verdict::DecisionVerdict,
+    r: &crate::research::Research,
+    market: Market,
+    profile: &crate::config::EffectiveProfile,
+    portfolio: &Portfolio,
+    notes: impl FnOnce() -> Result<NoteStore>,
+) {
+    let held = holding_context_in(portfolio, notes, r, market);
+    set_holding_or_unknown(v, r, profile, held);
+}
+
+/// Decide `v`'s action as a holding, or, when the portfolio or notes could
+/// not be read, make it a no call that says so.
+fn set_holding_or_unknown(
+    v: &mut crate::verdict::DecisionVerdict,
+    r: &crate::research::Research,
+    profile: &crate::config::EffectiveProfile,
+    held: Result<Option<HoldingContext>>,
+) {
+    match held {
+        Ok(Some(h)) => crate::verdict::set_holding(v, r, profile, h),
         Ok(None) => {}
         Err(e) => {
-            let msg = format!("Active portfolio could not be read ({e}); holding status unknown");
+            let msg = format!("Portfolio or notes could not be read ({e}); holding status unknown");
             let mut no = Action::undecided(&v.currency);
             no.horizon = v.action.horizon;
             no.coverage = v.action.coverage;
@@ -127,25 +174,37 @@ pub(crate) fn apply_holding(
 }
 
 /// Structured quote-only action for a holding or watched stock (`today`,
-/// `hot`, the digest and the Telegram bot).
+/// `hot`, the digest and the Telegram bot). `notes` is read only for a
+/// holding; when it could not be loaded, a holding gets a no call that says
+/// so instead of an action that skips the thesis limits.
 pub(crate) fn row_action(
     q: &Quote,
     h: Option<&pf::Holding>,
     weight_pct: Option<f64>,
     target_weight_pct: Option<f64>,
-    notes: &NoteStore,
+    notes: Result<&NoteStore, &anyhow::Error>,
     profile: &crate::config::EffectiveProfile,
     today: NaiveDate,
 ) -> Action {
-    match h {
-        Some(h) => quick_holding_action(q, h, weight_pct, target_weight_pct, notes, profile, today),
-        None => {
-            let score = crate::longterm::score_for_longterm(q, None);
-            let i = action::inputs_from_quote(q, &Series::default(), &score, Horizon::Long, today)
-                .with_profile(profile);
-            action::decide(&i)
+    match (h, notes) {
+        (Some(h), Ok(notes)) => {
+            quick_holding_action(q, h, weight_pct, target_weight_pct, notes, profile, today)
         }
+        (Some(_), Err(e)) => notes_unreadable(q.currency.as_deref().unwrap_or_default(), e),
+        (None, _) => unheld_action(q, profile, today),
     }
+}
+
+/// Quote-only action for a stock not held. Reads no notes.
+pub(crate) fn unheld_action(
+    q: &Quote,
+    profile: &crate::config::EffectiveProfile,
+    today: NaiveDate,
+) -> Action {
+    let score = crate::longterm::score_for_longterm(q, None);
+    let i = action::inputs_from_quote(q, &Series::default(), &score, Horizon::Long, today)
+        .with_profile(profile);
+    action::decide(&i)
 }
 
 /// Compact one-line summary of an [`Action`] that retains its invalidation
@@ -183,12 +242,21 @@ pub(crate) fn action_line(
     profile: &crate::config::EffectiveProfile,
     today: NaiveDate,
 ) -> String {
-    let a = row_action(q, h, weight_pct, target_weight_pct, notes, profile, today);
+    let a = row_action(
+        q,
+        h,
+        weight_pct,
+        target_weight_pct,
+        Ok(notes),
+        profile,
+        today,
+    );
     format_action_line(&a)
 }
 
-/// The user's notes (thesis limits), for callers outside this module.
-pub(crate) fn load_notes() -> NoteStore {
+/// The user's notes (thesis limits), for callers outside this module. Only
+/// a missing file is an empty store.
+pub(crate) fn load_notes() -> Result<NoteStore> {
     notes()
 }
 
@@ -307,13 +375,22 @@ pub(crate) fn quick_actions(
                         .map(|v| v / totals.value * 100.0)
                 })
                 .flatten();
+            let notes = match &notes {
+                Ok(n) => n,
+                Err(e) => {
+                    let currency = val
+                        .currency(&h.symbol)
+                        .unwrap_or_else(|| val.base().to_string());
+                    return (h.symbol.clone(), notes_unreadable(&currency, e));
+                }
+            };
             let a = match enriched.get(&h.symbol).or_else(|| val.quote(&h.symbol)) {
                 Some(q) => quick_holding_action(
                     q,
                     h,
                     weight,
                     portfolio.targets.get(&h.symbol).copied(),
-                    &notes,
+                    notes,
                     &profile,
                     today,
                 ),
@@ -404,7 +481,7 @@ pub(crate) async fn review(
     let report = super::portfolio_analyze::analysis_report(&g, market);
     let a = &report.analysis;
     let profile = crate::config::effective_profile();
-    let notes = notes();
+    let notes = notes()?;
     let today = chrono::Local::now().date_naive();
 
     // What funds and ETFs hold of the same companies.
@@ -775,5 +852,73 @@ mod tests {
         let (_, _, drift_free) =
             next_long_term(h2, 100.25, Some("INR"), Market::In, today).unwrap();
         assert_eq!(drift_free, Some(0.08));
+    }
+
+    fn tcs() -> (crate::research::Research, Portfolio) {
+        let mut r = crate::research::Research::default();
+        r.symbol = "TCS.NS".into();
+        r.currency = Some("INR".into());
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 100.0, "2025-12-01", "manual"));
+        (r, p)
+    }
+
+    #[test]
+    fn unreadable_notes_make_a_holding_no_call() {
+        let (r, p) = tcs();
+        let profile = crate::config::EffectiveProfile::default();
+        let mut v = crate::verdict::generate_verdict(&r, &[]);
+        apply_holding_in(&mut v, &r, Market::In, &profile, &p, || {
+            Err(anyhow::anyhow!("notes.json is not valid JSON"))
+        });
+        assert_eq!(v.action.kind, Kind::NoCall);
+        assert!(
+            v.action.reasons[0].contains("not valid JSON"),
+            "{:?}",
+            v.action
+        );
+
+        // Readable notes: decided as a holding.
+        let mut v = crate::verdict::generate_verdict(&r, &[]);
+        apply_holding_in(&mut v, &r, Market::In, &profile, &p, || {
+            Ok(NoteStore::default())
+        });
+        assert!(v.action.held, "{:?}", v.action);
+
+        // Not held: the notes are not read and the action is left as it is.
+        let mut v = crate::verdict::generate_verdict(&r, &[]);
+        let before = v.action.clone();
+        apply_holding_in(
+            &mut v,
+            &r,
+            Market::In,
+            &profile,
+            &Portfolio::default(),
+            || -> Result<NoteStore> { panic!("notes read for a stock not held") },
+        );
+        assert_eq!(v.action.kind, before.kind);
+        assert!(!v.action.held);
+    }
+
+    #[test]
+    fn row_action_with_unreadable_notes() {
+        let (_, p) = tcs();
+        let h = p.holding("TCS.NS").unwrap();
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            currency: Some("INR".into()),
+            regular_market_price: Some(120.0),
+            ..Default::default()
+        };
+        let profile = crate::config::EffectiveProfile::default();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let e = anyhow::anyhow!("Cannot read notes.json");
+        let a = row_action(&q, Some(h), None, None, Err(&e), &profile, today);
+        assert_eq!(a.kind, Kind::NoCall);
+        assert!(a.held);
+        assert!(a.reasons[0].contains("Cannot read notes.json"), "{a:?}");
+        // A stock not held reads no notes, so it is decided as usual.
+        let unheld = row_action(&q, None, None, None, Err(&e), &profile, today);
+        assert_eq!(unheld, unheld_action(&q, &profile, today));
     }
 }

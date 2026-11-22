@@ -16,7 +16,7 @@ use chrono::{Datelike, Duration, NaiveDate, Weekday};
 use serde::Serialize;
 
 /// Version of the action rules. Bump it whenever a rule or threshold changes.
-pub const METHODOLOGY: &str = "1";
+pub const METHODOLOGY: &str = "2";
 
 /// Below this data coverage (percent) the engine makes no call.
 pub const MIN_COVERAGE: f64 = 60.0;
@@ -771,6 +771,15 @@ fn size_for_entry(i: &Inputs, inv: Option<f64>) -> Option<SizeHint> {
     let inv = inv.filter(|v| *v < price)?;
     let risk_weight = i.risk_per_trade * price / (price - inv);
     let (cap, cap_name) = weight_cap(i);
+    // What funds and ETFs in the portfolio already hold of the company counts
+    // against the cap, so only the rest is left for the direct holding. With
+    // no look-through weight (or no direct weight) the cap applies as is.
+    let indirect = i
+        .holding
+        .as_ref()
+        .and_then(|h| Some((h.lookthrough_weight_pct? - h.weight_pct?).max(0.0)))
+        .unwrap_or(0.0);
+    let cap = (cap - indirect).max(0.0);
     let (mut w, mut by) = if risk_weight <= cap {
         (risk_weight, "risk_per_trade")
     } else {
@@ -1164,20 +1173,29 @@ fn decide_held(i: &Inputs, h: &HoldingContext) -> Action {
             (Some(f), Some(v)) if price > f && v >= SHORT_VOLUME_RATIO
         ),
     };
-    let room = match (h.weight_pct, h.target_weight_pct) {
-        (Some(w), Some(t)) => w < t.min(cap),
-        (Some(w), None) => w < cap,
-        (None, _) => false,
+    // The cap is on the company: direct weight plus what funds hold of it,
+    // when the look-through weight is known. A target is on the direct weight.
+    let combined = h
+        .weight_pct
+        .map(|w| h.lookthrough_weight_pct.map_or(w, |lw| lw.max(w)));
+    let room = match (h.weight_pct, combined, h.target_weight_pct) {
+        (Some(w), Some(c), Some(t)) => w < t && c < cap,
+        (Some(_), Some(c), None) => c < cap,
+        _ => false,
     };
     if composite >= BUY_COMPOSITE && trend_up && room {
         let mut r = vec![
             format!("Composite score {composite:.0} (65 or more)"),
             "Trend up: price above a rising average".to_string(),
         ];
-        if let Some(w) = h.weight_pct {
-            r.push(format!(
+        match (h.weight_pct, combined) {
+            (Some(w), Some(c)) if c > w => r.push(format!(
+                "Weight {w:.1}% ({c:.1}% with what your funds hold) leaves room under the {cap:.1}% cap"
+            )),
+            (Some(w), _) => r.push(format!(
                 "Weight {w:.1}% leaves room under the {cap:.1}% cap"
-            ));
+            )),
+            _ => {}
         }
         if let Some(days) = earnings_soon(i) {
             r.insert(
@@ -2206,6 +2224,39 @@ mod tests {
         assert_eq!(s2.shares, Some(100.0));
         assert_eq!(s2.limited_by, "direct_holding_only");
         assert!(a2.render("").contains("sell all 100 shares directly held"));
+    }
+
+    #[test]
+    fn add_counts_lookthrough_weight_against_the_cap() {
+        // 4% direct, 9% with what funds hold, 10% cap: 1 point of room left.
+        let mut i = held(good(), 4.0, 900.0);
+        i.portfolio_value = Some(2_500_000.0);
+        i.holding.as_mut().unwrap().lookthrough_weight_pct = Some(9.0);
+        let a = decide(&i);
+        assert_eq!(a.kind, Kind::Add, "{a:?}");
+        assert!(
+            a.reasons
+                .iter()
+                .any(|r| r.contains("9.0% with what your funds hold"))
+        );
+        // The direct holding may grow to 10% - 5% indirect = 5%: 125 shares
+        // at 1,000 in a 2,500,000 portfolio, less the 100 held.
+        let s = a.size_hint.clone().unwrap();
+        assert_eq!((s.max_weight_pct, s.limited_by), (5.0, "max_stock_weight"));
+        assert_eq!(s.shares, Some(25.0));
+        check(&a);
+
+        // Combined exposure at the cap: no room, so no add.
+        i.holding.as_mut().unwrap().lookthrough_weight_pct = Some(10.0);
+        let a = decide(&i);
+        assert_eq!(a.kind, Kind::Hold, "{a:?}");
+        assert!(a.reasons.iter().any(|r| r.contains("No room left")));
+
+        // Without look-through data the direct weight decides, as before.
+        i.holding.as_mut().unwrap().lookthrough_weight_pct = None;
+        let a = decide(&i);
+        assert_eq!(a.kind, Kind::Add);
+        assert!(a.size_hint.unwrap().max_weight_pct > 5.0);
     }
 
     #[test]
