@@ -719,6 +719,7 @@ pub(crate) async fn gather_inputs(
                         price: l.price,
                         date: chrono::NaiveDate::parse_from_str(&l.date, "%Y-%m-%d").ok(),
                         estimated: l.date_estimated,
+                        cost_base: val.lot_cost_base(sym, l).map(|(c, _)| c),
                     })
                     .collect(),
                 closes: hist,

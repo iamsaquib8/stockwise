@@ -255,6 +255,29 @@ fn tax_report_splits_terms_and_skips_unpriced() {
 }
 
 #[test]
+fn tax_report_realized_gains_net_deductible_charges() {
+    // A US sale at $110 of a $100 lot with $15 of charges is a $5 loss.
+    let mut p = Portfolio::default();
+    p.add_lot("AAPL", Lot::new(1.0, 100.0, "2026-02-01", "manual"));
+    p.sell_fifo("AAPL", 1.0, 110.0, "2026-03-01", "manual")
+        .unwrap();
+    p.realized[0].charges = Some(15.0);
+    let r = tax_report(Country::Us, &p, &valued(&p, vec![]), day("2026-06-01"));
+    assert!((r.realized.st_loss - 5.0).abs() < 1e-9, "{:?}", r.realized);
+    assert_eq!(r.realized.st_gain, 0.0);
+    assert!((r.sales[0].gain + 5.0).abs() < 1e-9);
+
+    // An Indian delivery sale stays before charges (they include STT).
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(1.0, 100.0, "2026-05-01", "manual"));
+    p.sell_fifo("TCS.NS", 1.0, 110.0, "2026-06-01", "manual")
+        .unwrap();
+    p.realized[0].charges = Some(3.0);
+    let r = tax_report(Country::India, &p, &valued(&p, vec![]), day("2026-07-01"));
+    assert_eq!(r.realized.st_gain, 10.0);
+}
+
+#[test]
 fn tax_in_reports_intraday_apart_from_111a_and_112a() {
     use crate::portfolio::{ImportOptions, ImportRow};
     let row = |date: &str, sell: bool, qty: f64, price: f64| ImportRow {
@@ -1497,6 +1520,7 @@ fn portfolio_analyze_csv_has_one_flat_row_per_holding() {
             price: 100.0,
             date: Some(day("2025-12-01")),
             estimated: false,
+            cost_base: None,
         }],
         tax_country: Some(crate::tax::Country::India),
         ..Default::default()

@@ -95,6 +95,9 @@ pub struct LotInput {
     pub date: Option<NaiveDate>,
     /// The date was not known and is a guess.
     pub estimated: bool,
+    /// Cost in the base currency at the purchase day's rate (or what was
+    /// paid in the base). `None`: `qty × price × fx_to_base` (today's rate).
+    pub cost_base: Option<f64>,
 }
 
 /// Everything known about one holding.
@@ -147,12 +150,13 @@ pub struct PositionInput {
 }
 
 impl PositionInput {
-    /// Closes in the base currency: `closes_base`, else `closes` when the
-    /// holding is in the base currency (`fx_to_base` of 1).
-    pub fn base_closes(&self) -> &[(NaiveDate, f64)] {
+    /// Closes in `base` currency: `closes_base`, else `closes` when the
+    /// holding's own currency is `base`; empty otherwise. A foreign rate of
+    /// 1 today does not make past closes base-currency prices.
+    pub fn base_closes(&self, base: &str) -> &[(NaiveDate, f64)] {
         if !self.closes_base.is_empty() {
             &self.closes_base
-        } else if self.fx_to_base == Some(1.0) {
+        } else if self.currency.as_deref() == Some(base) {
             &self.closes
         } else {
             &[]
@@ -563,15 +567,9 @@ fn position(p: &PositionInput, ctx: &Context, total_base: f64) -> Position {
             .filter(|(h, _)| *h > 0.0)
             .map(|(h, c)| (1.0 - c / h) * 100.0),
         max_drawdown_pct: max_drawdown(closes),
-        // Against a benchmark in the base currency, so in the base too.
-        beta: beta(
-            if p.base_closes().is_empty() {
-                &p.closes
-            } else {
-                p.base_closes()
-            },
-            &ctx.benchmark_closes,
-        ),
+        // Against a benchmark in the base currency, so in the base too:
+        // none for a foreign holding without base-currency closes.
+        beta: beta(p.base_closes(&ctx.base_currency), &ctx.benchmark_closes),
         score: p.score.map(|s| s.0),
         score_coverage: p.score.map(|s| s.1),
         risk_tier: p.risk_tier.clone(),
@@ -656,7 +654,7 @@ fn risk(inputs: &[PositionInput], positions: &[Position], ctx: &Context, total: 
         .iter()
         .zip(positions)
         .filter_map(|(i, p)| {
-            let closes = i.base_closes();
+            let closes = i.base_closes(&ctx.base_currency);
             (closes.len() >= MIN_CLOSES)
                 .then_some(closes)
                 .zip(p.value_base.filter(|v| *v > 0.0))
@@ -983,6 +981,20 @@ fn fmt_qty(q: f64) -> String {
 /// Sector name for holdings without one.
 pub const UNKNOWN_SECTOR: &str = "Unclassified";
 
+/// Whether a lot bought on `bought` is long-term on `today`, the way
+/// [`position`] splits a holding's gain.
+fn lot_is_long_term(
+    rule: TermRule,
+    default_months: Option<u32>,
+    bought: NaiveDate,
+    today: NaiveDate,
+) -> bool {
+    match rule.months_for(default_months, bought) {
+        None => false,
+        Some(m) => !crate::sellpreview::long_term_from(bought, m).is_some_and(|on| on > today),
+    }
+}
+
 /// Analyse the holdings.
 pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
     let total: f64 = inputs
@@ -1001,16 +1013,25 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
         .filter(|p| p.value_base.is_none())
         .map(|p| p.symbol.clone())
         .collect();
-    let to_base = |p: &Position, i: &PositionInput, x: Option<f64>| {
-        x.zip(i.fx_to_base)
-            .map(|(v, r)| v * r)
-            .filter(|_| p.value_base.is_some())
-    };
     let mut terms = Terms::default();
     for (p, i) in positions.iter().zip(inputs) {
-        terms.short_term_gain += to_base(p, i, p.short_term_gain).unwrap_or(0.0);
-        terms.long_term_gain += to_base(p, i, p.long_term_gain).unwrap_or(0.0);
         let default_months = i.tax_country.and_then(Country::long_term_months);
+        // Each lot's base gain: value at today's rate less its cost at the
+        // purchase's rate, so the currency move counts, in the lot's term.
+        if let (Some(price), Some(rate), Some(_)) = (i.price, i.fx_to_base, p.value_base)
+            && i.term_rule.has_terms(default_months)
+        {
+            for l in &i.lots {
+                let Some(d) = l.date else { continue };
+                let cost = l.cost_base.unwrap_or(l.qty * l.price * rate);
+                let gain = l.qty * price * rate - cost;
+                if lot_is_long_term(i.term_rule, default_months, d, ctx.today) {
+                    terms.long_term_gain += gain;
+                } else {
+                    terms.short_term_gain += gain;
+                }
+            }
+        }
         if i.term_rule.has_terms(default_months) {
             for l in &i.lots {
                 let Some(d) = l.date else {
@@ -1141,6 +1162,7 @@ mod tests {
                 price: cost,
                 date: Some(day("2024-01-10")),
                 estimated: false,
+                cost_base: None,
             }],
             tax_country: Some(Country::India),
             ..Default::default()
@@ -1203,12 +1225,14 @@ mod tests {
                 price: 100.0,
                 date: Some(day("2024-01-10")),
                 estimated: false,
+                cost_base: None,
             },
             LotInput {
                 qty: 5.0,
                 price: 100.0,
                 date: Some(day("2025-12-01")),
                 estimated: false,
+                cost_base: None,
             },
         ];
         let a = analyze(&[h], &ctx());
@@ -1354,6 +1378,23 @@ mod tests {
     }
 
     #[test]
+    fn no_beta_from_foreign_closes_without_exchange_rates() {
+        let bench = dated((0..80).map(|i| 100.0 + (i % 7) as f64).collect());
+        let mut c = ctx();
+        c.benchmark_closes = bench.clone();
+        let mut home = holding("A.NS", 1.0, 100.0, 100.0);
+        home.closes = bench.clone();
+        // A foreign holding whose rate happens to be 1 today.
+        let mut us = holding("AAPL", 1.0, 100.0, 100.0);
+        us.currency = Some("USD".into());
+        us.closes = bench;
+        assert!(us.base_closes("INR").is_empty());
+        let a = analyze(&[home, us], &c);
+        assert!((a.positions[0].beta.unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(a.positions[1].beta, None);
+    }
+
+    #[test]
     fn blended_benchmark_weights_daily_returns() {
         let a = dated(vec![100.0, 110.0, 110.0]);
         let b = dated(vec![100.0, 100.0, 90.0]);
@@ -1397,12 +1438,14 @@ mod tests {
                 price: 10.0,
                 date: Some(day("2021-01-10")),
                 estimated: false,
+                cost_base: None,
             },
             LotInput {
                 qty: 50.0,
                 price: 10.0,
                 date: Some(day("2023-06-01")),
                 estimated: false,
+                cost_base: None,
             },
         ];
         let a = analyze(&[f], &ctx());
@@ -1421,8 +1464,12 @@ mod tests {
         us.currency = Some("USD".into());
         us.fx_to_base = Some(84.0);
         us.cost_base = Some(10.0 * 100.0 * 75.0);
+        us.lots[0].cost_base = Some(10.0 * 100.0 * 75.0);
         let a = analyze(&[us], &ctx());
         assert!((a.pnl_pct - 12.0).abs() < 1e-9);
+        // The lot's term gain carries the currency move too.
+        assert!((a.terms.long_term_gain - 9000.0).abs() < 1e-9);
+        assert_eq!(a.terms.short_term_gain, 0.0);
         let p = &a.positions[0];
         assert_eq!(p.pnl, Some(0.0));
         assert!((p.fx_effect_base.unwrap() - 9000.0).abs() < 1e-9);
@@ -1450,12 +1497,14 @@ mod tests {
                 price: 100.0,
                 date: Some(day("2026-06-01")),
                 estimated: false,
+                cost_base: None,
             },
             LotInput {
                 qty: 5.0,
                 price: 100.0,
                 date: Some(day("2026-09-01")),
                 estimated: false,
+                cost_base: None,
             },
         ];
         let a = analyze(&[h], &ctx());

@@ -601,6 +601,7 @@ mod tests {
                 price: cost,
                 date: Some(day(bought)),
                 estimated: false,
+                cost_base: None,
             }],
             tax_country: Some(crate::tax::Country::India),
             score: Some((62.0, 0.8)),

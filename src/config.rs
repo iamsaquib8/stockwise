@@ -1262,9 +1262,10 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
             .map(|rel| header_idx + 1 + rel)
             .unwrap_or(lines.len());
         let commented = format!("# {key}");
+        // The parsed key, so a quoted `"residence" = ...` is found too.
         let found = lines[header_idx + 1..end_idx]
             .iter()
-            .position(|l| is_key(l.trim_start(), key))
+            .position(|l| table_key(l).as_deref() == Some(key))
             .or_else(|| {
                 lines[header_idx + 1..end_idx]
                     .iter()
@@ -2031,6 +2032,31 @@ mod tests {
         let cfg: Config = toml::from_str(&text).unwrap();
         let eff = EffectiveProfile::from_parts(None, None, &cfg.profile);
         assert_eq!(eff.residence.as_deref(), Some("in"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_profile_replaces_a_quoted_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "stockwise-quoted-residence-{}-{}",
+            std::process::id(),
+            crate::selfupdate::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[profile]\n\"residence\" = \"us\"\n").unwrap();
+        set_profile(
+            &path,
+            &ProfileUpdate {
+                residence: crate::tax::Country::parse("India"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("residence").count(), 1, "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.profile.residence.as_deref(), Some("in"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
