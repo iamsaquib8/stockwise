@@ -55,7 +55,7 @@ pub struct HotRow {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
+    pub action: Option<crate::action::Action>,
 }
 
 /// Everything `hot` shows.
@@ -224,7 +224,18 @@ pub(crate) async fn build_hot(
                             timed("Live quotes", client.get_quote(&refs), &mut warnings).await
                             && !live.is_empty()
                         {
-                            quotes = live;
+                            let mut by_sym: std::collections::HashMap<String, crate::api::Quote> =
+                                live.into_iter()
+                                    .filter_map(|q| Some((q.symbol.clone()?, q)))
+                                    .collect();
+                            for q in &mut quotes {
+                                if let Some(sym) = q.symbol.as_deref()
+                                    && let Some(fresh) = by_sym.remove(sym)
+                                {
+                                    *q = fresh;
+                                }
+                            }
+                            quotes.extend(by_sym.into_values());
                         }
                     }
                     r.top_movers = crate::hot::top_movers(&quotes, elapsed, min_value, limit);
@@ -423,7 +434,7 @@ pub(crate) fn plain_hot(r: &HotReport, n: usize) -> String {
                 h.why,
                 h.action
                     .as_ref()
-                    .map(|a| format!(" [{a}]"))
+                    .map(|a| format!(" [{}]", super::actions::format_action_line(a)))
                     .unwrap_or_default()
             ));
         }
@@ -437,6 +448,7 @@ pub(crate) fn plain_hot(r: &HotReport, n: usize) -> String {
             }
         }
     };
+    list(&mut out, "Top movers", &r.top_movers);
     list(&mut out, "Unusual volume", &r.unusual_volume);
     list(&mut out, "Gaps", &r.gaps);
     list(&mut out, "52-week highs", &r.new_highs);
@@ -474,6 +486,12 @@ pub(crate) fn plain_hot(r: &HotReport, n: usize) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    if !r.warnings.is_empty() {
+        out.push(String::new());
+        for w in &r.warnings {
+            out.push(format!("! {w}"));
+        }
     }
     if r.yours.iter().any(|h| h.action.is_some()) {
         out.push(String::new());
@@ -537,7 +555,9 @@ pub async fn cmd_hot(
             h.why,
             h.action
                 .as_ref()
-                .map(|a| format!("  [{a}]").bold().to_string())
+                .map(|a| format!("  [{}]", super::actions::format_action_line(a))
+                    .bold()
+                    .to_string())
                 .unwrap_or_default()
         );
         println!("  {:<14} {}", "", detail.join(" · ").dimmed());

@@ -32,6 +32,8 @@ pub enum Why {
     Market { bench_pct: f64 },
     /// An unusual move with no news found.
     Unexplained { sigma: f64 },
+    /// An unusual volume spike with no news found (when sigma is unavailable).
+    VolumeSpike { volume_x: f64 },
     /// A small move with no news.
     Quiet,
 }
@@ -56,6 +58,9 @@ impl Why {
             Why::Market { bench_pct } => format!("with the market ({bench_pct:+.1}%)"),
             Why::Unexplained { sigma } => {
                 format!("unexplained — {sigma:.1}σ move, no news or filing found")
+            }
+            Why::VolumeSpike { volume_x } => {
+                format!("unexplained — {volume_x:.1}× volume move, no news or filing found")
             }
             Why::Quiet => "little changed, no news".into(),
         }
@@ -105,7 +110,7 @@ pub struct Row {
     pub events: Vec<crate::calendar::Event>,
     /// The rule-based action, once the actions engine is available.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
+    pub action: Option<crate::action::Action>,
 }
 
 /// An index for the market backdrop.
@@ -223,7 +228,7 @@ pub fn move_stats_with_sd(p: &Series, b: &Series) -> (Option<f64>, Option<f64>, 
         _ => None,
     };
     let n = p.volume.len();
-    let volume_x = (n > 21)
+    let volume_x = (n >= 21)
         .then(|| {
             let avg = p.volume[n - 21..n - 1].iter().sum::<f64>() / 20.0;
             (avg > 0.0 && p.volume[n - 1] > 0.0).then(|| p.volume[n - 1] / avg)
@@ -296,6 +301,10 @@ pub fn explain_with_sd(
         if sd.is_finite() && crate::events::is_unusual_move(excess, sd, volume_x) {
             return Why::Unexplained { sigma: z.abs() };
         }
+    } else if let Some(vx) = volume_x.filter(|v| *v >= 3.0)
+        && change.abs() >= 1.5
+    {
+        return Why::VolumeSpike { volume_x: vx };
     }
     match bench_pct {
         Some(b) if change.abs() >= 0.5 && change.signum() == b.signum() && b.abs() >= 0.3 => {
@@ -488,11 +497,13 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
         let mut cal = crate::calendar::Calendar::new(client);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
         for s in &stock_syms {
-            if tokio::time::Instant::now() >= deadline {
-                warnings.push("Calendar lookups stopped after 25 s".into());
-                break;
+            match tokio::time::timeout_at(deadline, cal.events_for(s)).await {
+                Ok(ev) => events.extend(ev),
+                Err(_) => {
+                    warnings.push("Calendar lookups stopped after 25 s".into());
+                    break;
+                }
             }
-            events.extend(cal.events_for(s).await);
         }
         cal.save();
         let now = chrono::Utc::now();
@@ -530,9 +541,38 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             .iter()
             .find(|(b, _)| *b == benchmark(s))
             .map(|(_, b)| b);
+        let quote_session = q
+            .and_then(|q| q.regular_market_time)
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+            .map(|at| crate::clock::session_date(market, at));
         let (sigma, volume_x, excess_sd) = match (series, bench) {
-            (Some(p), Some(b)) => move_stats_with_sd(p, b),
-            (Some(p), None) => move_stats_with_sd(p, &Series::default()),
+            (Some(p), Some(b)) => {
+                let (mut sig, mut vx, sd) = move_stats_with_sd(p, b);
+                if let (Some(qd), Some(bd)) = (quote_session, p.dates.last())
+                    && *bd != qd
+                {
+                    // Chart last bar is from an earlier session: compute live sigma
+                    // from the quote's excess move against prior volatility and leave
+                    // stale volume_x unset.
+                    vx = None;
+                    sig = sd.filter(|sd| *sd > 0.0).and_then(|sd| {
+                        Some(((change_pct? - bench_pct(s).unwrap_or(0.0)) / 100.0) / sd)
+                    });
+                }
+                (sig, vx, sd)
+            }
+            (Some(p), None) => {
+                let (mut sig, mut vx, sd) = move_stats_with_sd(p, &Series::default());
+                if let (Some(qd), Some(bd)) = (quote_session, p.dates.last())
+                    && *bd != qd
+                {
+                    vx = None;
+                    sig = sd.filter(|sd| *sd > 0.0).and_then(|sd| {
+                        Some(((change_pct? - bench_pct(s).unwrap_or(0.0)) / 100.0) / sd)
+                    });
+                }
+                (sig, vx, sd)
+            }
             _ => (None, None, None),
         };
         let gap_pct = q.and_then(|q| {
@@ -577,7 +617,7 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             news,
             events: events.iter().filter(|e| &e.symbol == s).cloned().collect(),
             action: enriched.get(s).or(q).map(|q| {
-                crate::commands::action_line(
+                crate::commands::row_action(
                     q,
                     h,
                     is_held.then_some(weight * 100.0),
@@ -589,10 +629,11 @@ pub async fn gather(client: &YahooClient, market: Market, opts: Options) -> anyh
             }),
         });
     }
-    let day_pnl: Option<f64> = {
-        let v: Vec<f64> = rows.iter().filter_map(|r| r.day_pnl).collect();
-        (!v.is_empty()).then(|| v.iter().sum())
-    };
+    let held_priced_count = rows.iter().filter(|r| r.held && r.price.is_some()).count();
+    let day_pnl_rows: Vec<&Row> = rows.iter().filter(|r| r.day_pnl.is_some()).collect();
+    let day_pnl: Option<f64> = (!day_pnl_rows.is_empty()
+        && day_pnl_rows.len() == held_priced_count)
+        .then(|| day_pnl_rows.iter().filter_map(|r| r.day_pnl).sum());
     let day_pnl_pct = match (day_pnl, value) {
         (Some(p), Some(v)) if v - p > 0.0 => Some(p / (v - p) * 100.0),
         _ => None,

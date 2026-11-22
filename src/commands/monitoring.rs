@@ -225,6 +225,23 @@ pub(crate) async fn send_digest_once(
     Ok(true)
 }
 
+/// [`send_digest_once`], also persisting the advanced `cursor` from `full_pass`.
+pub(crate) async fn send_digest_once_with_cursor(
+    notifier: &Notifier,
+    digest: &crate::digest::Digest,
+    signals: &[Signal],
+    cursor: usize,
+) -> Result<bool> {
+    let sent = send_digest_once(notifier, digest, signals).await?;
+    if sent {
+        crate::store::update::<MonitorState, ()>(crate::monitor::STATE_FILE, |st| {
+            st.cursor = cursor;
+            Ok(())
+        })?;
+    }
+    Ok(sent)
+}
+
 /// `stockwise monitor [status|run]`.
 pub async fn cmd_monitor(action: &str, notify: bool, json: bool, market: Market) -> Result<()> {
     let t = Thresholds::from_config();
@@ -233,8 +250,32 @@ pub async fn cmd_monitor(action: &str, notify: bool, json: bool, market: Market)
         let client = YahooClient::new().await?;
         let mut st = state;
         let signals = full_pass(&client, market, &mut st).await?;
+        let mut sent_ok = false;
+        if notify && !signals.is_empty() {
+            let notifier = Notifier::from_env();
+            let msg = crate::notify::batch(
+                &format!("StockWise monitor: {} new", signals.len()),
+                &signals.iter().map(Signal::message).collect::<Vec<_>>(),
+            );
+            if notifier.send_logged(&msg).await {
+                crate::store::update::<MonitorState, ()>(crate::monitor::STATE_FILE, |s| {
+                    s.record(&signals);
+                    s.cursor = st.cursor;
+                    Ok(())
+                })?;
+                sent_ok = true;
+            }
+        } else {
+            let _ = crate::store::update::<MonitorState, ()>(crate::monitor::STATE_FILE, |s| {
+                s.cursor = st.cursor;
+                Ok(())
+            });
+        }
         if json {
-            return output::print_json(&serde_json::json!({ "signals": signals }));
+            return output::print_json(&serde_json::json!({
+                "signals": signals,
+                "notified": sent_ok,
+            }));
         }
         print_header("Monitor — one pass over every holding");
         if signals.is_empty() {
@@ -248,31 +289,13 @@ pub async fn cmd_monitor(action: &str, notify: bool, json: bool, market: Market)
             };
             println!("  {} {}  {}", mark, s.title.bold(), s.detail.dimmed());
         }
-        if notify && !signals.is_empty() {
-            let notifier = Notifier::from_env();
-            let msg = crate::notify::batch(
-                &format!("StockWise monitor: {} new", signals.len()),
-                &signals.iter().map(Signal::message).collect::<Vec<_>>(),
+        if sent_ok {
+            println!("\n  {} Sent and remembered.", "✓".green());
+        } else if !notify && !signals.is_empty() {
+            println!(
+                "\n  {} Not sent (add --notify). The worker sends these on its own.",
+                "→".dimmed()
             );
-            if notifier.send_logged(&msg).await {
-                crate::store::update::<MonitorState, ()>(crate::monitor::STATE_FILE, |s| {
-                    s.record(&signals);
-                    s.cursor = st.cursor;
-                    Ok(())
-                })?;
-                println!("\n  {} Sent and remembered.", "✓".green());
-            }
-        } else {
-            let _ = crate::store::update::<MonitorState, ()>(crate::monitor::STATE_FILE, |s| {
-                s.cursor = st.cursor;
-                Ok(())
-            });
-            if !signals.is_empty() {
-                println!(
-                    "\n  {} Not sent (add --notify). The worker sends these on its own.",
-                    "→".dimmed()
-                );
-            }
         }
         println!();
         return Ok(());
@@ -346,13 +369,7 @@ pub async fn cmd_digest(send: bool, json: bool, market: Market) -> Result<()> {
     let mut state: MonitorState =
         crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
     let (digest, signals) = build_digest(&client, market, Vec::new(), &mut state).await?;
-    if json {
-        return output::print_json(&digest);
-    }
     let msg = crate::digest::render(&digest);
-    print_header(&msg.title);
-    println!("{}", msg.body);
-    println!();
     if send {
         let notifier = Notifier::from_env();
         if !notifier.is_enabled() {
@@ -365,10 +382,18 @@ pub async fn cmd_digest(send: bool, json: bool, market: Market) -> Result<()> {
                 st.cursor = state.cursor;
                 Ok(())
             })?;
-            println!("  {} Sent.", "✓".green());
         } else {
             bail!("Every channel failed.");
         }
+    }
+    if json {
+        return output::print_json(&digest);
+    }
+    print_header(&msg.title);
+    println!("{}", msg.body);
+    println!();
+    if send {
+        println!("  {} Sent.", "✓".green());
     }
     Ok(())
 }

@@ -423,9 +423,10 @@ pub async fn securities(timeout: Duration) -> Result<(Vec<Security>, bool)> {
 pub fn parse_name(query: &str) -> Option<(f64, i32)> {
     let s: String = query
         .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '%' | '-'))
+        .filter(|c| !c.is_whitespace() && *c != '%')
         .collect::<String>()
         .to_ascii_uppercase()
+        .replacen("G-SEC", "GS", 1)
         .replacen("GSEC", "GS", 1)
         .replacen("GOI", "GS", 1);
     let (coupon, rest) = s.split_once("GS")?;
@@ -585,6 +586,8 @@ mod tests {
         assert_eq!(parse_name("718GSEC2033"), Some((7.18, 2033)));
         assert_eq!(parse_name("7.18 GOI 2033"), Some((7.18, 2033)));
         assert_eq!(parse_name("7.18% goi 2033"), Some((7.18, 2033)));
+        assert_eq!(parse_name("-7.18% GS 2033"), None);
+        assert_eq!(parse_name("-718GS2033"), None);
         assert_eq!(parse_name("RELIANCE"), None);
         assert_eq!(parse_name("GS2033"), None);
     }

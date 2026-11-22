@@ -693,25 +693,40 @@ pub fn weighted_index(series: &[(&[(NaiveDate, f64)], f64)]) -> Vec<(NaiveDate, 
         .collect();
     calendar.sort();
     calendar.dedup();
-    let aligned: Vec<Vec<Option<f64>>> = series
+    let aligned: Vec<(Vec<Option<f64>>, Vec<bool>)> = series
         .iter()
         .map(|(s, _)| {
-            let mut sorted = s.to_vec();
+            let mut sorted: Vec<(NaiveDate, f64)> = s
+                .iter()
+                .copied()
+                .filter(|(_, c)| c.is_finite() && *c > 0.0)
+                .collect();
             sorted.sort_by_key(|p| p.0);
-            crate::benchmark::align(&calendar, &sorted)
+            sorted.dedup_by_key(|p| p.0);
+            let actual: Vec<bool> = calendar
+                .iter()
+                .map(|d| sorted.binary_search_by_key(d, |p| p.0).is_ok())
+                .collect();
+            (crate::benchmark::align(&calendar, &sorted), actual)
         })
         .collect();
     let mut index: Vec<(NaiveDate, f64)> = Vec::new();
     for t in 1..calendar.len() {
         let (mut num, mut den) = (0.0, 0.0);
-        for ((_, w), a) in series.iter().zip(&aligned) {
-            // A zero or broken close would make every later value non-finite.
-            if let (Some(p0), Some(p1)) = (a[t - 1], a[t])
+        for ((_, w), (a, actual)) in series.iter().zip(&aligned) {
+            // Only count a holding when both endpoints are actual closes on
+            // those days (not forward-filled across its own missing sessions).
+            if actual[t - 1]
+                && actual[t]
+                && let (Some(p0), Some(p1)) = (a[t - 1], a[t])
                 && p0 > 0.0
                 && p1.is_finite()
             {
-                num += w * (p1 / p0 - 1.0);
-                den += w;
+                let r = p1 / p0 - 1.0;
+                if r.is_finite() {
+                    num += w * r;
+                    den += w;
+                }
             }
         }
         if den <= 0.0 {

@@ -109,7 +109,7 @@ pub(crate) fn plain_today(p: &Pulse, feed_limit: usize) -> String {
                 r.why.line(),
                 r.action
                     .as_ref()
-                    .map(|a| format!(" [{a}]"))
+                    .map(|a| format!(" [{}]", super::actions::format_action_line(a)))
                     .unwrap_or_default()
             ));
         }
@@ -141,6 +141,10 @@ pub(crate) fn plain_today(p: &Pulse, feed_limit: usize) -> String {
                 n.source
             ));
         }
+    }
+    if p.rows.iter().any(|r| r.action.is_some()) {
+        out.push(String::new());
+        out.push(crate::action::DISCLAIMER.to_string());
     }
     out.join("\n")
 }
@@ -257,7 +261,9 @@ pub async fn cmd_today(
                 },
                 r.action
                     .as_ref()
-                    .map(|a| format!("  [{a}]").bold().to_string())
+                    .map(|a| format!("  [{}]", super::actions::format_action_line(a))
+                        .bold()
+                        .to_string())
                     .unwrap_or_default()
             );
         }

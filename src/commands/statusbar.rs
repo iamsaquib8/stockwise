@@ -562,7 +562,7 @@ async fn fetch(market: Market, symbols: &[String], max: usize) -> Result<Snapsho
             .take(max)
             .map(|s| row(find(&quotes, s).as_ref(), s))
             .collect();
-        if rows.iter().all(|r| r.price.is_none()) {
+        if !rows.is_empty() && rows.iter().all(|r| r.price.is_none()) {
             bail!("no quotes for {}", symbols.join(", "));
         }
         return Ok(Snapshot {

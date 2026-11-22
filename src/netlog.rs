@@ -66,7 +66,8 @@ pub fn redact(url: &str) -> String {
 }
 
 fn line(text: &str) {
-    eprintln!("stockwise[net] {text}");
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "stockwise[net] {text}");
 }
 
 /// One finished request. `status` is the HTTP status, or `None` when no

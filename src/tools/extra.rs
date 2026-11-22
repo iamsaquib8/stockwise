@@ -65,7 +65,10 @@ pub(super) async fn run<D: DataSource>(
                 &resolved,
                 m,
                 60,
-                crate::research::Needs::VERDICT,
+                crate::research::Needs {
+                    filings: true,
+                    ..crate::research::Needs::VERDICT
+                },
             )
             .await?;
             let cards = crate::insights::generate_rich_insights(&r);
@@ -78,7 +81,9 @@ pub(super) async fn run<D: DataSource>(
                 "price": v.price,
                 "currency": v.currency,
                 "action": v.action,
+                "action_coverage": v.action.coverage,
                 "composite_score": v.overall_score,
+                "score_coverage": v.data_coverage,
                 "data_coverage": v.data_coverage,
                 "pillars": v.pillars.iter().map(|p| serde_json::json!({
                     "name": p.name, "score": p.score, "band": p.band,

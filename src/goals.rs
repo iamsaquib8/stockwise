@@ -1826,18 +1826,64 @@ impl GoalStore {
                 let mut dropped = Vec::new();
                 for h in &g.holdings {
                     let keys = resolve(h);
-                    match owner
-                        .iter()
-                        .find(|(k, first)| keys.contains(k) && !first.eq_ignore_ascii_case(&g.name))
-                    {
-                        Some((_, first)) => dropped.push((h.clone(), first.clone())),
-                        None => {
-                            for k in keys {
-                                if !owner.iter().any(|(o, _)| *o == k) {
-                                    owner.push((k, g.name.clone()));
+                    let mut link_kept = Vec::new();
+                    let mut link_dropped = Vec::new();
+                    for k in &keys {
+                        if let Some((_, first)) = owner.iter().find(|(ok, first)| {
+                            ok.eq_ignore_ascii_case(k) && !first.eq_ignore_ascii_case(&g.name)
+                        }) {
+                            link_dropped.push((k.clone(), first.clone()));
+                        } else {
+                            if !owner.iter().any(|(o, _)| o.eq_ignore_ascii_case(k)) {
+                                owner.push((k.clone(), g.name.clone()));
+                            }
+                            if !link_kept
+                                .iter()
+                                .any(|existing: &String| existing.eq_ignore_ascii_case(k))
+                            {
+                                link_kept.push(k.clone());
+                            }
+                        }
+                    }
+                    if link_kept.is_empty() {
+                        if keys.len() <= 1 {
+                            if let Some((_, first)) = link_dropped.into_iter().next() {
+                                dropped.push((h.clone(), first));
+                            }
+                        } else {
+                            dropped.extend(link_dropped);
+                        }
+                    } else if link_dropped.is_empty() {
+                        // Preserve the link verbatim when `default_resolve`
+                        // only returned its canonical key, but emit exact
+                        // resolved holding IDs when multiple or distinct
+                        // portfolio symbols matched.
+                        if link_kept.len() == 1 && link_kept[0] == holding_key(h) {
+                            if !kept
+                                .iter()
+                                .any(|existing: &String| existing.eq_ignore_ascii_case(h))
+                            {
+                                kept.push(h.clone());
+                            }
+                        } else {
+                            for k in link_kept {
+                                if !kept
+                                    .iter()
+                                    .any(|existing: &String| existing.eq_ignore_ascii_case(&k))
+                                {
+                                    kept.push(k);
                                 }
                             }
-                            kept.push(h.clone());
+                        }
+                    } else {
+                        dropped.extend(link_dropped);
+                        for k in link_kept {
+                            if !kept
+                                .iter()
+                                .any(|existing: &String| existing.eq_ignore_ascii_case(&k))
+                            {
+                                kept.push(k);
+                            }
                         }
                     }
                 }
@@ -1962,6 +2008,20 @@ mod tests {
             Some("House")
         );
         assert!(store.linked_elsewhere("GOLDBEES", "School").is_none());
+
+        // Partial overlap keeps unclaimed resolved keys while dropping claimed ones.
+        let store2 = GoalStore {
+            goals: vec![goal("House", &["TCS.NS"]), goal("School", &["TCS"])],
+        };
+        let alloc2 = store2.allocate_by(|link| match link {
+            "TCS" => vec!["TCS.NS".into(), "TCS.BO".into()],
+            _ => vec![link.to_string()],
+        });
+        assert_eq!(alloc2[1].0, vec!["TCS.BO".to_string()]);
+        assert_eq!(
+            alloc2[1].1,
+            vec![("TCS.NS".to_string(), "House".to_string())]
+        );
     }
 
     #[test]

@@ -244,6 +244,9 @@ pub struct MarketData {
     /// The symbol's exchange is in its regular session now (`None` for
     /// round-the-clock instruments and when unknown).
     pub market_open: Option<bool>,
+    /// Whether the exchange's scheduled session for `today` has closed
+    /// (`Some(false)` during pre-market, regular hours, or midday break).
+    pub session_closed: Option<bool>,
 }
 
 /// Quotes older than this are not used for price-level alerts.
@@ -265,11 +268,11 @@ impl MarketData {
     }
 
     /// Bars of sessions that are over: all of them, or all but the last
-    /// when the last is today's still-trading session.
+    /// when the last is today's still-trading (or midday-break) session.
     pub fn completed_bars(&self) -> Option<Bars> {
         let bars = self.bars.as_ref()?;
-        let live =
-            self.market_open == Some(true) && bars.time.last().map(|&t| bar_date(t)) == self.today;
+        let not_closed = self.session_closed == Some(false) || self.market_open == Some(true);
+        let live = not_closed && bars.time.last().map(|&t| bar_date(t)) == self.today;
         if !live {
             return Some(bars.clone());
         }

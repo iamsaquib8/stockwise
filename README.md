@@ -232,8 +232,11 @@ StockWise gives rule-based educational signals, not personalised financial,
 investment, tax or legal advice. It is not a SEBI-registered investment
 adviser or research analyst. Data comes from third parties and can be late
 or wrong. Check the reasons and the data before you act; every decision is
-yours, and you can lose money. Live trading commands place real orders only
-after a preview and a typed confirmation. Read [DISCLAIMER.md](DISCLAIMER.md).
+yours, and you can lose money. Live trading commands preview the order and ask
+for typed confirmation by default; passing `--yes` when `max_order_value` is
+set in your broker config bypasses typed confirmation and sends the order
+immediately (so typed confirmation is not a safety check in that case). Read
+[DISCLAIMER.md](DISCLAIMER.md).
 
 ## Contributing
 

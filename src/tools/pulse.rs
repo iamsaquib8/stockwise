@@ -5,14 +5,14 @@
 use super::args::Args;
 use crate::market::{self, Market};
 use crate::views::DataSource;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 /// Run one of this module's tools.
 pub(super) async fn run<D: DataSource>(src: &D, name: &str, a: &Args, m: Market) -> Result<Value> {
     if name == "monitor_status" {
-        let state: crate::monitor::MonitorState =
-            crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+        let state: crate::monitor::MonitorState = crate::store::load(crate::monitor::STATE_FILE)
+            .with_context(|| format!("Could not read {}", crate::monitor::STATE_FILE))?;
         return Ok(json!({
             "thresholds": crate::monitor::Thresholds::from_config(),
             "worker_running": crate::worker::running_pid().is_some(),
@@ -101,7 +101,8 @@ pub(super) async fn run<D: DataSource>(src: &D, name: &str, a: &Args, m: Market)
         }
         "digest" => {
             let mut st: crate::monitor::MonitorState =
-                crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
+                crate::store::load(crate::monitor::STATE_FILE)
+                    .with_context(|| format!("Could not read {}", crate::monitor::STATE_FILE))?;
             let (d, _) = crate::commands::build_digest(client, m, Vec::new(), &mut st).await?;
             let msg = crate::digest::render(&d);
             Ok(json!({ "digest": d, "text": format!("{}\n{}", msg.title, msg.body) }))

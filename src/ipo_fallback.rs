@@ -261,11 +261,15 @@ pub fn parse_bse_detail(v: &Value) -> BseDetail {
             data.push(json!({"title": t, "value": value}));
         }
     }
-    // The fresh / OFS rows tell the split when the size row does not.
+    // The fresh / OFS rows tell the split when the size row does not
+    // quantify both tranches.
     let size = match issue_size {
         Some(s) => {
             let lc = s.to_ascii_lowercase();
-            if parts.is_empty() || lc.contains("fresh") || lc.contains("offer for sale") {
+            let has_both_amounts = lc.contains("fresh")
+                && lc.contains("offer for sale")
+                && lc.matches(char::is_numeric).count() >= 2;
+            if parts.is_empty() || has_both_amounts {
                 Some(s)
             } else {
                 Some(format!("{s}; {}", parts.join("; ")))
@@ -431,15 +435,35 @@ pub fn same_company(a: &str, b: &str) -> bool {
     short.len() >= 10 && long.starts_with(short.as_str())
 }
 
-/// The BSE issue for an NSE row, by company name.
+/// The BSE issue for an NSE row, by company name (exact normalized match
+/// first, then prefix match).
 pub fn find_issue<'a>(issues: &'a [BseIssue], company: &str) -> Option<&'a BseIssue> {
+    let target = name_key(company);
+    if target.is_empty() {
+        return None;
+    }
     issues
         .iter()
-        .find(|i| same_company(&i.company_name, company))
+        .find(|i| name_key(&i.company_name) == target)
+        .or_else(|| {
+            issues
+                .iter()
+                .find(|i| same_company(&i.company_name, company))
+        })
 }
 
 /// A board row for an issue only BSE lists.
 pub fn row_from_issue(issue: &BseIssue, today: NaiveDate) -> IpoSummaryRow {
+    let mut scratch = Meta::default();
+    row_from_issue_with_meta(issue, today, "", &mut scratch)
+}
+
+fn row_from_issue_with_meta(
+    issue: &BseIssue,
+    today: NaiveDate,
+    prefix: &str,
+    meta: &mut Meta,
+) -> IpoSummaryRow {
     let board = issue.board.unwrap_or(BoardKind::Mainboard);
     let mut row = IpoSummaryRow {
         symbol: issue.symbol(),
@@ -468,8 +492,7 @@ pub fn row_from_issue(issue: &BseIssue, today: NaiveDate) -> IpoSummaryRow {
         verdict: None,
         quick_signal: String::new(),
     };
-    let mut scratch = Meta::default();
-    fill_from_issue(&mut row, issue, "", &mut scratch);
+    fill_from_issue(&mut row, issue, prefix, meta);
     crate::ipo::refresh_row(&mut row, today);
     row
 }
@@ -582,15 +605,33 @@ pub fn fill_from_detail(
         }
     }
     if let Some(dm) = demand
-        && sub.qib_x.is_none()
-        && sub.nii_x.is_none()
-        && sub.retail_x.is_none()
+        && (sub.qib_x.is_none() || sub.nii_x.is_none() || sub.retail_x.is_none())
     {
         let parsed = crate::ipo::parse_subscription(dm);
-        if parsed.qib_x.is_some() || parsed.retail_x.is_some() || parsed.total_x.is_some() {
-            let mut parsed = parsed;
-            parsed.source_note = "Consolidated BSE + NSE bid book (BSE)".to_string();
-            *sub = parsed;
+        if parsed.qib_x.is_some()
+            || parsed.nii_x.is_some()
+            || parsed.retail_x.is_some()
+            || parsed.total_x.is_some()
+        {
+            let nse_had_some = sub.qib_x.is_some() || sub.nii_x.is_some() || sub.retail_x.is_some();
+            if !nse_had_some {
+                let mut parsed = parsed;
+                parsed.source_note = "Consolidated BSE + NSE bid book (BSE)".to_string();
+                *sub = parsed;
+            } else {
+                if sub.qib_x.is_none() {
+                    sub.qib_x = parsed.qib_x;
+                }
+                if sub.nii_x.is_none() {
+                    sub.nii_x = parsed.nii_x;
+                }
+                if sub.retail_x.is_none() {
+                    sub.retail_x = parsed.retail_x;
+                }
+                if sub.total_x.is_none() {
+                    sub.total_x = parsed.total_x;
+                }
+            }
             row.qib_x = sub.qib_x;
             row.nii_x = sub.nii_x;
             row.retail_x = sub.retail_x;
@@ -725,15 +766,18 @@ pub fn merge_board(
         }
     }
     for (issue, used) in issues.iter().zip(used) {
-        if used
-            || issue.close_date.is_some_and(|c| c < today)
-            || recent
-                .iter()
-                .any(|r| same_company(&r.company_name, &issue.company_name))
-        {
+        let same_past_offering = recent.iter().any(|r| {
+            same_company(&r.company_name, &issue.company_name)
+                && match (r.close_date, issue.close_date) {
+                    (Some(rc), Some(ic)) => rc == ic,
+                    _ => r.open_date == issue.open_date,
+                }
+        });
+        if used || issue.close_date.is_some_and(|c| c < today) || same_past_offering {
             continue;
         }
-        let row = row_from_issue(issue, today);
+        let sym = issue.symbol();
+        let row = row_from_issue_with_meta(issue, today, &sym, meta);
         meta.record(&key(&row.symbol, F_BOARD_ROW), crate::provenance::BSE);
         match row.status {
             IpoStatus::Ongoing => ongoing.push(row),
@@ -875,7 +919,26 @@ pub fn merge_detail_json(
         }
     }
     if !had_book && let Some(cat) = book.and_then(|b| b.get("activeCat")) {
-        d["activeCat"] = cat.clone();
+        let bse_has_offered = cat
+            .get("dataList")
+            .and_then(Value::as_array)
+            .is_some_and(|list| {
+                list.iter().any(|item| {
+                    item.get("noOfShareOffered")
+                        .and_then(|v| {
+                            v.as_f64().or_else(|| {
+                                v.as_str().and_then(|s| s.replace(',', "").parse().ok())
+                            })
+                        })
+                        .is_some_and(|n| n > 0.0)
+                })
+            });
+        if bse_has_offered {
+            if let Some(obj) = d.as_object_mut() {
+                obj.remove("bidDetails");
+            }
+            d["activeCat"] = cat.clone();
+        }
     }
 
     let (lot, band, st) = crate::ipo::parse_issue_info(&d, &row.price_band);

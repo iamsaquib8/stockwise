@@ -1942,6 +1942,13 @@ pub async fn cmd_picks(
             super::portfolio::action_cell(p.action.as_ref()),
             p.strongest().join(", ").dimmed()
         );
+        if let Some(a) = &p.action {
+            println!(
+                "  {:<14}   {}",
+                "",
+                super::actions::format_action_line(a).dimmed()
+            );
+        }
     }
     if !run.flagged.is_empty() {
         let names: Vec<String> = run
@@ -2112,20 +2119,25 @@ pub(crate) async fn picks_review_report(
         .await
         .context("Could not fetch current prices for the logged picks")?;
     // Picks are dated by the session of their quote, so days held count to
-    // the session of today's prices: a list made on Saturday from Friday's
-    // closes is 0 days old, not 1.
-    let today = quotes
-        .iter()
-        .filter_map(|q| q.regular_market_time)
-        .max()
-        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-        .map(|at| crate::clock::session_date(market, at))
-        .filter(|d| *d <= today)
-        .unwrap_or(today);
-    let prices: std::collections::HashMap<String, f64> = quotes
-        .into_iter()
-        .filter_map(|q| Some((q.symbol.clone()?, q.regular_market_price?)))
-        .collect();
+    // the session of each quote's own timestamp (falling back to `today` when
+    // a quote carries no timestamp).
+    let mut prices: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut quote_dates: std::collections::HashMap<String, chrono::NaiveDate> =
+        std::collections::HashMap::new();
+    for q in quotes {
+        let (Some(sym), Some(px)) = (q.symbol, q.regular_market_price) else {
+            continue;
+        };
+        if let Some(d) = q
+            .regular_market_time
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+            .map(|at| crate::clock::session_date(market, at))
+            .filter(|d| *d <= today)
+        {
+            quote_dates.insert(sym.clone(), d);
+        }
+        prices.insert(sym, px);
+    }
     // Owned jobs: a stream over borrowed keys trips the `Send` bound of the
     // MCP handler that calls this.
     let jobs: Vec<(String, chrono::NaiveDate)> =
@@ -2145,13 +2157,14 @@ pub(crate) async fn picks_review_report(
         Some(_) => benchmark_level(client, market).await,
         None => None,
     };
-    Ok(crate::picks_log::review(
+    Ok(crate::picks_log::review_with_dates(
         &log,
         market.code(),
         horizon.as_str(),
         since,
         today,
         &prices,
+        &quote_dates,
         &splits,
         bench.map(|name| crate::picks_log::Benchmark {
             name,
@@ -2523,7 +2536,6 @@ pub(crate) fn sector_readings(
     histories: &[(String, Vec<(chrono::NaiveDate, f64)>)],
     bench: &[(chrono::NaiveDate, f64)],
 ) -> Vec<SectorReading> {
-    let bench_ret = RS_MONTHS.map(|m| period_return(bench, m));
     pair_by_symbol(names, quotes)
         .into_iter()
         .map(|(sym, name, q)| {
@@ -2533,10 +2545,10 @@ pub(crate) fn sector_readings(
                 .map(|(_, c)| c.as_slice())
                 .unwrap_or_default();
             let returns = RS_MONTHS.map(|m| period_return(closes, m));
-            let mut rs = [None; 3];
-            for i in 0..3 {
-                rs[i] = relative_strength(returns[i], bench_ret[i]);
-            }
+            let rs = RS_MONTHS.map(|m| {
+                let (s_ret, b_ret) = shared_period_returns(closes, bench, m)?;
+                relative_strength(Some(s_ret), Some(b_ret))
+            });
             SectorReading {
                 name: name.to_string(),
                 symbol: sym.to_string(),
@@ -2548,6 +2560,39 @@ pub(crate) fn sector_readings(
             }
         })
         .collect()
+}
+
+/// Sector and benchmark returns over a window whose start and end dates are
+/// shared by both series. Returns `None` if the two series do not have
+/// matching end and start dates.
+fn shared_period_returns(
+    sector: &[(chrono::NaiveDate, f64)],
+    bench: &[(chrono::NaiveDate, f64)],
+    months: u32,
+) -> Option<(f64, f64)> {
+    let &(end_date, s_end) = sector
+        .iter()
+        .rev()
+        .find(|(d, _)| bench.binary_search_by_key(d, |(bd, _)| *bd).is_ok())?;
+    let b_end_idx = bench.binary_search_by_key(&end_date, |(bd, _)| *bd).ok()?;
+    let b_end = bench[b_end_idx].1;
+    let target_start = end_date.checked_sub_months(chrono::Months::new(months))?;
+    let s_idx = sector.partition_point(|(d, _)| *d <= target_start);
+    let &(s_start_date, s_base) = sector.get(s_idx.checked_sub(1)?)?;
+    let b_idx = bench.partition_point(|(d, _)| *d <= target_start);
+    let &(b_start_date, b_base) = bench.get(b_idx.checked_sub(1)?)?;
+    if s_start_date != b_start_date
+        || s_base <= 0.0
+        || b_base <= 0.0
+        || !s_end.is_finite()
+        || !b_end.is_finite()
+    {
+        return None;
+    }
+    Some((
+        (s_end / s_base - 1.0) * 100.0,
+        (b_end / b_base - 1.0) * 100.0,
+    ))
 }
 
 /// Daily closes of `symbols` over the past year, by symbol; a failed chart
@@ -2790,6 +2835,54 @@ pub(crate) fn surprise_rows(
     rows
 }
 
+/// Parse all reported quarters from Yahoo `earningsHistory`, retaining
+/// quarters that report `epsActual` even when `epsEstimate` is absent (with
+/// `estimate` and `surprise_pct` set to `NaN` so `surprise_rows` keeps the
+/// latest reported quarter instead of falling back to an older quarter).
+pub(crate) fn parse_reported_quarters(
+    summary: &serde_json::Value,
+) -> Vec<crate::research::Surprise> {
+    let raw = |v: &serde_json::Value, k: &str| {
+        v.get(k)
+            .and_then(|x| x.get("raw").or(Some(x)))
+            .and_then(|r| r.as_f64())
+    };
+    let mut out: Vec<crate::research::Surprise> = summary
+        .get("earningsHistory")
+        .and_then(|e| e.get("history"))
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|h| {
+                    let quarter = chrono::DateTime::from_timestamp(raw(h, "quarter")? as i64, 0)?
+                        .date_naive();
+                    let actual = raw(h, "epsActual")?;
+                    let estimate = raw(h, "epsEstimate").unwrap_or(f64::NAN);
+                    let surprise_pct = if estimate.is_finite() {
+                        raw(h, "surprisePercent").unwrap_or_else(|| {
+                            if estimate.abs() > 1e-9 {
+                                (actual - estimate) / estimate.abs()
+                            } else {
+                                0.0
+                            }
+                        })
+                    } else {
+                        f64::NAN
+                    };
+                    Some(crate::research::Surprise {
+                        quarter,
+                        actual,
+                        estimate,
+                        surprise_pct,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|s| s.quarter);
+    out
+}
+
 pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) -> Result<()> {
     use futures_util::StreamExt;
     market.require_stocks("surprise")?;
@@ -2811,7 +2904,7 @@ pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) ->
                 let h = client_ref
                     .quote_summary(&sym, &["earningsHistory"])
                     .await
-                    .map(|v| crate::research::parse_surprises(&v))
+                    .map(|v| parse_reported_quarters(&v))
                     .unwrap_or_default();
                 (sym, h)
             })
@@ -2843,7 +2936,11 @@ pub async fn cmd_surprise(market: Market, universe: Option<market::Universe>) ->
             Some(s) => (
                 s.quarter.format("%b %Y").to_string(),
                 format!("{:.2}", s.actual),
-                format!("{:.2}", s.estimate),
+                if s.estimate.is_finite() {
+                    format!("{:.2}", s.estimate)
+                } else {
+                    "—".into()
+                },
             ),
             None => ("—".into(), "—".into(), "—".into()),
         };

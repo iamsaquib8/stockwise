@@ -1058,6 +1058,8 @@ pub(super) async fn apply_import_rows(
 
     // A holdings snapshot with more shares than StockWise has may just be a
     // split not yet applied to your lots: leave those for `portfolio actions`.
+    let import_source = format!("import:{source}");
+    let resolved_account = account.or_else(|| pf::account_of_source(&import_source));
     let snapshot: Vec<(String, f64)> = symbols
         .iter()
         .filter(|s| !dated(s))
@@ -1066,28 +1068,53 @@ pub(super) async fn apply_import_rows(
             (s.clone(), qty)
         })
         .collect();
-    let blocked = super::portfolio::blocked_by_pending_splits(&portfolio, &snapshot).await;
-    let rows: Vec<ImportRow> = rows
-        .into_iter()
-        .filter(|r| !blocked.iter().any(|(s, _)| *s == r.symbol))
-        .collect();
+    let fetched_blocked = super::portfolio::blocked_by_pending_splits_in_account(
+        &portfolio,
+        &snapshot,
+        resolved_account,
+    )
+    .await;
 
     // The splits and pending-split checks above took time: apply the rows to
     // the file as it is now, under a lock, so a change saved meanwhile (a
     // `portfolio add`, a sync) is kept.
-    let (outcomes, current) = Portfolio::update(|p| {
+    let (outcomes, current, blocked) = Portfolio::update(|p| {
+        let mut blocked = Vec::new();
+        for (sym, sp, reason) in &fetched_blocked {
+            let lots = p.lots_in_account(sym, resolved_account);
+            let held: f64 = lots.iter().map(|l| l.qty).sum();
+            let qty = snapshot
+                .iter()
+                .find(|(s, _)| s == sym)
+                .map_or(0.0, |(_, q)| *q);
+            if !lots.is_empty()
+                && qty > held + 1e-9
+                && sp.iter().any(|s| lots.iter().any(|l| s.pending_for(l)))
+            {
+                blocked.push((sym.clone(), reason.clone()));
+            }
+        }
+        let rows: Vec<ImportRow> = rows
+            .iter()
+            .filter(|r| !blocked.iter().any(|(s, _)| *s == r.symbol))
+            .cloned()
+            .collect();
         let outcomes = p.apply_import(
             &rows,
             ImportOptions {
-                source: &format!("import:{}", source),
+                source: &import_source,
                 replace,
                 tradebook,
                 splits: &splits,
                 account,
             },
         );
-        Ok((outcomes, p.clone()))
+        Ok((outcomes, p.clone(), blocked))
     })?;
+    let rows: Vec<ImportRow> = rows
+        .into_iter()
+        .filter(|r| !blocked.iter().any(|(s, _)| *s == r.symbol))
+        .collect();
     let portfolio = current;
     let updated = outcomes
         .iter()
@@ -1725,7 +1752,7 @@ pub(crate) fn compute_harvest_with(
             let net = sale.st + sale.lt;
             let mut row = HarvestRow {
                 symbol: h.symbol.clone(),
-                shares: round(sale.shares, 4),
+                shares: sale.shares,
                 avg_cost: round(sale.cost / sale.shares / scale, 2),
                 price: round(price, 2),
                 pnl: round(net, 2),
@@ -1746,8 +1773,7 @@ pub(crate) fn compute_harvest_with(
                 lots: None,
                 record: Some(format!(
                     "stockwise portfolio sell {} {}",
-                    h.symbol,
-                    round(sale.shares, 4)
+                    h.symbol, sale.shares
                 )),
             };
             if country == Country::Us {
@@ -1763,9 +1789,7 @@ pub(crate) fn compute_harvest_with(
                         .join(",");
                     row.record = Some(format!(
                         "stockwise portfolio sell {} {} --lots {}",
-                        h.symbol,
-                        round(sale.shares, 4),
-                        list
+                        h.symbol, sale.shares, list
                     ));
                     row.lots = Some(list);
                 }
@@ -1992,7 +2016,7 @@ pub async fn cmd_harvest(market: Market, fmt: Format, carry: CarriedForward) -> 
             println!(
                 "  {:<14} {:>8} {:>10} {:>10} {:>12} {:>12} {:>12} {:>11}",
                 r.symbol.cyan(),
-                format!("{}", r.shares),
+                format!("{}", round(r.shares, 4)),
                 format!("{}{:.2}", csym, r.avg_cost),
                 format!("{}{:.2}", csym, r.price),
                 signed_tax_money(csym, r.st_pnl),
@@ -2659,8 +2683,23 @@ pub async fn cmd_tax(country: &str, market: Market, fmt: Format) -> Result<()> {
     if report.sales.is_empty() {
         // Other sales this year (intraday, other currencies, debt funds,
         // gold ETFs, crypto) are shown in their own sections.
+        let shown_below =
+            !report.intraday.is_empty() || (country == Country::India && !other_rows.is_empty());
         let msg = if any_sale_this_year {
-            "No listed-share sales this tax year (Sec. 111A/112A); the year's other sales are listed below."
+            match (country, shown_below) {
+                (Country::India, true) => {
+                    "No listed-share sales this tax year (Sec. 111A/112A); the year's other rupee sales are listed below."
+                }
+                (Country::India, false) => {
+                    "No listed-share sales this tax year (Sec. 111A/112A); recorded sales are in another currency and are excluded from this report."
+                }
+                (_, true) => {
+                    "No capital-gain sales in this tax currency this tax year; intraday sales are listed below."
+                }
+                (_, false) => {
+                    "No sales in this tax currency this tax year; recorded sales are in another currency and are excluded from this report."
+                }
+            }
         } else {
             "No sales recorded this tax year. Record one with `stockwise portfolio sell`."
         };

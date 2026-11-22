@@ -742,14 +742,37 @@ pub async fn run(
     let profile = crate::config::effective_profile();
     let refs = PeReferences::of(&kept);
     for p in picks.iter_mut() {
-        let (Some(q), Some(series)) = (
-            kept.iter()
-                .find(|q| q.symbol.as_deref() == Some(p.symbol.as_str())),
-            bars.get(&p.symbol),
-        ) else {
+        let Some(q) = kept
+            .iter()
+            .find(|q| q.symbol.as_deref() == Some(p.symbol.as_str()))
+        else {
+            let mut a = crate::action::Action::undecided(p.currency.as_deref().unwrap_or("USD"));
+            a.horizon = horizon.into();
+            a.reasons = vec!["Quote unavailable for action evaluation".to_string()];
+            p.action = Some(a);
             continue;
         };
-        p.action = Some(action_for(q, series, horizon, today, &profile, &refs));
+        let Some(series) = bars.get(&p.symbol) else {
+            let mut a = crate::action::Action::undecided(q.currency.as_deref().unwrap_or("USD"));
+            a.horizon = horizon.into();
+            a.reasons = vec![
+                "Daily price bars were not fetched outside the finalist enrichment window"
+                    .to_string(),
+            ];
+            a.missing = vec!["price history".to_string()];
+            p.action = Some(a);
+            continue;
+        };
+        let next_earnings = crate::calendar::next_results(client, &p.symbol, today).await;
+        p.action = Some(action_for_with_earnings(
+            q,
+            series,
+            horizon,
+            today,
+            &profile,
+            &refs,
+            next_earnings,
+        ));
     }
     Ok(Run {
         picks,
@@ -789,19 +812,32 @@ impl PeReferences {
                 (v[n / 2 - 1] + v[n / 2]) / 2.0
             }
         };
-        let mut by_sector: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut by_sector: HashMap<String, (Vec<String>, Vec<f64>)> = HashMap::new();
         for q in quotes {
-            if let (Some(s), Some(p)) = (q.sector.as_deref().filter(|s| !s.is_empty()), pe(q)) {
-                by_sector.entry(s.to_string()).or_default().push(p);
+            if let (Some(s), Some(p)) = (
+                q.sector.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                pe(q),
+            ) {
+                let entry = by_sector.entry(s.to_ascii_lowercase()).or_default();
+                if !entry.0.iter().any(|k| k == s) {
+                    entry.0.push(s.to_string());
+                }
+                entry.1.push(p);
             }
         }
         let all: Vec<f64> = quotes.iter().filter_map(pe).collect();
+        let mut sector = HashMap::new();
+        for (lower, (names, v)) in by_sector {
+            if v.len() >= 3 {
+                let m = median(v);
+                sector.insert(lower, m);
+                for n in names {
+                    sector.insert(n, m);
+                }
+            }
+        }
         PeReferences {
-            sector: by_sector
-                .into_iter()
-                .filter(|(_, v)| v.len() >= 3)
-                .map(|(s, v)| (s, median(v)))
-                .collect(),
+            sector,
             market: (all.len() >= 10).then(|| median(all)),
         }
     }
@@ -817,14 +853,38 @@ pub fn action_for(
     profile: &crate::config::EffectiveProfile,
     refs: &PeReferences,
 ) -> crate::action::Action {
+    action_for_with_earnings(q, series, horizon, today, profile, refs, None)
+}
+
+/// [`action_for`], with an optional upcoming results date for the 5-day
+/// earnings blackout rule.
+pub fn action_for_with_earnings(
+    q: &Quote,
+    series: &crate::research::Series,
+    horizon: Horizon,
+    today: chrono::NaiveDate,
+    profile: &crate::config::EffectiveProfile,
+    refs: &PeReferences,
+    next_earnings: Option<chrono::NaiveDate>,
+) -> crate::action::Action {
     let closes = (!series.close.is_empty()).then_some(series.close.as_slice());
     let score = crate::longterm::score_for_longterm(q, closes);
     let mut i = crate::action::inputs_from_quote(q, series, &score, horizon.into(), today)
         .with_profile(profile);
     if i.pe_sector.is_none() {
-        i.pe_sector = q.sector.as_ref().and_then(|s| refs.sector.get(s)).copied();
+        i.pe_sector = q
+            .sector
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| {
+                refs.sector
+                    .get(&s.to_ascii_lowercase())
+                    .or_else(|| refs.sector.get(s))
+            })
+            .copied();
     }
     i.pe_market = refs.market;
+    i.next_earnings = next_earnings;
     crate::action::decide(&i)
 }
 
@@ -892,7 +952,12 @@ pub async fn enrich_finalists_with_bars(
                         .unwrap_or_default();
                     History::from_bars(&closes, &volumes)
                 }
-                Err(_) => History::default(),
+                Err(e) => {
+                    q.meta
+                        .get_or_insert_with(Default::default)
+                        .warn(format!("{sym}: price history unavailable ({e:#})"));
+                    History::default()
+                }
             };
             (q, history, series)
         }))

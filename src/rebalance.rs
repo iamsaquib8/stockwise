@@ -1276,7 +1276,8 @@ pub fn plan(
             for (i, h) in holdings.iter().enumerate() {
                 orders[i].target_value = invest * weights[i] / 100.0;
                 let cur_pct = h.value / kept * 100.0;
-                if (cur_pct - weights[i]).abs() <= o.drift_tolerance + 1e-9 {
+                let eff_target_pct = orders[i].target_value / kept * 100.0;
+                if (cur_pct - eff_target_pct).abs() <= o.drift_tolerance + 1e-9 {
                     continue;
                 }
                 let want = orders[i].target_value - h.value;
@@ -1413,6 +1414,11 @@ pub fn plan(
                         if q <= 1e-9 {
                             continue;
                         }
+                        if sell_net(h, orders[i].sell + q, o)
+                            <= sell_net(h, orders[i].sell, o) + 1e-9
+                        {
+                            continue;
+                        }
                         let (soon, rate) = lot_rate(h, li, q, running, o);
                         let over =
                             -(orders[i].projected(h) - orders[i].target_value) / h.value.max(EPS);
@@ -1436,7 +1442,9 @@ pub fn plan(
                 orders[i].sell += q;
                 orders[i].taken.push((li, q));
                 let l = &h.lots[li];
-                running.add(q * (h.price - l.unit_cost), l.long_term);
+                if h.taxed {
+                    running.add(q * (h.price - l.unit_cost), l.long_term);
+                }
             }
             let got = raised(&orders);
             if got + 1e-6 < goal {
@@ -1685,7 +1693,7 @@ pub fn band_for(target_pct: f64, absolute: f64) -> f64 {
     if target_pct > EPS {
         absolute.min(target_pct * RELATIVE_BAND_PCT / 100.0)
     } else {
-        absolute
+        0.0
     }
 }
 

@@ -194,6 +194,34 @@ pub fn review(
     splits: &HashMap<String, Option<f64>>,
     benchmark: Option<Benchmark>,
 ) -> Review {
+    review_with_dates(
+        entries,
+        market,
+        horizon,
+        since,
+        today,
+        prices,
+        &HashMap::new(),
+        splits,
+        benchmark,
+    )
+}
+
+/// [`review`], using each quote's own session date (`quote_dates`) for that
+/// pick's elapsed `days` and falling back to `today` when a quote has no
+/// timestamp.
+#[allow(clippy::too_many_arguments)]
+pub fn review_with_dates(
+    entries: &[Entry],
+    market: &str,
+    horizon: &str,
+    since: NaiveDate,
+    today: NaiveDate,
+    prices: &HashMap<String, f64>,
+    quote_dates: &HashMap<String, NaiveDate>,
+    splits: &HashMap<String, Option<f64>>,
+    benchmark: Option<Benchmark>,
+) -> Review {
     let mut first: Vec<&Entry> = Vec::new();
     for e in entries.iter().filter(|e| {
         e.kind == "pick" && e.market == market && e.horizon == horizon && e.date >= since
@@ -236,10 +264,11 @@ pub fn review(
             let now = b.now.filter(|p| *p > 0.0)?;
             Some(now / then - 1.0)
         });
+        let end_date = quote_dates.get(&e.symbol).copied().unwrap_or(today);
         rows.push(Row {
             symbol: e.symbol.clone(),
             picked_on: e.date,
-            days: (today - e.date).num_days(),
+            days: (end_date - e.date).num_days(),
             rank: e.rank,
             score: e.score,
             entry_price: e.price,

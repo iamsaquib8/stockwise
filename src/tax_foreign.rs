@@ -218,10 +218,19 @@ pub fn schedule_fa<'a>(
         // Prices in a minor unit (`GBp`) are scaled to the major one.
         let (scale, major) = crate::market::to_major(1.0, &quote);
         let rate = |day: NaiveDate| fx(&major, day);
+        // Exclude pieces sold before the Schedule FA reporting year from initial
+        // value and quantity (while keeping pieces sold during the year).
+        let active_pieces: Vec<&Piece> = pieces
+            .iter()
+            .filter(|p| p.sold.is_none_or(|(sd, _)| sd >= start))
+            .collect();
+        if active_pieces.is_empty() {
+            continue;
+        }
         // Each purchase at its own recorded rate, else the day's rate.
         let mut initial = 0i64;
         let mut no_initial = false;
-        for p in &pieces {
+        for p in &active_pieces {
             match p.paid_rate.or_else(|| rate(acquired)) {
                 Some(r) => initial += paise::from_rupees(p.qty * price * scale * r),
                 None => no_initial = true,
@@ -241,7 +250,7 @@ pub fn schedule_fa<'a>(
                 missing.push(field);
             }
         };
-        let quantity: f64 = pieces.iter().map(|p| p.qty).sum();
+        let quantity: f64 = active_pieces.iter().map(|p| p.qty).sum();
         let mut peak = (0i64, None);
         for (day, close) in series.iter().filter(|(d, _)| *d >= start && *d <= end) {
             let units = held_on(&pieces, *day);
@@ -295,8 +304,12 @@ pub fn schedule_fa<'a>(
             } else {
                 0.0
             };
+            let gross_share = d.amount * share;
+            if gross_share.abs() <= 1e-12 {
+                continue;
+            }
             let paid_in = d.currency.clone().unwrap_or_else(|| quote.clone());
-            let (amount, cur) = crate::market::to_major(d.amount * share, &paid_in);
+            let (amount, cur) = crate::market::to_major(gross_share, &paid_in);
             match fx(&cur, day) {
                 Some(r) => dividends += paise::from_rupees(amount * r),
                 None => miss("dividends"),

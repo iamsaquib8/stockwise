@@ -499,11 +499,16 @@ fn long_term_debt_with_current_total_but_no_portion_is_not_double_counted() {
     let st = parse_company_facts(&v.to_string()).unwrap();
     assert_eq!(st.debt, Some(112.0));
 
+    // Positive DebtCurrent without LongTermDebtCurrent or short-term breakdown is ambiguous.
+    let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
+    gaap.remove("ShortTermBorrowings");
+    gaap.remove("LongTermDebtCurrent");
+    let st = parse_company_facts(&v.to_string()).unwrap();
+    assert_eq!(st.debt, None);
+
     // LongTermDebt alone stands as reported.
     let gaap = v["facts"]["us-gaap"].as_object_mut().unwrap();
     gaap.remove("DebtCurrent");
-    gaap.remove("ShortTermBorrowings");
-    gaap.remove("LongTermDebtCurrent");
     let st = parse_company_facts(&v.to_string()).unwrap();
     assert_eq!(st.debt, Some(100.0));
 }

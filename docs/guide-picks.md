@@ -11,7 +11,7 @@ from a few seconds to a minute.
 > to buy it. The Action column applies fixed rules and is a rule-based
 > educational signal, not personalised advice. StockWise is not a
 > SEBI-registered investment adviser or research analyst, and you can lose
-> money. See the [disclaimer](disclaimer.md).
+> money. See the [disclaimer](../DISCLAIMER.md).
 
 ## 1. Run a scan
 
@@ -100,10 +100,13 @@ stockwise picks review --json
 ```
 
 It prints each pick's return since it was listed, the benchmark's return over
-the same days (NIFTY 50 price index for India, the S&P 500 total return for
-the US) and the excess return, then a summary line: how many rose, how many
-beat the index, mean and median. Returns are price only; dividends are not
-included.
+the same days (`^NSEI` NIFTY 50 price index for India, `^SP500TR` S&P 500
+total return for the US) and the excess return, then a summary line: how many
+rose, how many beat the index, mean and median. Stock returns are price-only
+(excluding dividends). NIFTY 50 (`^NSEI`) is also a price index excluding
+dividends, whereas the US benchmark (`^SP500TR`) is a total-return index that
+includes dividends — so US excess returns compare price-only stock returns
+against a total-return benchmark.
 
 Fundamentals have no point-in-time history, so the picks method cannot be
 backtested without look-ahead bias. This forward track record, which starts

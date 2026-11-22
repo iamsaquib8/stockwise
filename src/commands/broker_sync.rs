@@ -740,17 +740,24 @@ fn now_label() -> String {
 
 /// Keep `report` as the broker's latest in [`DRIFT_FILE`].
 fn save_drift(report: &DriftReport) -> Result<()> {
-    let mut saved: SavedDrift = crate::store::load(DRIFT_FILE).unwrap_or_default();
-    saved.reports.retain(|r| r.broker != report.broker);
+    let path = crate::store::path(DRIFT_FILE)?;
+    let _lock = crate::store::lock(&path)?;
+    let mut saved: SavedDrift = crate::store::load_from(&path)?;
+    saved
+        .reports
+        .retain(|r| !(r.broker == report.broker && r.portfolio_name() == report.portfolio_name()));
     saved.reports.push(report.clone());
-    saved.reports.sort_by(|a, b| a.broker.cmp(&b.broker));
-    crate::store::save(DRIFT_FILE, &saved, false)
+    saved
+        .reports
+        .sort_by(|a, b| (a.portfolio_name(), &a.broker).cmp(&(b.portfolio_name(), &b.broker)));
+    crate::store::save_to(&path, &saved, true)
 }
 
 /// The missing buys `portfolio sync --apply` adds: (symbol, broker
 /// quantity, broker average price).
-fn missing_buys(rows: &[DriftRow]) -> Vec<(String, f64, f64)> {
+fn missing_buys(rows: &[DriftRow], unchecked: &[String]) -> Vec<(String, f64, f64)> {
     rows.iter()
+        .filter(|r| !unchecked.iter().any(|u| u.eq_ignore_ascii_case(&r.symbol)))
         .filter_map(|r| match r.fix {
             DriftFix::MissingBuy { .. } => Some((
                 r.symbol.clone(),
@@ -779,23 +786,27 @@ struct DriftJsonRow<'a> {
     suggestion: String,
 }
 
+fn drift_json<'a>(report: &'a DriftReport, added: &'a [String]) -> DriftJson<'a> {
+    DriftJson {
+        broker: &report.broker,
+        portfolio: report.portfolio_name(),
+        at: &report.at,
+        applied: !added.is_empty(),
+        added,
+        rows: report
+            .rows
+            .iter()
+            .map(|r| DriftJsonRow {
+                row: r,
+                suggestion: r.suggestion(),
+            })
+            .collect(),
+    }
+}
+
 fn print_drift(report: &DriftReport, added: &[String], format: Format) -> Result<()> {
     if format == Format::Json {
-        return output::print_json(&DriftJson {
-            broker: &report.broker,
-            portfolio: crate::portfolio::active().unwrap_or("default"),
-            at: &report.at,
-            applied: !added.is_empty(),
-            added,
-            rows: report
-                .rows
-                .iter()
-                .map(|r| DriftJsonRow {
-                    row: r,
-                    suggestion: r.suggestion(),
-                })
-                .collect(),
-        });
+        return output::print_json(&drift_json(report, added));
     }
     print_header(&format!(
         "{} holdings vs your lots ({})",
@@ -854,12 +865,19 @@ pub async fn cmd_portfolio_sync(
     apply: bool,
     format: Format,
 ) -> Result<()> {
+    let active_portfolio = crate::portfolio::active().unwrap_or("default").to_string();
     let Some(kind) = kind else {
-        let saved: SavedDrift = crate::store::load(DRIFT_FILE).unwrap_or_default();
-        if saved.reports.is_empty() {
-            if format == Format::Json {
-                return output::print_json(&saved);
-            }
+        let saved: SavedDrift = crate::store::load(DRIFT_FILE)?;
+        let reports: Vec<DriftReport> = saved
+            .reports
+            .into_iter()
+            .filter(|r| r.portfolio_name() == active_portfolio)
+            .collect();
+        if format == Format::Json {
+            let items: Vec<DriftJson<'_>> = reports.iter().map(|r| drift_json(r, &[])).collect();
+            return output::print_json(&serde_json::json!({ "reports": items }));
+        }
+        if reports.is_empty() {
             println!(
                 "\n  {}\n",
                 "No broker sync yet. Run `stockwise portfolio sync <broker>` after \
@@ -869,47 +887,67 @@ pub async fn cmd_portfolio_sync(
             );
             return Ok(());
         }
-        for r in &saved.reports {
+        for r in &reports {
             print_drift(r, &[], format)?;
         }
         return Ok(());
     };
     let broker = ReadOnly::new(brokers::connect(kind).await?);
-    let holdings = broker.holdings().await?;
-    let portfolio = Portfolio::load()?;
-    let rows = broker_rows(&portfolio, &holdings);
-    let pending = crate::corp_actions::pending_splits_live(&portfolio).await;
-    let report = DriftReport {
-        broker: kind.id().to_string(),
-        at: now_label(),
-        rows: crate::corp_actions::drift_report(&portfolio, kind.id(), &rows, &pending),
-    };
-    save_drift(&report)?;
-    let mut added = Vec::new();
-    if apply && !missing_buys(&report.rows).is_empty() {
+    let mut attempt = 0;
+    let (report, added) = loop {
+        attempt += 1;
+        let holdings = broker.holdings().await?;
+        let portfolio = Portfolio::load()?;
+        let rows = broker_rows(&portfolio, &holdings);
+        let pending = crate::corp_actions::pending_splits_live(&portfolio).await;
+        let report = DriftReport {
+            broker: kind.id().to_string(),
+            portfolio: Some(active_portfolio.clone()),
+            at: now_label(),
+            rows: crate::corp_actions::drift_report(&portfolio, kind.id(), &rows, &pending),
+        };
+        save_drift(&report)?;
+        let todo = missing_buys(&report.rows, &pending.unchecked);
+        if !apply || todo.is_empty() {
+            break (report, Vec::new());
+        }
         let source = format!("broker:{}", kind.id());
-        added = Portfolio::update(|p| {
-            // The file as it is now: a buy recorded meanwhile is not added twice.
+        let observed: Vec<(String, Vec<crate::portfolio::Lot>)> = todo
+            .iter()
+            .map(|(sym, _, _)| (sym.clone(), portfolio.lots_in_account(sym, Some(kind.id()))))
+            .collect();
+        let outcome = Portfolio::update(|p| {
+            let changed = observed
+                .iter()
+                .any(|(sym, lots)| p.lots_in_account(sym, Some(kind.id())) != *lots);
+            if changed {
+                return Ok(None);
+            }
             let now = crate::corp_actions::drift_report(p, kind.id(), &rows, &pending);
-            let todo = missing_buys(&now);
+            let todo = missing_buys(&now, &pending.unchecked);
             let summary = format!("{}: {} missing buy(s)", kind.id(), todo.len());
-            Ok(p.journalled("sync", &summary, |p| {
+            let added = p.journalled("sync", &summary, |p| {
                 todo.iter()
                     .filter_map(|(sym, qty, avg)| {
-                        let n = match p.sync_quantity(sym, *qty, *avg, &source) {
-                            crate::portfolio::SyncChange::Added(n) => n,
-                            crate::portfolio::SyncChange::New => *qty,
-                            _ => return None,
-                        };
+                        let n = p.add_missing_buy(sym, *qty, *avg, &source)?;
                         Some(format!(
                             "{sym}: added a lot of {} share(s) at the broker's average, dated today (estimated)",
                             (n * 1e6).round() / 1e6
                         ))
                     })
                     .collect::<Vec<_>>()
-            }))
+            });
+            Ok(Some(added))
         })?;
-    }
+        match outcome {
+            Some(added) => break (report, added),
+            None if attempt < 3 => continue,
+            None => bail!(
+                "Holdings changed while checking corporate actions — re-run `stockwise portfolio sync {}`",
+                kind.id()
+            ),
+        }
+    };
     print_drift(&report, &added, format)
 }
 
@@ -927,6 +965,7 @@ pub async fn daily_holdings_drift() -> usize {
     if portfolio.holdings.is_empty() {
         return 0;
     }
+    let active_portfolio = crate::portfolio::active().unwrap_or("default").to_string();
     let mut pending = None;
     let mut drifted = 0;
     for kind in BrokerKind::ALL {
@@ -948,6 +987,7 @@ pub async fn daily_holdings_drift() -> usize {
         let rows = broker_rows(&portfolio, &holdings);
         let report = DriftReport {
             broker: kind.id().to_string(),
+            portfolio: Some(active_portfolio.clone()),
             at: now_label(),
             rows: crate::corp_actions::drift_report(&portfolio, kind.id(), &rows, pending),
         };

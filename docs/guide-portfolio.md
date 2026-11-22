@@ -208,7 +208,15 @@ stockwise portfolio actions --undo
 ```
 
 The undo is refused if you changed the same holdings afterwards. In that case
-use `stockwise portfolio restore` instead.
+list the last five saved versions with `stockwise portfolio restore`, pick the
+backup number before the action (by its timestamp and holding/sale counts), and
+run `stockwise portfolio restore <N>` (for example,
+`stockwise portfolio restore 1`). Restoring replaces the entire active
+portfolio, so any edits made after that backup was saved are removed from it;
+save a snapshot first (such as `stockwise portfolio --json` or checking
+`stockwise portfolio lots <SYMBOL>`) so you can reapply later trades or edits
+(`portfolio add`, `portfolio sell`, `import`). The displaced version stays
+available as backup `1`, so `stockwise portfolio restore 1` undoes the restore.
 
 For an event that is not in the tables, record it yourself. Each of these
 commands is also journalled, and running it twice changes nothing:

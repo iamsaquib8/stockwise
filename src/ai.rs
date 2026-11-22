@@ -285,16 +285,55 @@ fn is_retryable_ai_status(status: u16) -> bool {
     matches!(status, 429 | 503 | 529)
 }
 
-/// How long to wait before retry `attempt` (0-based): `Retry-After` seconds
-/// when given (capped), else 2, 4, 8 seconds.
-fn ai_retry_wait(attempt: u32, retry_after: Option<&str>) -> std::time::Duration {
+fn parse_http_date_wait(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<f64> {
+    let s = raw.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+        let secs = (dt.with_timezone(&chrono::Utc) - now).num_milliseconds() as f64 / 1000.0;
+        return Some(secs.max(0.0));
+    }
+    let stripped = s
+        .strip_suffix(" GMT")
+        .or_else(|| s.strip_suffix(" UTC"))
+        .unwrap_or(s);
+    for fmt in [
+        "%a, %d %b %Y %H:%M:%S",
+        "%A, %d-%b-%y %H:%M:%S",
+        "%a %b %e %H:%M:%S %Y",
+        "%a %b %d %H:%M:%S %Y",
+    ] {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(stripped.trim(), fmt) {
+            let secs = (ndt.and_utc() - now).num_milliseconds() as f64 / 1000.0;
+            return Some(secs.max(0.0));
+        }
+    }
+    None
+}
+
+fn ai_retry_wait_at(
+    attempt: u32,
+    retry_after: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::time::Duration {
     let backoff = std::time::Duration::from_secs(2u64 << attempt.min(4));
+    let max_secs = AI_RETRY_MAX_WAIT.as_secs_f64();
     retry_after
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|s| s.is_finite() && *s >= 0.0)
-        .map(std::time::Duration::from_secs_f64)
+        .and_then(|v| {
+            let s = v.trim();
+            s.parse::<f64>()
+                .ok()
+                .filter(|x| x.is_finite() && *x >= 0.0)
+                .or_else(|| parse_http_date_wait(s, now))
+        })
+        .map(|s| std::time::Duration::from_secs_f64(s.clamp(0.0, max_secs)))
         .unwrap_or(backoff)
         .min(AI_RETRY_MAX_WAIT)
+}
+
+/// How long to wait before retry `attempt` (0-based): `Retry-After` seconds
+/// or HTTP-date when given (clamped to [`AI_RETRY_MAX_WAIT`] before `Duration`
+/// conversion), else 2, 4, 8 seconds.
+fn ai_retry_wait(attempt: u32, retry_after: Option<&str>) -> std::time::Duration {
+    ai_retry_wait_at(attempt, retry_after, chrono::Utc::now())
 }
 
 impl AiClient {
@@ -493,7 +532,9 @@ impl AiClient {
             self.model.clone()
         };
         let cache_key = format!("{}{}", AI_CACHE_PREFIX, hash_prompt(&cache_model, prompt));
-        if let Some(cached) = self.cache_get(&cache_key).await {
+        if let Some(cached) = self.cache_get(&cache_key).await
+            && validate_ai_commentary(prompt, &cached).is_ok()
+        {
             return Ok(cached);
         }
 
@@ -528,6 +569,7 @@ impl AiClient {
                 self.model
             );
         }
+        validate_ai_commentary(prompt, &result)?;
         // Cache to Redis (1 hour TTL)
         self.cache_set(&cache_key, &result).await;
 
@@ -767,12 +809,122 @@ impl AiClient {
 /// Bumped whenever the prompts change, and part of every cache key, so an
 /// answer cached under older wording (v1 asked for BUY/HOLD/SELL verdicts;
 /// v2 forbade naming the engine's action) is never shown again.
-pub const PROMPT_VERSION: u32 = 3;
+pub const PROMPT_VERSION: u32 = 4;
 
 /// Printed under every AI section.
-pub const DISCLAIMER: &str = "AI-generated educational analysis, not investment advice. The AI \
-     explains StockWise's rule-based action and never makes its own. StockWise is not a \
-     SEBI-registered investment adviser or research analyst; you can lose money.";
+pub const DISCLAIMER: &str = "AI-generated educational analysis, not investment advice. \
+     Authoritative actions come only from StockWise's rule-based engine; AI commentary is \
+     validated against that action policy and is not authorized to make its own calls. \
+     StockWise is not a SEBI-registered investment adviser or research analyst; you can lose money.";
+
+/// Extract the deterministic engine action label supplied in `prompt`, if any.
+pub fn supplied_action_kind(prompt: &str) -> Option<&'static str> {
+    let marker = "StockWise's rule-based action";
+    let pos = prompt.find(marker)?;
+    let after = &prompt[pos + marker.len()..];
+    let body = after
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or(after)
+        .trim_start();
+    if body.starts_with("NO CALL") {
+        return Some("NO CALL");
+    }
+    let first = body
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    match first {
+        "BUY" => Some("BUY"),
+        "WATCH" => Some("WATCH"),
+        "AVOID" => Some("AVOID"),
+        "ADD" => Some("ADD"),
+        "HOLD" => Some("HOLD"),
+        "TRIM" => Some("TRIM"),
+        "EXIT" => Some("EXIT"),
+        _ => None,
+    }
+}
+
+/// Reject AI commentary that invents an action call when none was supplied or
+/// contradicts the deterministic engine's action.
+pub fn validate_ai_commentary(prompt: &str, response: &str) -> Result<()> {
+    let allowed = supplied_action_kind(prompt);
+    const CALL_TOKENS: &[&str] = &[
+        "BUY", "SELL", "HOLD", "ADD", "TRIM", "EXIT", "AVOID", "WATCH",
+    ];
+    for token in response.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if CALL_TOKENS.contains(&token) && Some(token) != allowed {
+            match allowed {
+                Some(exp) => {
+                    bail!("AI commentary contradicted engine action {exp} by emitting {token}")
+                }
+                None => bail!(
+                    "AI commentary introduced an unauthorized action call ({token}) when no engine action was supplied"
+                ),
+            }
+        }
+    }
+    let lower = response.to_ascii_lowercase();
+    let check_phrases = |phrases: &[&str], target: &str| -> Result<()> {
+        if phrases.iter().any(|p| lower.contains(p)) && allowed != Some(target) {
+            match allowed {
+                Some(exp) => bail!(
+                    "AI commentary contradicted engine action {exp} with a {target} recommendation"
+                ),
+                None => bail!("AI commentary introduced an unauthorized {target} recommendation"),
+            }
+        }
+        Ok(())
+    };
+    check_phrases(
+        &[
+            "you should buy",
+            "recommend buying",
+            "recommendation: buy",
+            "verdict: buy",
+            "rating: buy",
+            "action: buy",
+            "strong buy",
+        ],
+        "BUY",
+    )?;
+    check_phrases(
+        &[
+            "you should sell",
+            "recommend selling",
+            "recommendation: sell",
+            "verdict: sell",
+            "rating: sell",
+            "action: sell",
+            "strong sell",
+        ],
+        "EXIT",
+    )?;
+    check_phrases(
+        &[
+            "you should hold",
+            "recommend holding",
+            "recommendation: hold",
+            "verdict: hold",
+            "rating: hold",
+            "action: hold",
+        ],
+        "HOLD",
+    )?;
+    check_phrases(
+        &[
+            "you should avoid",
+            "recommend avoiding",
+            "recommendation: avoid",
+            "verdict: avoid",
+            "rating: avoid",
+            "action: avoid",
+        ],
+        "AVOID",
+    )?;
+    Ok(())
+}
 
 /// The prompts behind every AI section. Each starts with [`prompts::RULES`]:
 /// the model explains signals, risks and what to watch, and explains the
@@ -1353,7 +1505,7 @@ mod tests {
     fn disclaimer_says_it_is_education_not_advice() {
         let d = DISCLAIMER.to_lowercase();
         assert!(d.contains("educational") && d.contains("not investment advice"));
-        assert!(d.contains("never makes its own"));
+        assert!(d.contains("rule-based engine") && d.contains("not authorized to make its own"));
         assert!(d.contains("sebi"));
         assert!(!DISCLAIMER.contains('\n'), "one line under each AI section");
     }
@@ -1620,11 +1772,14 @@ mod tests {
     async fn anthropic_request_shape_and_fallback_opt_in() {
         let server = crate::testutil::MockServer::start(vec![(
             200,
-            r#"{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"BUY"}]}"#.into(),
+            r#"{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"Valuation is in line with peers."}]}"#.into(),
         )])
         .await;
         let mut ai = cloud_client(AiProvider::Anthropic, "claude-opus-5-5", &server.url);
-        assert_eq!(ai.generate("prompt one").await.unwrap(), "BUY");
+        assert_eq!(
+            ai.generate("prompt one").await.unwrap(),
+            "Valuation is in line with peers."
+        );
         let mut older = cloud_client(AiProvider::Anthropic, "claude-haiku-4-5", &server.url);
         older.generate("prompt two").await.unwrap();
 
@@ -1670,7 +1825,21 @@ mod tests {
         assert_eq!(ai_retry_wait(2, None), Duration::from_secs(8));
         assert_eq!(ai_retry_wait(0, Some("5")), Duration::from_secs(5));
         assert_eq!(ai_retry_wait(0, Some("3600")), AI_RETRY_MAX_WAIT);
+        // Huge finite value clamps before Duration::from_secs_f64 without panicking.
+        assert_eq!(ai_retry_wait(0, Some("1e100")), AI_RETRY_MAX_WAIT);
         assert_eq!(ai_retry_wait(1, Some("soon")), Duration::from_secs(4));
+        // HTTP-date 20 seconds in the future is honored and capped at 30s.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-21T07:27:40Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            ai_retry_wait_at(0, Some("Wed, 21 Oct 2026 07:28:00 GMT"), now),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            ai_retry_wait_at(0, Some("Wed, 21 Oct 2026 08:28:00 GMT"), now),
+            AI_RETRY_MAX_WAIT
+        );
         assert!(is_retryable_ai_status(429) && is_retryable_ai_status(529));
         assert!(!is_retryable_ai_status(400) && !is_retryable_ai_status(401));
     }
@@ -1679,11 +1848,11 @@ mod tests {
     async fn openai_request_uses_bearer_auth_and_responses_api() {
         let server = crate::testutil::MockServer::start(vec![(
             200,
-            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"SELL"}]}]}"#.into(),
+            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Momentum is neutral."}]}]}"#.into(),
         )])
         .await;
         let mut ai = cloud_client(AiProvider::OpenAi, "gpt-test", &server.url);
-        assert_eq!(ai.generate("p").await.unwrap(), "SELL");
+        assert_eq!(ai.generate("p").await.unwrap(), "Momentum is neutral.");
         let req = &server.requests()[0];
         assert_eq!(req.target, "/v1/responses");
         assert_eq!(req.header("authorization"), Some("Bearer sk-test-123"));
@@ -1696,17 +1865,53 @@ mod tests {
     async fn gemini_request_keeps_the_key_out_of_the_url() {
         let server = crate::testutil::MockServer::start(vec![(
             200,
-            r#"{"candidates":[{"content":{"parts":[{"text":"HOLD"}]},"finishReason":"STOP"}]}"#
+            r#"{"candidates":[{"content":{"parts":[{"text":"Trend is steady."}]},"finishReason":"STOP"}]}"#
                 .into(),
         )])
         .await;
         let mut ai = cloud_client(AiProvider::Gemini, "gemini-test", &server.url);
-        assert_eq!(ai.generate("p").await.unwrap(), "HOLD");
+        assert_eq!(ai.generate("p").await.unwrap(), "Trend is steady.");
         let req = &server.requests()[0];
         assert_eq!(req.target, "/v1beta/models/gemini-test:generateContent");
         assert!(!req.target.contains("sk-test"));
         assert_eq!(req.header("x-goog-api-key"), Some("sk-test-123"));
         assert_eq!(req.json()["contents"][0]["parts"][0]["text"], "p");
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_invented_or_contradicting_action_calls() {
+        // 1. No action supplied, model invents BUY.
+        let server = crate::testutil::MockServer::start(vec![(
+            200,
+            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"BUY this stock now."}]}]}"#.into(),
+        )])
+        .await;
+        let mut ai = cloud_client(AiProvider::OpenAi, "gpt-test", &server.url);
+        let mut data = StockData::sample();
+        data.action = None;
+        let err = ai.analyze_stock(&data).await.unwrap_err().to_string();
+        assert!(err.contains("unauthorized"), "{err}");
+
+        // 2. Engine supplies AVOID, model contradicts with BUY.
+        let server2 = crate::testutil::MockServer::start(vec![(
+            200,
+            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Despite the warning, BUY on the dip."}]}]}"#.into(),
+        )])
+        .await;
+        let mut ai2 = cloud_client(AiProvider::OpenAi, "gpt-test", &server2.url);
+        data.action = Some("AVOID (high confidence)\n- Weak cash flow".into());
+        let err2 = ai2.analyze_stock(&data).await.unwrap_err().to_string();
+        assert!(err2.contains("contradicted engine action AVOID"), "{err2}");
+
+        // 3. Engine supplies HOLD, model explains HOLD without contradicting.
+        let server3 = crate::testutil::MockServer::start(vec![(
+            200,
+            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"The engine action is HOLD because trend support remains intact."}]}]}"#.into(),
+        )])
+        .await;
+        let mut ai3 = cloud_client(AiProvider::OpenAi, "gpt-test", &server3.url);
+        data.action = Some("HOLD (medium confidence)\n- Trend intact".into());
+        assert!(ai3.analyze_stock(&data).await.is_ok());
     }
 
     #[tokio::test]

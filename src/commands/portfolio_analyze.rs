@@ -947,13 +947,18 @@ fn foreign_rows(
             } else {
                 st_rate
             };
-            let raw = foreign_gains(portfolio.holding(&i.symbol), i.price, months, val, today);
+            let holding = portfolio.holding(&i.symbol);
+            let estimated = holding.is_some_and(|h| h.has_estimated_dates());
+            let raw = foreign_gains(holding, i.price, months, val, today);
             let gains = raw.filter(|_| in_tax_currency);
             let unavailable = match (raw, in_tax_currency) {
                 (_, false) => Some(format!(
                     "run with --base {} for the gain",
                     country.tax_currency()
                 )),
+                (None, true) if estimated => Some(
+                    "purchase date is estimated (imported or upgraded without dates): fix with `portfolio lots` for the gain".to_string(),
+                ),
                 (None, true) => {
                     Some("no price, exchange rate or purchase date for the gain".to_string())
                 }
@@ -988,6 +993,9 @@ fn foreign_gains(
     let (h, price) = (h?, price?);
     let (mut st, mut lt) = (0.0, 0.0);
     for l in &h.lots {
+        if l.date_estimated {
+            return None;
+        }
         let bought = pf::parse_date(&l.date).ok()?;
         let value = val.to_base(&h.symbol, l.qty * price)?;
         let (cost, _) = val.lot_cost_base(&h.symbol, l)?;

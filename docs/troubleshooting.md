@@ -209,9 +209,12 @@ More in [importing holdings](brokers.md#importing-holdings) and
   Config file                  ✗ <path> (invalid)
 ```
 
-and the parse error under it. Fix the key it names, or write a fresh template
-with `stockwise config init --force`. `STOCKWISE_CONFIG` pointing to a file
-that does not exist is also an error (`create it with stockwise config init`).
+and the parse error under it. Repair the invalid entry in place to keep your
+existing settings and credentials. If you want to replace it with a fresh
+commented template, back up the file first before running
+`stockwise config init --force`, as `--force` overwrites the existing config
+file without making a backup. `STOCKWISE_CONFIG` pointing to a file that does
+not exist is also an error (`create it with stockwise config init`).
 
 ## Tax residence or investor profile looks wrong
 

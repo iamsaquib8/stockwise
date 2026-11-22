@@ -375,9 +375,15 @@ fn balance_sheet(gaap: &HashMap<String, Concept>) -> (Option<(NaiveDate, f64)>, 
         // current total on top only when that portion is known and can be
         // taken out; otherwise add just the short-term borrowings, which
         // never overlap it.
-        (None, Some(total)) => match (at(&["DebtCurrent"]), ltd_current) {
-            (Some(debt_current), Some(portion)) => Some(total - portion + debt_current),
-            _ => Some(total + at(SHORT_BORROWINGS).or(at(COMMERCIAL_PAPER)).unwrap_or(0.0)),
+        (None, Some(total)) => match (
+            at(&["DebtCurrent"]),
+            ltd_current,
+            at(SHORT_BORROWINGS).or(at(COMMERCIAL_PAPER)),
+        ) {
+            (Some(debt_current), Some(portion), _) => Some(total - portion + debt_current),
+            (_, _, Some(short)) => Some(total + short),
+            (Some(dc), None, None) if dc > 0.0 => None,
+            _ => Some(total),
         },
         (None, None) => current,
     };

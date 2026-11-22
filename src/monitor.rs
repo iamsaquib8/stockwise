@@ -178,10 +178,10 @@ pub fn last_return_and_sigma(closes: &[f64]) -> Option<(f64, f64)> {
 /// The deepest 10%-step at or past `threshold` that `fall_pct` reaches
 /// (20 → 20, 34 → 30 with a 20 threshold), so each further 10% notifies once.
 fn bucket(fall_pct: f64, threshold: f64) -> Option<u32> {
-    if !fall_pct.is_finite() || fall_pct < threshold {
+    if !fall_pct.is_finite() || fall_pct + 1e-9 < threshold {
         return None;
     }
-    let steps = ((fall_pct - threshold) / 10.0).floor().max(0.0);
+    let steps = ((fall_pct + 1e-9 - threshold) / 10.0).floor().max(0.0);
     Some((threshold + steps * 10.0).round() as u32)
 }
 
@@ -235,24 +235,27 @@ pub fn price_signals(
         });
     }
 
-    // New 52-week low: below every low of the year before today.
+    // New 52-week low: require bars spanning roughly a year before labeling "52-week".
     if n > 60 {
         let from = n.saturating_sub(253);
-        let prior_low = s.low[from..n - 1]
-            .iter()
-            .chain(&s.close[from..n - 1])
-            .copied()
-            .filter(|v| *v > 0.0)
-            .fold(f64::INFINITY, f64::min);
-        if prior_low.is_finite() && price < prior_low {
-            out.push(Signal {
-                symbol: symbol.into(),
-                kind: SignalKind::NewLow,
-                priority: Priority::Normal,
-                title: format!("{symbol} at a new 52-week low"),
-                detail: format!("{price:.2}, below the year's low of {prior_low:.2}."),
-                key: format!("{symbol}:low52:{day}"),
-            });
+        let span_days = (day - s.dates[from]).num_days();
+        if span_days >= 330 {
+            let prior_low = s.low[from..n - 1]
+                .iter()
+                .chain(&s.close[from..n - 1])
+                .copied()
+                .filter(|v| *v > 0.0)
+                .fold(f64::INFINITY, f64::min);
+            if prior_low.is_finite() && price < prior_low {
+                out.push(Signal {
+                    symbol: symbol.into(),
+                    kind: SignalKind::NewLow,
+                    priority: Priority::Normal,
+                    title: format!("{symbol} at a new 52-week low"),
+                    detail: format!("{price:.2}, below the year's low of {prior_low:.2}."),
+                    key: format!("{symbol}:low52:{day}"),
+                });
+            }
         }
     }
 
@@ -363,7 +366,7 @@ pub fn event_signals(events: &[crate::calendar::Event], tomorrow: NaiveDate) -> 
                 } else {
                     Priority::Low
                 },
-                title: format!("{}: {} tomorrow", e.symbol, what),
+                title: format!("{}: {} on {}", e.symbol, what, e.date.format("%d %b")),
                 detail,
                 key: format!("{}:event:{:?}:{}", e.symbol, e.kind, e.date),
             })
@@ -381,7 +384,7 @@ pub fn ownership_signals(symbol: &str, holdings: &[crate::research::Holding]) ->
         return out;
     };
     let q = last.date;
-    if last.pledged == Some(true) && prev.pledged != Some(true) {
+    if last.pledged == Some(true) && prev.pledged == Some(false) {
         out.push(Signal {
             symbol: symbol.into(),
             kind: SignalKind::Pledge,
@@ -523,7 +526,13 @@ pub fn insider_signals(
                     },
                     crate::events::format_date(t.ts)
                 ),
-                key: format!("{symbol}:insider:{}:{}:{}", t.ts, t.name, t.shares),
+                key: format!(
+                    "{symbol}:insider:{}:{}:{}:{}",
+                    t.ts,
+                    if t.is_buy { "buy" } else { "sell" },
+                    t.name,
+                    t.shares
+                ),
             }
         })
         .collect()
@@ -727,9 +736,9 @@ mod tests {
         assert_eq!(
             titles,
             [
-                "ITC.NS: results tomorrow",
-                "ITC.NS: ex-dividend date tomorrow",
-                "ITC.NS: record date tomorrow"
+                "ITC.NS: results on 24 Nov",
+                "ITC.NS: ex-dividend date on 24 Nov",
+                "ITC.NS: record date on 24 Nov"
             ]
         );
     }

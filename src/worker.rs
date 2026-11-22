@@ -1111,8 +1111,8 @@ async fn notify_after_close(
     // message — the digest when it is on, else a batch.
     let (silent, loud): (Vec<Pending>, Vec<Pending>) =
         pending.into_iter().partition(|p| p.msg.title.is_empty());
-    let sent = loud.len();
-    let filings = loud.iter().filter(|p| p.filings.is_some()).count();
+    let loud_total = loud.len();
+    let loud_filings = loud.iter().filter(|p| p.filings.is_some()).count();
     let notices: Vec<crate::notify::Message> = loud.iter().map(|p| p.msg.clone()).collect();
     let delivered = deliver_after_close(client, market, &notifier, notices).await;
     let mut record = |p: Pending| {
@@ -1127,11 +1127,14 @@ async fn notify_after_close(
     for p in silent {
         record(p);
     }
-    if delivered {
+    let (sent, filings) = if delivered {
         for p in loud {
             record(p);
         }
-    }
+        (loud_total, loud_filings)
+    } else {
+        (0, 0)
+    };
     trim_notified(&mut state.ltcg_notified);
     // Merge into the file's current state: the worker loop saves its own
     // fields too, and neither write should erase the other.
@@ -1225,8 +1228,10 @@ pub(crate) fn last_closed_session(
     now: chrono::DateTime<Utc>,
 ) -> Option<chrono::NaiveDate> {
     let today = clock::session_date(market, now);
-    if let Some(close) = clock::close_at(market, today) {
-        return (now >= close).then_some(today);
+    if let Some(close) = clock::close_at(market, today)
+        && now >= close
+    {
+        return Some(today);
     }
     let mut d = today;
     for _ in 0..10 {
@@ -1615,6 +1620,7 @@ pub async fn run_worker(market: Market) -> Result<()> {
         std::process::id(),
         market.label()
     );
+    let mut next_flush = Utc::now() + chrono::Duration::seconds(300);
     loop {
         let now = Utc::now();
         // `check_alerts` skips each alert whose own market is closed, so this
@@ -1655,8 +1661,9 @@ pub async fn run_worker(market: Market) -> Result<()> {
             }
         }
         // Notices held for quiet hours go out once they end.
-        if now.timestamp() % 300 < 5 {
+        if now >= next_flush {
             crate::notify::Notifier::from_env().flush_held().await;
+            next_flush = now + chrono::Duration::seconds(300);
         }
         if let Some(date) = eod_due(market, now, &state) {
             let has_work = Portfolio::load().is_ok_and(|p| !p.holdings.is_empty())

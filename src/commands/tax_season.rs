@@ -235,6 +235,16 @@ pub async fn cmd_tax_reconcile(
             return output::print_json(&v);
         }
         Format::Csv => {
+            if outside > 0 {
+                eprintln!("  note: {outside} row(s) outside {fy_label} excluded.");
+            }
+            if !skipped.is_empty() {
+                eprintln!(
+                    "  warning: {} broker row(s) skipped: {}",
+                    skipped.len(),
+                    skipped.join("; ")
+                );
+            }
             print!("{}", reconcile_csv(&r));
             return Ok(());
         }
@@ -1202,11 +1212,15 @@ pub(crate) fn publish_pack(dir: &Path, files: &[(String, String)]) -> Result<()>
     }
     if let Err(e) = std::fs::rename(&staging, dir) {
         // Put the earlier pack back.
-        if exists {
-            let _ = std::fs::rename(&old, dir);
+        let mut rollback_note = String::new();
+        if exists && let Err(re) = std::fs::rename(&old, dir) {
+            rollback_note = format!(
+                "; rollback failed ({re}), previous pack preserved at {}",
+                old.display()
+            );
         }
         let _ = std::fs::remove_dir_all(&staging);
-        return Err(e).with_context(|| format!("Cannot write {}", dir.display()));
+        return Err(e).with_context(|| format!("Cannot write {}{rollback_note}", dir.display()));
     }
     if exists {
         let _ = std::fs::remove_dir_all(&old);
@@ -1421,14 +1435,14 @@ fn load_ledger() -> Result<AdvanceLedger> {
 
 /// Record `payments` for the financial year starting in `year`, holding the
 /// data-file lock across the read, merge and save (owner-only file).
-fn record_payments(payments: &[tax::AdvancePayment], year: i32) -> Result<usize> {
+fn record_payments(payments: &[tax::AdvancePayment], year: i32) -> Result<(usize, AdvanceLedger)> {
     let path = crate::store::path(ADVANCE_LEDGER)?;
     let _lock = crate::store::lock(&path)?;
     let mut ledger: AdvanceLedger = crate::store::load_from(&path)
         .with_context(|| format!("Cannot read {} (left as it is)", path.display()))?;
     let added = ledger.record(payments, year);
     crate::store::save_to(&path, &ledger, true)?;
-    Ok(added)
+    Ok((added, ledger))
 }
 
 /// The schedule `tax advance` and the reminder work from: capital gains,
@@ -1513,9 +1527,8 @@ pub async fn cmd_tax_advance(
     let start = india_fy(fy)?;
     let year = start.year();
     let portfolio = pf::Portfolio::load()?;
-    let ledger = load_ledger()?;
-    let added = if record {
-        let added = record_payments(&given, year)?;
+    let (ledger, added) = if record {
+        let (added, committed) = record_payments(&given, year)?;
         eprintln!(
             "  {}",
             format!(
@@ -1524,9 +1537,9 @@ pub async fn cmd_tax_advance(
             )
             .green()
         );
-        Some(added)
+        (committed, Some(added))
     } else {
-        None
+        (load_ledger()?, None)
     };
     let mut payments = ledger.for_year(year);
     for p in &given {

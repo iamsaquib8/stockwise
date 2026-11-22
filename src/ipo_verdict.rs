@@ -138,12 +138,42 @@ pub struct CategoryBook {
     pub times: Option<f64>,
 }
 
-/// Lots in the smallest application above `floor_inr` rupees.
+/// Convert a rupee amount to integer paise.
+pub fn to_paise(inr: f64) -> i64 {
+    if !inr.is_finite() {
+        return 0;
+    }
+    (inr * 100.0).round() as i64
+}
+
+/// Convert integer paise back to rupees.
+pub fn from_paise(paise: i64) -> f64 {
+    paise as f64 / 100.0
+}
+
+/// Lots in the smallest application strictly above `floor_inr` rupees.
 pub fn lots_above(floor_inr: f64, lot_inr: f64) -> u64 {
-    if lot_inr <= 0.0 {
+    let lot_paise = to_paise(lot_inr);
+    if lot_paise <= 0 {
         return 1;
     }
-    (((floor_inr + 1.0) / lot_inr).ceil() as u64).max(1)
+    let floor_paise = to_paise(floor_inr).max(0);
+    ((floor_paise / lot_paise) + 1).max(1) as u64
+}
+
+/// Minimum application lots for a retail/individual applicant on `board`.
+pub fn min_application_lots(board: BoardKind, lot_inr: f64) -> u64 {
+    match board {
+        BoardKind::Sme => lots_above(200_000.0, lot_inr).max(2),
+        BoardKind::Mainboard => 1,
+    }
+}
+
+/// Minimum application amount (INR, exact in paise) for a retail/individual applicant.
+pub fn min_application_inr(board: BoardKind, lot: u64, cap: f64) -> f64 {
+    let lot_paise = (lot as i64).saturating_mul(to_paise(cap));
+    let min_lots = min_application_lots(board, from_paise(lot_paise));
+    from_paise((min_lots as i64).saturating_mul(lot_paise))
 }
 
 /// Chance one minimum application is allotted: lots of the minimum size
@@ -184,15 +214,18 @@ pub fn category_odds(
     snii: &CategoryBook,
     bnii: &CategoryBook,
 ) -> Vec<CategoryOdds> {
-    let lot_inr = lot as f64 * cap;
+    let lot_paise = (lot as i64).saturating_mul(to_paise(cap));
+    let lot_inr = from_paise(lot_paise);
     let row = |category: &str, min_lots: u64, packet_lots: u64, book: &CategoryBook| {
         let (p, basis) = p_allot(book, packet_lots * lot);
+        let min_paise = (min_lots as i64).saturating_mul(lot_paise);
+        let allotted_paise = (packet_lots as i64).saturating_mul(lot_paise);
         CategoryOdds {
             category: category.to_string(),
             min_lots,
-            min_amount_inr: (min_lots as f64 * lot_inr).round(),
+            min_amount_inr: from_paise(min_paise),
             allotted_lots: packet_lots,
-            allotted_amount_inr: (packet_lots as f64 * lot_inr).round(),
+            allotted_amount_inr: from_paise(allotted_paise),
             subscription_x: book.times,
             shares_offered: book.offered_shares,
             applications: book.applications,
@@ -203,7 +236,7 @@ pub fn category_odds(
     match board {
         BoardKind::Sme => {
             // SME individual applicants bid at least two lots, above ₹2 lakh.
-            let min = lots_above(200_000.0, lot_inr).max(2);
+            let min = min_application_lots(BoardKind::Sme, lot_inr);
             vec![row("SME individual", min, min, retail)]
         }
         BoardKind::Mainboard => {
@@ -239,15 +272,19 @@ pub fn blocked_days(today: NaiveDate, close: Option<NaiveDate>) -> i64 {
 
 pub fn expected_value(o: &CategoryOdds, gain_pct: f64, days: i64) -> Option<CategoryEv> {
     let p = o.p_allot?;
-    let cost = o.min_amount_inr * COST_OF_FUNDS_PCT / 100.0 * days as f64 / 365.0;
-    let ev = p * gain_pct / 100.0 * o.allotted_amount_inr - cost;
+    let blocked_paise = to_paise(o.min_amount_inr);
+    let allotted_paise = to_paise(o.allotted_amount_inr);
+    let cost_paise = ((blocked_paise as f64) * (COST_OF_FUNDS_PCT / 100.0) * (days as f64 / 365.0))
+        .round() as i64;
+    let gross_ev_paise = (p * (gain_pct / 100.0) * (allotted_paise as f64)).round() as i64;
+    let ev_paise = gross_ev_paise - cost_paise;
     Some(CategoryEv {
         category: o.category.clone(),
-        amount_blocked_inr: o.min_amount_inr,
+        amount_blocked_inr: from_paise(blocked_paise),
         p_allot: p,
         expected_listing_gain_pct: gain_pct,
-        blocked_cost_inr: round(cost, 2),
-        ev_inr: round(ev, 2),
+        blocked_cost_inr: from_paise(cost_paise),
+        ev_inr: from_paise(ev_paise),
     })
 }
 
@@ -353,9 +390,20 @@ pub struct Valuation {
     pub peer_median_ev_sales: Option<f64>,
     pub peers_used: Vec<String>,
     /// P/E ÷ peer median P/E.
+    #[serde(serialize_with = "serialize_opt_round2")]
     pub pe_vs_peers: Option<f64>,
     /// Where the figures came from.
     pub sources: Vec<String>,
+}
+
+fn serialize_opt_round2<S: serde::Serializer>(
+    v: &Option<f64>,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match v {
+        Some(n) => s.serialize_some(&round(*n, 2)),
+        None => s.serialize_none(),
+    }
 }
 
 /// Compound annual growth of `v` (oldest first), percent; `None` without
@@ -401,9 +449,21 @@ pub fn valuation(
     if let Some(r) = rhp {
         v.sources
             .push("RHP figures (ipo/<SYMBOL>.toml)".to_string());
-        let fresh_shares = r
-            .fresh_shares
-            .or_else(|| Some(fresh_cr? * 1e7 / cap.filter(|c| *c > 0.0)?));
+        let cap_pos = cap.filter(|c| *c > 0.0);
+        let (fresh_shares, fresh_proceeds_cr) = match r.fresh_shares {
+            Some(s) => {
+                let implied = cap_pos.map(|c| s * c / 1e7);
+                if let (Some(imp), Some(ex)) = (implied, fresh_cr)
+                    && (imp - ex).abs() > 0.5
+                {
+                    v.sources.push(format!(
+                        "RHP fresh shares imply ₹{imp:.2} Cr proceeds vs exchange text ₹{ex:.2} Cr; using RHP"
+                    ));
+                }
+                (Some(s), implied.or(fresh_cr))
+            }
+            None => (fresh_cr.zip(cap_pos).map(|(cr, c)| cr * 1e7 / c), fresh_cr),
+        };
         // Share counts from the RHP beat the rupee split in the issue text.
         if let (Some(f), Some(o)) = (fresh_shares, r.ofs_shares)
             && (f + o) > 0.0
@@ -415,7 +475,6 @@ pub fn valuation(
             (Some(p), None) if p > 0.0 && fresh_cr == Some(0.0) => Some(p),
             _ => None,
         };
-        let fresh_proceeds_cr = fresh_cr.or_else(|| Some(fresh_shares? * cap? / 1e7));
         v.market_cap_cr = match (v.post_issue_shares, cap) {
             (Some(s), Some(c)) => Some(s * c / 1e7),
             _ => None,
@@ -493,7 +552,6 @@ pub fn valuation(
         &mut v.peer_median_pe,
         &mut v.peer_median_pb,
         &mut v.peer_median_ev_sales,
-        &mut v.pe_vs_peers,
     ] {
         *x = x.map(|n| round(n, 2));
     }
@@ -527,6 +585,8 @@ pub struct Inputs {
     pub issue_size_cr: Option<f64>,
     /// Whether the fresh/OFS split is known.
     pub structure_known: bool,
+    /// Whether an anchor allocation is evidenced in the issue structure.
+    pub anchor_allocated: bool,
     pub valuation: Valuation,
     pub gmp_pct: Option<f64>,
     pub regime_pct: Option<f64>,
@@ -553,6 +613,7 @@ impl Inputs {
             odds: Vec::new(),
             issue_size_cr: None,
             structure_known: false,
+            anchor_allocated: false,
             valuation: Valuation::default(),
             gmp_pct: None,
             regime_pct: None,
@@ -962,6 +1023,13 @@ fn pct(v: f64) -> String {
 /// ([`crate::ipo_model::active`]); without one, mainboard issues get NO CALL.
 pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
     let (coverage, missing) = coverage(i);
+    let unlocks = || {
+        if i.anchor_allocated {
+            anchor_unlocks(i.close_date, i.today)
+        } else {
+            Vec::new()
+        }
+    };
     if i.status == IpoStatus::Listed {
         let mut v = no_call(
             i,
@@ -974,7 +1042,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         );
         v.kind = Kind::Listed;
         v.label = Kind::Listed.label();
-        v.overhang = anchor_unlocks(i.close_date, i.today)
+        v.overhang = unlocks()
             .into_iter()
             .filter(|u| NaiveDate::parse_from_str(&u.date, "%Y-%m-%d").is_ok_and(|d| d >= i.today))
             .collect();
@@ -995,7 +1063,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             coverage,
             missing,
         );
-        v.overhang = anchor_unlocks(i.close_date, i.today);
+        v.overhang = unlocks();
         return v;
     }
 
@@ -1062,13 +1130,23 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             .filter_map(|o| expected_value(o, gain, days))
             .collect()
     };
+    let retail_ev = |gain: f64| -> Option<CategoryEv> {
+        ev_at(gain)
+            .into_iter()
+            .find(|e| e.category.eq_ignore_ascii_case("Retail"))
+    };
     let evs = if i.bidding_open() {
         ev_at(mu)
     } else {
         Vec::new()
     };
-    // Before bidding opens the odds are unknown: the EV test waits for them.
-    let retail_ev_positive = |gain: f64| ev_at(gain).first().is_none_or(|e| e.ev_inr > 0.0);
+    // Before the book is final (including before bidding opens), a missing
+    // retail EV is deferred; on a final book, APPLY requires a known positive
+    // retail EV.
+    let retail_ev_positive = |gain: f64| match retail_ev(gain) {
+        Some(e) => e.ev_inr > 0.0,
+        None => !i.book_final,
+    };
 
     if !gates.is_empty() {
         return avoid(i, gates, coverage, missing, outlook, evs);
@@ -1129,7 +1207,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
                     d.format("%d %b %Y").to_string()
                 });
                 trigger = Some(format!(
-                    "{} if QIB ≥ {q:.1}x by 3 PM IST on {day}",
+                    "{} if QIB ≥ {q:.1}x (with current NII, retail and odds, and all final gates passing) by 3 PM IST on {day}",
                     if_strong.label()
                 ));
                 let now = i.qib_x.unwrap_or(0.0);
@@ -1151,6 +1229,25 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
                 });
                 invalidation = Some(format!("QIB ends below {q:.1}x at close"));
             }
+            None if model.b_qib <= 0.0 => {
+                kind = Kind::Wait;
+                let day = i.close_date.map_or("the closing day".to_string(), |d| {
+                    d.format("%d %b %Y").to_string()
+                });
+                trigger = Some(format!(
+                    "{} if the final book clears the listing and gate checks by 3 PM IST on {day}",
+                    if_strong.label()
+                ));
+                reasons.push(format!(
+                    "Book still building (QIB {} so far); the active model has a non-positive QIB \
+                     weight ({:+.2}), so no increasing QIB trigger applies and the call waits for \
+                     the final book at 3 PM IST",
+                    times(i.qib_x),
+                    model.b_qib
+                ));
+                invalidation =
+                    Some("the final book at close fails the listing or gate checks".to_string());
+            }
             None => {
                 return avoid(
                     i,
@@ -1167,7 +1264,10 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             }
         }
     } else if !listing_strong {
-        let ev_retail = evs.first().map(|e| e.ev_inr);
+        let ev_retail = evs
+            .iter()
+            .find(|e| e.category.eq_ignore_ascii_case("Retail"))
+            .map(|e| e.ev_inr);
         return avoid(
             i,
             vec![format!(
@@ -1175,9 +1275,14 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
                  the issue price{}",
                 pct(mu),
                 p_loss * 100.0,
-                ev_retail.map_or(String::new(), |e| format!(
-                    "; expected value of a retail application ₹{e:.0}"
-                ))
+                ev_retail.map_or(
+                    if mu > 0.0 && p_loss < MAX_P_LOSS {
+                        "; retail expected value unavailable".to_string()
+                    } else {
+                        String::new()
+                    },
+                    |e| format!("; expected value of a retail application ₹{e:.0}"),
+                )
             )],
             coverage,
             missing,
@@ -1200,7 +1305,10 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
             times(i.nii_x),
             times(i.retail_x)
         ));
-        if let Some(e) = evs.first() {
+        if let Some(e) = evs
+            .iter()
+            .find(|e| e.category.eq_ignore_ascii_case("Retail"))
+        {
             reasons.push(format!(
                 "{} application: {:.1}% allotment odds, expected value ₹{:.0} on ₹{:.0} blocked",
                 e.category,
@@ -1255,7 +1363,7 @@ pub fn decide(i: &Inputs, model: Option<&ListingModel>) -> Verdict {
         outlook,
         expected_value: evs,
         plan,
-        overhang: anchor_unlocks(i.close_date, i.today),
+        overhang: unlocks(),
         gates: Vec::new(),
         coverage,
         missing,
@@ -1291,7 +1399,11 @@ fn avoid(
         outlook,
         expected_value: evs,
         plan: None,
-        overhang: anchor_unlocks(i.close_date, i.today),
+        overhang: if i.anchor_allocated {
+            anchor_unlocks(i.close_date, i.today)
+        } else {
+            Vec::new()
+        },
         gates,
         coverage,
         missing,
@@ -1431,6 +1543,7 @@ mod tests {
         i.retail_x = Some(8.0);
         i.total_x = Some(35.0);
         i.structure_known = true;
+        i.anchor_allocated = true;
         i.odds = category_odds(
             BoardKind::Mainboard,
             75,
@@ -1960,5 +2073,94 @@ mod tests {
         r_no_debt.total_debt_cr = None;
         let v_no_debt = valuation(Some(&r_no_debt), Some(200.0), Some(200.0), Some(0.0), &[]);
         assert_eq!(v_no_debt.ev_sales, None);
+    }
+
+    #[test]
+    fn lots_above_uses_minor_units_and_sme_minimum_is_consistent() {
+        // ₹100,000.25 per lot: two lots cost ₹200,000.50 (> ₹200,000).
+        assert_eq!(lots_above(200_000.0, 100_000.25), 2);
+        // Exact multiple of the floor requires one more lot.
+        assert_eq!(lots_above(200_000.0, 100_000.0), 3);
+        // SME lot 1,000 shares × ₹94 = ₹94,000: needs 3 lots (₹282,000) to clear ₹200,000.
+        assert_eq!(min_application_inr(BoardKind::Sme, 1000, 94.0), 282_000.0);
+        let odds = category_odds(
+            BoardKind::Sme,
+            1000,
+            94.0,
+            &CategoryBook::default(),
+            &CategoryBook::default(),
+            &CategoryBook::default(),
+        );
+        assert_eq!(odds[0].min_lots, 3);
+        assert_eq!(odds[0].min_amount_inr, 282_000.0);
+        // Exact paise preserved on fractional cap prices.
+        let main = category_odds(
+            BoardKind::Mainboard,
+            1,
+            100.25,
+            &CategoryBook::default(),
+            &CategoryBook::default(),
+            &CategoryBook::default(),
+        );
+        assert_eq!(main[0].min_amount_inr, 100.25);
+    }
+
+    #[test]
+    fn valuation_uses_rhp_fresh_shares_for_proceeds_and_unrounded_pe_vs_peers_for_gate() {
+        // RHP has 1.0e7 fresh shares at ₹200 (₹200 Cr implied); exchange says ₹100 Cr.
+        // Post-issue book and EV must use the ₹200 Cr implied by RHP fresh_shares.
+        let v = valuation(
+            Some(&rhp()),
+            Some(200.0),
+            Some(100.0),
+            Some(0.0),
+            &peers(20.0),
+        );
+        assert_eq!(v.pb, Some(2.5));
+        assert_eq!(v.ev_sales, Some(1.48));
+
+        // Raw P/E vs peer median of 1.504 triggers the > 1.50 AVOID gate even though it rounds to 1.50.
+        let mut i = strong();
+        i.valuation = valuation(
+            Some(&rhp()),
+            Some(200.0),
+            Some(200.0),
+            Some(0.0),
+            &peers(20.0 / 1.504),
+        );
+        assert_eq!(decide(&i, Some(&model())).kind, Kind::Avoid);
+
+        // Exactly 1.50 passes the > 1.50 gate.
+        i.valuation = valuation(
+            Some(&rhp()),
+            Some(200.0),
+            Some(200.0),
+            Some(0.0),
+            &peers(20.0 / 1.5),
+        );
+        assert_eq!(decide(&i, Some(&model())).kind, Kind::ApplySellOnListing);
+    }
+
+    #[test]
+    fn retail_ev_selected_by_category_and_required_on_final_book() {
+        // Retail odds missing while sNII has positive EV: final book must not pass APPLY
+        // or label sNII EV as retail.
+        let mut i = strong();
+        i.odds.retain(|o| o.category != "Retail");
+        let v = decide(&i, Some(&model()));
+        assert_eq!(v.kind, Kind::Avoid);
+        assert!(!v.reasons[0].contains("expected value of a retail application ₹"));
+
+        // Non-positive b_qib keeps an open issue on WAIT instead of claiming no QIB up to 1,000x can pass.
+        let mut m = model();
+        m.b_qib = 0.0;
+        let mut open = strong();
+        open.book_final = false;
+        assert_eq!(decide(&open, Some(&m)).kind, Kind::Wait);
+
+        // Without anchor allocation evidence, no anchor unlock overhang is reported.
+        let mut no_anchor = strong();
+        no_anchor.anchor_allocated = false;
+        assert!(decide(&no_anchor, Some(&model())).overhang.is_empty());
     }
 }

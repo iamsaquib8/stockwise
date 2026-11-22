@@ -99,7 +99,7 @@ answers `GET` only.
 | | `market` | A market code; its section comes first | the server's `-m` |
 | `/api/search` | `q` | Company name or ticker, 1 to 100 characters. Required | — |
 | `/api/portfolio` | `base` | A 3-letter currency code for the totals (`inr`, `usd`, `eur`, ...) | the market's currency |
-| | `portfolio` | A named portfolio (as in `--portfolio NAME`); empty or `default` is `portfolio.json` | the active portfolio |
+| | `portfolio` | A named portfolio (as in `--portfolio NAME`); empty uses the active portfolio, while `default` selects `portfolio.json` | the active portfolio |
 | | `market` | A market code for bare tickers | the server's `-m` |
 | `/api/portfolios`, `/api/watchlist`, `/api/alerts`, `/api/events`, `/healthz`, `/metrics` | none | | |
 

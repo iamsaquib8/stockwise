@@ -11,7 +11,7 @@ You need: a portfolio. If you have not built one yet, start with
 > [methodology](methodology.md#actions-methodology-1). They are not
 > personalised advice. StockWise is not a SEBI-registered investment adviser
 > or research analyst, and you can lose money. See the
-> [disclaimer](disclaimer.md).
+> [disclaimer](../DISCLAIMER.md).
 
 ## 1. What an action is
 
@@ -118,10 +118,12 @@ level trails the price up. A holding that closes below it becomes an EXIT.
 days out. Short horizon: 10 trading sessions out. Look again by then, or
 sooner if the price closes below the invalidation level.
 
-**Size hint.** For BUY and ADD, the largest weight your profile allows
-(`risk_per_trade`, capped by `max_stock_weight`, half of it for a small cap).
-For TRIM, the shares to sell to get back under the cap. Set your own limits
-with `stockwise profile set active:low` (or another mode); see
+**Size hint.** For BUY and ADD, the engine divides `risk_per_trade` by the
+fractional distance from price to invalidation (`(price − invalidation) /
+price`) before applying the `max_stock_weight` cap (half of it for a small
+cap) — for example, 0.25% risk with a 5% distance gives a 5% weight, subject
+to the cap. For TRIM, the shares to sell to get back under the cap. Set your
+own limits with `stockwise profile set active:low` (or another mode); see
 `stockwise profile show`.
 
 **Tax note.** For TRIM and EXIT: when a lot turns long-term within 30 days and
@@ -157,10 +159,23 @@ or `portfolio sell`, or import the new tradebook.
 
 ## 7. Get told when it changes
 
-Put an alert on the invalidation price, checked on the daily close:
+Close-only (`--on-close`) alerts are not available for fixed price levels
+(`above` or `below`); `--on-close` applies only to moving-average crosses and
+breakouts (`cross-above-sma`, `cross-below-sma`, `cross-above-ema`,
+`cross-below-ema`, `breakout-high`, `breakdown-low`). Watch the 200-day
+moving-average invalidation floor on daily closes, or watch the fixed level
+intraday when crossed:
 
 ```bash
-stockwise alert add HDFCBANK below 801.66 --on-close
+stockwise alert add HDFCBANK cross-below-sma 200 --on-close
+stockwise alert add HDFCBANK below 801.66 --cross
+```
+
+```text
+  ✓ Alert #0: HDFCBANK.NS close crosses below the 200-day SMA
+  → Checked on daily bars by `stockwise alert check` and `alert watch`, on completed sessions only.
+  ✓ Alert #1: HDFCBANK.NS below 801.66
+  → Notifies only when the price crosses the level, not while it stays beyond it.
 ```
 
 The background worker also watches every holding and sends one digest after

@@ -52,20 +52,13 @@ impl PendingSplits {
     fn set_demergers(&mut self, portfolio: &Portfolio) {
         self.demergers = portfolio.pending_demergers();
         if self.demergers.is_empty() {
+            self.demerger_conflicts.clear();
             return;
         }
-        let mut trial = portfolio.clone();
-        self.demerger_conflicts = self
-            .demergers
-            .iter()
-            .flat_map(|(sym, d)| {
-                trial
-                    .apply_demerger(sym, d)
-                    .conflicts
-                    .into_iter()
-                    .map(move |c| format!("{} demerger into {}: {}", sym, d.child, c))
-            })
-            .collect();
+        let mut p = portfolio.clone();
+        let mut conflicts = Vec::new();
+        self.apply_events(&mut p, Some(&mut conflicts));
+        self.demerger_conflicts = conflicts;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -89,6 +82,95 @@ impl PendingSplits {
         h.lots.iter().map(|l| adjusted_qty(l, splits)).sum()
     }
 
+    fn apply_events(&self, p: &mut Portfolio, mut conflicts: Option<&mut Vec<String>>) {
+        if let Some(c) = conflicts.as_deref_mut() {
+            c.clear();
+        }
+        let mut events: Vec<(&str, &str, Option<Split>, Option<&Demerger>)> = Vec::new();
+        for (sym, splits) in &self.by_symbol {
+            for s in splits {
+                let as_split = Split {
+                    bonus: None,
+                    ..s.clone()
+                };
+                events.push((s.date.as_str(), sym.as_str(), Some(as_split), None));
+            }
+        }
+        // Splits excluded because the parent quote predates them still apply on
+        // their effective date if a later demerger's record date needs them; we
+        // only omit splits dated after the quote if they are not followed by a
+        // demerger, or rather we apply pre-demerger splits for demerger
+        // entitlement and keep parent shares aligned to the quote.
+        for (sym, d) in &self.demergers {
+            events.push((d.record_date, sym.as_str(), None, Some(*d)));
+        }
+        // Stable: on the same day a split goes before a demerger.
+        events.sort_by(|a, b| a.0.cmp(b.0).then(a.3.is_some().cmp(&b.3.is_some())));
+        for (_, sym, split, demerger) in events {
+            if let Some(s) = split {
+                p.apply_split(sym, &s);
+            }
+            if let Some(d) = demerger {
+                // Any split in `not_in_price` on or before `d.record_date`
+                // happened by the record date even if the parent's quote is
+                // older: apply it on a temporary copy of the parent's lots to
+                // compute record-date entitlement, or apply and revert the
+                // parent quantity while keeping the demerger's child shares and
+                // cost split.
+                let pre_demerger_splits: Vec<Split> = self
+                    .not_in_price
+                    .iter()
+                    .filter(|(s, _)| d.is_parent(s))
+                    .flat_map(|(s, v)| {
+                        v.iter()
+                            .filter(|sp| sp.date.as_str() <= d.record_date)
+                            .map(move |sp| (s.clone(), sp.clone()))
+                    })
+                    .map(|(s, sp)| {
+                        p.apply_split(
+                            &s,
+                            &Split {
+                                bonus: None,
+                                ..sp.clone()
+                            },
+                        );
+                        sp
+                    })
+                    .collect();
+                let out = p.apply_demerger(sym, d);
+                if !pre_demerger_splits.is_empty() {
+                    // Undo the unpriced split on the parent's open lots so the
+                    // parent remains in the quote's share count.
+                    for sp in pre_demerger_splits.iter().rev() {
+                        let id = sp.id();
+                        let r = sp.ratio();
+                        for h in p.holdings.iter_mut().filter(|h| d.is_parent(&h.symbol)) {
+                            for l in &mut h.lots {
+                                if let Some(pos) = l.adjustments.iter().position(|a| *a == id) {
+                                    l.adjustments.remove(pos);
+                                    l.qty /= r;
+                                    l.price *= r;
+                                }
+                            }
+                            h.shares = h.lots.iter().map(|l| l.qty).sum();
+                            if h.shares > 0.0 {
+                                let total_cost: f64 = h.lots.iter().map(|l| l.qty * l.price).sum();
+                                h.avg_cost = total_cost / h.shares;
+                            } else {
+                                h.avg_cost = 0.0;
+                            }
+                        }
+                    }
+                }
+                if let Some(c) = conflicts.as_deref_mut() {
+                    for msg in out.conflicts {
+                        c.push(format!("{} demerger into {}: {}", sym, d.child, msg));
+                    }
+                }
+            }
+        }
+    }
+
     /// A copy of `portfolio` with every pending event applied to its lots,
     /// oldest first, so a demerger's entitlement counts the splits and
     /// bonuses before its record date. A demerger is applied as `portfolio
@@ -102,29 +184,7 @@ impl PendingSplits {
             return portfolio.clone();
         }
         let mut p = portfolio.clone();
-        let mut events: Vec<(&str, &str, Option<Split>, Option<&Demerger>)> = Vec::new();
-        for (sym, splits) in &self.by_symbol {
-            for s in splits {
-                let as_split = Split {
-                    bonus: None,
-                    ..s.clone()
-                };
-                events.push((s.date.as_str(), sym.as_str(), Some(as_split), None));
-            }
-        }
-        for (sym, d) in &self.demergers {
-            events.push((d.record_date, sym.as_str(), None, Some(*d)));
-        }
-        // Stable: on the same day a split goes before a demerger.
-        events.sort_by(|a, b| a.0.cmp(b.0).then(a.3.is_some().cmp(&b.3.is_some())));
-        for (_, sym, split, demerger) in events {
-            if let Some(s) = split {
-                p.apply_split(sym, &s);
-            }
-            if let Some(d) = demerger {
-                p.apply_demerger(sym, d);
-            }
-        }
+        self.apply_events(&mut p, None);
         p
     }
 
@@ -285,13 +345,7 @@ pub async fn pending_splits(client: &YahooClient, portfolio: &Portfolio) -> Pend
     }
     out.by_symbol.sort_by(|a, b| a.0.cmp(&b.0));
     out.unchecked.sort();
-    // With the splits known, the trial runs them first (see `adjusted`).
-    let after_splits = PendingSplits {
-        by_symbol: out.by_symbol.clone(),
-        ..PendingSplits::default()
-    }
-    .adjusted(portfolio);
-    out.set_demergers(&after_splits);
+    out.set_demergers(portfolio);
     out
 }
 
@@ -373,56 +427,73 @@ pub struct RightsEntitlement {
 /// days after the record date at the issue price).
 pub fn rights_entitlements(portfolio: &Portfolio) -> Vec<RightsEntitlement> {
     let mut out = Vec::new();
-    for h in &portfolio.holdings {
-        let (base, _) = crate::portfolio::indian_base(&h.symbol);
+    for sym in portfolio.symbols_with_history() {
+        let (base, _) = crate::portfolio::indian_base(&sym);
+        let h = portfolio.holding(&sym);
         for issue in RIGHTS_ISSUES
             .iter()
             .filter(|r| r.parents.contains(&base.as_str()))
         {
-            let recorded = h.lots.iter().any(|l| {
-                (l.price - issue.price).abs() < 1e-6
-                    && l.date.as_str() >= issue.record_date
-                    && chrono::NaiveDate::parse_from_str(&l.date, "%Y-%m-%d")
+            let within_120_days = |date: &str| {
+                date >= issue.record_date
+                    && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
                         .ok()
                         .zip(chrono::NaiveDate::parse_from_str(issue.record_date, "%Y-%m-%d").ok())
                         .is_some_and(|(l, r)| (l - r).num_days() <= 120)
-            });
-            if recorded {
-                continue;
-            }
+            };
             let mut accounts: Vec<(Option<String>, f64)> = Vec::new();
-            let held = h
-                .lots
-                .iter()
+            let open_held = h
+                .into_iter()
+                .flat_map(|h| h.lots.iter())
                 .filter(|l| l.date.as_str() < issue.record_date)
                 .map(|l| {
                     (
                         l.account_key().map(str::to_string),
                         crate::portfolio::qty_on(l.qty, &l.adjustments, issue.record_date),
                     )
+                });
+            let sold_held = portfolio
+                .realized
+                .iter()
+                .filter(|s| {
+                    s.symbol == sym
+                        && s.buy_date.as_str() < issue.record_date
+                        && s.sell_date.as_str() >= issue.record_date
                 })
-                .chain(
-                    portfolio
-                        .realized
-                        .iter()
-                        .filter(|s| {
-                            s.symbol == h.symbol
-                                && s.buy_date.as_str() < issue.record_date
-                                && s.sell_date.as_str() >= issue.record_date
-                        })
-                        .map(|s| (s.account_key().map(str::to_string), s.qty)),
-                );
-            for (account, q) in held {
+                .map(|s| {
+                    let adj = s.origin.as_ref().map_or(&[][..], |o| &o.adjustments[..]);
+                    (
+                        s.account_key().map(str::to_string),
+                        crate::portfolio::qty_on(s.qty, adj, issue.record_date),
+                    )
+                });
+            for (account, q) in open_held.chain(sold_held) {
                 match accounts.iter_mut().find(|(a, _)| *a == account) {
                     Some((_, t)) => *t += q,
                     None => accounts.push((account, q)),
                 }
             }
             for (account, q) in accounts {
+                let recorded_open = h.is_some_and(|h| {
+                    h.lots.iter().any(|l| {
+                        l.account_key() == account.as_deref()
+                            && (l.price - issue.price).abs() < 1e-6
+                            && within_120_days(&l.date)
+                    })
+                });
+                let recorded_sold = portfolio.realized.iter().any(|s| {
+                    s.symbol == sym
+                        && s.account_key() == account.as_deref()
+                        && (s.buy_price - issue.price).abs() < 1e-6
+                        && within_120_days(&s.buy_date)
+                });
+                if recorded_open || recorded_sold {
+                    continue;
+                }
                 let shares = (q * issue.rights_shares / issue.held_shares + 1e-9).floor();
                 if shares >= 1.0 {
                     out.push(RightsEntitlement {
-                        symbol: h.symbol.clone(),
+                        symbol: sym.clone(),
                         account,
                         issue,
                         shares,
@@ -558,24 +629,9 @@ pub fn drift_report(
     holdings: &[(String, f64, Option<f64>)],
     pending: &PendingSplits,
 ) -> Vec<DriftRow> {
-    // The account's lots of a holding: those naming it, or every lot when
-    // none names an account.
-    let lots_of = |sym: &str| -> Vec<Lot> {
-        let Some(h) = portfolio.holding(sym) else {
-            return Vec::new();
-        };
-        if h.lots.iter().any(|l| l.account_key() == Some(broker)) {
-            h.lots
-                .iter()
-                .filter(|l| l.account_key() == Some(broker))
-                .cloned()
-                .collect()
-        } else if h.lots.iter().all(|l| l.account_key().is_none()) {
-            h.lots.clone()
-        } else {
-            Vec::new()
-        }
-    };
+    // The account's lots of a holding: those in the account's scope (see
+    // `Portfolio::scope`).
+    let lots_of = |sym: &str| -> Vec<Lot> { portfolio.lots_in_account(sym, Some(broker)) };
     let mut symbols: Vec<String> = holdings.iter().map(|(s, _, _)| s.to_uppercase()).collect();
     for h in &portfolio.holdings {
         if !crate::offmarket::is_off_market(&h.symbol)
@@ -592,10 +648,24 @@ pub fn drift_report(
         .map(|sym| {
             let lots = lots_of(&sym);
             let ledger: f64 = lots.iter().map(|l| l.qty).sum();
-            let (broker_qty, broker_avg) = holdings
+            let matching: Vec<(f64, Option<f64>)> = holdings
                 .iter()
                 .filter(|(s, _, _)| s.eq_ignore_ascii_case(&sym))
-                .fold((0.0, None), |(q, a), (_, bq, ba)| (q + bq, a.or(*ba)));
+                .map(|(_, bq, ba)| (*bq, *ba))
+                .collect();
+            let broker_qty: f64 = matching.iter().map(|(q, _)| *q).sum();
+            let broker_avg = (!matching.is_empty()
+                && broker_qty > 0.0
+                && matching
+                    .iter()
+                    .all(|(_, a)| a.is_some_and(|x| x.is_finite() && x > 0.0)))
+            .then(|| {
+                matching
+                    .iter()
+                    .map(|(q, a)| q * a.unwrap_or(0.0))
+                    .sum::<f64>()
+                    / broker_qty
+            });
             let diff = broker_qty - ledger;
             let splits = pending.for_symbol(&sym);
             let adjusted: f64 = lots.iter().map(|l| adjusted_qty(l, splits)).sum();
@@ -648,12 +718,18 @@ pub struct SavedDrift {
 pub struct DriftReport {
     /// The broker id (`zerodha`), which is also the account name.
     pub broker: String,
+    /// The portfolio compared (`default` for the unnamed default portfolio).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portfolio: Option<String>,
     /// `YYYY-MM-DD HH:MM`, local time.
     pub at: String,
     pub rows: Vec<DriftRow>,
 }
 
 impl DriftReport {
+    pub fn portfolio_name(&self) -> &str {
+        self.portfolio.as_deref().unwrap_or("default")
+    }
     pub fn drifted(&self) -> impl Iterator<Item = &DriftRow> {
         self.rows.iter().filter(|r| !r.in_sync())
     }
@@ -892,6 +968,7 @@ mod tests {
         );
         let report = DriftReport {
             broker: "zerodha".into(),
+            portfolio: None,
             at: "2026-11-21 16:00".into(),
             rows: rows.clone(),
         };

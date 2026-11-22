@@ -772,11 +772,12 @@ pub fn compute_advance_tax_with_income(
         },
     ];
 
-    // A payment dated before the year began was made for an earlier year.
+    // A payment dated before the year began was made for an earlier year;
+    // a payment dated after `as_of` has not been made yet.
     let ignored_before_year = payments.iter().any(|p| !p.in_year(fy_start));
     let total_paid: f64 = payments
         .iter()
-        .filter(|p| p.in_year(fy_start))
+        .filter(|p| p.counts_by(fy_start, as_of))
         .map(|p| p.amount)
         .sum();
 
@@ -874,12 +875,12 @@ pub fn compute_advance_tax_with_income(
 
         let paid_by_due: f64 = payments
             .iter()
-            .filter(|p| p.counts_by(fy_start, m.due_date))
+            .filter(|p| p.counts_by(fy_start, m.due_date.min(as_of)))
             .map(|p| p.amount)
             .sum();
         let paid_by_cutoff: f64 = payments
             .iter()
-            .filter(|p| p.counts_by(fy_start, m.cutoff_date))
+            .filter(|p| p.counts_by(fy_start, m.cutoff_date.min(as_of)))
             .map(|p| p.amount)
             .sum();
         // Sec. 234C(1) proviso: the requirement on a due date is the tax on

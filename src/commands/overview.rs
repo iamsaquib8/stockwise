@@ -1037,13 +1037,28 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
         // share count and exchange rate. Funds and SGBs have no previous
         // close and are left out ([n/m] says how many count).
         let day = super::portfolio::period_change("1 day", &portfolio, &val, |s| {
-            val.quote(s).and_then(|q| q.regular_market_previous_close)
+            val.quote(s).and_then(|q| {
+                let prev = q.regular_market_previous_close?;
+                // If `regular_market_change` was supplied alongside `regular_market_price`,
+                // verify `prev` is on the same split basis (`price - change ≈ prev`);
+                // backup-filled previous closes on a split ex-date can be pre-split.
+                if let (Some(px), Some(chg)) = (q.regular_market_price, q.regular_market_change)
+                    && prev > 0.0
+                    && ((px - chg) - prev).abs() > prev.abs().max(px.abs()) * 0.05
+                {
+                    return None;
+                }
+                Some(prev)
+            })
         });
+        let total_holdings = portfolio.holdings.len();
         let day_str = match &day {
             Some(c) => {
                 let pct = format!("({:+.2}%)", c.pct);
-                let cover = if c.covered < c.of {
-                    format!(" [{}/{}]", c.covered, c.of).dimmed().to_string()
+                let cover = if c.covered < total_holdings {
+                    format!(" [{}/{}]", c.covered, total_holdings)
+                        .dimmed()
+                        .to_string()
                 } else {
                     String::new()
                 };

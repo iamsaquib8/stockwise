@@ -363,14 +363,16 @@ pub fn cmd_worker_install(market: Market, dry_run: bool, interval_min: u64) -> R
     } else {
         crate::store::data_dir()?
     };
+    let mut args = vec!["-m".into(), market.code().into()];
+    if let Some(pf) = crate::portfolio::active() {
+        args.push("--portfolio".into());
+        args.push(pf.into());
+    }
+    args.push("worker".into());
+    args.push("run".into());
     let spec = ServiceSpec {
         exe,
-        args: vec![
-            "-m".into(),
-            market.code().into(),
-            "worker".into(),
-            "run".into(),
-        ],
+        args,
         env: passed_env(|k| std::env::var(k).ok()),
         log: data_dir.join(LOG_FILE),
         restart_secs: interval_min * 60,
@@ -397,10 +399,8 @@ pub fn cmd_worker_install(market: Market, dry_run: bool, interval_min: u64) -> R
     }
 
     if let Some(pid) = crate::worker::running_pid() {
-        println!(
-            "  {} A worker is already running (pid {pid}). The service's worker waits for it: \
-             stop that one with `stockwise worker stop`.",
-            "!".yellow()
+        bail!(
+            "A worker is already running (pid {pid}). Stop it first with `stockwise worker stop` before installing the service."
         );
     }
     if let Some(dir) = path.parent() {
@@ -471,7 +471,12 @@ pub fn cmd_worker_uninstall(dry_run: bool) -> Result<()> {
     }
     println!();
     for step in &before {
-        run_step(step)?;
+        if !run_step(step)? {
+            bail!(
+                "Could not stop the active worker service cleanly; {} was left in place.",
+                path.display()
+            );
+        }
     }
     std::fs::remove_file(&path).with_context(|| format!("Cannot remove {}", path.display()))?;
     println!("  {} Removed {}", "✓".green(), path.display());

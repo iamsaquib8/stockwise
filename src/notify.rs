@@ -378,12 +378,13 @@ impl NotifyConfig {
         match (get("STOCKWISE_NTFY_TOPIC"), get("STOCKWISE_NTFY_SERVER")) {
             (Some(topic), server) => {
                 let server = server.unwrap_or_else(|| "https://ntfy.sh".into());
-                let host = reqwest::Url::parse(&server)
-                    .ok()
-                    .and_then(|u| u.host_str().map(str::to_string));
-                if server.starts_with("https://")
-                    || (server.starts_with("http://") && host.as_deref().is_some_and(is_loopback))
-                {
+                let parsed = reqwest::Url::parse(&server).ok();
+                let valid = parsed.as_ref().is_some_and(|u| {
+                    u.has_host()
+                        && (u.scheme() == "https"
+                            || (u.scheme() == "http" && u.host_str().is_some_and(is_loopback)))
+                });
+                if valid {
                     cfg.ntfy = Some(Ntfy {
                         server: server.trim_end_matches('/').to_string(),
                         topic,
@@ -731,8 +732,31 @@ impl Notifier {
         let Ok(held) = crate::store::load::<Held>(HELD_FILE) else {
             return;
         };
-        let Some(msg) = held.combined() else { return };
-        if self.deliver_logged(&msg).await {
+        if held.messages.is_empty() {
+            return;
+        }
+        // Apply each channel's priority threshold per message before combining
+        // so low-priority held notices are not promoted by a higher-priority sibling.
+        let mut any_eligible = false;
+        let mut delivered = false;
+        for channel in self.config.channels() {
+            let eligible: Vec<Message> = held
+                .messages
+                .iter()
+                .filter(|m| self.config.routes_to(channel, m.priority))
+                .cloned()
+                .collect();
+            let batch_holder = Held { messages: eligible };
+            let Some(msg) = batch_holder.combined() else {
+                continue;
+            };
+            any_eligible = true;
+            match self.send_one(channel, &msg).await {
+                Ok(()) => delivered = true,
+                Err(e) => eprintln!("  ! {} notification failed: {:#}", channel, e),
+            }
+        }
+        if !any_eligible || delivered {
             let sent = held.messages.len();
             let _ = crate::store::update::<Held, ()>(HELD_FILE, |h| {
                 h.messages.drain(..sent.min(h.messages.len()));

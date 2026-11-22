@@ -123,8 +123,12 @@ fn portfolio_totals_skip_holdings_without_a_price() {
         ]
     );
     assert_eq!(row["price_source"], "quote");
+    assert!(row["action"]["kind"].is_string(), "{row}");
+    crate::action::testing::check_action(&row["action"]);
     crate::action::testing::assert_action_well_formed(&row.to_string());
-    assert!(serde_json::to_value(&rows[1]).unwrap()["price_source"].is_null());
+    let row1 = serde_json::to_value(&rows[1]).unwrap();
+    assert!(row1["price_source"].is_null());
+    assert!(row1["action"].is_null(), "{row1}");
     assert_eq!(
         keys(&serde_json::to_value(totals).unwrap()),
         [
@@ -554,6 +558,14 @@ fn technical_json_has_the_documented_keys() {
     for c in [&up, &down] {
         let v = technical_json("X", None, "1y", "1d", c, c, c, &[1000; 250]);
         assert!(v["rsi_signal"].is_string());
+        assert!(
+            matches!(
+                v["bias"]["verdict"].as_str(),
+                Some("bullish" | "bearish" | "neutral")
+            ),
+            "unexpected bias.verdict: {}",
+            v["bias"]["verdict"]
+        );
         crate::action::testing::assert_action_well_formed(&v.to_string());
     }
 

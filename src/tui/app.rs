@@ -808,11 +808,11 @@ impl App {
             }
             SortBy::Value => {
                 snap.watchlist.sort_by(|a, b| cmp_desc(a.price, b.price));
-                // The weight is in the base currency, so a rupee holding and
-                // a dollar holding compare by what they are worth.
+                // value_base is in the base currency, so a rupee holding and
+                // a dollar holding compare by what they are worth without rounding ties.
                 snap.portfolio
                     .holdings
-                    .sort_by(|a, b| cmp_desc(a.weight_percent, b.weight_percent));
+                    .sort_by(|a, b| cmp_desc(a.value_base, b.value_base));
             }
         }
     }
@@ -1343,5 +1343,24 @@ pub(crate) mod tests {
         app.update(Msg::RefreshDue);
         app.update(Msg::Snapshot(Ok(snapshot())));
         assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn value_sort_orders_by_value_base_even_when_rounded_weights_tie() {
+        let mut app = loaded();
+        let mut snap = snapshot();
+        // Set identical rounded weight_percent but distinct value_base.
+        snap.portfolio.holdings[0].weight_percent = Some(50.0);
+        snap.portfolio.holdings[0].value_base = Some(100.0);
+        snap.portfolio.holdings[1].weight_percent = Some(50.0);
+        snap.portfolio.holdings[1].value_base = Some(200.0);
+        app.update(Msg::RefreshDue);
+        app.update(Msg::Snapshot(Ok(snap)));
+        // Cycle to SortBy::Value (Default -> Symbol -> Change -> Value)
+        app.update(key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::Value);
+        assert_eq!(hold_symbols(&app), ["INFY.NS", "TCS.NS", "DELISTED.NS"]);
     }
 }

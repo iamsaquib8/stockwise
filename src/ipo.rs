@@ -376,7 +376,7 @@ pub async fn fetch_board(
     past_limit: usize,
 ) -> Result<IpoBoardView> {
     let session = nse::shared_session();
-    let today = ist_today();
+    let (today, hour) = ist_today_and_hour();
     let year = today.year();
     let news_query = format!("India IPO GMP subscription NSE BSE {year}");
 
@@ -395,6 +395,7 @@ pub async fn fetch_board(
     let mut notes = Vec::new();
     let mut meta = Meta::default();
     let nse_board_failed = curr_res.is_err() || up_res.is_err();
+    let nse_board_answered = curr_res.is_ok() || up_res.is_ok();
     if curr_res.is_ok() || up_res.is_ok() || past_res.is_ok() {
         meta.add_source(provenance::NSE);
     }
@@ -441,6 +442,32 @@ pub async fn fetch_board(
         );
         sort_board(&mut ongoing, &mut upcoming);
     }
+    // Resolve unknown BSE-only board types before filtering by `--board` so SME
+    // issues match `BoardFilter::Sme` and are excluded by `BoardFilter::Mainboard`.
+    if filter != BoardFilter::All {
+        let issues = bse.issues(&mut meta).await;
+        for row in ongoing.iter_mut().chain(upcoming.iter_mut()) {
+            if fallback::bse_only(row, &meta)
+                && let Some(issue) = fallback::find_issue(&issues, &row.company_name)
+                && issue.board.is_none()
+            {
+                let (det, _) = bse.pages(&issue.ipo_no, false, &mut meta).await;
+                let prefix = row.symbol.clone();
+                let mut st = IssueStructure::default();
+                let mut sub = SubscriptionBreakdown::default();
+                fallback::fill_from_detail(
+                    row,
+                    &mut st,
+                    &mut sub,
+                    det.as_ref(),
+                    None,
+                    &prefix,
+                    &mut meta,
+                );
+                refresh_row(row, today);
+            }
+        }
+    }
     ongoing.retain(|r| filter.matches(r.board));
     upcoming.retain(|r| filter.matches(r.board));
 
@@ -450,7 +477,6 @@ pub async fn fetch_board(
     }
 
     let model = crate::ipo_model::active();
-    let hour = ist_hour();
     // Enrich ongoing issues (up to 6) with the category book from
     // `/api/ipo-detail` (BSE's pages for what NSE lacks) and decide each;
     // upcoming issues are decided on their terms and any RHP figures.
@@ -481,10 +507,11 @@ pub async fn fetch_board(
             None => (board_subscription(row), IssueStructure::default()),
         };
         let no_book = sub.qib_x.is_none() && sub.nii_x.is_none() && sub.retail_x.is_none();
-        if no_book || structure.fresh_pct.is_none() || fallback::row_has_gaps(row) {
+        let missing_book = sub.qib_x.is_none() || sub.nii_x.is_none() || sub.retail_x.is_none();
+        if missing_book || structure.fresh_pct.is_none() || fallback::row_has_gaps(row) {
             let issues = bse.issues(&mut meta).await;
             if let Some(issue) = fallback::find_issue(&issues, &row.company_name) {
-                let (det, book) = bse.pages(&issue.ipo_no, no_book, &mut meta).await;
+                let (det, book) = bse.pages(&issue.ipo_no, missing_book, &mut meta).await;
                 let prefix = row.symbol.clone();
                 fallback::fill_from_detail(
                     row,
@@ -498,6 +525,7 @@ pub async fn fetch_board(
                 refresh_row(row, today);
             }
         }
+        let _ = no_book;
         let ctx = RowContext::load(yahoo, &row.symbol, None).await;
         let (v, _) = decide_row(
             row,
@@ -556,7 +584,7 @@ pub async fn fetch_board(
     if !headlines.is_empty() {
         meta.add_source(GOOGLE_NEWS);
     }
-    board_coverage(&mut meta, &ongoing, &upcoming);
+    board_coverage_with(&mut meta, &ongoing, &upcoming, nse_board_answered);
     if model.is_none() {
         notes.push(
             "No calibrated listing-day model is installed, so mainboard issues get NO CALL; run `stockwise ipo calibrate`."
@@ -583,6 +611,16 @@ const GOOGLE_NEWS: &str = "Google News";
 /// `meta.missing` and `meta.coverage` over the key fields of the open and
 /// upcoming rows (`SYMBOL field`).
 pub fn board_coverage(meta: &mut Meta, ongoing: &[IpoSummaryRow], upcoming: &[IpoSummaryRow]) {
+    let nse_board = meta.sources.iter().any(|s| s == provenance::NSE);
+    board_coverage_with(meta, ongoing, upcoming, nse_board);
+}
+
+fn board_coverage_with(
+    meta: &mut Meta,
+    ongoing: &[IpoSummaryRow],
+    upcoming: &[IpoSummaryRow],
+    nse_board_answered: bool,
+) {
     let mut names: Vec<(String, bool)> = Vec::new();
     for row in ongoing.iter().chain(upcoming) {
         for (field, ok) in fallback::field_checks(row, None) {
@@ -591,11 +629,8 @@ pub fn board_coverage(meta: &mut Meta, ongoing: &[IpoSummaryRow], upcoming: &[Ip
     }
     let checks: Vec<(&str, bool)> = names.iter().map(|(n, ok)| (n.as_str(), *ok)).collect();
     meta.set_fields(&checks);
-    let answered = meta
-        .sources
-        .iter()
-        .any(|s| s == provenance::NSE || s == provenance::BSE);
-    if checks.is_empty() && !answered {
+    let bse_answered = meta.sources.iter().any(|s| s == provenance::BSE);
+    if checks.is_empty() && !(nse_board_answered || bse_answered) {
         meta.coverage = 0.0;
     }
 }
@@ -793,7 +828,7 @@ pub async fn fetch_analysis(
     rhp: Option<&std::path::Path>,
 ) -> Result<IpoAnalysis> {
     let session = nse::shared_session();
-    let today = ist_today();
+    let (today, hour) = ist_today_and_hour();
 
     let (curr_res, up_res, past_res) = tokio::join!(
         session.get_json("/api/ipo-current-issue", &[], BOARD_TTL),
@@ -1006,7 +1041,7 @@ pub async fn fetch_analysis(
         &ctx,
         model.as_ref(),
         today,
-        ist_hour(),
+        hour,
     );
     if !nse_detail && detail_json.is_some() {
         analysis.notes.push(
@@ -1554,15 +1589,15 @@ fn apply_quotes_to_recent(recent: &mut [IpoSummaryRow], quotes: &[Quote]) {
     }
 }
 
-/// The listing-day bar: the first session on or after `on_or_after`, as
+/// The listing-day bar: the session matching `listing_date`, as
 /// (date, open, close). Dates are in the exchange's time zone.
 pub fn listing_bar(
     chart: &crate::api::ChartData,
-    on_or_after: NaiveDate,
+    listing_date: NaiveDate,
 ) -> Option<(NaiveDate, f64, f64)> {
     session_bars(chart)
         .into_iter()
-        .find(|(d, _, _)| *d >= on_or_after)
+        .find(|(d, _, _)| *d == listing_date)
 }
 
 /// Every session of a daily chart with both an open and a close.
@@ -1877,7 +1912,11 @@ pub fn parse_subscription(detail: &Value) -> SubscriptionBreakdown {
             .filter(|c| matches!(c.sr_no.as_str(), "1" | "2" | "3" | "4" | "5"))
             .filter_map(|c| c.bid_shares)
             .sum();
-        if sum_off > 0 {
+        let has_any_bid = categories
+            .iter()
+            .filter(|c| matches!(c.sr_no.as_str(), "1" | "2" | "3" | "4" | "5"))
+            .any(|c| c.bid_shares.is_some());
+        if sum_off > 0 && has_any_bid {
             out.total_offered = Some(sum_off);
             out.total_bids = Some(sum_bid);
             out.total_x = Some(round(sum_bid as f64 / sum_off as f64, 2));
@@ -2085,7 +2124,13 @@ fn populate_fresh_vs_ofs(st: &mut IssueStructure, cap_price: Option<f64>) {
                 st.structure_tag = format!("Mixed ({fp:.0}% Fresh / {:.0}% OFS)", 100.0 - fp);
             }
             _ => {
-                st.total_issue_cr = extract_amount_cr(raw, cap_price);
+                // Only treat the raw header as a total issue size when it explicitly
+                // states an aggregate ("aggregating" / "total issue"); otherwise a single
+                // tranche amount would be mispublished as the whole issue size.
+                let lc = raw.to_ascii_lowercase();
+                if lc.contains("aggregating") || lc.contains("total issue") {
+                    st.total_issue_cr = extract_amount_cr(raw, cap_price);
+                }
                 st.structure_tag = "Mixed (Fresh Issue + OFS)".to_string();
             }
         }
@@ -2290,7 +2335,11 @@ pub fn parse_street_buzz(rss_xml: &str, cap_price: Option<f64>) -> StreetBuzz {
         }
     }
 
-    let gmp_readings = gmp_pcts.len().max(gmp_inrs.len());
+    let gmp_readings = if !gmp_pcts.is_empty() {
+        gmp_pcts.len()
+    } else {
+        gmp_inrs.len()
+    };
     let gmp_pct = median_opt(&mut gmp_pcts);
     let gmp_inr = median_opt(&mut gmp_inrs).or_else(|| match (gmp_pct, cap_price) {
         (Some(p), Some(cap)) => Some(round(cap * p / 100.0, 1)),
@@ -2883,13 +2932,14 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
-fn ist_today() -> NaiveDate {
-    (Utc::now() + chrono::Duration::seconds(19_800)).date_naive()
+fn ist_today_and_hour() -> (NaiveDate, u32) {
+    use chrono::Timelike;
+    let now = Utc::now() + chrono::Duration::seconds(19_800);
+    (now.date_naive(), now.hour())
 }
 
-fn ist_hour() -> u32 {
-    use chrono::Timelike;
-    (Utc::now() + chrono::Duration::seconds(19_800)).hour()
+fn ist_today() -> NaiveDate {
+    ist_today_and_hour().0
 }
 
 pub fn fmt_price(p: f64) -> String {
@@ -3379,10 +3429,21 @@ mod tests {
     fn closing_afternoon_turns_wait_into_a_call() {
         let today = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
         let board = fixture_board(BoardFilter::All, 10);
-        let row = board.ongoing[0].clone();
-        let a = fixture_analysis("BCSSL", None, None).unwrap();
+        let mut row = board.ongoing[0].clone();
+        row.close_date = Some(today);
+        let mut a = fixture_analysis("BCSSL", None, None).unwrap();
+        a.structure.fresh_pct = Some(100.0);
+        a.subscription.qib_x = Some(80.0);
+        a.subscription.nii_x = Some(50.0);
+        a.subscription.retail_x = Some(25.0);
         let ctx = RowContext {
-            rhp: None,
+            rhp: Some(verdict::RhpFigures {
+                pre_issue_shares: Some(50_000_000.0),
+                pat_cr: vec![100.0],
+                revenue_cr: vec![500.0, 600.0],
+                promoter_post_pct: Some(60.0),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let model = crate::ipo_model::testing::model();
@@ -3398,10 +3459,7 @@ mod tests {
             today,
             14,
         );
-        assert!(
-            matches!(v.kind, verdict::Kind::Wait | verdict::Kind::NoCall),
-            "{v:?}"
-        );
+        assert_eq!(v.kind, verdict::Kind::Wait, "{v:?}");
         // After 3 PM the book is final and the gates and model decide.
         let (v, _) = decide_row(
             &row,
@@ -3414,7 +3472,7 @@ mod tests {
             today,
             15,
         );
-        assert_ne!(v.kind, verdict::Kind::Wait, "{v:?}");
+        assert_eq!(v.kind, verdict::Kind::Apply, "{v:?}");
     }
 
     /// The live NSE answer (recorded 2026-11-21): consolidated book in

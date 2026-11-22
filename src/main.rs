@@ -4588,6 +4588,8 @@ fn parse_bare_symbol_invocation(
             }
             fmt = Format::Csv;
             i += 1;
+        } else if a == "-v" || a == "--verbose" {
+            i += 1;
         } else if a.starts_with('-') {
             return None;
         } else if symbol.is_none() {
@@ -4751,8 +4753,11 @@ fn wants_json(args: &[String]) -> bool {
         .enumerate()
         .any(|(i, a)| {
             a == "--json"
-                || a == "--format=json"
-                || (a == "--format" && args.get(i + 2).is_some_and(|v| v == "json"))
+                || a.eq_ignore_ascii_case("--format=json")
+                || (a == "--format"
+                    && args
+                        .get(i + 2)
+                        .is_some_and(|v| v.eq_ignore_ascii_case("json")))
         })
 }
 

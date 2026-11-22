@@ -115,7 +115,17 @@ pub async fn cmd_events(
 
 pub async fn cmd_insights(symbol: &str, market: Market, json: bool) -> Result<()> {
     let client = YahooClient::new().await?;
-    let r = research::fetch(&client, symbol, market, 60, research::Needs::VERDICT).await?;
+    let r = research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        research::Needs {
+            filings: true,
+            ..research::Needs::VERDICT
+        },
+    )
+    .await?;
     let cards = insights::generate_rich_insights(&r);
 
     if json {
@@ -152,7 +162,17 @@ pub async fn cmd_verdict(
     let profile = crate::config::effective_profile();
     let explain = explain || profile.auto_explain;
     let client = YahooClient::new().await?;
-    let r = research::fetch(&client, symbol, market, 60, research::Needs::VERDICT).await?;
+    let r = research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        research::Needs {
+            filings: true,
+            ..research::Needs::VERDICT
+        },
+    )
+    .await?;
     let cards = insights::generate_rich_insights(&r);
     let mut decision = verdict::generate_verdict_for(&r, &cards, &profile, horizon);
     super::actions::apply_holding(&mut decision, &r, market);

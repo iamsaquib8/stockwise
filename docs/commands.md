@@ -202,10 +202,13 @@ A stock you don't hold gets BUY, WATCH or AVOID; one you hold gets ADD, HOLD,
 TRIM or EXIT. Below 60% data coverage the line is
 `ACTION: NO CALL — missing: ROE, D/E` and nothing is guessed. A daily close
 below the invalidation price invalidates the action; look again by the review
-date. `--horizon short` (on `verdict`, `portfolio review` and `picks`) sets
-the invalidation at the higher of close − 1.5 × ATR and the 20-day low,
-reviews in 10 sessions, and also asks for a price above the 50-day average and
-rising volume before a BUY. Small caps (below ₹5,000 crore or $2 billion) face
+date. For unheld stocks the ATR reference is the last close; for holdings it is
+the highest close of the last 20 sessions, so the stop trails price up. On the
+default long horizon the invalidation is the higher of the 200-day average and
+reference − 2.5 × ATR(14). `--horizon short` (on `verdict`, `portfolio review`
+and `picks`) sets the invalidation at the higher of reference − 1.5 × ATR(14)
+and the 20-day low, reviews in 10 sessions, and also asks for a price above the
+50-day average and rising volume before a BUY. Small caps (below ₹5,000 crore or $2 billion) face
 extra gates: promoter pledge above 10%, thin trading, more than 2 price-band
 hits in 20 sessions (NSE/BSE), an auditor red flag, or exchange surveillance
 make them AVOID. The same action appears in the Action columns of

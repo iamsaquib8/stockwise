@@ -704,36 +704,41 @@ pub(crate) async fn run_checkup(
         max_smallcap_weight: g.ctx.max_smallcap_weight,
     };
     let mut checkup = ck::evaluate(&input, skipped);
-    let enriched = match client {
-        Some(c) => super::actions::enriched_quotes(c, &g.portfolio, &g.val).await,
-        None => Default::default(),
+    let actions = if fundamentals {
+        let enriched = match client {
+            Some(c) => super::actions::enriched_quotes(c, &g.portfolio, &g.val).await,
+            None => Default::default(),
+        };
+        let mut actions: Vec<ck::HoldingAction> =
+            super::actions::quick_actions(&g.portfolio, &g.val, &enriched)
+                .into_iter()
+                .map(|(symbol, action)| ck::HoldingAction {
+                    weight_pct: analysis
+                        .positions
+                        .iter()
+                        .find(|p| p.symbol == symbol)
+                        .and_then(|p| p.weight_pct)
+                        .map(|w| round(w, 2)),
+                    symbol,
+                    action,
+                })
+                .collect();
+        actions.sort_by(|a, b| {
+            a.action
+                .kind
+                .review_rank()
+                .cmp(&b.action.kind.review_rank())
+                .then(
+                    b.weight_pct
+                        .unwrap_or(0.0)
+                        .total_cmp(&a.weight_pct.unwrap_or(0.0)),
+                )
+                .then(a.symbol.cmp(&b.symbol))
+        });
+        actions
+    } else {
+        Vec::new()
     };
-    let mut actions: Vec<ck::HoldingAction> =
-        super::actions::quick_actions(&g.portfolio, &g.val, &enriched)
-            .into_iter()
-            .map(|(symbol, action)| ck::HoldingAction {
-                weight_pct: analysis
-                    .positions
-                    .iter()
-                    .find(|p| p.symbol == symbol)
-                    .and_then(|p| p.weight_pct)
-                    .map(|w| round(w, 2)),
-                symbol,
-                action,
-            })
-            .collect();
-    actions.sort_by(|a, b| {
-        a.action
-            .kind
-            .review_rank()
-            .cmp(&b.action.kind.review_rank())
-            .then(
-                b.weight_pct
-                    .unwrap_or(0.0)
-                    .total_cmp(&a.weight_pct.unwrap_or(0.0)),
-            )
-            .then(a.symbol.cmp(&b.symbol))
-    });
     checkup.actions = actions;
     Ok(CheckupRun {
         checkup,
@@ -828,13 +833,12 @@ fn print_checkup(c: &Checkup) {
         );
         for a in &c.actions {
             let weight = a.weight_pct.map_or(String::new(), |w| format!("{w:.1}%"));
-            let why = a.action.reasons.first().cloned().unwrap_or_default();
             println!(
                 "  {:<14} {} {:>6}  {}",
                 a.symbol.cyan().bold(),
                 super::portfolio::action_cell(Some(&a.action)),
                 weight,
-                why.dimmed()
+                super::actions::format_action_line(&a.action).dimmed()
             );
         }
     }
@@ -1106,11 +1110,14 @@ pub(crate) async fn wrap_report(
     }
     let t = wrap::totals(&years, &period, as_of, 3);
 
-    let (bench_symbol, bench_name) = match market {
-        Market::In => ("^NSEI", "NIFTY 50"),
-        Market::Us => ("^GSPC", "S&P 500"),
-        Market::Global(x) => x.info().benchmark(),
-        _ => ("^GSPC", "S&P 500"),
+    let (bench_symbol, bench_name, bench_currency) = match market {
+        Market::In => ("^NSEI", "NIFTY 50", "INR"),
+        Market::Us => ("^GSPC", "S&P 500", "USD"),
+        Market::Global(x) => {
+            let (s, n) = x.info().benchmark();
+            (s, n, market_currency(market))
+        }
+        _ => ("^GSPC", "S&P 500", "USD"),
     };
     // A total-return index when Yahoo has one; else the price index,
     // compared with the return without dividends.
@@ -1150,7 +1157,6 @@ pub(crate) async fn wrap_report(
     // The index is in its market's currency; the portfolio's return is in
     // the base: convert each close at its own day's rate, so a currency move
     // is not counted as alpha.
-    let bench_currency = market_currency(market);
     if !bench_currency.eq_ignore_ascii_case(val.base()) && !bench.is_empty() {
         let fx = if offline {
             crate::fx_history::FxHistory::new(val.base())

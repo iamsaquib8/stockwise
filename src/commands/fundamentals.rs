@@ -93,21 +93,29 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         .context("No data found for this symbol")?;
     crate::research::enrich_quote(&client, q, false).await;
     let q = &*q;
-    let r_opt =
-        crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::VERDICT)
-            .await
-            .ok();
+    let r_opt = crate::research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        crate::research::Needs {
+            filings: true,
+            ..crate::research::Needs::VERDICT
+        },
+    )
+    .await
+    .ok();
+    let cards = r_opt
+        .as_ref()
+        .map(insights::generate_rich_insights)
+        .unwrap_or_default();
+    let verdict = r_opt.as_ref().map(|r| {
+        let mut v = crate::verdict::generate_verdict(r, &cards);
+        super::actions::apply_holding(&mut v, r, market);
+        v
+    });
 
     if json {
-        let cards = r_opt
-            .as_ref()
-            .map(insights::generate_rich_insights)
-            .unwrap_or_default();
-        let verdict = r_opt.as_ref().map(|r| {
-            let mut v = crate::verdict::generate_verdict(r, &cards);
-            super::actions::apply_holding(&mut v, r, market);
-            v
-        });
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
@@ -243,7 +251,11 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_kv("Volatility", &risk);
     }
 
-    print_unified_research_footer(r_opt.as_ref(), q, None);
+    if let Some(v) = &verdict {
+        println!();
+        print!("{}", crate::verdict::render_action(&v.action));
+    }
+    print_unified_research_footer(r_opt.as_ref(), q, verdict.as_ref());
 
     // AI-powered analysis (with --ai, if the provider is available)
     let mut ai = crate::ai::AiClient::connect().await;
@@ -1041,23 +1053,35 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
         }
     };
 
+    let fallback_action = || {
+        let mut a = crate::action::Action::undecided(q.currency.as_deref().unwrap_or("USD"));
+        a.reasons = vec![
+            "Research data unavailable; quote-only view cannot evaluate full rules".to_string(),
+        ];
+        a
+    };
+    let cards = r_opt
+        .as_ref()
+        .map(insights::generate_rich_insights)
+        .unwrap_or_default();
+    let deep_verdict = r_opt.as_ref().map(|r| {
+        let mut v = crate::verdict::generate_verdict(r, &cards);
+        super::actions::apply_holding(&mut v, r, market);
+        v
+    });
+    let deep_action = deep_verdict
+        .as_ref()
+        .map(|v| v.action.clone())
+        .unwrap_or_else(fallback_action);
+
     if json {
-        let cards = r_opt
-            .as_ref()
-            .map(insights::generate_rich_insights)
-            .unwrap_or_default();
-        let verdict = r_opt.as_ref().map(|r| {
-            let mut v = crate::verdict::generate_verdict(r, &cards);
-            super::actions::apply_holding(&mut v, r, market);
-            v
-        });
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
-            "action": verdict.as_ref().map(|v| &v.action),
+            "action": deep_action,
             "period": period,
             "quote": market::quote_json(q),
-            "verdict": verdict,
+            "verdict": deep_verdict,
             "scorecard": scorecard,
             "insights": cards,
             "meta": meta,
@@ -1077,16 +1101,8 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
 
     // The rule-based action is the first thing printed.
-    let deep_verdict = r_opt.as_ref().map(|r| {
-        let cards = insights::generate_rich_insights(r);
-        let mut v = crate::verdict::generate_verdict(r, &cards);
-        super::actions::apply_holding(&mut v, r, market);
-        v
-    });
-    if let Some(v) = &deep_verdict {
-        println!();
-        print!("{}", crate::verdict::render_action(&v.action));
-    }
+    println!();
+    print!("{}", crate::verdict::render_action(&deep_action));
     print_header(&format!("DEEP DIVE: {} — {}", resolved, name));
     println!(
         "  {}  {}\n",

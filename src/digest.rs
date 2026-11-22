@@ -20,7 +20,7 @@ pub struct Line {
     pub pnl: Option<f64>,
     pub why: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
+    pub action: Option<crate::action::Action>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -100,6 +100,7 @@ impl Digest {
         self.day_pnl.is_none()
             && self.signals.is_empty()
             && self.alerts.is_empty()
+            && self.upcoming.is_empty()
             && self.notices.iter().all(|n| n.title.is_empty())
     }
 }
@@ -185,7 +186,7 @@ pub fn render(d: &Digest) -> Message {
             l.why
         );
         if let Some(a) = &l.action {
-            s.push_str(&format!(" [{a}]"));
+            s.push_str(&format!(" [{}]", crate::commands::format_action_line(a)));
         }
         s
     };
@@ -260,10 +261,18 @@ pub fn log_alerts(texts: &[String]) {
     }
     let now = chrono::Utc::now().timestamp();
     let _ = crate::store::update::<AlertLog, ()>(ALERT_LOG, |log| {
-        log.entries.extend(texts.iter().map(|t| Logged {
-            ts: now,
-            text: t.clone(),
-        }));
+        for t in texts {
+            if !log
+                .entries
+                .iter()
+                .any(|e| e.text == *t && (now - e.ts).abs() < 86_400)
+            {
+                log.entries.push(Logged {
+                    ts: now,
+                    text: t.clone(),
+                });
+            }
+        }
         if log.entries.len() > MAX_LOGGED {
             let drop = log.entries.len() - MAX_LOGGED;
             log.entries.drain(..drop);
@@ -309,7 +318,16 @@ mod tests {
                 change_pct: Some(-4.1),
                 pnl: Some(-6_400.0),
                 why: "unexplained — 3.2σ move, no news or filing found".into(),
-                action: Some("HOLD".into()),
+                action: Some({
+                    let mut a = crate::action::Action::undecided("INR");
+                    a.kind = crate::action::Kind::Hold;
+                    a.label = "HOLD";
+                    a.invalidation_price = Some(2950.0);
+                    a.review_by = Some("2027-02-18".into());
+                    a.reasons =
+                        vec!["Composite score 58: no exit, trim or add rule triggered".into()];
+                    a
+                }),
             }],
             backdrop: vec!["NIFTY 50 +0.4%".into()],
             signals: vec![Signal {
@@ -345,7 +363,7 @@ mod tests {
             "Market: NIFTY 50 +0.4%",
             "Top contributors\n• ITC.NS +1.2% +₹1,100 — with the market (+0.4%)",
             "Top detractors\n• TCS.NS -4.1% −₹6,400 — unexplained",
-            "[HOLD]",
+            "[HOLD (invalid below ₹2950.00)",
             "Monitor\n• TCS.NS at a new 52-week low",
             "Alerts triggered\n• INFY.NS below 1,400.00",
             "Notices\n• Lot turns long-term soon: HDFCBANK.NS",

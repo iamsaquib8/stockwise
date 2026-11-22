@@ -1901,6 +1901,61 @@ impl Portfolio {
         self.sync_account(symbol, qty, avg, source, account_of_source(source))
     }
 
+    /// Add a missing buy of `broker_qty` minus the account's existing quantity
+    /// in `symbol`, using the same account scope as [`Portfolio::scope`].
+    /// Never reduces holdings.
+    pub fn add_missing_buy(
+        &mut self,
+        symbol: &str,
+        broker_qty: f64,
+        avg: f64,
+        source: &str,
+    ) -> Option<f64> {
+        let account = account_of_source(source);
+        let scope = self.scope(symbol, account);
+        let mut lot = Lot::new(broker_qty, avg, today(), source);
+        lot.date_estimated = true;
+        lot.account = account.map(str::to_string);
+        let Some(h) = self.holding_mut(symbol) else {
+            if broker_qty > EPS {
+                self.add_lot(symbol, lot);
+                return Some(broker_qty);
+            }
+            return None;
+        };
+        if let (Some(a), true) = (account, scope.claim) {
+            for l in h.lots.iter_mut().filter(|l| l.account_key().is_none()) {
+                l.account = Some(a.to_string());
+            }
+        }
+        let (shares, cost) = h
+            .lots
+            .iter()
+            .filter(|l| scope.lot(l))
+            .fold((0.0, 0.0), |(q, c), l| (q + l.qty, c + l.cost()));
+        let diff = broker_qty - shares;
+        if diff <= EPS {
+            return None;
+        }
+        let implied = (broker_qty * avg - cost) / diff;
+        lot.qty = diff;
+        if implied.is_finite() && implied > 0.0 {
+            lot.price = implied;
+        }
+        h.lots.push(lot);
+        h.recompute();
+        Some(diff)
+    }
+
+    /// The open lots of `symbol` in `account`'s scope (see [`Scope`]).
+    pub(crate) fn lots_in_account(&self, symbol: &str, account: Option<&str>) -> Vec<Lot> {
+        let Some(h) = self.holding(symbol) else {
+            return Vec::new();
+        };
+        let scope = self.scope(symbol, account);
+        h.lots.iter().filter(|l| scope.lot(l)).cloned().collect()
+    }
+
     fn sync_account(
         &mut self,
         symbol: &str,

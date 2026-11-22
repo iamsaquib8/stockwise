@@ -22,8 +22,13 @@ pub async fn cmd_ipo(
     fmt: Format,
 ) -> Result<()> {
     if rhp_template {
-        let sym = query.unwrap_or("SYMBOL").trim().to_ascii_uppercase();
-        if let Some(p) = ipo::rhp_path(&sym) {
+        let raw_sym = query.unwrap_or("SYMBOL").trim().to_ascii_uppercase();
+        let sym = ipo::yahoo_symbol(&raw_sym);
+        let base = sym
+            .strip_suffix(".NS")
+            .or_else(|| sym.strip_suffix(".BO"))
+            .unwrap_or(&sym);
+        if let Some(p) = ipo::rhp_path(base) {
             eprintln!("Save as {}", p.display());
         }
         print!("{}", iv::RHP_TEMPLATE);
@@ -55,18 +60,24 @@ pub async fn cmd_ipo(
             if fmt == Format::Json {
                 let mut v = serde_json::to_value(&analysis)?;
                 if let Some(a) = stock_action {
-                    v["stock_action"] = serde_json::Value::String(a);
+                    v["stock_action"] = serde_json::to_value(&a)?;
                 }
                 return output::print_json(&v);
             }
-            print_ipo_analysis(&analysis, stock_action.as_deref());
+            print_ipo_analysis(
+                &analysis,
+                stock_action
+                    .as_ref()
+                    .map(crate::verdict::render_action)
+                    .as_deref(),
+            );
         }
     }
     Ok(())
 }
 
-/// The stock action engine's line for an issue that already trades.
-async fn listed_action(client: &YahooClient, symbol: &str) -> Option<String> {
+/// The stock action engine's structured decision for an issue that already trades.
+async fn listed_action(client: &YahooClient, symbol: &str) -> Option<crate::action::Action> {
     let sym = ipo::yahoo_symbol(symbol);
     let q = client
         .get_quote(&[sym.as_str()])
@@ -76,7 +87,7 @@ async fn listed_action(client: &YahooClient, symbol: &str) -> Option<String> {
         .next()?;
     let notes = crate::commands::load_notes();
     let profile = crate::config::effective_profile();
-    Some(crate::commands::action_line(
+    Some(crate::commands::row_action(
         &q,
         None,
         None,
@@ -1001,8 +1012,12 @@ async fn fill_listing_prices(
             // A first bar days after the listing date means the symbol
             // changed or Yahoo lacks the day: leave it out.
             Some((d, o, c)) if (d - rows[i].listing_date).num_days() <= 3 => {
-                rows[i].listing_open = o;
-                rows[i].listing_close = c;
+                if rows[i].listing_open <= 0.0 {
+                    rows[i].listing_open = o;
+                }
+                if rows[i].listing_close <= 0.0 {
+                    rows[i].listing_close = c;
+                }
             }
             _ => skipped.push(format!("{}: no listing-day bar on Yahoo", rows[i].symbol)),
         }
@@ -1011,6 +1026,7 @@ async fn fill_listing_prices(
 
 pub async fn cmd_ipo_calibrate(opts: CalibrateOptions, fmt: Format) -> Result<()> {
     let client = YahooClient::new().await?;
+    let today = ist_today();
     let (mut rows, mut skipped) = match &opts.csv {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -1027,18 +1043,30 @@ pub async fn cmd_ipo_calibrate(opts: CalibrateOptions, fmt: Format) -> Result<()
         }
         None => calibration_rows_live(&client, opts.since).await?,
     };
+    let before = rows.len();
+    rows.retain(|s| s.listing_date >= opts.since && s.listing_date < today);
+    let out_of_window = before.saturating_sub(rows.len());
+    if out_of_window > 0 {
+        skipped.push(format!(
+            "{out_of_window} row(s) outside completed-listing window ({}..<{today})",
+            opts.since
+        ));
+    }
     if opts.csv.is_some() {
         fill_listing_prices(&client, &mut rows, &mut skipped).await;
     }
-    rows.retain(|s| s.listing_date >= opts.since);
-    let today = ist_today();
     let model = crate::ipo_model::fit(&rows, true, today).map_err(|e| anyhow::anyhow!("{e}"))?;
     let ols = crate::ipo_model::fit(&rows, false, today).ok();
     let dataset = crate::ipo_model::samples_to_csv(&rows);
     if let Ok(dir) = crate::store::data_dir() {
         let path = dir.join("ipo_calibration.csv");
-        if std::fs::write(&path, &dataset).is_ok() {
-            eprintln!("  dataset: {}", path.display());
+        let same_as_input = opts.csv.as_ref().is_some_and(|p| p == &path);
+        if !same_as_input {
+            if let Err(e) = std::fs::write(&path, &dataset) {
+                eprintln!("  warning: could not write {}: {e}", path.display());
+            } else {
+                eprintln!("  dataset: {}", path.display());
+            }
         }
     }
     if opts.save {
@@ -1118,13 +1146,19 @@ mod tests {
     #[test]
     fn board_and_analysis_print() {
         let mut board = ipo::fixture_board(BoardFilter::All, 10);
+        let mut a_sample = crate::action::Action::undecided("INR");
+        a_sample.reasons = vec!["Listed issue — see full stock verdict".to_string()];
+        let rendered = crate::verdict::render_action(&a_sample);
+        crate::action::testing::assert_action_well_formed(&rendered);
         for (symbol, capital) in [("BCSSL", Some(250_000.0)), ("MAXENGS", None)] {
             let a = ipo::fixture_analysis(symbol, None, capital).unwrap();
-            print_ipo_analysis(&a, Some("HOLD — test"));
+            print_ipo_analysis(&a, Some(&rendered));
+            crate::action::testing::assert_action_well_formed(&serde_json::to_string(&a).unwrap());
             if let Some(row) = board.ongoing.iter_mut().find(|r| r.symbol == symbol) {
                 row.verdict = Some(a.verdict.clone());
             }
         }
         print_ipo_board(&board);
+        crate::action::testing::assert_action_well_formed(&serde_json::to_string(&board).unwrap());
     }
 }

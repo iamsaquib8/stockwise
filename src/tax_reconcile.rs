@@ -492,9 +492,16 @@ pub fn parse_file(bytes: &[u8], name: &str) -> Result<ParsedPnl> {
         parse_rows(&rows)
     };
     if parsed.rows.is_empty() {
+        if parsed.skipped.is_empty() {
+            bail!(
+                "No sales found in {name}: expected a tax P&L with columns such as Symbol, ISIN, \
+                 Quantity, Buy Date, Sell Date, Buy Value, Sell Value and Profit"
+            );
+        }
         bail!(
-            "No sales found in {name}: expected a tax P&L with columns such as Symbol, ISIN, \
-             Quantity, Buy Date, Sell Date, Buy Value, Sell Value and Profit"
+            "No usable sales found in {name} ({} skipped): {}",
+            parsed.skipped.len(),
+            parsed.skipped.join("; ")
         );
     }
     Ok(parsed)
@@ -740,7 +747,8 @@ pub fn reconcile(
     let mut ix = Vec::new();
     for o in ours {
         ot.add(Some(o.term), o.gain);
-        ix.push((entry(&bare_symbol(&o.symbol)), true, Some(o.term), o.gain));
+        let sym_key = bare_symbol(&o.symbol);
+        ix.push((entry(&sym_key), true, Some(o.term), o.gain));
     }
     for (j, t) in theirs.iter().enumerate() {
         tt.add(t.term, t.gain());
@@ -761,7 +769,12 @@ pub fn reconcile(
     let reason_ix: Vec<(usize, Reason)> = matched
         .iter()
         .flat_map(|m| {
-            let i = entry(&bare_symbol(&m.symbol));
+            let canonical = ours
+                .iter()
+                .find(|o| bare_symbol(&o.symbol) == bare_symbol(&m.symbol))
+                .map(|o| bare_symbol(&o.symbol))
+                .unwrap_or_else(|| bare_symbol(&m.symbol));
+            let i = entry(&canonical);
             m.reasons.iter().map(move |r| (i, *r))
         })
         .collect();

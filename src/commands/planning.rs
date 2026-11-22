@@ -2648,21 +2648,39 @@ pub(crate) async fn linked_value(
     strict: bool,
 ) -> Result<Linked> {
     let portfolio = Portfolio::load()?;
+    linked_value_with(src, &portfolio, symbols, market, strict, false).await
+}
+
+async fn linked_value_with(
+    src: Option<&impl views::DataSource>,
+    portfolio: &Portfolio,
+    symbols: &[String],
+    market: Market,
+    strict: bool,
+    exact: bool,
+) -> Result<Linked> {
     if strict && portfolio.holdings.is_empty() {
         bail!("The portfolio is empty: add holdings with `stockwise portfolio add`");
     }
     let mut chosen = portfolio.clone();
+    let matches_symbol = |h: &pf::Holding, s: &str| {
+        if exact {
+            h.symbol.eq_ignore_ascii_case(s.trim())
+        } else {
+            names_holding(h, s)
+        }
+    };
     if !symbols.is_empty() {
         if strict {
             for s in symbols {
-                if !portfolio.holdings.iter().any(|h| names_holding(h, s)) {
+                if !portfolio.holdings.iter().any(|h| matches_symbol(h, s)) {
                     bail!("No holding named `{s}` in the portfolio");
                 }
             }
         }
         chosen
             .holdings
-            .retain(|h| symbols.iter().any(|s| names_holding(h, s)));
+            .retain(|h| symbols.iter().any(|s| matches_symbol(h, s)));
     }
     if chosen.holdings.is_empty() {
         return Ok(Linked {
@@ -2783,7 +2801,7 @@ pub(crate) async fn goal_rows(
     // One goal per holding: a holding linked to several goals counts
     // towards the first only.
     // Links resolved to the holdings they select, as `linked_value` does.
-    let held = Portfolio::load().unwrap_or_default();
+    let held = Portfolio::load()?;
     let allocation = store.allocate_by(|link| goal_link_holdings(&held, link));
     for (g, (holdings, dropped)) in store.goals.iter().zip(allocation) {
         for (h, first) in &dropped {
@@ -2798,7 +2816,7 @@ pub(crate) async fn goal_rows(
         let (linked, valued_at) = if holdings.is_empty() {
             (0.0, "none")
         } else {
-            let l = linked_value(src, &holdings, market, false).await?;
+            let l = linked_value_with(src, &held, &holdings, market, false, true).await?;
             (l.value, if l.live { "market" } else { "cost" })
         };
         let infl = g.inflation_pct.unwrap_or(0.0);
@@ -2864,7 +2882,7 @@ pub fn cmd_goal_add(a: GoalAdd) -> Result<()> {
         return_pct: a.return_pct,
         created: today.to_string(),
     };
-    let portfolio = Portfolio::load().unwrap_or_default();
+    let portfolio = Portfolio::load()?;
     let resolve = |link: &str| goal_link_holdings(&portfolio, link);
     store::update(GOALS_FILE, |s: &mut goals::GoalStore| {
         if s.find(&saved.name).is_some() {
@@ -3380,6 +3398,33 @@ mod tests {
         let alloc = store.allocate_by(resolve);
         assert_eq!(alloc[1].0, vec!["TCS.BO".to_string()]);
         assert_eq!(alloc[1].1, vec![("VOD.L".to_string(), "a".to_string())]);
+
+        // Partially overlapping link keeps the unclaimed listing (TCS.BO)
+        // and values only that retained holding via exact matching.
+        let mut store_partial = goals::GoalStore::default();
+        store_partial.goals.push(goal("a", &["TCS.NS"]));
+        store_partial.goals.push(goal("b", &["TCS"]));
+        let alloc_partial = store_partial.allocate_by(resolve);
+        assert_eq!(alloc_partial[1].0, vec!["TCS.BO".to_string()]);
+        assert_eq!(
+            alloc_partial[1].1,
+            vec![("TCS.NS".to_string(), "a".to_string())]
+        );
+        let mut p_cost = Portfolio::default();
+        p_cost.add_lot("TCS.NS", pf::Lot::new(1.0, 100.0, "2024-01-02", "manual"));
+        p_cost.add_lot("TCS.BO", pf::Lot::new(2.0, 200.0, "2024-01-02", "manual"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let val = rt
+            .block_on(linked_value_with(
+                None::<&YahooClient>,
+                &p_cost,
+                &alloc_partial[1].0,
+                Market::In,
+                false,
+                true,
+            ))
+            .unwrap();
+        assert_eq!(val.value, 400.0);
     }
 
     #[test]

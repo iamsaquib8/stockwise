@@ -171,7 +171,8 @@ impl EtfKind {
             }
             Self::Liquid | Self::Debt => {
                 "debt ETF: units bought from 1 Apr 2023 are taxed at your slab rate however long \
-                 you hold them (Sec. 50AA); older units at 12.5% after 12 months"
+                 you hold them (Sec. 50AA); older units sold from 23 Jul 2024 at 12.5% after \
+                 24 months (12 months if sold before 23 Jul 2024)"
             }
         }
     }
@@ -362,12 +363,11 @@ pub fn parse_nse_etf_list(text: &str) -> Vec<(String, String, String)> {
         .filter_map(|l| {
             let f = crate::brokers::csv_fields(l);
             let s = f.get(sym)?.trim().to_ascii_uppercase();
+            let u = f.get(under)?.trim().to_string();
             (!s.is_empty()).then(|| {
                 (
                     s,
-                    f.get(under)
-                        .map(|u| u.trim().to_string())
-                        .unwrap_or_default(),
+                    u,
                     name.and_then(|n| f.get(n))
                         .map(|n| n.trim().to_string())
                         .unwrap_or_default(),

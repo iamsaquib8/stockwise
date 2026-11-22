@@ -144,12 +144,15 @@ impl WatchState {
     }
 
     /// Move entries kept under the pre-id key (symbol, condition, number,
-    /// date) to the alert's id, so upgrading re-sends nothing.
+    /// date) to every matching alert's id, so upgrading re-sends nothing.
     fn migrate(&mut self, alerts: &[crate::alerts::Alert]) {
         for a in alerts {
-            if let Some(f) = self.fired.remove(&a.legacy_key()) {
+            if let Some(f) = self.fired.get(&a.legacy_key()).cloned() {
                 self.fired.entry(a.id.clone()).or_insert(f);
             }
+        }
+        for a in alerts {
+            self.fired.remove(&a.legacy_key());
         }
     }
 
@@ -336,28 +339,32 @@ async fn check_alerts(
         let reading = alert.evaluate_now(&d);
         // Crosses on sessions completed since the last check (the worker
         // was off, the laptop asleep) still notify, once.
-        let mut caught_up: Option<NaiveDate> = None;
+        let mut caught_up: Option<(NaiveDate, crate::alerts::Reading)> = None;
         let mut prev_checked_through = None;
         if alert.condition.is_cross() {
             prev_checked_through = Some(state.checked_through.get(&key).copied());
             let last = crate::alerts::Alert::last_completed_session(&d);
             if let Some(since) = state.checked_through.get(&key).copied()
-                && reading.is_none_or(|r| !r.hit)
-                && let Some((day, _)) = alert.missed_cross(&d, since, MAX_CATCH_UP)
+                && let Some((day, missed)) = alert.missed_cross(&d, since, MAX_CATCH_UP)
                 && Some(day) != d.today
                 // Already announced live on that session's bar.
                 && state.fired.get(&key).is_none_or(|f| f.last < day)
             {
-                caught_up = Some(day);
+                caught_up = Some((day, missed));
             }
             if let Some(last) = last {
                 state.checked_through.insert(key.clone(), last);
             }
         }
+        let caught_up_day = caught_up.map(|(day, _)| day);
         let reading = match (reading, caught_up) {
-            (Some(r), Some(_)) => Some(crate::alerts::Reading { hit: true, ..r }),
-            (r, _) => r,
+            (_, Some((_, missed))) => Some(crate::alerts::Reading {
+                hit: true,
+                ..missed
+            }),
+            (r, None) => r,
         };
+        let caught_up = caught_up_day;
         let Some(reading) = reading else {
             // Past results with the next date not known yet: re-arm, so the
             // next quarter's date notifies again.
@@ -642,16 +649,18 @@ async fn report_triggers(
             reading
         );
     }
-    crate::digest::log_alerts(&triggers.iter().map(Trigger::text).collect::<Vec<_>>());
-    if let Some(msg) = trigger_message(triggers)
-        && !notifier
+    if let Some(msg) = trigger_message(triggers) {
+        if notifier
             .send_logged(&msg.with_priority(crate::notify::Priority::High))
             .await
-    {
-        for t in triggers {
-            state.undo_trigger(t);
+        {
+            crate::digest::log_alerts(&triggers.iter().map(Trigger::text).collect::<Vec<_>>());
+        } else {
+            for t in triggers {
+                state.undo_trigger(t);
+            }
+            eprintln!("  ! Not delivered — will try again at the next check.");
         }
-        eprintln!("  ! Not delivered — will try again at the next check.");
     }
 }
 
@@ -721,10 +730,13 @@ pub async fn cmd_notify(action: &str) -> Result<()> {
 
     println!();
     let results = notifier
-        .send(&Message::new(
-            "StockWise test notification",
-            "If you can read this, StockWise can reach you here.",
-        ))
+        .send(
+            &Message::new(
+                "StockWise test notification",
+                "If you can read this, StockWise can reach you here.",
+            )
+            .with_priority(crate::notify::Priority::High),
+        )
         .await;
     let mut failed = 0;
     for (channel, result) in &results {

@@ -131,7 +131,8 @@ pub fn parse_nse_pit(v: &Value) -> Vec<Trade> {
                 (true, true) => "—".to_string(),
             };
             let shares = nse_num(t, "secAcq");
-            let value = nse_num(t, "secVal");
+            let value = nse_num(t, "secVal").filter(|v| *v > 0.0);
+            let price = per_share(value, shares);
             Some(Trade {
                 date,
                 name: text(t, "acqName").unwrap_or_else(|| "—".into()),
@@ -140,7 +141,7 @@ pub fn parse_nse_pit(v: &Value) -> Vec<Trade> {
                 side,
                 open_market,
                 shares,
-                price: per_share(value, shares),
+                price,
                 value,
                 source: Source::NsePit,
             })
@@ -298,11 +299,14 @@ fn flag(s: &str, name: &str) -> bool {
     field(s, name).is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// What a Form 4 transaction code means.
+/// What a Form 4 transaction code means. SEC codes `P` and `S` cover both
+/// open-market and private purchases/sales, so they use venue-neutral labels
+/// and are not counted as open-market unless the filing establishes an
+/// exchange execution.
 fn form4_action(code: &str, acquired: bool) -> (String, bool) {
     let (label, open_market) = match code {
-        "P" => ("Buy (open market)", true),
-        "S" => ("Sell (open market)", true),
+        "P" => ("Buy", false),
+        "S" => ("Sell", false),
         "A" => ("Award / grant", false),
         "M" => ("Option exercise", false),
         "X" => ("Option exercise", false),
@@ -319,6 +323,54 @@ fn form4_action(code: &str, acquired: bool) -> (String, bool) {
     } else {
         (label.to_string(), open_market)
     }
+}
+
+/// Whether a Form 4 transaction block's referenced footnotes or filing
+/// remarks establish that the trade occurred on an exchange / open market.
+fn form4_is_exchange_trade(xml: &str, tx_block: &str) -> bool {
+    let mut notes = String::new();
+    let mut rest = tx_block;
+    while let Some(pos) = rest.find("<footnoteId") {
+        let after = &rest[pos + "<footnoteId".len()..];
+        let Some(end) = after.find('>') else { break };
+        let attrs = &after[..end];
+        if let Some(id_pos) = attrs.find("id=\"") {
+            let id_rest = &attrs[id_pos + 4..];
+            if let Some(q) = id_rest.find('"') {
+                let id = &id_rest[..q];
+                let needle = format!("<footnote id=\"{id}\"");
+                if let Some(fpos) = xml.find(&needle) {
+                    let fafter = &xml[fpos + needle.len()..];
+                    if let Some(fstart) = fafter.find('>') {
+                        let fbody = &fafter[fstart + 1..];
+                        if let Some(fend) = fbody.find("</footnote>") {
+                            notes.push(' ');
+                            notes.push_str(&unescape(&fbody[..fend]));
+                        }
+                    }
+                }
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    if let Some(r) = tag(xml, "remarks") {
+        notes.push(' ');
+        notes.push_str(&unescape(r));
+    }
+    let lower = notes.to_lowercase();
+    if lower.contains("private") || lower.contains("off-market") || lower.contains("off market") {
+        return false;
+    }
+    [
+        "open market",
+        "open-market",
+        "on the exchange",
+        "stock exchange",
+        "nasdaq",
+        "nyse",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
 }
 
 /// The non-derivative transactions (shares, not options) of one Form 4
@@ -358,11 +410,17 @@ pub fn parse_form4(xml: &str) -> Vec<Trade> {
                 .and_then(|c| field(c, "transactionCode"))
                 .unwrap_or_default();
             let acquired = field(t, "transactionAcquiredDisposedCode").as_deref() == Some("A");
-            let (action, open_market) = form4_action(&code, acquired);
-            let shares = field(t, "transactionShares").and_then(|v| v.parse::<f64>().ok());
+            let (mut action, mut open_market) = form4_action(&code, acquired);
+            if matches!(code.as_str(), "P" | "S") && form4_is_exchange_trade(xml, t) {
+                open_market = true;
+                action = format!("{action} (open market)");
+            }
+            let shares = field(t, "transactionShares")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|x| x.is_finite());
             let price = field(t, "transactionPricePerShare")
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|p| *p > 0.0);
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|p| p.is_finite() && *p > 0.0);
             let value = match (shares, price) {
                 (Some(s), Some(p)) => Some(s * p),
                 _ => None,
@@ -396,6 +454,43 @@ pub fn parse_form4(xml: &str) -> Vec<Trade> {
 /// Form 4 filings read per run.
 const FORM4_FILINGS: usize = 12;
 
+/// Combine Form 4 XML download results: preserve trades from successful
+/// downloads, return a coverage warning when some downloads failed, and
+/// return an error if all downloads failed (while an empty filing or a
+/// filing with no share transactions succeeds cleanly).
+pub fn collect_form4_downloads<I>(symbol: &str, results: I) -> Result<(Vec<Trade>, Option<String>)>
+where
+    I: IntoIterator<Item = Result<String>>,
+{
+    let mut trades = Vec::new();
+    let mut loaded = 0usize;
+    let mut failed = 0usize;
+    let mut last_err: Option<anyhow::Error> = None;
+    for res in results {
+        match res {
+            Ok(xml) => {
+                loaded += 1;
+                trades.extend(parse_form4(&xml));
+            }
+            Err(e) => {
+                failed += 1;
+                last_err = Some(e);
+            }
+        }
+    }
+    let total = loaded + failed;
+    if total > 0 && loaded == 0 {
+        return Err(last_err.unwrap_or_else(|| anyhow!("Form 4 download failed")));
+    }
+    sort_newest_first(&mut trades);
+    let warning = (failed > 0).then(|| {
+        format!(
+            "SEC Form 4 {symbol}: {failed} of {total} filing download(s) failed; showing partial results from {loaded} filing(s)"
+        )
+    });
+    Ok((trades, warning))
+}
+
 /// The share trades in a US stock's latest Form 4 filings. `Ok(None)` for
 /// a symbol SEC doesn't list.
 pub async fn sec_trades(client: &YahooClient, symbol: &str) -> Result<Option<Vec<Trade>>> {
@@ -412,21 +507,23 @@ pub async fn sec_trades(client: &YahooClient, symbol: &str) -> Result<Option<Vec
     .await?;
     let v: Value =
         serde_json::from_str(&body).map_err(|_| anyhow!("EDGAR filings list is not JSON"))?;
-    let mut trades = Vec::new();
-    for f in form4_filings(&v, FORM4_FILINGS) {
-        // A filing that fails to load is skipped; the rest still count.
-        if let Ok(xml) = edgar::get(
-            client,
-            &f.url(cik),
-            Duration::from_secs(24 * 3600),
-            "Form 4",
-        )
-        .await
-        {
-            trades.extend(parse_form4(&xml));
-        }
+    let filings = form4_filings(&v, FORM4_FILINGS);
+    let mut downloads = Vec::with_capacity(filings.len());
+    for f in filings {
+        downloads.push(
+            edgar::get(
+                client,
+                &f.url(cik),
+                Duration::from_secs(24 * 3600),
+                "Form 4",
+            )
+            .await,
+        );
     }
-    sort_newest_first(&mut trades);
+    let (trades, warning) = collect_form4_downloads(symbol, downloads)?;
+    if let Some(w) = warning {
+        crate::netlog::note(crate::netlog::Level::Warn, &w);
+    }
     Ok(Some(trades))
 }
 
@@ -457,6 +554,7 @@ pub fn parse_yahoo(summary: &Value) -> Vec<Trade> {
             };
             let shares = crate::research::raw(t, "shares");
             let value = crate::research::raw(t, "value").filter(|v| *v > 0.0);
+            let price = per_share(value, shares);
             Some(Trade {
                 date,
                 name: text(t, "filerName").unwrap_or_else(|| "—".into()),
@@ -465,7 +563,7 @@ pub fn parse_yahoo(summary: &Value) -> Vec<Trade> {
                 side,
                 open_market,
                 shares,
-                price: per_share(value, shares),
+                price,
                 value,
                 source: Source::Yahoo,
             })
@@ -482,20 +580,75 @@ pub async fn yahoo_trades(client: &YahooClient, symbol: &str) -> Result<Vec<Trad
     Ok(parse_yahoo(&v))
 }
 
-/// Open-market buys and sells: (count, value) each.
-pub fn open_market_totals(trades: &[Trade]) -> ((usize, f64), (usize, f64)) {
-    let mut buys = (0, 0.0);
-    let mut sells = (0, 0.0);
+/// Exact minor-unit summary of open-market trades on one side (acquisitions or
+/// disposals), tracking whether any counted trade lacked a reported value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenMarketSideTotal {
+    pub count: usize,
+    pub value_minor: i64,
+    /// True when at least one counted open-market trade had no reported value.
+    pub incomplete: bool,
+}
+
+impl OpenMarketSideTotal {
+    /// Complete total when every counted trade had a value, or `None` when
+    /// one or more values were missing (so `value_minor` is only a known subtotal).
+    pub fn complete_value(&self) -> Option<f64> {
+        (!self.incomplete).then(|| crate::tax::paise::to_rupees(self.value_minor))
+    }
+
+    /// Format the side summary, distinguishing an incomplete subtotal from a
+    /// complete total.
+    pub fn format_summary(&self, label: &str, currency: Option<&str>) -> String {
+        let v = crate::tax::paise::to_rupees(self.value_minor);
+        if !self.incomplete {
+            format!(
+                "{} {label} ({})",
+                self.count,
+                crate::display::format_large_number(v, currency)
+            )
+        } else if self.value_minor == 0 {
+            format!("{} {label} (value unavailable)", self.count)
+        } else {
+            format!(
+                "{} {label} ({}+ incomplete subtotal)",
+                self.count,
+                crate::display::format_large_number(v, currency)
+            )
+        }
+    }
+}
+
+/// Open-market buys and sells with completeness tracking.
+pub fn open_market_summary(trades: &[Trade]) -> (OpenMarketSideTotal, OpenMarketSideTotal) {
+    let mut buys = OpenMarketSideTotal::default();
+    let mut sells = OpenMarketSideTotal::default();
     for t in trades.iter().filter(|t| t.open_market) {
         let slot = match t.side {
             Side::Acquired => &mut buys,
             Side::Disposed => &mut sells,
             Side::Other => continue,
         };
-        slot.0 += 1;
-        slot.1 += t.value.unwrap_or(0.0);
+        slot.count += 1;
+        match t.value.filter(|v| v.is_finite()) {
+            Some(v) => {
+                slot.value_minor = slot
+                    .value_minor
+                    .saturating_add(crate::tax::paise::from_rupees(v))
+            }
+            None => slot.incomplete = true,
+        }
     }
     (buys, sells)
+}
+
+/// Open-market buys and sells: (count, value) each.
+pub fn open_market_totals(trades: &[Trade]) -> ((usize, f64), (usize, f64)) {
+    let (buys, sells) = open_market_summary(trades);
+    (
+        (buys.count, crate::tax::paise::to_rupees(buys.value_minor)),
+        (sells.count, crate::tax::paise::to_rupees(sells.value_minor)),
+    )
 }
 
 #[cfg(test)]
@@ -567,10 +720,12 @@ mod tests {
                 .all(|x| x.name == "DOE JANE" && x.source == Source::SecForm4)
         );
         assert_eq!(t[0].role, "Director, Chief Financial Officer");
-        let sale = t.iter().find(|x| x.action == "Sell (open market)").unwrap();
+        // Code S without exchange evidence in footnotes/remarks is venue-neutral
+        // and not assumed to be an open-market exchange trade.
+        let sale = t.iter().find(|x| x.action == "Sell").unwrap();
         assert_eq!(sale.date, d("2026-11-14"));
         assert_eq!(sale.side, Side::Disposed);
-        assert!(sale.open_market);
+        assert!(!sale.open_market);
         assert_eq!(sale.shares, Some(1_200.0));
         assert_eq!(sale.price, Some(210.5));
         assert_eq!(sale.value, Some(252_600.0));
@@ -582,8 +737,73 @@ mod tests {
         let tax = t.iter().find(|x| x.action == "Tax withholding").unwrap();
         assert!(!tax.open_market);
         let ((nb, _), (ns, vs)) = open_market_totals(&t);
+        assert_eq!((nb, ns), (0, 0));
+        assert_eq!(vs, 0.0);
+
+        // When the footnote establishes an open-market exchange execution,
+        // it is labeled and counted as an open-market trade.
+        let exchange_xml = include_str!("fixtures/edgar_form4.xml").replace(
+            "Weighted average price; sales between $210.00 and $211.00.",
+            "Open market sales executed on NASDAQ between $210.00 and $211.00.",
+        );
+        let t_ex = parse_form4(&exchange_xml);
+        let ex_sale = t_ex
+            .iter()
+            .find(|x| x.action == "Sell (open market)")
+            .unwrap();
+        assert!(ex_sale.open_market);
+        let ((nb, _), (ns, vs)) = open_market_totals(&t_ex);
         assert_eq!((nb, ns), (0, 1));
         assert_eq!(vs, 252_600.0);
+    }
+
+    #[test]
+    fn form4_download_collection_distinguishes_partial_empty_and_all_failed() {
+        let empty_xml = "<ownershipDocument></ownershipDocument>".to_string();
+        let (trades, warn) = collect_form4_downloads("AAPL", vec![Ok(empty_xml.clone())]).unwrap();
+        assert!(trades.is_empty());
+        assert!(warn.is_none());
+
+        let (trades, warn) = collect_form4_downloads(
+            "AAPL",
+            vec![
+                Ok(include_str!("fixtures/edgar_form4.xml").to_string()),
+                Err(anyhow!("HTTP 403")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(trades.len(), 3);
+        assert!(warn.as_deref().unwrap().contains("1 of 2"));
+
+        let err = collect_form4_downloads(
+            "AAPL",
+            vec![Err(anyhow!("HTTP 403")), Err(anyhow!("HTTP 429"))],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("HTTP"));
+    }
+
+    #[test]
+    fn open_market_summary_marks_missing_values_as_incomplete() {
+        let v = serde_json::json!({"insiderTransactions": {"transactions": [
+            {"filerName": "ROE RICHARD", "filerRelation": "Officer", "transactionText": "Sale at price 100.00 per share.",
+             "startDate": {"raw": 1_763_337_600_i64}, "shares": {"raw": 10.0}, "value": {"raw": 1000.0}},
+            {"filerName": "ROE RICHARD", "filerRelation": "Officer", "transactionText": "Sale at market.",
+             "startDate": {"raw": 1_763_424_000_i64}, "shares": {"raw": 5.0}}
+        ]}});
+        let trades = parse_yahoo(&v);
+        let (buys, sells) = open_market_summary(&trades);
+        assert_eq!(buys.count, 0);
+        assert!(!buys.incomplete);
+        assert_eq!(sells.count, 2);
+        assert!(sells.incomplete);
+        assert_eq!(sells.complete_value(), None);
+        assert_eq!(sells.value_minor, crate::tax::paise::from_rupees(1000.0));
+        assert!(
+            sells
+                .format_summary("disposals", Some("USD"))
+                .contains("incomplete subtotal")
+        );
     }
 
     #[test]

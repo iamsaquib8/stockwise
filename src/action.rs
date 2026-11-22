@@ -301,6 +301,12 @@ fn size_text(a: &Action, s: &SizeHint) -> String {
         format!("{n} {word}")
     };
     match (a.kind, s.shares) {
+        (Kind::Trim, Some(n)) if s.limited_by == "direct_holding_only" => format!(
+            "Size: sell all {} directly held; fund look-through keeps combined weight at or above the {:.1}% cap ({})",
+            shares(n),
+            s.max_weight_pct,
+            s.limited_by
+        ),
         (Kind::Trim, Some(n)) => format!(
             "Size: sell about {} to get back to {:.1}% of the portfolio ({})",
             shares(n),
@@ -423,7 +429,7 @@ impl Technicals {
                     let mv = (c[i] / prev - 1.0).abs();
                     let at_edge =
                         (h[i] - c[i]).abs() <= c[i] * 0.001 || (c[i] - l[i]).abs() <= c[i] * 0.001;
-                    mv >= 0.0495 && at_edge
+                    mv >= 0.05 - 1e-9 && at_edge
                 })
                 .count();
             self.circuit_hits = Some(hits);
@@ -701,7 +707,20 @@ pub fn invalidation(i: &Inputs) -> Option<f64> {
             }
         }
     };
-    level.filter(|l| l.is_finite() && *l > 0.0)
+    level
+        .filter(|l| l.is_finite() && *l > 0.0)
+        .map(round_price)
+        .filter(|l| *l > 0.0)
+}
+
+fn round_price(v: f64) -> f64 {
+    if v >= 1.0 {
+        (v * 100.0).round() / 100.0
+    } else if v >= 0.01 {
+        (v * 10_000.0).round() / 10_000.0
+    } else {
+        (v * 1_000_000.0).round() / 1_000_000.0
+    }
 }
 
 /// The next review date: the next earnings date if it comes within 90 days,
@@ -752,11 +771,21 @@ fn size_for_entry(i: &Inputs, inv: Option<f64>) -> Option<SizeHint> {
     let inv = inv.filter(|v| *v < price)?;
     let risk_weight = i.risk_per_trade * price / (price - inv);
     let (cap, cap_name) = weight_cap(i);
-    let (w, by) = if risk_weight <= cap {
+    let (mut w, mut by) = if risk_weight <= cap {
         (risk_weight, "risk_per_trade")
     } else {
         (cap, cap_name)
     };
+    if let Some(t) = i
+        .holding
+        .as_ref()
+        .and_then(|h| h.target_weight_pct)
+        .filter(|t| *t > 0.0)
+        && t < w
+    {
+        w = t;
+        by = "target_weight";
+    }
     let held = i.holding.as_ref().map_or(0.0, |h| h.shares);
     let shares = i
         .portfolio_value
@@ -821,6 +850,28 @@ fn finish(i: &Inputs, kind: Kind, mut reasons: Vec<String>, decisive_gate: bool)
     }
     let inv = invalidation(i);
     let shows_level = matches!(kind, Kind::Buy | Kind::Add | Kind::Hold | Kind::Trim);
+    if shows_level && inv.is_none() {
+        let (why, field) = match i.horizon {
+            Horizon::Long => (
+                "No 200-day average or 14-day ATR to set an invalidation price".to_string(),
+                "200-day average",
+            ),
+            Horizon::Short => (
+                "No 14-day ATR or 20-day low to set an invalidation price".to_string(),
+                "price history",
+            ),
+        };
+        if i.holding.is_some() {
+            let mut a = no_call(i, why);
+            if !a.missing.iter().any(|m| m == field) {
+                a.missing.push(field.to_string());
+            }
+            return a;
+        }
+        let mut r = vec![why];
+        r.extend(reasons);
+        return finish(i, Kind::Watch, r, false);
+    }
     let size_hint = match kind {
         Kind::Buy | Kind::Add => size_for_entry(i, inv),
         Kind::Trim => trim_size(i),
@@ -836,11 +887,7 @@ fn finish(i: &Inputs, kind: Kind, mut reasons: Vec<String>, decisive_gate: bool)
         label: kind.label(),
         confidence: confidence(i, kind, decisive_gate),
         reasons,
-        invalidation_price: if shows_level {
-            inv.map(|v| (v * 100.0).round() / 100.0)
-        } else {
-            None
-        },
+        invalidation_price: if shows_level { inv } else { None },
         review_by: Some(review_by(i).to_string()),
         size_hint,
         tax_note,
@@ -857,22 +904,28 @@ fn finish(i: &Inputs, kind: Kind, mut reasons: Vec<String>, decisive_gate: bool)
 fn trim_size(i: &Inputs) -> Option<SizeHint> {
     let h = i.holding.as_ref()?;
     let (cap, by) = weight_cap(i);
-    let w = h.weight_pct?;
-    if w <= cap {
+    let direct = h.weight_pct?;
+    let total = h.lookthrough_weight_pct.map_or(direct, |lw| lw.max(direct));
+    if total <= cap || direct <= 0.0 {
         return Some(SizeHint {
             max_weight_pct: round1(cap),
             shares: None,
             limited_by: by,
         });
     }
-    // Shares to sell so the remaining position is `cap` percent of the
-    // portfolio after the sale (the sale itself shrinks the portfolio only
-    // if the cash leaves it; it stays, so the total is unchanged).
-    let shares = (h.shares * (1.0 - cap / w)).ceil().min(h.shares);
+    // Direct reduction needed to bring combined exposure back to `cap`,
+    // capped at the entire direct holding when indirect fund exposure
+    // alone stays at or above `cap`.
+    let reduce_pct = (total - cap).min(direct);
+    let (shares, limited_by) = if total - direct >= cap {
+        (h.shares.ceil(), "direct_holding_only")
+    } else {
+        ((h.shares * (reduce_pct / direct)).ceil().min(h.shares), by)
+    };
     Some(SizeHint {
         max_weight_pct: round1(cap),
         shares: Some(shares),
-        limited_by: by,
+        limited_by,
     })
 }
 
@@ -1371,8 +1424,8 @@ pub fn own_median_pe(r: &crate::research::Research) -> Option<f64> {
         if idx == 0 || idx > r.prices.close.len() {
             continue;
         }
-        // Only quarter ends inside the history (not before its first bar).
-        if r.prices.dates[0] > end {
+        // Only quarter ends inside the history (not before its first bar or after its last).
+        if r.prices.dates[0] > end || r.prices.dates.last().is_some_and(|last| end > *last) {
             continue;
         }
         let (close_major, _) =
@@ -1420,15 +1473,19 @@ pub fn auditor_flag<'a>(titles: impl IntoIterator<Item = &'a str>) -> Option<Str
     for t in titles {
         let l = t.to_ascii_lowercase();
         let auditor = l.contains("auditor") || l.contains("statutory audit");
-        let bad = l.contains("resign")
-            || l.contains("qualified opinion")
-            || l.contains("adverse opinion")
-            || l.contains("disclaimer of opinion")
-            || l.contains("modified opinion");
-        if (auditor && l.contains("resign"))
-            || (bad && !l.contains("unmodified") && auditor)
-            || l.contains("qualified opinion") && !l.contains("unqualified")
-        {
+        let has_word = |phrase: &str| {
+            l.match_indices(phrase).any(|(idx, _)| {
+                let before = l[..idx].chars().next_back();
+                let after = l[idx + phrase.len()..].chars().next();
+                !before.is_some_and(|c| c.is_ascii_alphanumeric())
+                    && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        };
+        let bad_opinion = has_word("qualified opinion")
+            || has_word("adverse opinion")
+            || has_word("disclaimer of opinion")
+            || (has_word("modified opinion") && !has_word("unmodified"));
+        if (auditor && l.contains("resign")) || bad_opinion {
             return Some(t.trim().to_string());
         }
     }
@@ -1516,9 +1573,9 @@ pub(crate) mod testing {
             a["review_by"].is_string(),
             "action without review date: {a}"
         );
-        if matches!(kind, Kind::Buy | Kind::Add) {
+        if matches!(kind, Kind::Buy | Kind::Add | Kind::Hold | Kind::Trim) {
             assert!(
-                a["invalidation_price"].is_number(),
+                a["invalidation_price"].as_f64().is_some_and(|v| v > 0.0),
                 "{} without invalidation: {a}",
                 kind.label()
             );
@@ -1576,6 +1633,13 @@ pub(crate) mod testing {
                     rest.contains(" confidence") && rest.contains("review by"),
                     "ACTION line not in the engine's format: {line}"
                 );
+                if matches!(kind, Kind::Buy | Kind::Add | Kind::Hold | Kind::Trim) {
+                    assert!(
+                        rest.contains("invalid below "),
+                        "{} ACTION line without invalidation price: {line}",
+                        kind.label()
+                    );
+                }
                 continue;
             }
             // Outside action lines: no free-standing calls. A line that names
@@ -2129,6 +2193,47 @@ mod tests {
         let a = decide(&i);
         assert_eq!(a.kind, Kind::Trim);
         assert!(a.reasons[0].contains("funds hold"));
+        // 12.5% combined vs 10% cap => 2.5% reduction out of 8% direct => ceil(100 * 2.5 / 8.0) = 32 shares.
+        let s = a.size_hint.as_ref().unwrap();
+        assert_eq!(s.shares, Some(32.0));
+        assert_eq!(s.limited_by, "max_stock_weight");
+
+        // When indirect exposure alone is >= cap (2% direct, 12.5% combined => 10.5% indirect),
+        // selling all direct shares is capped by direct_holding_only.
+        i.holding.as_mut().unwrap().weight_pct = Some(2.0);
+        let a2 = decide(&i);
+        let s2 = a2.size_hint.as_ref().unwrap();
+        assert_eq!(s2.shares, Some(100.0));
+        assert_eq!(s2.limited_by, "direct_holding_only");
+        assert!(a2.render("").contains("sell all 100 shares directly held"));
+    }
+
+    #[test]
+    fn add_size_hint_caps_at_portfolio_target_and_missing_level_downgrades() {
+        let mut i = held(good(), 4.0, 900.0);
+        i.portfolio_value = Some(2_500_000.0);
+        i.holding.as_mut().unwrap().target_weight_pct = Some(5.0);
+        let a = decide(&i);
+        assert_eq!(a.kind, Kind::Add);
+        let s = a.size_hint.unwrap();
+        assert_eq!((s.max_weight_pct, s.limited_by), (5.0, "target_weight"));
+        // 5% of 2,500,000 at ₹1,000 = 125 shares total, minus 100 held = 25 shares.
+        assert_eq!(s.shares, Some(25.0));
+
+        // Held stock with no sma200 and no atr14 cannot set an invalidation price -> NO CALL.
+        let mut no_inv = held(good(), 4.0, 900.0);
+        no_inv.tech.sma200 = None;
+        no_inv.tech.atr14 = None;
+        let a_held = decide(&no_inv);
+        assert_eq!(a_held.kind, Kind::NoCall);
+
+        // Short-horizon unheld BUY candidate without atr14 or low20 -> WATCH.
+        let mut short_unheld = good();
+        short_unheld.horizon = Horizon::Short;
+        short_unheld.tech.atr14 = None;
+        short_unheld.tech.low20 = None;
+        let a_unheld = decide(&short_unheld);
+        assert_eq!(a_unheld.kind, Kind::Watch);
     }
 
     #[test]
@@ -2211,12 +2316,30 @@ mod tests {
         }
         let t = Technicals::from_bars(&c, &h, &l, &[1.0; 40]);
         assert_eq!(t.circuit_hits, Some(3));
+
+        // 4.96% moves do not count as 5% circuit hits.
+        let mut c496: Vec<f64> = vec![100.0; 40];
+        let mut h496: Vec<f64> = vec![101.0; 40];
+        for k in [30, 33, 36] {
+            let up = c496[k - 1] * 1.0496;
+            h496[k] = up;
+            for x in c496.iter_mut().skip(k) {
+                *x = up;
+            }
+        }
+        for k in 0..40 {
+            h496[k] = h496[k].max(c496[k]);
+        }
+        let t496 = Technicals::from_bars(&c496, &h496, &l, &[1.0; 40]);
+        assert_eq!(t496.circuit_hits, Some(0));
     }
 
     #[test]
     fn auditor_and_surveillance_detection() {
         assert!(auditor_flag(["Resignation of Statutory Auditors"]).is_some());
         assert!(auditor_flag(["Audit report with qualified opinion"]).is_some());
+        assert!(auditor_flag(["Adverse opinion on standalone financial results"]).is_some());
+        assert!(auditor_flag(["Independent auditor's report with unqualified opinion"]).is_none());
         assert!(auditor_flag(["Unmodified opinion on financial results"]).is_none());
         assert!(auditor_flag(["Board meeting outcome", "Unqualified opinion"]).is_none());
         let w = ["NSE surveillance: ASM (Long Term ASM Stage 1)".to_string()];
@@ -2243,6 +2366,8 @@ mod tests {
         for bad in [
             "STRONG BUY this now",
             "ACTION: BUY now",
+            "ACTION: BUY · high confidence · review by 1 Jan 2027",
+            "ACTION: HOLD · medium confidence · review by 1 Jan 2027",
             "ACTION: MOON · high confidence · review by 1 Jan 2027",
             "SELL",
         ] {
@@ -2259,10 +2384,14 @@ mod tests {
             std::panic::catch_unwind(|| assert_action_well_formed(&low_coverage.to_string()))
                 .is_err()
         );
-        let no_level = serde_json::json!({"action": {"kind": "BUY", "reasons": ["x"], "disclaimer": DISCLAIMER, "methodology": METHODOLOGY, "confidence": "low", "coverage": 90.0, "review_by": "2027-01-01"}});
-        assert!(
-            std::panic::catch_unwind(|| assert_action_well_formed(&no_level.to_string())).is_err()
-        );
+        for k in ["BUY", "ADD", "HOLD", "TRIM"] {
+            let no_level = serde_json::json!({"action": {"kind": k, "reasons": ["x"], "disclaimer": DISCLAIMER, "methodology": METHODOLOGY, "confidence": "low", "coverage": 90.0, "review_by": "2027-01-01"}});
+            assert!(
+                std::panic::catch_unwind(|| assert_action_well_formed(&no_level.to_string()))
+                    .is_err(),
+                "{k} without invalidation_price must be rejected"
+            );
+        }
         // Plain descriptions of flows and the sell preview are fine.
         assert_action_well_formed(
             "Recent insider open-market buying; FII selling; `portfolio sell` preview",
@@ -2289,5 +2418,10 @@ mod tests {
         }
         let pe = own_median_pe(&r).unwrap();
         assert!((pe - 11.7).abs() < 1e-6, "expected 11.7, got {pe}");
+
+        // Quarter ends after the final price bar are excluded rather than reusing the last close.
+        r.prices.dates.truncate(5);
+        r.prices.close.truncate(5);
+        assert!(own_median_pe(&r).is_none());
     }
 }

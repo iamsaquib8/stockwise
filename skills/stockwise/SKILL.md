@@ -60,8 +60,10 @@ gives value, P&L, XIRR, split by market, currency, cap tier and sector, tax
 terms, risk and observations. Add `portfolio_summary` for live P&L,
 `portfolio_checkup` (`stockwise portfolio checkup --json`) for six-lens
 observations, `portfolio_pme` for index-twin comparison, `holdings_lots`
-(`stockwise portfolio lots TCS --json`) for lot holding periods, and
-`tax_estimate` or `harvest` for tax questions. For target-weight drift, call
+(`stockwise portfolio lots TCS --json`) for lot holding periods (note: ignores
+profile residence and uses the selected or default country's generic holding
+period; use `portfolio_analyze` for foreign shares where residence changes the
+holding period), and `tax_estimate` or `harvest` for tax questions. For target-weight drift, call
 `rebalance` and then `portfolio_sell_preview` for each proposed trim's tax
 (report unavailable estimates explicitly and never sum independent previews).
 
@@ -72,8 +74,10 @@ as returned: the kind (BUY, WATCH or AVOID; ADD, HOLD, TRIM or EXIT for a
 holding), its confidence, its reasons, the invalidation price (a daily close
 below it invalidates the action), the review date, any size hint and tax note,
 and the disclaimer. Never make up, upgrade or change an action, and never add
-a price level it did not return. If it is NO CALL, say there is not enough
-data for a call and name what is missing. Then add `fit_check` with the
+a price level it did not return. If it is NO CALL, report the engine's
+returned reason and list `missing` fields only when any are returned — do not
+characterize an instrument-eligibility reason (such as an ETF or fund not
+being a listed stock) as missing data. Then add `fit_check` with the
 symbol (and `amount` if the user named one): `fits_your_rules` is yes, no or
 unclear against the user's own limits (largest weight of one stock, small-cap
 share, risk level, and the P/E and ROE limits in their note). Present it as
@@ -97,9 +101,12 @@ floors on five pillars (value, quality, growth, trend, risk) among the stocks
 scanned. Options: `universe` (such as `nifty50` or `smallcap250`), `cap`
 (`small` ranks small caps against each other), `horizon` (`long`, the
 default, or `short` for weeks to months), `min_mcap` and `min_adv`. Leave out
-picks whose `coverage` is under 0.6. Finalists carry their rule-based
-`action`; quote it as returned. Every list is logged, and `picks_review`
-shows how earlier lists did against the index: cite it, misses included.
+picks whose `coverage` is under 0.6. Enriched finalists carry their rule-based
+`action` — quote it as returned when present; picks lacking daily bars can
+have `action` set to `None` (omitted in JSON), so do not quote a missing
+action and use `stock_action` when an action is needed. Every list is logged,
+and `picks_review` shows how earlier lists did against the index: cite it,
+misses included.
 `verdicts` scores up to 25 tickers in one call, and `quote` prices up to 25.
 `picks` scans the full default universe unless `universe` is narrowed;
 `screen` covers only the market's popular stocks. `movers` and `ipo_board` help
@@ -132,7 +139,10 @@ and their `_remove` pairs change them.
 **Tax season (India).** `tax_estimate` for capital gains, `tax_advance` for
 the advance-tax schedule, `harvest` for loss and 112A harvesting. The profile's
 tax residence (`--residence`) decides the long-term holding period for foreign
-shares. With the CLI, `stockwise tax export in --fy 2025-26 --json` gives
+shares in residence-aware `portfolio_analyze` (`holdings_lots` ignores profile
+residence and uses the selected or default country's generic holding period, so
+use `portfolio_analyze` for foreign shares where residence affects the holding
+period). With the CLI, `stockwise tax export in --fy 2025-26 --json` gives
 Schedule CG rows.
 
 **Indian fixed income, gold and currency.** `bonds_yields` (G-sec curve),

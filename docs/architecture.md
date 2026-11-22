@@ -288,11 +288,15 @@ Request → memory → second layer → network → store in memory and the seco
                    (Redis when STOCKWISE_REDIS_URL is set, else cache.db http_cache)
 ```
 
-`cache.db` is a SQLite file in the data directory. It holds HTTP responses,
-market snapshots (`cache warm`), daily bars, results, index members and the
-task queue. It only holds data that can be fetched again, so deleting it is
-safe; `stockwise cache clear [http|quotes|snapshots|bars|results|members|bhavcopy|all]`
-removes parts of it, and `stockwise cache status` shows its size.
+`cache.db` is a SQLite file in the data directory. It holds cached HTTP
+responses, market snapshots (`cache warm`), daily bars, results and index
+members, as well as stateful data: saved `ask` conversations (`ask_sessions`),
+queued tasks (`tasks`) and accumulated conditions history
+(`conditions_history`). Deleting `cache.db` loses those conversations, tasks
+and history and is not safe. To remove only cached market data, run
+`stockwise cache clear [http|quotes|snapshots|bars|results|members|bhavcopy|all]`
+— even `cache clear all` preserves those three tables; `stockwise cache status`
+shows the cache size.
 
 | Data | TTL | Why |
 |------|-----|-----|

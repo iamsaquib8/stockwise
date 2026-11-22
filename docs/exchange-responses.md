@@ -8,8 +8,9 @@ expects in two places:
 - **This page** lists every endpoint and the fields StockWise reads. Fields
   not listed are ignored, so new fields never break anything.
 - **Fixtures** in [`src/providers/fixtures/`](../src/providers/fixtures/) hold
-  one recorded-style response per endpoint. Parser tests run against them;
-  no test touches the network.
+  one recorded-style response per provider endpoint, and IPO fixtures live in
+  [`src/fixtures/`](../src/fixtures/). Parser tests run against them; no test
+  touches the network.
 
 ## Fixture format
 
@@ -42,8 +43,9 @@ together and note the date here.
    developer tools' Network tab open, filtered to `api`.
 2. Click the request (`quote-equity?symbol=RELIANCE`) and copy the response
    body.
-3. Trim and anonymise it as above, save it under `src/providers/fixtures/`,
-   and run `cargo test providers`.
+3. Trim and anonymise it as above, save provider fixtures under
+   `src/providers/fixtures/` and run `cargo test providers` (for IPO fixtures,
+   save under `src/fixtures/` and run `cargo test ipo`).
 
 Use your browser for this, as a person visiting the site would; don't script
 requests around the exchanges' bot protection.
@@ -76,12 +78,14 @@ No cookies; calls carry `Referer` and `Origin` of `https://www.bseindia.com`.
 | `getScripHeaderData/w?Debtflag=&scripcode=500325&seriesid=` | `bse_header.json` | `CurrRate.LTP`, `.Chg`, `.PcChg`; `Header.PrevClose`, `.Open`, `.High`, `.Low`, `.LTP`; `Cmpname.FullN`. Numbers are strings, sometimes with thousands separators. Neither `Header` nor `CurrRate` = format change |
 | `StockReachGraph/w?scripcode=500325&flag=0&fromdate=&todate=&seriesid=` | `bse_stock_reach_graph.json` | `Data`: a JSON list sent as a string (or a list) of `{dttm: "Fri Oct 24 2025 09:15:00" (IST), vale1: price}` |
 | `StockPriceCSVDownload/w?pageType=0&rbType=D&Scode=500325&FDates=24/10/2024&TDates=24/10/2025` | `bse_stock_prices.csv` | CSV columns found by name: `Date` (`24-October-2025`), `Open Price`, `High Price`, `Low Price`, `Close Price`, `No.of Shares` |
-| `GetPublicIssue_par_updated/w?flag=1` | `tests/fixtures/bse_ipo_board.json` | IPO fallback (`src/ipo_fallback.rs`). `Table` rows: `Scrip_Name`, `Scrip_cd`, `IPO_NO`, `IR_flag` (only `IPO` is kept), `Status` (`L` open, `F` forthcoming), `Start_Dt`, `End_Dt` (ISO, `dd/mm/yyyy` or `19 Nov 2026`), `Price_Band`; the platform from `Exchange_Platform` / `TYPE` when present |
-| `ipo_details_ng/w?stripono=<IPO_NO>` | `tests/fixtures/bse_ipo_detail.json` | `TableRows` of `Label` / `Label_flg` / `Value`: price band, minimum bid quantity, issue size (or separate fresh-issue and offer-for-sale rows), issue period, issue type, face value, lead managers, registrar; `Label_flg` `eXCHANGE_PLATFORM` gives mainboard or SME. Renamed to NSE's `issueInfo` titles and read by the same parser |
-| `Pubissues_BBS_CumultveCatdem_ng/w?IPO_NO=<IPO_NO>` | `tests/fixtures/bse_ipo_demand.json` | Consolidated BSE + NSE category demand. `Table` rows: `CATEGORYNAME`, `BID_FOR` (shares offered), `QUANTITY` (shares bid), `PERC` (times subscribed). Categories are mapped to NSE's serials (QIB 1, FII 1(a), MF 1(c), NII 2, bNII 2.1, sNII 2.2, retail 3); anchor and market-maker rows are left out. No application counts |
+| `GetPublicIssue_par_updated/w?flag=1` | `src/fixtures/bse_ipo_board.json` | IPO fallback (`src/ipo_fallback.rs`). `Table` rows: `Scrip_Name`, `Scrip_cd`, `IPO_NO`, `IR_flag` (only `IPO` is kept), `Status` (`L` open, `F` forthcoming), `Start_Dt`, `End_Dt` (ISO, `dd/mm/yyyy` or `19 Nov 2026`), `Price_Band`; the platform from `Exchange_Platform` / `TYPE` when present |
+| `ipo_details_ng/w?stripono=<IPO_NO>` | `src/fixtures/bse_ipo_detail.json` | `TableRows` of `Label` / `Label_flg` / `Value`: price band, minimum bid quantity, issue size (or separate fresh-issue and offer-for-sale rows), issue period, issue type, face value, lead managers, registrar; `Label_flg` `eXCHANGE_PLATFORM` gives mainboard or SME. Renamed to NSE's `issueInfo` titles and read by the same parser |
+| `Pubissues_BBS_CumultveCatdem_ng/w?IPO_NO=<IPO_NO>` | `src/fixtures/bse_ipo_demand.json` | Consolidated BSE + NSE category demand. `Table` rows: `CATEGORYNAME`, `BID_FOR` (shares offered), `QUANTITY` (shares bid), `PERC` (times subscribed). Categories are mapped to NSE's serials (QIB 1, FII 1(a), MF 1(c), NII 2, bNII 2.1, sNII 2.2, retail 3); anchor and market-maker rows are left out. No application counts |
 
 The three IPO endpoints and their fields were read from the code of
 bseindia.com's public-issue pages on 21 Nov 2026. BSE answered the app with
 HTTP 403 from the machine they were written on, so the fixtures follow those
-field names but were not captured live; update them from a browser session as
-described above when BSE answers.
+field names but were not captured live. When BSE answers in a browser session,
+trim and anonymise the responses, save them under `src/fixtures/`, and test
+the parser in `src/ipo_fallback.rs` with `cargo test ipo_fallback` (or run all
+IPO tests with `cargo test ipo`).

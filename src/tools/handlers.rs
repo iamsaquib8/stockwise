@@ -376,9 +376,10 @@ async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {
 async fn ipo_board(src: &impl DataSource, a: &Args) -> Result<Value> {
     let filter = crate::ipo::BoardFilter::from_name(a.str("board"));
     let view = crate::ipo::fetch_board(src.yahoo().await?, filter, a.usize_or("recent", 6)).await?;
+    let v = serde_json::to_value(&view)?;
     // Verdicts given over MCP join the track record like the CLI's.
-    crate::commands::log_board(&view);
-    Ok(serde_json::to_value(view)?)
+    let _ = tokio::task::spawn_blocking(move || crate::commands::log_board(&view)).await;
+    Ok(v)
 }
 
 async fn ipo_analyze(src: &impl DataSource, a: &Args) -> Result<Value> {
@@ -395,8 +396,8 @@ async fn ipo_analyze(src: &impl DataSource, a: &Args) -> Result<Value> {
         None,
     )
     .await?;
-    crate::commands::log_analysis(&analysis);
-    let mut v = serde_json::to_value(analysis)?;
+    let mut v = serde_json::to_value(&analysis)?;
+    let _ = tokio::task::spawn_blocking(move || crate::commands::log_analysis(&analysis)).await;
     // Per-category rows repeat what the summary fields already say.
     if let Some(sub) = v.get_mut("subscription").and_then(Value::as_object_mut) {
         sub.remove("categories");

@@ -42,14 +42,31 @@ fn item_title(item: &str) -> Option<&'static str> {
     })
 }
 
+fn parse_acceptance_ts(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"] {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(ndt.and_utc().timestamp());
+        }
+    }
+    None
+}
+
 /// Filings in a submissions document filed on or after `since` (unix
 /// seconds), newest first.
 pub fn parse_submissions(json: &Value, cik: u64, since: i64) -> Vec<Headline> {
     let recent = &json["filings"]["recent"];
     let col = |k: &str| recent[k].as_array().cloned().unwrap_or_default();
-    let (forms, dates, accessions, docs, items, descs) = (
+    let (forms, dates, acceptances, accessions, docs, items, descs) = (
         col("form"),
         col("filingDate"),
+        col("acceptanceDateTime"),
         col("accessionNumber"),
         col("primaryDocument"),
         col("items"),
@@ -68,10 +85,16 @@ pub fn parse_submissions(json: &Value, cik: u64, since: i64) -> Vec<Headline> {
         else {
             continue;
         };
-        // Filed by the end of the US business day.
-        let ts = date
-            .and_hms_opt(21, 0, 0)
-            .map_or(0, |d| d.and_utc().timestamp());
+        let acceptance_ts = acceptances
+            .get(i)
+            .and_then(Value::as_str)
+            .and_then(parse_acceptance_ts);
+        // Use the actual acceptance timestamp when available; otherwise keep
+        // date-only midnight UTC rather than inventing a late-day publication time.
+        let ts = acceptance_ts.unwrap_or_else(|| {
+            date.and_hms_opt(0, 0, 0)
+                .map_or(0, |d| d.and_utc().timestamp())
+        });
         if ts < since {
             continue;
         }
@@ -96,12 +119,23 @@ pub fn parse_submissions(json: &Value, cik: u64, since: i64) -> Vec<Headline> {
                 f => format!("{f} filing"),
             },
         };
-        let link = match (
-            accessions.get(i).and_then(Value::as_str),
-            docs.get(i).and_then(Value::as_str),
-        ) {
-            (Some(a), Some(d)) if !d.is_empty() => Some(format!(
+        let accession = accessions
+            .get(i)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|a| !a.is_empty());
+        let doc = docs
+            .get(i)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        let link = match (accession, doc) {
+            (Some(a), Some(d)) => Some(format!(
                 "https://www.sec.gov/Archives/edgar/data/{cik}/{}/{d}",
+                a.replace('-', "")
+            )),
+            (Some(a), None) => Some(format!(
+                "https://www.sec.gov/Archives/edgar/data/{cik}/{}/{a}-index.htm",
                 a.replace('-', "")
             )),
             _ => None,
@@ -174,5 +208,26 @@ mod tests {
         );
         assert!(h[0].official);
         assert_eq!(h[1].title, "10-Q quarterly report");
+        // Without acceptanceDateTime, ts is date-only midnight UTC (not 21:00 UTC).
+        assert_eq!(h[0].ts % 86_400, 0);
+    }
+
+    #[test]
+    fn acceptance_timestamp_is_used_when_available() {
+        let json = serde_json::json!({"filings": {"recent": {
+            "form": ["8-K"],
+            "filingDate": ["2026-11-19"],
+            "acceptanceDateTime": ["2026-11-19T14:25:30.000Z"],
+            "accessionNumber": ["0000320193-26-000101"],
+            "primaryDocument": ["aapl-8k.htm"],
+            "items": ["2.02"],
+            "primaryDocDescription": ["8-K"]
+        }}});
+        let h = parse_submissions(&json, 320193, 0);
+        assert_eq!(h.len(), 1);
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-11-19T14:25:30Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(h[0].ts, expected);
     }
 }

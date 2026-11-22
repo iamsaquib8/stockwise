@@ -189,9 +189,31 @@ pub fn active() -> Option<ListingModel> {
 /// File in the data directory written by `ipo calibrate --save`.
 pub const USER_FILE: &str = "ipo_model.json";
 
+fn valid_user_model(m: &ListingModel) -> Result<(), &'static str> {
+    if m.n < 30 {
+        return Err("fewer than 30 sample issues");
+    }
+    if m.residual_quantiles.len() != QUANTILES {
+        return Err("wrong residual quantile length");
+    }
+    if !m
+        .residual_quantiles
+        .windows(2)
+        .all(|w| w[0].is_finite() && w[1].is_finite() && w[0] <= w[1])
+    {
+        return Err("residual quantiles are not in ascending order");
+    }
+    Ok(())
+}
+
 fn load_user() -> Option<ListingModel> {
     let m: Option<ListingModel> = crate::store::load::<Option<ListingModel>>(USER_FILE).ok()?;
-    m.filter(|m| m.n >= 30 && m.residual_quantiles.len() == QUANTILES)
+    let m = m?;
+    if let Err(why) = valid_user_model(&m) {
+        eprintln!("  ⚠ Ignoring saved {USER_FILE} ({why}); using the shipped fit.");
+        return None;
+    }
+    Some(m)
 }
 
 /// CDF of the residuals at `x`, linear between stored quantiles.
@@ -203,13 +225,13 @@ fn residual_cdf(q: &[f64], x: f64) -> f64 {
     if x <= q[0] {
         return 0.0;
     }
-    if x >= q[q.len() - 1] {
+    if x > q[q.len() - 1] {
         return 1.0;
     }
     for i in 0..q.len() - 1 {
         let (a, b) = (q[i], q[i + 1]);
         if x >= a && x <= b {
-            let t = if b > a { (x - a) / (b - a) } else { 1.0 };
+            let t = if b > a { (x - a) / (b - a) } else { 0.0 };
             return (i as f64 + t) * step;
         }
     }
@@ -366,18 +388,37 @@ impl std::fmt::Display for FitError {
 
 impl std::error::Error for FitError {}
 
+/// Keep each valid `(symbol, listing_date)` once when duplicate rows are
+/// identical, and drop both when duplicate rows conflict.
+pub fn distinct_valid_samples(samples: &[Sample]) -> Vec<&Sample> {
+    let mut seen: Vec<(&Sample, bool)> = Vec::new();
+    for s in samples.iter().filter(|s| s.valid()) {
+        if let Some((first, conflicted)) = seen.iter_mut().find(|(o, _)| {
+            o.listing_date == s.listing_date && o.symbol.eq_ignore_ascii_case(&s.symbol)
+        }) {
+            if *first != s {
+                *conflicted = true;
+            }
+        } else {
+            seen.push((s, false));
+        }
+    }
+    seen.into_iter()
+        .filter_map(|(s, conflicted)| (!conflicted).then_some(s))
+        .collect()
+}
+
 /// Fit the model on `samples` (mainboard only). Each issue's regime is
 /// computed from the issues listed before it in the same set. `huber`
 /// down-weights outliers (iteratively reweighted least squares).
 pub fn fit(samples: &[Sample], huber: bool, fit_date: NaiveDate) -> Result<ListingModel, FitError> {
-    let mut rows: Vec<&Sample> = samples.iter().filter(|s| s.valid()).collect();
+    let mut rows: Vec<&Sample> = distinct_valid_samples(samples);
     rows.sort_by_key(|s| s.listing_date);
     if rows.len() < 30 {
         return Err(FitError::TooFew(rows.len()));
     }
     let history: Vec<(NaiveDate, f64)> = rows
         .iter()
-        .filter(|s| s.valid())
         .map(|s| (s.listing_date, s.listing_return_pct()))
         .collect();
     let regimes: Vec<Option<f64>> = rows
@@ -590,25 +631,42 @@ pub fn samples_from_csv(text: &str) -> (Vec<Sample>, Vec<String>) {
             .map(|s| s.trim().trim_matches('"'))
             .collect();
         let num = |i: usize| f.get(pos[i]).and_then(|s| s.parse::<f64>().ok());
-        let opt = |at: Option<usize>| {
-            at.and_then(|i| f.get(i))
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0)
+        let opt = |at: Option<usize>| -> Option<f64> {
+            match at.and_then(|i| f.get(i)).map(|s| s.trim()) {
+                None | Some("") => Some(0.0),
+                Some(s) => s.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0),
+            }
         };
         let row = (|| {
             Some(Sample {
                 symbol: f.get(pos[0]).filter(|s| !s.is_empty())?.to_string(),
                 listing_date: NaiveDate::parse_from_str(f.get(pos[1])?, "%Y-%m-%d").ok()?,
-                issue_price: num(2).filter(|p| *p > 0.0)?,
-                qib_x: num(3).filter(|x| *x >= 0.0)?,
-                nii_x: num(4).filter(|x| *x >= 0.0)?,
-                retail_x: num(5).filter(|x| *x >= 0.0)?,
-                listing_open: opt(open_at),
-                listing_close: opt(close_at),
+                issue_price: num(2).filter(|p| p.is_finite() && *p > 0.0)?,
+                qib_x: num(3).filter(|x| x.is_finite() && *x >= 0.0)?,
+                nii_x: num(4).filter(|x| x.is_finite() && *x >= 0.0)?,
+                retail_x: num(5).filter(|x| x.is_finite() && *x >= 0.0)?,
+                listing_open: opt(open_at)?,
+                listing_close: opt(close_at)?,
             })
         })();
         match row {
-            Some(s) => out.push(s),
+            Some(s) => {
+                if let Some(pos_dup) = out.iter().position(|o: &Sample| {
+                    o.listing_date == s.listing_date && o.symbol.eq_ignore_ascii_case(&s.symbol)
+                }) {
+                    if out[pos_dup] != s {
+                        out.remove(pos_dup);
+                        errors.push(format!(
+                            "line {}: conflicting duplicate for {} on {}",
+                            n + 1,
+                            s.symbol,
+                            s.listing_date
+                        ));
+                    }
+                } else {
+                    out.push(s);
+                }
+            }
             None => errors.push(format!("line {}: not a usable row", n + 1)),
         }
     }
@@ -639,18 +697,17 @@ pub fn samples_to_csv(rows: &[Sample]) -> String {
 /// In-sample check of P(loss): for each band of predicted probability, the
 /// issues in it and the share that actually closed listing day below issue.
 pub fn loss_calibration(m: &ListingModel, rows: &[Sample]) -> Vec<(String, usize, Option<f64>)> {
-    let history: Vec<(NaiveDate, f64)> = rows
+    let distinct = distinct_valid_samples(rows);
+    let history: Vec<(NaiveDate, f64)> = distinct
         .iter()
-        .filter(|s| s.valid())
         .map(|s| (s.listing_date, s.listing_return_pct()))
         .collect();
     let bands = [(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 1.01)];
     bands
         .iter()
         .map(|(lo, hi)| {
-            let hits: Vec<bool> = rows
+            let hits: Vec<bool> = distinct
                 .iter()
-                .filter(|s| s.valid())
                 .filter_map(|s| {
                     let f = Features {
                         qib_x: s.qib_x,
@@ -797,6 +854,31 @@ mod tests {
         assert_eq!(m.p_loss(100.0), 0.0);
         assert_eq!(m.p_loss(-100.0), 1.0);
         assert!((m.quantile(10.0, 0.5) - 10.0).abs() < 1e-9);
+        // Upper quantiles tied at zero do not count break-even outcomes as losses.
+        let mut tied = m.clone();
+        tied.residual_quantiles = (-18..=0).map(|i| i as f64).chain([0.0, 0.0]).collect();
+        assert!((tied.p_loss(0.0) - 0.90).abs() < 1e-9);
+        assert_eq!(tied.p_loss(-1.0), 1.0);
+    }
+
+    #[test]
+    fn saved_model_validation_rejects_unsorted_quantiles_and_deduplicates_samples() {
+        let mut m = testing::model();
+        assert!(valid_user_model(&m).is_ok());
+        m.residual_quantiles.reverse();
+        assert!(valid_user_model(&m).is_err());
+
+        // 29 distinct listings + 1 identical duplicate -> still 29 (< 30).
+        let mut s: Vec<Sample> = synthetic(|_| 0.0).into_iter().take(29).collect();
+        s.push(s[0].clone());
+        assert_eq!(fit(&s, false, d("2026-11-21")), Err(FitError::TooFew(29)));
+
+        // 30 distinct listings + 1 conflicting duplicate for S0 -> 29 unambiguous (< 30).
+        let mut s30: Vec<Sample> = synthetic(|_| 0.0).into_iter().take(30).collect();
+        let mut conflict = s30[0].clone();
+        conflict.listing_close += 5.0;
+        s30.push(conflict);
+        assert_eq!(fit(&s30, false, d("2026-11-21")), Err(FitError::TooFew(29)));
     }
 
     #[test]
@@ -848,7 +930,8 @@ mod tests {
         let text = "symbol,listing_date,issue_price,qib_x,nii_x,retail_x,listing_open,listing_close\n\
                     AAA,2025-01-10,100,50,20,5,130,125\n\
                     BBB,2025-13-10,100,1,1,1,100,100\n\
-                    CCC,2025-02-10,100,1,1,1,,\n";
+                    CCC,2025-02-10,100,1,1,1,,\n\
+                    DDD,2025-02-12,100,1,1,1,100,typo\n";
         let (rows, errors) = samples_from_csv(text);
         assert_eq!(rows.len(), 2);
         // Prices left for the caller to fill.
@@ -858,7 +941,10 @@ mod tests {
         assert_eq!(back, rows[..1]);
         assert_eq!(rows[0].listing_return_pct(), 25.0);
         assert!((rows[0].open_return_pct() - 30.0).abs() < 1e-9);
-        assert_eq!(errors, ["line 3: not a usable row"]);
+        assert_eq!(
+            errors,
+            ["line 3: not a usable row", "line 5: not a usable row"]
+        );
         let (_, e) = samples_from_csv("symbol,issue_price\n");
         assert_eq!(e, ["missing column listing_date"]);
     }

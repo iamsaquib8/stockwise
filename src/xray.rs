@@ -547,7 +547,7 @@ pub fn fund_sector_label(symbol: &str, name: Option<&str>, category: Option<&str
         ("power", "Utilities"),
         ("psu", "Industrials"),
     ];
-    if sectoral || !text.contains("cap") {
+    if sectoral {
         let padded = format!(" {text} ");
         if let Some((_, sec)) = sector_words.iter().find(|(w, _)| padded.contains(w)) {
             return sec.to_string();
@@ -594,6 +594,15 @@ pub fn fund_sector_label(symbol: &str, name: Option<&str>, category: Option<&str
         ("banking and psu", "Debt"),
         ("index", "Index"),
     ];
+    if !sectoral && let Some((_, k)) = kinds.iter().find(|(w, _)| text.contains(w)) {
+        return format!("{FUND_PREFIX}{k}");
+    }
+    if !text.contains("cap") {
+        let padded = format!(" {text} ");
+        if let Some((_, sec)) = sector_words.iter().find(|(w, _)| padded.contains(w)) {
+            return sec.to_string();
+        }
+    }
     match kinds.iter().find(|(w, _)| text.contains(w)) {
         Some((_, k)) => format!("{FUND_PREFIX}{k}"),
         None => FUND_NO_LOOK_THROUGH.to_string(),
@@ -694,6 +703,60 @@ struct CompanyAccumulator {
     via_funds: Vec<FundContribution>,
 }
 
+fn is_indian_symbol_or_currency(symbol: &str, currency: Option<&str>) -> bool {
+    let up = symbol.trim().to_ascii_uppercase();
+    if up.ends_with(".NS") || up.ends_with(".BO") {
+        return true;
+    }
+    if up.contains('.') || up.contains('=') || up.starts_with('^') {
+        return false;
+    }
+    currency.is_some_and(|c| c.eq_ignore_ascii_case("INR"))
+}
+
+fn is_indian_fund_constituent(
+    fund: &XrayInputHolding,
+    profile: &FundProfile,
+    constituent_sym: &str,
+) -> bool {
+    let up = constituent_sym.trim().to_ascii_uppercase();
+    if up.ends_with(".NS") || up.ends_with(".BO") {
+        return true;
+    }
+    if up.contains('.') || up.contains('=') || up.starts_with('^') {
+        return false;
+    }
+    let fund_sym_up = fund.symbol.trim().to_ascii_uppercase();
+    let fund_is_indian = fund_sym_up.ends_with(".NS")
+        || fund_sym_up.ends_with(".BO")
+        || fund_sym_up.starts_with("MF:")
+        || fund
+            .currency
+            .as_deref()
+            .or(profile.currency.as_deref())
+            .is_some_and(|c| c.eq_ignore_ascii_case("INR"));
+    if !fund_is_indian {
+        return false;
+    }
+    let desc = format!(
+        "{} {} {}",
+        fund.name.as_deref().unwrap_or(""),
+        profile.name.as_deref().unwrap_or(""),
+        fund.fund_category
+            .as_deref()
+            .or(profile.category.as_deref())
+            .unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    !(desc.contains("international")
+        || desc.contains("overseas")
+        || desc.contains("global")
+        || desc.contains("world")
+        || desc.contains("s&p")
+        || desc.contains("nasdaq")
+        || desc.contains("us "))
+}
+
 /// Compute portfolio X-Ray look-through exposures and macro allocations using the default 10% threshold.
 pub fn compute_xray(
     portfolio_name: &str,
@@ -737,6 +800,7 @@ pub fn compute_xray_with_threshold(
     }
 
     let mut companies: HashMap<String, CompanyAccumulator> = HashMap::new();
+    let mut indian_exposures: Vec<(String, f64)> = Vec::new();
     let mut sector_values: HashMap<String, f64> = HashMap::new();
     let mut asset_classes = AssetClassSplit::default();
     let mut large_cap_val = 0.0;
@@ -862,6 +926,13 @@ pub fn compute_xray_with_threshold(
                         });
 
                     entry.fund_value += c_val;
+                    if let Some(sym) = c
+                        .symbol
+                        .as_deref()
+                        .filter(|s| is_indian_fund_constituent(h, profile, s))
+                    {
+                        indian_exposures.push((sym.to_string(), c_val));
+                    }
                     if entry.name.is_none() && c.name.is_some() {
                         entry.name = c.name.clone();
                     }
@@ -959,6 +1030,9 @@ pub fn compute_xray_with_threshold(
                 });
 
             entry.direct_value += h.value;
+            if is_indian_symbol_or_currency(&h.symbol, h.currency.as_deref()) {
+                indian_exposures.push((h.symbol.clone(), h.value));
+            }
             if entry.name.is_none() && h.name.is_some() {
                 entry.name = h.name.clone();
             }
@@ -1046,13 +1120,7 @@ pub fn compute_xray_with_threshold(
         .collect();
     sector_allocation.sort_by(|a, b| b.value.total_cmp(&a.value));
 
-    let business_groups = crate::business_groups::group_exposure(
-        &effective_holdings
-            .iter()
-            .map(|e| (e.symbol.clone(), e.total_value))
-            .collect::<Vec<_>>(),
-        total_value,
-    );
+    let business_groups = crate::business_groups::group_exposure(&indian_exposures, total_value);
     PortfolioXrayReport {
         portfolio_name: portfolio_name.to_string(),
         base_currency: base_currency.to_string(),
@@ -2096,8 +2164,43 @@ mod tests {
             "Fund: Index (NIFTY 50)"
         );
         assert_eq!(fund_sector_label("MF:5", None, None), FUND_NO_LOOK_THROUGH);
+        assert_eq!(
+            fund_sector_label(
+                "MF:6",
+                Some("Bank of India ELSS Tax Saver Fund"),
+                Some("Equity Scheme - ELSS")
+            ),
+            "Fund: ELSS"
+        );
         assert!(is_fund_sector_label("Fund: Large Cap"));
         assert!(is_fund_sector_label(FUND_NO_LOOK_THROUGH));
         assert!(!is_fund_sector_label("Financial Services"));
+    }
+
+    #[test]
+    fn unsupported_index_variant_gets_no_lookthrough_and_us_hal_not_indian_psu() {
+        let holdings = vec![
+            fund_only(
+                "MF:1",
+                Some("ICICI Prudential Nifty50 Value 20 Index Fund"),
+                Some("Other Scheme - Index Funds"),
+            ),
+            XrayInputHolding {
+                symbol: "HAL".to_string(),
+                name: Some("Halliburton Company".to_string()),
+                shares: 10.0,
+                price: 30.0,
+                value: 300.0,
+                sector: Some("Energy".to_string()),
+                market_cap: Some(25_000_000_000.0),
+                currency: Some("USD".to_string()),
+                is_fund: false,
+                is_sgb: false,
+                fund_category: None,
+            },
+        ];
+        let report = compute_xray("p", "INR", &holdings, &HashMap::new());
+        assert!(!report.funds_analyzed[0].look_through_available);
+        assert!(report.business_groups.is_empty());
     }
 }

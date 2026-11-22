@@ -68,15 +68,20 @@ pub async fn cmd_daemon(mode: &str, amount: Option<f64>, market: Market, once: b
                 } else {
                     format!("-{}{:.0}", csym, pnl.abs()).red().to_string()
                 };
+                let label = if unpriced > 0 {
+                    format!("Partial portfolio ({unpriced} unpriced)")
+                } else {
+                    "Portfolio".to_string()
+                };
                 println!(
-                    "    Portfolio: {}{:.0} ({}) | {} holdings",
+                    "    {label}: {}{:.0} ({}) | {} holdings",
                     csym,
                     total_value,
                     pnl_str,
                     portfolio.holdings.len()
                 );
                 summary.push(format!(
-                    "Portfolio {}{:.0}, {}{}{:.0} over cost, {} holdings",
+                    "{label} {}{:.0}, {}{}{:.0} over cost, {} holdings",
                     csym,
                     total_value,
                     if pnl >= 0.0 { "+" } else { "-" },

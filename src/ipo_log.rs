@@ -122,9 +122,8 @@ pub fn final_verdicts(log: &[Entry], since: NaiveDate) -> Vec<Entry> {
         }
         if let Some(c) = e.close_date
             && e.date > c
-            && out.iter().any(|o| o.symbol == e.symbol)
         {
-            // After close the book is final; an earlier final verdict stands.
+            // After close the book is final; post-close entries are not pre-listing verdicts.
             continue;
         }
         match out.iter_mut().find(|o| o.symbol == e.symbol) {
@@ -321,16 +320,36 @@ pub fn outcome_from_bars(
     nifty: &[(NaiveDate, f64, f64)],
     close_date: Option<NaiveDate>,
 ) -> Outcome {
-    let after = close_date.unwrap_or(NaiveDate::MIN);
-    let Some(first) = bars.iter().position(|(d, _, _)| *d > after) else {
-        return Outcome::default();
+    outcome_from_bars_on(bars, nifty, close_date, None)
+}
+
+/// Outcome from daily bars `(date, open, close)` of the issue and of NIFTY
+/// 50, requiring an exact bar on `listing_date` when `listing_date` is known.
+pub fn outcome_from_bars_on(
+    bars: &[(NaiveDate, f64, f64)],
+    nifty: &[(NaiveDate, f64, f64)],
+    close_date: Option<NaiveDate>,
+    listing_date: Option<NaiveDate>,
+) -> Outcome {
+    let first = match listing_date {
+        Some(expected) => bars.iter().position(|(d, _, _)| *d == expected),
+        None => {
+            let after = close_date.unwrap_or(NaiveDate::MIN);
+            bars.iter().position(|(d, _, _)| *d > after)
+        }
+    };
+    let Some(first) = first else {
+        return Outcome {
+            listing_date,
+            ..Outcome::default()
+        };
     };
     let (ld, open, close) = bars[first];
     let three = bars.get(first + THREE_MONTH_SESSIONS).map(|b| b.2);
     let nifty_before = nifty.iter().rev().find(|(d, _, _)| *d < ld).map(|b| b.2);
     let nifty_3m = bars
         .get(first + THREE_MONTH_SESSIONS)
-        .and_then(|(d3, _, _)| nifty.iter().rev().find(|(d, _, _)| d <= d3))
+        .and_then(|(d3, _, _)| nifty.iter().rev().find(|(d, _, _)| d == d3))
         .map(|b| b.2);
     Outcome {
         listing_date: Some(ld),
@@ -387,6 +406,8 @@ mod tests {
             entry("2026-10-10", "A", "APPLY"),
             // Logged after close (the board was opened again): not the verdict.
             entry("2026-10-12", "A", "AVOID"),
+            // Post-close with no earlier entry: still excluded.
+            entry("2026-10-12", "POST_ONLY", "AVOID"),
             entry("2026-10-12", "B", "LISTED"),
             entry("2026-09-01", "C", "AVOID"),
         ];
@@ -431,6 +452,21 @@ mod tests {
         // Too early for three months.
         let o = outcome_from_bars(&bars[..10], &nifty, Some(d("2026-10-10")));
         assert_eq!(o.close_3m, None);
+        // Known listing date without a matching bar does not substitute a later session.
+        let missing_day1 =
+            outcome_from_bars_on(&bars[1..], &nifty, Some(d("2026-10-10")), Some(start));
+        assert_eq!(missing_day1.listing_date, Some(start));
+        assert_eq!(missing_day1.listing_close, None);
+        assert_eq!(missing_day1.close_3m, None);
+        // NIFTY stopping before the stock's 63-session endpoint leaves nifty_3m absent.
+        let nifty_short: Vec<(NaiveDate, f64, f64)> = nifty
+            .iter()
+            .copied()
+            .filter(|(d, _, _)| *d < start + chrono::Duration::days(63))
+            .collect();
+        let o_short = outcome_from_bars_on(&bars, &nifty_short, Some(d("2026-10-10")), Some(start));
+        assert_eq!(o_short.close_3m, Some(125.0 + 63.0));
+        assert_eq!(o_short.nifty_3m, None);
         // Not listed yet.
         assert_eq!(outcome_from_bars(&[], &nifty, None), Outcome::default());
     }

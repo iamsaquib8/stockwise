@@ -628,23 +628,33 @@ pub(crate) async fn fetch_actions(
     Ok((splits, divs, events.currency))
 }
 
-/// Splits Yahoo reports for `symbol` that are not yet applied to its lots.
-pub(super) async fn pending_splits(
+/// Splits Yahoo reports for `symbol` that are not yet applied to its lots in
+/// `account`'s scope (`None`: all lots).
+pub(super) async fn pending_splits_in_account(
     client: &YahooClient,
     portfolio: &Portfolio,
     symbol: &str,
+    account: Option<&str>,
 ) -> Result<Vec<Split>> {
-    let Some(h) = portfolio.holding(symbol) else {
-        return Ok(Vec::new());
-    };
-    let Some(since) = h.lots.iter().map(|l| l.units_date()).min() else {
+    let lots = portfolio.lots_in_account(symbol, account);
+    let Some(since) = lots.iter().map(|l| l.units_date()).min() else {
         return Ok(Vec::new());
     };
     let (splits, _, _) = fetch_actions(client, symbol, since).await?;
     Ok(splits
         .into_iter()
-        .filter(|s| h.lots.iter().any(|l| s.pending_for(l)))
+        .filter(|s| lots.iter().any(|l| s.pending_for(l)))
         .collect())
+}
+
+/// Splits Yahoo reports for `symbol` that are not yet applied to its lots.
+#[allow(dead_code)]
+pub(super) async fn pending_splits(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    symbol: &str,
+) -> Result<Vec<Split>> {
+    pending_splits_in_account(client, portfolio, symbol, None).await
 }
 
 /// Ask NSE which of the `splits` Yahoo reported for an Indian `symbol` are
@@ -689,18 +699,19 @@ fn describe_splits(splits: &[Split]) -> String {
 
 /// Of `snapshot` (symbol, quantity from a broker or holdings file), the
 /// holdings whose quantity went up while a split or bonus is not yet applied
-/// to their lots — syncing those would count the new shares twice. Returns
-/// (symbol, reason). Without a network connection nothing is blocked.
-pub(super) async fn blocked_by_pending_splits(
+/// to their lots in `account` — syncing those would count the new shares twice.
+/// Returns (symbol, splits, reason). Without a network connection nothing is blocked.
+pub(super) async fn blocked_by_pending_splits_in_account(
     portfolio: &Portfolio,
     snapshot: &[(String, f64)],
-) -> Vec<(String, String)> {
+    account: Option<&str>,
+) -> Vec<(String, Vec<Split>, String)> {
     let grew: Vec<&(String, f64)> = snapshot
         .iter()
         .filter(|(sym, qty)| {
-            portfolio
-                .holding(sym)
-                .is_some_and(|h| *qty > h.shares + 1e-9)
+            let lots = portfolio.lots_in_account(sym, account);
+            let held: f64 = lots.iter().map(|l| l.qty).sum();
+            !lots.is_empty() && *qty > held + 1e-9
         })
         .collect();
     if grew.is_empty() {
@@ -711,20 +722,30 @@ pub(super) async fn blocked_by_pending_splits(
     };
     let mut blocked = Vec::new();
     for (sym, _) in grew {
-        if let Ok(splits) = pending_splits(&client, portfolio, sym).await
+        if let Ok(splits) = pending_splits_in_account(&client, portfolio, sym, account).await
             && !splits.is_empty()
         {
-            blocked.push((
-                sym.clone(),
-                format!(
-                    "split/bonus {} not applied to your lots yet — run `stockwise portfolio actions {} --apply`, then sync again",
-                    describe_splits(&splits),
-                    sym
-                ),
-            ));
+            let reason = format!(
+                "split/bonus {} not applied to your lots yet — run `stockwise portfolio actions {} --apply`, then sync again",
+                describe_splits(&splits),
+                sym
+            );
+            blocked.push((sym.clone(), splits, reason));
         }
     }
     blocked
+}
+
+#[allow(dead_code)]
+pub(super) async fn blocked_by_pending_splits(
+    portfolio: &Portfolio,
+    snapshot: &[(String, f64)],
+) -> Vec<(String, String)> {
+    blocked_by_pending_splits_in_account(portfolio, snapshot, None)
+        .await
+        .into_iter()
+        .map(|(s, _, r)| (s, r))
+        .collect()
 }
 
 pub(super) fn portfolio_title(title: &str) -> String {

@@ -114,11 +114,38 @@ pub fn csv_cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
-        // A rule action (`crate::action::Action`) prints as its label.
+        // A rule action (`crate::action::Action`) prints with its invalidation
+        // level, reasons and disclaimer so single-column CSV exports (`picks --csv`)
+        // retain the required action context.
         Value::Object(m)
             if m.contains_key("kind") && m.get("label").is_some_and(Value::is_string) =>
         {
-            m["label"].as_str().unwrap_or_default().to_string()
+            let label = m["label"].as_str().unwrap_or_default();
+            let level = m
+                .get("invalidation_price")
+                .and_then(Value::as_f64)
+                .map(|p| format!(" (invalid below {p:.2})"))
+                .unwrap_or_default();
+            let reasons = m
+                .get("reasons")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            let disclaimer = m
+                .get("disclaimer")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match (reasons.is_empty(), disclaimer.is_empty()) {
+                (false, false) => format!("{label}{level} — {reasons} ({disclaimer})"),
+                (false, true) => format!("{label}{level} — {reasons}"),
+                (true, false) => format!("{label}{level} ({disclaimer})"),
+                (true, true) => format!("{label}{level}"),
+            }
         }
         other => other.to_string(),
     }

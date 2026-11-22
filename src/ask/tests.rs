@@ -901,7 +901,9 @@ async fn playbooks_run_end_to_end_on_fixtures_without_advice() {
             if m["role"] != "tool" {
                 continue;
             }
-            let v: Value = serde_json::from_str(m["content"].as_str().unwrap()).unwrap();
+            let raw = m["content"].as_str().unwrap();
+            crate::action::testing::assert_action_well_formed(raw);
+            let v: Value = serde_json::from_str(raw).unwrap();
             let mut texts = Vec::new();
             strings(&v, &mut texts);
             crate::action::testing::assert_action_well_formed(&texts.join("\n"));

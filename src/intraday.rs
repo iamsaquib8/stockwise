@@ -250,6 +250,20 @@ fn detect_regime(closes: &[f64]) -> MarketRegime {
     }
 }
 
+/// Convert a floating-point price or currency boundary value into integer
+/// minor units (paise/cents, 10^-2), and convert back at the output boundary.
+fn money_minor(v: f64) -> i128 {
+    if v.is_finite() {
+        (v * 100.0).round() as i128
+    } else {
+        0
+    }
+}
+
+fn money_f64(m: i128) -> f64 {
+    m as f64 / 100.0
+}
+
 /// Today's session from 5-minute bars: the session VWAP and how today's
 /// volume so far compares with the volume earlier sessions had traded by the
 /// same time of day.
@@ -260,6 +274,8 @@ pub struct SessionStats {
     /// the same minute of the session. None when unknown (before the open,
     /// or without enough intraday history).
     pub volume_pace: Option<f64>,
+    /// Close of the preceding intraday bar in today's session.
+    pub prev_close: Option<f64>,
 }
 
 /// One intraday bar with every price present.
@@ -361,7 +377,12 @@ fn session_stats(bars: &[IntradayBar], market: market::Market, today: NaiveDate)
         let expected = expected.iter().sum::<f64>() / expected.len() as f64;
         (expected > 0.0).then(|| traded / expected)
     });
-    SessionStats { vwap, volume_pace }
+    let prev_close = session.len().checked_sub(2).map(|i| session[i].close);
+    SessionStats {
+        vwap,
+        volume_pace,
+        prev_close,
+    }
 }
 
 /// Scale on the score when the volume pace is unknown: the same as a
@@ -418,7 +439,7 @@ fn compute_signal(
     // ── Strategy: VWAP Reclaim (today's session VWAP) ──
     let vwap = session.vwap;
     let above_vwap = vwap.is_some_and(|v| price > v);
-    let prev_close = closes.len().checked_sub(2).map(|i| closes[i]);
+    let prev_close = session.prev_close;
     if let (Some(v), Some(prev)) = (vwap, prev_close) {
         match vwap_cross(prev, price, v) {
             Some((Direction::Long, dist)) => strategies.push(StrategySignal {
@@ -831,7 +852,6 @@ pub fn generate_trade_plans_with(
     limits: PlanLimits,
 ) -> Vec<TradePlan> {
     let (risk_pct, kf) = limits.risk_pct();
-    let max_risk_per_trade = capital * (risk_pct / 100.0);
     let mut plans = Vec::new();
 
     for signal in signals
@@ -897,23 +917,47 @@ pub fn generate_trade_plans_with(
         let risk_reward = profit_per_share / risk_per_share;
 
         // Size from the risk budget, capped per position. The loss at the
-        // exact exit level includes the round trip's charges and slippage.
+        // exact exit level includes the round trip's charges and slippage,
+        // computed in integer minor units (i128).
         let long = signal.direction == Direction::Long;
-        let loss_at_exit = |qty: u32| {
-            qty as f64 * risk_per_share
-                + limits.costs.as_ref().map_or(0.0, |m| {
-                    crate::simulator::round_trip_cost(m, long, qty, price, &[(qty, stop_loss)])
-                })
+        let capital_minor = money_minor(capital);
+        let price_minor = money_minor(price);
+        let stop_minor = money_minor(stop_loss);
+        let target2_minor = money_minor(target2);
+        let risk_per_share_minor = (price_minor - stop_minor).abs();
+        let profit_per_share_minor = (target2_minor - price_minor).abs();
+        let budget_minor = (capital_minor as f64 * risk_pct / 100.0).round() as i128;
+        let loss_at_exit_minor = |qty: u32| -> i128 {
+            let charges_minor = limits.costs.as_ref().map_or(0, |m| {
+                money_minor(crate::simulator::round_trip_cost(
+                    m,
+                    long,
+                    qty,
+                    price,
+                    &[(qty, stop_loss)],
+                ))
+            });
+            (qty as i128) * risk_per_share_minor + charges_minor
         };
-        let max_capital = capital * (limits.max_position_pct / 100.0);
-        let cap_qty = whole_shares(max_capital / price);
-        let mut qty = whole_shares(max_risk_per_trade / risk_per_share).min(cap_qty);
+        let max_capital_minor =
+            (capital_minor as f64 * limits.max_position_pct / 100.0).round() as i128;
+        let cap_qty = if price_minor > 0 {
+            whole_shares(max_capital_minor as f64 / price_minor as f64)
+        } else {
+            0
+        };
+        let mut qty = if risk_per_share_minor > 0 {
+            whole_shares(budget_minor as f64 / risk_per_share_minor as f64).min(cap_qty)
+        } else {
+            0
+        };
         if qty > 0 && limits.costs.is_some() {
-            // One proportional step for the costs, then share by share.
-            let per_share = loss_at_exit(qty) / qty as f64;
-            qty = qty.min(whole_shares(max_risk_per_trade / per_share));
-            let budget = max_risk_per_trade * (1.0 + 1e-9);
-            while qty > 0 && loss_at_exit(qty) > budget {
+            // One proportional step for the costs, then share by share in minor units.
+            let per_share_minor = loss_at_exit_minor(qty) / (qty as i128);
+            if per_share_minor > 0 {
+                qty = qty.min(whole_shares(budget_minor as f64 / per_share_minor as f64));
+            }
+            while qty > 0 && loss_at_exit_minor(qty) > budget_minor {
                 qty -= 1;
             }
         }
@@ -921,9 +965,13 @@ pub fn generate_trade_plans_with(
             continue;
         }
 
-        let capital_required = qty as f64 * price;
-        let max_risk = loss_at_exit(qty);
-        let expected_profit = qty as f64 * profit_per_share;
+        let qty_i = qty as i128;
+        let capital_required_minor = qty_i * price_minor;
+        let max_risk_minor = loss_at_exit_minor(qty);
+        let expected_profit_minor = qty_i * profit_per_share_minor;
+        let capital_required = money_f64(capital_required_minor);
+        let max_risk = money_f64(max_risk_minor);
+        let expected_profit = money_f64(expected_profit_minor);
         let position_pct = (capital_required / capital) * 100.0;
 
         plans.push(TradePlan {
@@ -979,37 +1027,47 @@ fn cap_total_allocation(
     max_positions: usize,
     costs: Option<&crate::backtest::costs::CostModel>,
 ) -> Vec<TradePlan> {
-    let mut remaining = capital;
+    let mut remaining_minor = money_minor(capital);
     let mut kept = Vec::new();
     for mut plan in plans {
         if kept.len() >= max_positions {
             break;
         }
-        if plan.capital_required > remaining {
-            let qty = whole_shares(remaining / plan.entry);
+        let mut cap_req_minor = money_minor(plan.capital_required);
+        if cap_req_minor > remaining_minor {
+            let entry_minor = money_minor(plan.entry);
+            if entry_minor <= 0 {
+                continue;
+            }
+            let qty = whole_shares(remaining_minor as f64 / entry_minor as f64);
             if qty == 0 {
                 continue;
             }
-            let per_share_profit = plan.expected_profit / plan.qty as f64;
+            let old_qty_i = plan.qty.max(1) as i128;
+            let per_share_profit_minor = money_minor(plan.expected_profit) / old_qty_i;
+            let qty_i = qty as i128;
             plan.qty = qty;
-            plan.capital_required = qty as f64 * plan.entry;
-            // Recomputed, not scaled: per-order charges don't shrink with
-            // the quantity.
+            cap_req_minor = qty_i * entry_minor;
+            plan.capital_required = money_f64(cap_req_minor);
+            // Recomputed in minor units, not scaled: per-order charges don't shrink
+            // with the quantity.
             let long = plan.signal.direction == Direction::Long;
-            plan.max_risk = qty as f64 * (plan.entry - plan.stop_loss).abs()
-                + costs.map_or(0.0, |m| {
-                    crate::simulator::round_trip_cost(
-                        m,
-                        long,
-                        qty,
-                        plan.entry,
-                        &[(qty, plan.stop_loss)],
-                    )
-                });
-            plan.expected_profit = qty as f64 * per_share_profit;
+            let stop_minor = money_minor(plan.stop_loss);
+            let charges_minor = costs.map_or(0, |m| {
+                money_minor(crate::simulator::round_trip_cost(
+                    m,
+                    long,
+                    qty,
+                    plan.entry,
+                    &[(qty, plan.stop_loss)],
+                ))
+            });
+            let max_risk_minor = qty_i * (entry_minor - stop_minor).abs() + charges_minor;
+            plan.max_risk = money_f64(max_risk_minor);
+            plan.expected_profit = money_f64(qty_i * per_share_profit_minor);
             plan.position_pct = plan.capital_required / capital * 100.0;
         }
-        remaining -= plan.capital_required;
+        remaining_minor = (remaining_minor - cap_req_minor).max(0);
         kept.push(plan);
     }
     kept
@@ -2037,5 +2095,75 @@ mod tests {
     fn signal_direction_is_described_not_called() {
         assert_eq!(Direction::Long.lean(), "bullish");
         assert_eq!(Direction::Short.lean(), "bearish");
+    }
+
+    #[test]
+    fn vwap_crossing_uses_previous_intraday_close_not_daily_close() {
+        // Daily second-to-last close is 99.8 (below VWAP 100.0), while the
+        // previous intraday close is 100.3 (above VWAP 100.0) and current price
+        // is 100.2 (still above VWAP). No VWAP Reclaim should fire.
+        let mut daily = crate::backtest::Bars::default();
+        for _ in 0..20 {
+            daily.open.push(99.8);
+            daily.high.push(100.5);
+            daily.low.push(99.5);
+            daily.close.push(99.8);
+            daily.volume.push(1000);
+        }
+        let q = Quote {
+            symbol: Some("TEST.NS".into()),
+            short_name: Some("Test".into()),
+            regular_market_price: Some(100.2),
+            regular_market_change: Some(0.4),
+            regular_market_change_percent: Some(0.4),
+            regular_market_previous_close: Some(99.8),
+            regular_market_open: Some(100.0),
+            regular_market_day_high: Some(100.5),
+            regular_market_day_low: Some(99.9),
+            regular_market_volume: Some(10_000),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let no_cross = compute_signal(
+            "TEST.NS",
+            &q,
+            100.2,
+            &daily,
+            SessionStats {
+                vwap: Some(100.0),
+                volume_pace: Some(1.2),
+                prev_close: Some(100.3),
+            },
+            None,
+            None,
+        );
+        assert!(
+            !no_cross.strategies.iter().any(|s| s.name == "VWAP Reclaim"),
+            "{:?}",
+            no_cross.strategies
+        );
+
+        // Reverse: daily close is 100.3 (above VWAP 100.0), but previous
+        // intraday close is 99.8 (below VWAP) and current price is 100.2
+        // (above VWAP) -> VWAP Reclaim fires.
+        daily.close.fill(100.3);
+        let cross = compute_signal(
+            "TEST.NS",
+            &q,
+            100.2,
+            &daily,
+            SessionStats {
+                vwap: Some(100.0),
+                volume_pace: Some(1.2),
+                prev_close: Some(99.8),
+            },
+            None,
+            None,
+        );
+        assert!(
+            cross.strategies.iter().any(|s| s.name == "VWAP Reclaim"),
+            "{:?}",
+            cross.strategies
+        );
     }
 }

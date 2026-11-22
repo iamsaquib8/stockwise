@@ -209,16 +209,19 @@ pub fn range_breaks(quotes: &[Quote], up: bool, min_value: f64, n: usize) -> Vec
     v.into_iter()
         .take(n)
         .filter_map(|q| {
-            mover(
-                q,
-                None,
-                if up {
+            let p = q.regular_market_price?;
+            let note = if up {
+                if q.fifty_two_week_high.is_some_and(|h| p >= h) {
                     "at a 52-week high"
                 } else {
-                    "at a 52-week low"
+                    "near a 52-week high"
                 }
-                .into(),
-            )
+            } else if q.fifty_two_week_low.is_some_and(|l| p <= l) {
+                "at a 52-week low"
+            } else {
+                "near a 52-week low"
+            };
+            mover(q, None, note.into())
         })
         .collect()
 }
@@ -257,7 +260,7 @@ pub fn most_mentioned(titles: &[String], quotes: &[Quote], n: usize) -> Vec<(Str
         .iter()
         .filter_map(|q| {
             let sym = q.symbol.clone()?;
-            let base = sym.split('.').next().unwrap_or(&sym).to_lowercase();
+            let base = normalize(sym.split('.').next().unwrap_or(&sym));
             let name = q
                 .short_name
                 .as_deref()
@@ -585,13 +588,20 @@ pub fn parse_large_deals(v: &Value) -> Vec<Deal> {
                 continue;
             };
             let side = text(d, "buySell").to_ascii_uppercase();
+            let buy = if side.starts_with('B') {
+                true
+            } else if side.starts_with('S') {
+                false
+            } else {
+                continue;
+            };
             out.push(Deal {
                 kind,
                 date: text(d, "date"),
                 symbol: text(d, "symbol"),
                 name: text(d, "name"),
                 client: text(d, "clientName"),
-                buy: side.starts_with('B'),
+                buy,
                 qty,
                 price,
             });
@@ -693,8 +703,13 @@ pub fn parse_oi_spurts(v: &Value, quotes: &[Quote], n: usize) -> Vec<OiMove> {
                 .iter()
                 .find(|q| q.symbol.as_deref() == Some(yahoo.as_str()))
                 .and_then(|q| q.regular_market_change_percent)?;
+            let reading = if pc.abs() <= 1e-12 || oi.abs() <= 1e-12 {
+                "unchanged"
+            } else {
+                oi_reading(pc > 0.0, oi > 0.0)
+            };
             Some(OiMove {
-                reading: oi_reading(pc >= 0.0, oi >= 0.0),
+                reading,
                 symbol,
                 oi_change_pct: oi,
                 price_change_pct: Some(pc),

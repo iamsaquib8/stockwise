@@ -236,38 +236,139 @@ pub fn weights(index: &str) -> Option<&'static IndexWeights> {
     TABLES.iter().copied().find(|t| t.index == want)
 }
 
+/// Normalize separators (including Unicode dashes) and repeated whitespace so
+/// weighting qualifiers like `Equal–Weight` match reliably.
+fn normalize_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_space = true;
+    for ch in name.chars() {
+        if ch.is_alphanumeric() || ch == '&' {
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
+            prev_space = false;
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Whether `words` contains `pat` as an exact supported benchmark (not an
+/// index variant such as `Nifty50 Value 20`, `Nifty 50 Equal Weight`, or
+/// `S&P 500 Growth`).
+fn has_exact_benchmark(words: &[&str], pat: &[&str], allow_junior: bool) -> bool {
+    let n = pat.len();
+    words.windows(n).enumerate().any(|(i, win)| {
+        if win != pat {
+            return false;
+        }
+        if i > 0 && matches!(words[i - 1], "ex" | "non" | "anti" | "equal" | "weight") {
+            return false;
+        }
+        if (pat == ["next", "50"] || pat == ["next50"])
+            && i > 0
+            && matches!(words[i - 1], "bse" | "sensex")
+        {
+            return false;
+        }
+        match words.get(i + n).copied() {
+            None => true,
+            Some(
+                "index" | "etf" | "bees" | "fund" | "fof" | "plan" | "scheme" | "tri" | "pr"
+                | "trust" | "ucits",
+            ) => true,
+            Some("junior") if allow_junior => matches!(
+                words.get(i + n + 1).copied(),
+                None | Some("index" | "etf" | "bees" | "fund" | "fof" | "plan")
+            ),
+            Some("exchange") => words.get(i + n + 1).copied() == Some("traded"),
+            _ => false,
+        }
+    })
+}
+
 /// The index a fund tracks, from its symbol (a known ETF) or, for an index
-/// fund, its scheme name ("... Nifty 50 Index Fund").
+/// fund, its scheme name ("... Nifty 50 Index Fund"). Returns `None` for
+/// equal-weight and other unsupported benchmark variants so they never receive
+/// cap-weighted constituent tables.
 pub fn index_of_fund(symbol: &str, name: Option<&str>) -> Option<&'static str> {
     if let Some(i) = crate::xray::index_for_etf(symbol) {
         return Some(i);
     }
-    let n = name?.to_ascii_lowercase();
-    let indexed = n.contains("index") || n.contains("etf") || n.contains("bees");
+    let norm = normalize_name(name?);
+    let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
+    let indexed = words.iter().any(|&w| matches!(w, "index" | "etf" | "bees"));
     // An equal-weight fund holds the same names in other proportions: the
     // cap-weighted tables would misstate it.
-    if !indexed || n.contains("equal weight") || n.contains("equal-weight") {
+    if !indexed || norm.contains("equal weight") || norm.contains("equalweight") {
         return None;
     }
-    if n.contains("next 50") || n.contains("next50") {
+    if has_exact_benchmark(&words, &["nifty", "next", "50"], true)
+        || has_exact_benchmark(&words, &["nifty", "next50"], true)
+        || has_exact_benchmark(&words, &["next", "50"], true)
+        || has_exact_benchmark(&words, &["next50"], true)
+    {
         Some("NIFTY NEXT 50")
-    } else if n.contains("nifty bank") || n.contains("bank nifty") {
+    } else if has_exact_benchmark(&words, &["nifty", "bank"], false)
+        || has_exact_benchmark(&words, &["bank", "nifty"], false)
+    {
         Some("NIFTY BANK")
-    } else if has_token(&n, "nifty 50") || has_token(&n, "nifty50") {
+    } else if has_exact_benchmark(&words, &["nifty", "50"], false)
+        || has_exact_benchmark(&words, &["nifty50"], false)
+    {
         Some("NIFTY 50")
-    } else if has_token(&n, "s&p 500") || has_token(&n, "s&p500") {
+    } else if has_exact_benchmark(&words, &["s&p", "500"], false)
+        || has_exact_benchmark(&words, &["s&p500"], false)
+    {
         Some("S&P 500")
-    } else if n.contains("nasdaq 100") || n.contains("nasdaq-100") || n.contains("nasdaq100") {
+    } else if has_exact_benchmark(&words, &["nasdaq", "100"], false)
+        || has_exact_benchmark(&words, &["nasdaq100"], false)
+    {
         Some("NASDAQ 100")
     } else {
         None
     }
 }
 
-/// `pat` occurs in `hay` not followed by a digit ("nifty 50", not "nifty 500").
-fn has_token(hay: &str, pat: &str) -> bool {
-    hay.match_indices(pat)
-        .any(|(i, _)| !hay[i + pat.len()..].starts_with(|c: char| c.is_ascii_digit()))
+/// Whether `symbol`/`name` identifies an index fund or ETF (including
+/// equal-weight and unsupported index variants that have no shipped table).
+pub fn is_index_fund(symbol: &str, name: Option<&str>) -> bool {
+    if index_of_fund(symbol, name).is_some() {
+        return true;
+    }
+    let Some(raw) = name else {
+        return false;
+    };
+    let norm = normalize_name(raw);
+    let words: Vec<&str> = norm.split(' ').filter(|w| !w.is_empty()).collect();
+    words.iter().any(|&w| matches!(w, "etf" | "bees"))
+        || (words.contains(&"index")
+            && (words.iter().any(|&w| {
+                matches!(
+                    w,
+                    "fund" | "fof" | "plan" | "scheme" | "direct" | "regular" | "growth" | "idcw"
+                )
+            }) || words.iter().any(|&w| {
+                matches!(
+                    w,
+                    "nifty"
+                        | "nifty50"
+                        | "s&p"
+                        | "s&p500"
+                        | "nasdaq"
+                        | "nasdaq100"
+                        | "sensex"
+                        | "bse"
+                        | "msci"
+                        | "ftse"
+                        | "russell"
+                )
+            })))
 }
 
 /// The shipped weights for the index `symbol`/`name` tracks, if any.
@@ -289,6 +390,24 @@ mod tests {
             index_of_fund("MF:4", Some("DSP Nifty 50 Equal Weight Index Fund")),
             None
         );
+        assert_eq!(
+            index_of_fund("MF:4B", Some("DSP Nifty 50 Equal\u{2013}Weight Index Fund")),
+            None
+        );
+        assert_eq!(
+            index_of_fund("MF:6", Some("ICICI Prudential Nifty50 Value 20 Index Fund")),
+            None
+        );
+        assert_eq!(index_of_fund("MF:7", Some("SPDR S&P 500 Growth ETF")), None);
+        assert!(is_index_fund(
+            "EQWT",
+            Some("DSP Nifty 50 Equal\u{2013}Weight Index Fund")
+        ));
+        assert!(is_index_fund(
+            "VAL20",
+            Some("ICICI Prudential Nifty50 Value 20 Index Fund")
+        ));
+        assert!(!is_index_fund("TCS.NS", Some("Tata Consultancy Services")));
         assert_eq!(
             index_of_fund("MF:5", Some("UTI Nifty 50 Index Fund - Direct")),
             Some("NIFTY 50")

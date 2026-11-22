@@ -113,12 +113,8 @@ fn review_text(p: &crate::pulse::Pulse, portfolio: &Portfolio) -> String {
         crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
     let mut rows: Vec<&crate::pulse::Row> = p.held().collect();
     // Most urgent action first (EXIT, TRIM, ADD, HOLD, no call), then weight.
-    let urgency = |r: &crate::pulse::Row| {
-        r.action
-            .as_deref()
-            .and_then(|a| crate::action::Kind::parse(a.split(" — ").next().unwrap_or(a)))
-            .map_or(u8::MAX, |k| k.review_rank())
-    };
+    let urgency =
+        |r: &crate::pulse::Row| r.action.as_ref().map_or(u8::MAX, |a| a.kind.review_rank());
     rows.sort_by(|a, b| {
         urgency(a)
             .cmp(&urgency(b))
@@ -158,7 +154,7 @@ fn review_text(p: &crate::pulse::Pulse, portfolio: &Portfolio) -> String {
                 .unwrap_or_else(|| "—".into()),
             r.action
                 .as_ref()
-                .map(|a| format!(" [{a}]"))
+                .map(|a| format!(" [{}]", super::actions::format_action_line(a)))
                 .unwrap_or_default(),
             if signals.is_empty() {
                 String::new()
@@ -166,6 +162,10 @@ fn review_text(p: &crate::pulse::Pulse, portfolio: &Portfolio) -> String {
                 format!(" — {}", signals.join("; "))
             }
         ));
+    }
+    if p.held().any(|r| r.action.is_some()) {
+        out.push(String::new());
+        out.push(crate::action::DISCLAIMER.to_string());
     }
     out.join("\n")
 }
@@ -272,21 +272,24 @@ pub async fn cmd_telegram_bot(once: bool, market: Market) -> Result<()> {
         if shutdown.requested() {
             break;
         }
-        // Scheduled digest, once per session date (shared with the worker).
+        // Scheduled digest, once per closed session date (shared with the worker).
         if let Some(t) = digest_time() {
             let now = chrono::Local::now();
             let utc = chrono::Utc::now();
-            if now.time() >= t
-                && crate::clock::is_trading_day(market, crate::clock::session_date(market, utc))
-            {
+            let sess = crate::clock::session_date(market, utc);
+            let session_closed = crate::clock::close_at(market, sess).is_some_and(|c| utc >= c);
+            if now.time() >= t && crate::clock::is_trading_day(market, sess) && session_closed {
                 let mut st: crate::monitor::MonitorState =
                     crate::store::load(crate::monitor::STATE_FILE).unwrap_or_default();
-                let date = crate::clock::session_date(market, utc).to_string();
+                let date = sess.to_string();
                 if st.last_digest.as_deref() != Some(date.as_str())
                     && let Ok((d, signals)) =
                         super::monitoring::build_digest(&client, market, Vec::new(), &mut st).await
                 {
-                    let _ = super::monitoring::send_digest_once(&notifier, &d, &signals).await;
+                    let _ = super::monitoring::send_digest_once_with_cursor(
+                        &notifier, &d, &signals, st.cursor,
+                    )
+                    .await;
                 }
             }
         }
@@ -300,9 +303,45 @@ pub async fn cmd_telegram_bot(once: bool, market: Market) -> Result<()> {
             _ = shutdown.wait() => None,
         };
         let Some(polled) = polled else { break };
-        let updates = match polled {
-            Ok(resp) => resp.json::<serde_json::Value>().await.unwrap_or_default(),
+        let updates: serde_json::Value = match polled {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    if once {
+                        bail!("Telegram getUpdates failed with HTTP {status}");
+                    }
+                    eprintln!("  ! Telegram poll HTTP {status} — retrying");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                }
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) if v.get("ok").and_then(|b| b.as_bool()) == Some(true) => v,
+                    Ok(v) => {
+                        let desc = v
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("unknown Telegram error");
+                        if once {
+                            bail!("Telegram getUpdates rejected: {desc}");
+                        }
+                        eprintln!("  ! Telegram poll rejected: {desc} — retrying");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        if once {
+                            bail!("Telegram getUpdates invalid JSON: {e}");
+                        }
+                        eprintln!("  ! Telegram poll parse failed: {e} — retrying");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        continue;
+                    }
+                }
+            }
             Err(e) => {
+                if once {
+                    bail!("Telegram poll failed: {}", e.without_url());
+                }
                 eprintln!("  ! Telegram poll failed: {} — retrying", e.without_url());
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;

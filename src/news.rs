@@ -60,14 +60,20 @@ impl NewsItem {
         }
     }
 
-    /// Local date and time, e.g. `21 Nov 16:05`.
+    /// Local date and time, e.g. `21 Nov 16:05`, or date-only `21 Nov` when an
+    /// official filing has only a calendar date (midnight UTC).
     pub fn local_time(&self) -> Option<String> {
-        let t = chrono::DateTime::from_timestamp(self.ts?, 0)?;
-        Some(
-            t.with_timezone(&chrono::Local)
-                .format("%d %b %H:%M")
-                .to_string(),
-        )
+        let ts = self.ts?;
+        let t = chrono::DateTime::from_timestamp(ts, 0)?;
+        if self.official && ts.rem_euclid(86_400) == 0 {
+            Some(t.format("%d %b").to_string())
+        } else {
+            Some(
+                t.with_timezone(&chrono::Local)
+                    .format("%d %b %H:%M")
+                    .to_string(),
+            )
+        }
     }
 
     /// Hours since publication at `now`.
@@ -106,17 +112,44 @@ fn fingerprint(title: &str) -> Vec<String> {
         .collect()
 }
 
+fn is_sec_filing(item: &NewsItem) -> bool {
+    item.source == "SEC EDGAR" || item.publisher == "SEC EDGAR"
+}
+
 /// Remove near-duplicates (over 60% of the shorter title's words shared),
 /// keeping the official or earlier-seen copy, then sort newest first.
 pub fn collate(mut items: Vec<NewsItem>) -> Vec<NewsItem> {
     // Filings first so they win ties; then newest first.
     items.sort_by_key(|i| (!i.official, std::cmp::Reverse(i.ts.unwrap_or(0))));
-    let mut seen: Vec<Vec<String>> = Vec::new();
+    let mut seen: Vec<(Option<String>, Vec<String>)> = Vec::new();
     let mut out: Vec<NewsItem> = Vec::new();
     for item in items {
+        let same_link = item.link.as_ref().is_some_and(|l| {
+            out.iter().any(|o| {
+                (o.symbol == item.symbol || o.symbol.is_none() || item.symbol.is_none())
+                    && o.link.as_ref() == Some(l)
+            })
+        });
+        if same_link {
+            continue;
+        }
+        if is_sec_filing(&item) {
+            let same_unlinked_sec = item.link.is_none()
+                && out.iter().any(|o| {
+                    is_sec_filing(o)
+                        && o.symbol == item.symbol
+                        && o.link.is_none()
+                        && o.ts == item.ts
+                        && o.title == item.title
+                });
+            if !same_unlinked_sec {
+                out.push(item);
+            }
+            continue;
+        }
         let words = fingerprint(&item.title);
-        let dup = seen.iter().any(|w| {
-            if w.is_empty() || words.is_empty() {
+        let dup = seen.iter().any(|(sym, w)| {
+            if *sym != item.symbol || w.is_empty() || words.is_empty() {
                 return false;
             }
             let shared = words.iter().filter(|x| w.contains(x)).count();
@@ -126,12 +159,8 @@ pub fn collate(mut items: Vec<NewsItem>) -> Vec<NewsItem> {
                 && shared as f64 / words.len().min(w.len()) as f64 > 0.6
                 && (shared >= 3 || words == *w)
         });
-        let same_link = item
-            .link
-            .as_ref()
-            .is_some_and(|l| out.iter().any(|o| o.link.as_ref() == Some(l)));
-        if !dup && !same_link {
-            seen.push(words);
+        if !dup {
+            seen.push((item.symbol.clone(), words));
             out.push(item);
         }
     }
@@ -272,6 +301,18 @@ async fn google(
 /// nothing about the company: a fund-like name plus a holding verb.
 pub fn is_noise(title: &str) -> bool {
     let t = format!(" {} ", title.to_lowercase());
+    const SUBSTANTIVE: &[&str] = &[
+        "controlling stake",
+        "majority stake",
+        "strategic stake",
+        "entire stake",
+        "100% stake",
+        "takeover",
+        "buyout",
+    ];
+    if SUBSTANTIVE.iter().any(|w| t.contains(w)) {
+        return false;
+    }
     const HOLDING: &[&str] = &["stake", "position", "shares", "holdings"];
     const MOVE: &[&str] = &[
         "acquired by",
@@ -306,7 +347,12 @@ pub fn is_noise(title: &str) -> bool {
         "asset management",
         "advisors",
         "advisory",
-        "wealth",
+        "wealth management",
+        "wealth advisors",
+        "wealth advisory",
+        "wealth partners",
+        "wealth group",
+        "private wealth",
         "capital management",
         "investment board",
         "investment management",
@@ -432,7 +478,7 @@ pub async fn fetch(client: &YahooClient, q: &Query) -> Fetched {
         item.importance = importance(item, now);
     }
     out.items
-        .retain(|i| i.ts.is_none_or(|t| t >= cutoff) && !is_noise(&i.title));
+        .retain(|i| i.ts.is_none_or(|t| t >= cutoff) && (i.official || !is_noise(&i.title)));
     out.items = collate(std::mem::take(&mut out.items));
     out
 }
@@ -556,6 +602,30 @@ mod tests {
         ));
         assert!(!is_noise("Infosys buyback opens this week"));
         assert!(!is_noise("Tata Motors acquires stake in EV maker"));
+        assert!(!is_noise(
+            "Company acquires controlling stake in wealth manager"
+        ));
+    }
+
+    #[test]
+    fn distinct_companies_and_sec_filings_with_different_links_survive_collate() {
+        let mut a = item("Outcome of Board Meeting", 100, true, "A.NS");
+        a.link = Some("https://nseindia.com/a.pdf".into());
+        let mut b = item("Outcome of Board Meeting", 100, true, "B.NS");
+        b.link = Some("https://nseindia.com/b.pdf".into());
+        let out = collate(vec![a, b]);
+        assert_eq!(out.len(), 2, "{out:#?}");
+
+        let mut sec1 = item("8-K: Results of operations", 200, true, "AAPL");
+        sec1.source = "SEC EDGAR".into();
+        sec1.publisher = "SEC EDGAR".into();
+        sec1.link = Some("https://www.sec.gov/Archives/edgar/data/320193/1/8k.htm".into());
+        let mut sec2 = item("8-K: Results of operations", 100, true, "AAPL");
+        sec2.source = "SEC EDGAR".into();
+        sec2.publisher = "SEC EDGAR".into();
+        sec2.link = Some("https://www.sec.gov/Archives/edgar/data/320193/2/8k.htm".into());
+        let out_sec = collate(vec![sec1, sec2]);
+        assert_eq!(out_sec.len(), 2, "{out_sec:#?}");
     }
 
     #[test]

@@ -558,8 +558,14 @@ async fn longterm_scan(
                     info.source = m.data_source.clone();
                     info.warnings = m.warnings.clone();
                 }
-                info.last = c.dated_closes().last().map(|(d, _)| *d);
-                Some(c.return_closes()).filter(|c| !c.is_empty())
+                let retained: Vec<_> = c
+                    .dated_closes()
+                    .into_iter()
+                    .filter(|(_, px)| *px > 0.0 && px.is_finite())
+                    .collect();
+                info.last = retained.last().map(|(d, _)| *d);
+                let closes: Vec<f64> = retained.into_iter().map(|(_, px)| px).collect();
+                (!closes.is_empty()).then_some(closes)
             }
             Err(e) => {
                 info.warnings

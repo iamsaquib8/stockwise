@@ -417,7 +417,7 @@ pub fn classify(text: &str) -> Kind {
     if has_any(
         &t,
         &[
-            "acquire*",
+            "acquir*",
             "acquisition*",
             "merger*",
             "joint venture",
@@ -2155,5 +2155,12 @@ mod tests {
             "Award of Order",
             "L&T has received a mega order"
         )));
+    }
+
+    #[test]
+    fn test_acquiring_classified_as_deal() {
+        assert_eq!(classify("Company is acquiring a rival unit"), Kind::Deal);
+        assert_eq!(classify("Company acquired a rival unit"), Kind::Deal);
+        assert_eq!(classify("Company acquires a rival unit"), Kind::Deal);
     }
 }

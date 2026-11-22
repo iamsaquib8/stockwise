@@ -399,8 +399,13 @@ pub fn symbol_year_in(
     if let Some(h) = p.holding(symbol) {
         for l in h.lots.iter().filter(|l| inside(date(&l.date))) {
             let d = date(&l.date).expect("checked");
+            let gross = l.cost() + l.charges.unwrap_or(0.0);
+            if gross.abs() <= 1e-12 {
+                y.flows.push((d, 0.0));
+                continue;
+            }
             let r = paid_rate(l.fx_currency.as_deref(), l.fx_rate).unwrap_or_else(|| rate(d));
-            let cost = (l.cost() + l.charges.unwrap_or(0.0)) * r;
+            let cost = gross * r;
             y.bought += cost;
             y.flows.push((d, cost));
         }
@@ -416,9 +421,13 @@ pub fn symbol_year_in(
         let paid = paid_rate(s.fx_currency.as_deref(), s.buy_fx_rate);
         if inside(bought) {
             let d = bought.expect("checked");
-            let cost = buy_cost * paid.unwrap_or_else(|| rate(d));
-            y.bought += cost;
-            y.flows.push((d, cost));
+            if buy_cost.abs() <= 1e-12 {
+                y.flows.push((d, 0.0));
+            } else {
+                let cost = buy_cost * paid.unwrap_or_else(|| rate(d));
+                y.bought += cost;
+                y.flows.push((d, cost));
+            }
         }
         if inside(sold) {
             let d = sold.expect("checked");

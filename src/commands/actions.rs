@@ -71,15 +71,17 @@ pub(crate) fn holding_context_for(
     pe: Option<f64>,
     roe: Option<f64>,
     market: Market,
-) -> Option<HoldingContext> {
-    let portfolio = Portfolio::load().ok()?;
-    let h = portfolio.holding(symbol)?;
+) -> Result<Option<HoldingContext>> {
+    let portfolio = Portfolio::load()?;
+    let Some(h) = portfolio.holding(symbol) else {
+        return Ok(None);
+    };
     if h.shares <= 0.0 {
-        return None;
+        return Ok(None);
     }
     let today = chrono::Local::now().date_naive();
     let notes = notes();
-    Some(HoldingContext {
+    Ok(Some(HoldingContext {
         shares: h.shares,
         avg_cost: h.avg_cost,
         weight_pct: None,
@@ -87,7 +89,7 @@ pub(crate) fn holding_context_for(
         target_weight_pct: portfolio.targets.get(&h.symbol).copied(),
         thesis_breaches: action::thesis_breaches(notes.get(symbol), pe, roe, None),
         next_long_term: price.and_then(|p| next_long_term(h, p, currency, market, today)),
-    })
+    }))
 }
 
 /// Re-decide a verdict's action as a holding when the active portfolio has
@@ -100,7 +102,7 @@ pub(crate) fn apply_holding(
     if cfg!(test) {
         return;
     }
-    if let Some(h) = holding_context_for(
+    match holding_context_for(
         &r.symbol,
         r.price(),
         r.currency.as_deref(),
@@ -108,13 +110,70 @@ pub(crate) fn apply_holding(
         r.fin.roe,
         market,
     ) {
-        crate::verdict::set_holding(v, r, &crate::config::effective_profile(), h);
+        Ok(Some(h)) => {
+            crate::verdict::set_holding(v, r, &crate::config::effective_profile(), h);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let msg = format!("Active portfolio could not be read ({e}); holding status unknown");
+            let mut no = Action::undecided(&v.currency);
+            no.horizon = v.action.horizon;
+            no.coverage = v.action.coverage;
+            no.reasons = vec![msg.clone()];
+            v.action = no;
+            v.profile_notes.push(msg);
+        }
+    }
+}
+
+/// Structured quote-only action for a holding or watched stock (`today`,
+/// `hot`, the digest and the Telegram bot).
+pub(crate) fn row_action(
+    q: &Quote,
+    h: Option<&pf::Holding>,
+    weight_pct: Option<f64>,
+    target_weight_pct: Option<f64>,
+    notes: &NoteStore,
+    profile: &crate::config::EffectiveProfile,
+    today: NaiveDate,
+) -> Action {
+    match h {
+        Some(h) => quick_holding_action(q, h, weight_pct, target_weight_pct, notes, profile, today),
+        None => {
+            let score = crate::longterm::score_for_longterm(q, None);
+            let i = action::inputs_from_quote(q, &Series::default(), &score, Horizon::Long, today)
+                .with_profile(profile);
+            action::decide(&i)
+        }
+    }
+}
+
+/// Compact one-line summary of an [`Action`] that retains its invalidation
+/// price for `BUY`, `ADD`, `HOLD` and `TRIM` alongside its reasons.
+pub(crate) fn format_action_line(a: &Action) -> String {
+    if a.kind == Kind::NoCall {
+        return a.headline().trim_start_matches("ACTION: ").to_string();
+    }
+    let level = a
+        .invalidation_price
+        .map(|p| {
+            format!(
+                " (invalid below {}{p:.2})",
+                crate::market::currency_symbol(Some(&a.currency))
+            )
+        })
+        .unwrap_or_default();
+    let reasons = a.reasons.join("; ");
+    if reasons.is_empty() {
+        format!("{}{level}", a.label)
+    } else {
+        format!("{}{level} — {reasons}", a.label)
     }
 }
 
 /// The one-line action `today`, `hot`, the digest and the Telegram bot show:
 /// the quote-only rules (see [`quick_holding_action`]) for a holding, or for
-/// a watched stock not held, as "TRIM — weight 14% above the 12% cap".
+/// a watched stock not held, including the invalidation level when present.
 pub(crate) fn action_line(
     q: &Quote,
     h: Option<&pf::Holding>,
@@ -124,19 +183,8 @@ pub(crate) fn action_line(
     profile: &crate::config::EffectiveProfile,
     today: NaiveDate,
 ) -> String {
-    let a = match h {
-        Some(h) => quick_holding_action(q, h, weight_pct, target_weight_pct, notes, profile, today),
-        None => {
-            let score = crate::longterm::score_for_longterm(q, None);
-            let i = action::inputs_from_quote(q, &Series::default(), &score, Horizon::Long, today)
-                .with_profile(profile);
-            action::decide(&i)
-        }
-    };
-    match a.reasons.first() {
-        Some(r) if a.kind != Kind::NoCall => format!("{} — {}", a.label, r),
-        _ => a.headline().trim_start_matches("ACTION: ").to_string(),
-    }
+    let a = row_action(q, h, weight_pct, target_weight_pct, notes, profile, today);
+    format_action_line(&a)
 }
 
 /// The user's notes (thesis limits), for callers outside this module.
@@ -246,26 +294,50 @@ pub(crate) fn quick_actions(
     let notes = notes();
     let today = chrono::Local::now().date_naive();
     let totals = val.totals(portfolio);
+    let complete = totals.unpriced.is_empty() && totals.unconverted.is_empty();
     portfolio
         .holdings
         .iter()
-        .filter_map(|h| {
-            let q = enriched.get(&h.symbol).or_else(|| val.quote(&h.symbol))?;
-            let weight = val
-                .price(&h.symbol)
-                .and_then(|p| val.to_base(&h.symbol, h.shares * p))
-                .filter(|_| totals.value > 0.0)
-                .map(|v| v / totals.value * 100.0);
-            let a = quick_holding_action(
-                q,
-                h,
-                weight,
-                portfolio.targets.get(&h.symbol).copied(),
-                &notes,
-                &profile,
-                today,
-            );
-            Some((h.symbol.clone(), a))
+        .map(|h| {
+            let weight = complete
+                .then(|| {
+                    val.price(&h.symbol)
+                        .and_then(|p| val.to_base(&h.symbol, h.shares * p))
+                        .filter(|_| totals.value > 0.0)
+                        .map(|v| v / totals.value * 100.0)
+                })
+                .flatten();
+            let a = match enriched.get(&h.symbol).or_else(|| val.quote(&h.symbol)) {
+                Some(q) => quick_holding_action(
+                    q,
+                    h,
+                    weight,
+                    portfolio.targets.get(&h.symbol).copied(),
+                    &notes,
+                    &profile,
+                    today,
+                ),
+                None => {
+                    let currency = val
+                        .currency(&h.symbol)
+                        .unwrap_or_else(|| val.base().to_string());
+                    let mut i =
+                        action::Inputs::new(&h.symbol, &currency, today).with_profile(&profile);
+                    i.is_stock = crate::market::AssetClass::of(&h.symbol)
+                        == crate::market::AssetClass::Stock
+                        && !crate::offmarket::is_fund(&h.symbol)
+                        && !crate::offmarket::is_sgb(&h.symbol);
+                    i.holding = Some(HoldingContext {
+                        shares: h.shares,
+                        avg_cost: h.avg_cost,
+                        weight_pct: weight,
+                        target_weight_pct: portfolio.targets.get(&h.symbol).copied(),
+                        ..Default::default()
+                    });
+                    action::decide(&i)
+                }
+            };
+            (h.symbol.clone(), a)
         })
         .collect()
 }
@@ -376,6 +448,7 @@ pub(crate) async fn review(
         .into_iter()
         .collect();
 
+    let complete_portfolio = a.left_out.is_empty();
     let mut rows = Vec::new();
     for p in &a.positions {
         let Some(h) = g.portfolio.holding(&p.symbol) else {
@@ -383,12 +456,24 @@ pub(crate) async fn review(
         };
         let q = enriched.get(&p.symbol).or_else(|| g.val.quote(&p.symbol));
         let currency = p.currency.clone();
+        let weight_pct = complete_portfolio.then_some(p.weight_pct).flatten();
         let action = match q {
             None => {
                 let mut i =
-                    action::Inputs::new(&p.symbol, currency.as_deref().unwrap_or("USD"), today);
+                    action::Inputs::new(&p.symbol, currency.as_deref().unwrap_or("USD"), today)
+                        .with_profile(&profile);
                 i.horizon = horizon;
-                i.is_stock = false;
+                i.is_stock = crate::market::AssetClass::of(&p.symbol)
+                    == crate::market::AssetClass::Stock
+                    && !crate::offmarket::is_fund(&p.symbol)
+                    && !crate::offmarket::is_sgb(&p.symbol);
+                i.holding = Some(HoldingContext {
+                    shares: h.shares,
+                    avg_cost: h.avg_cost,
+                    weight_pct,
+                    target_weight_pct: g.portfolio.targets.get(&p.symbol).copied(),
+                    ..Default::default()
+                });
                 action::decide(&i)
             }
             Some(q) => {
@@ -399,25 +484,30 @@ pub(crate) async fn review(
                     .with_profile(&profile);
                 i.next_earnings = next;
                 let to_base = g.val.to_base(&p.symbol, 1.0).filter(|r| *r > 0.0);
-                i.portfolio_value = to_base.map(|r| a.value / r);
+                i.portfolio_value = complete_portfolio
+                    .then(|| to_base.map(|r| a.value / r))
+                    .flatten();
                 i.holding = Some(HoldingContext {
                     shares: h.shares,
                     avg_cost: h.avg_cost,
-                    weight_pct: p.weight_pct,
-                    lookthrough_weight_pct: lookthrough
-                        .get(&crate::xray::canonical_ticker(&p.symbol))
-                        .copied(),
+                    weight_pct,
+                    lookthrough_weight_pct: complete_portfolio
+                        .then(|| {
+                            lookthrough
+                                .get(&crate::xray::canonical_ticker(&p.symbol))
+                                .copied()
+                        })
+                        .flatten(),
                     target_weight_pct: g.portfolio.targets.get(&p.symbol).copied(),
                     thesis_breaches: action::thesis_breaches(
                         notes.get(&p.symbol),
                         q.trailing_pe,
                         q.return_on_equity,
-                        p.weight_pct,
+                        weight_pct,
                     ),
-                    next_long_term: p
-                        .next_long_term
-                        .as_ref()
-                        .map(|n| (n.days, n.date, n.rate_difference)),
+                    next_long_term: q
+                        .regular_market_price
+                        .and_then(|pr| next_long_term(h, pr, currency.as_deref(), market, today)),
                 });
                 action::decide(&i)
             }
@@ -563,6 +653,7 @@ pub(crate) struct ReviewCsv {
     size_shares: Option<f64>,
     reasons: String,
     tax_note: Option<String>,
+    disclaimer: &'static str,
 }
 
 impl CsvRow for ReviewCsv {
@@ -577,6 +668,7 @@ impl CsvRow for ReviewCsv {
         "size_shares",
         "reasons",
         "tax_note",
+        "disclaimer",
     ];
 }
 
@@ -594,6 +686,7 @@ fn review_csv(r: &Review) -> Vec<ReviewCsv> {
             size_shares: row.action.size_hint.as_ref().and_then(|s| s.shares),
             reasons: row.action.reasons.join("; "),
             tax_note: row.action.tax_note.clone(),
+            disclaimer: row.action.disclaimer,
         })
         .collect()
 }
@@ -652,6 +745,7 @@ mod tests {
             missing.is_empty() && extra.is_empty(),
             "{missing:?} {extra:?}"
         );
+        assert_eq!(rows[0].disclaimer, action::DISCLAIMER);
         assert_action_well_formed(&serde_json::to_string(&r).unwrap());
         assert_action_well_formed(&render_review(&r));
     }
