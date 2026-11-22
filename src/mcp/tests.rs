@@ -526,11 +526,12 @@ async fn every_tool_has_annotations_and_the_main_ones_an_output_schema() {
         }
     }
     for (name, destructive, idempotent) in [
-        ("watchlist_add", false, true),
+        ("watchlist_add", false, false),
         ("watchlist_remove", true, true),
         ("alert_add", false, false),
         ("alert_remove", true, false),
-        ("goal_save", true, true),
+        ("goal_save", true, false),
+        ("note_set", true, false),
         ("profile_set", true, true),
         ("portfolio_add", false, false),
         ("portfolio_sell", true, false),

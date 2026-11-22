@@ -1974,6 +1974,15 @@ impl<D: DataSource> ToolContext<D> {
                 let limit = self.timeout.unwrap_or_else(|| default_timeout(tool.name));
                 match tokio::time::timeout(limit, handlers::run(self, tool.name, &args)).await {
                     Ok(r) => r?,
+                    // A logging read hands its track-record write to a
+                    // blocking task, which a timeout cannot stop.
+                    Err(_) if LOGGING_READS.contains(&tool.name) => bail!(
+                        "Stopped waiting for {} after {} seconds. Its track-record write \
+                         may still finish in the background. Data sources may be slow; \
+                         try again, or ask for less (a smaller universe).",
+                        tool.name,
+                        limit.as_secs()
+                    ),
                     Err(_) => bail!(
                         "{} did not finish within {} seconds and was stopped. Data sources \
                          may be slow; try again, or ask for less (fewer symbols, a smaller \

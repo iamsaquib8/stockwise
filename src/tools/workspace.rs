@@ -483,15 +483,17 @@ pub fn access(name: &str) -> Access {
 /// leaves the same files as calling it once.
 pub fn write_effect(name: &str) -> (bool, bool) {
     match name {
-        // Adding to a set: a second call finds the tickers already there.
-        "watchlist_add" => (false, true),
-        // Each call adds another alert or lot.
-        "alert_add" | "portfolio_add" => (false, false),
+        // Each call adds another alert or lot. A repeated watchlist add finds
+        // the tickers already there but still writes an undo-journal entry.
+        "watchlist_add" | "alert_add" | "portfolio_add" => (false, false),
         // Indexes shift after a removal; a sale uses up lots each time.
         "alert_remove" | "portfolio_sell" => (true, false),
+        // Saves that stamp today's date (`created`, `updated`): a retry on a
+        // later day changes the stored file.
+        "goal_save" | "note_set" => (true, false),
         // Removals, and saves that replace by name or key.
-        "watchlist_remove" | "goal_save" | "goal_remove" | "target_set" | "target_remove"
-        | "profile_set" | "profile_onboard" | "note_set" => (true, true),
+        "watchlist_remove" | "goal_remove" | "target_set" | "target_remove" | "profile_set"
+        | "profile_onboard" => (true, true),
         // Unknown writes: the cautious answer.
         _ => (true, false),
     }

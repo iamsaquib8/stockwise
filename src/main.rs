@@ -4330,7 +4330,7 @@ fn curated_quickstart_help(new_user: bool) -> String {
     }
     out.push_str(&format!(
         "\n  {}\n",
-        "Run `stockwise --help` (or `stockwise --help-all`) for all 75+ commands, or `stockwise doctor` to check setup."
+        "Run `stockwise --help` for the core commands, `stockwise --help-all` for every command, or `stockwise doctor` to check setup."
             .dimmed()
     ));
     out

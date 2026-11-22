@@ -345,7 +345,7 @@ the OS keyring when one is available (`STOCKWISE_KEYRING=off` keeps them in the 
 | `alert_watch.json` | Which alerts `alert watch` already announced |
 | `angel_config.json` | Angel One API credentials (secrets in the OS keyring when available) |
 | `zerodha_config.json`, `upstox_config.json`, `dhan_config.json`, `fyers_config.json` | Experimental broker apps and daily sessions (secrets in the keyring when available) |
-| `cache.db` | SQLite cache: HTTP responses, market snapshots, bars, results, index members, background tasks, `ask` sessions (safe to delete; `cache clear`) |
+| `cache.db` | SQLite cache: HTTP responses, market snapshots, bars, results, index members, background tasks, `ask` sessions (do not delete: it holds tasks and `ask` sessions; clear cached data with `stockwise cache clear`) |
 | `goals.json`, `notes.json` | Saved goals; per-stock thesis and limits |
 | `signal_log.json` | Every `picks` list, for `picks review` |
 | `monitor_state.json`, `alert_log.json` | Monitor signals already sent; alert history for the digest |

@@ -225,10 +225,14 @@ seconds), for example when the background worker marks an alert triggered.
 ### For client authors
 
 - Every tool has `readOnlyHint`, `destructiveHint`, `idempotentHint` and
-  `openWorldHint`. Read tools are read-only, except `picks`, which appends
-  its list to the local track record (not idempotent, since a repeat can log new picks; never destructive); write tools touch only local
-  files (closed-world), and the ones that remove or replace saved data are
-  marked destructive.
+  `openWorldHint`. Read tools are read-only, except `picks`, `ipo_board` and
+  `ipo_analyze`, which append to the local track record (not idempotent,
+  since a repeat can log new records; never destructive). Write tools touch
+  only local files (closed-world), and the ones that remove or replace saved
+  data are marked destructive. A write is idempotent only when a repeat
+  leaves the same files: adds that record an undo-journal entry each time
+  (`watchlist_add`) and saves that stamp today's date (`goal_save`,
+  `note_set`) are not.
 - `quote`, `history`, `verdict`, `verdicts`, `picks`, `picks_review`,
   `portfolio_summary`, `portfolio_analyze`, `portfolio_checkup`, `rebalance`,
   `tax_estimate` and `market_conditions` publish an `outputSchema`. Their
