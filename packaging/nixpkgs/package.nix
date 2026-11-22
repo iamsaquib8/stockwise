@@ -10,16 +10,16 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "stockwise";
-  version = "0.8.1";
+  version = "0.8.2";
 
   src = fetchFromGitHub {
     owner = "iamsaquib8";
     repo = "stockwise";
     tag = "v${finalAttrs.version}";
-    hash = "sha256-I4DDghl4q/Pi8MscU6HB9j7Yjz6A7GWFGXyyFwXI288=";
+    hash = "sha256-8Q6Ld1i2hRLqusbnH/IMTLFh7T6tjUE56z9CxmN3I9k=";
   };
 
-  cargoHash = "sha256-lcX/tUlKtUNg+S3KVyydjUps8U4gx28ej2U5FPzP6K0=";
+  cargoHash = "sha256-DfwR7hDBSMwSHJ2ZG53TMwF15PRznM/JQifdZQ5hXzk=";
 
   nativeBuildInputs = [ installShellFiles ];
 
@@ -38,8 +38,13 @@ rustPlatform.buildRustPackage (finalAttrs: {
   doInstallCheck = true;
 
   checkFlags = [
-    # Static test fixture in v0.8.1 tag drifts relative to runtime date
+    # Static test fixture in the tagged source drifts relative to runtime date
     "--skip=providers::alphavantage::tests::short_history_is_refused_so_yahoo_serves_it"
+    # Creates the data directory in the read-only sandbox home in v0.8.2
+    # (fixed on main: reading saved data no longer creates it)
+    "--skip=tools::tests::monitor_status_runs_offline_on_fixtures"
+    # Looks up tickers on Yahoo; the build sandbox has no network
+    "--skip=init_imports_a_groww_file_and_prints_holdings"
   ];
 
   passthru.updateScript = nix-update-script { };
