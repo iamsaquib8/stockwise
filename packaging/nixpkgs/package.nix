@@ -19,7 +19,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     hash = "sha256-8Q6Ld1i2hRLqusbnH/IMTLFh7T6tjUE56z9CxmN3I9k=";
   };
 
-  cargoHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  cargoHash = "sha256-DfwR7hDBSMwSHJ2ZG53TMwF15PRznM/JQifdZQ5hXzk=";
 
   nativeBuildInputs = [ installShellFiles ];
 
@@ -40,6 +40,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
   checkFlags = [
     # Static test fixture in the tagged source drifts relative to runtime date
     "--skip=providers::alphavantage::tests::short_history_is_refused_so_yahoo_serves_it"
+    # Creates the data directory in the read-only sandbox home in v0.8.2
+    # (fixed on main: reading saved data no longer creates it)
+    "--skip=tools::tests::monitor_status_runs_offline_on_fixtures"
   ];
 
   passthru.updateScript = nix-update-script { };
