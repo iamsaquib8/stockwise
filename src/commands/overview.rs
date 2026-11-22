@@ -479,7 +479,7 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
             &resolved,
             market,
             30,
-            crate::research::Needs::VERDICT,
+            crate::research::Needs::ACTION,
         )
         .await
         .ok()
@@ -536,7 +536,7 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
         resolved,
         market,
         60,
-        crate::research::Needs::VERDICT | crate::research::Needs::STATEMENTS,
+        crate::research::Needs::ACTION,
     )
     .await;
     let bundle = match r {

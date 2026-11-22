@@ -741,6 +741,8 @@ pub async fn run(
     let today = chrono::Local::now().date_naive();
     let profile = crate::config::effective_profile();
     let refs = PeReferences::of(&kept);
+    // One calendar for every finalist: the cache is read once and saved once.
+    let mut calendar = crate::calendar::Calendar::new(client);
     for p in picks.iter_mut() {
         let Some(q) = kept
             .iter()
@@ -763,7 +765,7 @@ pub async fn run(
             p.action = Some(a);
             continue;
         };
-        let next_earnings = crate::calendar::next_results(client, &p.symbol, today).await;
+        let next_earnings = calendar.next_results(&p.symbol, today).await;
         p.action = Some(action_for_with_earnings(
             q,
             series,
@@ -774,6 +776,7 @@ pub async fn run(
             next_earnings,
         ));
     }
+    calendar.save();
     Ok(Run {
         picks,
         universe: universe_len,

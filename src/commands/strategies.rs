@@ -638,20 +638,46 @@ fn longterm_meta(
     if let Some(oldest) = scored.iter().filter_map(|(_, h)| h.last).min() {
         meta.history_as_of = Some(oldest.to_string());
     }
+    if let Some(w) = volatility_warning(scores) {
+        meta.warn(w);
+    }
     let no_vol = scores
         .iter()
         .filter(|s| s.monte_carlo_median.is_none())
         .count();
-    if no_vol > 0 {
-        meta.warn(format!(
-            "volatility missing for {no_vol} of {} scored stocks (no price history)",
-            scores.len()
-        ));
-        if no_vol * 2 > scores.len() {
-            meta.missing.push("volatility".into());
-        }
+    if no_vol * 2 > scores.len() {
+        meta.missing.push("volatility".into());
     }
     meta
+}
+
+/// How many scored stocks have no simulated range, split into those with no
+/// price history and those whose history was too short to measure volatility.
+fn volatility_warning(scores: &[longterm::LongTermScore]) -> Option<String> {
+    let missing = |history: bool| {
+        scores
+            .iter()
+            .filter(|s| s.monte_carlo_median.is_none() && s.has_price_history == history)
+            .count()
+    };
+    let (absent, short) = (missing(false), missing(true));
+    let mut why = Vec::new();
+    if absent > 0 {
+        why.push(format!("{absent} with no price history"));
+    }
+    if short > 0 {
+        why.push(format!(
+            "{short} with insufficient history to measure volatility"
+        ));
+    }
+    (!why.is_empty()).then(|| {
+        format!(
+            "volatility missing for {} of {} scored stocks ({})",
+            absent + short,
+            scores.len(),
+            why.join(", ")
+        )
+    })
 }
 
 fn longterm_json(s: &longterm::LongTermScore) -> serde_json::Value {
@@ -834,4 +860,31 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
     );
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volatility_warning_separates_absent_and_short_history() {
+        let mut q = crate::api::Quote::default();
+        q.symbol = Some("AAA".into());
+        q.trailing_pe = Some(20.0);
+        let closes: Vec<f64> = (0..252)
+            .map(|i| 100.0 + (i as f64 * 0.07).sin() * 12.0)
+            .collect();
+        let scores = vec![
+            longterm::score_for_longterm(&q, Some(&closes)),
+            longterm::score_for_longterm(&q, Some(&[100.0, 101.0])),
+            longterm::score_for_longterm(&q, None),
+        ];
+        assert_eq!(
+            volatility_warning(&scores).as_deref(),
+            Some(
+                "volatility missing for 2 of 3 scored stocks (1 with no price history, 1 with insufficient history to measure volatility)"
+            )
+        );
+        assert_eq!(volatility_warning(&scores[..1]), None);
+    }
 }
