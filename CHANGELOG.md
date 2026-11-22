@@ -7,6 +7,906 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-22
+
+### Added
+- `verdict --horizon short` (also `portfolio review` and `picks --horizon short`) sets the
+  invalidation at the higher of close − 1.5×ATR and the 20-day low, reviews in 10 sessions and
+  needs a rising trend and volume before a BUY. Small caps (below ₹5,000 crore or $2 billion)
+  get AVOID on a pledge above 10%, thin trading, repeated price-band hits, auditor red flags or
+  exchange surveillance, and at most half the usual position size.
+- `verdict`, `deep` and `stockwise SYMBOL` start with a rule-based action (BUY, WATCH or AVOID;
+  ADD, HOLD, TRIM or EXIT for a holding; NO CALL below 60% data coverage) with its reasons,
+  confidence, invalidation price and review date. New `portfolio review` lists each holding's
+  action (EXIT, TRIM, ADD, HOLD) with size and tax notes; `portfolio`, `portfolio checkup` and
+  `picks` gain an Action column, `--json` an `action` object, and MCP the `stock_action` and
+  `portfolio_review` tools.
+- `portfolio xray` adds up Indian business groups (Tata, Adani, Reliance,
+  Bajaj, Aditya Birla, public sector and more), directly and through index
+  funds, and `portfolio analyze` notes when one promoter group is over 20% of
+  the portfolio.
+- `portfolio add` and `portfolio sell` take `--charges auto` for NSE/BSE
+  delivery trades: STT, stamp duty, the exchange charge in force that day,
+  SEBI fee, GST and the DP charge on a sell are estimated, shown and kept on
+  the lot or sale (brokerage is left out; give it with `--charges N`).
+- After the close the worker sends one digest instead of a message per
+  notice: the day's P&L, top contributors and detractors with the news or
+  filing behind each move (or flagged unexplained), monitor signals, alerts
+  that triggered, the LTCG, results and filing notices, and dates coming up.
+  `stockwise digest` prints it; `--send` sends it now.
+- `portfolio analyze` lists ELSS units still in their three-year lock-in
+  under "tax if sold", with the date each purchase becomes redeemable.
+- The worker's filing notices now cover BSE (`.BO`) holdings through BSE
+  announcements and US holdings through SEC EDGAR (8-K, 10-Q, 10-K and more).
+- `stockwise hot` shows what's hot: your holdings and watchlist ranked by
+  heat (excess move in σ, volume surge, fresh news or filings, a date within
+  three days, scaled by portfolio weight), each with its move and a one-line
+  why; then the market's biggest moves, unusual volume, gaps, 52-week highs
+  and lows, most-mentioned stocks, sectors and FII/DII flows, NSE bulk and
+  block deals. `--cap small` and `--json`.
+- `today`, `hot`, the daily digest and the Telegram `/review` show each
+  stock's rule-based action (EXIT and TRIM first in `/review`). The
+  after-close message also carries a target-drift notice when a target is out
+  of its band, and an advance-tax reminder a week before an instalment is due
+  (India).
+- Allotment odds now use application counts (lots available ÷
+  applications), not 1 ÷ subscription, and each category shows the
+  expected value of a minimum application net of the blocked money's cost.
+- `stockwise ipo`, `ipo SYMBOL` and the MCP `ipo_board` / `ipo_analyze` tools fall
+  back to BSE's public-issue pages for anything NSE does not supply: the open and
+  forthcoming list, price band, lot, dates, issue size, fresh/OFS split and the
+  category subscription multiples. Values are merged field by field (NSE's value
+  is kept when it has one), and a new `meta` object names the sources, the
+  fields BSE filled (`field_sources`), what no source had (`missing`), what
+  failed (`warnings`) and the key-field `coverage`; text output ends with the
+  same footer. A field neither exchange supplies stays empty and lowers the
+  verdict's data coverage, so an incomplete issue gets NO CALL instead of a
+  guess. BSE is asked only when NSE leaves a gap.
+- Listing-day plan and anchor lock-in dates; listed issues hand over to the
+  stock action engine.
+- MCP: `ipo_analyze` and `ipo_board` carry the `verdict` object; new prompt
+  `should_i_apply_ipo`.
+- The IPO-market regime is the recency-weighted median listing-day return
+  of the last 180 days (8 listings minimum), not today's price of listings
+  of different ages.
+- `stockwise ipo review` (track record per verdict: listing day, three
+  months, against NIFTY 50) and `stockwise ipo calibrate` (refit the model).
+- The verdict rests on a listing-day model fitted by robust regression on
+  past NSE mainboard issues (expected gain and the probability of listing
+  below the issue price from its residuals), valuation at the upper band
+  against listed peers from the RHP figures you save
+  (`--rhp-template`), and hard gates (P/E over 1.5× peers, a fund-exit OFS
+  over 75%, losses without growth, QIB or total under 1x at close,
+  negative GMP, SME red flags).
+- `stockwise ipo` gives every Indian IPO a rule-based verdict: APPLY, APPLY –
+  SELL ON LISTING, WAIT (with the QIB multiple by 3 PM IST on the closing day
+  that would make it APPLY), AVOID or NO CALL, with up to three reasons,
+  confidence, invalidation and review date (IPO methodology `ipo-1`,
+  `docs/methodology.md`). It replaces the 6-pillar IPO score.
+- MCP: new tools `whats_hot`, `today`, `news_feed`, `monitor_status` and
+  `digest`, each with an output schema.
+- `stockwise mcp` for Indian investors: new tools `bonds_yields`,
+  `bonds_list` and `bonds_calc` (G-secs and T-bills), `commodity` (gold,
+  silver and Sovereign Gold Bonds in rupees), `fx_history` (USD/INR),
+  `returns`, `correlate`, `compare` and `portfolio_wrap` (calendar or Indian
+  financial year), prompts `mf_review` and `advance_tax_check`, ticker
+  completion that puts NSE and BSE listings first, and instructions that
+  cover rupee units, market hours and Indian capital-gains rules.
+- `stockwise mcp` upgrade: the main tools (`quote`, `history`, `verdict`,
+  `picks`, the portfolio tools, `rebalance`, `tax_estimate`,
+  `market_conditions`) publish an `outputSchema` their structured results
+  follow; every tool carries read-only, destructive, idempotent and
+  open-world hints; symbol arguments complete from your holdings, watchlist
+  and ticker search. New tools `picks_review` and `verdicts` (up to 25
+  tickers, as `quote` now takes), new resources `stockwise://picks/latest`,
+  `stockwise://track-record`, `stockwise://methodology` and
+  `stockwise://quote/{symbol}`, subscriptions that notify when the
+  portfolio, watchlist, alerts or profile change, six new prompts (daily
+  briefing, should I buy, exit check, small-cap short-term scan, tax-aware
+  rebalance, weekly review), per-call timeouts (`STOCKWISE_MCP_TIMEOUT`) and
+  instructions for the recommendations policy. `picks` lists asked for by an
+  assistant are logged to the track record too.
+- The background worker now watches every holding with no setup: a day drop
+  of 5% or 2σ, a new 52-week low, a fall past a threshold from cost or from
+  the peak, a gap at the open, results, ex-dividend, record date or split
+  tomorrow, promoter pledge or shareholding changes, analyst rating changes
+  and insider trades. Thresholds live in `[monitor]`; `stockwise monitor`
+  shows them and runs a pass.
+- `portfolio pme` and `portfolio wrap` compare Indian portfolios with a NIFTY 50
+  total-return series (NIFTYBEES' dividend-adjusted closes; BANKBEES for NIFTY
+  Bank), so your dividends count on both sides; without it they fall back to
+  the price index with dividends left out.
+- `notify` supports ntfy and Pushover, gives every notice a priority, and
+  `STOCKWISE_NOTIFY_ROUTES` (e.g. `desktop=high,telegram=low`) sends each
+  channel only the priorities it should get.
+- `rebalance` is tax- and cost-aware: each sell lists its lots (losing lots
+  first, then the lowest tax, lots turning long-term within 45 days last, where
+  the ledger allows choosing), its STCG/LTCG and the tax it adds, and each trade
+  its STT, stamp duty, exchange fees, DP charge, brokerage (`--brokerage`) and FX
+  spread (`--fx-spread`), with a `--min-trade` floor. New `--raise AMOUNT` sells
+  only, at the lowest tax; `--inflow N --with-sells` adds new cash to a full
+  rebalance; `--cash-buffer` keeps cash aside; asset-class targets (`equity`,
+  `debt`, `gold`, `international`, `cash`) use the `xray` look-through.
+- `[profile] residence = "in"` (or `"us"`, `"uk"`) sets the country whose
+  holding periods and tax rules `portfolio analyze` applies; without it the
+  analysis says which residence it assumed from the market.
+- `stockwise portfolio target drift` (no percentage) shows current against
+  target for every target key with the 5/25 band (5 points or 25% of the target,
+  whichever is smaller), as text or `--json`; `drift_notice_today` gives the
+  scheduled drift notice for the background notifier.
+- `stockwise today` shows what changed in your portfolio today: each
+  holding's day move and P&L with why it moved (the headline or exchange
+  filing behind it, "with the market", or "unexplained" for an unusual move
+  with no news), the market backdrop, dates in the next three days, and one
+  news feed for holdings and the watchlist ranked by weight × importance.
+- `portfolio` shows total return: unrealized, realized (this financial year
+  and all time) and dividends, plus the 1-day, 1-week, 1-month and
+  year-to-date change of current holdings; XIRR is hidden for lots with an
+  unknown purchase date.
+- `portfolio analyze` shows the portfolio's value-weighted P/E, P/B and
+  dividend yield, with how much of the value each covers and which holdings
+  have no trailing P/E.
+- `worker install` runs the background worker at login as a per-user launchd
+  agent (macOS) or systemd user service (Linux), restarting it after a
+  failure; `--dry-run` prints the unit and commands. `worker uninstall` and
+  `worker service-status` remove and check it.
+- AI commands retry a cloud provider's rate limit or overload (HTTP 429, 503,
+  529) up to three times, waiting as `Retry-After` asks (at most 30 s)
+  ([#114](https://github.com/iamsaquib8/stockwise/issues/114)).
+- `daemon longterm` sends its findings through your notification channels,
+  inside the day's digest ([#118](https://github.com/iamsaquib8/stockwise/issues/118)).
+- `STOCKWISE_QUIET_HOURS` (e.g. `22:00-07:00`) holds every notice below
+  high priority until the quiet hours end and then sends them as one message
+  ([#121](https://github.com/iamsaquib8/stockwise/issues/121)).
+- A global `--verbose` (`-v`) flag and the `STOCKWISE_LOG` variable print network
+  diagnostics on stderr: each request's source, host and path, status and time,
+  and with `STOCKWISE_LOG=debug` cache hits. Query strings (keys, tokens) are never
+  printed ([#179](https://github.com/iamsaquib8/stockwise/issues/179)).
+- `quote DXY -m fx` (and `USDX`, `DX-Y.NYB`) shows the US dollar index, and
+  `markets --fx` adds the AED, SGD, JPY, AUD, CAD and CHF rupee pairs
+  ([#18](https://github.com/iamsaquib8/stockwise/issues/18)).
+- `stockwise init` walks a new user from install to a first portfolio: it
+  saves the default market, imports a broker file (`kite`, `groww`, `upstox`,
+  `indmoney`, `cas`), shows the Claude / Cursor MCP config and prints three
+  next commands. Every step has a flag (`--market`, `--import SOURCE:FILE`,
+  `--no-mcp`) and nothing is prompted without a TTY. The no-argument screen
+  starts with "New here?" while the portfolio is empty
+  ([#192](https://github.com/iamsaquib8/stockwise/issues/192)).
+- `tax reconcile FILE` compares StockWise's realised gains with a broker's tax P&L (Zerodha
+  Console, Groww, Upstox; CSV or `.xlsx`) sale by sale, names the likely reason for each
+  difference (cost, sale value, buy date, quantity, grandfathering, charges, term), lists rows
+  it could not read, and totals STCG/LTCG on both sides, with `--json` and `--csv`. Closes [#203](https://github.com/iamsaquib8/stockwise/issues/203).
+- `tax income` lists dividends and SGB interest for a financial year with gross, estimated TDS
+  (10% of a company's dividends once they pass ₹10,000 in the year, ₹5,000 up to FY 2024-25)
+  and net in paise-exact amounts, split by advance-tax period; `tax export in --schedule os`
+  writes it for ITR Schedule OS (naming anything left out), and `tax advance --slab 30` adds it
+  to the instalments. Closes [#246](https://github.com/iamsaquib8/stockwise/issues/246).
+- `tax in`, `tax export in`, `tax advance` and `harvest` now use the Section 112A grandfathered
+  cost for long-term lots bought on or before 31 Jan 2018: the higher of the actual cost and the
+  lower of the 31 Jan 2018 price and the sale price. The export adds fair market value and
+  actual cost columns. Closes [#247](https://github.com/iamsaquib8/stockwise/issues/247).
+- `portfolio sync <broker>` compares your lots with the broker's holdings
+  through a read-only session and reports the drift per symbol with the likely
+  fix (an unapplied split or demerger, a missing buy, a missing sale). It writes
+  nothing unless you pass `--apply`, which adds only the missing buys. The worker
+  runs the same read-only comparison every day after the close for each broker
+  with a saved session, and `portfolio sync` shows the latest reports. Closes
+  [#254](https://github.com/iamsaquib8/stockwise/issues/254).
+- `tax foreign` and `tax export in --schedule fa|form67` give Schedule FA (calendar-year
+  initial, peak and closing values of foreign shares at each day's rupee rate, flagging any
+  missing rate) and Form 67 foreign tax credit inputs at the `--withholding` rate from your
+  statement; `tax in` and the audit pack apply Sec. 50AA to debt funds bought from 1 Apr 2023
+  and market-linked debentures, Sec. 112 to other funds and SGBs, and Sec. 115BBH (30% flat,
+  no set-off, 1% TDS) to crypto, same-day sales included. Closes [#264](https://github.com/iamsaquib8/stockwise/issues/264).
+- `stockwise telegram` is a two-way Telegram bot: `/today`, `/hot`, `/review`
+  and `/digest` from your chat, and a digest every trading day at
+  `STOCKWISE_DIGEST_TIME` ([#265](https://github.com/iamsaquib8/stockwise/issues/265)).
+- Kite, Upstox, Dhan and Fyers instrument lists (15–30 MB each) are now
+  downloaded once per IST day and kept in `cache/instruments/` in the data
+  directory, with the parsed list held in memory for the rest of the process.
+  A second order on the same day makes no download; a new day, or a damaged
+  cache file, downloads the list again. Closes
+  [#31](https://github.com/iamsaquib8/stockwise/issues/31).
+- `import --account NAME` names the demat account a file belongs to, so two
+  accounts at one broker (yours and a family member's) keep separate lots and
+  sales, and re-importing either file changes nothing. Closes
+  [#315](https://github.com/iamsaquib8/stockwise/issues/315).
+- `quote`, `verdict`, `deep`, `longterm` and `picks` end with one line naming the sources,
+  the as-of time and the missing fields, and their `--json` has a `meta` object (`sources`,
+  `as_of`, `missing`, `warnings`, `coverage`); `longterm` gains `--json`
+  ([#338](https://github.com/iamsaquib8/stockwise/issues/338)).
+- `verdict`, `deep` and the bare `stockwise SYMBOL` fill fundamentals Yahoo leaves empty: US stocks
+  from SEC EDGAR, then Finnhub/FMP when keyed; Indian stocks from NSE and BSE. Each filled field is
+  named in `meta.field_sources` ([#339](https://github.com/iamsaquib8/stockwise/issues/339), part of [#361](https://github.com/iamsaquib8/stockwise/issues/361)).
+- When Yahoo Finance fails, FX pairs and the large coins keep working
+  through two keyless sources. Frankfurter serves the ECB's daily reference
+  rates for `-m fx` quotes and history and for portfolio and statement
+  currency conversion, labelled "ECB reference rate, daily". CoinGecko serves
+  crypto prices and up to 365 days of daily history for `history`, `risk`,
+  `correlate` and `backtest`; `COINGECKO_API_KEY` takes an optional free Demo
+  key. The output footer and `--json` `meta.sources` name the source, a symbol
+  neither source carries keeps Yahoo's error, and
+  `STOCKWISE_KEYLESS_BACKUPS=off` turns both off
+  ([#341](https://github.com/iamsaquib8/stockwise/issues/341)).
+- `stockwise goal` is a horizon-aware, post-tax planner. Without `--return`,
+  `goal sip` and `goal education` match the return to the horizon (capital
+  preservation to 24 months, conservative hybrid to 60, long-term growth
+  beyond), accept `--months`, `--horizon 18mo` and `--by YYYY-MM`, estimate tax
+  and exit load per instalment at redemption, show the SIP that leaves the
+  target after tax (`--net`), `--inflation`, P10 / median / P90 outcome bands
+  and a ±2% return sensitivity, and warn when an equity return is forced on a
+  short goal. `--from-portfolio` and `--holdings` link existing savings to the
+  portfolio; `goal add|list|show|remove` keep goals in `goals.json`;
+  `goal retire` reports the withdrawal rate and survival after a 30% first-day
+  fall; new `goal swp`, `goal emergency` and `goal prepay`, and MCP tools
+  `goal_swp`, `goal_prepay` and `goal_list`
+  ([#356](https://github.com/iamsaquib8/stockwise/issues/356)).
+- `--cap all|mega|large|mid|small|micro` on `movers`, `screen` and `heatmap`,
+  served from fresh `cache.db` snapshots when the worker has them.
+- `--universe nifty500|midcap150|smallcap250`: one NSE request prices the whole
+  index, so `movers` and `heatmap` work when Yahoo Finance is unreachable and
+  every index scan feeds `market_snapshots`
+  ([#357](https://github.com/iamsaquib8/stockwise/issues/357)).
+- Provider router: `FINNHUB_API_KEY` (quotes, profile, analyst trend, earnings
+  surprises) and `FMP_API_KEY` (quotes, quarterly statements, screener) back
+  Yahoo up per capability, respecting each free tier's window and merging
+  fields with `meta.sources`; `results` and US scans keep working when Yahoo
+  fails, `doctor` and `config show` list the keys, and the BSE provider reads
+  announcements, results filings and group members
+  ([#357](https://github.com/iamsaquib8/stockwise/issues/357)).
+- `sectors <NAME> [--cap all|mega|large|mid|small|micro]` lists an Indian sector's member stocks with their cap tier (`cap_tier` in `--json`/`--csv`).
+- Market-cap tier badge (`mega`, `large`, `mid`, `small`, `micro`) in `quote`,
+  a bare `stockwise SYMBOL`, `deep`, `analyze`, `compare`, `movers`, `screen`
+  and `portfolio`, with a `cap_tier` field in `--json` / `--csv`. India follows
+  the SEBI/AMFI ranks (NIFTY 100 / MIDCAP 150 / SMALLCAP 250 / outside NIFTY
+  500) from saved index members, with rupee cut-offs offline; every other
+  market converts the cap to dollars (London pence and yen included). One
+  classifier now serves `cache.db` snapshots and `portfolio xray`.
+- `stockwise hot` lists cross-market movers among Indian and US large caps,
+  with relative volume paced for the time of day while the session is open
+  ([#358](https://github.com/iamsaquib8/stockwise/issues/358)).
+- `stockwise hot` tracks theme baskets (AI, semiconductors, defence, battery
+  and EV, minerals and metals) for India and the US, with each basket's
+  equal-weight day move and its best and worst member
+  ([#359](https://github.com/iamsaquib8/stockwise/issues/359)).
+- `stockwise results AAPL -m us` reads SEC EDGAR (keyless `companyfacts` XBRL
+  from 10-K and 10-Q filings) for 12 or more quarters and the fiscal years
+  behind them, instead of Yahoo's last four: revenue, operating income, net
+  income, diluted EPS, operating cash flow and capex. Q4 is derived as the
+  fiscal year minus Q1 to Q3, cash-flow quarters from year-to-date
+  differences, restated facts take the latest filing, and September or
+  52/53-week year ends work. Yahoo fills the fields EDGAR lacks and the
+  source is listed; periods are stored in `cache.db` tagged `edgar`. Requests
+  carry a generic `stockwise` User-Agent (no email) and stay under 5 a second.
+- `stockwise results SYMBOL` collates the last 8 or more quarters of reported
+  results side by side: revenue, operating profit and margin, other income,
+  interest, depreciation, pre-tax profit, tax rate, net profit and diluted EPS,
+  with YoY and QoQ growth, margin change in basis points, a trailing-twelve-month
+  column, and EPS against consensus with the 1-day and 5-day move versus the
+  index. It asks Yahoo's `fundamentals-timeseries` with explicit period bounds
+  (`quoteSummary` carries four quarters). Banks add net interest income and
+  gross/net NPA when the NSE filing has them. `--annual` shows fiscal years with
+  CFO/PAT, free cash flow, ROE, ROCE and 3/5/10-year CAGR. `results --holdings`
+  and `results --universe nifty50` print an earnings-season scoreboard with
+  aggregate YoY growth and beat/in-line/miss counts. All forms take `--json` and
+  `--csv`, every fetched period is stored in the `financial_results` table of
+  `cache.db`, and the MCP server gains a `quarterly_results` tool
+  ([#361](https://github.com/iamsaquib8/stockwise/issues/361)).
+- `stockwise hot -m in` shows the NSE F&O ban list and open-interest
+  build-up (long or short build-up, short covering, long unwinding)
+  ([#362](https://github.com/iamsaquib8/stockwise/issues/362)).
+- `stockwise profile` introduces investor profile modes (`passive`, `active:low|med|high`, `ultra`) and personal guardrails across research, goals, rebalancing, technical analysis, and tax:
+  - `stockwise profile set <MODE[:RISK]> [--tax-slab PCT] [--tax-regime new|old] [--horizon-years N] [--max-stock-weight PCT] [--max-smallcap-weight PCT] [--risk-per-trade PCT]` writes `[profile]` to `config.toml`, and `stockwise profile [show] [--json]` displays effective guardrails and their origin (`flag > env > config file > default`).
+  - Global `--profile <MODE[:RISK]>` (and `STOCKWISE_PROFILE`) overrides the active profile for any command.
+  - `passive` mode automatically enables educational explanations in `verdict`, `score`, `technical`, and `tax`, highlights P10–P50 high-confidence bands and auto-enables glide path for long-horizon goals, defaults rebalance drift to 5.0%, and flags small-cap or single-stock concentration exceeding configured guardrails.
+  - `ultra` mode introduces a dense Pro Terminal View for bare symbol lookup (`stockwise <SYM>`) featuring microstructure, verdict, accounting forensics, 8Q earnings delta, technicals & classic pivot levels, and F&O buildup, plus 1R/holding portfolio heat tracking.
+  - `stockwise stoploss` adds position sizing with `--capital` and `--risk-pct` (defaulting to the profile's `risk_per_trade`), computing share quantities and position values against the risk budget.
+  - Exposed MCP tool `profile` and resource `stockwise://profile` for AI terminal assistants
+  ([#374](https://github.com/iamsaquib8/stockwise/issues/374), [#22](https://github.com/iamsaquib8/stockwise/issues/22)).
+- `stockwise import cas FILE.pdf [--password P]` converts a password-protected
+  CAS PDF through `casparser` when it is on `PATH` (password from
+  `--password`, `STOCKWISE_CAS_PASSWORD` or a hidden prompt), `import cas -`
+  reads casparser output from standard input, and a missing `casparser` prints
+  a one-line install-and-run command instead of a UTF-8 error
+  ([#375](https://github.com/iamsaquib8/stockwise/issues/375)).
+- `stockwise mf bleed` compares held Regular-plan funds with their Direct
+  twin: TER gap from AMFI's disclosure, yearly rupee cost, 10-year compounded
+  cost, and the units that can switch tax-free inside the Sec. 112A exemption.
+  `portfolio` points to it when a Regular plan is held. New MCP tool `mf_bleed`
+  ([#375](https://github.com/iamsaquib8/stockwise/issues/375)).
+- `stockwise portfolio sell SYMBOL QTY [PRICE] --preview` (alias `--dry-run`)
+  shows the FIFO lots a sale would take, the short- and long-term capital-gains
+  tax with the unused Sec. 112A exemption, grandfathered cost and 4% cess, a
+  countdown for lots within 45 days of turning long-term (with the tax saved by
+  waiting) and a mutual-fund exit-load check, without changing `portfolio.json`.
+  `sellpreview::ltcg_countdown` is a pure function the background worker can
+  call for post-close notifications. New MCP tool `portfolio_sell_preview`
+  ([#375](https://github.com/iamsaquib8/stockwise/issues/375)).
+- `stockwise portfolio checkup` lists findings in six lenses (concentration,
+  forensic flags, valuation, downside, fees and tax, goals), ranked by the
+  money at stake, each with the command to inspect it; `--offline` uses only
+  the cache, and MCP has `portfolio_checkup`. `stockwise portfolio wrap`
+  reviews a year (`--year 2026`, `--fy 2026-27`) against the benchmark, and
+  `--redact` hides every amount so the card can be shared
+  ([#376](https://github.com/iamsaquib8/stockwise/issues/376)).
+- The background worker's post-close sync now also notifies about new
+  non-routine NSE exchange filings of held `.NS` stocks (date, title and
+  category, plus `stockwise events SYMBOL`), once per filing; the `eod` task
+  result reports a `filings` count
+  ([#377](https://github.com/iamsaquib8/stockwise/issues/377)).
+- The background worker's post-close sync now sends notices through your
+  notification channels: when a held lot is about to turn long-term (7-day
+  heads-up) or has turned, and when a held stock reports a new quarter. Each
+  is sent once; `stockwise tasks add eod` queues the same sync for the worker
+  ([#377](https://github.com/iamsaquib8/stockwise/issues/377)).
+- Zero-setup persistent cache and background worker. Without Redis, provider
+  responses are kept in a SQLite (WAL) `cache.db` in the data directory, so
+  the next command reuses fresh quotes and NAVs. The same file now holds
+  `market_snapshots` (cap tier, sector, P/E, RVOL, ROE, yield),
+  `ohlcv_bars`, `nav_history`, `financial_results` and a `tasks` queue.
+  New: `stockwise cache status|clear|warm|snapshots`, `stockwise worker
+  start|stop|status|run` (quotes while the market is open, queued tasks,
+  alert checks, a post-close sync of snapshots, fund NAVs and wealth
+  history), and `stockwise tasks [list|show|cancel|add]`. `serve` exposes
+  `GET /api/events` (SSE), `tui` refreshes on live price changes, and
+  `/metrics` and `doctor` report `cache.db`. `STOCKWISE_CACHE_DB=off`
+  disables the file
+  ([#377](https://github.com/iamsaquib8/stockwise/issues/377)).
+- `stockwise ask` knows your investor profile, saves conversations
+  (`-c`, `--resume ID`, `--sessions`), holds one in the terminal (`-i`), runs
+  prepared tasks (`--playbook checkup|tax-season|earnings`), and with `--auto`
+  may change your workspace, undoable with `stockwise undo`
+  ([#378](https://github.com/iamsaquib8/stockwise/issues/378)).
+- `stockwise connect` adds StockWise's MCP server to the AI apps on your
+  computer in one step: Claude Desktop and Code, Cursor, Windsurf, VS Code,
+  Cline, Gemini CLI, Google Antigravity, OpenAI Codex, Zed, LM Studio and
+  opencode (Goose and Continue get lines to paste). It backs up each config,
+  changes only the `stockwise` entry, installs the agent skill where the app
+  reads skills, and `--remove` takes it out
+  ([#378](https://github.com/iamsaquib8/stockwise/issues/378)).
+- `stockwise mcp --allow-writes` lets an assistant change your watchlist,
+  alerts, goals, targets, notes and profile (with a few-question profile
+  onboarding), and `--allow-portfolio` record lots; `stockwise undo` reverses
+  any change. Nine more read tools, among them `portfolio_analyze`,
+  `market_conditions`, `picks` and `fit_check`, which says whether a stock
+  fits your own rules
+  ([#378](https://github.com/iamsaquib8/stockwise/issues/378)).
+- The `stockwise trade` order preview (and `--dry-run`) now lists estimated
+  charges for NSE equity: brokerage and the DP charge on delivery sells at
+  each broker's published rates, STT, the exchange transaction charge in
+  force on the day, SEBI fee, stamp duty and GST, as delivery and as
+  intraday side by side, plus an estimated slippage line from the bid-ask
+  spread for MARKET and SL-M orders. STT, SEBI fee, stamp duty and GST use
+  the backtest's own rates. `--dry-run --json` and `--dry-run --csv` print
+  the preview and the charges as data. Part of
+  [#382](https://github.com/iamsaquib8/stockwise/issues/382).
+- `stockwise use` shows or switches the default market and the active
+  portfolio (`stockwise use us`, `stockwise use long-term`), and
+  `--bind` ties a portfolio to a market. Without `-m`, ISINs, exchange
+  suffixes and tickers that only one market lists resolve to the right
+  market offline (`stockwise NVDA` with India as the default quotes NVIDIA);
+  tickers listed in several markets keep the current one and print a hint
+  ([#388](https://github.com/iamsaquib8/stockwise/issues/388)).
+- `backtest` strategy files can size positions (`fixed-fraction`, or
+  `atr-risk` to lose a set share of capital on an ATR move), trade
+  fractional shares, sell short with a borrow fee, trail stops by a percent
+  or by ATR, earn interest on idle cash and pay capital-gains tax on
+  realised gains. Every option is optional and old files give the same
+  results. Reports add the Probabilistic and Deflated Sharpe ratios, with
+  the `[grid]` combinations as trials
+  ([#394](https://github.com/iamsaquib8/stockwise/issues/394)).
+- `stockwise backup export [PATH.swbak]` writes portfolios (default and
+  named), goals, watchlist, alerts, notes, the undo log, practice history and
+  `config.toml` to one passphrase-encrypted file (Argon2id key derivation,
+  XChaCha20-Poly1305, authenticated header with format version and KDF
+  costs). The archive inside is deterministic. Caches, lock files, rotating
+  backups, broker session files and notification secrets are left out.
+  `stockwise backup restore PATH.swbak [--dry-run]` checks the whole file
+  first (a wrong passphrase or a changed byte stops it cleanly), lists the
+  files it would add or replace, keeps `<file>.bak` copies and writes each
+  file atomically. The passphrase comes from a hidden prompt, `--passphrase-fd N`
+  or `STOCKWISE_BACKUP_PASSPHRASE`, never from an argument.
+  `stockwise portfolio export --format beancount|hledger [-o FILE]` writes the
+  portfolio as a plain-text double-entry journal: commodity and account
+  declarations, lot purchases at cost, sales at their matched cost with
+  `Income:CapitalGains:ShortTerm` / `LongTerm` legs, and dividends, in date
+  order; symbols become valid commodity names (`MF:120503` → `MF_120503`)
+  ([#397](https://github.com/iamsaquib8/stockwise/issues/397)).
+- `stockwise update` (alias `self-update`) updates a binary installed with
+  install.sh or from a release archive: it downloads the new archive and its
+  `.sha256`, refuses to continue if the checksum is missing or wrong, and swaps
+  the binary atomically. Homebrew, Scoop, winget, Nix, Cargo, npm, pipx, uv,
+  pip, `.deb`/`.rpm` and Docker installs are left alone and the command prints
+  their upgrade command. `--check` only reports the versions. `stockwise doctor`
+  says when a newer release is out, checking at most once a week; no other
+  command checks for updates
+  ([#398](https://github.com/iamsaquib8/stockwise/issues/398)).
+- `tax export in --audit-pack DIR` writes one workpaper CSV per rupee sale (lot, dates, cost,
+  31 Jan 2018 FMV where it applies, gain to the paisa and the rule applied), a `summary.csv`
+  and the Schedule CG CSV, all or nothing. Part of [#399](https://github.com/iamsaquib8/stockwise/issues/399).
+- `income` (and `portfolio income` / `portfolio dividends`) adds a 12-month
+  trailing and projected passive income calendar with terminal monthly volume
+  charts, Yield-on-Cost (YoC) per holding and per lot, TDS/withholding tax
+  estimates (10% India Section 194/194K, 25% US WHT), Sovereign Gold Bond (2.5%
+  p.a.) half-yearly coupon schedules, factual Free Cash Flow and payout ratio
+  sustainability checks, upcoming ex-dividend radar (`income upcoming`), and
+  the `income_calendar` MCP tool
+  ([#403](https://github.com/iamsaquib8/stockwise/issues/403)).
+- `portfolio pme` (Index Twin / Public Market Equivalent) mirrors your exact historical cash
+  flows into a passive benchmark (SPY, VOO, VWCE, NIFTY50, NIFTYBEES), computing Kaplan-Schoar
+  PME, Direct Alpha, and net currency value added vs the index ([#404](https://github.com/iamsaquib8/stockwise/issues/404)).
+- `portfolio actions` detects more corporate actions and shows how each lot
+  would change before `--apply` records it: reverse splits, US spin-offs with
+  the cost split from each company's Form 8937 (GE → GEHC and GEV, 3M →
+  Solventum, Danaher → Veralto, Merck → Organon, IBM → Kyndryl), rights issues
+  (Reliance 2020, Bharti Airtel 2021; reported, not recorded), and
+  `portfolio return-of-capital` (`roc`) cuts the cost of the lots held on the
+  ex-date. Every `--apply` is journalled: `--journal` lists the entries and
+  `--undo` takes back the newest. Closes
+  [#405](https://github.com/iamsaquib8/stockwise/issues/405).
+- `statusbar` prints one compact line for tmux, waybar, sketchybar or starship
+  (`▲ ₹+12.3k (+0.8%) · RELIANCE +1.2% · TCS −0.4%`), plus `--format json`. It
+  answers from a local cache, fetches at most once per `--refresh` seconds
+  within 3 s, shows the cached line marked stale when offline and stays quiet
+  while markets are closed ([#408](https://github.com/iamsaquib8/stockwise/issues/408)).
+- Market scans cover whole markets. India scans every stock listed on BSE
+  that traded ₹10 lakh or more on the last session (about 1,900, from BSE's
+  end-of-day bhavcopy; NIFTY 500 when it is unavailable), the US scans
+  the S&P 1500, and London, Germany, Japan, Hong Kong, Singapore, Canada and
+  Australia scan their main index (FTSE 350, DAX and MDAX, Nikkei 225, Hang
+  Seng, STI, S&P/TSX Composite, S&P/ASX 200) instead of 15 stocks each. `--universe` takes `all` (every BSE stock), `bse` (its main
+  board) or an NSE index, whose members come from NSE, else niftyindices.com,
+  else a built-in list; `picks`, `matrix`, `surprise` and `longterm` take it
+  too. Scans reuse quotes kept in `cache.db` for 15 minutes, and
+  `stockwise cache clear` takes a target (`http`, `quotes`, `snapshots`,
+  `bars`, `results`, `members`, `bhavcopy` or `all`). Outside Indian market
+  hours, `movers` and `heatmap` price every stock from the bhavcopy
+  ([#431](https://github.com/iamsaquib8/stockwise/pull/431)).
+- `stockwise conditions` shows where a market stands, as readings: the main
+  index against its 200- and 50-day averages and its highs, India VIX or VIX
+  against five years, the share of scanned stocks above their averages, and
+  aggregate P/E and earnings yield against the 10-year government yield.
+  Breadth and valuation are saved each session (also by the daily
+  `daemon longterm` run) and ranked against the sessions saved before. `--json` prints the report. Readings of the data: not a forecast and not a
+  signal to invest or to wait
+  ([#435](https://github.com/iamsaquib8/stockwise/pull/435)).
+- `stockwise portfolio analyze` (also `portfolio dash`, and key `p` in
+  `stockwise tui`) shows the portfolio by market (with each market's own
+  currency total), currency, cap tier and sector; unrealised gains split into
+  short- and long-term with the next lots to turn long-term and the estimated
+  tax if everything were sold today; volatility, largest fall, beta and
+  concentration; and neutral observations, each with its figures.
+  `portfolio add --currency INR` converts a price paid in another currency at
+  that day's exchange rate
+  ([#437](https://github.com/iamsaquib8/stockwise/pull/437)).
+- `portfolio lots SYMBOL --lot N` can now change a lot's quantity (`--qty`) and
+  price (`--price`) or delete it (`--delete`), and `--undo-sale N` puts a
+  recorded sale back as the exact lot it came from (date, price, split record,
+  account). Each portfolio save keeps the previous five versions
+  (`portfolio.json.1` to `.5`); `portfolio restore` lists them and
+  `portfolio restore N` brings one back. `portfolio remove` asks before
+  dropping a holding with more than one lot (`--yes` skips the question)
+  ([#94](https://github.com/iamsaquib8/stockwise/issues/94)).
+- `portfolio demerger PARENT CHILD --ratio A:B --cost-split PCT [--date D]`
+  records any demerger or spin-off: the parent's lots keep their quantity,
+  purchase dates and the rest of the cost, and the new company's lots get the
+  same dates. `portfolio rename OLD NEW` moves a holding's lots, sales and
+  dividends to a new ticker. Both are journalled and safe to repeat. Closes
+  [#96](https://github.com/iamsaquib8/stockwise/issues/96).
+- `tax export us` finds wash sales: a loss with the same shares bought within
+  30 days gets code `W` and the disallowed loss in Form 8949 columns (f) and
+  (g), and `harvest -m us` flags loss candidates bought in the last 30 days
+  ([#97](https://github.com/iamsaquib8/stockwise/issues/97)).
+- `tax advance` shows the next instalment (15 Dec, 15 Mar, ...) with the amount left to pay and
+  the Sec. 234C interest if it is missed, applies the capital-gains and dividend proviso only
+  when their tax is paid by 31 March, and `--paid DATE:AMOUNT --record` keeps payments per
+  financial year for later runs and for the reminder notifiers can send seven days ahead. Part
+  of [#259](https://github.com/iamsaquib8/stockwise/issues/259).
+- `doctor` also checks notification channels, the background worker and its
+  login service, which AI apps have the MCP server, and the investor profile and
+  tax residence; every problem comes with a fix, and `doctor --json` prints the
+  checks for scripts.
+- `quote`, `verdict` and `chart` for Indian stocks: when Yahoo has no data for `X.NS` (or `X.BO`) the other
+  listing on Yahoo stands in; `quote` shows NSE's sector P/E; NSE surveillance (ASM/GSM), suspension and
+  delisting flags appear as warnings; banks and NBFCs no longer count debt/equity as missing data.
+- `picks --horizon short` ranks for weeks to months: trend (3-month momentum
+  per unit of volatility, 50-day average, rising volume) carries 45% and risk
+  20%. `--min-mcap` / `--min-adv` set the floors.
+- `picks review` shows the track record. Every `picks` list is logged to
+  `signal_log.json`, and each pick is measured from the day it was first listed
+  against NIFTY 50 or the S&P 500 total return, with hit rate and mean and
+  median excess return.
+- `portfolio lots SYMBOL --json` prints the holding's stored lots, sales and
+  dividends for scripts and bug reports
+  ([#223](https://github.com/iamsaquib8/stockwise/issues/223)).
+- `chart`, `risk`, `verdict` and backtests keep working when Yahoo's price history fails: Indian stocks
+  and NSE indices fall back to NSE (or BSE) history adjusted for splits and bonuses, then to bars cached
+  in `cache.db`, with a warning that says how old they are.
+- `profile set --residence in|us|uk` saves the country of tax residence, `profile
+  show` prints it, and `doctor` points to the flag when it is not set.
+
+### Changed
+- `verdict` and the other stock views now give rule-based actions by default instead of
+  neutral readings only. The rules are published in the methodology, AI only explains the
+  computed action, and the disclaimer now says these are educational signals, StockWise is not
+  a SEBI-registered adviser and losses are possible.
+- `stockwise --help` shows the core commands, including `today`, `hot`, `portfolio
+  review`, `picks review` and `tax reconcile`; `stockwise --help-all` lists every
+  command ([#150](https://github.com/iamsaquib8/stockwise/issues/150)).
+- `--json`: every key ending in `_pct` now also appears as its `_percent` twin
+  (`weight_pct` and `weight_percent`), so scripts can use the documented
+  `_percent` suffix everywhere; the `_pct` names are deprecated and go in 1.0
+  ([#223](https://github.com/iamsaquib8/stockwise/issues/223)).
+- `tax`, `tax export in`, `tax advance` and `harvest` now tell gold, silver, international,
+  liquid and debt ETFs by their category in NSE's ETF list, with a longer built-in table and
+  name patterns as the offline fallback, so a new non-equity ETF is no longer taxed as equity.
+  Closes [#318](https://github.com/iamsaquib8/stockwise/issues/318).
+- `daemon intraday` keeps one market-data client for the life of the loop
+  instead of rebuilding it after every third failed tick; the client already
+  renews its own session, so a failure now only changes the retry delay
+  ([#342](https://github.com/iamsaquib8/stockwise/issues/342)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `goal sip` prints "1 year" instead of "1 years", no longer defaults to 12%
+  on short goals, and the MCP `goal_sip` / `goal_education` tools need `years`,
+  `months` or `by` instead of assuming one year at 12%
+  ([#356](https://github.com/iamsaquib8/stockwise/issues/356)).
+- Redis is now opt-in: without `STOCKWISE_REDIS_URL` or `redis_url`, StockWise
+  no longer probes `127.0.0.1:6379` and uses the SQLite `cache.db` instead.
+  Chart fetches also keep their complete OHLCV bars in `cache.db`, and
+  `worker start|stop` works on Windows
+  ([#377](https://github.com/iamsaquib8/stockwise/issues/377)).
+- `picks` ranks stocks against each other: each of four pillars (value,
+  quality, growth, trend) is a percentile rank among the stocks scanned,
+  replacing eight fixed yes/no rules. The table shows every pillar and how
+  much of the score had data; `--cap` ranks one cap tier within itself, and
+  `--top N`, `--json` and `--csv` are new
+  ([#431](https://github.com/iamsaquib8/stockwise/pull/431)).
+- `risk`, `deep`, `longterm`, `chart`, `timeframes` and backtests measure returns and volatility on Yahoo's
+  dividend-adjusted closes; NSE, BSE and Alpha Vantage history is adjusted for splits and bonuses.
+  `picks --json` is now an object with `picks` and `meta`.
+- Docs: new guides for rule-based actions (`portfolio review`, `verdict`),
+  `hot`, `today` and `digest`, and `picks` with `picks review`; an accurate
+  source map in `docs/architecture.md`; and `docs/troubleshooting.md` with the
+  `doctor` line and fix for each common failure
+  ([#201](https://github.com/iamsaquib8/stockwise/issues/201),
+  [#303](https://github.com/iamsaquib8/stockwise/issues/303)).
+- `serve`: `docs/server.md` lists every endpoint, including `/api/research`
+  and `/api/portfolios`, and every query parameter each one takes
+  ([#111](https://github.com/iamsaquib8/stockwise/issues/111)).
+- Harden repository `.gitignore` against local databases (`cache.db*`), user portfolios, model weights, and editor caches, and add universal AI developer context files (`CLAUDE.md`, `AGENTS.md`, `CODEX.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`, `.clinerules`).
+- With `--json`, errors print as `{"error":{"message":…,"exit_code":…}}` on stderr
+  instead of coloured text, so scripts can read them
+  ([#223](https://github.com/iamsaquib8/stockwise/issues/223)).
+- `README.md` is organised around four jobs: review your holdings
+  (`portfolio review`), see what's hot (`hot`), find candidates (`picks`) and
+  file your tax (`tax`), with real example output and every install channel
+  ([#191](https://github.com/iamsaquib8/stockwise/issues/191)).
+
+### Fixed
+- `portfolio add --currency INR` keeps the rate you paid on the lot, so a US
+  share bought with rupees is costed at the rupees paid; `portfolio add` and
+  `portfolio sell` take `--charges`, and realized P&L is net of them.
+- `alert`: `--on-close` judges moving-average crosses and breakouts on
+  completed sessions only; crosses missed while nothing ran are caught up
+  once; price levels are checked only on fresh quotes while their market is
+  open; `--cross` notifies only when the price crosses the level; adding an
+  identical alert is refused; and each alert has a stable id, so editing the
+  list never re-sends or loses a trigger.
+- `portfolio checkup` pairs correlations on shared dates, scales drawdown by
+  the value it covers and says how much, and counts index funds by their
+  constituents; mutual funds get a category or "Fund (no look-through)"
+  sector instead of all sharing one.
+- `portfolio actions --apply` demergers: splits before the record date count in
+  the entitlement, shares sold after it get their new shares and a split cost,
+  new shares are held only from the record date, a broker snapshot's shares
+  are not counted twice, and a tradebook re-import keeps the demerger.
+- `portfolio actions --apply` records Indian demergers (Reliance → JIOFIN,
+  ITC → ITCHOTELS, Tata Motors → TMCV): each lot held on the record date gets
+  a lot of the new company with the same purchase date and the cost share
+  from the company's filing; the parent keeps the rest (Sec. 49(2C)/(2D)).
+  Until then, `portfolio`, `analyze`, `checkup`, `income`, `xray` and `wrap`
+  value a copy with it applied and say "demerger pending".
+- `earnings` shows each holding's and watchlist stock's next results date,
+  soonest first; `surprise` shows the latest quarter's actual against estimated
+  EPS and the surprise %; `insider` lists insider trades from NSE PIT disclosures
+  (India) and SEC Form 4 filings (US), with Yahoo Finance as a labelled fallback.
+- `harvest` LTCG step-up rows give the exact share count whose gain fits the
+  ₹1.25 lakh exemption left (oldest lots first) instead of the whole holding,
+  label the saving "13% incl. cess", take losses brought forward
+  (`--carry-st`, `--carry-lt`), and remind Indian investors to buy back on the
+  next trading day. US loss rows name their lots and the command that records
+  them: new `portfolio sell --lots N,N` sells specific lots of US and UK shares,
+  so the ledger books the loss the broker reports.
+- `heatmap` no longer panics when a quote's change is not a number; stocks
+  without a change are listed last with "—" instead of as 0%.
+- `portfolio` costs foreign holdings, sales, dividends and XIRR at each
+  purchase or sale date's exchange rate (ECB reference rates, cached in
+  `cache.db`) instead of today's, adds an FX effect column, and keeps closed
+  positions in other currencies in the portfolio XIRR.
+- `portfolio income` pays SGB interest on the issue price without TDS, applies
+  dividend TDS only above ₹10,000 per company, and includes the current month;
+  goals compound at the effective monthly rate and link each holding to one
+  goal; `divcal` and `pcorr` weight by value and list what they left out.
+- The worker's "lot turns long-term" notices find their lot by purchase date
+  and quantity, so a FIFO sale of an older lot no longer loses the notice,
+  and they now cover every market you hold, not just the worker's.
+- Money now adds up exactly in the tax report (realized, unrealized and
+  intraday totals, net of charges), per-lot short- and long-term gains in
+  `portfolio analyze`, the PME value added and `sim` status, settle and
+  session totals: amounts are summed in integer minor units (paise, cents)
+  and converted to decimals only for display and JSON.
+- `movers` says when its prices are from: the local time, the session date of
+  the latest trade and whether the market is open. `dashboard` adds the
+  portfolio's day change in value and percent.
+- `news` searches by company name in the stock's own locale, keeps only the
+  last `--days`, adds exchange and SEC filings, shows each item's link and
+  local time, counts the sources that actually answered, and has `--json`.
+- `portfolio`, `portfolio analyze`, `checkup`, `income`, `xray`, `pme` and
+  `wrap` notice a split or bonus Yahoo reports but your lots have not taken
+  yet, say "split pending: run `portfolio actions --apply`", and value the
+  adjusted share count meanwhile, so a 2:1 split no longer shows a fake 50% loss.
+- `portfolio pme` leaves holdings without a price out on both sides and says
+  how many, never lets the Index Twin sell more than it holds, compares with a
+  total-return index when one exists (else leaves dividends out on both
+  sides), and flags cash flows dated before the index history.
+- `rebalance` plans now balance their cash: whole-share sells pay for buys
+  (plus any new cash), leftovers go to the holdings furthest below target and
+  buys are trimmed by the same priority when cash runs short; the plan shows the
+  net cash it frees or needs and the cash left. Projected weights come from the
+  rounded orders instead of repeating the target, `--inflow` splits new cash the
+  way that really minimizes the squared deviation from target, holdings without
+  a price are left out with a warning instead of failing the plan, and the
+  profile's `max_stock_weight` is a hard limit that no longer flags ETFs.
+- `portfolio target` warns about keys that match no holding, sector or asset
+  class instead of dropping them silently, carves a symbol target out of its
+  sector target instead of counting both, and accepts symbols not held yet
+  (`rebalance` gives them a buy line). `target remove` resolves the symbol like
+  `target set`, `target show` prints the real default drift band, and `checkup`
+  measures drift against the same normalized targets as `rebalance`.
+- Fixed a second round of review findings. Action methodology is now 2: ADD
+  checks the combined direct plus fund look-through weight against the cap,
+  and the size hint leaves room for indirect exposure. An unreadable notes file
+  gives holdings NO CALL instead of acting as if there were no notes. MCP
+  `stock_action` reads the caller's workspace portfolio, and `deep` sends the
+  cloud AI only the public rule-based action. Also: realized tax buckets net
+  eligible charges, per-lot term gains use purchase-date FX, foreign holdings
+  without base-currency history get no beta, checkup tax rules follow
+  residence, quoted profile keys are replaced, effective bets with partial
+  index data are labelled an upper bound, PME twin keeps unsold value,
+  `sim settle` keeps trades the daemon already closed, `sim status` leaves
+  unquoted trades out of the total, the volume baseline needs full session
+  coverage, long-term scores treat a zero P/E as unusable and count a P/E pair
+  as growth data, picks uses one earnings calendar per scan, and MCP write
+  tools report honest idempotence.
+- Fixed IPO verdict and BSE fallback edge cases (missing category books no
+  longer default to 0x, `--board sme` filters before ongoing enrichment, numeric
+  BSE scrip codes resolve to `.BO`, `WAIT` thresholds round up, NSE anchor share
+  counts survive BSE split merges, 180-day regime edge is included, and RHP
+  template zeros are commented out), `GBp` market-cap and own-P/E scaling in the
+  action engine, look-through key matching in `portfolio review`, alert
+  cross/delivery rollback, off-market insider classification, walk-forward
+  carried short trades, advance-tax `relief_lost` status, demerger child
+  reconciliation, rebalance cap clamping, `monitor_status` offline access,
+  session refusal locking, `-100%` day-change guards, action invalidation and
+  filings-coverage gating, minor-unit intraday/insider math, EDGAR/pulse/worker
+  hardening, and documentation and skill accuracy.
+- `portfolio analyze` measures risk on base-currency closes without cutting
+  every holding to the shortest history, uses a blended IN/US benchmark for
+  mixed portfolios, and `portfolio benchmark` alpha is over a risk-free rate
+  with at least 60 observations.
+- `rotation` and `sectorcmp` match each sector to its own quote by symbol, so a
+  quote Yahoo drops no longer shifts numbers onto the wrong sector, and show
+  relative strength against NIFTY 50 / S&P 500 over 1, 3 and 6 months ("—" when
+  missing) instead of overweight/underweight labels from the day's change.
+- `sentiment` takes `-m in|us`: India reads India VIX (with its own, higher
+  bands), NIFTY 50, NIFTY MIDCAP 50 and BANK NIFTY. Headline sentiment (here and
+  in `events`) matches whole words, so "commissioned" no longer counts as "miss"
+  or "windfall" as "fall", handles negation ("not a loss", "no growth") and uses
+  one shared word list; corporate actions are no longer scored positive by default.
+- `portfolio analyze` picks the tax term by where you live: for an Indian
+  resident, foreign shares turn long-term at 24 months and debt funds bought
+  from 1 April 2023 never do. "Tax if sold" lists foreign, other-rule and
+  unpriced holdings in their own sections instead of dropping them.
+- `portfolio wrap` converts each amount at its own date's exchange rate,
+  measures alpha like for like (with dividends against a total-return index,
+  without them against a price index), and shows no Modified Dietz return
+  over a near-empty starting base.
+- `portfolio xray` leaves out and lists holdings without a price or exchange
+  rate, looks through NIFTYBEES, BANKBEES, JUNIORBEES, SPY/VOO/IVV and QQQ with
+  shipped index weights instead of equal weights, matches gold and silver by
+  exact symbol, and labels funds it can't classify as unknown.
+- `tui`: each `s` sort order is distinct and labelled in the pane titles (file
+  order, symbol, change %, value), file order comes back at once, holdings sort
+  by value in the base currency, and the selection stays on the same symbol
+  when a refresh reorders the rows
+  ([#104](https://github.com/iamsaquib8/stockwise/issues/104)).
+- `tui`: the "Refreshing…" message clears when a manual refresh finishes, so
+  the key hints come back ([#105](https://github.com/iamsaquib8/stockwise/issues/105)).
+- `serve`: `portfolio=default` shows `portfolio.json` even when another
+  portfolio is active, the dashboard's picker starts on the active portfolio,
+  and an unknown name is a 404
+  ([#109](https://github.com/iamsaquib8/stockwise/issues/109)).
+- `serve` returns JSON errors for a query value of the wrong type (400) and
+  for a method other than GET (405) instead of plain text or an empty body
+  ([#110](https://github.com/iamsaquib8/stockwise/issues/110)).
+- Research, `options` (NSE option chains), `calendar`, `results` and `hot` reach
+  nseindia.com through the one shared NSE session: one cookie handshake, one
+  rate limit, and no more requests after NSE refuses. The session now loads its
+  cookies from the option-chain page (NSE refuses scripts on its home page), and
+  an endpoint that refuses (such as `quote-equity`) is left alone for 15 minutes
+  without blocking the others ([#159](https://github.com/iamsaquib8/stockwise/issues/159)).
+- `quote DOW -m us` and `quote DAX -m us` look up Dow Inc. and the Global X DAX
+  ETF instead of the indices; `DJIA`, `^DJI` and `^GDAXI` still give the indices
+  ([#162](https://github.com/iamsaquib8/stockwise/issues/162)).
+- `-m crypto` accepts exchange-style pairs: `BTC/USD`, `eth_inr` and `BTC USD`
+  resolve to `BTC-USD` / `ETH-INR` instead of asking Yahoo for
+  `BTC/USD-USD`
+  ([#163](https://github.com/iamsaquib8/stockwise/issues/163)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `events`: US news after 16:00 New York is assigned to the next session using
+  the real close (20:00 or 21:00 UTC with daylight-saving time)
+  ([#165](https://github.com/iamsaquib8/stockwise/issues/165)).
+- `history` reports Yahoo's 404 for an unknown symbol as "No price history for
+  <symbol>" with the market hint — `GET /api/history/{unknown}` now answers 404
+  instead of 502 — and the same holds for the `history` command
+  ([#167](https://github.com/iamsaquib8/stockwise/issues/167)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- Long-running `serve`, `tui`, `mcp` and `ask` sessions keep the in-memory
+  cache bounded (500 entries, 64 MB, one-hour TTL) instead of holding every
+  researched symbol for as long as the process lives; Redis still keeps the
+  long-lived copies
+  ([#168](https://github.com/iamsaquib8/stockwise/issues/168)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `insider` no longer prints an empty "Analyst Consensus" header, and `export
+  portfolio` and `wealth` show the same empty-portfolio hint as other commands
+  ([#213](https://github.com/iamsaquib8/stockwise/issues/213), [#224](https://github.com/iamsaquib8/stockwise/issues/224)).
+- `deep` prints `Income on ₹1L` for Indian stocks and `Income on $10k` for US
+  stocks instead of the literal `Income on {}1L`
+  ([#213](https://github.com/iamsaquib8/stockwise/issues/213)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `news` and `sentiment` show the publisher name (e.g. `Liquide Blog`) instead
+  of the raw `url="...">` attribute from Google News items, and no longer repeat
+  the publisher at the end of the title
+  ([#214](https://github.com/iamsaquib8/stockwise/issues/214)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `markets` prints index levels and VIX as plain points (`25,030.35`, `25.64`)
+  without a currency sign, and money in tables groups digits — lakhs for INR
+  (`₹1,25,000`, `₹1,20,092.03`) and thousands otherwise (`$104,250.50`) — in
+  the `portfolio`, `tax` and X-Ray tables and price columns; JSON and CSV stay
+  ungrouped
+  ([#217](https://github.com/iamsaquib8/stockwise/issues/217)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `portfolio` draws one allocation bar per holding, heaviest first, so the
+  chart still reads with `NO_COLOR` set or with more than seven holdings
+  ([#218](https://github.com/iamsaquib8/stockwise/issues/218)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `rebalance` no longer prints `SELL 0 shares` for a position less than one
+  share over target; it reports OK instead, and one-share orders read
+  `1 share` ([#219](https://github.com/iamsaquib8/stockwise/issues/219)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `portfolio sell` now ends with `stockwise portfolio lots <SYMBOL>` so the
+  hint can be copied and run, the empty states of `harvest`, `rebalance` and
+  `tax in` point at `stockwise portfolio add ...`, and the `events` footer no
+  longer says "Buy/Sell guidance"
+  ([#224](https://github.com/iamsaquib8/stockwise/issues/224)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- After a merger such as HDFC into HDFC Bank, `portfolio actions --apply`
+  keeps the whole shares and records the cash paid for the fractional share as
+  a sale at the record date's close, with its own gain. The total cost is
+  unchanged. Closes [#317](https://github.com/iamsaquib8/stockwise/issues/317).
+- `serve` stops exporting a daemon's session gauges from `/metrics` once its
+  saved date is no longer the current session, so yesterday's open positions no
+  longer read as today's
+  ([#342](https://github.com/iamsaquib8/stockwise/issues/342)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `search` falls back to the saved NSE/BSE symbol list when an exchange
+  answers 200 with an unreadable page, not only when the request fails
+  ([#342](https://github.com/iamsaquib8/stockwise/issues/342)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `funds` no longer falls back to a TER spreadsheet saved more than a week ago
+  when AMFI is unreachable; an older copy is refused with a message naming the
+  limit ([#342](https://github.com/iamsaquib8/stockwise/issues/342)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- Every save now uses its own temp file, so two writes in one process (two
+  commands, or one racing the daemon) can no longer rename or delete each
+  other's half-written file ([#342](https://github.com/iamsaquib8/stockwise/issues/342)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- `results` bank asset quality now reads NSE's real banking XBRL (`PercentageOfGrossNpa` and `PercentageOfNpa`, filed as fractions), falls back to the standalone filing when the consolidated one has 0.00 placeholders, and skips list rows without an XBRL file.
+- `intraday` measures the OBV trend relative to the average's magnitude, so a
+  stock whose OBV is negative no longer reports a falling series as
+  accumulation (or a rising one as distribution) and no longer emits the
+  wrong "OBV Divergence" signal
+  ([#41](https://github.com/iamsaquib8/stockwise/issues/41)).
+  Thanks [@abu-tahir-0](https://github.com/abu-tahir-0).
+- London stocks get the right cap tier: Yahoo gives their market cap in
+  pounds while quoting prices in pence, and the tier read the cap as pence
+  (Vodafone came out "small")
+  ([#437](https://github.com/iamsaquib8/stockwise/pull/437)).
+- `bonds tbill` refuses a yield and term whose discount factor is zero or negative
+  instead of printing an infinite or negative price ([#57](https://github.com/iamsaquib8/stockwise/issues/57)).
+- `bonds gsec` accepts the common ways people write a G-sec name: `7.18% G-Sec
+  2033`, `7.18 GSEC 2033` and `7.18% GOI 2033` ([#58](https://github.com/iamsaquib8/stockwise/issues/58)).
+- `backtest walkforward`: a trade carried into a test window from its train
+  window is counted from the window's start (entry at the previous close, exit
+  costs only), and trade money scales with each window's capital, so the
+  out-of-sample trade statistics no longer include in-sample gains
+  ([#78](https://github.com/iamsaquib8/stockwise/issues/78)).
+- `intraday`: "VWAP Reclaim" and "VWAP Rejection" now need a real cross of the session
+  VWAP (the previous bar on the other side), not just a price near it
+  ([#79](https://github.com/iamsaquib8/stockwise/issues/79)).
+- `options` (US): time to expiry counts to 16:00 New York at 21:00 UTC in winter,
+  not 20:00 UTC all year, so winter IV and greeks no longer lose an hour
+  ([#81](https://github.com/iamsaquib8/stockwise/issues/81)).
+- `portfolio actions --apply` and tradebook imports record an Indian bonus
+  issue as a new lot at zero cost dated on the allotment date, as Indian tax
+  treats it, instead of as a split; the original lots keep their cost, so FIFO
+  sales and capital gains come out right. Bonuses are told from splits with
+  NSE's filings ([#95](https://github.com/iamsaquib8/stockwise/issues/95)).
+- `screen dividend`, `picks` and `longterm` use the corrected dividend yield;
+  Yahoo's trailing yield is 0 for many NSE stocks.
+- `verdict` and the action columns say an ETF (such as NIFTYBEES, which Yahoo
+  labels as equity) is not a listed company, instead of a data-coverage NO CALL.
+- `portfolio review` and action sizing say "about 1 share", not "about 1 shares",
+  and `cache snapshots`, `tasks` and `fundamental` describe every flag in `--help`.
+- `technical`, alerts and backtests read the RSI of a flat series as 50 (it
+  was 100, "overbought"). MACD with fewer than 35 bars gives no reading instead
+  of a fake signal line of zero.
+- `sim`, `bot` and `daemon intraday`: paper P&L is now after brokerage, STT,
+  exchange and stamp charges and slippage (set with `STOCKWISE_SIM_COSTS`,
+  `STOCKWISE_SIM_BROKERAGE`, `STOCKWISE_SIM_SLIPPAGE_BPS`). Exit levels sit at
+  least 1 × ATR away, each trade risks a fixed 0.5% until 30 closed paper
+  trades allow measured half-Kelly, plans rank by score, oversold readings
+  share one vote, MACD reads three months of bars, VWAP and volume pace come
+  from today's 5-minute bars, and Sharpe counts every trading day.
+- `longterm` leaves pillars without data out of the composite. A debt/equity
+  above 250 now gets its own band, and a negative P/E counts as a loss. The
+  assumed return comes from earnings yield, growth and the last year's price
+  return instead of the score itself, and the Monte Carlo median now matches
+  the 5-year projection. The finalists' fundamentals are fetched before
+  scoring ([#302](https://github.com/iamsaquib8/stockwise/issues/302)).
+- `forecast` and `longterm` no longer assume 30% or 25% volatility when it can't be measured: bands and
+  simulations show "missing". `forecast`'s "Expected Change" is now "Trend-line projection".
+  Failed fundamentals sources are reported instead of dropped; `STOCKWISE_SEC_USER_AGENT` sets the
+  contact SEC EDGAR asks for when it refuses requests (HTTP 403).
+- `picks review` counts a pick's days to the session of today's prices, so a list
+  made on a Saturday from Friday's closes shows 0 days, not 1; an ETF's NO CALL
+  says it is not a listed company instead of listing company fields as missing.
+- `picks` no longer puts stocks with broken or one-off figures at the top. Size
+  and liquidity floors apply (India ₹500 crore and ₹2 crore traded a day, US
+  $1 billion and $5 million, lower for `--cap small` / `--cap micro`).
+  Fundamentals and a year of prices are fetched for the leaders before the
+  final ranking. Losses and negative book value rank last, P/E below 3 or ROE
+  above 80% are listed apart to check, stocks with under 60% of their data stay
+  out, and at most 3 per sector are listed. There is a new risk pillar
+  (volatility, drawdown, beta). See `docs/methodology.md`.
+- `today`, `hot` and the digest complete each holding's and watched stock's quote
+  before deciding its action, so they show the same BUY/HOLD/TRIM/EXIT as
+  `portfolio review` instead of NO CALL (missing ROE, D/E) for every row; the
+  disclaimer now prints with those actions, and digest amounts group in lakhs
+  for rupees.
+
+### Performance
+- `stockwise <SYMBOL>` uses one Yahoo client for the research snapshot and the
+  quote, saving a handshake and a repeated quote request
+  ([#156](https://github.com/iamsaquib8/stockwise/issues/156)).
+- With `STOCKWISE_DATA_PROVIDER=exchange`, NSE and BSE quotes and searches run at
+  the same time, and keyed-provider quotes run alongside Yahoo's, so mixed
+  watchlists load in about the time of the slower source
+  ([#160](https://github.com/iamsaquib8/stockwise/issues/160)).
+- `markets` (and `/api/markets` and the TUI) fetches every section in one quote
+  request, with the India 10-year yield fetched alongside it
+  ([#161](https://github.com/iamsaquib8/stockwise/issues/161)).
+- `longterm` draws each Monte Carlo path's 5-year endpoint in one step instead of
+  looping over 1,260 trading days, so scoring a list of stocks no longer spends
+  most of its time in the simulation; the median and range are unchanged
+  ([#37](https://github.com/iamsaquib8/stockwise/issues/37)).
+- When NSE or BSE refuses StockWise, the refusal is remembered for 15 minutes
+  across runs, so each `quote` of an Indian stock no longer spends a request and
+  about 0.1 s asking again first.
+
+### Security
+- `doctor` and `trade config` now mask broker client, app and login IDs in diagnostics, reducing accidental disclosure in bug reports ([#298](https://github.com/iamsaquib8/stockwise/issues/298)).
+
 ## [0.8.1] - 2026-11-07
 
 Fixes the wrong numbers and import data loss listed under "Known issues" in 0.8.0, and replaces the BUY/SELL verdict with neutral pillar scores.
@@ -1057,7 +1957,8 @@ Initial development. Not published. Highlights that landed during this phase:
 - Multi-timeframe and braille terminal charts; `-p/--period` flag on chart commands.
 - `deep` command — full report on a single stock in one shot.
 
-[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/iamsaquib8/stockwise/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/iamsaquib8/stockwise/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/iamsaquib8/stockwise/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/iamsaquib8/stockwise/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/iamsaquib8/stockwise/compare/v0.5.0...v0.7.0

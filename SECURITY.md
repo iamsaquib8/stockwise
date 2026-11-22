@@ -59,7 +59,7 @@ with you.
 ## Supported versions
 
 This is a pre-1.0 project. Security fixes target the most recent **tagged
-release** (`v0.8.1` as of this update); older release tags are not maintained
+release** (`v0.8.2` as of this update); older release tags are not maintained
 unless explicitly announced. Check the
 [releases](https://github.com/iamsaquib8/stockwise/releases) for the current
 supported tag.

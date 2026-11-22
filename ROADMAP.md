@@ -28,6 +28,15 @@ Legend: ✅ shipped · 🛠️ in progress · 📋 planned · 💡 exploring
 
 ## ✅ Shipped
 
+**0.8.2** — honest picks, clear actions, complete data and correct portfolio math
+- Rule-based action engine (`BUY`/`WATCH`/`AVOID` and `ADD`/`HOLD`/`TRIM`/`EXIT`, or `NO CALL`
+  below 60% data coverage) with `--horizon short`, invalidation levels, `portfolio review`,
+  and `stock_action` / `portfolio_review` MCP tools
+- Portfolio depth: Indian business-group X-Ray, `--charges auto` on NSE/BSE delivery trades,
+  ELSS lock-in tracking, lot editing/undoing sales, and rotating `portfolio.json.1`–`.5` backups
+- Market & worker intelligence: `stockwise hot`, `stockwise digest` after-close summary, BSE &
+  SEC EDGAR filing notices, and multi-currency / tax / corporate-action precision fixes
+
 **0.8.1** — fix what was wrong
 - Imports no longer lose lots: a second tradebook or broker file merges, same-day trades are
   intraday, HDFC and Mindtree trades use the merger ratios, and writes are locked
