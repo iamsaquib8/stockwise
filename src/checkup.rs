@@ -21,6 +21,12 @@ pub const DEFAULT_MAX_STOCK_WEIGHT: f64 = 12.0;
 pub const FUND_OVERLAP_PCT: f64 = 35.0;
 /// Fewer effective bets (1 / HHI of look-through weights) than this is noted.
 pub const MIN_EFFECTIVE_BETS: f64 = 5.0;
+
+/// Look-through weight left out (percent of the portfolio) above which the
+/// effective-bets figure is labelled an upper bound: an index table lists
+/// only the index's largest constituents.
+const PARTIAL_INDEX_PCT: f64 = 0.5;
+
 /// A Piotroski F-Score at or below this (with most signals evaluated).
 pub const WEAK_PIOTROSKI: u8 = 3;
 /// Piotroski signals needed before a low score counts.
@@ -737,15 +743,30 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
             .min(1.0)
     };
     let bets = if herf > 0.0 { 1.0 / herf } else { 0.0 };
+    // An index table lists only the largest constituents: the weight it
+    // leaves out adds nothing to the HHI, so the figure is an upper bound.
+    let omitted_pct = if input.look_through.is_empty() {
+        0.0
+    } else {
+        (100.0 - weights.iter().map(|w| w.1.max(0.0)).sum::<f64>()).max(0.0)
+    };
+    let partial = omitted_pct > PARTIAL_INDEX_PCT;
     if !weights.is_empty() {
         b.ran(Rule::EffectiveBets);
+        if partial {
+            skipped.push(format!(
+                "Effective bets ({bets:.1}) is an upper bound: {omitted_pct:.1}% of the portfolio \
+                 sits in index constituents beyond the index table's largest ones"
+            ));
+        }
         if bets < MIN_EFFECTIVE_BETS {
+            let like = if partial { "at most " } else { "" };
             b.add(
                 Rule::EffectiveBets,
                 Severity::Medium,
                 None,
                 format!(
-                    "The portfolio behaves like {bets:.1} equal-sized holdings (HHI {herf:.3}), \
+                    "The portfolio behaves like {like}{bets:.1} equal-sized holdings (HHI {herf:.3}), \
                      fewer than {MIN_EFFECTIVE_BETS:.0}."
                 ),
                 total,
@@ -1937,5 +1958,30 @@ mod tests {
         // One ETF holding 50 companies is far more than one bet.
         assert!(c.effective_bets > 10.0, "{}", c.effective_bets);
         assert!(!rules(&c).contains(&Rule::EffectiveBets));
+        // The table lists only the largest constituents: an upper bound.
+        assert!(
+            c.skipped.iter().any(|s| s.contains("upper bound")),
+            "{:?}",
+            c.skipped
+        );
+    }
+
+    #[test]
+    fn a_complete_look_through_is_not_an_upper_bound() {
+        let mut i = input(vec![HoldingFacts {
+            symbol: "S1".into(),
+            value: 1000.0,
+            weight_pct: 100.0,
+            ..Default::default()
+        }]);
+        i.look_through = vec![("S1".into(), 60.0), ("S2".into(), 40.0)];
+        let c = evaluate(&i, vec![]);
+        assert!(!c.skipped.iter().any(|s| s.contains("upper bound")));
+        let f = c
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::EffectiveBets)
+            .unwrap();
+        assert!(!f.observed.contains("at most"), "{}", f.observed);
     }
 }

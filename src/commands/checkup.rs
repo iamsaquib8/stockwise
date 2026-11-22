@@ -116,12 +116,16 @@ pub(crate) struct CheckupRun {
     pub(crate) tax: Option<ck::TaxFacts>,
 }
 
+/// The investor's tax residence (`[profile] residence`, else guessed from
+/// the market) when the tax headroom has rules for it. The market still
+/// picks the quotes; it does not pick whose tax rules apply.
 fn home_country(market: Market) -> Option<Country> {
-    match market {
-        Market::In => Some(Country::India),
-        Market::Us => Some(Country::Us),
-        _ => None,
-    }
+    tax_home(super::portfolio_analyze::residence(market))
+}
+
+/// The residences the harvest report covers: India and the US.
+fn tax_home(residence: Option<Country>) -> Option<Country> {
+    residence.filter(|c| matches!(c, Country::India | Country::Us))
 }
 
 fn is_fund_like(symbol: &str) -> bool {
@@ -279,30 +283,33 @@ fn goal_facts(
     ))
 }
 
-/// The harvest report. Offline it skips the 31 Jan 2018 price lookup, so
-/// grandfathered lots count at their cost.
+/// The harvest report under `country`'s rules, with quotes for `market`.
+/// Offline it skips the 31 Jan 2018 price lookup, so grandfathered lots
+/// count at their cost.
 async fn harvest(
     src: &impl views::DataSource,
     portfolio: &Portfolio,
     market: Market,
+    country: Country,
     today: chrono::NaiveDate,
     offline: bool,
 ) -> Result<super::holdings::HarvestSummary> {
-    if !offline {
-        return Ok(
-            super::holdings::harvest_summary(src, portfolio, market, today)
-                .await?
-                .0,
-        );
-    }
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    let val = value_holdings(src, &symbols, market, None).await?;
-    Ok(super::holdings::compute_harvest(
-        portfolio, &val, market, today,
+    let val = if offline {
+        let symbols: Vec<String> = portfolio
+            .holdings
+            .iter()
+            .map(|h| h.symbol.clone())
+            .collect();
+        value_holdings(src, &symbols, market, None).await?
+    } else {
+        super::holdings::tax_valuation(src, portfolio, market).await?
+    };
+    Ok(super::holdings::compute_harvest_in(
+        portfolio,
+        &val,
+        country,
+        today,
+        Default::default(),
     ))
 }
 
@@ -329,14 +336,23 @@ fn adjust_for_pending_splits(
         };
         i.shares = h.shares;
         i.value = i.price.map(|p| p * h.shares);
+        // A split leaves each lot's cost as it was, so its base cost too
+        // when the lots still line up one to one.
+        let same_lots = i.lots.len() == h.lots.len();
         i.lots = h
             .lots
             .iter()
-            .map(|l| pa::LotInput {
+            .enumerate()
+            .map(|(n, l)| pa::LotInput {
                 qty: l.qty,
                 price: l.price,
                 date: chrono::NaiveDate::parse_from_str(&l.date, "%Y-%m-%d").ok(),
                 estimated: l.date_estimated,
+                cost_base: i
+                    .lots
+                    .get(n)
+                    .filter(|_| same_lots)
+                    .and_then(|o| o.cost_base),
             })
             .collect();
     }
@@ -531,7 +547,7 @@ pub(crate) async fn run_checkup(
     // Tax headroom.
     let tax = match home_country(market) {
         None => None,
-        Some(country) => match harvest(src, &g.portfolio, market, today, offline).await {
+        Some(country) => match harvest(src, &g.portfolio, market, country, today, offline).await {
             Ok(h) if fx(h.currency).is_none() => {
                 skipped.push(format!(
                     "Tax headroom: no {} to {} exchange rate",
@@ -1295,6 +1311,15 @@ pub async fn cmd_portfolio_wrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tax_headroom_follows_the_residence_not_the_market() {
+        assert_eq!(tax_home(Some(Country::Us)), Some(Country::Us));
+        assert_eq!(tax_home(Some(Country::India)), Some(Country::India));
+        // No harvest rules for a UK resident yet.
+        assert_eq!(tax_home(Some(Country::Uk)), None);
+        assert_eq!(tax_home(None), None);
+    }
 
     #[test]
     fn csv_has_one_row_per_finding_in_rank_order() {

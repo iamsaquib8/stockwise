@@ -1616,6 +1616,18 @@ pub(crate) fn compute_harvest_with(
         Market::Us => Country::Us,
         _ => Country::India,
     };
+    compute_harvest_in(portfolio, val, country, today, carry)
+}
+
+/// [`compute_harvest_with`] under `country`'s rules (India or the US), for
+/// a caller that knows the investor's residence.
+pub(crate) fn compute_harvest_in(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    country: Country,
+    today: chrono::NaiveDate,
+    carry: CarriedForward,
+) -> HarvestSummary {
     let report = tax_report(country, portfolio, val, today);
     let realized = report.realized.plus(carry.buckets());
     let realized_est = tax::estimate(country, realized);
@@ -2443,7 +2455,16 @@ pub(crate) fn tax_report(
         };
         let unit_cost =
             tax_export::lot_unit_cost(&s.buy_date, long, s.buy_price, s.sell_price, fmv);
-        let gain = s.qty * (s.sell_price - unit_cost) * scale;
+        // Net of the sale's recorded charges where they are deductible, as
+        // `Sale::gain` is, on the (possibly grandfathered) cost. An Indian
+        // capital gain stays before charges, as in `tax export`: the
+        // recorded charges include STT, which Sec. 48 does not allow.
+        let charges = if country != Country::India || s.is_intraday() {
+            s.charges()
+        } else {
+            0.0
+        };
+        let gain = (s.qty * (s.sell_price - unit_cost) - charges) * scale;
         let row = TaxSaleRow {
             grandfathered: fmv.is_some() && unit_cost != s.buy_price,
             symbol: s.symbol.clone(),
