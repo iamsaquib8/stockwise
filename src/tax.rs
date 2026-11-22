@@ -174,6 +174,37 @@ impl Buckets {
     }
 }
 
+/// [`Buckets`] summed in minor units, so many sales add up exactly; turned
+/// into [`Buckets`] once, for the report.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MinorBuckets {
+    st_gain: i64,
+    st_loss: i64,
+    lt_gain: i64,
+    lt_loss: i64,
+}
+
+impl MinorBuckets {
+    pub fn add(&mut self, gain: i64, long_term: bool) {
+        match (gain >= 0, long_term) {
+            (true, true) => self.lt_gain += gain,
+            (true, false) => self.st_gain += gain,
+            (false, true) => self.lt_loss -= gain,
+            (false, false) => self.st_loss -= gain,
+        }
+    }
+
+    pub fn to_buckets(self) -> Buckets {
+        use crate::money::from_minor;
+        Buckets {
+            st_gain: from_minor(self.st_gain),
+            st_loss: from_minor(self.st_loss),
+            lt_gain: from_minor(self.lt_gain),
+            lt_loss: from_minor(self.lt_loss),
+        }
+    }
+}
+
 /// Tax on a set of gains after set-off. For the UK, which has no short/long
 /// split, everything is reported in the short-term fields.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]

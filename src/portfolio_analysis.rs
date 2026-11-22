@@ -96,8 +96,9 @@ pub struct LotInput {
     /// The date was not known and is a guess.
     pub estimated: bool,
     /// Cost in the base currency at the purchase day's rate (or what was
-    /// paid in the base). `None`: `qty × price × fx_to_base` (today's rate).
-    pub cost_base: Option<f64>,
+    /// paid in the base), in minor units ([`crate::money`]). `None`:
+    /// `qty × price × fx_to_base` (today's rate).
+    pub cost_base: Option<i64>,
 }
 
 /// Everything known about one holding.
@@ -1013,22 +1014,27 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
         .filter(|p| p.value_base.is_none())
         .map(|p| p.symbol.clone())
         .collect();
+    use crate::money::{from_minor, to_minor};
     let mut terms = Terms::default();
+    let (mut short_term_minor, mut long_term_minor) = (0i64, 0i64);
     for (p, i) in positions.iter().zip(inputs) {
         let default_months = i.tax_country.and_then(Country::long_term_months);
         // Each lot's base gain: value at today's rate less its cost at the
         // purchase's rate, so the currency move counts, in the lot's term.
+        // Summed in minor units, so the totals are exact.
         if let (Some(price), Some(rate), Some(_)) = (i.price, i.fx_to_base, p.value_base)
             && i.term_rule.has_terms(default_months)
         {
             for l in &i.lots {
                 let Some(d) = l.date else { continue };
-                let cost = l.cost_base.unwrap_or(l.qty * l.price * rate);
-                let gain = l.qty * price * rate - cost;
+                let cost = l
+                    .cost_base
+                    .unwrap_or_else(|| to_minor(l.qty * l.price * rate));
+                let gain = to_minor(l.qty * price * rate) - cost;
                 if lot_is_long_term(i.term_rule, default_months, d, ctx.today) {
-                    terms.long_term_gain += gain;
+                    long_term_minor += gain;
                 } else {
-                    terms.short_term_gain += gain;
+                    short_term_minor += gain;
                 }
             }
         }
@@ -1051,6 +1057,8 @@ pub fn analyze(inputs: &[PositionInput], ctx: &Context) -> Analysis {
             }
         }
     }
+    terms.short_term_gain = from_minor(short_term_minor);
+    terms.long_term_gain = from_minor(long_term_minor);
     let mut a = Analysis {
         base_currency: ctx.base_currency.clone(),
         value: total,
@@ -1464,7 +1472,7 @@ mod tests {
         us.currency = Some("USD".into());
         us.fx_to_base = Some(84.0);
         us.cost_base = Some(10.0 * 100.0 * 75.0);
-        us.lots[0].cost_base = Some(10.0 * 100.0 * 75.0);
+        us.lots[0].cost_base = Some(crate::money::to_minor(10.0 * 100.0 * 75.0));
         let a = analyze(&[us], &ctx());
         assert!((a.pnl_pct - 12.0).abs() < 1e-9);
         // The lot's term gain carries the currency move too.

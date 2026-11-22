@@ -278,6 +278,25 @@ fn tax_report_realized_gains_net_deductible_charges() {
 }
 
 #[test]
+fn tax_report_totals_add_up_exactly() {
+    // Three sales each 10 cents up: the bucket is exactly 0.30, which a
+    // plain f64 sum (0.1 + 0.1 + 0.1) is not.
+    let mut p = Portfolio::default();
+    for (i, d) in ["2026-02-02", "2026-02-03", "2026-02-04"]
+        .iter()
+        .enumerate()
+    {
+        p.add_lot("AAPL", Lot::new(1.0, 10.0, *d, "manual"));
+        p.sell_fifo("AAPL", 1.0, 10.1, &format!("2026-03-0{}", i + 1), "manual")
+            .unwrap();
+    }
+    let r = tax_report(Country::Us, &p, &valued(&p, vec![]), day("2026-06-01"));
+    assert_ne!(0.1 + 0.1 + 0.1, 0.3);
+    assert_eq!(r.realized.st_gain, 0.3, "{:?}", r.realized);
+    assert_eq!(r.sales[0].gain, 0.1);
+}
+
+#[test]
 fn tax_in_reports_intraday_apart_from_111a_and_112a() {
     use crate::portfolio::{ImportOptions, ImportRow};
     let row = |date: &str, sell: bool, qty: f64, price: f64| ImportRow {

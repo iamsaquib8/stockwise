@@ -2432,6 +2432,11 @@ pub(crate) fn tax_report(
         }
     };
 
+    // Money adds up in minor units (exact); the report gets the totals.
+    use crate::money::{from_minor, times, to_minor};
+    let mut realized = tax::MinorBuckets::default();
+    let mut unrealized = tax::MinorBuckets::default();
+    let mut intraday_gain: i64 = 0;
     for s in portfolio
         .realized
         .iter()
@@ -2460,11 +2465,14 @@ pub(crate) fn tax_report(
         // capital gain stays before charges, as in `tax export`: the
         // recorded charges include STT, which Sec. 48 does not allow.
         let charges = if country != Country::India || s.is_intraday() {
-            s.charges()
+            to_minor(s.charges())
         } else {
-            0.0
+            0
         };
-        let gain = (s.qty * (s.sell_price - unit_cost) - charges) * scale;
+        let gain = times(
+            to_minor(s.qty * s.sell_price) - to_minor(s.qty * unit_cost) - charges,
+            scale,
+        );
         let row = TaxSaleRow {
             grandfathered: fmv.is_some() && unit_cost != s.buy_price,
             symbol: s.symbol.clone(),
@@ -2472,19 +2480,19 @@ pub(crate) fn tax_report(
             bought: s.buy_date.clone(),
             bought_estimated: s.buy_date_estimated,
             sold: s.sell_date.clone(),
-            gain: round(gain, 2),
+            gain: from_minor(gain),
             term: terms.then_some(if long { "long" } else { "short" }),
         };
         // India: a same-day buy and sell is speculative income at slab rates.
         if country == Country::India && s.is_intraday() {
-            r.intraday_gain += gain;
+            intraday_gain += gain;
             r.intraday.push(TaxSaleRow {
                 term: Some("intraday"),
                 ..row
             });
             continue;
         }
-        r.realized.add(gain, long);
+        realized.add(gain, long);
         r.sales.push(row);
     }
 
@@ -2501,7 +2509,7 @@ pub(crate) fn tax_report(
             r.unpriced.push(h.symbol.clone());
             continue;
         };
-        let (mut st, mut lt) = (0.0, 0.0);
+        let (mut st, mut lt) = (0i64, 0i64);
         for l in &h.lots {
             let long = date(&l.date).is_some_and(|d| country.is_long_term(d, today));
             let fmv = if country == Country::India {
@@ -2510,8 +2518,8 @@ pub(crate) fn tax_report(
                 None
             };
             let unit_cost = tax_export::lot_unit_cost(&l.date, long, l.price, price, fmv);
-            let gain = l.qty * (price - unit_cost) * scale;
-            r.unrealized.add(gain, long);
+            let gain = times(to_minor(l.qty * price) - to_minor(l.qty * unit_cost), scale);
+            unrealized.add(gain, long);
             if long {
                 lt += gain;
             } else {
@@ -2522,11 +2530,14 @@ pub(crate) fn tax_report(
             symbol: h.symbol.clone(),
             cost: round(h.cost_basis() * scale, 2),
             value: round(h.shares * price * scale, 2),
-            short_term_gain: round(st, 2),
-            long_term_gain: round(lt, 2),
+            short_term_gain: from_minor(st),
+            long_term_gain: from_minor(lt),
             estimated_dates: h.has_estimated_dates(),
         });
     }
+    r.realized = realized.to_buckets();
+    r.unrealized = unrealized.to_buckets();
+    r.intraday_gain = from_minor(intraday_gain);
     r.other_currency.sort();
     r.other_currency.dedup();
     r

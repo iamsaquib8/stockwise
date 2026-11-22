@@ -56,7 +56,8 @@ pub struct Twin {
     pub capped: usize,
     /// End value of the units capped sales could not sell (0 when nothing
     /// was capped): the part of those distributions the twin could not pay.
-    pub shortfall_value: f64,
+    /// In minor units ([`crate::money`]).
+    pub shortfall_value: i64,
 }
 
 /// Build the [`Twin`] of `flows` (`(date, amount)` in base currency, buys
@@ -95,7 +96,7 @@ pub fn twin(
         value: shares * end_price,
         flows: twin_flows,
         capped,
-        shortfall_value: shortfall_units * end_price,
+        shortfall_value: crate::money::to_minor(shortfall_units * end_price),
     })
 }
 
@@ -245,7 +246,11 @@ pub fn compute_pme(
     let twin_value = twin.value;
     // A distribution the twin could not match still counts for the
     // portfolio: its unmatched units are valued at the end price.
-    let value_added = actual_value - twin_value + twin.shortfall_value;
+    // Added in minor units, so the money figure is exact.
+    let value_added = {
+        use crate::money::{from_minor, to_minor};
+        from_minor(to_minor(actual_value) - to_minor(twin_value) + twin.shortfall_value)
+    };
     let pme_ratio = kaplan_schoar_pme(flows, actual_value, benchmark_closes, today);
     let direct_alpha_percent =
         direct_alpha(flows, actual_value, benchmark_closes, today).map(|a| a * 100.0);
@@ -346,7 +351,7 @@ mod tests {
         assert_eq!(res.twin_capped_sales, 1);
         assert!(res.twin_value >= 0.0);
         // The 50 units the twin could not sell, at the end price of 50.
-        assert_eq!(t.shortfall_value, 2500.0);
+        assert_eq!(t.shortfall_value, 250_000);
         assert_eq!(res.value_added, 2500.0);
     }
 
@@ -355,9 +360,10 @@ mod tests {
         let closes = vec![(d("2024-01-01"), 100.0), (d("2025-01-01"), 120.0)];
         let flows = vec![(d("2024-01-01"), -1000.0), (d("2025-01-01"), 600.0)];
         let t = twin(&flows, &closes, d("2025-01-01")).unwrap();
-        assert_eq!((t.capped, t.shortfall_value), (0, 0.0));
+        assert_eq!((t.capped, t.shortfall_value), (0, 0));
         let res = compute_pme(&flows, 700.0, &closes, d("2025-01-01")).unwrap();
-        assert!((res.value_added - (700.0 - t.value)).abs() < 1e-9);
+        // value_added is rounded to the minor unit.
+        assert!((res.value_added - (700.0 - t.value)).abs() <= 0.005);
     }
 
     #[test]

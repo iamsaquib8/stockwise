@@ -63,6 +63,7 @@ mod longterm;
 mod market;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod money;
 mod monitor;
 mod netlog;
 mod news;

@@ -241,6 +241,7 @@ pub async fn cmd_sim(
 
                 let costs = session.costs();
                 let mut total_pnl = 0.0_f64;
+                let mut total_minor = 0i64;
                 let mut unpriced = 0usize;
                 for t in &session.trades {
                     let quote = quotes
@@ -248,7 +249,7 @@ pub async fn cmd_sim(
                         .find(|q| q.symbol.as_deref() == Some(&t.symbol))
                         .and_then(|q| q.regular_market_price)
                         .filter(|p| p.is_finite() && *p > 0.0);
-                    let Some(pnl) = status_pnl(&costs, t, quote) else {
+                    let Some(pnl_minor) = status_pnl(&costs, t, quote) else {
                         // No current price: no valuation, and nothing added
                         // to the total.
                         unpriced += 1;
@@ -263,7 +264,9 @@ pub async fn cmd_sim(
                         );
                         continue;
                     };
-                    total_pnl += pnl;
+                    total_minor += pnl_minor;
+                    total_pnl = crate::money::from_minor(total_minor);
+                    let pnl = crate::money::from_minor(pnl_minor);
                     let current = t.exit_price.or(quote).unwrap_or(t.entry_price);
                     let is_long = crate::intraday::Direction::is_long_str(&t.direction);
                     let hit_t2 = if is_long {
@@ -415,31 +418,31 @@ fn settle_charges(
 /// net P&L once it has closed, else its P&L if closed at `quote` now, after
 /// the round trip's charges and slippage. None when it is still open and
 /// there is no quote: a missing price is never valued at the entry price.
+/// In minor units ([`crate::money`]).
 fn status_pnl(
     costs: &crate::backtest::costs::CostModel,
     t: &SimTrade,
     quote: Option<f64>,
-) -> Option<f64> {
+) -> Option<i64> {
+    use crate::money::to_minor;
     if let Some(pnl) = t.pnl {
-        return Some(pnl);
+        return Some(to_minor(pnl));
     }
     let current = quote?;
     let is_long = crate::intraday::Direction::is_long_str(&t.direction);
-    let gross = if is_long {
-        (current - t.entry_price) * t.qty as f64
-    } else {
-        (t.entry_price - current) * t.qty as f64
-    };
-    Some(
-        gross
-            - crate::simulator::round_trip_cost(
-                costs,
-                is_long,
-                t.qty,
-                t.entry_price,
-                &[(t.qty, current)],
-            ),
-    )
+    let (entry, now) = (
+        to_minor(t.entry_price * t.qty as f64),
+        to_minor(current * t.qty as f64),
+    );
+    let gross = if is_long { now - entry } else { entry - now };
+    let cost = crate::simulator::round_trip_cost(
+        costs,
+        is_long,
+        t.qty,
+        t.entry_price,
+        &[(t.qty, current)],
+    );
+    Some(gross - to_minor(cost))
 }
 
 /// A trade of an open session that has no result yet. `sim settle` replays
@@ -455,10 +458,12 @@ fn record_replay(
     trade: &mut SimTrade,
     r: &crate::simulator::Replay,
 ) {
-    let charges = settle_charges(costs, trade, r);
-    let net = r.pnl - charges;
+    // Net of charges in minor units, so the stored figures are exact.
+    use crate::money::{from_minor, to_minor};
+    let charges = to_minor(settle_charges(costs, trade, r));
+    let net = from_minor(to_minor(r.pnl) - charges);
     trade.exit_price = Some(r.exit_price);
-    trade.charges = Some(charges);
+    trade.charges = Some(from_minor(charges));
     trade.pnl = Some(net);
     let cost = trade.entry_price * trade.qty as f64;
     trade.pnl_pct = Some(if cost > 0.0 { net / cost * 100.0 } else { 0.0 });
@@ -466,14 +471,16 @@ fn record_replay(
     trade.hit_stop = Some(r.status == PositionStatus::StopHit);
 }
 
-/// Net P&L, charges, wins and losses over a settled session's trades.
-fn session_totals(trades: &[SimTrade]) -> (f64, f64, u32, u32) {
-    let mut totals = (0.0, 0.0, 0u32, 0u32);
+/// Net P&L and charges (minor units), wins and losses over a settled
+/// session's trades.
+fn session_totals(trades: &[SimTrade]) -> (i64, i64, u32, u32) {
+    use crate::money::to_minor;
+    let mut totals = (0i64, 0i64, 0u32, 0u32);
     for t in trades {
-        let net = t.pnl.unwrap_or(0.0);
+        let net = to_minor(t.pnl.unwrap_or(0.0));
         totals.0 += net;
-        totals.1 += t.charges.unwrap_or(0.0);
-        if net > 0.0 {
+        totals.1 += to_minor(t.charges.unwrap_or(0.0));
+        if net > 0 {
             totals.2 += 1;
         } else {
             totals.3 += 1;
@@ -930,6 +937,10 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
         }
 
         let (total_pnl, total_charges, wins, losses) = session_totals(&session.trades);
+        let (total_pnl, total_charges) = (
+            crate::money::from_minor(total_pnl),
+            crate::money::from_minor(total_charges),
+        );
         let total_pnl_pct = (total_pnl / session.capital) * 100.0;
         session.total_pnl = Some(total_pnl);
         session.total_pnl_pct = Some(total_pnl_pct);
@@ -1163,11 +1174,11 @@ mod tests {
         let flat = status_pnl(&costs, &t, Some(100.0)).unwrap();
         let want = crate::simulator::round_trip_cost(&costs, true, 100, 100.0, &[(100, 100.0)]);
         assert!(want > 0.0);
-        assert!((flat + want).abs() < 1e-9, "{flat}");
+        assert_eq!(flat, -crate::money::to_minor(want), "{flat}");
         // A trade that already closed shows its recorded result.
         let mut done = open_trade("B.NS");
         done.pnl = Some(55.0);
-        assert_eq!(status_pnl(&costs, &done, None), Some(55.0));
+        assert_eq!(status_pnl(&costs, &done, None), Some(5_500));
     }
 
     #[test]
@@ -1210,8 +1221,8 @@ mod tests {
         assert_eq!(trades[1].pnl, Some(-200.0));
         assert_eq!(trades[1].hit_stop, Some(true));
         let (total, charges, wins, losses) = session_totals(&trades);
-        assert!((total - (187.5 - 200.0)).abs() < 1e-9);
-        assert!((charges - 12.5).abs() < 1e-9);
+        assert_eq!(total, -1_250);
+        assert_eq!(charges, 1_250);
         assert_eq!((wins, losses), (1, 1));
     }
 
