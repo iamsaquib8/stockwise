@@ -195,7 +195,7 @@ ACTION: BUY · medium confidence · invalid below ₹2,410.50 · review by 21 Fe
   • Price above its 200-day average (₹2,388.10)
   • P/E 24.3 within 1.2x the sector P/E (22.0)
   • Size: at most 6.2% of the portfolio, about 25 shares (risk_per_trade)
-  Methodology 1 (long horizon). Rule-based educational signal from StockWise's published methodology, ...
+  Methodology 2 (long horizon). Rule-based educational signal from StockWise's published methodology, ...
 ```
 
 A stock you don't hold gets BUY, WATCH or AVOID; one you hold gets ADD, HOLD,

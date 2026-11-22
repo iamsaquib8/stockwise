@@ -345,7 +345,7 @@ pub struct HoldingAction {
 
 /// Said under every checkup.
 pub const DISCLAIMER: &str = "Findings are observations from your recorded holdings and public data. \
-     The Action column comes from StockWise's published rules (methodology 1): educational signals, \
+     The Action column comes from StockWise's published rules (methodology 2): educational signals, \
      not personalised advice; StockWise is not a SEBI-registered adviser. Check the figures with the \
      command shown before acting.";
 

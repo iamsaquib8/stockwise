@@ -57,7 +57,7 @@ rest is as printed, trimmed):
   STOCK-A.NS            …        …       72     53       87      34     90    67   87%  …            Quality, Trend
   STOCK-B.BO            …        …       71     18       86      70     84    60  100%  …            Quality, Trend
   ...
-  Action: rule-based (methodology 1), as if not held: BUY / WATCH / AVOID or NO CALL on thin data. The rank
+  Action: rule-based (methodology 2), as if not held: BUY / WATCH / AVOID or NO CALL on thin data. The rank
   is relative to this scan; the action applies fixed rules. `stockwise verdict SYM` shows the reasons.
 ```
 

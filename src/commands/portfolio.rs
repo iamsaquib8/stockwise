@@ -1378,7 +1378,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
     if !actions.is_empty() {
         println!(
             "  {}",
-            "Action: quote-based rules (methodology 1). `stockwise portfolio review` adds price history, look-through and tax notes."
+            "Action: quote-based rules (methodology 2). `stockwise portfolio review` adds price history, look-through and tax notes."
                 .dimmed()
         );
     }

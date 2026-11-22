@@ -29,7 +29,7 @@ stockwise portfolio review
 
 ```text
   Portfolio review (long horizon)
-  2 exit · 3 trim · 0 add · 1 hold · 0 no call   (long horizon, methodology 1)
+  2 exit · 3 trim · 0 add · 1 hold · 0 no call   (long horizon, methodology 2)
 
   INFY.NS  INFOSYS LIMITED  9.0% of portfolio  P&L -26.3%
     ACTION: EXIT · medium confidence · review by 13 Jan 2027

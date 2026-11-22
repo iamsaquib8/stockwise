@@ -1982,7 +1982,7 @@ pub async fn cmd_picks(
         trend_lines[1],
         "Losses and negative book value rank last. Data: share of the score that had data; the rest pulls",
         "the score toward 50. With a positive --top, at most 3 stocks per known sector. `picks review`: past lists.",
-        "Action: rule-based (methodology 1), as if not held: BUY / WATCH / AVOID or NO CALL on thin data. The rank",
+        "Action: rule-based (methodology 2), as if not held: BUY / WATCH / AVOID or NO CALL on thin data. The rank",
         "is relative to this scan; the action applies fixed rules. `stockwise verdict SYM` shows the reasons.",
     ] {
         println!("  {}", line.dimmed().italic());

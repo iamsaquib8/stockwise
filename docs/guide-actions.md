@@ -43,7 +43,7 @@ Output from a sample portfolio of nine large caps on 21 Nov 2026 (trimmed):
 
 ```text
   Portfolio review (long horizon)
-  2 exit · 0 trim · 2 add · 5 hold · 0 no call   (long horizon, methodology 1)
+  2 exit · 0 trim · 2 add · 5 hold · 0 no call   (long horizon, methodology 2)
 
   INFY.NS  INFOSYS LIMITED  11.2% of portfolio  P&L -26.8%
     ACTION: EXIT · medium confidence · review by 13 Jan 2027
@@ -91,7 +91,7 @@ stockwise deep SUNPHARMA                     # everything, starts with the actio
     • Composite score 59 is below 65
     • No P/E history or sector P/E to check valuation against
     • Price above its 200-day average (₹1,821.49)
-    Methodology 1 (long horizon). Rule-based educational signal from StockWise's published methodology, ...
+    Methodology 2 (long horizon). Rule-based educational signal from StockWise's published methodology, ...
 ```
 
 A stock you hold gets ADD, HOLD, TRIM or EXIT here too. `verdict --explain`
