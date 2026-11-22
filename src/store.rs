@@ -121,7 +121,12 @@ where
 }
 
 pub fn load_from<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
-    if !path.exists() {
+    // Only a path that is really absent means "nothing saved yet"; one that
+    // cannot be checked (a folder above it denies access) is an error.
+    if !path
+        .try_exists()
+        .with_context(|| format!("Cannot check {}", path.display()))?
+    {
         return Ok(T::default());
     }
     let data =
@@ -205,6 +210,32 @@ pub fn restrict_permissions(_path: &Path) -> Result<bool> {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[cfg(unix)]
+    #[test]
+    fn load_from_reports_a_path_it_cannot_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("sw-store-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let locked = base.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        // Missing: the default.
+        assert_eq!(
+            load_from::<Doc>(&base.join("none.json")).unwrap(),
+            Doc::default()
+        );
+        // Behind a folder with no search permission: an error, not a default.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::metadata(locked.join("x"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+        let r = load_from::<Doc>(&locked.join("state.json"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        // Root can search anything; only check where access is really denied.
+        if denied {
+            assert!(r.is_err(), "{r:?}");
+        }
+    }
 
     #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
     struct Doc {
