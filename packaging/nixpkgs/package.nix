@@ -43,6 +43,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     # Creates the data directory in the read-only sandbox home in v0.8.2
     # (fixed on main: reading saved data no longer creates it)
     "--skip=tools::tests::monitor_status_runs_offline_on_fixtures"
+    # Looks up tickers on Yahoo; the build sandbox has no network
+    "--skip=init_imports_a_groww_file_and_prints_holdings"
   ];
 
   passthru.updateScript = nix-update-script { };
