@@ -72,9 +72,26 @@ pub(super) async fn run<D: DataSource>(
             )
             .await?;
             let cards = crate::insights::generate_rich_insights(&r);
-            let profile = crate::config::effective_profile();
+            let profile = super::current_profile(ctx);
             let mut v = crate::verdict::generate_verdict_for(&r, &cards, &profile, horizon);
-            crate::commands::apply_holding(&mut v, &r, m);
+            // The holding context comes from the caller's workspace: its
+            // portfolio file and notes when it has one, else the data
+            // source's portfolio that the other read tools see. When that
+            // portfolio cannot be read, the action stays the public one,
+            // without holding context.
+            let (portfolio, notes) = match &ctx.workspace {
+                Some(w) => (
+                    crate::portfolio::Portfolio::load_from(&w.portfolio),
+                    Some(w.dir.join(crate::notes::FILE)),
+                ),
+                None => (src.portfolio(), None),
+            };
+            if let Ok(p) = portfolio {
+                crate::commands::apply_holding_in(&mut v, &r, m, &profile, &p, || match notes {
+                    Some(path) => crate::store::load_from(&path),
+                    None => crate::commands::load_notes(),
+                });
+            }
             Ok(serde_json::json!({
                 "symbol": v.symbol,
                 "name": v.name,

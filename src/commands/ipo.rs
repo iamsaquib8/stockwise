@@ -85,14 +85,11 @@ async fn listed_action(client: &YahooClient, symbol: &str) -> Option<crate::acti
         .ok()?
         .into_iter()
         .next()?;
-    let notes = crate::commands::load_notes();
+    // Decided as a stock not held, so the notes (thesis limits for holdings)
+    // are not read.
     let profile = crate::config::effective_profile();
-    Some(crate::commands::row_action(
+    Some(super::actions::unheld_action(
         &q,
-        None,
-        None,
-        None,
-        &notes,
         &profile,
         chrono::Local::now().date_naive(),
     ))

@@ -5,7 +5,9 @@ applied the same way to every stock, and you can check it yourself. When a
 rule changes, its version number changes, so the track record can tell old
 lists from new ones.
 
-## Actions (methodology 1)
+<a id="actions-methodology-1"></a>
+
+## Actions (methodology 2)
 
 `stockwise verdict`, `deep`, a bare `stockwise SYMBOL`, `portfolio review`,
 the Action columns of `portfolio`, `portfolio checkup` and `picks`, and the
@@ -151,7 +153,9 @@ The rules run in this order; the first that fires decides.
   50-day average above the 200-day. Short horizon: close above the 50-day
   average and the 20/60-day volume ratio at least 1.2;
 - the weight is known and below the cap (and below your `portfolio target`
-  for it, if you set one).
+  for it, if you set one). When the look-through weight is known (what your
+  funds and ETFs hold of the same company, as for TRIM), that combined weight
+  must be below the cap; the target is compared with the direct weight.
 
 If results are due within 5 days, ADD becomes **HOLD** until they are out.
 
@@ -186,7 +190,9 @@ For BUY and ADD, the largest position the rules allow is
 as a percent of the portfolio, so a close at the invalidation price would cost
 about `risk_per_trade` percent of the portfolio. It is capped by
 `max_stock_weight`, or half of it for a small cap. `risk_per_trade` and
-`max_stock_weight` come from your investor profile. When the portfolio value
+`max_stock_weight` come from your investor profile. For ADD with a known
+look-through weight, what your funds and ETFs already hold of the company is
+taken off the cap first, so the hint never takes combined exposure above it. When the portfolio value
 is known, the hint also gives the number of shares to buy to reach that
 weight (less any you hold). The hint names the limit that set it:
 `risk_per_trade`, `max_stock_weight` or `small_cap_half_cap`.
@@ -250,7 +256,7 @@ When a rule or threshold below changes, `METHODOLOGY` in
 | WAIT | The institutional book is not final yet; the trigger says which QIB multiple by 3 PM IST on the closing day would make it APPLY |
 | AVOID | A hard gate fired, or the final book gives a weak listing case |
 | NO CALL | Data coverage below 60%, no calibrated model, or an SME issue without red flags |
-| LISTED | The issue trades; the stock action engine ([Actions](#actions-methodology-1)) decides |
+| LISTED | The issue trades; the stock action engine ([Actions](#actions-methodology-2)) decides |
 
 Every verdict carries up to three reasons, a confidence level (high,
 medium, low), what would invalidate it (or the WAIT trigger), a review date
@@ -551,7 +557,7 @@ the evidence. Check it before trusting a list.
 ### 9. The table's last columns
 
 - **Top fifth on** names the pillars where the stock ranks 80 or more.
-- **Action** is the rule-based action of the [Actions](#actions-methodology-1)
+- **Action** is the rule-based action of the [Actions](#actions-methodology-2)
   rules for each finalist, as if you did not hold it: BUY, WATCH, AVOID or NO
   CALL. It uses the quote-based long-term score as the composite, a year of
   daily bars, and the scan's sector median P/E (or the scan median) as the
