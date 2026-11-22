@@ -642,44 +642,48 @@ impl DaemonState {
     }
 
     /// The day as a simulator session. `settled` sessions carry exits and
-    /// P&L; unsettled ones carry only the entries (with the original stop),
-    /// for `sim settle` to replay from intraday bars.
+    /// P&L. Unsettled ones keep the recorded result of every position that
+    /// already closed and carry only the entry (with the original stop) of
+    /// each open one, for `sim settle` to replay from intraday bars.
     pub fn to_sim_session(&self, settled: bool) -> crate::simulator::SimSession {
         let model = self.costs();
         let trades: Vec<crate::simulator::SimTrade> = self
             .positions
             .iter()
-            .map(|p| crate::simulator::SimTrade {
-                symbol: p.symbol.clone(),
-                direction: p.direction.clone(),
-                entry_price: p.entry_price,
-                target1: p.target1,
-                target2: p.target2,
-                stop_loss: if settled {
-                    p.stop_loss
-                } else {
-                    p.initial_stop.unwrap_or(p.stop_loss)
-                },
-                qty: p.qty,
-                capital: p.entry_price * p.qty as f64,
-                score: p.score,
-                confidence: "DAEMON".into(),
-                strategies: p.strategies.clone(),
-                entered_at: p.entered_at.map(|t| t.to_rfc3339()),
-                trail_distance: p.trail_distance,
-                charges: settled.then(|| p.charges(&model)),
-                exit_price: settled.then_some(p.current_price),
-                pnl: settled.then(|| p.net_pnl(&model)),
-                pnl_pct: settled.then(|| {
-                    let cost = p.entry_price * p.qty as f64;
-                    if cost > 0.0 {
-                        p.net_pnl(&model) / cost * 100.0
+            .map(|p| {
+                let done = settled || !p.is_open();
+                crate::simulator::SimTrade {
+                    symbol: p.symbol.clone(),
+                    direction: p.direction.clone(),
+                    entry_price: p.entry_price,
+                    target1: p.target1,
+                    target2: p.target2,
+                    stop_loss: if done {
+                        p.stop_loss
                     } else {
-                        0.0
-                    }
-                }),
-                hit_target: settled.then_some(p.status == PositionStatus::T2Hit),
-                hit_stop: settled.then_some(p.status == PositionStatus::StopHit),
+                        p.initial_stop.unwrap_or(p.stop_loss)
+                    },
+                    qty: p.qty,
+                    capital: p.entry_price * p.qty as f64,
+                    score: p.score,
+                    confidence: "DAEMON".into(),
+                    strategies: p.strategies.clone(),
+                    entered_at: p.entered_at.map(|t| t.to_rfc3339()),
+                    trail_distance: p.trail_distance,
+                    charges: done.then(|| p.charges(&model)),
+                    exit_price: done.then_some(p.current_price),
+                    pnl: done.then(|| p.net_pnl(&model)),
+                    pnl_pct: done.then(|| {
+                        let cost = p.entry_price * p.qty as f64;
+                        if cost > 0.0 {
+                            p.net_pnl(&model) / cost * 100.0
+                        } else {
+                            0.0
+                        }
+                    }),
+                    hit_target: done.then_some(p.status == PositionStatus::T2Hit),
+                    hit_stop: done.then_some(p.status == PositionStatus::StopHit),
+                }
             })
             .collect();
         let total_pnl = self.total_pnl();
@@ -1292,12 +1296,48 @@ mod tests {
         assert_eq!(settled.trades[0].exit_price, Some(103.5));
         assert_eq!(settled.trades[0].stop_loss, 100.0); // moved to breakeven
 
-        // Unsettled hand-over keeps the original stop for the replay.
+        // Unsettled hand-over keeps the original stop of an open position
+        // for the replay.
+        let mut s = state_with(vec![make_position(100.0, 103.0, 106.0, 97.0)]);
+        s.positions[0].initial_stop = Some(97.0);
+        s.apply_prices(&prices(&[("TEST.NS", 103.5)]), Phase::Active);
         let open = s.to_sim_session(false);
         assert!(!open.settled);
         assert_eq!(open.trades[0].stop_loss, 97.0);
         assert_eq!(open.trades[0].exit_price, None);
         assert_eq!(open.total_pnl, None);
+    }
+
+    #[test]
+    fn hand_over_keeps_completed_trades() {
+        // A closed at its level 2; B still open when the daemon missed the
+        // close. A keeps its recorded exit, P&L and charges; only B is left
+        // for `sim settle` to replay, and the session stays open.
+        let mut a = make_position(100.0, 103.0, 106.0, 97.0);
+        a.symbol = "A.NS".into();
+        let mut b = make_position(100.0, 103.0, 106.0, 97.0);
+        b.symbol = "B.NS".into();
+        b.initial_stop = Some(97.0);
+        let mut s = state_with(vec![a, b]);
+        s.apply_prices(&prices(&[("A.NS", 107.0), ("B.NS", 101.0)]), Phase::Active);
+        assert!(!s.positions[0].is_open());
+        assert!(s.positions[1].is_open());
+        let model = s.costs();
+        let want_pnl = s.positions[0].net_pnl(&model);
+        let want_charges = s.positions[0].charges(&model);
+
+        let handed = s.to_sim_session(false);
+        assert!(!handed.settled);
+        assert_eq!(handed.total_pnl, None);
+        let (ta, tb) = (&handed.trades[0], &handed.trades[1]);
+        assert_eq!(ta.exit_price, Some(107.0));
+        assert_eq!(ta.pnl, Some(want_pnl));
+        assert_eq!(ta.charges, Some(want_charges));
+        assert_eq!(ta.hit_target, Some(true));
+        assert_eq!(tb.exit_price, None);
+        assert_eq!(tb.pnl, None);
+        assert_eq!(tb.charges, None);
+        assert_eq!(tb.stop_loss, 97.0);
     }
 
     #[test]

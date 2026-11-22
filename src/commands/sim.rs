@@ -112,6 +112,10 @@ pub async fn cmd_sim(
                 return Ok(());
             }
 
+            // The trades open now, when the plans are locked in, not when the
+            // scan started: a bar that ended during the scan must not be able
+            // to settle a trade before its entry (the worker does the same).
+            let entered_at = chrono::Utc::now().to_rfc3339();
             let sim_trades: Vec<SimTrade> = plans
                 .iter()
                 .take(5)
@@ -132,7 +136,7 @@ pub async fn cmd_sim(
                         .iter()
                         .map(|s| s.name.to_string())
                         .collect(),
-                    entered_at: Some(now.to_rfc3339()),
+                    entered_at: Some(entered_at.clone()),
                     trail_distance: Some((p.entry - p.trailing_stop).abs()),
                     charges: None,
                     exit_price: None,
@@ -229,28 +233,31 @@ pub async fn cmd_sim(
 
                 let costs = session.costs();
                 let mut total_pnl = 0.0_f64;
+                let mut unpriced = 0usize;
                 for t in &session.trades {
-                    let current = quotes
+                    let quote = quotes
                         .iter()
                         .find(|q| q.symbol.as_deref() == Some(&t.symbol))
                         .and_then(|q| q.regular_market_price)
-                        .unwrap_or(t.entry_price);
-                    let is_long = crate::intraday::Direction::is_long_str(&t.direction);
-                    let gross = if is_long {
-                        (current - t.entry_price) * t.qty as f64
-                    } else {
-                        (t.entry_price - current) * t.qty as f64
-                    };
-                    // As if closed now, after charges and slippage.
-                    let pnl = gross
-                        - crate::simulator::round_trip_cost(
-                            &costs,
-                            is_long,
+                        .filter(|p| p.is_finite() && *p > 0.0);
+                    let Some(pnl) = status_pnl(&costs, t, quote) else {
+                        // No current price: no valuation, and nothing added
+                        // to the total.
+                        unpriced += 1;
+                        println!(
+                            "  {:<14} {:>6} {:>10} {:>10} {:>12} {:>10}",
+                            t.symbol.cyan(),
                             t.qty,
-                            t.entry_price,
-                            &[(t.qty, current)],
+                            format!("{}{:.2}", csym, t.entry_price),
+                            "—".dimmed(),
+                            "unpriced".dimmed(),
+                            "No quote".yellow()
                         );
+                        continue;
+                    };
                     total_pnl += pnl;
+                    let current = t.exit_price.or(quote).unwrap_or(t.entry_price);
+                    let is_long = crate::intraday::Direction::is_long_str(&t.direction);
                     let hit_t2 = if is_long {
                         current >= t.target2
                     } else {
@@ -266,7 +273,9 @@ pub async fn cmd_sim(
                     } else {
                         current <= t.target1
                     };
-                    let status = if hit_t2 {
+                    let status = if !is_unfinished(t) {
+                        "Closed".dimmed().to_string()
+                    } else if hit_t2 {
                         "LEVEL 2".green().bold().to_string()
                     } else if hit_stop {
                         "EXIT LEVEL".red().bold().to_string()
@@ -310,11 +319,20 @@ pub async fn cmd_sim(
                         .yellow()
                         .to_string()
                 };
+                let note = if unpriced > 0 {
+                    format!(
+                        "partial: {} of {} trade(s) have no quote and are left out; after charges and slippage if closed now",
+                        unpriced,
+                        session.trades.len()
+                    )
+                } else {
+                    "after charges and slippage if closed now".to_string()
+                };
                 println!(
                     "  Total: {}  |  {}  ({})",
                     total_str,
                     on_track,
-                    "after charges and slippage if closed now".dimmed()
+                    note.dimmed()
                 );
             }
             println!();
@@ -383,6 +401,77 @@ fn settle_charges(
     let long = crate::intraday::Direction::is_long_str(&trade.direction);
     let fills = crate::simulator::exit_fills(trade.qty, r.t1_booked, trade.target1, r.exit_price);
     crate::simulator::round_trip_cost(costs, long, trade.qty, trade.entry_price, &fills)
+}
+
+/// What a trade of an open session is worth for `sim status`: its recorded
+/// net P&L once it has closed, else its P&L if closed at `quote` now, after
+/// the round trip's charges and slippage. None when it is still open and
+/// there is no quote: a missing price is never valued at the entry price.
+fn status_pnl(
+    costs: &crate::backtest::costs::CostModel,
+    t: &SimTrade,
+    quote: Option<f64>,
+) -> Option<f64> {
+    if let Some(pnl) = t.pnl {
+        return Some(pnl);
+    }
+    let current = quote?;
+    let is_long = crate::intraday::Direction::is_long_str(&t.direction);
+    let gross = if is_long {
+        (current - t.entry_price) * t.qty as f64
+    } else {
+        (t.entry_price - current) * t.qty as f64
+    };
+    Some(
+        gross
+            - crate::simulator::round_trip_cost(
+                costs,
+                is_long,
+                t.qty,
+                t.entry_price,
+                &[(t.qty, current)],
+            ),
+    )
+}
+
+/// A trade of an open session that has no result yet. `sim settle` replays
+/// only these; a trade the daemon closed before handing the day over keeps
+/// its recorded exit, P&L and charges.
+fn is_unfinished(trade: &SimTrade) -> bool {
+    trade.pnl.is_none()
+}
+
+/// Write a replayed exit into `trade`: price, charges, net P&L and outcome.
+fn record_replay(
+    costs: &crate::backtest::costs::CostModel,
+    trade: &mut SimTrade,
+    r: &crate::simulator::Replay,
+) {
+    let charges = settle_charges(costs, trade, r);
+    let net = r.pnl - charges;
+    trade.exit_price = Some(r.exit_price);
+    trade.charges = Some(charges);
+    trade.pnl = Some(net);
+    let cost = trade.entry_price * trade.qty as f64;
+    trade.pnl_pct = Some(if cost > 0.0 { net / cost * 100.0 } else { 0.0 });
+    trade.hit_target = Some(r.status == PositionStatus::T2Hit);
+    trade.hit_stop = Some(r.status == PositionStatus::StopHit);
+}
+
+/// Net P&L, charges, wins and losses over a settled session's trades.
+fn session_totals(trades: &[SimTrade]) -> (f64, f64, u32, u32) {
+    let mut totals = (0.0, 0.0, 0u32, 0u32);
+    for t in trades {
+        let net = t.pnl.unwrap_or(0.0);
+        totals.0 += net;
+        totals.1 += t.charges.unwrap_or(0.0);
+        if net > 0.0 {
+            totals.2 += 1;
+        } else {
+            totals.3 += 1;
+        }
+    }
+    totals
 }
 
 /// Fewest settled days before the paper record gets a rating.
@@ -470,6 +559,17 @@ fn daily_bar_len(pnl: f64, best_day: Option<f64>, worst_day: Option<f64>) -> usi
     ((pnl.abs() / scale * MAX_BAR).min(MAX_BAR) as usize).max(1)
 }
 
+/// Settled P&L per date of `market`, oldest first. Several sessions on one
+/// date (settle --now, then start again) add up to one day, as in
+/// [`SimHistory::stats`].
+fn daily_pnls(history: &SimHistory, market: &str) -> Vec<(String, f64)> {
+    let mut daily: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    for s in history.in_market(market).filter(|s| s.settled) {
+        *daily.entry(s.date.as_str()).or_default() += s.total_pnl.unwrap_or(0.0);
+    }
+    daily.into_iter().map(|(d, p)| (d.to_string(), p)).collect()
+}
+
 /// `sim history`: past sessions and the bot's confidence rating.
 pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
     let csym = market.currency_symbol();
@@ -488,14 +588,10 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
     }
 
     print_header(&format!("Paper Trading Performance — {}", market.label()));
-    let daily_pnls: Vec<f64> = history
-        .in_market(market.id())
-        .filter(|s| s.settled)
-        .filter_map(|s| s.total_pnl)
-        .collect();
-    if daily_pnls.len() > 1 {
+    let daily = daily_pnls(&history, market.id());
+    if daily.len() > 1 {
         let mut equity = vec![0.0_f64];
-        for &pnl in &daily_pnls {
+        for &(_, pnl) in &daily {
             equity.push(equity.last().unwrap() + pnl);
         }
         let color = if *equity.last().unwrap() >= 0.0 {
@@ -508,8 +604,8 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
         }
         println!();
         println!("  {}", "Daily P&L".bold());
-        for s in history.in_market(market.id()).filter(|s| s.settled) {
-            let pnl = s.total_pnl.unwrap_or(0.0);
+        for (date, pnl) in &daily {
+            let pnl = *pnl;
             let bar_len = daily_bar_len(pnl, stats.best_day, stats.worst_day);
             let bar = if pnl >= 0.0 {
                 "█".repeat(bar_len.max(1)).green().to_string()
@@ -521,12 +617,15 @@ pub fn cmd_sim_history(market: Market, fmt: Format) -> Result<()> {
             } else {
                 format!("-{}{:.0}", csym, pnl.abs()).red().to_string()
             };
-            println!("  {} {} {}", s.date.dimmed(), bar, ps);
+            println!("  {} {} {}", date.dimmed(), bar, ps);
         }
     }
 
     print_section("Performance");
-    print_kv("Days Simulated", &stats.total_days.to_string());
+    print_kv("Days Simulated", &stats.distinct_days.to_string());
+    if stats.total_days != stats.distinct_days {
+        print_kv("Sessions", &stats.total_days.to_string());
+    }
     print_kv(
         "Winning Days",
         &format!("{} ({:.0}%)", stats.winning_days, stats.day_win_rate),
@@ -711,16 +810,21 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             ));
             continue;
         }
-        if client.is_none() {
-            client = Some(YahooClient::new().await?);
-        }
-        let client = client.as_ref().expect("client was just created");
-
-        // Replay every trade before touching the session, so a missing
-        // chart leaves it open instead of half-settled.
-        let mut results = Vec::new();
+        // Replay every unfinished trade before touching the session, so a
+        // missing chart leaves it open instead of half-settled. A trade that
+        // already has a result (the daemon closed it before handing the day
+        // over) keeps it and is not replayed.
+        let mut results: Vec<Option<(crate::simulator::Replay, &str)>> = Vec::new();
         let mut problem = None;
         for trade in &session.trades {
+            if !is_unfinished(trade) {
+                results.push(None);
+                continue;
+            }
+            if client.is_none() {
+                client = Some(YahooClient::new().await?);
+            }
+            let client = client.as_ref().expect("client was just created");
             let entered_at = trade
                 .entered_at
                 .as_deref()
@@ -729,7 +833,7 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             match session_bars(client, &trade.symbol, market, date).await {
                 Ok(Some((bars, len, label))) => {
                     match replay_trade(trade, &bars, len, market, entered_at) {
-                        Some(r) => results.push((r, label)),
+                        Some(r) => results.push(Some((r, label))),
                         None => {
                             problem = Some(format!("no bars for {} after the entry", trade.symbol));
                             break;
@@ -770,41 +874,37 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             "Result".bold()
         );
         println!("  {}", "─".repeat(75).dimmed());
-        let mut total_pnl = 0.0_f64;
-        let mut total_charges = 0.0_f64;
-        let (mut wins, mut losses) = (0u32, 0u32);
         let mut sources: Vec<&str> = Vec::new();
-        for (trade, (r, label)) in session.trades.iter_mut().zip(&results) {
-            let charges = settle_charges(&costs, trade, r);
-            let net = r.pnl - charges;
-            trade.exit_price = Some(r.exit_price);
-            trade.charges = Some(charges);
-            trade.pnl = Some(net);
-            let cost = trade.entry_price * trade.qty as f64;
-            trade.pnl_pct = Some(if cost > 0.0 { net / cost * 100.0 } else { 0.0 });
-            trade.hit_target = Some(r.status == PositionStatus::T2Hit);
-            trade.hit_stop = Some(r.status == PositionStatus::StopHit);
-            total_pnl += net;
-            total_charges += charges;
-            if net > 0.0 {
-                wins += 1;
-            } else {
-                losses += 1;
-            }
-            if !sources.contains(label) {
-                sources.push(label);
-            }
-            let at = clock::local(market, r.exit_time).format("%H:%M");
-            let result = match r.status {
-                PositionStatus::T2Hit => format!("LEVEL 2 {}", at).green().bold().to_string(),
-                PositionStatus::StopHit if r.t1_booked => {
-                    format!("LEVEL 1, then exit level {}", at)
-                        .yellow()
-                        .to_string()
+        for (trade, replay) in session.trades.iter_mut().zip(&results) {
+            let result = match replay {
+                Some((r, label)) => {
+                    record_replay(&costs, trade, r);
+                    if !sources.contains(label) {
+                        sources.push(label);
+                    }
+                    let at = clock::local(market, r.exit_time).format("%H:%M");
+                    match r.status {
+                        PositionStatus::T2Hit => {
+                            format!("LEVEL 2 {}", at).green().bold().to_string()
+                        }
+                        PositionStatus::StopHit if r.t1_booked => {
+                            format!("LEVEL 1, then exit level {}", at)
+                                .yellow()
+                                .to_string()
+                        }
+                        PositionStatus::StopHit => format!("EXIT LEVEL {}", at).red().to_string(),
+                        _ => format!("Exit {}", at).dimmed().to_string(),
+                    }
                 }
-                PositionStatus::StopHit => format!("EXIT LEVEL {}", at).red().to_string(),
-                _ => format!("Exit {}", at).dimmed().to_string(),
+                None if trade.hit_target == Some(true) => {
+                    "LEVEL 2 (recorded)".green().bold().to_string()
+                }
+                None if trade.hit_stop == Some(true) => "EXIT LEVEL (recorded)".red().to_string(),
+                None => "Closed (recorded)".dimmed().to_string(),
             };
+            let net = trade.pnl.unwrap_or(0.0);
+            let charges = trade.charges.unwrap_or(0.0);
+            let exit_price = trade.exit_price.unwrap_or(trade.entry_price);
             let pnl_str = if net >= 0.0 {
                 format!("+{}{:.0}", csym, net).green().to_string()
             } else {
@@ -814,13 +914,14 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
                 "  {:<14} {:>10} {:>10} {:>10} {:>12}  {}",
                 trade.symbol.cyan(),
                 format!("{}{:.2}", csym, trade.entry_price),
-                format!("{}{:.2}", csym, r.exit_price),
+                format!("{}{:.2}", csym, exit_price),
                 format!("{}{:.2}", csym, charges).dimmed(),
                 pnl_str,
                 result
             );
         }
 
+        let (total_pnl, total_charges, wins, losses) = session_totals(&session.trades);
         let total_pnl_pct = (total_pnl / session.capital) * 100.0;
         session.total_pnl = Some(total_pnl);
         session.total_pnl_pct = Some(total_pnl_pct);
@@ -860,11 +961,19 @@ pub async fn cmd_sim_settle(now_flag: bool) -> Result<()> {
             .to_string()
         };
         println!("  {} {}", "→".bold(), verdict);
-        println!(
-            "  {} Replayed from {}; a bar that touched both the stop and a target counts as the stop.",
-            "→".dimmed(),
-            sources.join(" and ")
-        );
+        if !sources.is_empty() {
+            println!(
+                "  {} Replayed from {}; a bar that touched both the stop and a target counts as the stop.",
+                "→".dimmed(),
+                sources.join(" and ")
+            );
+        }
+        if results.iter().any(Option::is_none) {
+            println!(
+                "  {} Trades marked (recorded) closed before the hand-over and keep their result.",
+                "→".dimmed()
+            );
+        }
     }
 
     if settled_any {
@@ -979,6 +1088,101 @@ mod tests {
         assert_eq!((stats.total_days, stats.distinct_days), (20, 1));
         assert_eq!(stats.total_trades, 40);
         assert_eq!(sim_confidence(&stats), None);
+        // The daily chart shows the date once, with the day's total.
+        let daily = daily_pnls(&h, "IN");
+        assert_eq!(daily.len(), 1);
+        assert_eq!(daily[0].0, "2026-11-20");
+        assert!((daily[0].1 - 76.0).abs() < 1e-9);
+        // The JSON keeps its session count under "days".
+        let json = sim_history_json(&h, Market::In, &stats);
+        assert_eq!(json["stats"]["days"], 20);
+        assert_eq!(json["stats"]["distinct_days"], 1);
+    }
+
+    fn open_trade(symbol: &str) -> SimTrade {
+        SimTrade {
+            symbol: symbol.into(),
+            direction: "long".into(),
+            entry_price: 100.0,
+            target1: 101.0,
+            target2: 102.0,
+            stop_loss: 98.0,
+            qty: 100,
+            capital: 10_000.0,
+            score: 70.0,
+            confidence: "DAEMON".into(),
+            strategies: vec![],
+            entered_at: None,
+            trail_distance: None,
+            charges: None,
+            exit_price: None,
+            pnl: None,
+            pnl_pct: None,
+            hit_target: None,
+            hit_stop: None,
+        }
+    }
+
+    #[test]
+    fn status_never_values_a_missing_quote() {
+        let costs = crate::backtest::costs::CostModel::in_intraday();
+        let t = open_trade("A.NS");
+        // No quote: unpriced, not a loss at the entry price.
+        assert_eq!(status_pnl(&costs, &t, None), None);
+        // A real quote equal to the entry still pays both orders' costs.
+        let flat = status_pnl(&costs, &t, Some(100.0)).unwrap();
+        let want = crate::simulator::round_trip_cost(&costs, true, 100, 100.0, &[(100, 100.0)]);
+        assert!(want > 0.0);
+        assert!((flat + want).abs() < 1e-9, "{flat}");
+        // A trade that already closed shows its recorded result.
+        let mut done = open_trade("B.NS");
+        done.pnl = Some(55.0);
+        assert_eq!(status_pnl(&costs, &done, None), Some(55.0));
+    }
+
+    #[test]
+    fn settle_replays_only_unfinished_trades() {
+        // A closed before the daemon handed the day over; B is replayed.
+        let mut a = open_trade("A.NS");
+        a.exit_price = Some(102.0);
+        a.charges = Some(12.5);
+        a.pnl = Some(187.5);
+        a.pnl_pct = Some(1.875);
+        a.hit_target = Some(true);
+        a.hit_stop = Some(false);
+        let recorded = a.clone();
+        let mut trades = vec![a, open_trade("B.NS")];
+        assert!(!is_unfinished(&trades[0]));
+        assert!(is_unfinished(&trades[1]));
+
+        let costs = crate::backtest::costs::CostModel::none();
+        let r = crate::simulator::Replay {
+            exit_price: 98.0,
+            exit_time: Utc::now(),
+            pnl: -200.0,
+            pnl_pct: -2.0,
+            status: PositionStatus::StopHit,
+            t1_booked: false,
+        };
+        for t in trades.iter_mut().filter(|t| is_unfinished(t)) {
+            record_replay(&costs, t, &r);
+        }
+        let a = &trades[0];
+        assert_eq!(
+            (a.exit_price, a.charges, a.pnl, a.hit_target),
+            (
+                recorded.exit_price,
+                recorded.charges,
+                recorded.pnl,
+                recorded.hit_target
+            )
+        );
+        assert_eq!(trades[1].pnl, Some(-200.0));
+        assert_eq!(trades[1].hit_stop, Some(true));
+        let (total, charges, wins, losses) = session_totals(&trades);
+        assert!((total - (187.5 - 200.0)).abs() < 1e-9);
+        assert!((charges - 12.5).abs() < 1e-9);
+        assert_eq!((wins, losses), (1, 1));
     }
 
     #[test]
