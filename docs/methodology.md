@@ -565,6 +565,10 @@ the evidence. Check it before trusting a list.
   50.
 - A debt-to-equity ratio above 250 is its own, worse band.
 - A negative P/E is a loss and lowers the valuation pillar.
+  A zero P/E is treated as missing: it neither lowers nor raises the pillar.
+- When both the trailing and forward P/E are above zero, the growth pillar
+  has data. Only a forward P/E more than 20% below the trailing one adds
+  points.
 - The **assumed annual return** comes from the earnings yield plus growth
   (revenue growth, else earnings growth, held to −10%…15%), blended 70/30
   with the last year's price return (held to −10%…25%). When only one of

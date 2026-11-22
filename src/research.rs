@@ -501,6 +501,14 @@ impl Needs {
         corporate_actions: false,
     };
 
+    /// What the rule-based action reads: the verdict needs plus filings, whose
+    /// titles carry the auditor flag. Every command that shows an action
+    /// (`verdict`, the bare-symbol overview, Ultra) fetches this, so they agree.
+    pub const ACTION: Self = Self {
+        filings: true,
+        ..Self::VERDICT
+    };
+
     /// Event timeline sources (price action, ownership, news, filings, corporate actions).
     pub const EVENTS: Self = Self {
         statements: false,
@@ -2154,8 +2162,11 @@ pub async fn fetch(
                 meta.add_source(source);
             }
         }
+        // Same 3 s cap as the other NSE requests; a timeout or error just
+        // leaves the flags out.
         if (needs.ownership || needs.statements)
-            && let Ok(Some(info)) = client.nse_equity_info(&symbol).await
+            && let Ok(Ok(Some(info))) =
+                tokio::time::timeout(Duration::from_secs(3), client.nse_equity_info(&symbol)).await
         {
             for f in info.flags {
                 meta.warn(f);
@@ -2943,6 +2954,13 @@ mod tests {
                 req.target
             );
         }
+    }
+
+    #[test]
+    fn action_needs_are_the_verdict_needs_plus_filings() {
+        // The auditor flag comes from filing titles, so every action view
+        // must fetch filings.
+        assert_eq!(Needs::ACTION, Needs::VERDICT.with_filings(true));
     }
 
     #[tokio::test]

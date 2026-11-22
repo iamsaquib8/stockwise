@@ -530,6 +530,19 @@ impl<'a> Calendar<'a> {
     /// Every event the sources list for `symbol`, past and future. Only
     /// stocks have a calendar.
     pub async fn events_for(&mut self, symbol: &str) -> Vec<Event> {
+        self.events_from(symbol, &NSE_ENDPOINTS).await
+    }
+
+    /// The next results date for `symbol` on or after `today`. Asks only the
+    /// sources that carry results dates (Yahoo's calendar and NSE's board
+    /// meetings), not NSE's corporate actions.
+    pub async fn next_results(&mut self, symbol: &str, today: NaiveDate) -> Option<NaiveDate> {
+        let events = self.events_from(symbol, &NSE_ENDPOINTS[..1]).await;
+        next_results_in(&events, today)
+    }
+
+    /// Yahoo's events plus those of the given NSE endpoints.
+    async fn events_from(&mut self, symbol: &str, endpoints: &[(&str, &str)]) -> Vec<Event> {
         if AssetClass::of(symbol) != AssetClass::Stock {
             return Vec::new();
         }
@@ -556,7 +569,7 @@ impl<'a> Calendar<'a> {
         events.extend(entry.events);
 
         if let Some(nse) = nse_symbol(symbol) {
-            for (path, referer) in NSE_ENDPOINTS {
+            for &(path, referer) in endpoints {
                 let key = format!("nse:{path}:{nse}");
                 let entry = match self.cached(&key, now) {
                     Some(e) => e,
@@ -735,9 +748,9 @@ pub async fn next_results(
     today: NaiveDate,
 ) -> Option<NaiveDate> {
     let mut cal = Calendar::new(yahoo);
-    let events = cal.events_for(symbol).await;
+    let next = cal.next_results(symbol, today).await;
     cal.save();
-    next_results_in(&events, today)
+    next
 }
 
 // ── NSE ──
@@ -860,6 +873,49 @@ mod tests {
             {"symbol":"TCS","series":"EQ","faceVal":"1","subject":"Bonus 1:1","exDate":"12-Nov-2026","recDate":"12-Nov-2026"},
             {"symbol":"TCS","series":"EQ","faceVal":"1","subject":"Annual General Meeting","exDate":"-","recDate":"-"}
         ])
+    }
+
+    #[tokio::test]
+    async fn next_results_skips_the_corporate_actions_request() {
+        let yahoo = YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", |u: &str| {
+            u.to_string()
+        });
+        let now = Utc::now().timestamp();
+        let fresh = |events| Entry {
+            fetched_at: now,
+            error: None,
+            events,
+        };
+        let mut cache = Cache::default();
+        cache.entries.insert(
+            "yahoo:TCS.NS".into(),
+            fresh(parse_yahoo("TCS.NS", &yahoo_fixture())),
+        );
+        cache.entries.insert(
+            format!("nse:{MEETINGS}:TCS"),
+            fresh(parse_nse_meetings("TCS.NS", &meetings_fixture())),
+        );
+        let mut cal = Calendar {
+            yahoo: &yahoo,
+            nse: None,
+            nse_blocked: None,
+            cache,
+            dirty: false,
+            yahoo_missing: Vec::new(),
+        };
+        // NSE's filed date wins over Yahoo's estimate.
+        assert_eq!(
+            cal.next_results("TCS.NS", d("2026-10-20")).await,
+            Some(d("2027-01-09"))
+        );
+        // The corporate-actions calendar was neither fetched nor cached, so
+        // nothing needs saving.
+        assert!(
+            !cal.cache
+                .entries
+                .contains_key(&format!("nse:{ACTIONS}:TCS"))
+        );
+        assert!(!cal.dirty);
     }
 
     #[test]

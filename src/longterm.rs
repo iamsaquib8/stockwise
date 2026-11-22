@@ -84,6 +84,9 @@ pub struct LongTermScore {
     pub monte_carlo_median: Option<f64>,
     pub monte_carlo_p10: Option<f64>,
     pub monte_carlo_p90: Option<f64>,
+    /// Whether any closes came with the quote. Tells "no price history"
+    /// apart from history too short to measure volatility from.
+    pub has_price_history: bool,
 }
 
 /// The analysts' mean rating as a number and its scale, never as a call.
@@ -171,10 +174,12 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     seen[0] |=
         q.trailing_pe.is_some() || q.price_to_book.is_some() || q.enterprise_to_ebitda.is_some();
     if let Some(pe) = q.trailing_pe {
-        if pe <= 0.0 {
+        if pe < 0.0 {
             // A negative P/E is a loss, not a bargain.
             val -= 10.0;
             lowered_by.push("Loss-making (negative P/E)".into());
+        } else if pe == 0.0 {
+            // A zero P/E is a missing figure, not a loss and not a bargain.
         } else if pe < 12.0 {
             val += 25.0;
             raised_by.push(format!("P/E {:.1} (below 12)", pe));
@@ -217,17 +222,21 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     }
 
     // Forward P/E compression = earnings growth expected
-    if let (Some(t), Some(f)) = (q.trailing_pe, q.forward_pe) {
-        if f < t * 0.8 && t > 0.0 && f > 0.0 {
+    if let (Some(t), Some(f)) = (q.trailing_pe, q.forward_pe)
+        && t > 0.0
+        && f > 0.0
+    {
+        // Two usable P/Es say where earnings are expected to go, up, flat or
+        // down: that is growth data even when it earns no points.
+        seen[1] = true;
+        if f < t * 0.8 {
             val += 10.0;
             growth += 10.0;
-            // Expected earnings growth is growth data: keep the pillar.
-            seen[1] = true;
             raised_by.push(format!(
                 "Forward P/E {:.0} is more than 20% below trailing P/E {:.0} (earnings estimated to rise)",
                 f, t
             ));
-        } else if f > t * 1.2 && t > 0.0 {
+        } else if f > t * 1.2 {
             lowered_by.push(
                 "Forward P/E is more than 20% above trailing P/E (earnings estimated to fall)"
                     .into(),
@@ -714,6 +723,7 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
         monte_carlo_median: mc_median,
         monte_carlo_p10: mc_p10,
         monte_carlo_p90: mc_p90,
+        has_price_history: hist_closes.is_some_and(|c| !c.is_empty()),
     }
 }
 
@@ -903,7 +913,12 @@ pub fn render_report(scores: &[LongTermScore], monthly: f64, csym: &str) -> Stri
             format!("\n  {}", "Simulated 5Y range (1000 paths)".bold().yellow()),
         );
         line(&mut o, format!("  {}", "─".repeat(40).dimmed()));
-        let sim = |v: Option<f64>| v.map_or("missing (no price history)".to_string(), percentile);
+        let why = if s.has_price_history {
+            "missing (insufficient history to measure volatility)"
+        } else {
+            "missing (no price history)"
+        };
+        let sim = |v: Option<f64>| v.map_or(why.to_string(), percentile);
         kv(&mut o, "90th percentile", &sim(s.monte_carlo_p90));
         kv(&mut o, "Median", &sim(s.monte_carlo_median));
         kv(&mut o, "10th percentile", &sim(s.monte_carlo_p10));
@@ -1540,6 +1555,55 @@ mod tests {
         ] {
             assert!(!text.contains(gone), "{gone:?} still shown");
         }
+    }
+
+    #[test]
+    fn two_usable_pes_are_growth_data_but_only_compression_adds_points() {
+        for fwd in [20.0, 25.0] {
+            let mut q = sparse_quote("PEG");
+            q.trailing_pe = Some(20.0);
+            q.forward_pe = Some(fwd);
+            q.profit_margins = Some(0.10);
+            let s = score_for_longterm(&q, None);
+            assert!(s.pillar_data[1], "forward P/E {fwd}: growth pillar missing");
+            assert!((s.growth_score - 50.0).abs() < 1e-9, "forward P/E {fwd}");
+        }
+        let mut q = sparse_quote("PEG");
+        q.forward_pe = Some(10.0);
+        let s = score_for_longterm(&q, None);
+        assert!(s.pillar_data[1]);
+        assert!((s.growth_score - 60.0).abs() < 1e-9);
+        // A forward P/E of zero is not usable.
+        q.forward_pe = Some(0.0);
+        assert!(!score_for_longterm(&q, None).pillar_data[1]);
+    }
+
+    #[test]
+    fn zero_pe_is_not_a_loss() {
+        let mut q = sparse_quote("ZPE");
+        q.trailing_pe = Some(0.0);
+        let s = score_for_longterm(&q, None);
+        assert!((s.valuation_score - 50.0).abs() < 1e-9);
+        assert!(!s.lowered_by.iter().any(|r| r.contains("Loss-making")));
+        q.trailing_pe = Some(-5.0);
+        let s = score_for_longterm(&q, None);
+        assert!(s.lowered_by.iter().any(|r| r.contains("Loss-making")));
+    }
+
+    #[test]
+    fn short_history_is_not_called_absent() {
+        let q = full_quote("AAA");
+        let short = score_for_longterm(&q, Some(&[100.0, 101.0]));
+        assert!(short.has_price_history);
+        assert_eq!(short.monte_carlo_median, None);
+        let text = strip_ansi(&render_report(&[short], 15_000.0, "$"));
+        assert!(text.contains("insufficient history to measure volatility"));
+        assert!(!text.contains("no price history"));
+
+        let bare = score_for_longterm(&q, None);
+        assert!(!bare.has_price_history);
+        let text = strip_ansi(&render_report(&[bare], 15_000.0, "$"));
+        assert!(text.contains("missing (no price history)"));
     }
 
     #[test]
