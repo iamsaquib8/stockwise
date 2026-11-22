@@ -1422,7 +1422,14 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     if ai.auto_available().await {
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
         let mut stock_data = crate::ai::StockData::from_quote(q);
-        if let Some(a) = &public_action {
+        // Only when the holding left the call unchanged: if it moved the
+        // displayed action (a thesis limit, a NO CALL after a notes or
+        // portfolio read failure), the public action would be stale, so the
+        // AI gets the public numbers and no action at all.
+        if let Some(a) = public_action
+            .as_ref()
+            .filter(|a| a.kind == deep_action.kind)
+        {
             stock_data = stock_data.with_action(a);
         }
         match ai.analyze_stock(&stock_data).await {

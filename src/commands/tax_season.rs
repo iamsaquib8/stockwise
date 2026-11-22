@@ -1164,6 +1164,32 @@ fn is_audit_pack(dir: &Path) -> bool {
             .is_ok_and(|t| t.starts_with("StockWise audit pack"))
 }
 
+/// Create `dir`, which must not exist yet: owner-only (0700) on Unix.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir)
+}
+
+/// Write a new file (it must not exist yet): owner-only (0600) on Unix.
+fn write_private_new(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
 /// Write `files` as the audit pack `dir`, all or nothing: into a staging
 /// folder beside it first, then moved into place. An earlier pack in `dir`
 /// is replaced whole (no workpaper of a removed sale is left behind); a
@@ -1189,14 +1215,19 @@ pub(crate) fn publish_pack(dir: &Path, files: &[(String, String)]) -> Result<()>
     std::fs::create_dir_all(&parent)
         .with_context(|| format!("Cannot create {}", parent.display()))?;
     let pid = std::process::id();
-    let staging = parent.join(format!(".{name}.staging-{pid}"));
-    let _ = std::fs::remove_dir_all(&staging);
+    // The workpapers hold the user's trades: owner-only folder and files.
+    // The staging folder is created fresh (never an existing path removed
+    // first), under a name that includes the time so it cannot be guessed
+    // and pre-made by someone else.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let staging = parent.join(format!(".{name}.staging-{pid}-{nonce}"));
+    private_dir(&staging).with_context(|| format!("Cannot create {}", staging.display()))?;
     let written = (|| -> Result<()> {
-        std::fs::create_dir(&staging)
-            .with_context(|| format!("Cannot create {}", staging.display()))?;
         for (file, body) in files {
             let path = staging.join(file);
-            std::fs::write(&path, body)
+            write_private_new(&path, body.as_bytes())
                 .with_context(|| format!("Cannot write {}", path.display()))?;
         }
         Ok(())
@@ -1696,6 +1727,14 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["sale-001-A-2026-05-01.csv", "summary.csv"]);
+        // Owner-only: the workpapers hold the user's trades.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&dir.join("summary.csv")), 0o600);
+        }
         // A folder with other files is refused and left alone.
         let other = base.join("mine");
         std::fs::create_dir_all(&other).unwrap();

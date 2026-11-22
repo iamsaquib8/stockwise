@@ -171,8 +171,10 @@ pub fn score_for_longterm(q: &Quote, hist_closes: Option<&[f64]>) -> LongTermSco
     // ══════════════════════════════════════════
 
     // P/E analysis
-    seen[0] |=
-        q.trailing_pe.is_some() || q.price_to_book.is_some() || q.enterprise_to_ebitda.is_some();
+    // A zero ratio is a missing figure, so it is not valuation data; a
+    // negative P/E is (it records a loss).
+    let usable = |v: Option<f64>| v.is_some_and(|v| v.is_finite() && v != 0.0);
+    seen[0] |= usable(q.trailing_pe) || usable(q.price_to_book) || usable(q.enterprise_to_ebitda);
     if let Some(pe) = q.trailing_pe {
         if pe < 0.0 {
             // A negative P/E is a loss, not a bargain.
@@ -1585,9 +1587,17 @@ mod tests {
         let s = score_for_longterm(&q, None);
         assert!((s.valuation_score - 50.0).abs() < 1e-9);
         assert!(!s.lowered_by.iter().any(|r| r.contains("Loss-making")));
+        let zero_coverage = s.data_coverage;
         q.trailing_pe = Some(-5.0);
         let s = score_for_longterm(&q, None);
         assert!(s.lowered_by.iter().any(|r| r.contains("Loss-making")));
+        // A loss is valuation data; a zero P/E is not.
+        assert!(
+            s.data_coverage > zero_coverage,
+            "{} vs {}",
+            s.data_coverage,
+            zero_coverage
+        );
     }
 
     #[test]

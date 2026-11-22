@@ -795,13 +795,16 @@ fn size_for_entry(i: &Inputs, inv: Option<f64>) -> Option<SizeHint> {
         w = t;
         by = "target_weight";
     }
+    // Round the cap down once and derive both figures from it, so rounding
+    // never shows (or sizes to) more than the cap.
+    let w = floor1(w);
     let held = i.holding.as_ref().map_or(0.0, |h| h.shares);
     let shares = i
         .portfolio_value
         .filter(|v| *v > 0.0 && price > 0.0)
         .map(|v| ((w / 100.0 * v / price).floor() - held).max(0.0));
     Some(SizeHint {
-        max_weight_pct: round1(w),
+        max_weight_pct: w,
         shares,
         limited_by: by,
     })
@@ -809,6 +812,11 @@ fn size_for_entry(i: &Inputs, inv: Option<f64>) -> Option<SizeHint> {
 
 fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
+}
+
+/// Down to one decimal, with a small tolerance so 4.9999999 stays 5.0.
+fn floor1(v: f64) -> f64 {
+    ((v * 10.0) + 1e-9).floor() / 10.0
 }
 
 fn confidence(i: &Inputs, kind: Kind, decisive_gate: bool) -> Confidence {
@@ -917,7 +925,7 @@ fn trim_size(i: &Inputs) -> Option<SizeHint> {
     let total = h.lookthrough_weight_pct.map_or(direct, |lw| lw.max(direct));
     if total <= cap || direct <= 0.0 {
         return Some(SizeHint {
-            max_weight_pct: round1(cap),
+            max_weight_pct: floor1(cap),
             shares: None,
             limited_by: by,
         });
@@ -932,7 +940,7 @@ fn trim_size(i: &Inputs) -> Option<SizeHint> {
         ((h.shares * (reduce_pct / direct)).ceil().min(h.shares), by)
     };
     Some(SizeHint {
-        max_weight_pct: round1(cap),
+        max_weight_pct: floor1(cap),
         shares: Some(shares),
         limited_by,
     })

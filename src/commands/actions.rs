@@ -137,16 +137,20 @@ pub(crate) fn apply_holding(
 }
 
 /// [`apply_holding`] against a given portfolio and notes (the MCP caller's
-/// workspace) instead of the active ones.
+/// workspace) instead of the active ones. A portfolio that could not be
+/// read makes the action a no call that says so, as unreadable notes do.
 pub(crate) fn apply_holding_in(
     v: &mut crate::verdict::DecisionVerdict,
     r: &crate::research::Research,
     market: Market,
     profile: &crate::config::EffectiveProfile,
-    portfolio: &Portfolio,
+    portfolio: Result<&Portfolio, &anyhow::Error>,
     notes: impl FnOnce() -> Result<NoteStore>,
 ) {
-    let held = holding_context_in(portfolio, notes, r, market);
+    let held = match portfolio {
+        Ok(p) => holding_context_in(p, notes, r, market),
+        Err(e) => Err(anyhow::anyhow!("{e:#}")),
+    };
     set_holding_or_unknown(v, r, profile, held);
 }
 
@@ -868,7 +872,7 @@ mod tests {
         let (r, p) = tcs();
         let profile = crate::config::EffectiveProfile::default();
         let mut v = crate::verdict::generate_verdict(&r, &[]);
-        apply_holding_in(&mut v, &r, Market::In, &profile, &p, || {
+        apply_holding_in(&mut v, &r, Market::In, &profile, Ok(&p), || {
             Err(anyhow::anyhow!("notes.json is not valid JSON"))
         });
         assert_eq!(v.action.kind, Kind::NoCall);
@@ -880,7 +884,7 @@ mod tests {
 
         // Readable notes: decided as a holding.
         let mut v = crate::verdict::generate_verdict(&r, &[]);
-        apply_holding_in(&mut v, &r, Market::In, &profile, &p, || {
+        apply_holding_in(&mut v, &r, Market::In, &profile, Ok(&p), || {
             Ok(NoteStore::default())
         });
         assert!(v.action.held, "{:?}", v.action);
@@ -893,11 +897,29 @@ mod tests {
             &r,
             Market::In,
             &profile,
-            &Portfolio::default(),
+            Ok(&Portfolio::default()),
             || -> Result<NoteStore> { panic!("notes read for a stock not held") },
         );
         assert_eq!(v.action.kind, before.kind);
         assert!(!v.action.held);
+
+        // An unreadable portfolio: holding status unknown, so no call.
+        let mut v = crate::verdict::generate_verdict(&r, &[]);
+        let err = anyhow::anyhow!("portfolio.json is not valid JSON");
+        apply_holding_in(
+            &mut v,
+            &r,
+            Market::In,
+            &profile,
+            Err(&err),
+            || -> Result<NoteStore> { panic!("notes read without a portfolio") },
+        );
+        assert_eq!(v.action.kind, Kind::NoCall);
+        assert!(
+            v.action.reasons[0].contains("portfolio.json"),
+            "{:?}",
+            v.action
+        );
     }
 
     #[test]

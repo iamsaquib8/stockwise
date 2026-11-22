@@ -781,12 +781,28 @@ pub fn peer_quotes(quotes: &[Quote]) -> Vec<PeerQuote> {
         .collect()
 }
 
-/// Where the RHP figures for `symbol` live: `ipo/<SYMBOL>.toml` in the data directory.
+/// Where the RHP figures for `symbol` live: `ipo/<SYMBOL>.toml` in the data
+/// directory. None for a symbol that is not a plain ticker (letters, digits,
+/// `&`, `-`, `_`, `.` but no leading dot): symbols come from exchange feeds,
+/// so one must never be able to name a path outside `ipo/`.
 pub fn rhp_path(symbol: &str) -> Option<std::path::PathBuf> {
-    crate::store::data_dir().ok().map(|d| {
-        d.join("ipo")
-            .join(format!("{}.toml", symbol.trim().to_ascii_uppercase()))
-    })
+    let sym = rhp_file_stem(symbol)?;
+    crate::store::data_dir()
+        .ok()
+        .map(|d| d.join("ipo").join(format!("{sym}.toml")))
+}
+
+/// `symbol` upper-cased when it is safe as a file name, else None.
+fn rhp_file_stem(symbol: &str) -> Option<String> {
+    let sym = symbol.trim().to_ascii_uppercase();
+    let plain = !sym.is_empty()
+        && sym.len() <= 40
+        && !sym.starts_with('.')
+        && !sym.contains("..")
+        && sym
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '&' | '-' | '_' | '.'));
+    plain.then_some(sym)
 }
 
 /// Fold one `ipo-detail` answer into a board row (category multiples, lot,
@@ -3288,6 +3304,24 @@ pub fn fixture_analysis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rhp_file_names_are_plain_tickers() {
+        assert_eq!(rhp_file_stem(" m&m ").as_deref(), Some("M&M"));
+        assert_eq!(rhp_file_stem("bajaj-auto").as_deref(), Some("BAJAJ-AUTO"));
+        for bad in [
+            "",
+            "../config",
+            "..",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "x..y",
+            "a b",
+        ] {
+            assert_eq!(rhp_file_stem(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn price_band_parses_nse_formats() {

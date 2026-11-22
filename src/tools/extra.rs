@@ -77,8 +77,8 @@ pub(super) async fn run<D: DataSource>(
             // The holding context comes from the caller's workspace: its
             // portfolio file and notes when it has one, else the data
             // source's portfolio that the other read tools see. When that
-            // portfolio cannot be read, the action stays the public one,
-            // without holding context.
+            // portfolio cannot be read, holding status is unknown and the
+            // action is a no call that says why.
             let (portfolio, notes) = match &ctx.workspace {
                 Some(w) => (
                     crate::portfolio::Portfolio::load_from(&w.portfolio),
@@ -86,12 +86,12 @@ pub(super) async fn run<D: DataSource>(
                 ),
                 None => (src.portfolio(), None),
             };
-            if let Ok(p) = portfolio {
-                crate::commands::apply_holding_in(&mut v, &r, m, &profile, &p, || match notes {
+            crate::commands::apply_holding_in(&mut v, &r, m, &profile, portfolio.as_ref(), || {
+                match notes {
                     Some(path) => crate::store::load_from(&path),
                     None => crate::commands::load_notes(),
-                });
-            }
+                }
+            });
             Ok(serde_json::json!({
                 "symbol": v.symbol,
                 "name": v.name,

@@ -115,7 +115,15 @@ pub async fn cmd_sim(
             // The trades open now, when the plans are locked in, not when the
             // scan started: a bar that ended during the scan must not be able
             // to settle a trade before its entry (the worker does the same).
-            let entered_at = chrono::Utc::now().to_rfc3339();
+            let entry_time = chrono::Utc::now();
+            // A trade entered at or after square-off has no session bars left
+            // to settle against, so `sim settle` could never close it: enter
+            // nothing instead.
+            if let Some(reason) = too_late_to_enter(market, entry_time) {
+                println!("  {} {reason} No trades entered.", "→".yellow());
+                return Ok(());
+            }
+            let entered_at = entry_time.to_rfc3339();
             let sim_trades: Vec<SimTrade> = plans
                 .iter()
                 .take(5)
@@ -1037,9 +1045,31 @@ pub fn cmd_sim_reset(yes: bool) -> Result<()> {
     Ok(())
 }
 
+/// Why a paper trade cannot be entered at `at`: square-off has begun (or the
+/// session is over), so no bar after the entry is left for `sim settle`.
+fn too_late_to_enter(market: Market, at: DateTime<Utc>) -> Option<String> {
+    match clock::market_phase(market, at) {
+        clock::Phase::SquareOff | clock::Phase::PostMarket | clock::Phase::Closed => Some(format!(
+            "The scan finished at {}, after {} square-off began.",
+            clock::format_local(market, at),
+            clock::exchange(market)
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_entry_once_square_off_begins() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        let close = clock::close_at(Market::In, day).expect("a trading day");
+        assert!(too_late_to_enter(Market::In, close - chrono::Duration::hours(3)).is_none());
+        assert!(too_late_to_enter(Market::In, close - chrono::Duration::minutes(10)).is_some());
+        assert!(too_late_to_enter(Market::In, close + chrono::Duration::hours(2)).is_some());
+    }
 
     #[test]
     fn rating_counts_distinct_dates_not_sessions() {
