@@ -1,6 +1,6 @@
 # Cline / Roo-Code Rules for StockWise
 - Language: Pure Rust 1.97.
 - Financial Precision: Use integer minor units (`i64`) or `rust_decimal::Decimal` for currency and tax.
-- Compliance: Strict non-advisory boundary.
-- Verification: Always run `cargo fmt`, `cargo clippy`, and `cargo test`.
+- Recommendations policy: Actions are rule-based and deterministic, computed only by `src/action.rs`, with reasons, confidence, invalidation price, review date and disclaimer; NO CALL below 60% data coverage. AI explains the computed action and never invents, upgrades or changes one, or invents price levels.
+- Verification: Always run `cargo +stable fmt --all -- --check`, `cargo +stable clippy --all-targets --all-features -- -D warnings`, and `cargo +stable test`.
 - Full Context: Read `AGENTS.md`.

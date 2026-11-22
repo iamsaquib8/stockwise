@@ -115,18 +115,44 @@ fn portfolio_totals_skip_holdings_without_a_price() {
             "name",
             "price_source",
             "nav_date",
-            "cap_tier"
+            "cap_tier",
+            "cost_basis_base",
+            "value_base",
+            "fx_effect",
+            "action"
         ]
     );
     assert_eq!(row["price_source"], "quote");
-    assert!(serde_json::to_value(&rows[1]).unwrap()["price_source"].is_null());
+    assert!(row["action"]["kind"].is_string(), "{row}");
+    crate::action::testing::check_action(&row["action"]);
+    crate::action::testing::assert_action_well_formed(&row.to_string());
+    let row1 = serde_json::to_value(&rows[1]).unwrap();
+    assert!(row1["price_source"].is_null());
+    assert_eq!(row1["action"]["kind"], "NO_CALL", "{row1}");
+    crate::action::testing::check_action(&row1["action"]);
+    crate::action::testing::assert_action_well_formed(&row1.to_string());
     assert_eq!(
         keys(&serde_json::to_value(totals).unwrap()),
-        ["cost_basis", "value", "pnl", "pnl_percent", "currency"]
+        [
+            "cost_basis",
+            "value",
+            "pnl",
+            "pnl_percent",
+            "currency",
+            "fx_effect",
+            "cost_at_today_fx"
+        ]
     );
     assert_eq!(
         keys(&serde_json::to_value(&report).unwrap()),
-        ["holdings", "totals", "unpriced", "unconverted", "notes"]
+        [
+            "holdings",
+            "totals",
+            "unpriced",
+            "unconverted",
+            "notes",
+            "warnings"
+        ]
     );
     assert_columns(&rows[0]);
 }
@@ -135,9 +161,13 @@ fn portfolio_totals_skip_holdings_without_a_price() {
 fn portfolio_csv_leaves_missing_prices_empty() {
     let p = lots(&[("GONE.NS", 5.0, 100.0, "2025-01-02")]);
     let report = portfolio_report(&p, &valued(&p, Vec::new()), day("2026-01-02"));
+    let expected = format!(
+        "GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown,500.0,,0.0,\"NO CALL — No price ({})\"",
+        crate::action::DISCLAIMER
+    );
     assert_eq!(
         to_csv(&report.holdings).unwrap().lines().nth(1),
-        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown")
+        Some(expected.as_str())
     );
 }
 
@@ -222,6 +252,48 @@ fn tax_report_splits_terms_and_skips_unpriced() {
         ]
     );
     assert_columns(&r.holdings[0]);
+}
+
+#[test]
+fn tax_report_realized_gains_net_deductible_charges() {
+    // A US sale at $110 of a $100 lot with $15 of charges is a $5 loss.
+    let mut p = Portfolio::default();
+    p.add_lot("AAPL", Lot::new(1.0, 100.0, "2026-02-01", "manual"));
+    p.sell_fifo("AAPL", 1.0, 110.0, "2026-03-01", "manual")
+        .unwrap();
+    p.realized[0].charges = Some(15.0);
+    let r = tax_report(Country::Us, &p, &valued(&p, vec![]), day("2026-06-01"));
+    assert!((r.realized.st_loss - 5.0).abs() < 1e-9, "{:?}", r.realized);
+    assert_eq!(r.realized.st_gain, 0.0);
+    assert!((r.sales[0].gain + 5.0).abs() < 1e-9);
+
+    // An Indian delivery sale stays before charges (they include STT).
+    let mut p = Portfolio::default();
+    p.add_lot("TCS.NS", Lot::new(1.0, 100.0, "2026-05-01", "manual"));
+    p.sell_fifo("TCS.NS", 1.0, 110.0, "2026-06-01", "manual")
+        .unwrap();
+    p.realized[0].charges = Some(3.0);
+    let r = tax_report(Country::India, &p, &valued(&p, vec![]), day("2026-07-01"));
+    assert_eq!(r.realized.st_gain, 10.0);
+}
+
+#[test]
+fn tax_report_totals_add_up_exactly() {
+    // Three sales each 10 cents up: the bucket is exactly 0.30, which a
+    // plain f64 sum (0.1 + 0.1 + 0.1) is not.
+    let mut p = Portfolio::default();
+    for (i, d) in ["2026-02-02", "2026-02-03", "2026-02-04"]
+        .iter()
+        .enumerate()
+    {
+        p.add_lot("AAPL", Lot::new(1.0, 10.0, *d, "manual"));
+        p.sell_fifo("AAPL", 1.0, 10.1, &format!("2026-03-0{}", i + 1), "manual")
+            .unwrap();
+    }
+    let r = tax_report(Country::Us, &p, &valued(&p, vec![]), day("2026-06-01"));
+    assert_ne!(0.1 + 0.1 + 0.1, 0.3);
+    assert_eq!(r.realized.st_gain, 0.3, "{:?}", r.realized);
+    assert_eq!(r.sales[0].gain, 0.1);
 }
 
 #[test]
@@ -526,7 +598,7 @@ fn technical_json_has_the_documented_keys() {
     assert_eq!(keys(&v["bias"]), ["verdict", "bullish", "bearish"]);
     assert!(v["sma_200"].is_number());
     // Every string in the output describes data; none reads as advice.
-    crate::verdict::testing::assert_neutral(&v.to_string());
+    crate::action::testing::assert_action_well_formed(&v.to_string());
 
     // A steep rise and a steep fall give both extreme RSI readings.
     let up: Vec<f64> = (0..250).map(|i| 100.0 + i as f64).collect();
@@ -534,7 +606,15 @@ fn technical_json_has_the_documented_keys() {
     for c in [&up, &down] {
         let v = technical_json("X", None, "1y", "1d", c, c, c, &[1000; 250]);
         assert!(v["rsi_signal"].is_string());
-        crate::verdict::testing::assert_neutral(&v.to_string());
+        assert!(
+            matches!(
+                v["bias"]["verdict"].as_str(),
+                Some("bullish" | "bearish" | "neutral")
+            ),
+            "unexpected bias.verdict: {}",
+            v["bias"]["verdict"]
+        );
+        crate::action::testing::assert_action_well_formed(&v.to_string());
     }
 
     // Too few bars for the long averages: null, not 0.
@@ -981,6 +1061,9 @@ fn goal_and_tax_export_json_shapes() {
         origin: None,
         bonuses: Vec::new(),
         bonus_shares: false,
+        charges: None,
+        fx_currency: None,
+        buy_fx_rate: None,
     };
     let india = serde_json::to_value(crate::tax_export::india_schedule(
         std::slice::from_ref(&sale),
@@ -1456,6 +1539,7 @@ fn portfolio_analyze_csv_has_one_flat_row_per_holding() {
             price: 100.0,
             date: Some(day("2025-12-01")),
             estimated: false,
+            cost_base: None,
         }],
         tax_country: Some(crate::tax::Country::India),
         ..Default::default()
@@ -1554,4 +1638,89 @@ fn us_harvest_does_not_count_recent_bonus_shares_as_a_buy() {
         .find(|r| r.symbol == "MSFT")
         .unwrap();
     assert_eq!(row.recent_buy, None);
+}
+
+/// `harvest -m us` sells only the losing lots: the row names them, and
+/// recording the sale with `portfolio sell --lots` books exactly that loss.
+#[test]
+fn us_harvest_is_recordable_with_lots() {
+    // AAPL: 10 @ 100 (2025-01-06, a gain) and 8 @ 200 (2026-03-02, the
+    // loss), price 150. FIFO would sell the gain first.
+    let mut p = lots(&[
+        ("AAPL", 10.0, 100.0, "2025-01-06"),
+        ("AAPL", 8.0, 200.0, "2026-03-02"),
+    ]);
+    let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let val = Valuation::new(
+        vec![Quote {
+            currency: Some("USD".into()),
+            ..quote("AAPL", Some(150.0), None)
+        }],
+        &symbols,
+        Market::Us,
+        None,
+    );
+    let h = super::holdings::compute_harvest(&p, &val, Market::Us, day("2026-11-01"));
+    let row = &h.loss_candidates[0];
+    assert_eq!(row.shares, 8.0);
+    assert_eq!(row.pnl, -400.0);
+    assert_eq!(row.lots.as_deref(), Some("2"));
+    assert_eq!(
+        row.record.as_deref(),
+        Some("stockwise portfolio sell AAPL 8 --lots 2")
+    );
+    // Record it as the row says.
+    let sales = p
+        .sell_specific("AAPL", row.shares, 150.0, "2026-11-01", "manual", &[2])
+        .unwrap();
+    let booked: f64 = sales.iter().map(|s| s.gain()).sum();
+    assert!((booked - row.pnl).abs() < 1e-9);
+    // The gain lot is still held.
+    let left = p.holding("AAPL").unwrap();
+    assert_eq!(left.lots.len(), 1);
+    assert_eq!(left.lots[0].price, 100.0);
+}
+
+/// The LTCG step-up sells the exact share count whose gain fits the ₹1.25
+/// lakh exemption left, oldest lots first, and labels the rate with cess.
+#[test]
+fn ltcg_step_up_sells_the_exact_share_count() {
+    // TCS: 100 @ 500 (2020) and 100 @ 900 (2024-01), price 1,500; both
+    // long-term on 2026-11-01. Lot 1: 100 × 1,000 = ₹1,00,000. The ₹25,000
+    // left fits floor(25,000 / 600) = 41 shares of lot 2 (₹24,600).
+    let p = lots(&[
+        ("TCS.NS", 100.0, 500.0, "2020-01-01"),
+        ("TCS.NS", 100.0, 900.0, "2024-01-15"),
+    ]);
+    let h = super::holdings::compute_harvest(
+        &p,
+        &valued(&p, vec![quote("TCS.NS", Some(1500.0), None)]),
+        Market::In,
+        day("2026-11-01"),
+    );
+    let r = &h.gain_harvest_candidates[0];
+    assert_eq!(r.shares, 141.0);
+    assert_eq!(r.lt_pnl, 124_600.0);
+    // 12.5% + 4% cess = 13%.
+    assert_eq!(r.estimated_tax_saved, 16_198.0);
+    assert_eq!(
+        r.record.as_deref(),
+        Some("stockwise portfolio sell TCS.NS 141")
+    );
+    assert!(h.notes.iter().any(|n| n.contains("next trading day")));
+}
+
+/// Losses brought forward set off first, so more long-term gain fits.
+#[test]
+fn carried_forward_losses_widen_the_tax_free_room() {
+    let p = lots(&[("TCS.NS", 200.0, 500.0, "2020-01-01")]);
+    let val = valued(&p, vec![quote("TCS.NS", Some(1500.0), None)]);
+    let carry = super::holdings::CarriedForward {
+        short_term: 0.0,
+        long_term: 20_000.0,
+    };
+    let h = super::holdings::compute_harvest_with(&p, &val, Market::In, day("2026-11-01"), carry);
+    assert!((h.tax_free_gain_room - 145_000.0).abs() < 0.02);
+    assert_eq!(h.gain_harvest_candidates[0].shares, 145.0);
+    assert_eq!(h.carried_forward.long_term, 20_000.0);
 }

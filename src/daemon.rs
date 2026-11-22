@@ -37,6 +37,39 @@ pub struct LivePosition {
     /// Stop-loss at entry, before breakeven / wind-down tightening.
     #[serde(default)]
     pub initial_stop: Option<f64>,
+    /// How far the trailing exit level hangs behind the price: 1.5 × ATR at
+    /// entry. State files from before 0.9 have none and trail by 1.5%.
+    #[serde(default)]
+    pub trail_distance: Option<f64>,
+    /// Charges and slippage fixed when the position closed, so a later
+    /// change to the cost settings never rewrites a finished result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
+}
+
+impl LivePosition {
+    /// Charges and slippage of the round trip: the amount recorded at the
+    /// close, or for an open position the estimate if it closed at the
+    /// current price (the opening order, the half booked at level 1 if any,
+    /// and the rest at `current_price`).
+    pub fn charges(&self, model: &crate::backtest::costs::CostModel) -> f64 {
+        if let Some(c) = self.charges {
+            return c;
+        }
+        let long = crate::intraday::Direction::is_long_str(&self.direction);
+        let fills = crate::simulator::exit_fills(
+            self.qty,
+            self.t1_booked,
+            self.target1,
+            self.current_price,
+        );
+        crate::simulator::round_trip_cost(model, long, self.qty, self.entry_price, &fills)
+    }
+
+    /// P&L after [`Self::charges`].
+    pub fn net_pnl(&self, model: &crate::backtest::costs::CostModel) -> f64 {
+        self.pnl - self.charges(model)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,16 +240,19 @@ pub fn update_position(pos: &mut LivePosition, new_price: f64, phase: Phase) {
         pos.pnl_pct = pnl_pct_of_cost(pos);
     }
 
-    // Update trailing stop (only moves in favorable direction)
+    // Update the trailing exit level (only moves in the favourable
+    // direction): 1.5 × ATR from the entry plan, or 1.5% for old state files.
+    let trail = pos
+        .trail_distance
+        .filter(|d| *d > 0.0 && d.is_finite())
+        .unwrap_or(new_price * 0.015);
     if is_long {
-        let atr_trail = new_price * 0.015; // ~1.5% trail
-        let new_trail = new_price - atr_trail;
+        let new_trail = new_price - trail;
         if new_trail > pos.trailing_stop {
             pos.trailing_stop = new_trail;
         }
     } else {
-        let atr_trail = new_price * 0.015;
-        let new_trail = new_price + atr_trail;
+        let new_trail = new_price + trail;
         if new_trail < pos.trailing_stop {
             pos.trailing_stop = new_trail;
         }
@@ -275,6 +311,8 @@ pub fn plans_to_positions(
             score: p.signal.score,
             entered_at: Some(entered_at),
             initial_stop: Some(p.stop_loss),
+            trail_distance: Some((p.entry - p.trailing_stop).abs()),
+            charges: None,
         })
         .collect()
 }
@@ -434,6 +472,10 @@ pub struct DaemonState {
     /// The day is over: results are in the simulator history.
     pub settled: bool,
     pub updated_at: DateTime<Utc>,
+    /// The cost model fixed for this session when it started. State files
+    /// from before it was saved read the settings instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_model: Option<crate::backtest::costs::CostModel>,
 }
 
 impl DaemonState {
@@ -455,6 +497,7 @@ impl DaemonState {
             tick_count: 0,
             settled: false,
             updated_at: now,
+            cost_model: Some(crate::simulator::paper_cost_model(market)),
         }
     }
 
@@ -480,8 +523,29 @@ impl DaemonState {
             .collect()
     }
 
+    /// The charges and slippage this day's paper results pay: the model
+    /// saved with the session, else the current settings.
+    pub fn costs(&self) -> crate::backtest::costs::CostModel {
+        self.cost_model
+            .clone()
+            .unwrap_or_else(|| crate::simulator::paper_cost_model(&self.market))
+    }
+
+    /// One position's P&L after charges and slippage.
+    pub fn net_pnl(&self, pos: &LivePosition) -> f64 {
+        pos.net_pnl(&self.costs())
+    }
+
+    /// The day's P&L after charges and slippage.
     pub fn total_pnl(&self) -> f64 {
-        self.positions.iter().map(|p| p.pnl).sum()
+        let model = self.costs();
+        self.positions.iter().map(|p| p.net_pnl(&model)).sum()
+    }
+
+    /// The day's charges and slippage.
+    pub fn total_charges(&self) -> f64 {
+        let model = self.costs();
+        self.positions.iter().map(|p| p.charges(&model)).sum()
     }
 
     /// Open the day's positions from the (already capital-capped) plans.
@@ -511,6 +575,7 @@ impl DaemonState {
     /// and trip the kill switch if the day's loss passes the limit. Symbols
     /// missing from `prices` keep their last price — never valued at 0.
     pub fn apply_prices(&mut self, prices: &HashMap<String, f64>, phase: Phase) -> Vec<Event> {
+        let model = self.costs();
         let mut events = Vec::new();
         for pos in self.positions.iter_mut().filter(|p| p.is_open()) {
             let Some(&price) = prices.get(&pos.symbol) else {
@@ -526,22 +591,25 @@ impl DaemonState {
                 });
             }
             if pos.status.is_closed() {
-                self.risk.record_exit(pos.pnl);
+                pos.charges = Some(pos.charges(&model));
+                let net = pos.net_pnl(&model);
+                self.risk.record_exit(net);
                 events.push(Event::Closed {
                     symbol: pos.symbol.clone(),
                     status: pos.status,
                     price: pos.current_price,
-                    pnl: pos.pnl,
+                    pnl: net,
                 });
             }
         }
 
         if !self.risk.killed {
+            // Open positions count as if closed now, charges included.
             let unrealized: f64 = self
                 .positions
                 .iter()
                 .filter(|p| p.is_open())
-                .map(|p| p.pnl)
+                .map(|p| p.net_pnl(&model))
                 .sum();
             if self.risk.check_daily_limit(unrealized) {
                 events.push(Event::KillSwitch {
@@ -556,53 +624,74 @@ impl DaemonState {
 
     /// Close every open position at its last price (paper square-off).
     pub fn square_off_all(&mut self) -> Vec<Event> {
+        let model = self.costs();
         let mut events = Vec::new();
         for pos in self.positions.iter_mut().filter(|p| p.is_open()) {
             pos.status = PositionStatus::SquaredOff;
-            self.risk.record_exit(pos.pnl);
+            pos.charges = Some(pos.charges(&model));
+            let net = pos.net_pnl(&model);
+            self.risk.record_exit(net);
             events.push(Event::Closed {
                 symbol: pos.symbol.clone(),
                 status: pos.status,
                 price: pos.current_price,
-                pnl: pos.pnl,
+                pnl: net,
             });
         }
         events
     }
 
     /// The day as a simulator session. `settled` sessions carry exits and
-    /// P&L; unsettled ones carry only the entries (with the original stop),
-    /// for `sim settle` to replay from intraday bars.
+    /// P&L. Unsettled ones keep the recorded result of every position that
+    /// already closed and carry only the entry (with the original stop) of
+    /// each open one, for `sim settle` to replay from intraday bars.
     pub fn to_sim_session(&self, settled: bool) -> crate::simulator::SimSession {
+        let model = self.costs();
         let trades: Vec<crate::simulator::SimTrade> = self
             .positions
             .iter()
-            .map(|p| crate::simulator::SimTrade {
-                symbol: p.symbol.clone(),
-                direction: p.direction.clone(),
-                entry_price: p.entry_price,
-                target1: p.target1,
-                target2: p.target2,
-                stop_loss: if settled {
-                    p.stop_loss
-                } else {
-                    p.initial_stop.unwrap_or(p.stop_loss)
-                },
-                qty: p.qty,
-                capital: p.entry_price * p.qty as f64,
-                score: p.score,
-                confidence: "DAEMON".into(),
-                strategies: p.strategies.clone(),
-                entered_at: p.entered_at.map(|t| t.to_rfc3339()),
-                exit_price: settled.then_some(p.current_price),
-                pnl: settled.then_some(p.pnl),
-                pnl_pct: settled.then_some(p.pnl_pct),
-                hit_target: settled.then_some(p.status == PositionStatus::T2Hit),
-                hit_stop: settled.then_some(p.status == PositionStatus::StopHit),
+            .map(|p| {
+                let done = settled || !p.is_open();
+                crate::simulator::SimTrade {
+                    symbol: p.symbol.clone(),
+                    direction: p.direction.clone(),
+                    entry_price: p.entry_price,
+                    target1: p.target1,
+                    target2: p.target2,
+                    stop_loss: if done {
+                        p.stop_loss
+                    } else {
+                        p.initial_stop.unwrap_or(p.stop_loss)
+                    },
+                    qty: p.qty,
+                    capital: p.entry_price * p.qty as f64,
+                    score: p.score,
+                    confidence: "DAEMON".into(),
+                    strategies: p.strategies.clone(),
+                    entered_at: p.entered_at.map(|t| t.to_rfc3339()),
+                    trail_distance: p.trail_distance,
+                    charges: done.then(|| p.charges(&model)),
+                    exit_price: done.then_some(p.current_price),
+                    pnl: done.then(|| p.net_pnl(&model)),
+                    pnl_pct: done.then(|| {
+                        let cost = p.entry_price * p.qty as f64;
+                        if cost > 0.0 {
+                            p.net_pnl(&model) / cost * 100.0
+                        } else {
+                            0.0
+                        }
+                    }),
+                    hit_target: done.then_some(p.status == PositionStatus::T2Hit),
+                    hit_stop: done.then_some(p.status == PositionStatus::StopHit),
+                }
             })
             .collect();
         let total_pnl = self.total_pnl();
-        let wins = self.positions.iter().filter(|p| p.pnl > 0.0).count() as u32;
+        let wins = self
+            .positions
+            .iter()
+            .filter(|p| p.net_pnl(&model) > 0.0)
+            .count() as u32;
         crate::simulator::SimSession {
             date: self.date.format("%Y-%m-%d").to_string(),
             market: self.market.clone(),
@@ -614,6 +703,8 @@ impl DaemonState {
             loss_count: settled.then_some(trades.len() as u32 - wins),
             trades,
             settled,
+            // `sim settle` replays a handed-over day with this model.
+            cost_model: Some(model),
         }
     }
 }
@@ -728,6 +819,8 @@ mod tests {
             score: 75.0,
             entered_at: None,
             initial_stop: None,
+            trail_distance: None,
+            charges: None,
         }
     }
 
@@ -806,7 +899,7 @@ mod tests {
         ] {
             text.push_str(&format!("\n{s}"));
         }
-        crate::verdict::testing::assert_neutral(&text);
+        crate::action::testing::assert_action_well_formed(&text);
         for banned in ["ENTRY", "SL ", "T1", "T2", "STOPPED", "TARGET"] {
             assert!(!text.contains(banned), "{banned:?} in {text}");
         }
@@ -1043,7 +1136,10 @@ mod tests {
         let mut s = state_with(vec![make_position(100.0, 103.0, 106.0, 97.0)]);
         let events = s.apply_prices(&prices(&[("TEST.NS", 107.0)]), Phase::Active);
         assert_eq!(s.positions[0].status, PositionStatus::T2Hit);
-        assert!((s.risk.realized_pnl - 70.0).abs() < 1e-9);
+        // ₹70 gross, less the round trip's charges and slippage.
+        let charges = s.positions[0].charges(&s.costs());
+        assert!(charges > 0.0);
+        assert!((s.risk.realized_pnl - (70.0 - charges)).abs() < 1e-9);
         assert!(matches!(
             events.as_slice(),
             [Event::Closed {
@@ -1054,7 +1150,7 @@ mod tests {
         // A closed position takes no more updates or exits.
         let events = s.apply_prices(&prices(&[("TEST.NS", 90.0)]), Phase::Active);
         assert!(events.is_empty());
-        assert!((s.risk.realized_pnl - 70.0).abs() < 1e-9);
+        assert!((s.risk.realized_pnl - (70.0 - charges)).abs() < 1e-9);
     }
 
     #[test]
@@ -1064,8 +1160,14 @@ mod tests {
         assert!(matches!(events.as_slice(), [Event::T1Booked { .. }]));
         assert_eq!(s.risk.realized_pnl, 0.0); // not closed yet
         s.apply_prices(&prices(&[("TEST.NS", 110.0)]), Phase::Active);
-        // 5 × 4 booked at T1 + 5 × 10 at T2.
-        assert!((s.risk.realized_pnl - 70.0).abs() < 1e-9);
+        // 5 × 4 booked at T1 + 5 × 10 at T2, less charges on three orders
+        // (the opening one and two closing halves).
+        let charges = s.positions[0].charges(&s.costs());
+        let m = s.costs();
+        let want =
+            crate::simulator::round_trip_cost(&m, true, 10, 100.0, &[(5, 104.0), (5, 110.0)]);
+        assert!((charges - want).abs() < 1e-9);
+        assert!((s.risk.realized_pnl - (70.0 - charges)).abs() < 1e-9);
     }
 
     #[test]
@@ -1092,7 +1194,8 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert!(s.risk.killed);
         assert_eq!(s.open_count(), 0);
-        assert!((s.risk.realized_pnl + 800.0).abs() < 1e-9);
+        let charges: f64 = s.positions.iter().map(|p| p.charges(&s.costs())).sum();
+        assert!((s.risk.realized_pnl + 800.0 + charges).abs() < 1e-9);
         // Later ticks don't trip it again.
         assert!(
             s.apply_prices(&prices(&[("TEST.NS", 80.0)]), Phase::Active)
@@ -1109,7 +1212,8 @@ mod tests {
         s.apply_prices(&prices(&[("TEST.NS", 102.0)]), Phase::Active);
         let events = s.square_off_all();
         assert_eq!(events.len(), 1);
-        assert!((s.risk.realized_pnl - 20.0).abs() < 1e-9);
+        let charges = s.positions[0].charges(&s.costs());
+        assert!((s.risk.realized_pnl - (20.0 - charges)).abs() < 1e-9);
         assert!(s.square_off_all().is_empty());
     }
 
@@ -1123,6 +1227,7 @@ mod tests {
                 currency: None,
                 change_pct: 0.0,
                 volume_ratio: 1.0,
+                volume_known: true,
                 regime: crate::intraday::MarketRegime::Ranging,
                 confidence: crate::intraday::Confidence::High,
                 direction: crate::intraday::Direction::Long,
@@ -1191,12 +1296,107 @@ mod tests {
         assert_eq!(settled.trades[0].exit_price, Some(103.5));
         assert_eq!(settled.trades[0].stop_loss, 100.0); // moved to breakeven
 
-        // Unsettled hand-over keeps the original stop for the replay.
+        // Unsettled hand-over keeps the original stop of an open position
+        // for the replay.
+        let mut s = state_with(vec![make_position(100.0, 103.0, 106.0, 97.0)]);
+        s.positions[0].initial_stop = Some(97.0);
+        s.apply_prices(&prices(&[("TEST.NS", 103.5)]), Phase::Active);
         let open = s.to_sim_session(false);
         assert!(!open.settled);
         assert_eq!(open.trades[0].stop_loss, 97.0);
         assert_eq!(open.trades[0].exit_price, None);
         assert_eq!(open.total_pnl, None);
+    }
+
+    #[test]
+    fn hand_over_keeps_completed_trades() {
+        // A closed at its level 2; B still open when the daemon missed the
+        // close. A keeps its recorded exit, P&L and charges; only B is left
+        // for `sim settle` to replay, and the session stays open.
+        let mut a = make_position(100.0, 103.0, 106.0, 97.0);
+        a.symbol = "A.NS".into();
+        let mut b = make_position(100.0, 103.0, 106.0, 97.0);
+        b.symbol = "B.NS".into();
+        b.initial_stop = Some(97.0);
+        let mut s = state_with(vec![a, b]);
+        s.apply_prices(&prices(&[("A.NS", 107.0), ("B.NS", 101.0)]), Phase::Active);
+        assert!(!s.positions[0].is_open());
+        assert!(s.positions[1].is_open());
+        let model = s.costs();
+        let want_pnl = s.positions[0].net_pnl(&model);
+        let want_charges = s.positions[0].charges(&model);
+
+        let handed = s.to_sim_session(false);
+        assert!(!handed.settled);
+        assert_eq!(handed.total_pnl, None);
+        let (ta, tb) = (&handed.trades[0], &handed.trades[1]);
+        assert_eq!(ta.exit_price, Some(107.0));
+        assert_eq!(ta.pnl, Some(want_pnl));
+        assert_eq!(ta.charges, Some(want_charges));
+        assert_eq!(ta.hit_target, Some(true));
+        assert_eq!(tb.exit_price, None);
+        assert_eq!(tb.pnl, None);
+        assert_eq!(tb.charges, None);
+        assert_eq!(tb.stop_loss, 97.0);
+    }
+
+    #[test]
+    fn trailing_exit_level_follows_the_plan_distance() {
+        // 1.5 × ATR of ₹3 = ₹4.5 behind the price, not a flat 1.5%.
+        let mut pos = make_position(100.0, 103.0, 120.0, 97.0);
+        pos.trail_distance = Some(4.5);
+        pos.trailing_stop = 95.5;
+        update_position(&mut pos, 110.0, Phase::Active);
+        assert!((pos.trailing_stop - 105.5).abs() < 1e-9);
+        // Old state files without a distance keep the 1.5% trail.
+        let mut old = make_position(100.0, 103.0, 120.0, 97.0);
+        update_position(&mut old, 110.0, Phase::Active);
+        assert!((old.trailing_stop - 108.35).abs() < 1e-9);
+    }
+
+    #[test]
+    fn settled_sessions_carry_net_pnl_and_charges() {
+        let mut s = state_with(vec![make_position(100.0, 103.0, 106.0, 97.0)]);
+        s.positions[0].qty = 100;
+        s.positions[0].remaining_qty = 100;
+        s.apply_prices(&prices(&[("TEST.NS", 102.0)]), Phase::Active);
+        s.square_off_all();
+        let session = s.to_sim_session(true);
+        let t = &session.trades[0];
+        let charges = t.charges.unwrap();
+        // 100 × ₹2 gross, less brokerage, STT, exchange, SEBI, GST, stamp
+        // duty and slippage on ₹10,000 in and ₹10,200 out.
+        let m = s.costs();
+        let want = crate::simulator::round_trip_cost(&m, true, 100, 100.0, &[(100, 102.0)]);
+        assert!((charges - want).abs() < 1e-9);
+        assert!(charges > 10.0, "{charges}"); // 5 bps a side alone is ₹10.10
+        assert!((t.pnl.unwrap() - (200.0 - charges)).abs() < 1e-9);
+        assert!((session.total_pnl.unwrap() - (200.0 - charges)).abs() < 1e-9);
+        assert!((t.pnl_pct.unwrap() - (200.0 - charges) / 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn closed_results_keep_the_costs_they_were_closed_with() {
+        // Closed with costs off: ₹70. Changing the settings later (here the
+        // saved model, as a resumed session with new settings would) must
+        // not turn it into ₹68.
+        let mut s = state_with(vec![make_position(100.0, 103.0, 106.0, 97.0)]);
+        s.cost_model = Some(crate::backtest::costs::CostModel::none());
+        s.apply_prices(&prices(&[("TEST.NS", 107.0)]), Phase::Active);
+        assert!((s.risk.realized_pnl - 70.0).abs() < 1e-9);
+        let mut flat = crate::backtest::costs::CostModel::none();
+        flat.brokerage.flat = Some(1.0);
+        s.cost_model = Some(flat);
+        assert!((s.total_pnl() - 70.0).abs() < 1e-9);
+        assert_eq!(s.to_sim_session(true).trades[0].pnl, Some(70.0));
+        // The session's model survives a save and load.
+        let back: DaemonState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.cost_model, s.cost_model);
+        assert_eq!(back.positions[0].charges, Some(0.0));
+        // A day handed to `sim settle` carries the model with it.
+        let handed = s.to_sim_session(false);
+        assert_eq!(handed.cost_model, s.cost_model);
+        assert_eq!(handed.costs(), s.costs());
     }
 
     #[test]

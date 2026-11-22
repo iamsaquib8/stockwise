@@ -32,7 +32,7 @@
   "tools": [
     {
       "name": "quote",
-      "description": "Stock quotes. Live (often delayed) quotes for up to 20 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
+      "description": "Stock quotes. Live (often delayed) quotes for up to 25 tickers: price, change, day range, volume, 52-week range, market cap, P/E."
     },
     {
       "name": "history",
@@ -49,6 +49,14 @@
     {
       "name": "verdict",
       "description": "6-pillar scorecard. Quantitative 6-pillar scores for one ticker (valuation, growth, balance sheet, ownership, analysts, technical trend) with a 0-100 composite, data coverage and the facts behind each score. Not a recommendation."
+    },
+    {
+      "name": "stock_action",
+      "description": "Rule-based action for a stock. StockWise's deterministic call for one stock: BUY, WATCH or AVOID when not held, ADD, HOLD, TRIM or EXIT when held, NO CALL below 60% data coverage; with confidence, reasons, invalidation price, review date, size hint, tax note and disclaimer."
+    },
+    {
+      "name": "portfolio_review",
+      "description": "Rule-based review of holdings. The action for every holding, sorted EXIT, TRIM, ADD, HOLD, with reasons, invalidation price, review date, shares to trim and tax notes."
     },
     {
       "name": "scorecard",
@@ -220,7 +228,15 @@
     },
     {
       "name": "picks",
-      "description": "Highest-scoring stocks. Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data."
+      "description": "Highest-scoring stocks. Stocks of the market that clear size and liquidity floors, ranked against each other on five pillars (value, quality, growth, trend, risk), each a percentile among the stocks scanned, with the share of the score that had data."
+    },
+    {
+      "name": "picks_review",
+      "description": "Track record of picks. How past picks lists did since each stock was first listed, against NIFTY 50 or the S&P 500 total return: hit rate, share that beat the index, mean and median return and excess."
+    },
+    {
+      "name": "verdicts",
+      "description": "6-pillar scores for several stocks. The verdict tool's composite, data coverage and pillar scores for up to 25 tickers in one call."
     },
     {
       "name": "movers",
@@ -241,6 +257,62 @@
     {
       "name": "changes_list",
       "description": "Changes made by assistants. The workspace changes made through StockWise's assistant tools (watchlist, alerts, goals, targets, profile, notes, portfolio), newest first, with each change's id for `stockwise undo`."
+    },
+    {
+      "name": "bonds_yields",
+      "description": "Indian government bond yields. T-bill and G-sec yields by tenor from CCIL, with the benchmark security."
+    },
+    {
+      "name": "bonds_list",
+      "description": "Find an Indian government security. RBI's list of outstanding G-secs: ISIN, coupon, maturity, NSE symbol, amount outstanding."
+    },
+    {
+      "name": "bonds_calc",
+      "description": "G-sec price and yield calculator. Clean and dirty price, accrued interest, yield, duration and convexity of a G-sec or T-bill."
+    },
+    {
+      "name": "commodity",
+      "description": "Gold, silver and Sovereign Gold Bonds. Gold and silver in rupees, futures, NSE gold and silver ETFs, and every SGB series with its premium to gold."
+    },
+    {
+      "name": "fx_history",
+      "description": "Currency against the rupee. History of USD/INR or another pair: change, high, low and daily rates."
+    },
+    {
+      "name": "returns",
+      "description": "Trailing returns. 1 week to 5 years, annualized beyond a year, and what ₹1 lakh became."
+    },
+    {
+      "name": "correlate",
+      "description": "Correlation of stocks. Correlation matrix of daily returns of 2 to 10 tickers over the last year."
+    },
+    {
+      "name": "compare",
+      "description": "Compare stocks side by side. Valuation, quality, growth, dividend and risk figures of up to 6 stocks."
+    },
+    {
+      "name": "portfolio_wrap",
+      "description": "Portfolio year in review. Return over a calendar or Indian financial year, flows, dividends, realized gains, best and worst holdings."
+    },
+    {
+      "name": "whats_hot",
+      "description": "What's hot. Your holdings and watchlist ranked by heat (excess move, volume, fresh news, dates soon, weighted by portfolio weight), then market lists: unusual volume, gaps, 52-week breaks, news mentions, sectors, themes, FII/DII, deals, F&O ban, OI build-up."
+    },
+    {
+      "name": "today",
+      "description": "Today in my portfolio. Each holding's day move and why (headline, filing, with the market, or unexplained), day P&L, market backdrop and a news feed ranked by weight and importance."
+    },
+    {
+      "name": "news_feed",
+      "description": "News feed. Merged, de-duplicated headlines and exchange/SEC filings for symbols, or for holdings and the watchlist ranked by weight and importance."
+    },
+    {
+      "name": "monitor_status",
+      "description": "Holding monitor status. Thresholds, whether the worker runs it, and the signals it sent recently."
+    },
+    {
+      "name": "digest",
+      "description": "Daily digest. Day P&L, top contributors and detractors with reasons, monitor signals, triggered alerts and dates coming up."
     }
   ],
   "tools_generated": false,

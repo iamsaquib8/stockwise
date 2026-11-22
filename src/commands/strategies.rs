@@ -430,7 +430,11 @@ pub async fn cmd_intraday(
             format!("{}{:.2}", csym, s.price),
             chg,
             rsi_str,
-            format!("{:.1}x", s.volume_ratio),
+            if s.volume_known {
+                format!("{:.1}x", s.volume_ratio)
+            } else {
+                "—".to_string()
+            },
             regime_str,
             score_str,
             conf_str
@@ -503,6 +507,28 @@ pub(super) async fn longterm_scores(
     client: &YahooClient,
     quotes: &[crate::api::Quote],
 ) -> Vec<longterm::LongTermScore> {
+    longterm_scan(client, quotes).await.0
+}
+
+/// [`longterm_scores`] plus the quotes the scores were computed from (the
+/// finalists' enriched copies, a failed lookup kept as a warning on each),
+/// for the provenance of the run.
+/// Where one finalist's price history came from: its source when not
+/// Yahoo, the date of its last bar, and the chart's warnings.
+#[derive(Default)]
+struct HistoryInfo {
+    source: Option<String>,
+    last: Option<chrono::NaiveDate>,
+    warnings: Vec<String>,
+}
+
+async fn longterm_scan(
+    client: &YahooClient,
+    quotes: &[crate::api::Quote],
+) -> (
+    Vec<longterm::LongTermScore>,
+    Vec<(crate::api::Quote, HistoryInfo)>,
+) {
     use futures_util::StreamExt;
     let mut first: Vec<(&crate::api::Quote, Option<f64>)> = quotes
         .iter()
@@ -518,31 +544,64 @@ pub(super) async fn longterm_scores(
         first.truncate(LONGTERM_CHART_LIMIT);
     }
     futures_util::stream::iter(first.into_iter().map(|(q, _)| async move {
+        // The bulk quote has no margins, debt, beta or growth: fetch them
+        // for the finalists so quality and safety are scored on data.
+        let mut q = q.clone();
+        for w in crate::research::enrich_quote(client, &mut q, false).await {
+            q.meta.get_or_insert_with(Default::default).warn(w);
+        }
         let sym = q.symbol.as_deref().unwrap_or("");
-        let hist = client.get_chart(sym, "1y", "1d").await.ok().and_then(|c| {
-            c.indicators
-                .quote
-                .first()
-                .and_then(|qi| qi.close.as_ref())
-                .map(|c| c.iter().filter_map(|v| *v).collect::<Vec<f64>>())
-        });
-        longterm::score_for_longterm(q, hist.as_deref())
+        let mut info = HistoryInfo::default();
+        let hist = match client.get_chart(sym, "1y", "1d").await {
+            Ok(c) => {
+                if let Some(m) = &c.meta {
+                    info.source = m.data_source.clone();
+                    info.warnings = m.warnings.clone();
+                }
+                let retained: Vec<_> = c
+                    .dated_closes()
+                    .into_iter()
+                    .filter(|(_, px)| *px > 0.0 && px.is_finite())
+                    .collect();
+                info.last = retained.last().map(|(d, _)| *d);
+                let closes: Vec<f64> = retained.into_iter().map(|(_, px)| px).collect();
+                (!closes.is_empty()).then_some(closes)
+            }
+            Err(e) => {
+                info.warnings
+                    .push(format!("{sym}: price history unavailable ({e:#})"));
+                None
+            }
+        };
+        let score = longterm::score_for_longterm(&q, hist.as_deref());
+        (score, (q, info))
     }))
     .buffered(8)
-    .collect()
+    .collect::<Vec<_>>()
     .await
+    .into_iter()
+    .unzip()
 }
 
 pub async fn cmd_longterm(
     amount: Option<f64>,
     market: Market,
     universe: Option<market::Universe>,
+    json: bool,
 ) -> Result<()> {
     market.require_bot_support("longterm")?;
     let client = YahooClient::new().await?;
     let quotes = super::markets::universe_quotes(&client, market, universe).await?;
     let csym = market.currency_symbol();
     let monthly = amount.unwrap_or(10000.0);
+
+    if json {
+        let (mut scores, scored) = longterm_scan(&client, &quotes).await;
+        longterm::rank(&mut scores);
+        let meta = longterm_meta(&scored, &scores);
+        let rows: Vec<serde_json::Value> = scores.iter().map(longterm_json).collect();
+        return crate::output::print_json(&serde_json::json!({ "scores": rows, "meta": meta }));
+    }
 
     print_header(&format!("Long-Term Scores — {} Market", market.label()));
     println!(
@@ -551,12 +610,101 @@ pub async fn cmd_longterm(
         quotes.len()
     );
 
-    let mut scores = longterm_scores(&client, &quotes).await;
+    let (mut scores, scored) = longterm_scan(&client, &quotes).await;
     longterm::rank(&mut scores);
 
     print!("{}", longterm::render_report(&scores, monthly, csym));
+    println!("  {}", longterm_meta(&scored, &scores).footer().dimmed());
     println!();
     Ok(())
+}
+
+/// Provenance of a `longterm` run: the scan's fundamentals, plus how many
+/// scored stocks had no price history for their volatility.
+fn longterm_meta(
+    scored: &[(crate::api::Quote, HistoryInfo)],
+    scores: &[longterm::LongTermScore],
+) -> crate::provenance::Meta {
+    let mut meta = crate::provenance::for_scan(scored.iter().map(|(q, _)| q));
+    for (_, h) in scored {
+        if let Some(s) = &h.source {
+            meta.add_source(s);
+        }
+        for w in &h.warnings {
+            meta.warn(w.clone());
+        }
+    }
+    // The oldest history behind any score, apart from the quote time.
+    if let Some(oldest) = scored.iter().filter_map(|(_, h)| h.last).min() {
+        meta.history_as_of = Some(oldest.to_string());
+    }
+    if let Some(w) = volatility_warning(scores) {
+        meta.warn(w);
+    }
+    let no_vol = scores
+        .iter()
+        .filter(|s| s.monte_carlo_median.is_none())
+        .count();
+    if no_vol * 2 > scores.len() {
+        meta.missing.push("volatility".into());
+    }
+    meta
+}
+
+/// How many scored stocks have no simulated range, split into those with no
+/// price history and those whose history was too short to measure volatility.
+fn volatility_warning(scores: &[longterm::LongTermScore]) -> Option<String> {
+    let missing = |history: bool| {
+        scores
+            .iter()
+            .filter(|s| s.monte_carlo_median.is_none() && s.has_price_history == history)
+            .count()
+    };
+    let (absent, short) = (missing(false), missing(true));
+    let mut why = Vec::new();
+    if absent > 0 {
+        why.push(format!("{absent} with no price history"));
+    }
+    if short > 0 {
+        why.push(format!(
+            "{short} with insufficient history to measure volatility"
+        ));
+    }
+    (!why.is_empty()).then(|| {
+        format!(
+            "volatility missing for {} of {} scored stocks ({})",
+            absent + short,
+            scores.len(),
+            why.join(", ")
+        )
+    })
+}
+
+fn longterm_json(s: &longterm::LongTermScore) -> serde_json::Value {
+    serde_json::json!({
+        "symbol": s.symbol,
+        "name": s.name,
+        "price": s.price,
+        "currency": s.currency,
+        "total_score": s.total(),
+        "data_coverage": s.data_coverage,
+        "pillars": {
+            "valuation": s.pillar_data[0].then_some(s.valuation_score),
+            "growth": s.pillar_data[1].then_some(s.growth_score),
+            "quality": s.pillar_data[2].then_some(s.quality_score),
+            "momentum": s.pillar_data[3].then_some(s.momentum_score),
+            "dividend": s.pillar_data[4].then_some(s.dividend_score),
+            "safety": s.pillar_data[5].then_some(s.safety_score),
+        },
+        "raised_by": s.raised_by,
+        "lowered_by": s.lowered_by,
+        "est_annual_return_percent": s.est_annual_return,
+        "simulated_5y_return_percent": {
+            "p10": s.monte_carlo_p10,
+            "median": s.monte_carlo_median,
+            "p90": s.monte_carlo_p90,
+        },
+    })
 }
 
 // ── Tax Calculator ──
@@ -581,10 +729,15 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
             // Build summary for AI
             let mut data = String::new();
             for s in signals.iter().take(10) {
-                data.push_str(&format!("{}: price={:.2}, chg={:+.2}%, RSI={}, vol={:.1}x, regime={}, score={:.0}, strategies={}\n",
+                let vol = if s.volume_known {
+                    format!("{:.1}x", s.volume_ratio)
+                } else {
+                    "N/A".to_string()
+                };
+                data.push_str(&format!("{}: price={:.2}, chg={:+.2}%, RSI={}, vol={}, regime={}, score={:.0}, strategies={}\n",
                     s.symbol, s.price, s.change_pct,
                     s.rsi.map_or("N/A".into(), |r| format!("{:.0}", r)),
-                    s.volume_ratio, s.regime, s.score,
+                    vol, s.regime, s.score,
                     s.strategies.iter().map(|st| st.name).collect::<Vec<_>>().join("+")
                 ));
             }
@@ -616,7 +769,7 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
                     sym, q.regular_market_price.unwrap_or(0.0),
                     q.trailing_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
                     q.forward_pe.map_or("N/A".into(), |v| format!("{:.1}", v)),
-                    q.trailing_annual_dividend_yield.map_or("0".into(), |v| format!("{:.2}%", v * 100.0)),
+                    q.dividend_yield_fraction().map_or("0".into(), |v| format!("{:.2}%", v * 100.0)),
                     q.regular_market_change_percent.unwrap_or(0.0),
                     q.fifty_day_average.unwrap_or(0.0), q.two_hundred_day_average.unwrap_or(0.0),
                 ));
@@ -707,4 +860,31 @@ pub async fn cmd_report(what: &str, market: Market) -> Result<()> {
     );
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volatility_warning_separates_absent_and_short_history() {
+        let mut q = crate::api::Quote::default();
+        q.symbol = Some("AAA".into());
+        q.trailing_pe = Some(20.0);
+        let closes: Vec<f64> = (0..252)
+            .map(|i| 100.0 + (i as f64 * 0.07).sin() * 12.0)
+            .collect();
+        let scores = vec![
+            longterm::score_for_longterm(&q, Some(&closes)),
+            longterm::score_for_longterm(&q, Some(&[100.0, 101.0])),
+            longterm::score_for_longterm(&q, None),
+        ];
+        assert_eq!(
+            volatility_warning(&scores).as_deref(),
+            Some(
+                "volatility missing for 2 of 3 scored stocks (1 with no price history, 1 with insufficient history to measure volatility)"
+            )
+        );
+        assert_eq!(volatility_warning(&scores[..1]), None);
+    }
 }

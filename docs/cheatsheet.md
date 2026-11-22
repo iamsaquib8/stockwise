@@ -10,6 +10,23 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 `STOCKWISE_MARKET`. Many commands take `--json`, and tables take
 `--csv` (`stockwise <command> --help` shows which).
 
+## Your four jobs
+
+| Do this | Command |
+|---|---|
+| A rule-based action for every holding (EXIT, TRIM, ADD, HOLD, NO CALL) | `stockwise portfolio review` · `stockwise portfolio review --horizon short` |
+| What changed in your portfolio today, and why | `stockwise today` |
+| What's hot in your holdings and watchlist, then the market | `stockwise hot` · `stockwise hot --cap small` |
+| The after-close digest (day P&L, reasons, alerts, dates) | `stockwise digest` · `stockwise digest --send` |
+| Candidates ranked on value, quality, growth, trend and risk | `stockwise picks` · `stockwise picks --horizon short --cap small` |
+| How past picks lists did against the index | `stockwise picks review` · `stockwise picks review --since 6m` |
+| Capital-gains tax for the year | `stockwise tax in` |
+| Check StockWise's gains against your broker's tax P&L | `stockwise tax reconcile taxpnl.xlsx` |
+
+Actions are rule-based educational signals, not advice: see
+[methodology.md](methodology.md#actions-methodology-1) and the
+[disclaimer](https://github.com/iamsaquib8/stockwise/blob/main/DISCLAIMER.md).
+
 ## Quotes and markets
 
 | Do this | Command |
@@ -25,12 +42,14 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Sector performance | `stockwise sectors` |
 | Find a ticker by name | `stockwise search "tata motors"` |
 | First-run setup: market, holdings import, MCP snippet | `stockwise init` (no prompts without a TTY: `init --market in --import groww:FILE --no-mcp`) |
-| Check your setup | `stockwise doctor` |
+| Check your setup (each failed check has a fix) | `stockwise doctor` · `stockwise doctor --json` |
 | Persistent response cache: size, clear | `stockwise cache status` / `stockwise cache clear` |
 | Clear one cached data set (`quotes`, `members`, `bhavcopy`, ... or `all`) | `stockwise cache clear quotes` |
 | Pre-load the market universe into `cache.db` | `stockwise cache warm` (or `--background`) |
 | Filter cached stocks offline by cap, sector, P/E, RVOL | `stockwise cache snapshots --cap large --min-pe 10 --sort roe` |
 | Run the background worker (live quotes, tasks, alerts, post-close sync) | `stockwise worker start` / `status` / `stop` |
+| Start the worker at every login (launchd / systemd user service) | `stockwise worker install` (`--dry-run` to preview) / `stockwise worker uninstall` |
+| Portfolio day change in tmux, waybar, sketchybar or starship | `stockwise statusbar --format waybar` |
 | Post-close notices: LTCG turns, new quarters, new non-routine NSE filings of held `.NS` stocks (each sent once) | `stockwise tasks add eod` queues it for a running worker (`worker start`) |
 | Queue a long job and follow it | `stockwise tasks add run -- backtest TCS` then `stockwise tasks` / `tasks show 1` |
 
@@ -43,10 +62,11 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Last 8 quarters: YoY, QoQ, OPM, TTM, beat/miss | `stockwise results TCS` · `results AAPL -m us --quarters 12` · `results TCS --annual` |
 | Earnings-season scoreboard | `stockwise results --universe nifty50` · `results --holdings --csv` |
 | Positive and negative findings | `stockwise insights LT` |
-| 6-pillar score (not a recommendation) | `stockwise verdict LT` · `stockwise verdict LT --explain` |
-| Piotroski F-score & Altman Z-score | `stockwise score INFY --explain` · `stockwise scorecard TCS --json` |
-| Open and upcoming IPOs | `stockwise ipo` |
-| One IPO: demand, scores and allotment odds | `stockwise ipo BCSSL --capital 2.5L` |
+| Rule-based action and the 6-pillar score behind it | `stockwise verdict LT` · `stockwise verdict LT --horizon short --explain` |
+| Piotroski F-score & Altman Z-score | `stockwise fundamental score INFY --explain` · `stockwise fundamental score TCS --json` |
+| Open and upcoming IPOs, a verdict each | `stockwise ipo` |
+| One IPO: verdict, listing model, valuation, odds | `stockwise ipo BCSSL --capital 2.5L` |
+| How past IPO verdicts did | `stockwise ipo review` |
 | RSI, MACD, Bollinger Bands | `stockwise technical TCS -p 6mo --explain` |
 | Price chart with volume | `stockwise history AAPL -m us -p 1y` |
 | Compare stocks | `stockwise compare TCS INFY WIPRO` |
@@ -66,7 +86,7 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Regular vs Direct plan cost of the funds you hold | `stockwise mf bleed --return 10` |
 | Option chain with greeks | `stockwise options chain NIFTY` |
 | Put/call ratio, max pain | `stockwise options pcr BANKNIFTY` · `stockwise options maxpain NIFTY` |
-| OI build-up & resistance/support walls | `stockwise fno oi NIFTY` · `stockwise options oi BANKNIFTY -n 5 --explain` |
+| OI build-up & resistance/support walls | `stockwise options oi NIFTY` · `stockwise options oi BANKNIFTY -n 5 --explain` |
 | Strategy payoff | `stockwise options payoff NIFTY --strategy iron-condor --width 200` |
 | Gold and silver in ₹/10 g | `stockwise commodity spot` |
 | Sovereign Gold Bonds | `stockwise commodity sgb` |
@@ -92,9 +112,11 @@ Bare tickers use the Indian market (`TCS` → `TCS.NS`). Add `-m us`, `-m uk`,
 | Set target allocation | `stockwise portfolio target set TCS 25` · `stockwise portfolio target show` |
 | Inflow rebalance (buy-only) | `stockwise rebalance --inflow 50000` (buy underweight without selling) |
 | Rebalance with drift band | `stockwise rebalance --drift 2.0` |
+| Raise cash at the lowest tax (sells only; shows tax and costs) | `stockwise rebalance --raise 100000` |
 | Tax-loss & LTCG exemption harvest | `stockwise harvest` · `stockwise harvest --json` |
 | Capital-gains estimate | `stockwise tax in` |
 | ITR Schedule CG CSV | `stockwise tax export in --out cg.csv` |
+| Match each sale with Zerodha, Groww or Upstox tax P&L | `stockwise tax reconcile taxpnl.xlsx --fy 2025-26` |
 | Advance tax schedule & 234C estimator | `stockwise tax advance` · `stockwise tax advance --paid 25000` |
 | Advance tax with each payment dated (exact 234C) | `stockwise tax advance --fy 2025-26 --paid 2025-06-14:3000 --paid 2025-09-10:5000` |
 | Everything on one screen | `stockwise dashboard` |

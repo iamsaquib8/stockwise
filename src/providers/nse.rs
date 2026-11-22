@@ -53,7 +53,9 @@ pub fn site(base: &str) -> Site {
     Site {
         name: "NSE",
         base: base.trim_end_matches('/').to_string(),
-        home: Some(format!("{}/", base.trim_end_matches('/'))),
+        // The cookie page. NSE refuses scripts on its home page (HTTP 403)
+        // but serves the option-chain page, which sets the same cookies.
+        home: Some(format!("{}/option-chain", base.trim_end_matches('/'))),
         referer: format!("{}/", base.trim_end_matches('/')),
         origin: None,
     }
@@ -186,6 +188,197 @@ pub fn parse_quote(json: &Value) -> Result<Option<Quote>, &'static str> {
     q.upper_circuit = pos(&price_info["upperCP"]);
     q.lower_circuit = pos(&price_info["lowerCP"]);
     Ok(Some(q))
+}
+
+/// What `quote-equity` says about the company beyond the price: NSE's own
+/// P/E and its sector index's P/E, the industry, and the shares issued (for
+/// the market cap).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EquityInfo {
+    pub pe: Option<f64>,
+    pub sector_pe: Option<f64>,
+    pub industry: Option<String>,
+    /// The sectoral index NSE files the stock under (`NIFTY OIL & GAS`).
+    pub sector_index: Option<String>,
+    pub issued_shares: Option<f64>,
+    pub price: Option<f64>,
+    /// `metadata.lastUpdateTime` (`24-Oct-2025 16:00:00`, IST).
+    pub updated: Option<NaiveDate>,
+    /// Exchange flags an investor should see: surveillance (ASM/GSM stage),
+    /// suspension, delisting.
+    pub flags: Vec<String>,
+}
+
+impl EquityInfo {
+    pub fn market_cap(&self) -> Option<f64> {
+        Some(self.issued_shares? * self.price?)
+    }
+}
+
+fn text_of(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "-" && *s != "NA")
+        .map(str::to_string)
+}
+
+/// `quote-equity` → the company facts; `None` when the answer has neither
+/// `metadata` nor `info` (unknown symbol or a new format).
+pub fn parse_equity_info(json: &Value) -> Option<EquityInfo> {
+    let meta = &json["metadata"];
+    let info = &json["info"];
+    if !meta.is_object() && !info.is_object() {
+        return None;
+    }
+    Some(EquityInfo {
+        pe: pos(&meta["pdSymbolPe"]),
+        sector_pe: pos(&meta["pdSectorPe"]),
+        industry: text_of(&info["industry"]).or_else(|| text_of(&meta["industry"])),
+        sector_index: text_of(&meta["pdSectorInd"]),
+        issued_shares: pos(&json["securityInfo"]["issuedSize"]),
+        price: pos(&json["priceInfo"]["lastPrice"]),
+        updated: meta["lastUpdateTime"].as_str().and_then(parse_date),
+        flags: equity_flags(json),
+    })
+}
+
+/// Surveillance and trading-status flags from `quote-equity`.
+fn equity_flags(json: &Value) -> Vec<String> {
+    let mut flags = Vec::new();
+    let surv = &json["securityInfo"]["surveillance"];
+    match (text_of(&surv["surv"]), text_of(&surv["desc"])) {
+        (Some(s), Some(d)) => flags.push(format!("NSE surveillance: {s} ({d})")),
+        (Some(s), None) | (None, Some(s)) => flags.push(format!("NSE surveillance: {s}")),
+        (None, None) => {}
+    }
+    if json["info"]["isSuspended"].as_bool() == Some(true) {
+        flags.push("Trading suspended on NSE".into());
+    }
+    if json["info"]["isDelisted"].as_bool() == Some(true) {
+        flags.push("Delisted from NSE".into());
+    }
+    if let Some(status) = text_of(&json["securityInfo"]["tradingStatus"])
+        && !status.eq_ignore_ascii_case("active")
+    {
+        flags.push(format!("NSE trading status: {status}"));
+    }
+    flags
+}
+
+/// One quarter from NSE's financial results comparison.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResultRow {
+    pub end: NaiveDate,
+    /// Revenue from operations (₹ lakh, as filed).
+    pub revenue: Option<f64>,
+    /// Net profit after tax (₹ lakh).
+    pub net_profit: Option<f64>,
+    /// Diluted EPS, else basic (₹).
+    pub eps: Option<f64>,
+}
+
+/// A number that may be written with thousands separators.
+fn loose(v: &Value) -> Option<f64> {
+    num(v).or_else(|| {
+        v.as_str()
+            .and_then(|s| s.trim().replace(',', "").parse::<f64>().ok())
+            .filter(|x| x.is_finite())
+    })
+}
+
+fn first_of(row: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|k| loose(&row[*k]))
+}
+
+/// `results-comparision?symbol=X` → quarters, oldest first. The endpoint
+/// lists the latest quarters (`resCmpData`), each with its end date and the
+/// figures as filed. Rows without a date are skipped.
+pub fn parse_results(json: &Value) -> Vec<ResultRow> {
+    let rows = json["resCmpData"]
+        .as_array()
+        .or_else(|| json["data"].as_array())
+        .or_else(|| json.as_array());
+    let mut out: Vec<ResultRow> = rows
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    let end = ["re_to_dt", "toDate", "to_date"]
+                        .iter()
+                        .find_map(|k| r[*k].as_str().and_then(parse_date))?;
+                    Some(ResultRow {
+                        end,
+                        revenue: first_of(
+                            r,
+                            &[
+                                "re_net_sale",
+                                "re_rev_frm_ops",
+                                "re_total_inc",
+                                "re_tot_inc",
+                            ],
+                        ),
+                        net_profit: first_of(
+                            r,
+                            &[
+                                "re_net_profit",
+                                "re_pro_loss_aft_tax",
+                                "re_con_pro_loss",
+                                "re_proloss_ord_act",
+                            ],
+                        ),
+                        eps: first_of(
+                            r,
+                            &[
+                                "re_dil_eps",
+                                "re_diluted_eps",
+                                "re_dil_eps_for_cont_dic_opr",
+                                "re_basic_eps",
+                                "re_basic_eps_for_cont_dic_opr",
+                            ],
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|r| r.end);
+    out.dedup_by_key(|r| r.end);
+    out
+}
+
+/// Trailing figures from quarterly results, in Yahoo's units: EPS over the
+/// last four quarters, net margin over the same, and the latest quarter's
+/// revenue against the same quarter a year earlier.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResultRatios {
+    pub eps_ttm: Option<f64>,
+    pub profit_margin: Option<f64>,
+    pub revenue_growth: Option<f64>,
+    pub as_of: Option<NaiveDate>,
+}
+
+pub fn result_ratios(rows: &[ResultRow]) -> ResultRatios {
+    let n = rows.len();
+    let last_four = rows
+        .get(n.saturating_sub(4)..)
+        .filter(|q| q.len() == 4 && (240..=300).contains(&(q[3].end - q[0].end).num_days()));
+    let sum = |pick: fn(&ResultRow) -> Option<f64>| -> Option<f64> {
+        last_four?.iter().map(pick).sum::<Option<f64>>()
+    };
+    let revenue = sum(|r| r.revenue).filter(|r| *r > 0.0);
+    let revenue_growth = rows.last().and_then(|last| {
+        let before = rows
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|r| (340..=390).contains(&(last.end - r.end).num_days()))?;
+        Some(last.revenue? / before.revenue.filter(|v| *v > 0.0)? - 1.0)
+    });
+    ResultRatios {
+        eps_ttm: sum(|r| r.eps),
+        profit_margin: sum(|r| r.net_profit).zip(revenue).map(|(p, r)| p / r),
+        revenue_growth,
+        as_of: rows.last().map(|r| r.end),
+    }
 }
 
 /// Add volume, market cap and delivery % from `quote-equity?section=trade_info`.
@@ -718,6 +911,47 @@ impl Nse {
         Ok(Some(q))
     }
 
+    /// NSE's company facts for an `.NS` equity (`quote-equity`).
+    pub async fn equity_info(&self, symbol: &str) -> Result<Option<EquityInfo>> {
+        let Some(Target::Equity(nse)) = target(symbol) else {
+            return Ok(None);
+        };
+        let json = self
+            .session
+            .get_json(
+                "/api/quote-equity",
+                &[("symbol", &nse)],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|e| self.fail(e))?;
+        Ok(parse_equity_info(&json))
+    }
+
+    /// The latest quarterly results of an `.NS` (or same-named `.BO`)
+    /// equity, oldest first.
+    pub async fn results(&self, symbol: &str) -> Result<Vec<ResultRow>> {
+        let base = symbol
+            .trim()
+            .to_ascii_uppercase()
+            .trim_end_matches(".NS")
+            .trim_end_matches(".BO")
+            .to_string();
+        if base.is_empty() || base.contains('.') || base.starts_with('^') {
+            return Ok(Vec::new());
+        }
+        let json = self
+            .session
+            .get_json(
+                "/api/results-comparision",
+                &[("symbol", &base)],
+                Duration::from_secs(6 * 3600),
+            )
+            .await
+            .map_err(|e| self.fail(e))?;
+        Ok(parse_results(&json))
+    }
+
     async fn all_indices(&self) -> Result<Vec<(&'static str, Quote)>> {
         let json = self
             .session
@@ -993,6 +1227,59 @@ mod tests {
         assert!(parse_quote(&suspended).unwrap().is_none());
         assert!(parse_quote(&serde_json::json!({"equityQuote": {"ltp": 1}})).is_err());
         assert!(parse_quote(&serde_json::json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn quote_equity_gives_pe_sector_pe_industry_and_shares() {
+        let info = parse_equity_info(&fixture("quote")).unwrap();
+        assert_eq!(info.pe, Some(24.12));
+        assert_eq!(info.sector_pe, Some(19.33));
+        assert_eq!(info.industry.as_deref(), Some("Refineries & Marketing"));
+        assert_eq!(info.sector_index.as_deref(), Some("NIFTY OIL & GAS"));
+        assert_eq!(info.issued_shares, Some(13_532_472_634.0));
+        assert!((info.market_cap().unwrap() - 13_532_472_634.0 * 1451.6).abs() < 1.0);
+        assert_eq!(info.updated, Some(d("2025-10-24")));
+        assert_eq!(
+            parse_equity_info(&serde_json::json!({"msg": "no data"})),
+            None
+        );
+        assert!(info.flags.is_empty());
+        let mut flagged = fixture("quote");
+        flagged["securityInfo"]["surveillance"] =
+            serde_json::json!({"surv": "ASM", "desc": "Long Term ASM Stage 1"});
+        flagged["info"]["isSuspended"] = serde_json::json!(true);
+        let info = parse_equity_info(&flagged).unwrap();
+        assert_eq!(
+            info.flags,
+            vec![
+                "NSE surveillance: ASM (Long Term ASM Stage 1)".to_string(),
+                "Trading suspended on NSE".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn results_give_trailing_eps_margin_and_growth() {
+        let json = serde_json::json!({"resCmpData": [
+            {"re_to_dt": "30-SEP-2025", "re_net_sale": "2,40,000", "re_net_profit": "24000", "re_dil_eps": "17.5"},
+            {"re_to_dt": "30-JUN-2025", "re_net_sale": 230000, "re_net_profit": 23000, "re_dil_eps": 16.5},
+            {"re_to_dt": "31-MAR-2025", "re_net_sale": 220000, "re_net_profit": 22000, "re_basic_eps": 15.0},
+            {"re_to_dt": "31-DEC-2024", "re_net_sale": 210000, "re_net_profit": 21000, "re_dil_eps": 14.0},
+            {"re_to_dt": "30-SEP-2024", "re_net_sale": 200000, "re_net_profit": 20000, "re_dil_eps": 13.0},
+            {"re_net_sale": 1}
+        ]});
+        let rows = parse_results(&json);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].end, d("2024-09-30"));
+        assert_eq!(rows[4].revenue, Some(240_000.0));
+        let r = result_ratios(&rows);
+        assert_eq!(r.eps_ttm, Some(17.5 + 16.5 + 15.0 + 14.0));
+        assert!((r.profit_margin.unwrap() - 0.1).abs() < 1e-12);
+        assert!((r.revenue_growth.unwrap() - 0.2).abs() < 1e-12);
+        assert_eq!(r.as_of, Some(d("2025-09-30")));
+        // Fewer than four quarters: no trailing sums.
+        let short = result_ratios(&rows[3..]);
+        assert_eq!(short.eps_ttm, None);
     }
 
     #[test]

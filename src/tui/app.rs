@@ -66,42 +66,74 @@ pub enum Mode {
     Search(Search),
 }
 
+/// Row order of the watchlist and portfolio panes, cycled with `s`. Each
+/// pane sorts by the figure it has: holdings carry no day change and
+/// watched symbols no value, so `Change` and `Value` use a different key
+/// per pane (see [`SortBy::label`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortBy {
+    /// The order of the watchlist and portfolio files.
     #[default]
     Default,
     Symbol,
-    ChangePct,
+    /// Watchlist by day change %, holdings by P&L %, largest first.
+    Change,
+    /// Watchlist by price, holdings by weight (value in the base currency),
+    /// largest first.
     Value,
-    PnlPct,
 }
 
 impl SortBy {
     pub fn next(self) -> Self {
         match self {
             Self::Default => Self::Symbol,
-            Self::Symbol => Self::ChangePct,
-            Self::ChangePct => Self::Value,
-            Self::Value => Self::PnlPct,
-            Self::PnlPct => Self::Default,
+            Self::Symbol => Self::Change,
+            Self::Change => Self::Value,
+            Self::Value => Self::Default,
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Default => "default order",
-            Self::Symbol => "symbol (A–Z)",
-            Self::ChangePct => "day change %",
-            Self::Value => "holding value",
-            Self::PnlPct => "P&L %",
+    /// What the rows of `pane` are sorted by.
+    pub fn label(self, pane: Focus) -> &'static str {
+        match (self, pane) {
+            (Self::Default, _) => "file order",
+            (Self::Symbol, _) => "symbol A–Z",
+            (Self::Change, Focus::Watchlist) => "day change %",
+            (Self::Change, Focus::Portfolio) => "P&L %",
+            (Self::Value, Focus::Watchlist) => "price",
+            (Self::Value, Focus::Portfolio) => "value",
         }
     }
+
+    /// The status line after `s`.
+    fn summary(self) -> String {
+        let (w, p) = (self.label(Focus::Watchlist), self.label(Focus::Portfolio));
+        if w == p {
+            format!("Sorted by {}", w)
+        } else {
+            format!("Sorted by {} (watchlist) and {} (portfolio)", w, p)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Error,
+    /// "Refreshing…": cleared when the refresh finishes.
+    Refreshing,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Status {
     pub text: String,
-    pub error: bool,
+    pub kind: StatusKind,
+}
+
+impl Status {
+    pub fn is_error(&self) -> bool {
+        self.kind == StatusKind::Error
+    }
 }
 
 #[derive(Debug)]
@@ -177,6 +209,9 @@ pub struct App {
     pub chart_loading: bool,
     pub mode: Mode,
     pub sort: SortBy,
+    /// Watchlist and holding symbols in file order, as the last snapshot
+    /// listed them, so `SortBy::Default` can restore that order.
+    file_order: (Vec<String>, Vec<String>),
     pub status: Option<Status>,
     pub quit: bool,
     pub screen: Screen,
@@ -210,6 +245,7 @@ impl App {
             chart_loading: false,
             mode: Mode::Normal,
             sort: SortBy::Default,
+            file_order: (Vec::new(), Vec::new()),
             status: None,
             quit: false,
             screen: Screen::Overview,
@@ -303,18 +339,19 @@ impl App {
         vec![Effect::LoadChart { symbol, period }]
     }
 
-    fn info(&mut self, text: impl Into<String>) {
+    fn set_status(&mut self, kind: StatusKind, text: impl Into<String>) {
         self.status = Some(Status {
             text: text.into(),
-            error: false,
+            kind,
         });
     }
 
+    fn info(&mut self, text: impl Into<String>) {
+        self.set_status(StatusKind::Info, text);
+    }
+
     fn error(&mut self, text: impl Into<String>) {
-        self.status = Some(Status {
-            text: text.into(),
-            error: true,
-        });
+        self.set_status(StatusKind::Error, text);
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
@@ -343,10 +380,9 @@ impl App {
                 let mut effects = Vec::new();
                 match result {
                     Ok(snap) => {
-                        self.watch_sel = self.watch_sel.min(snap.watchlist.len().saturating_sub(1));
-                        self.hold_sel = self
-                            .hold_sel
-                            .min(snap.portfolio.holdings.len().saturating_sub(1));
+                        // Keep the selection on the same symbols, wherever
+                        // the new figures sort them.
+                        let keep = self.selected_rows();
                         // Start on the portfolio when there is nothing to watch.
                         if self.snapshot.is_none()
                             && snap.watchlist.is_empty()
@@ -354,10 +390,24 @@ impl App {
                         {
                             self.focus = Focus::Portfolio;
                         }
+                        self.file_order = (
+                            snap.watchlist.iter().map(|r| r.symbol.clone()).collect(),
+                            snap.portfolio
+                                .holdings
+                                .iter()
+                                .map(|h| h.symbol.clone())
+                                .collect(),
+                        );
                         self.snapshot = Some(snap);
-                        self.apply_sort();
+                        self.sort_rows();
+                        self.reselect(keep);
                         self.last_refresh = Some(chrono::Local::now());
-                        if self.status.as_ref().is_some_and(|s| s.error) {
+                        // Errors are fixed, and "Refreshing…" is done.
+                        if self
+                            .status
+                            .as_ref()
+                            .is_some_and(|s| s.kind != StatusKind::Info)
+                        {
                             self.status = None;
                         }
                         // A failed analysis re-run is not fixed by a good
@@ -449,7 +499,7 @@ impl App {
                         if self
                             .status
                             .as_ref()
-                            .is_some_and(|s| s.error && s.text.starts_with(ANALYSIS_FAILED))
+                            .is_some_and(|s| s.is_error() && s.text.starts_with(ANALYSIS_FAILED))
                         {
                             self.status = None;
                         }
@@ -584,7 +634,8 @@ impl App {
     }
 
     fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        if !matches!(key.code, KeyCode::Char('r')) && self.status.as_ref().is_some_and(|s| !s.error)
+        if !matches!(key.code, KeyCode::Char('r'))
+            && self.status.as_ref().is_some_and(|s| !s.is_error())
         {
             self.status = None;
         }
@@ -619,7 +670,7 @@ impl App {
             KeyCode::Char('s') => {
                 self.sort = self.sort.next();
                 self.apply_sort();
-                self.info(format!("Sorted by {}", self.sort.label()));
+                self.info(self.sort.summary());
                 self.chart_effect(false)
             }
             KeyCode::Char('/') | KeyCode::Char('a') => {
@@ -627,7 +678,7 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('r') => {
-                self.info("Refreshing…");
+                self.set_status(StatusKind::Refreshing, "Refreshing…");
                 self.request_refresh()
             }
             KeyCode::Tab | KeyCode::BackTab => {
@@ -685,7 +736,44 @@ impl App {
         self.chart_effect(false)
     }
 
+    /// The symbols selected in the watchlist and the portfolio.
+    fn selected_rows(&self) -> (Option<String>, Option<String>) {
+        let Some(s) = &self.snapshot else {
+            return (None, None);
+        };
+        (
+            s.watchlist.get(self.watch_sel).map(|r| r.symbol.clone()),
+            s.portfolio
+                .holdings
+                .get(self.hold_sel)
+                .map(|h| h.symbol.clone()),
+        )
+    }
+
+    /// Move each selection to its symbol's row; a symbol no longer listed
+    /// keeps the index, clamped to the list.
+    fn reselect(&mut self, (watch, hold): (Option<String>, Option<String>)) {
+        let Some(s) = &self.snapshot else {
+            return;
+        };
+        let w = watch.and_then(|w| s.watchlist.iter().position(|r| r.symbol == w));
+        let h = hold.and_then(|h| s.portfolio.holdings.iter().position(|r| r.symbol == h));
+        let (wl, hl) = (s.watchlist.len(), s.portfolio.holdings.len());
+        self.watch_sel = w.unwrap_or(self.watch_sel.min(wl.saturating_sub(1)));
+        self.hold_sel = h.unwrap_or(self.hold_sel.min(hl.saturating_sub(1)));
+    }
+
+    /// Re-sort for a new sort order, keeping the selected symbols selected.
     fn apply_sort(&mut self) {
+        let keep = self.selected_rows();
+        self.sort_rows();
+        self.reselect(keep);
+    }
+
+    /// Put the rows in file order, then sort them stably by `self.sort`, so
+    /// ties stay in file order and the result never depends on the
+    /// previous order.
+    fn sort_rows(&mut self) {
         let Some(snap) = &mut self.snapshot else {
             return;
         };
@@ -695,6 +783,14 @@ impl App {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
         };
+        let rank = |order: &[String], symbol: &str| {
+            order.iter().position(|s| s == symbol).unwrap_or(usize::MAX)
+        };
+        let (watch_order, hold_order) = &self.file_order;
+        snap.watchlist.sort_by_key(|r| rank(watch_order, &r.symbol));
+        snap.portfolio
+            .holdings
+            .sort_by_key(|h| rank(hold_order, &h.symbol));
         match self.sort {
             SortBy::Default => {}
             SortBy::Symbol => {
@@ -703,7 +799,7 @@ impl App {
                     .holdings
                     .sort_by(|a, b| a.symbol.cmp(&b.symbol));
             }
-            SortBy::ChangePct => {
+            SortBy::Change => {
                 snap.watchlist
                     .sort_by(|a, b| cmp_desc(a.change_percent, b.change_percent));
                 snap.portfolio
@@ -712,16 +808,11 @@ impl App {
             }
             SortBy::Value => {
                 snap.watchlist.sort_by(|a, b| cmp_desc(a.price, b.price));
+                // value_base is in the base currency, so a rupee holding and
+                // a dollar holding compare by what they are worth without rounding ties.
                 snap.portfolio
                     .holdings
-                    .sort_by(|a, b| cmp_desc(a.value, b.value));
-            }
-            SortBy::PnlPct => {
-                snap.watchlist
-                    .sort_by(|a, b| cmp_desc(a.change_percent, b.change_percent));
-                snap.portfolio
-                    .holdings
-                    .sort_by(|a, b| cmp_desc(a.pnl_percent, b.pnl_percent));
+                    .sort_by(|a, b| cmp_desc(a.value_base, b.value_base));
             }
         }
     }
@@ -857,7 +948,7 @@ pub(crate) mod tests {
         app.update(Msg::Snapshot(Err("offline".into())));
         assert!(app.snapshot.is_some());
         let status = app.status.clone().unwrap();
-        assert!(status.error);
+        assert!(status.is_error());
         assert!(status.text.contains("offline"));
         // The next good refresh clears the error.
         app.update(Msg::RefreshDue);
@@ -1131,12 +1222,145 @@ pub(crate) mod tests {
         app.update(key(KeyCode::Char('s')));
         assert_eq!(app.sort, SortBy::Symbol);
         app.update(key(KeyCode::Char('s')));
-        assert_eq!(app.sort, SortBy::ChangePct);
+        assert_eq!(app.sort, SortBy::Change);
         app.update(key(KeyCode::Char('s')));
         assert_eq!(app.sort, SortBy::Value);
         app.update(key(KeyCode::Char('s')));
-        assert_eq!(app.sort, SortBy::PnlPct);
+        assert_eq!(app.sort, SortBy::Default);
+    }
+
+    fn watch_symbols(app: &App) -> Vec<String> {
+        let s = app.snapshot.as_ref().unwrap();
+        s.watchlist.iter().map(|r| r.symbol.clone()).collect()
+    }
+
+    fn hold_symbols(app: &App) -> Vec<String> {
+        let s = app.snapshot.as_ref().unwrap();
+        s.portfolio
+            .holdings
+            .iter()
+            .map(|h| h.symbol.clone())
+            .collect()
+    }
+
+    #[test]
+    fn each_sort_has_its_own_order_and_default_restores_file_order() {
+        let mut app = loaded();
+        let file_watch = watch_symbols(&app);
+        let file_hold = hold_symbols(&app);
+        assert_eq!(file_watch, ["RELIANCE.NS", "TCS.NS"]);
+        assert_eq!(file_hold, ["TCS.NS", "INFY.NS", "DELISTED.NS"]);
+
+        app.update(key(KeyCode::Char('s'))); // symbol
+        assert_eq!(watch_symbols(&app), ["RELIANCE.NS", "TCS.NS"]);
+        assert_eq!(hold_symbols(&app), ["DELISTED.NS", "INFY.NS", "TCS.NS"]);
+
+        app.update(key(KeyCode::Char('s'))); // day change % / P&L %
+        // TCS +1.5% today against RELIANCE +0.8%.
+        assert_eq!(watch_symbols(&app), ["TCS.NS", "RELIANCE.NS"]);
+        // TCS +17% P&L, INFY -6%, DELISTED unpriced last.
+        assert_eq!(hold_symbols(&app), ["TCS.NS", "INFY.NS", "DELISTED.NS"]);
+        assert_eq!(
+            app.status.as_ref().unwrap().text,
+            "Sorted by day change % (watchlist) and P&L % (portfolio)"
+        );
+
+        app.update(key(KeyCode::Char('s'))); // price / value
+        assert_eq!(watch_symbols(&app), ["TCS.NS", "RELIANCE.NS"]);
+        assert_eq!(hold_symbols(&app), ["TCS.NS", "INFY.NS", "DELISTED.NS"]);
+
+        // Back to file order at once, without waiting for a refresh.
         app.update(key(KeyCode::Char('s')));
         assert_eq!(app.sort, SortBy::Default);
+        assert_eq!(watch_symbols(&app), file_watch);
+        assert_eq!(hold_symbols(&app), file_hold);
+    }
+
+    #[test]
+    fn a_refresh_that_reorders_rows_keeps_the_same_symbol_selected() {
+        let mut app = loaded();
+        app.update(key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::Change);
+        // TCS (+1.5%) is first; select RELIANCE (+0.8%) and inspect it.
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.selected_symbol().as_deref(), Some("RELIANCE.NS"));
+        app.update(key(KeyCode::Char('d')));
+        assert_eq!(app.mode, Mode::Detail);
+
+        // RELIANCE jumps to +5%, so it now sorts first.
+        let mut snap = snapshot();
+        for r in &mut snap.watchlist {
+            if r.symbol == "RELIANCE.NS" {
+                r.change_percent = Some(5.0);
+            }
+        }
+        app.update(Msg::RefreshDue);
+        let effects = app.update(Msg::Snapshot(Ok(snap)));
+        assert_eq!(watch_symbols(&app), ["RELIANCE.NS", "TCS.NS"]);
+        assert_eq!(app.watch_sel, 0);
+        assert_eq!(app.selected_symbol().as_deref(), Some("RELIANCE.NS"));
+        assert_eq!(app.mode, Mode::Detail);
+        assert_eq!(
+            effects,
+            vec![Effect::LoadChart {
+                symbol: "RELIANCE.NS".into(),
+                period: "1mo"
+            }]
+        );
+    }
+
+    #[test]
+    fn changing_the_sort_keeps_the_selection() {
+        let mut app = loaded();
+        app.update(key(KeyCode::Tab));
+        app.update(key(KeyCode::End));
+        assert_eq!(app.selected_symbol().as_deref(), Some("DELISTED.NS"));
+        // Symbol order puts DELISTED first; the chart is already shown.
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.hold_sel, 0);
+        assert_eq!(app.selected_symbol().as_deref(), Some("DELISTED.NS"));
+    }
+
+    #[test]
+    fn a_finished_refresh_clears_refreshing() {
+        let mut app = loaded();
+        assert_eq!(app.update(key(KeyCode::Char('r'))), vec![Effect::Refresh]);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.kind),
+            Some(StatusKind::Refreshing)
+        );
+        app.update(Msg::Snapshot(Ok(snapshot())));
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn a_finished_refresh_keeps_other_messages() {
+        let mut app = loaded();
+        app.update(key(KeyCode::Tab));
+        app.update(key(KeyCode::Char('x')));
+        assert_eq!(app.status.as_ref().map(|s| s.kind), Some(StatusKind::Info));
+        app.update(Msg::RefreshDue);
+        app.update(Msg::Snapshot(Ok(snapshot())));
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn value_sort_orders_by_value_base_even_when_rounded_weights_tie() {
+        let mut app = loaded();
+        let mut snap = snapshot();
+        // Set identical rounded weight_percent but distinct value_base.
+        snap.portfolio.holdings[0].weight_percent = Some(50.0);
+        snap.portfolio.holdings[0].value_base = Some(100.0);
+        snap.portfolio.holdings[1].weight_percent = Some(50.0);
+        snap.portfolio.holdings[1].value_base = Some(200.0);
+        app.update(Msg::RefreshDue);
+        app.update(Msg::Snapshot(Ok(snap)));
+        // Cycle to SortBy::Value (Default -> Symbol -> Change -> Value)
+        app.update(key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('s')));
+        assert_eq!(app.sort, SortBy::Value);
+        assert_eq!(hold_symbols(&app), ["INFY.NS", "TCS.NS", "DELISTED.NS"]);
     }
 }

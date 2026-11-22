@@ -1,0 +1,10 @@
+{
+  "Table": [
+    {"Scrip_cd": "544612", "Scrip_Name": "Mahanadi Coalfields Limited", "IPO_NO": "2001", "IR_flag": "IPO", "Status": "L", "Start_Dt": "2026-11-19T00:00:00", "End_Dt": "2026-11-23T00:00:00", "Price_Band": "129.00 - 136.00", "Face_Val": "10", "Exchange_Platform": "Mainboard"},
+    {"Scrip_cd": "", "Scrip_Name": "Watrana Bonds 2031", "IPO_NO": "2002", "IR_flag": "DEBT", "Status": "L", "Start_Dt": "2026-11-18T00:00:00", "End_Dt": "2026-11-28T00:00:00", "Price_Band": "1000.00"},
+    {"Scrip_cd": "", "Scrip_Name": "Shree Siddhivinayak Greentech Industries Limited", "IPO_NO": "2003", "IR_flag": "IPO", "Status": "F", "Start_Dt": "25 Nov 2026", "End_Dt": "27 Nov 2026", "Price_Band": "130.00 - 142.00", "Exchange_Platform": "SME"},
+    {"Scrip_cd": "532123", "Scrip_Name": "Old Steel Limited", "IPO_NO": "1990", "IR_flag": "FPO", "Status": "L", "Start_Dt": "2026-11-20T00:00:00", "End_Dt": "2026-11-24T00:00:00", "Price_Band": "50.00 - 55.00"},
+    {"Scrip_cd": "", "Scrip_Name": "Northwind Foods Limited", "IPO_NO": "2004", "IR_flag": "IPO", "Status": "F", "Start_Dt": "02/12/2026", "End_Dt": "04/12/2026", "Price_Band": "-"},
+    {"Scrip_cd": "544600", "Scrip_Name": "BLS Polymers Limited", "IPO_NO": "1985", "IR_flag": "IPO", "Status": "H", "Start_Dt": "2026-10-28T00:00:00", "End_Dt": "2026-10-30T00:00:00", "Price_Band": "142.00 - 150.00"}
+  ]
+}

@@ -18,7 +18,13 @@ fn altman_summary(a: &scorecard::AltmanScorecard) -> Option<String> {
     })
 }
 
-fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &crate::api::Quote) {
+/// `shown`: the verdict whose action the view already printed at the top
+/// (only the score block is repeated here).
+fn print_unified_research_footer(
+    r_opt: Option<&crate::research::Research>,
+    q: &crate::api::Quote,
+    shown: Option<&crate::verdict::DecisionVerdict>,
+) {
     if let Some(r) = r_opt {
         let sc = scorecard::generate_scorecard_report(r);
         print_section("Accounting Scorecards (Piotroski & Altman)");
@@ -56,10 +62,15 @@ fn print_unified_research_footer(r_opt: Option<&crate::research::Research>, q: &
             }
         }
 
-        let v = crate::verdict::generate_verdict(r, &cards);
         println!();
         println!("{}", "─".repeat(60).dimmed());
-        crate::verdict::print_snapshot(&v, &r.symbol);
+        match shown {
+            Some(v) => crate::verdict::print_snapshot_body(v, &r.symbol),
+            None => {
+                let v = crate::verdict::generate_verdict(r, &cards);
+                crate::verdict::print_snapshot(&v, &r.symbol);
+            }
+        }
         println!("{}", "─".repeat(60).dimmed());
     } else {
         print_section("Insights");
@@ -82,26 +93,38 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         .context("No data found for this symbol")?;
     crate::research::enrich_quote(&client, q, false).await;
     let q = &*q;
-    let r_opt =
-        crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::VERDICT)
-            .await
-            .ok();
+    let r_opt = crate::research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        crate::research::Needs {
+            filings: true,
+            ..crate::research::Needs::VERDICT
+        },
+    )
+    .await
+    .ok();
+    let cards = r_opt
+        .as_ref()
+        .map(insights::generate_rich_insights)
+        .unwrap_or_default();
+    let verdict = r_opt.as_ref().map(|r| {
+        let mut v = crate::verdict::generate_verdict(r, &cards);
+        super::actions::apply_holding(&mut v, r, market);
+        v
+    });
 
     if json {
-        let cards = r_opt
-            .as_ref()
-            .map(insights::generate_rich_insights)
-            .unwrap_or_default();
-        let verdict = r_opt
-            .as_ref()
-            .map(|r| crate::verdict::generate_verdict(r, &cards));
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
+            "action": verdict.as_ref().map(|v| &v.action),
             "quote": market::quote_json(q),
             "verdict": verdict,
             "scorecard": scorecard,
             "insights": cards,
+            "meta": r_opt.as_ref().map(|r| &r.meta),
         });
         return output::print_json(&out);
     }
@@ -228,7 +251,11 @@ pub async fn cmd_analyze(symbol: &str, market: Market, json: bool) -> Result<()>
         print_kv("Volatility", &risk);
     }
 
-    print_unified_research_footer(r_opt.as_ref(), q);
+    if let Some(v) = &verdict {
+        println!();
+        print!("{}", crate::verdict::render_action(&v.action));
+    }
+    print_unified_research_footer(r_opt.as_ref(), q, verdict.as_ref());
 
     // AI-powered analysis (with --ai, if the provider is available)
     let mut ai = crate::ai::AiClient::connect().await;
@@ -768,6 +795,61 @@ pub async fn cmd_dividends(symbol: &str, market: Market, fmt: Format) -> Result<
 
 // ── Insider Activity (via Yahoo search news) ──
 
+/// Insider trades shown at most.
+const INSIDER_ROWS: usize = 20;
+
+/// At most `max` characters, with an ellipsis when cut.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Insider trades for `resolved`: the regulator's filings first (NSE PIT
+/// for Indian stocks, SEC Form 4 for US ones), Yahoo when those fail or
+/// list nothing. Returns the trades and notes on what was tried.
+async fn insider_trades(
+    client: &YahooClient,
+    resolved: &str,
+) -> (Vec<crate::insider::Trade>, Vec<String>) {
+    use crate::insider;
+    let mut notes = Vec::new();
+    let upper = resolved.to_ascii_uppercase();
+    let primary: Option<(&str, anyhow::Result<Vec<insider::Trade>>)> =
+        if upper.ends_with(".NS") || upper.ends_with(".BO") {
+            Some(("NSE", insider::nse_trades(resolved).await))
+        } else if crate::providers::edgar::ticker(resolved).is_some() {
+            match insider::sec_trades(client, resolved).await {
+                Ok(Some(t)) => Some(("SEC EDGAR", Ok(t))),
+                Ok(None) => {
+                    notes.push(format!("{resolved} is not in SEC's ticker list."));
+                    None
+                }
+                Err(e) => Some(("SEC EDGAR", Err(e))),
+            }
+        } else {
+            None
+        };
+    match primary {
+        Some((_, Ok(t))) if !t.is_empty() => return (t, notes),
+        Some((who, Ok(_))) => notes.push(format!("{who} lists no insider trades for {resolved}.")),
+        Some((_, Err(e))) => notes.push(format!("{e:#}")),
+        None => {}
+    }
+    match insider::yahoo_trades(client, resolved).await {
+        Ok(t) => (t, notes),
+        Err(e) => {
+            notes.push(format!(
+                "Yahoo Finance insider transactions unavailable ({e:#})."
+            ));
+            (Vec::new(), notes)
+        }
+    }
+}
+
 pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
     let resolved = market::resolve_symbol(symbol, market);
     let client = YahooClient::new().await?;
@@ -778,16 +860,83 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
         .as_deref()
         .or(q.long_name.as_deref())
         .unwrap_or("Unknown");
+    let cur = q.currency.as_deref();
 
-    // Yahoo doesn't have a free insider endpoint, but we can show key holder metrics
     print_header(&format!("Insider & Institutional: {}", resolved));
     print_kv("Company", name);
     print_kv(
         "Price",
-        &format_price(q.regular_market_price.unwrap_or(0.0), q.currency.as_deref()),
+        &format_price(q.regular_market_price.unwrap_or(0.0), cur),
     );
 
-    // Show what we have from the quote
+    let (trades, notes) = insider_trades(&client, &resolved).await;
+    let source = trades.first().map(|t| t.source);
+    print_section(&match source {
+        Some(s) => format!("Insider Trades — {}", s.label()),
+        None => "Insider Trades".to_string(),
+    });
+    for n in &notes {
+        println!("  {} {}", "!".yellow(), n.dimmed());
+    }
+    if trades.is_empty() {
+        println!("  {}", "No insider trades found.".dimmed());
+    } else {
+        println!(
+            "  {:<11} {:<24} {:<20} {:<24} {:>10} {:>10} {:>12}",
+            "Date".bold(),
+            "Insider".bold(),
+            "Role".bold(),
+            "Transaction".bold(),
+            "Shares".bold(),
+            "Price".bold(),
+            "Value".bold()
+        );
+        println!("  {}", "─".repeat(117).dimmed());
+        for t in trades.iter().take(INSIDER_ROWS) {
+            let action = clip(&t.action, 24);
+            let action = match (t.open_market, t.side) {
+                (true, crate::insider::Side::Acquired) => action.green().to_string(),
+                (true, crate::insider::Side::Disposed) => action.red().to_string(),
+                _ => action,
+            };
+            println!(
+                "  {:<11} {:<24} {:<20} {:<24} {:>10} {:>10} {:>12}",
+                t.date.format("%d %b %Y"),
+                clip(&t.name, 24),
+                clip(if t.role.is_empty() { "—" } else { &t.role }, 20),
+                action,
+                t.shares.map_or("—".to_string(), |s| format!("{s:.0}")),
+                t.price.map_or("—".to_string(), |p| format_price(p, cur)),
+                t.value
+                    .map_or("—".to_string(), |v| format_large_number(v, cur)),
+            );
+        }
+        if trades.len() > INSIDER_ROWS {
+            println!(
+                "  {}",
+                format!("... {} older trades not shown", trades.len() - INSIDER_ROWS).dimmed()
+            );
+        }
+        let ((nb, vb), (ns, vs)) = crate::insider::open_market_totals(&trades);
+        println!(
+            "\n  {} Open-market trades listed: {} acquisitions ({}), {} disposals ({}).",
+            "→".cyan(),
+            nb,
+            format_large_number(vb, cur),
+            ns,
+            format_large_number(vs, cur)
+        );
+        println!(
+            "  {}",
+            "Grants, option exercises, tax withholding, gifts, pledges and off-market transfers are listed but not counted."
+                .dimmed()
+        );
+    }
+
+    // Analyst consensus from the quote (no header when there is none)
+    if has_analyst_data(q) {
+        print_section("Analyst Consensus");
+    }
     if let Some(rec) = q.recommendation_mean {
         print_kv("Analyst Rating", &mean_rating_text(rec));
     }
@@ -803,14 +952,14 @@ pub async fn cmd_insider(symbol: &str, market: Market) -> Result<()> {
             "Analyst Mean Price Estimate",
             &format!(
                 "{}{:.2} ({:+.1}% from price)",
-                market::currency_symbol(q.currency.as_deref()),
+                market::currency_symbol(cur),
                 target,
                 upside
             ),
         );
     }
 
-    // Fetch insider-related news from multiple sources concurrently
+    // Insider- and analyst-related news from multiple sources concurrently
     let base = resolved.split('.').next().unwrap_or(&resolved).to_string();
     let yahoo_insider_q = format!("{} insider", resolved);
     let insider_query = format!("{} insider buying selling", base);
@@ -880,28 +1029,67 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     // ── 1. Quote + Fundamentals ──
     let mut quotes = client.get_quote(&[cur_ref.as_str()]).await?;
     let q = quotes.first_mut().context("Symbol not found")?;
-    crate::research::enrich_quote(&client, q, false).await;
+    let mut meta = crate::provenance::Meta::default();
+    crate::research::enrich_quote_with(&client, q, false, &mut meta).await;
     let q = &*q;
-    let r_opt = crate::research::fetch(&client, symbol, market, 60, crate::research::Needs::ALL)
-        .await
-        .ok();
+    let r_opt = match crate::research::fetch(
+        &client,
+        symbol,
+        market,
+        60,
+        crate::research::Needs::ALL,
+    )
+    .await
+    {
+        Ok(r) => {
+            let mut m = r.meta.clone();
+            m.merge(&meta);
+            meta = m;
+            Some(r)
+        }
+        Err(e) => {
+            meta.warn(format!("Research data unavailable ({e:#})"));
+            None
+        }
+    };
+
+    let fallback_action = || {
+        let mut a = crate::action::Action::undecided(q.currency.as_deref().unwrap_or("USD"));
+        a.reasons = vec![
+            "Research data unavailable; quote-only view cannot evaluate full rules".to_string(),
+        ];
+        a
+    };
+    let cards = r_opt
+        .as_ref()
+        .map(insights::generate_rich_insights)
+        .unwrap_or_default();
+    // The rule-based action before the holding is applied: the only one the
+    // AI prompt gets, so thesis limits, holding weights and other
+    // portfolio-derived reasons stay on this machine.
+    let mut public_action = None;
+    let deep_verdict = r_opt.as_ref().map(|r| {
+        let mut v = crate::verdict::generate_verdict(r, &cards);
+        public_action = Some(v.action.clone());
+        super::actions::apply_holding(&mut v, r, market);
+        v
+    });
+    let deep_action = deep_verdict
+        .as_ref()
+        .map(|v| v.action.clone())
+        .unwrap_or_else(fallback_action);
 
     if json {
-        let cards = r_opt
-            .as_ref()
-            .map(insights::generate_rich_insights)
-            .unwrap_or_default();
-        let verdict = r_opt
-            .as_ref()
-            .map(|r| crate::verdict::generate_verdict(r, &cards));
         let scorecard = r_opt.as_ref().map(scorecard::generate_scorecard_report);
         let out = serde_json::json!({
             "symbol": resolved,
+            "action": deep_action,
             "period": period,
             "quote": market::quote_json(q),
-            "verdict": verdict,
+            "verdict": deep_verdict,
             "scorecard": scorecard,
             "insights": cards,
+            "meta": meta,
         });
         return output::print_json(&out);
     }
@@ -917,6 +1105,9 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     let change = q.regular_market_change.unwrap_or(0.0);
     let change_pct = q.regular_market_change_percent.unwrap_or(0.0);
 
+    // The rule-based action is the first thing printed.
+    println!();
+    print!("{}", crate::verdict::render_action(&deep_action));
     print_header(&format!("DEEP DIVE: {} — {}", resolved, name));
     println!(
         "  {}  {}\n",
@@ -1177,19 +1368,20 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
 
         // Risk
         print_section("Risk Profile");
-        if let Some(vol) = technical::annualized_volatility(&closes) {
+        let rc = chart.return_closes();
+        if let Some(vol) = technical::annualized_volatility(&rc) {
             print_kv("Annualized Vol", &format!("{:.1}%", vol * 100.0));
         }
-        if let Some(sharpe) = technical::sharpe_ratio(&closes, 0.05) {
+        if let Some(sharpe) = technical::sharpe_ratio(&rc, 0.05) {
             print_kv("Sharpe Ratio", &format!("{:.2}", sharpe));
         }
-        if let Some((mdd, _, _)) = technical::max_drawdown(&closes) {
+        if let Some((mdd, _, _)) = technical::max_drawdown(&rc) {
             print_kv(
                 "Max Drawdown",
                 &format!("-{:.1}%", mdd * 100.0).red().to_string(),
             );
         }
-        if let Some(var95) = technical::value_at_risk(&closes, 0.95) {
+        if let Some(var95) = technical::value_at_risk(&rc, 0.95) {
             print_kv("Daily VaR (95%)", &format!("{:.2}%", var95 * 100.0));
         }
 
@@ -1223,13 +1415,23 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     }
 
     // ── 3. Unified Scorecards, Rich Insights & 6-Pillar Verdict ──
-    print_unified_research_footer(r_opt.as_ref(), q);
+    print_unified_research_footer(r_opt.as_ref(), q, deep_verdict.as_ref());
 
     // ── 4. AI Analysis ──
     let mut ai = crate::ai::AiClient::connect().await;
     if ai.auto_available().await {
         print_section(&format!("AI Analysis ({})", ai.provider().name()));
-        let stock_data = crate::ai::StockData::from_quote(q);
+        let mut stock_data = crate::ai::StockData::from_quote(q);
+        // Only when the holding left the call unchanged: if it moved the
+        // displayed action (a thesis limit, a NO CALL after a notes or
+        // portfolio read failure), the public action would be stale, so the
+        // AI gets the public numbers and no action at all.
+        if let Some(a) = public_action
+            .as_ref()
+            .filter(|a| a.kind == deep_action.kind)
+        {
+            stock_data = stock_data.with_action(a);
+        }
         match ai.analyze_stock(&stock_data).await {
             Ok(analysis) => print_ai_answer(&analysis),
             Err(_) => {
@@ -1243,6 +1445,10 @@ pub async fn cmd_deep(symbol: &str, period: &str, market: Market, json: bool) ->
     print_hint(&format!(
         "Drill down: stockwise verdict {bare} · stockwise score {bare} · stockwise insights {bare} · stockwise events {bare}"
     ));
+    for w in &meta.warnings {
+        println!("  {} {}", "!".yellow(), w.dimmed());
+    }
+    println!("\n  {}", meta.footer().dimmed());
     println!(
         "\n  {}",
         "Not financial advice. Do your own research."
@@ -1714,6 +1920,7 @@ mod tests {
                     close: Some(close),
                     volume: Some(vec![Some(100); n]),
                 }],
+                adjclose: None,
             },
             events: None,
         }

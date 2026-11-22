@@ -270,6 +270,7 @@ messages! {
     TotalInvested => "Total Invested", "कुल निवेश";
     PnL => "P&L", "लाभ/हानि";
     PnLPct => "P&L %", "लाभ/हानि %";
+    DayChange => "Day Change", "आज का बदलाव";
     TriggeredAlerts => "Triggered Alerts", "ट्रिगर हुए अलर्ट";
     GetStarted => "Get started", "शुरुआत करें";
     GetStartedTrack => "track a holding (symbol, shares, cost)", "होल्डिंग जोड़ें (सिंबल, शेयर, लागत)";
@@ -366,7 +367,7 @@ messages! {
     GoalFutureCost => "Cost in {0}", "{0} बाद लागत";
     GoalPerYear => "{0}% a year", "{0}% सालाना";
     GoalPerMonth => "{0} a month", "{0} प्रति माह";
-    GoalAssumptions => "Assumes the same return every year, SIPs at the start of each month and a monthly rate of annual ÷ 12 (12% a year is 12.68% once compounded). Tax and exit load are estimates at redemption; outcome ranges are simulated, not forecasts. Returns are not guaranteed — not financial advice.", "हर साल एक जैसा रिटर्न, हर महीने की शुरुआत में SIP और मासिक दर = सालाना ÷ 12 मानकर (12% सालाना जुड़कर 12.68% बनता है)। टैक्स और एग्ज़िट लोड निकासी पर अनुमान हैं; परिणाम की रेंज सिमुलेशन है, भविष्यवाणी नहीं। रिटर्न की गारंटी नहीं — यह वित्तीय सलाह नहीं है।";
+    GoalAssumptions => "Assumes the same return every year, SIPs at the start of each month and a monthly rate that compounds to the annual return ((1 + annual)^(1/12) − 1: 12% a year is 0.949% a month). Tax and exit load are estimates at redemption; outcome ranges are simulated, not forecasts. Returns are not guaranteed — not financial advice.", "हर साल एक जैसा रिटर्न, हर महीने की शुरुआत में SIP और मासिक दर (1 + सालाना)^(1/12) − 1 मानकर (12% सालाना = 0.949% मासिक, जो साल भर में जुड़कर 12% बनती है)। टैक्स और एग्ज़िट लोड निकासी पर अनुमान हैं; परिणाम की रेंज सिमुलेशन है, भविष्यवाणी नहीं। रिटर्न की गारंटी नहीं — यह वित्तीय सलाह नहीं है।";
 
     // ── Goal planner: horizons, tax, bands ──
     DurYear1 => "1 year", "1 साल";

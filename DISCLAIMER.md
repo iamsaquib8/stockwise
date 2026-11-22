@@ -1,15 +1,32 @@
 # Disclaimer
 
-**StockWise is for educational and informational purposes only. It is not
+**StockWise gives rule-based educational signals. It is not personalised
 financial, investment, trading, legal, or tax advice.**
 
-- Nothing produced by StockWise — quotes, analysis, technical signals,
-  backtests, "AI verdicts", "picks", forecasts, or daemon decisions — is a
-  recommendation to buy, sell, or hold any security. Markets are risky and you
-  can lose money, including more than you invest.
-- All data is sourced from third-party providers (e.g. Yahoo Finance) on an
-  "as available" basis. It may be delayed, inaccurate, incomplete, or wrong.
-  Do not rely on it for real decisions without independent verification.
+- **Actions are rule-based signals, not advice.** StockWise shows actions
+  (BUY, WATCH, AVOID for a stock you don't hold; ADD, HOLD, TRIM, EXIT for one
+  you do) computed by published, deterministic rules (see
+  [docs/methodology.md](docs/methodology.md), "Actions"). Each comes with its
+  reasons, an invalidation price and a review date. When the data is too thin
+  it says NO CALL. The rules do not know your full finances, goals or tax
+  position, so the signals are not personalised advice.
+- **StockWise is not a registered adviser.** It is not a SEBI-registered
+  investment adviser or research analyst, and it is not a registered
+  investment adviser, broker-dealer or financial adviser in any other country.
+- **You decide, and you are responsible.** Check the reasons and the data
+  before you act. Every decision, and its result, is yours.
+- **You can lose money.** Markets are risky. Prices can fall below an
+  invalidation level before you act on it, and you can lose part or all of
+  your capital, or more than you invest with leverage or derivatives. Quotes,
+  scores, technical signals, backtests, picks, AI answers, forecasts and
+  daemon decisions are not promises of any result.
+- **Data can be wrong or stale.** All data comes from third-party providers
+  (e.g. Yahoo Finance, NSE, BSE) on an "as available" basis. It may be delayed,
+  inaccurate, incomplete, or wrong, and an action computed from it is only as
+  good as that data. Verify it independently before you rely on it.
+- **AI only explains.** AI answers (`ask`, `--ai`, MCP assistants) describe the
+  action the rules computed. If an AI states an action or a price level that
+  StockWise did not compute, ignore it.
 - **Live trading places real orders with real money.** The `trade buy`, `sell`
   and `limit` commands send orders to your connected broker (e.g. Angel One)
   after showing a preview and asking you to confirm — or immediately when you
@@ -27,6 +44,6 @@ financial, investment, trading, legal, or tax advice.**
   endorsed by, or sponsored by** Yahoo, Angel One, Zerodha, the NSE, the BSE, or
   any exchange, broker, or data provider.
 
-Consult a licensed financial advisor before making investment decisions. Use of
-this software constitutes acceptance of this disclaimer. If you do not agree, do
-not use it.
+For advice that fits your situation, consult a SEBI-registered investment
+adviser (or a licensed adviser where you live). Use of this software
+constitutes acceptance of this disclaimer. If you do not agree, do not use it.

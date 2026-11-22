@@ -2,149 +2,181 @@
 
 ## Source Layout
 
+StockWise is one crate and one binary. `src/main.rs` defines the CLI; the
+rest are modules it calls. The analysis engines are pure functions over plain
+inputs, so they test without the network.
+
 ```
 src/
-  main.rs            CLI definition (clap): 76 top-level commands, the grouped `--help` table, parse tests
-  commands/          Command handlers — one file per area, each `cmd_*` re-exported
-    mod.rs           Shared imports and helpers (period → interval, symbol resolution)
-    overview.rs      quote, markets, dashboard, search, doctor
-    setup.rs         config path/show/init
-    fundamentals.rs  analyze, compare, peers, dividends, insider, deep, score (`fundamental score`)
-    research.rs      events, insights, verdict (printing; the data is in `research.rs`, `events.rs`, `verdict.rs`)
+  main.rs            CLI definition (clap): 95 top-level commands, the grouped help table
+                     (`--help` core commands, `--help-all` every command), dispatch, parse tests
+  commands/          Command handlers, one file per area; each `cmd_*` is re-exported by mod.rs
+    overview.rs      quote, markets, dashboard, search, doctor, cache status / clear
+    background.rs    cache warm / snapshots, worker start / stop / status / run, tasks
+    service.rs       worker install / uninstall / service-status (launchd agent, systemd user unit)
+    context.rs       use (default market, active portfolio)
+    init.rs          init (first run)
+    setup.rs         config path / show / init, profile show / set / reset
+    update.rs        update (see selfupdate.rs)
+    fundamentals.rs  analyze, compare, peers, dividends, insider, deep, fundamental score, results
+    research.rs      events, insights, verdict (printing; data in research.rs, events.rs, verdict.rs)
+    actions.rs       portfolio review; the holding context behind verdict, deep and a bare SYMBOL;
+                     quick actions for the portfolio and checkup tables
     technicals.rs    technical, history, chart, timeframes, patterns, support, fibs, volume, gaps, stoploss
     risk.rs          risk, correlate, returns, forecast, options moves
-    funds.rs         mf search, nav, history, sip, screen, overlap (TER in nav/history/screen)
+    markets.rs       movers, sectors, news, sentiment, conditions, screen, picks, picks review,
+                     earnings, rotation, matrix, surprise, heatmap, sectorcmp
+    hot.rs           hot
+    today.rs         today
+    monitoring.rs    monitor, digest, and the monitor passes the worker runs
+    bot.rs           telegram (two-way bot)
+    statusbar.rs     statusbar
+    ipo.rs           ipo, ipo review, ipo calibrate
+    calendar.rs      calendar
+    funds.rs         mf search, nav, history, sip, screen, overlap
     fno.rs           options chain, pcr, maxpain, oi, payoff
-    commodities.rs   commodity spot, futures, etfs, sgb
+    commodities.rs   commodity
     bonds.rs         bonds yields, list, calc
-    markets.rs       movers, sectors, news, sentiment, conditions, screen, picks, earnings, rotation, matrix, surprise, heatmap, sectorcmp
-    ipo.rs           ipo (live board, one issue's analysis)
-    calendar.rs      calendar (results, dividends and splits for holdings and watchlist)
+    income.rs        income
     backtests.rs     backtest (single, portfolio, walkforward, strategies)
     strategies.rs    sip, whatif, intraday, longterm, report
-    portfolio.rs     portfolio (show, add, sell, lots, actions, list, remove, target, xray) and rebalance;
-                     valuation in a base currency
-                     (`value_holdings`: market quotes + `offmarket` fund NAVs and SGB prices)
-    planning.rs      tax export, tax advance, portfolio benchmark (history, FX, sectors), goal sip/retire/education
-    holdings.rs      watch, alert, import (Kite, INDmoney, generic CSV and `.xlsx`, tradebooks), export, wealth,
-                     harvest, tax, divcal, pcorr
-    imports.rs       Groww / Upstox and CAS (casparser JSON/CSV) import parsers
-    sim.rs           paper-trading simulator (settle replays intraday bars)
-    practice.rs      sim replay / challenge / profile / card (practice mode)
+    sim.rs           sim start / status / history / settle / reset
+    practice.rs      sim replay, sim challenge, sim profile, sim card
     worker.rs        daemon intraday / longterm loops
-    alerting.rs      alert watch loop, notify status/test
-    trade.rs         Live orders for every broker: place_live_order (validation, preview, cap, confirmation)
-    broker_selftest.rs  trade selftest: read-only checks + redacted report for broker test reports
-    broker_sync.rs   trade sync (trade book → lots/sales, idempotent) and trade gtt list status changes
+    portfolio.rs     portfolio show / add / sell / lots / actions / demerger / rename /
+                     return-of-capital / remove / restore / list / target / xray, and rebalance;
+                     valuation in a base currency (`value_holdings`)
+    portfolio_analyze.rs  portfolio analyze
+    checkup.rs       portfolio checkup, portfolio wrap
+    taxpreview.rs    portfolio sell --preview, mf bleed
+    planning.rs      tax export, portfolio benchmark, portfolio pme, goal
+    tax_season.rs    tax reconcile, tax income, tax foreign, tax export --schedule / --audit-pack, tax advance
+    holdings.rs      watch, alert, import (Kite, INDmoney, generic CSV and .xlsx, tradebooks), export,
+                     wealth, harvest, tax, divcal, pcorr
+    imports.rs       Groww / Upstox and CAS (casparser JSON/CSV) import parsers
+    casbridge.rs     import cas FILE.pdf through casparser
+    alerting.rs      alert watch loop, notify status / test
+    trade.rs         live orders for every broker: place_live_order (validation, preview, cap, confirmation)
+    broker_selftest.rs  trade selftest (read-only checks and a redacted report)
+    broker_sync.rs   trade sync, trade gtt list status changes, portfolio sync
     interfaces.rs    tui and serve (behind the `tui` / `server` cargo features)
-    assistant.rs     ask and mcp (the MCP server behind the `mcp` cargo feature)
-  views.rs           Data behind quote/history/markets/portfolio/watchlist/alerts as structs,
-                     shared by the CLI printers, the TUI and the server; `DataSource` trait
-  tui/               `stockwise tui`: app.rs (state + key handling, no I/O), ui.rs (ratatui
-                     drawing), mod.rs (event loop, fetches)
-  server/            `stockwise serve`: axum routes, bearer auth, Prometheus metrics; web.rs serves
-                     the dashboard (web/, embedded with include_str!) and sets CSP/security headers
-  daemon_status.rs   Reads the intraday daemon's daemon_state.json for /metrics
-  tools/             The tools for AI agents, shared by `mcp` and `ask`: mod.rs (Tool
-                     definitions, JSON schemas from typed Param lists, the result envelope with
-                     the "not financial advice" note and size limit), args.rs (argument checks),
-                     handlers.rs and extra.rs (each read tool calls the function behind the
-                     command's --json; extra.rs also has fit_check), workspace.rs (the opt-in
-                     write tools, each run through the audit journal),
-                     tests.rs (also checks that the Claude Desktop manifest lists every tool)
-  mcp.rs, mcp/       `stockwise mcp`: rmcp ServerHandler (tools, resources, prompts), stdio and
-                     Streamable HTTP transports (`mcp` feature); mcp/tests.rs
-  ask.rs, ask/       `stockwise ask`: the tool-calling loop in each provider's dialect (Ollama
-                     /api/chat, OpenAI Responses, Anthropic Messages, Gemini generateContent),
-                     saved conversations (ask_sessions in cache.db) and playbooks; ask/tests.rs
-  audit.rs           Journal of assistant changes (audit.json, file copies in undo/) for `undo`
-  onboarding.rs      Profile questions and the fixed mapping from answers to [profile]
-  notes.rs           Per-stock thesis and limits (notes.json) read by fit_check
-  connect.rs         `stockwise connect`: each AI app's MCP config file and format, merged in
-                     place with a backup; installs skills/stockwise/SKILL.md where apps read skills
-  store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME); `update` locks a file
-                     (`<file>.lock`) around load-change-save — do network work first, then update
-  config.rs          Optional config.toml: defaults for market, AI, cache, data dir, periods
-  output.rs          --json / --csv rendering (Format, CsvRow, RFC 4180 quoting)
-  portfolio.rs       Lots, FIFO sales, splits/dividends, XIRR cash flows, FX, named portfolios, import
-                     rules (kept tradebook trades, merging, `--replace`)
+    assistant.rs     ask, mcp, undo, connect
+    output_tests.rs  --json / --csv shape tests (the shapes in docs/commands.md)
+  action.rs          Rule-based actions: BUY / WATCH / AVOID, ADD / HOLD / TRIM / EXIT, NO CALL
+                     (see "Actions" below)
+  verdict.rs         6-pillar score from fixed rules; pillars without data are left out, `data_coverage`
+  picks.rs           picks: five percentile-ranked pillars per scan, long and short horizons
+  picks_log.rs       picks track record (`signal_log.json`) for picks review
+  provenance.rs      Where each figure came from: sources, field coverage, warnings, the footer
+  research.rs        One research snapshot per stock (Yahoo, NSE/XBRL filings, news) for events,
+                     insights, verdict
+  insights.rs        Rule-based plain-English insights
+  events.rs          Key-events timeline: de-duplicated, categorised, with the price reaction
+  scorecard.rs       Piotroski F-score and Altman Z (Z'') with every criterion and formula
+  results.rs, results/  Quarterly and annual results, earnings-season scoreboard
+  conditions.rs      Market readings: trend, volatility, breadth, valuation
+  insider.rs         Insider trades from the regulator's filings
+  news.rs            Headlines and exchange filings per stock; the merged feed for holdings and watchlist
+  pulse.rs           What moved today and why: shared by today, hot, the digest, the bot and MCP
+  hot.rs             Heat ranking and market scanners (moves, volume, gaps, deals, FII/DII, F&O ban, OI)
+  crossmarket.rs     Picks the market for a symbol when -m is not given
+  monitor.rs         Holding monitor detectors and thresholds (`monitor_state.json`)
+  digest.rs          The after-close digest as one message; alert log
+  notify.rs          Notifications: Telegram, Slack, Discord, SMTP email, ntfy, Pushover, desktop;
+                     priorities, routes, quiet hours
+  alerts.rs          Alert conditions and their evaluation on quotes and daily bars
+  calendar.rs        Results, dividend and split dates (Yahoo + NSE), day cache
+  portfolio.rs       Lots, FIFO sales, splits/dividends, XIRR cash flows, FX, named portfolios,
+                     import rules, the corporate-action journal
+  corp_actions.rs    Splits and bonuses not yet applied to lots; broker holdings drift
+  trade_charges.rs   portfolio add/sell --charges (auto estimate for NSE/BSE delivery trades)
+  sellpreview.rs     FIFO lots, tax and LTCG countdown for a sale that is not recorded
+  portfolio_analysis.rs  Figures behind portfolio analyze
+  checkup.rs, wrap.rs    portfolio checkup lenses; portfolio wrap year in review
+  xray.rs            Look-through overlap, asset-class, market-cap and sector split
+  index_weights.rs   Shipped index weights for ETF look-through
+  business_groups.rs Indian promoter groups for concentration checks
+  benchmark.rs       Time-weighted return vs an index, alpha/beta/tracking error, attribution
+  pme.rs             Public Market Equivalent (Index Twin)
+  rebalance.rs       Target weights, drift bands, buy-only, sell-only (`--raise`) and tax-aware plans
+  income.rs          Dividend, coupon and passive-income analytics
+  bleed.rs           Regular vs Direct mutual-fund cost
+  goals.rs           SIP / step-up, retirement, education, SWP, prepay math; Indian amounts (1cr, 25L, 50k)
   tax.rs             Capital-gains rules: holding periods, tax years, set-off, cess, sale-date rates,
                      advance tax and Sec. 234C (India/US/UK)
-  tax_export.rs      ITR Schedule CG / 112A and Form 8949 schedules from realized sales, as CSV/JSON
-  rebalance.rs       Target weights, drift bands and buy-only (`--inflow`) rebalancing
-  xray.rs            Portfolio X-Ray: look-through overlap, asset-class, market-cap and sector split
-  benchmark.rs       Daily time-weighted return vs an index, alpha/beta/tracking error, Carino attribution
-  goals.rs           SIP / step-up, retirement and education math; Indian amounts (1cr, 25L, 50k)
-  api.rs             Yahoo Finance client (session, quotes, charts, search, cache, retries); routes to a provider
-  providers/         MarketData trait + opt-in Alpha Vantage, Massive (Polygon), Twelve Data; Yahoo fills gaps
-    nse.rs, bse.rs   NSE / BSE website JSON (quotes, intraday + daily bars, search, NIFTY index members)
-    session.rs       Polite exchange HTTP: one cookie session per site, ≤3 req/s with jitter, retries, refusal = stop
-  i18n.rs            Typed English/Hindi message catalog, --lang / STOCKWISE_LANG / locale detection
-  brokers/           Broker trait + clients: angel (SmartAPI, TOTP), zerodha, upstox, dhan, fyers
-                     (experimental), secrets.rs (OS keyring / owner-only file), mock.rs (test HTTP server),
-                     readonly.rs (session wrapper that refuses every order/GTT/cancel), gtt_watch.rs
-                     (GTT status changes between looks), per-endpoint response shapes for selftest
-  funds.rs           AMFI NAV file + api.mfapi.in history (cached), AMFI TER disclosure (cached a day),
-                     returns, SIP, ETF holdings overlap
-  xlsx.rs            Minimal .xlsx reader (zip via flate2 + sheet cells, tab-ordered sheets) for AMFI's TER export and broker imports
-  derivatives.rs     Option chains from NSE / BSE / Yahoo, lot sizes, PCR, max pain, per-contract IV and greeks
-  greeks.rs          Black-Scholes pricing, greeks, implied-volatility solver
-  payoff.rs          Multi-leg option payoffs: presets, max profit/loss, breakevens, probability of profit
-  commodity.rs       Gold/silver spot in ₹ from COMEX × USDINR, futures and ETF lists, SGB tranches
-                     and NSE's SGB list (fixture-tested parser; `nse_sgb_list` fetches it)
-  offmarket.rs       Prices for holdings Yahoo doesn't quote: `MF:` funds at AMFI's NAV, SGBs from
-                     NSE's list or estimated from gold spot; used by the shared valuation
-  bonds.rs           Bond math: price ↔ YTM (half-yearly, 30/360), accrued interest, duration, T-bills
-  gsec.rs            CCIL tenor-wise yields, RBI benchmarks and outstanding G-sec list (HTML parsers)
+  tax_export.rs      ITR Schedule CG / 112A and Form 8949 from realized sales
+  tax_reconcile.rs   Broker tax P&L parser (Zerodha, Groww, Upstox) and sale-by-sale matcher
+  tax_income.rs      Dividends and interest with TDS (Schedule OS)
+  tax_foreign.rs     Schedule FA and Form 67
+  fx_history.rs      Historical exchange rates for costing foreign purchases
+  pta_export.rs      portfolio export as a beancount or hledger journal
+  backup.rs          backup export / restore (passphrase-encrypted .swbak)
+  selfupdate.rs      update: how the binary was installed, newer release, in-place replace
+  api.rs             Yahoo Finance client (session, quotes, charts, search), cache, rate limit,
+                     retries; NSE requests share one session; routes to a provider
+  providers/         MarketData trait and routing (router.rs) over the configured providers:
+                     nse.rs, bse.rs, bse_bhav.rs, niftyindices.rs (exchange sites), edgar.rs and edgar/
+                     (SEC filings), alphavantage.rs, massive.rs, twelvedata.rs, finnhub.rs, fmp.rs
+                     (keyed), coingecko.rs, frankfurter.rs (keyless backups), fill.rs (fill missing
+                     fundamentals field by field), adjust.rs (split adjustment), session.rs (polite
+                     exchange HTTP: one cookie session per site, rate limit, a refusal stops)
+  db.rs              cache.db: SQLite (WAL) with http_cache, market snapshots, bars, tasks;
+                     safe to delete
   pagecache.rs       Cached fetch of public pages (CCIL, RBI, NSE SGB list) with a stale-copy fallback
-  ai.rs              AI: Ollama (default) or opt-in OpenAI / Anthropic / Gemini; educational prompts
-                     (`ai::prompts`, versioned cache keys), disclaimer, opt-in flag, model checks
-  clock.rs           Exchange clock: IST / US Eastern / European / Sydney time, NSE, NYSE and global
-                     exchange holidays and half days, lunch breaks, session phases
-  daemon.rs          Worker state: positions, risk manager, daemon_state.json, shutdown, retry
-                     (`daemon intraday --once` stops after one session)
-  notify.rs          Notifications: Telegram, Slack, Discord, SMTP email, desktop
-  technical.rs       Indicators and statistics (SMA, EMA, RSI, MACD, BB, ATR, VWAP, OBV, VaR, Sharpe, XIRR, ...)
-  backtest/          Backtesting engine (see docs/backtesting.md)
-    mod.rs           Daily bars from Yahoo charts
-    rules.rs         TOML strategy rules: parser, validation, signals; built-ins from examples/strategies/
-    indicators.rs    Whole-series indicators matching technical.rs
-    costs.rs         Indian delivery/intraday and US cost models, slippage
-    engine.rs        Simulator (single symbol or portfolio, fills, stops, rebalancing) and metrics
-    walkforward.rs   Rolling train/test optimisation and the overfitting verdict
-    plugin.rs        WASM strategy plugins: wasmi sandbox, ABI v1 (`wasm-plugins` feature)
-  intraday.rs        Intraday bot (9 strategies, regime detection, Kelly sizing)
-  longterm.rs        Long-term scores (6-pillar scoring, Monte Carlo, DRIP)
-  simulator.rs       Paper-trading sessions and confidence rating
-  practice/          Practice mode (see docs/simulator.md): scenarios/*.toml and challenges.toml
-                     (embedded), scenario.rs, tape.rs (cached daily bars; reads stop at the replay
-                     date), replay.rs (next-open fills with backtest costs, stops, marks),
-                     challenge.rs + live.rs (rules and goals), score.rs (0–100 score, badges),
-                     profile.rs (streaks, best scores), card.rs (text and SVG cards)
-  insights.rs        Rule-based plain-English insights
-  research.rs        One research snapshot per stock (Yahoo, NSE/XBRL filings, news) for events, insights, verdict
-  events.rs          Key-events timeline: de-duplicated, categorised, with the price reaction
-  verdict.rs         6-pillar score from fixed rules; pillars without data are left out, `data_coverage`
-  scorecard.rs       Piotroski F-score and Altman Z (Z'') with every criterion and formula
-  ipo.rs             Indian IPO board, subscription, SEBI allotment odds and 6-pillar demand score
-  charts.rs          Braille line charts, option payoff chart, volume bars, gauges
-  display.rs         Currency- and asset-aware formatting (₹/$/€/£/¥, FX and crypto decimals), width-aware padding
-  market.rs          Market enum (in/us/crypto/fx/commodity + global exchanges), the MarketInfo table
-                     (uk/de/jp/hk/sg/ca/au: suffix, currency, indices, sectors, hours, holidays, tax),
-                     asset classes, symbol resolution, index/sector/coin/pair lists
-  alerts.rs          Alert conditions (price, RSI, MA crosses, breakouts, day change, volume, results)
-                     and their evaluation on quotes / daily bars; persisted via store.rs
-  calendar.rs        Results, dividend and split dates: Yahoo calendarEvents + NSE board meetings and
-                     corporate actions (one rate-limited session), day cache in calendar_cache.json
-  watchlist.rs, wealth.rs   Data models persisted via store.rs
+  nifty500.rs, sp500.rs, global_lists.rs  Shipped index member lists, the offline scan fallback
+  market.rs          Market enum and MarketInfo table, symbol resolution, index/sector/coin/pair lists
+  clock.rs           Exchange clocks, holidays, half days, lunch breaks, session phases
+  funds.rs           AMFI NAVs and TER, api.mfapi.in history, returns, SIP, ETF overlap
+  offmarket.rs       Prices Yahoo doesn't give: MF: funds at AMFI's NAV, SGBs; ETF categories
+  derivatives.rs     Option chains (NSE / BSE / Yahoo), lot sizes, PCR, max pain, IV and greeks
+  greeks.rs, payoff.rs  Black-Scholes and IV solver; multi-leg payoffs
+  commodity.rs       Gold and silver spot in rupees, futures, ETFs, SGBs
+  bonds.rs, gsec.rs  Bond math; CCIL yields, RBI benchmarks, G-sec list
+  ipo.rs             Indian IPO board, subscription, allotment odds, regime; assembles the verdict
+  ipo_verdict.rs     IPO verdicts (APPLY / WAIT / AVOID / NO CALL): valuation, odds, EV, gates, plan
+  ipo_model.rs       Listing-day model: shipped fit, Huber regression, residual P(loss), regime
+  ipo_log.rs         IPO verdict log (`ipo_signal_log.json`) and `ipo review`
+  technical.rs       Indicators and statistics (SMA, EMA, RSI, MACD, BB, ATR, VWAP, OBV, VaR, Sharpe, XIRR)
+  backtest/          Backtesting engine (docs/backtesting.md): rules.rs, indicators.rs, costs.rs,
+                     engine.rs, walkforward.rs, stats.rs, regression.rs, plugin.rs (WASM, `wasm-plugins`)
+  intraday.rs, longterm.rs  Intraday signal scanner and sizing; long-term scores and Monte Carlo
+  daemon.rs, daemon_status.rs  Paper-trading daemon state; its status for /metrics
+  simulator.rs       Paper-trading sessions, costs, track record
+  practice/          Historical replays, challenges, scores, badges, cards (docs/simulator.md)
+  worker.rs          Background worker: market-aware ticker, task executor, end-of-day sync
+  views.rs           Data behind quote/history/markets/portfolio/watchlist/alerts as structs, shared by
+                     the CLI, the TUI and the server; the `DataSource` trait
+  tui/               stockwise tui: app.rs (state, keys), ui.rs (drawing), analysis.rs, mod.rs (event loop)
+  server/            stockwise serve: mod.rs (axum routes, bearer auth), metrics.rs (Prometheus),
+                     web.rs (embedded dashboard, CSP headers)
+  mcp.rs, mcp/       stockwise mcp: tools, resources, prompts, stdio and Streamable HTTP; mcp/tests.rs
+  tools/             Tools shared by mcp and ask (see "MCP and AI" below)
+  ask.rs, ask/       stockwise ask: the tool-calling loop per provider, sessions, playbooks
+  ai.rs              AI providers (Ollama, OpenAI, Anthropic, Gemini), prompts, the explain-only rules
+  connect.rs         stockwise connect: each AI app's MCP config, merged in place with a backup
+  audit.rs           Journal of assistant changes for undo
+  onboarding.rs, notes.rs  Profile questions; per-stock thesis and limits (notes.json)
+  brokers/           Broker trait and clients: angel, zerodha, upstox, dhan, fyers (experimental);
+                     secrets.rs (OS keyring), readonly.rs, mock.rs, gtt_watch.rs, charges.rs,
+                     masters.rs, app.rs, http.rs
+  config.rs          Optional config.toml: defaults, [profile], [monitor], notify settings
+  store.rs           Atomic JSON persistence, data directory (STOCKWISE_HOME), file locks
+  output.rs          --json / --csv rendering (Format, CsvRow, RFC 4180 quoting)
+  charts.rs, display.rs  Braille charts and bars; currency- and asset-aware formatting
+  i18n.rs            English/Hindi message catalog
+  xlsx.rs            Minimal .xlsx reader
+  watchlist.rs, wealth.rs  Data models persisted via store.rs
+  testutil.rs        Mock HTTP server for tests
+  fixtures/          Parser fixtures (exchange pages, XBRL, broker tax P&L files)
 ```
 
 Adding a command: define it in `Commands` in `main.rs` (and in the `GROUPS`
-help table — a test enforces this), write `cmd_<name>` in the matching
-`commands/*.rs` file, and dispatch to it in `main()`. For machine-readable
-output, flatten `TableOutput` (`--json`/`--csv`) or `JsonOutput` (`--json`)
-into the command, build the rows once as `Serialize` structs, and branch on
-`output::Format`; shape tests live in `commands/output_tests.rs`.
+help table; a test enforces this), write `cmd_<name>` in the matching
+`commands/*.rs` file, dispatch to it in `main()`, and list it in
+`docs/commands.md`. For machine-readable output, flatten `TableOutput`
+(`--json`/`--csv`) or `JsonOutput` (`--json`) into the command, build the rows
+once as `Serialize` structs, and branch on `output::Format`; shape tests live in
+`commands/output_tests.rs`.
 
 ## Configuration
 
@@ -157,30 +189,114 @@ config file > default.
 
 ## Data Flow
 
+Every command follows the same path: providers fetch, `api.rs` caches, a
+command handler computes, and `output.rs` or a printer renders.
+
 ```
-User Input → clap CLI → commands/* → views.rs → api.rs → Yahoo Finance
-              tui/, server/ ───────────↗
-                                   → funds.rs → AMFI NAVAll.txt + TER disclosure, api.mfapi.in
-                                   → derivatives.rs → NSE / BSE option chains (India), Yahoo (US)
-                                   → gsec.rs → CCIL yields, RBI benchmarks and G-sec list (pagecache.rs)
-                                   → commodity.rs ← NSE SGB list (providers/nse session)
-                                            → providers/* → Alpha Vantage / Massive / Twelve Data / NSE / BSE (opt-in)
-                                   → brokers/* → Angel One, Kite, Upstox, Dhan, Fyers
-                                   → ai.rs → Local Ollama (or opt-in OpenAI / Anthropic / Gemini)
-                                   → technical.rs (indicators)
-                                   → intraday.rs / longterm.rs (bots)
-                                   → charts.rs (visualization)
-                                   → display.rs (formatting)
-                                   → store.rs (portfolio, watchlist, alerts, history)
+providers (Yahoo, NSE/BSE, EDGAR, AMFI, CCIL/RBI, keyed or keyless backups)
+   │  providers/router.rs picks a source per capability; fill.rs fills missing fields
+   ▼
+api.rs  ── rate limit (5 req/s), retries, one shared NSE session
+   │  cache: in-memory → Redis (if set) or cache.db → network
+   ▼
+engines (pure): technical, verdict, action, picks, tax, rebalance, portfolio, ...
+   │
+   ▼
+commands/*  (CLI)   tui/   server/   tools/ (mcp, ask)
+   │  views.rs gives the CLI, TUI and server the same structs
+   ▼
+output: table (display.rs, charts.rs) │ --json / --csv (output.rs) │ HTTP JSON │ MCP structuredContent
 ```
+
+User data (portfolio, watchlist, alerts, goals, notes, config) is read and
+written through `store.rs`; it never goes into a cache. Live orders go only
+through `place_live_order` in `commands/trade.rs`.
+
+`--verbose` (or `STOCKWISE_LOG=debug|info|warn`) prints each request's host,
+status, time and whether the cache answered on stderr. See
+[troubleshooting.md](troubleshooting.md).
+
+## Actions
+
+`src/action.rs` is the only place that computes an action. `decide(&Inputs)`
+is pure and deterministic: the same inputs give the same action. Builders fill
+`Inputs` from a research snapshot and its verdict
+(`inputs_from_research`) or from a quote and its long-term score
+(`inputs_from_quote`), then add the investor profile and, for a holding, the
+holding context.
+
+- A stock you don't hold gets BUY, WATCH or AVOID; one you hold gets ADD, HOLD,
+  TRIM or EXIT.
+- Data coverage below `MIN_COVERAGE` (60%) gives NO CALL with the missing
+  fields.
+- Every action carries at most three reasons, a confidence level, a review
+  date, the methodology version (`METHODOLOGY`) and the disclaimer; BUY, ADD,
+  HOLD and TRIM also carry an invalidation price.
+- `commands/actions.rs` connects it to `portfolio review`, `verdict`, `deep`,
+  the portfolio and checkup tables; `picks.rs` adds an action to each finalist;
+  `pulse.rs` adds one to `today`, `hot` and the digest; the MCP tools
+  `stock_action` and `portfolio_review` return it.
+- AI explains the computed action (`ai.rs` rules, MCP instructions). It never
+  makes one up or changes it.
+
+The rules and thresholds are in [methodology.md](methodology.md#actions-methodology-1).
+A change to a rule bumps `METHODOLOGY`. Tests that print an action use
+`crate::action::testing::assert_action_well_formed`.
+
+## MCP and AI
+
+- `src/tools/` holds the tools that `stockwise mcp` and `stockwise ask` share.
+  `mod.rs` defines them (`TOOLS`: names, typed parameters, hints, timeouts) and
+  the result envelope; `handlers.rs`, `extra.rs`, `more.rs` and `pulse.rs` run
+  the read tools, each calling the function behind a command's `--json`;
+  `schema.rs` has the output schemas; `workspace.rs` has the opt-in write tools,
+  each recorded in the audit journal (`audit.rs`) so `stockwise undo` can
+  reverse it; `args.rs` checks arguments. `stockwise mcp --list-tools` lists 71
+  tools.
+- `src/mcp.rs` is the MCP server (rmcp): tools, resources
+  (`stockwise://...`), prompts, completions, stdio and Streamable HTTP. It is
+  read-only unless started with `--allow-writes` / `--allow-portfolio`.
+  `packaging/mcpb/manifest.json` lists every tool; a test compares the lists.
+- `src/connect.rs` writes each AI app's MCP config (`stockwise connect`).
+- `src/ask.rs` runs the tool-calling loop for `stockwise ask` in each
+  provider's dialect; `src/ai.rs` holds the providers and prompts.
+
+## Worker
+
+`src/worker.rs` runs background work backed by `cache.db`:
+
+- **In process.** `tui`, `serve` and `mcp` start a light ticker that keeps
+  held and watched quotes warm and broadcasts changes (the server's
+  `/api/events`).
+- **As a service.** `stockwise worker start` (detached) or `worker run`
+  (foreground) adds the task executor (`tasks add`), alert checks, the holding
+  monitor during the session, and the post-close sync: the digest, notices,
+  broker holdings drift and snapshots. `worker install` registers `worker run`
+  as a launchd agent (macOS) or a systemd user service (Linux)
+  (`commands/service.rs`). State is in `worker_state.json`; the service logs to
+  `worker.log`.
+
+The worker never places orders. A failed fetch keeps the last data and backs
+off.
 
 ## Caching
 
-Hybrid cache: Redis (primary) + in-memory (fallback).
+Layers, checked in order:
 
 ```
-Request → Check Redis → Check Memory → Fetch Yahoo → Store Redis + Memory → Return
+Request → memory → second layer → network → store in memory and the second layer
+                   (Redis when STOCKWISE_REDIS_URL is set, else cache.db http_cache)
 ```
+
+`cache.db` is a SQLite file in the data directory. It holds cached HTTP
+responses, market snapshots (`cache warm`), daily bars, results and index
+members, as well as stateful data: saved `ask` conversations (`ask_sessions`),
+queued tasks (`tasks`) and accumulated conditions history
+(`conditions_history`). Deleting `cache.db` loses those conversations, tasks
+and history and is not safe. To remove only cached market data, run
+`stockwise cache clear [http|quotes|snapshots|bars|results|members|bhavcopy|all]`
+— even `cache clear all` preserves those three tables; `stockwise cache status`
+shows the cache size.
 
 | Data | TTL | Why |
 |------|-----|-----|
@@ -190,19 +306,20 @@ Request → Check Redis → Check Memory → Fetch Yahoo → Store Redis + Memor
 | Charts (1y+) | 10 min | Rarely changes |
 | Search | 2 min | Static-ish |
 
-Redis keys use `stockwise:` prefix. Cache persists across CLI invocations — run `stockwise deep RELIANCE`, then `stockwise technical RELIANCE` and chart data comes from Redis.
+Redis is off by default. Point at a server with `STOCKWISE_REDIS_URL` (or
+`redis_url` in the config file); `off` turns it off again. Keys use the `stockwise:`
+prefix. Connection and response timeouts (300/500 ms) keep a missing or hung
+Redis from slowing commands.
 
 ```bash
-brew services start redis       # Enable Redis caching
-redis-cli keys "stockwise:*"    # See cached entries
-redis-cli --scan --pattern 'stockwise:*' | xargs redis-cli del   # Clear only StockWise keys
+redis-cli --scan --pattern 'stockwise:*' | xargs redis-cli del   # clear only StockWise keys
 ```
 
-Falls back to an in-memory cache if Redis isn't running. Connection and response timeouts
-(300/500 ms) keep a missing or hung Redis from slowing commands. Point at another server with
-`STOCKWISE_REDIS_URL` (or `redis_url` in the config file), or set it to `off`.
-
-Rate limiting: 200ms minimum between requests (5 req/sec). Retry: 3 attempts with exponential backoff; HTTP 429 honours `Retry-After` (capped at 10s) and never sleeps after the last attempt.
+Rate limiting: 200 ms minimum between Yahoo requests (5 req/s). Retry: 3
+attempts with exponential backoff; HTTP 429 honours `Retry-After` (capped at
+10 s) and never sleeps after the last attempt. Exchange sites (NSE, BSE) get
+one cookie session each, at most 3 requests a second; a refusal stops requests
+to that site for a while.
 
 ## Data Storage
 
@@ -228,6 +345,15 @@ the OS keyring when one is available (`STOCKWISE_KEYRING=off` keeps them in the 
 | `alert_watch.json` | Which alerts `alert watch` already announced |
 | `angel_config.json` | Angel One API credentials (secrets in the OS keyring when available) |
 | `zerodha_config.json`, `upstox_config.json`, `dhan_config.json`, `fyers_config.json` | Experimental broker apps and daily sessions (secrets in the keyring when available) |
+| `cache.db` | SQLite cache: HTTP responses, market snapshots, bars, results, index members, background tasks, `ask` sessions (do not delete: it holds tasks and `ask` sessions; clear cached data with `stockwise cache clear`) |
+| `goals.json`, `notes.json` | Saved goals; per-stock thesis and limits |
+| `signal_log.json` | Every `picks` list, for `picks review` |
+| `monitor_state.json`, `alert_log.json` | Monitor signals already sent; alert history for the digest |
+| `worker_state.json`, `worker.log` | Background worker state and the login service's log |
+| `audit.json`, `undo/` | Changes made by an assistant, for `stockwise undo` |
+| `advance_tax.json` | Advance-tax payments recorded with `tax advance --record` |
+| `holdings-drift.json` | Daily broker holdings drift report (`portfolio sync`) |
+| `update-check.json` | When `doctor` / `update` last looked for a new release |
 | `cache/` | AMFI NAV file and per-scheme NAV history, re-downloaded after 12 hours; CCIL/RBI pages (6–24 hours) and NSE's SGB list (5 minutes) (safe to delete) |
 
 ## Dependencies
@@ -287,10 +413,10 @@ Unit tests sit next to the code they test, and the pure engines (`technical`,
 Parsers of exchange and broker pages run against fixtures in `fixtures/`
 directories, and the HTTP clients against `testutil::MockServer`, so no test
 reaches a real service. `tests/` holds the integration tests that run the
-built binary against a scratch `STOCKWISE_HOME`. Two tests read the docs: they
-parse every `stockwise ...` command written in backticks in
-`docs/cheatsheet.md` and `skills/stockwise/SKILL.md`, so a renamed flag breaks
-the build until the docs follow.
+built binary against a scratch `STOCKWISE_HOME`. Tests also read the docs:
+every `stockwise ...` command in backticks in `docs/cheatsheet.md`,
+`skills/stockwise/SKILL.md` and the guides (and in their `bash` blocks) must
+parse, so a renamed flag breaks the build until the docs follow.
 
 CI (`.github/workflows/ci.yml`) runs `scripts/changelog.py check`, the tests on
 Linux, macOS and Windows, `cargo fmt --check`, clippy for the default and the

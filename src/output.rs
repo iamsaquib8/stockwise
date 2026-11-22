@@ -40,9 +40,43 @@ impl Format {
 
 /// Print `value` as pretty JSON on stdout.
 pub fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
+    let value = with_percent_aliases(serde_json::to_value(value)?);
     // println! (not a writer) so `| head` exits quietly via the broken-pipe hook.
-    println!("{}", serde_json::to_string_pretty(value)?);
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+/// `_percent` is the documented suffix for percentages, but many keys still
+/// end in `_pct`. Every `x_pct` key gets an `x_percent` twin right after it
+/// (unless one exists), so scripts can use the documented name while old
+/// scripts keep working. The `_pct` names go in 1.0.
+pub fn with_percent_aliases(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    match value {
+        Value::Object(map) => {
+            let keys: std::collections::HashSet<String> = map.keys().cloned().collect();
+            let mut out = Map::with_capacity(map.len());
+            for (k, v) in map {
+                let v = with_percent_aliases(v);
+                let alias = k
+                    .strip_suffix("_pct")
+                    .map(|stem| format!("{stem}_percent"))
+                    .filter(|a| !keys.contains(a));
+                match alias {
+                    Some(a) => {
+                        out.insert(k, v.clone());
+                        out.insert(a, v);
+                    }
+                    None => {
+                        out.insert(k, v);
+                    }
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(with_percent_aliases).collect()),
+        other => other,
+    }
 }
 
 /// A row type that can be written as CSV.
@@ -80,6 +114,39 @@ pub fn csv_cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
+        // A rule action (`crate::action::Action`) prints with its invalidation
+        // level, reasons and disclaimer so single-column CSV exports (`picks --csv`)
+        // retain the required action context.
+        Value::Object(m)
+            if m.contains_key("kind") && m.get("label").is_some_and(Value::is_string) =>
+        {
+            let label = m["label"].as_str().unwrap_or_default();
+            let level = m
+                .get("invalidation_price")
+                .and_then(Value::as_f64)
+                .map(|p| format!(" (invalid below {p:.2})"))
+                .unwrap_or_default();
+            let reasons = m
+                .get("reasons")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            let disclaimer = m
+                .get("disclaimer")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match (reasons.is_empty(), disclaimer.is_empty()) {
+                (false, false) => format!("{label}{level} — {reasons} ({disclaimer})"),
+                (false, true) => format!("{label}{level} — {reasons}"),
+                (true, false) => format!("{label}{level} ({disclaimer})"),
+                (true, true) => format!("{label}{level}"),
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -136,6 +203,31 @@ pub fn round_opt(x: Option<f64>, places: i32) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pct_keys_get_percent_twins_in_place() {
+        let v = with_percent_aliases(serde_json::json!({
+            "symbol": "TCS",
+            "weight_pct": 12.5,
+            "pnl_percent": 3.0,
+            "pnl_pct": 3.0,
+            "rows": [{"share_pct": 40.0}],
+        }));
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "symbol",
+                "weight_pct",
+                "weight_percent",
+                "pnl_percent",
+                "pnl_pct",
+                "rows"
+            ]
+        );
+        assert_eq!(v["rows"][0]["share_percent"], 40.0);
+        assert_eq!(v["rows"][0]["share_pct"], 40.0);
+    }
 
     #[derive(Serialize)]
     struct Row {

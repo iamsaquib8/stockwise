@@ -828,10 +828,12 @@ async fn ticker_for_isin(yahoo: &YahooClient, isin: &str) -> Result<Option<Strin
 /// Turn parsed rows into portfolio import rows. A row with a full history
 /// becomes its dated buys and sells (the symbol's lots are rebuilt); a
 /// snapshot row becomes one undated row (quantity sync). A snapshot without
-/// a cost uses the cost of the holding already tracked, or is skipped.
+/// a cost uses the cost of the holding already tracked in the target account,
+/// or is skipped.
 pub(super) fn to_import_rows(
     portfolio: &Portfolio,
     parsed: &[ParsedRow],
+    account: Option<&str>,
 ) -> (Vec<ImportRow>, Vec<Skipped>) {
     let mut rows = Vec::new();
     let mut skipped = Vec::new();
@@ -848,7 +850,11 @@ pub(super) fn to_import_rows(
             }));
             continue;
         }
-        let existing = portfolio.holding(&sym).map(|h| h.avg_cost);
+        let existing = {
+            let lots = portfolio.lots_in_account(&sym, account);
+            let qty: f64 = lots.iter().map(|l| l.qty).sum();
+            (qty > 1e-6).then(|| lots.iter().map(|l| l.cost()).sum::<f64>() / qty)
+        };
         let Some(price) = r.avg_cost.or(existing) else {
             skipped.push(Skipped {
                 what: r.name.clone().unwrap_or_else(|| sym.clone()),
@@ -878,6 +884,7 @@ pub(super) async fn import_rows(
     source: &str,
     file: &str,
     replace: bool,
+    account: Option<&str>,
     parsed: Parsed,
 ) -> Result<()> {
     let Parsed {
@@ -917,8 +924,10 @@ pub(super) async fn import_rows(
         rows.retain(|r| !r.symbol.is_empty());
     }
 
+    let import_source = format!("import:{source}");
+    let resolved_account = account.or_else(|| crate::portfolio::account_of_source(&import_source));
     let portfolio = Portfolio::load()?;
-    let (import, not_applied) = to_import_rows(&portfolio, &rows);
+    let (import, not_applied) = to_import_rows(&portfolio, &rows, resolved_account);
     skipped.extend(not_applied);
     for s in &skipped {
         println!("  {} {} — {}", "!".yellow(), s.what, s.why.dimmed());
@@ -941,7 +950,7 @@ pub(super) async fn import_rows(
         );
     }
     // CAS rows are already split-free units; nothing to replay.
-    super::holdings::apply_import_rows(source, file, import, false, replace).await
+    super::holdings::apply_import_rows(source, file, import, false, replace, account).await
 }
 
 #[cfg(test)]
@@ -1045,7 +1054,7 @@ mod tests {
     }
 
     fn apply(portfolio: &mut Portfolio, parsed: &[ParsedRow]) -> Vec<Skipped> {
-        let (rows, skipped) = to_import_rows(portfolio, parsed);
+        let (rows, skipped) = to_import_rows(portfolio, parsed, None);
         portfolio.apply_import(
             &rows,
             pf::ImportOptions {

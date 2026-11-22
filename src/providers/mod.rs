@@ -35,11 +35,13 @@
 //! The exchange providers read the JSON endpoints behind nseindia.com and
 //! bseindia.com through one polite session per site (`session.rs`).
 
+pub mod adjust;
 pub mod alphavantage;
 pub mod bse;
 pub mod bse_bhav;
 pub mod coingecko;
 pub mod edgar;
+pub mod fill;
 pub mod finnhub;
 pub mod fmp;
 pub mod frankfurter;
@@ -517,6 +519,34 @@ impl Provider {
             _ => None,
         }
     }
+
+    /// The BSE client when the provider is BSE-backed.
+    pub fn bse(&self) -> Option<&bse::Bse> {
+        match self {
+            Provider::Bse(p) => Some(p),
+            Provider::Exchange(p) => Some(&p.bse),
+            _ => None,
+        }
+    }
+
+    /// Valuation and quality ratios from a keyed provider (Finnhub, FMP).
+    pub async fn ratios(&self, symbol: &str) -> Result<Option<router::Ratios>> {
+        match self {
+            Provider::Finnhub(p) => p.ratios(symbol).await,
+            Provider::Fmp(p) => p.ratios(symbol).await,
+            _ => Ok(None),
+        }
+    }
+
+    /// Splits of `symbol` from the provider itself, for adjusting its own
+    /// unadjusted daily bars when Yahoo's events can't be read. Alpha
+    /// Vantage only (one request of its daily allowance).
+    pub async fn splits(&self, symbol: &str) -> Result<Vec<adjust::SplitEvent>> {
+        match self {
+            Provider::AlphaVantage(p) => p.splits(symbol).await,
+            _ => bail!("{} has no split data", self.name()),
+        }
+    }
 }
 
 impl MarketData for Provider {
@@ -708,16 +738,23 @@ impl Exchange {
             .iter()
             .filter(|s| self.nse.supports(s) || self.bse.supports(s))
             .partition(|s| self.nse.supports(s));
-        let from_nse = if ns.is_empty() {
-            Ok(Vec::new())
-        } else {
-            self.nse.quotes(&ns).await
-        };
-        let from_bse = if bo.is_empty() {
-            Ok(Vec::new())
-        } else {
-            self.bse.quotes(&bo).await
-        };
+        // Each exchange has its own session and rate limit: ask both at once.
+        let (from_nse, from_bse) = tokio::join!(
+            async {
+                if ns.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    self.nse.quotes(&ns).await
+                }
+            },
+            async {
+                if bo.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    self.bse.quotes(&bo).await
+                }
+            }
+        );
         let mut all = match (from_nse, from_bse) {
             (Err(e), Err(_)) => return Err(e),
             (Err(e), Ok(b)) if b.is_empty() => return Err(e),
@@ -743,8 +780,7 @@ impl Exchange {
 
     /// NSE's matches first, then BSE's, ten in all.
     async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        let from_nse = self.nse.search(query).await;
-        let from_bse = self.bse.search(query).await;
+        let (from_nse, from_bse) = tokio::join!(self.nse.search(query), self.bse.search(query));
         let (n, b) = match (from_nse, from_bse) {
             (Err(e), Err(_)) => return Err(e),
             (n, b) => (n.unwrap_or_default(), b.unwrap_or_default()),
@@ -1045,7 +1081,16 @@ impl Http {
         if let Auth::Header(header, prefix) = auth {
             req = req.header(header, format!("{}{}", prefix, self.key));
         }
-        let resp = match req.send().await {
+        let started = Instant::now();
+        let sent = req.send().await;
+        // The key may sit in the query string: netlog prints host and path only.
+        crate::netlog::request(
+            name,
+            sent.as_ref().map_or("", |r| r.url().as_str()),
+            sent.as_ref().ok().map(|r| r.status().as_u16()),
+            started.elapsed(),
+        );
+        let resp = match sent {
             Ok(resp) => resp,
             // Unreachable or timing out: don't make every remaining symbol
             // wait for it too.
@@ -1309,6 +1354,7 @@ impl Series {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(self.bars.iter().map(|b| noon(b.date)).collect()),
             indicators: Indicators {
@@ -1319,6 +1365,7 @@ impl Series {
                     close: Some(self.bars.iter().map(|b| b.close).collect()),
                     volume: Some(self.bars.iter().map(|b| b.volume).collect()),
                 }],
+                adjclose: None,
             },
             // Dividends/splits come from Yahoo (`get_corporate_actions`).
             events: None,
@@ -1356,6 +1403,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
             exchange_name: None,
             gmtoffset: None,
             data_source: None,
+            warnings: Vec::new(),
         }),
         timestamp: Some(bars.iter().map(|b| b.ts).collect()),
         indicators: Indicators {
@@ -1366,6 +1414,7 @@ fn timed_chart(symbol: &str, bars: &[TimedBar], currency: Option<&str>) -> Chart
                 close: Some(bars.iter().map(|b| Some(b.close)).collect()),
                 volume: Some(bars.iter().map(|b| b.volume).collect()),
             }],
+            adjclose: None,
         },
         events: None,
     }

@@ -1,0 +1,15 @@
+Client ID,AB0000
+Zerodha Broking Ltd - Tax P&L Statement for Equity from 2026-04-01 to 2027-03-31
+Anonymised sample for StockWise tests: names and amounts are illustrative.
+
+Equity - Short Term
+Symbol,ISIN,Entry Date,Exit Date,Quantity,Buy Value,Sell Value,Profit,Period of Holding,Fair Market Value,Taxable Profit,Turnover,Brokerage,Exchange Transaction Charges,IPFT,SEBI Charges,CGST,SGST,IGST,Stamp Duty,STT
+INFY,INE009A01021,2025-11-03,2026-05-12,10,15000,16500,1468.8,190,,,31500,0,1.10,0.02,0.03,0.10,0.10,0,2.25,27.60
+RELIANCE,INE002A01018,2026-01-05,2026-09-10,4,5200,5600,400,248,,,10800,0,0.40,0.01,0.01,0.04,0.04,0,0.78,10.80
+
+Equity - Long Term
+Symbol,ISIN,Entry Date,Exit Date,Quantity,Buy Value,Sell Value,Profit,Period of Holding,Fair Market Value,Taxable Profit,Turnover,Brokerage,Exchange Transaction Charges,IPFT,SEBI Charges,CGST,SGST,IGST,Stamp Duty,STT
+TCS,INE467B01029,2025-01-10,2026-06-02,5,15000,17000,2000,508,,,32000,0,0,0,0,0,0,0,0,0
+HDFCBANK,INE040A01034,2017-03-01,2026-07-20,10,7000,18000,11000,3428,9480,8520,25000,0,0,0,0,0,0,0,0,0
+
+Total,,,,,42200,57100,14868.8

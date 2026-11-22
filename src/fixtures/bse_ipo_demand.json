@@ -1,0 +1,15 @@
+{
+  "Table": [
+    {"SRNO": "1", "CATEGORYNAME": "Qualified Institutional Buyers (QIBs)", "BID_FOR": 132380000, "QUANTITY": 181360600, "PERC": 1.37, "DISPLORDER": 1, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "1(a)", "CATEGORYNAME": "Foreign Institutional Investors (FIIs)", "BID_FOR": null, "QUANTITY": 90680300, "PERC": null, "DISPLORDER": 2, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "1(c)", "CATEGORYNAME": "Mutual Funds", "BID_FOR": null, "QUANTITY": 45340150, "PERC": null, "DISPLORDER": 3, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "2", "CATEGORYNAME": "Non Institutional Investors (NIIs)", "BID_FOR": 99285000, "QUANTITY": 17871300, "PERC": 0.18, "DISPLORDER": 4, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "2.1", "CATEGORYNAME": "NIIs (Bid amount of more than Ten Lakh Rupees)", "BID_FOR": 66190000, "QUANTITY": 9928500, "PERC": 0.15, "DISPLORDER": 5, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "2.2", "CATEGORYNAME": "NIIs (Bid amount of more than Two Lakh Rupees and up to Ten Lakh Rupees)", "BID_FOR": 33095000, "QUANTITY": 7942800, "PERC": 0.24, "DISPLORDER": 6, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "3", "CATEGORYNAME": "Retail Individual Investors (RIIs)", "BID_FOR": 231665000, "QUANTITY": 55599600, "PERC": 0.24, "DISPLORDER": 7, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "4", "CATEGORYNAME": "Employees", "BID_FOR": 1000000, "QUANTITY": 610000, "PERC": 0.61, "DISPLORDER": 8, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "5", "CATEGORYNAME": "Anchor Investors", "BID_FOR": 198570000, "QUANTITY": 198570000, "PERC": 1.0, "DISPLORDER": 9, "Maxdt": "2026-11-21T17:00:00"},
+    {"SRNO": "", "CATEGORYNAME": "Total", "BID_FOR": 464330000, "QUANTITY": 222887500, "PERC": 0.48, "DISPLORDER": 10, "Maxdt": "2026-11-21T17:00:00"}
+  ],
+  "Table1": [{"ir_flag": "IPO"}]
+}

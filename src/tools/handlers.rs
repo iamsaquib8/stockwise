@@ -84,9 +84,17 @@ pub(super) async fn run<D: DataSource>(
         "watchlist" => Ok(json!({ "watchlist": views::watchlist(src).await? })),
         "profile" => Ok(serde_json::to_value(super::current_profile(ctx))?),
         "profile_questions" => Ok(crate::onboarding::questions_json()),
-        "portfolio_analyze" | "portfolio_checkup" | "market_conditions" | "picks" | "movers"
-        | "dividends" | "goal_emergency" | "fit_check" | "changes_list" => {
+        "portfolio_analyze" | "portfolio_checkup" | "market_conditions" | "picks"
+        | "picks_review" | "verdicts" | "movers" | "dividends" | "goal_emergency" | "fit_check"
+        | "changes_list" | "stock_action" | "portfolio_review" => {
             super::extra::run(ctx, name, a, m).await
+        }
+        "bonds_yields" | "bonds_list" | "bonds_calc" | "commodity" | "fx_history" | "returns"
+        | "correlate" | "compare" | "portfolio_wrap" => {
+            super::more::run(src, name, a, m, budget).await
+        }
+        "whats_hot" | "today" | "news_feed" | "monitor_status" | "digest" => {
+            super::pulse::run(src, name, a, m).await
         }
         "order_preview" => order_preview(src, a).await,
         other => bail!("Tool '{}' has no handler", other),
@@ -272,8 +280,8 @@ async fn verdict(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> {
     verdict_value(&r)
 }
 
-/// The tool result: pillar scores, coverage and the facts behind them. No
-/// rating, entry, stop or target is ever added here.
+/// The tool result: pillar scores, coverage, the facts behind them and the
+/// engine's `action`. No other rating or level is ever added here.
 pub(super) fn verdict_value(r: &crate::research::Research) -> Result<Value> {
     let cards = crate::insights::generate_rich_insights(r);
     let v = crate::verdict::generate_verdict(r, &cards);
@@ -368,7 +376,10 @@ async fn search(src: &impl DataSource, a: &Args) -> Result<Value> {
 async fn ipo_board(src: &impl DataSource, a: &Args) -> Result<Value> {
     let filter = crate::ipo::BoardFilter::from_name(a.str("board"));
     let view = crate::ipo::fetch_board(src.yahoo().await?, filter, a.usize_or("recent", 6)).await?;
-    Ok(serde_json::to_value(view)?)
+    let v = serde_json::to_value(&view)?;
+    // Verdicts given over MCP join the track record like the CLI's.
+    let _ = tokio::task::spawn_blocking(move || crate::commands::log_board(&view)).await;
+    Ok(v)
 }
 
 async fn ipo_analyze(src: &impl DataSource, a: &Args) -> Result<Value> {
@@ -382,9 +393,11 @@ async fn ipo_analyze(src: &impl DataSource, a: &Args) -> Result<Value> {
         a.need_str("symbol")?,
         series,
         a.f64("capital"),
+        None,
     )
     .await?;
-    let mut v = serde_json::to_value(analysis)?;
+    let mut v = serde_json::to_value(&analysis)?;
+    let _ = tokio::task::spawn_blocking(move || crate::commands::log_analysis(&analysis)).await;
     // Per-category rows repeat what the summary fields already say.
     if let Some(sub) = v.get_mut("subscription").and_then(Value::as_object_mut) {
         sub.remove("categories");
@@ -688,8 +701,15 @@ async fn rebalance(src: &impl DataSource, a: &Args, m: Market) -> Result<Value> 
         let plan = crate::rebalance::RebalancePlan::empty(commands::market_currency(m));
         return Ok(serde_json::to_value(plan)?);
     }
-    let (plan, _) =
-        commands::rebalance_plan(src, &p, &[], a.f64("inflow"), a.f64("drift"), m).await?;
+    let args = commands::RebalanceArgs {
+        inflow: a.f64("inflow"),
+        with_sells: a.bool("with_sells"),
+        raise: a.f64("raise"),
+        cash_buffer: a.f64("cash_buffer"),
+        drift: a.f64("drift"),
+        ..Default::default()
+    };
+    let (plan, _) = commands::rebalance_plan(src, &p, &args, m, None).await?;
     Ok(serde_json::to_value(plan)?)
 }
 

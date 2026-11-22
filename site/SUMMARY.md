@@ -11,6 +11,9 @@
 
 - [Pick your path](guides.md)
   - [Import your trades and see true returns](guide-portfolio.md)
+  - [Review your holdings with rule-based actions](guide-actions.md)
+  - [See what's hot and what changed today](guide-daily.md)
+  - [Find candidates with picks](guide-picks.md)
   - [File your Indian capital-gains tax](guide-tax.md)
   - [Check a stock or fund fast](guide-research.md)
   - [Rebalance to target weights](guide-rebalance.md)
@@ -23,6 +26,7 @@
 
 - [Cheatsheet](cheatsheet.md)
 - [Commands](commands.md)
+- [Methodology: how scores are made](methodology.md)
 - [Markets](markets.md)
 - [Data providers](data-providers.md)
 - [AI](ai.md)

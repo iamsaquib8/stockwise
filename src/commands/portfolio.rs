@@ -33,19 +33,43 @@ pub(crate) struct Valuation {
     /// 31 Jan 2018 prices (Section 112A grandfathering) for the symbols whose
     /// old lots need one; only `tax_valuation` fills it.
     pub fmv_2018: Vec<(String, f64)>,
+    /// Daily exchange rates into the base, to cost purchases, sales and
+    /// dividends at the rate of their own day ([`Valuation::load_history`]).
+    pub hist: crate::fx_history::FxHistory,
+}
+
+/// A sale's gain and charges in the base currency (see
+/// [`Valuation::sale_parts_base`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SaleBase {
+    pub gain: f64,
+    /// The charges deducted in `gain`, converted as they were deducted.
+    pub charges: f64,
 }
 
 /// Cost and value in the base currency, leaving out holdings without a live
 /// price or an exchange rate (named here instead of being valued at 0).
 #[derive(Default)]
 pub(crate) struct Totals {
+    /// Cost in the base currency at each purchase's own exchange rate.
     pub cost: f64,
     pub value: f64,
+    /// The same cost at today's exchange rate: `cost_today - cost` is what
+    /// currency moves added to the value ([`Totals::fx_effect`]).
+    pub cost_today: f64,
     pub unpriced: Vec<String>,
     pub unconverted: Vec<String>,
+    /// Holdings whose cost had no historical rate and was converted at
+    /// today's (named in a note).
+    pub cost_at_today_fx: Vec<String>,
 }
 
 impl Totals {
+    /// Gain or loss from exchange-rate moves since the purchases, in the base.
+    pub fn fx_effect(&self) -> f64 {
+        self.cost_today - self.cost
+    }
+
     pub fn pnl_pct(&self) -> f64 {
         if self.cost > 0.0 {
             (self.value - self.cost) / self.cost * 100.0
@@ -78,6 +102,13 @@ impl Totals {
                 self.unconverted.join(", ")
             );
         }
+        if !self.cost_at_today_fx.is_empty() {
+            println!(
+                "  {} No exchange rate for the purchase dates of {}: their cost is converted at today's rate.",
+                "·".dimmed(),
+                self.cost_at_today_fx.join(", ")
+            );
+        }
     }
 }
 
@@ -90,6 +121,12 @@ impl Valuation {
 
     pub fn price(&self, symbol: &str) -> Option<f64> {
         self.quote(symbol).and_then(|q| q.regular_market_price)
+    }
+
+    /// The day `symbol`'s price was set (UTC), when the quote says.
+    pub fn priced_on(&self, symbol: &str) -> Option<chrono::NaiveDate> {
+        let t = self.quote(symbol)?.regular_market_time?;
+        chrono::DateTime::from_timestamp(t, 0).map(|d| d.date_naive())
     }
 
     /// The 31 Jan 2018 price of `symbol`, when it was looked up and found.
@@ -202,16 +239,200 @@ impl Valuation {
             };
             match (
                 self.to_base(&h.symbol, h.shares * price),
+                self.holding_cost_base(h),
                 self.to_base(&h.symbol, h.cost_basis()),
             ) {
-                (Some(v), Some(c)) => {
+                (Some(v), Some((c, historical)), Some(today)) => {
                     t.value += v;
                     t.cost += c;
+                    t.cost_today += today;
+                    if !historical {
+                        t.cost_at_today_fx.push(h.symbol.clone());
+                    }
                 }
                 _ => t.unconverted.push(h.symbol.clone()),
             }
         }
         t
+    }
+
+    /// Units of base per unit of `symbol`'s currency on `date`: the day's
+    /// reference rate when [`Valuation::load_history`] found one (true),
+    /// else today's rate (false).
+    pub fn rate_on(&self, symbol: &str, date: chrono::NaiveDate) -> Option<(f64, bool)> {
+        let cur = self.currency(symbol)?;
+        self.currency_rate_on(&cur, date)
+    }
+
+    /// [`Valuation::rate_on`] for a currency.
+    pub fn currency_rate_on(&self, cur: &str, date: chrono::NaiveDate) -> Option<(f64, bool)> {
+        if let Some(r) = self.hist.rate_on(cur, date) {
+            return Some((r, true));
+        }
+        self.fx.rate(cur).map(|r| (r, cur == self.base()))
+    }
+
+    /// What `lot` of `symbol` cost in the base currency: what was paid when
+    /// it was bought in the base (`portfolio add --currency`), else its cost
+    /// at the purchase date's rate, else at today's. The flag is false when
+    /// today's rate had to be used.
+    pub fn lot_cost_base(&self, symbol: &str, lot: &Lot) -> Option<(f64, bool)> {
+        let cur = self.currency(symbol)?;
+        let cost = lot.cost();
+        let (major_cost, _) = market::to_major(cost, &cur);
+        if let Some(paid) = lot.base_cost(self.base(), major_cost) {
+            return Some((paid, true));
+        }
+        let date = pf::parse_date(&lot.date).ok();
+        let (rate, historical) = match date {
+            Some(d) => self.currency_rate_on(&cur, d)?,
+            None => (self.fx.rate(&cur)?, false),
+        };
+        Some((cost * rate, historical))
+    }
+
+    /// Base-currency units per unit of `symbol`'s quote currency at `lot`'s purchase.
+    pub fn lot_purchase_rate(&self, symbol: &str, lot: &Lot) -> Option<f64> {
+        let cur = self.currency(symbol)?;
+        if let Some(r) = lot
+            .fx_currency
+            .as_deref()
+            .zip(lot.fx_rate)
+            .filter(|(c, r)| c.eq_ignore_ascii_case(self.base()) && *r > 0.0)
+            .map(|(_, r)| r)
+        {
+            let (major_one, _) = market::to_major(1.0, &cur);
+            return Some(r * major_one);
+        }
+        let date = pf::parse_date(&lot.date).ok()?;
+        self.currency_rate_on(&cur, date).map(|(r, _)| r)
+    }
+
+    /// [`Valuation::lot_cost_base`] summed over a holding's lots.
+    pub fn holding_cost_base(&self, h: &pf::Holding) -> Option<(f64, bool)> {
+        h.lots.iter().try_fold((0.0, true), |(sum, all), l| {
+            let (c, hist) = self.lot_cost_base(&h.symbol, l)?;
+            Some((sum + c, all && hist))
+        })
+    }
+
+    /// A sale's gain in the base currency: proceeds less charges at the sale
+    /// date's rate, less the cost at the purchase's (what was paid in the
+    /// base when the lot records it).
+    pub fn sale_gain_base(&self, sale: &pf::Sale) -> Option<f64> {
+        self.sale_parts_base(sale).map(|p| p.gain)
+    }
+
+    /// A sale in the base currency: purchase cost and purchase charges at
+    /// the purchase's rate (what was paid when the lot records it), proceeds
+    /// and the sale's own charges at the sale date's.
+    pub fn sale_parts_base(&self, sale: &pf::Sale) -> Option<SaleBase> {
+        let cur = self.currency(&sale.symbol)?;
+        let sold = pf::parse_date(&sale.sell_date).ok();
+        let bought = pf::parse_date(&sale.buy_date).ok();
+        let rate = |d: Option<chrono::NaiveDate>| match d {
+            Some(d) => self.currency_rate_on(&cur, d).map(|r| r.0),
+            None => self.fx.rate(&cur),
+        };
+        let sell_rate = rate(sold)?;
+        let sell_charges = sale.sell_charges() * sell_rate;
+        let proceeds = sale.qty * sale.sell_price * sell_rate - sell_charges;
+        let cost_local = sale.qty * sale.buy_price + sale.buy_charges();
+        let (major_cost, _) = market::to_major(cost_local, &cur);
+        let buy_rate = match sale
+            .fx_currency
+            .as_deref()
+            .zip(sale.buy_fx_rate)
+            .filter(|(c, r)| c.eq_ignore_ascii_case(self.base()) && *r > 0.0)
+        {
+            // What was paid per unit of the major currency.
+            Some((_, r)) => r * major_cost / cost_local.max(f64::MIN_POSITIVE),
+            None => rate(bought)?,
+        };
+        let cost = cost_local * buy_rate;
+        Some(SaleBase {
+            gain: proceeds - cost,
+            charges: sell_charges + sale.buy_charges() * buy_rate,
+        })
+    }
+
+    /// A dividend in the base currency at its ex-date's rate.
+    pub fn dividend_base(&self, d: &pf::DividendReceived) -> Option<f64> {
+        let cur = d.currency.clone().or_else(|| self.currency(&d.symbol))?;
+        let rate = match pf::parse_date(&d.ex_date).ok() {
+            Some(day) => self.currency_rate_on(&cur, day)?.0,
+            None => self.fx.rate(&cur)?,
+        };
+        Some(d.amount * rate)
+    }
+
+    /// `symbol`'s cash flows (see [`Portfolio::cash_flow_items`]) in the
+    /// base currency, each at its own date's rate (a purchase paid in the
+    /// base at what was paid). `None` when a flow has no rate at all.
+    pub fn flows_base(
+        &self,
+        portfolio: &Portfolio,
+        symbol: &str,
+    ) -> Option<Vec<(chrono::NaiveDate, f64)>> {
+        self.flow_items_base(portfolio, symbol)
+            .map(|v| v.into_iter().map(|(d, a, _)| (d, a)).collect())
+    }
+
+    /// [`Valuation::flows_base`] with what each flow was.
+    pub fn flow_items_base(
+        &self,
+        portfolio: &Portfolio,
+        symbol: &str,
+    ) -> Option<Vec<(chrono::NaiveDate, f64, pf::FlowKind)>> {
+        self.flow_items_base_where(portfolio, symbol, |_| true)
+    }
+
+    /// [`Valuation::flow_items_base`] of the flows `keep` selects; only
+    /// those need an exchange rate.
+    pub fn flow_items_base_where(
+        &self,
+        portfolio: &Portfolio,
+        symbol: &str,
+        keep: impl Fn(&pf::CashFlow) -> bool,
+    ) -> Option<Vec<(chrono::NaiveDate, f64, pf::FlowKind)>> {
+        let own = self.currency(symbol);
+        portfolio
+            .cash_flow_items(symbol)
+            .into_iter()
+            .filter(|f| keep(f))
+            .map(|f| {
+                let cur = f.currency.clone().or_else(|| own.clone())?;
+                if let Some((paid, rate)) = &f.paid
+                    && paid.eq_ignore_ascii_case(self.base())
+                    && *rate > 0.0
+                {
+                    let (major, _) = market::to_major(f.amount, &cur);
+                    return Some((f.date, major * rate, f.kind));
+                }
+                let (rate, _) = self.currency_rate_on(&cur, f.date)?;
+                Some((f.date, f.amount * rate, f.kind))
+            })
+            .collect()
+    }
+
+    /// Load daily exchange rates for every currency `portfolio` has
+    /// bought, sold or been paid dividends in, from its first such day.
+    /// Without a network connection and nothing cached, conversions fall
+    /// back to today's rate.
+    pub async fn load_history(&mut self, portfolio: &Portfolio) {
+        let mut needs: Vec<(String, chrono::NaiveDate)> = Vec::new();
+        for sym in portfolio.symbols_with_history() {
+            let own = self.currency(&sym);
+            for f in portfolio.cash_flow_items(&sym) {
+                if let Some(cur) = f.currency.or_else(|| own.clone()) {
+                    needs.push((cur, f.date));
+                }
+            }
+        }
+        if needs.iter().all(|(c, _)| self.hist.has(c)) {
+            return;
+        }
+        self.hist = crate::fx_history::FxHistory::load(self.base(), &needs).await;
     }
 
     /// "1 USD = ₹84.12" for each currency that was converted.
@@ -298,6 +519,7 @@ impl Valuation {
             fx: Fx::new(market_currency(market)),
             off: OffMarket::default(),
             fmv_2018: Vec::new(),
+            hist: Default::default(),
         };
         let currencies = v.currencies(symbols);
         let base = match base {
@@ -305,7 +527,11 @@ impl Valuation {
             None if currencies.len() == 1 => currencies[0].clone(),
             None => market_currency(market).to_string(),
         };
+        // Totals are in a major currency: a London-only portfolio quoted in
+        // pence totals in pounds, in both the live and the historical rates.
+        let (_, base) = market::to_major(1.0, &base);
         v.fx = Fx::new(&base);
+        v.hist = crate::fx_history::FxHistory::new(&base);
         v
     }
 
@@ -355,7 +581,7 @@ impl Valuation {
 
 /// Splits and dividends for `symbol` from `since` (YYYY-MM-DD) to today,
 /// oldest first, and the currency the dividends are paid in.
-pub(super) async fn fetch_actions(
+pub(crate) async fn fetch_actions(
     client: &YahooClient,
     symbol: &str,
     since: &str,
@@ -402,23 +628,33 @@ pub(super) async fn fetch_actions(
     Ok((splits, divs, events.currency))
 }
 
-/// Splits Yahoo reports for `symbol` that are not yet applied to its lots.
-pub(super) async fn pending_splits(
+/// Splits Yahoo reports for `symbol` that are not yet applied to its lots in
+/// `account`'s scope (`None`: all lots).
+pub(super) async fn pending_splits_in_account(
     client: &YahooClient,
     portfolio: &Portfolio,
     symbol: &str,
+    account: Option<&str>,
 ) -> Result<Vec<Split>> {
-    let Some(h) = portfolio.holding(symbol) else {
-        return Ok(Vec::new());
-    };
-    let Some(since) = h.lots.iter().map(|l| l.units_date()).min() else {
+    let lots = portfolio.lots_in_account(symbol, account);
+    let Some(since) = lots.iter().map(|l| l.units_date()).min() else {
         return Ok(Vec::new());
     };
     let (splits, _, _) = fetch_actions(client, symbol, since).await?;
     Ok(splits
         .into_iter()
-        .filter(|s| h.lots.iter().any(|l| s.pending_for(l)))
+        .filter(|s| lots.iter().any(|l| s.pending_for(l)))
         .collect())
+}
+
+/// Splits Yahoo reports for `symbol` that are not yet applied to its lots.
+#[allow(dead_code)]
+pub(super) async fn pending_splits(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    symbol: &str,
+) -> Result<Vec<Split>> {
+    pending_splits_in_account(client, portfolio, symbol, None).await
 }
 
 /// Ask NSE which of the `splits` Yahoo reported for an Indian `symbol` are
@@ -463,18 +699,19 @@ fn describe_splits(splits: &[Split]) -> String {
 
 /// Of `snapshot` (symbol, quantity from a broker or holdings file), the
 /// holdings whose quantity went up while a split or bonus is not yet applied
-/// to their lots — syncing those would count the new shares twice. Returns
-/// (symbol, reason). Without a network connection nothing is blocked.
-pub(super) async fn blocked_by_pending_splits(
+/// to their lots in `account` — syncing those would count the new shares twice.
+/// Returns (symbol, splits, reason). Without a network connection nothing is blocked.
+pub(super) async fn blocked_by_pending_splits_in_account(
     portfolio: &Portfolio,
     snapshot: &[(String, f64)],
-) -> Vec<(String, String)> {
+    account: Option<&str>,
+) -> Vec<(String, Vec<Split>, String)> {
     let grew: Vec<&(String, f64)> = snapshot
         .iter()
         .filter(|(sym, qty)| {
-            portfolio
-                .holding(sym)
-                .is_some_and(|h| *qty > h.shares + 1e-9)
+            let lots = portfolio.lots_in_account(sym, account);
+            let held: f64 = lots.iter().map(|l| l.qty).sum();
+            !lots.is_empty() && *qty > held + 1e-9
         })
         .collect();
     if grew.is_empty() {
@@ -485,20 +722,30 @@ pub(super) async fn blocked_by_pending_splits(
     };
     let mut blocked = Vec::new();
     for (sym, _) in grew {
-        if let Ok(splits) = pending_splits(&client, portfolio, sym).await
+        if let Ok(splits) = pending_splits_in_account(&client, portfolio, sym, account).await
             && !splits.is_empty()
         {
-            blocked.push((
-                sym.clone(),
-                format!(
-                    "split/bonus {} not applied to your lots yet — run `stockwise portfolio actions {} --apply`, then sync again",
-                    describe_splits(&splits),
-                    sym
-                ),
-            ));
+            let reason = format!(
+                "split/bonus {} not applied to your lots yet — run `stockwise portfolio actions {} --apply`, then sync again",
+                describe_splits(&splits),
+                sym
+            );
+            blocked.push((sym.clone(), splits, reason));
         }
     }
     blocked
+}
+
+#[allow(dead_code)]
+pub(super) async fn blocked_by_pending_splits(
+    portfolio: &Portfolio,
+    snapshot: &[(String, f64)],
+) -> Vec<(String, String)> {
+    blocked_by_pending_splits_in_account(portfolio, snapshot, None)
+        .await
+        .into_iter()
+        .map(|(s, _, r)| (s, r))
+        .collect()
 }
 
 pub(super) fn portfolio_title(title: &str) -> String {
@@ -603,6 +850,15 @@ pub(crate) struct HoldingRow {
     pub(crate) nav_date: Option<chrono::NaiveDate>,
     /// `mega|large|mid|small|micro`, `unknown` for funds and anything without a market cap.
     pub(crate) cap_tier: &'static str,
+    /// Cost in the base currency at each purchase date's exchange rate.
+    pub(crate) cost_basis_base: Option<f64>,
+    pub(crate) value_base: Option<f64>,
+    /// What exchange-rate moves since the purchases added, in the base
+    /// currency (0 for a holding in the base currency).
+    pub(crate) fx_effect: Option<f64>,
+    /// The quote-based rule action (`crate::action`); `portfolio review`
+    /// gives the full one. Null without a quote (funds, SGBs, no price).
+    pub(crate) action: Option<crate::action::Action>,
 }
 
 impl CsvRow for HoldingRow {
@@ -622,17 +878,26 @@ impl CsvRow for HoldingRow {
         "price_source",
         "nav_date",
         "cap_tier",
+        "cost_basis_base",
+        "value_base",
+        "fx_effect",
+        "action",
     ];
 }
 
 /// Totals over the priced holdings, converted to the base currency.
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct PortfolioTotals {
+    /// At each purchase date's exchange rate.
     pub(crate) cost_basis: f64,
     pub(crate) value: f64,
     pub(crate) pnl: f64,
     pub(crate) pnl_percent: f64,
     pub(crate) currency: Option<String>,
+    /// The part of `pnl` from exchange-rate moves since the purchases.
+    pub(crate) fx_effect: f64,
+    /// Holdings whose purchase-date rate was not found (cost at today's rate).
+    pub(crate) cost_at_today_fx: Vec<String>,
 }
 
 /// `portfolio --json`: every holding, totals in one currency, and the
@@ -646,6 +911,8 @@ pub(crate) struct PortfolioReport {
     pub(crate) unpriced: Vec<String>,
     pub(crate) unconverted: Vec<String>,
     pub(crate) notes: Vec<String>,
+    /// Splits and bonuses not yet applied to the lots (valued as if applied).
+    pub(crate) warnings: Vec<String>,
 }
 
 fn pct_of(part: f64, whole: f64) -> f64 {
@@ -662,6 +929,7 @@ pub(crate) fn portfolio_report(
     today: chrono::NaiveDate,
 ) -> PortfolioReport {
     let totals = val.totals(portfolio);
+    let mut actions = super::actions::quick_actions(portfolio, val, &Default::default());
     let holdings = portfolio
         .holdings
         .iter()
@@ -669,6 +937,11 @@ pub(crate) fn portfolio_report(
             let price = val.price(&h.symbol);
             let cost = h.cost_basis();
             let value = price.map(|p| h.shares * p);
+            let cost_base = val.holding_cost_base(h).map(|c| c.0);
+            let value_base = value.and_then(|v| val.to_base(&h.symbol, v));
+            let fx_effect = cost_base
+                .zip(val.to_base(&h.symbol, cost))
+                .map(|(hist, now)| round(now - hist, 2));
             HoldingRow {
                 symbol: h.symbol.clone(),
                 shares: h.shares,
@@ -681,14 +954,19 @@ pub(crate) fn portfolio_report(
                 weight_percent: value
                     .and_then(|v| val.to_base(&h.symbol, v))
                     .map(|v| round(pct_of(v, totals.value), 2)),
-                xirr_percent: value
-                    .and_then(|v| pf::xirr(&portfolio.cash_flows(&h.symbol), v, today))
+                // In the base currency; none from guessed purchase dates.
+                xirr_percent: value_base
+                    .and_then(|v| holding_xirr(portfolio, val, h, v, today))
                     .map(|r| round(r * 100.0, 2)),
                 currency: val.currency(&h.symbol),
                 name: val.name(&h.symbol),
                 price_source: val.price_source(&h.symbol),
                 nav_date: val.nav_date(&h.symbol),
                 cap_tier: val.cap_tier(&h.symbol).as_str(),
+                cost_basis_base: round_opt(cost_base, 2),
+                value_base: round_opt(value_base, 2),
+                fx_effect,
+                action: actions.remove(&h.symbol),
             }
         })
         .collect();
@@ -700,10 +978,13 @@ pub(crate) fn portfolio_report(
             pnl: round(totals.value - totals.cost, 2),
             pnl_percent: round(totals.pnl_pct(), 2),
             currency: Some(val.base().to_string()),
+            fx_effect: round(totals.fx_effect(), 2),
+            cost_at_today_fx: totals.cost_at_today_fx,
         },
         unpriced: totals.unpriced,
         unconverted: totals.unconverted,
         notes: val.off.notes.iter().map(offmarket::Note::line).collect(),
+        warnings: Vec::new(),
     }
 }
 
@@ -717,22 +998,53 @@ pub(crate) async fn load_portfolio_report(
     load_portfolio_report_named(src, market, base, None).await
 }
 
+/// The portfolio a `portfolio=NAME` request reads.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PortfolioPick {
+    /// The active portfolio (`--portfolio` / `STOCKWISE_PORTFOLIO`), read
+    /// through the data source.
+    Active,
+    /// Another one from disk: `None` is the default `portfolio.json`.
+    File(Option<String>),
+}
+
+/// No name means the active portfolio. `default` means `portfolio.json`
+/// even when another portfolio is active; a name equal to the active one
+/// is the active portfolio.
+pub(crate) fn pick_portfolio(
+    requested: Option<&str>,
+    active: Option<&str>,
+) -> Result<PortfolioPick> {
+    let Some(requested) = requested.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(PortfolioPick::Active);
+    };
+    let name = pf::normalize_name(Some(requested))?;
+    Ok(if name.as_deref() == active {
+        PortfolioPick::Active
+    } else {
+        PortfolioPick::File(name)
+    })
+}
+
 pub(crate) async fn load_portfolio_report_named(
     src: &impl views::DataSource,
     market: Market,
     base: Option<&str>,
     portfolio_name: Option<&str>,
 ) -> Result<PortfolioReport> {
-    let portfolio = match portfolio_name {
-        None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
-        Some(name) => {
-            let norm = pf::normalize_name(Some(name))?;
-            match norm {
-                None => src.portfolio().map_err(|e| e.context(views::LocalData))?,
-                Some(n) => {
-                    Portfolio::load_named(Some(&n)).map_err(|e| e.context(views::LocalData))?
-                }
+    let portfolio = match pick_portfolio(portfolio_name, pf::active())? {
+        PortfolioPick::Active => src.portfolio().map_err(|e| e.context(views::LocalData))?,
+        PortfolioPick::File(name) => {
+            // A missing file loads as an empty portfolio: refuse a name
+            // that was never saved rather than show an empty book.
+            if let Some(n) = &name
+                && !pf::list_names()
+                    .map_err(|e| e.context(views::LocalData))?
+                    .contains(n)
+            {
+                return Err(views::NotFound(format!("No portfolio named '{}'", n)).into());
             }
+            Portfolio::load_named(name.as_deref()).map_err(|e| e.context(views::LocalData))?
         }
     };
     let symbols: Vec<String> = portfolio
@@ -740,12 +1052,17 @@ pub(crate) async fn load_portfolio_report_named(
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let val = value_holdings(src, &symbols, market, base).await?;
-    Ok(portfolio_report(
-        &portfolio,
-        &val,
-        chrono::Local::now().date_naive(),
-    ))
+    let symbols = crate::corp_actions::with_demerger_children(&portfolio, symbols);
+    let mut val = value_holdings(src, &symbols, market, base).await?;
+    let mut pending = crate::corp_actions::pending_splits_live(&portfolio).await;
+    pending.align_to_quotes(|s| val.priced_on(s));
+    let portfolio = pending.adjusted(&portfolio);
+    if !cfg!(test) {
+        val.load_history(&portfolio).await;
+    }
+    let mut report = portfolio_report(&portfolio, &val, chrono::Local::now().date_naive());
+    report.warnings = pending.warnings();
+    Ok(report)
 }
 
 /// Said once when prices cannot be fetched.
@@ -844,36 +1161,85 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 .iter()
                 .map(|h| h.symbol.clone())
                 .collect();
+            let symbols = crate::corp_actions::with_demerger_children(&portfolio, symbols);
             let client = YahooClient::new().await.ok();
-            let (val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
+            let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
             if !live {
                 eprintln!("  {OFFLINE_NOTE}");
             }
-            portfolio_report(&portfolio, &val, chrono::Local::now().date_naive())
+            let pending = match client.as_ref().filter(|_| live) {
+                Some(c) => crate::corp_actions::pending_splits(c, &portfolio).await,
+                None => crate::corp_actions::PendingSplits::offline(&portfolio),
+            };
+            let portfolio = pending.adjusted(&portfolio);
+            if live {
+                val.load_history(&portfolio).await;
+            }
+            let mut report = portfolio_report(&portfolio, &val, chrono::Local::now().date_naive());
+            report.warnings = pending.warnings();
+            if let Some(c) = client.as_ref().filter(|_| live) {
+                let enriched = super::actions::enriched_quotes(c, &portfolio, &val).await;
+                let mut actions = super::actions::quick_actions(&portfolio, &val, &enriched);
+                for row in report.holdings.iter_mut() {
+                    if let Some(a) = actions.remove(&row.symbol) {
+                        row.action = Some(a);
+                    }
+                }
+            }
+            report
         };
         return match fmt {
             Format::Csv => output::print_csv(&report.holdings),
             _ => output::print_json(&report),
         };
     }
-    let portfolio = Portfolio::load()?;
-    if portfolio.holdings.is_empty() {
+    let loaded = Portfolio::load()?;
+    if loaded.holdings.is_empty() {
         println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
         return Ok(());
     }
 
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
+    let symbols: Vec<String> = loaded.holdings.iter().map(|h| h.symbol.clone()).collect();
+    let symbols = crate::corp_actions::with_demerger_children(&loaded, symbols);
     let client = YahooClient::new().await.ok();
     let (mut val, live) = value_or_offline(client.as_ref(), &symbols, market, base).await;
     let Some(client) = client.filter(|_| live) else {
-        print_offline_portfolio(&portfolio);
+        // A pending demerger needs no network: show it as `--json` does.
+        let pending = crate::corp_actions::PendingSplits::offline(&loaded);
+        print_offline_portfolio(&pending.adjusted(&loaded));
+        pending.print();
         return Ok(());
     };
     let today = chrono::Local::now().date_naive();
+    // A split or bonus Yahoo reports but the lots have not taken yet would
+    // show as a fake loss: value a copy with it applied, and say so.
+    let mut pending = crate::corp_actions::pending_splits(&client, &loaded).await;
+    pending.align_to_quotes(|s| val.priced_on(s));
+    let portfolio = pending.adjusted(&loaded);
+    // Rates for closed positions and dividends in currencies no open
+    // holding uses, before anything is totalled; then each day's rate.
+    let mut history_currencies: Vec<String> = portfolio
+        .symbols_with_history()
+        .iter()
+        .filter_map(|sym| val.currency(sym))
+        .chain(
+            portfolio
+                .dividends
+                .iter()
+                .filter_map(|d| d.currency.clone()),
+        )
+        .collect();
+    history_currencies.sort();
+    history_currencies.dedup();
+    val.add_rates(&client, &history_currencies).await;
+    val.load_history(&portfolio).await;
+
+    let base_currency = val.base().to_string();
+    let base = Some(base_currency.as_str());
+    let any_foreign = portfolio
+        .holdings
+        .iter()
+        .any(|h| val.currency(&h.symbol).is_some_and(|c| c != base_currency));
 
     print_header(&portfolio_title(t(Msg::YourPortfolio)));
     // Wide enough for `MF:<ISIN>` (and the `*` of estimated dates).
@@ -884,10 +1250,18 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         .max()
         .unwrap_or(0)
         .max(12);
-    let rule = "─".repeat(81 + sw);
+    let fx_w = if any_foreign { 12 } else { 0 };
+    let rule = "─".repeat(81 + 13 + sw + fx_w);
+    let enriched = super::actions::enriched_quotes(&client, &portfolio, &val).await;
+    let actions = super::actions::quick_actions(&portfolio, &val, &enriched);
+    let fx_head = if any_foreign {
+        format!(" {}", pad_start("FX effect", 11).bold())
+    } else {
+        String::new()
+    };
     // Width-aware padding: translated labels (e.g. Hindi) aren't one column per char.
     println!(
-        "  {} {} {} {} {} {} {} {} {}",
+        "  {} {} {} {} {} {} {}{} {} {} {}",
         pad_end(t(Msg::Symbol), sw).bold(),
         pad_start(t(Msg::Shares), 8).bold(),
         pad_start(t(Msg::AvgCost), 10).bold(),
@@ -895,8 +1269,10 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         pad_start(t(Msg::Value), 12).bold(),
         pad_start(t(Msg::PnL), 11).bold(),
         pad_start(t(Msg::PnLPct), 8).bold(),
+        fx_head,
         pad_start("XIRR", 8).bold(),
         pad_start("Cap", 6).bold(),
+        pad_end("Action", 12).bold(),
     );
     println!("  {}", rule.dimmed());
 
@@ -905,15 +1281,23 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let cur = val.currency(&h.symbol);
         let cur = cur.as_deref();
         let mut label = h.symbol.clone();
+        if !pending.for_symbol(&h.symbol).is_empty() {
+            label.push('†');
+        }
         if h.has_estimated_dates() {
             label.push('*');
             any_estimated = true;
         }
+        let fx_blank = if any_foreign {
+            format!(" {:>11}", "—")
+        } else {
+            String::new()
+        };
         // No live price (delisted, renamed, or a bad symbol): show N/A and
         // leave it out of the totals rather than valuing it at 0.
         let Some(price) = val.price(&h.symbol) else {
             println!(
-                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
+                "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6}",
                 label.yellow(),
                 h.shares,
                 format_price(h.avg_cost, cur),
@@ -921,6 +1305,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
                 "N/A",
                 "—",
                 "—",
+                fx_blank,
                 "—",
                 "",
             );
@@ -930,9 +1315,28 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         let cost = h.cost_basis();
         let pnl = value - cost;
         let pnl_pct = if cost > 0.0 { pnl / cost * 100.0 } else { 0.0 };
-        let xirr = pf::xirr(&portfolio.cash_flows(&h.symbol), value, today);
+        // In the base currency, each flow at its own date's rate; none
+        // from guessed purchase dates.
+        let xirr = val
+            .to_base(&h.symbol, value)
+            .and_then(|v| holding_xirr(&portfolio, &val, h, v, today));
+        let fx_cell = if !any_foreign {
+            String::new()
+        } else if cur == base {
+            fx_blank.clone()
+        } else {
+            match (
+                val.holding_cost_base(h),
+                val.to_base(&h.symbol, h.cost_basis()),
+            ) {
+                (Some((hist, true)), Some(now)) => {
+                    format!(" {:>11}", signed_money(now - hist, base))
+                }
+                _ => fx_blank.clone(),
+            }
+        };
         println!(
-            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
+            "  {:<sw$} {:>8.2} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6} {}",
             label.cyan(),
             h.shares,
             format_price(h.avg_cost, cur),
@@ -940,90 +1344,60 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             format_price(value, cur),
             signed_money(pnl, cur),
             signed_pct(pnl_pct),
+            fx_cell,
             xirr_cell(xirr),
             val.cap_tier(&h.symbol).badge().dimmed(),
+            action_cell(actions.get(&h.symbol)),
         );
     }
 
     let totals = val.totals(&portfolio);
-    let base_currency = val.base().to_string();
-    let base = Some(base_currency.as_str());
-    let portfolio_xirr = {
-        // Money-weighted return across everything ever held (closed
-        // positions too), converted at today's rates. Holdings left out of
-        // the totals are left out here as well.
-        let excluded: Vec<&String> = totals.unpriced.iter().chain(&totals.unconverted).collect();
-        let mut flows = Vec::new();
-        for sym in portfolio.symbols_with_history() {
-            if excluded.contains(&&sym) {
-                continue;
-            }
-            for (d, amount) in portfolio.cash_flows(&sym) {
-                match val.to_base(&sym, amount) {
-                    Some(a) => flows.push((d, a)),
-                    None => continue,
-                }
-            }
-        }
-        pf::xirr(&flows, totals.value, today)
+    let (portfolio_xirr, xirr_left_out) = portfolio_xirr(&portfolio, &val, &totals, today);
+    let fx_total = if any_foreign {
+        format!(" {:>11}", signed_money(totals.fx_effect(), base))
+    } else {
+        String::new()
     };
     println!("  {}", rule.dimmed());
+    // The Avg Cost column has no meaning for a mix of holdings: the total
+    // cost is printed below instead.
     println!(
-        "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8} {:>8} {:>6}",
+        "  {} {:>8} {:>10} {:>10} {:>12} {:>11} {:>8}{} {:>8} {:>6}",
         pad_end(t(Msg::Total), sw).bold(),
         "",
-        format_price(totals.cost, base),
+        "",
         "",
         format_price(totals.value, base).bold(),
         signed_money(totals.value - totals.cost, base),
         signed_pct(totals.pnl_pct()),
+        fx_total,
         xirr_cell(portfolio_xirr),
         "",
     );
+    print_kv("Cost basis", &format_price(totals.cost, base));
+    if !actions.is_empty() {
+        println!(
+            "  {}",
+            "Action: quote-based rules (methodology 2). `stockwise portfolio review` adds price history, look-through and tax notes."
+                .dimmed()
+        );
+    }
     if let Some(note) = val.fx_note() {
         println!("  {}", note.dimmed());
     }
-
-    // Realized P&L and dividends, all time, in the base currency. Closed
-    // positions may be in a currency no open holding uses.
-    let mut history_currencies: Vec<String> = portfolio
-        .realized
-        .iter()
-        .map(|s| &s.symbol)
-        .chain(portfolio.dividends.iter().map(|d| &d.symbol))
-        .filter_map(|sym| val.currency(sym))
-        .collect();
-    history_currencies.sort();
-    history_currencies.dedup();
-    val.add_rates(&client, &history_currencies).await;
-    let mut unconverted: Vec<&str> = portfolio
-        .realized
-        .iter()
-        .map(|s| s.symbol.as_str())
-        .chain(portfolio.dividends.iter().map(|d| d.symbol.as_str()))
-        .filter(|sym| val.to_base(sym, 1.0).is_none())
-        .collect();
-    unconverted.sort();
-    unconverted.dedup();
-    let realized: f64 = portfolio
-        .realized
-        .iter()
-        .filter_map(|s| val.to_base(&s.symbol, s.gain()))
-        .sum();
-    let dividends: f64 = portfolio
-        .dividends
-        .iter()
-        .filter_map(|d| val.to_base(&d.symbol, d.amount))
-        .sum();
-    if !portfolio.realized.is_empty() {
-        print_kv(
-            &format!("Realized P&L ({} sale lots)", portfolio.realized.len()),
-            &signed_money(realized, base),
+    if any_foreign {
+        println!(
+            "  {}",
+            format!(
+                "Cost in {} at each purchase date's exchange rate. FX effect: what exchange-rate moves since then added (P&L and P&L % on the right of the total include it).",
+                base_currency
+            )
+            .dimmed()
         );
     }
-    if !portfolio.dividends.is_empty() {
-        print_kv("Dividends received", &format_price(dividends, base));
-    }
+
+    print_total_return(&client, &portfolio, &val, &totals, today).await;
+
     let prof = crate::config::effective_profile();
     if prof.mode == crate::config::ProfileMode::Ultra && totals.value > 0.0 {
         let heat_per_pos = prof.risk_per_trade;
@@ -1040,6 +1414,7 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         );
     }
     println!();
+    pending.print();
     totals.print_exclusions();
     val.print_price_notes();
     let regular_funds = portfolio
@@ -1061,15 +1436,19 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
             regular_funds
         );
     }
-    if !unconverted.is_empty() {
+    if !xirr_left_out.is_empty() {
         println!(
-            "  {} No exchange rate for {} — left out of realized P&L and dividends.",
+            "  {} Some cash flows of {} have no exchange rate — left out of the portfolio XIRR.",
             "!".yellow(),
-            unconverted.join(", ")
+            xirr_left_out.join(", ")
         );
     }
     if any_estimated {
         println!("  {}", ESTIMATED_DATE_HINT.dimmed());
+        println!(
+            "  {}",
+            "XIRR is not shown for holdings with an unknown purchase date.".dimmed()
+        );
     }
 
     if portfolio.holdings.len() > 1 {
@@ -1091,6 +1470,350 @@ pub async fn cmd_portfolio_show(market: Market, base: Option<&str>, fmt: Format)
         "By market, sector and tax term, with risk and observations: stockwise portfolio analyze",
     );
     Ok(())
+}
+
+/// Money-weighted return across everything ever held (closed positions in
+/// any currency too), each flow at its own date's exchange rate. Open
+/// holdings left out of the totals are left out here as well. Returns the
+/// rate and the symbols that had no exchange rate.
+pub(crate) fn portfolio_xirr(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    totals: &Totals,
+    today: chrono::NaiveDate,
+) -> (Option<f64>, Vec<String>) {
+    let excluded: Vec<&String> = totals.unpriced.iter().chain(&totals.unconverted).collect();
+    let mut flows = Vec::new();
+    let mut left_out = Vec::new();
+    // The terminal value of the same holdings whose flows are counted.
+    let mut value_now = 0.0;
+    for sym in portfolio.symbols_with_history() {
+        if excluded.contains(&&sym) {
+            continue;
+        }
+        let Some(f) = val.flows_base(portfolio, &sym) else {
+            left_out.push(sym);
+            continue;
+        };
+        let value = match portfolio.holding(&sym) {
+            Some(h) => match val
+                .price(&sym)
+                .and_then(|p| val.to_base(&sym, h.shares * p))
+            {
+                Some(v) => v,
+                None => {
+                    left_out.push(sym);
+                    continue;
+                }
+            },
+            None => 0.0,
+        };
+        value_now += value;
+        flows.extend(f);
+    }
+    flows.sort_by_key(|f| f.0);
+    (pf::xirr(&flows, value_now, today), left_out)
+}
+
+/// A holding's XIRR in the base currency: each flow at its own date's rate
+/// and today's value at today's. `None` when a flow has no rate, or the
+/// purchase dates are estimates.
+pub(crate) fn holding_xirr(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    h: &pf::Holding,
+    value_base: f64,
+    today: chrono::NaiveDate,
+) -> Option<f64> {
+    if h.has_estimated_dates() {
+        return None;
+    }
+    pf::xirr(&val.flows_base(portfolio, &h.symbol)?, value_base, today)
+}
+
+/// Purchase charges recorded on the open lots of the holdings in `totals`,
+/// in the base currency at each purchase's rate.
+pub(crate) fn open_lot_charges_base(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    totals: &Totals,
+) -> f64 {
+    let left_out: Vec<&String> = totals.unpriced.iter().chain(&totals.unconverted).collect();
+    portfolio
+        .holdings
+        .iter()
+        .filter(|h| !left_out.contains(&&h.symbol))
+        .flat_map(|h| h.lots.iter().map(move |l| (h, l)))
+        .filter_map(|(h, l)| {
+            let c = l.charges.filter(|c| *c > 0.0)?;
+            // The lot's own rate: its cost in the base over its cost.
+            let (cost_base, _) = val.lot_cost_base(&h.symbol, l)?;
+            let rate = if l.cost() > 0.0 {
+                cost_base / l.cost()
+            } else {
+                let d = pf::parse_date(&l.date).ok()?;
+                val.rate_on(&h.symbol, d)?.0
+            };
+            Some(c * rate)
+        })
+        .sum()
+}
+
+/// The first day of the financial year holding `today`: 1 April in India
+/// (an INR base), else 1 January.
+pub(crate) fn fy_start(today: chrono::NaiveDate, base: &str) -> chrono::NaiveDate {
+    use chrono::Datelike;
+    let ymd = |y, m| chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(today);
+    if base.eq_ignore_ascii_case("INR") {
+        if today.month() >= 4 {
+            ymd(today.year(), 4)
+        } else {
+            ymd(today.year() - 1, 4)
+        }
+    } else {
+        ymd(today.year(), 1)
+    }
+}
+
+/// "FY 2026-27" for an INR base, "2026" otherwise.
+fn fy_label(start: chrono::NaiveDate, base: &str) -> String {
+    use chrono::Datelike;
+    if base.eq_ignore_ascii_case("INR") {
+        format!("FY {}-{:02}", start.year(), (start.year() + 1) % 100)
+    } else {
+        start.year().to_string()
+    }
+}
+
+/// Realized P&L and dividends in the base currency, all time and since
+/// `since`, each at its own date's exchange rate.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub(crate) struct Income {
+    pub realized: f64,
+    pub realized_since: f64,
+    pub sales: usize,
+    pub sales_since: usize,
+    pub dividends: f64,
+    pub dividends_since: f64,
+    pub charges: f64,
+}
+
+pub(crate) fn income_since(
+    portfolio: &Portfolio,
+    val: &Valuation,
+    since: chrono::NaiveDate,
+) -> Income {
+    let mut out = Income::default();
+    let after = |d: &str| pf::parse_date(d).is_ok_and(|d| d >= since);
+    for s in &portfolio.realized {
+        let Some(parts) = val.sale_parts_base(s) else {
+            continue;
+        };
+        let g = parts.gain;
+        out.realized += g;
+        out.sales += 1;
+        out.charges += parts.charges;
+        if after(&s.sell_date) {
+            out.realized_since += g;
+            out.sales_since += 1;
+        }
+    }
+    for d in &portfolio.dividends {
+        let Some(a) = val.dividend_base(d) else {
+            continue;
+        };
+        out.dividends += a;
+        if after(&d.ex_date) {
+            out.dividends_since += a;
+        }
+    }
+    out
+}
+
+/// How much the holdings now held moved over a period, at today's rates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PeriodChange {
+    pub label: &'static str,
+    pub change: f64,
+    pub pct: f64,
+    /// Holdings with a price at the period's start, of those priced now.
+    pub covered: usize,
+    pub of: usize,
+}
+
+/// Change of each holding's value since a past close, at today's share
+/// count and exchange rate. `then(symbol)` is the holding's price at the
+/// period start.
+pub(crate) fn period_change(
+    label: &'static str,
+    portfolio: &Portfolio,
+    val: &Valuation,
+    then: impl Fn(&str) -> Option<f64>,
+) -> Option<PeriodChange> {
+    let (mut change, mut before, mut covered, mut of) = (0.0, 0.0, 0, 0);
+    for h in &portfolio.holdings {
+        let Some(now) = val.price(&h.symbol) else {
+            continue;
+        };
+        of += 1;
+        let Some(past) = then(&h.symbol).filter(|p| *p > 0.0) else {
+            continue;
+        };
+        let (Some(v_now), Some(v_then)) = (
+            val.to_base(&h.symbol, h.shares * now),
+            val.to_base(&h.symbol, h.shares * past),
+        ) else {
+            continue;
+        };
+        change += v_now - v_then;
+        before += v_then;
+        covered += 1;
+    }
+    (covered > 0 && before > 0.0).then(|| PeriodChange {
+        label,
+        change,
+        pct: change / before * 100.0,
+        covered,
+        of,
+    })
+}
+
+/// The close on or before `date` in `closes` (oldest first).
+fn close_on_or_before(closes: &[(chrono::NaiveDate, f64)], date: chrono::NaiveDate) -> Option<f64> {
+    let idx = closes.partition_point(|(d, _)| *d <= date);
+    closes.get(idx.checked_sub(1)?).map(|c| c.1)
+}
+
+/// Unrealized, realized (this financial year and all time) and dividends,
+/// then how the current holdings moved over a day, a week, a month and
+/// the year to date.
+async fn print_total_return(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    val: &Valuation,
+    totals: &Totals,
+    today: chrono::NaiveDate,
+) {
+    use futures_util::StreamExt;
+    let base_currency = val.base().to_string();
+    let base = Some(base_currency.as_str());
+    let since = fy_start(today, &base_currency);
+    let fy = fy_label(since, &base_currency);
+    let inc = income_since(portfolio, val, since);
+    let unrealized = totals.value - totals.cost;
+    print_section(&format!("Total return ({})", base_currency));
+    print_kv("Unrealized", &signed_money(unrealized, base));
+    if inc.sales > 0 {
+        print_kv(
+            &format!("Realized, {} ({} sale lots)", fy, inc.sales_since),
+            &signed_money(inc.realized_since, base),
+        );
+        print_kv(
+            &format!("Realized, all time ({} sale lots)", inc.sales),
+            &signed_money(inc.realized, base),
+        );
+        if inc.charges > 0.0 {
+            print_kv(
+                "  of which charges",
+                &format!("-{}", format_price(inc.charges, base)),
+            );
+        }
+    }
+    if !portfolio.dividends.is_empty() {
+        print_kv(
+            &format!("Dividends, {}", fy),
+            &format_price(inc.dividends_since, base),
+        );
+        print_kv("Dividends, all time", &format_price(inc.dividends, base));
+    }
+    // Unrealized P&L is before the open lots' purchase charges; the total
+    // takes them off, as a sale would.
+    let open_charges = open_lot_charges_base(portfolio, val, totals);
+    if open_charges > 0.0 {
+        print_kv(
+            "Charges on open lots",
+            &format!("-{}", format_price(open_charges, base)),
+        );
+    }
+    print_kv(
+        "Total, all time",
+        &signed_money(
+            unrealized + inc.realized + inc.dividends - open_charges,
+            base,
+        ),
+    );
+
+    // Past closes of the holdings priced by Yahoo (funds and SGBs have none).
+    let symbols: Vec<String> = portfolio
+        .holdings
+        .iter()
+        .filter(|h| val.price(&h.symbol).is_some() && val.mark(&h.symbol).is_none())
+        .map(|h| h.symbol.clone())
+        .collect();
+    let histories: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> =
+        futures_util::stream::iter(symbols)
+            .map(|sym| async move {
+                let closes = client
+                    .get_chart(&sym, "1y", "1d")
+                    .await
+                    .map(|c| c.dated_closes())
+                    .unwrap_or_default();
+                (sym, closes)
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+    let past = |sym: &str, date: chrono::NaiveDate| {
+        histories
+            .iter()
+            .find(|(s, _)| s == sym)
+            .and_then(|(_, c)| close_on_or_before(c, date))
+    };
+    let ytd_start = {
+        use chrono::Datelike;
+        chrono::NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today)
+            - chrono::Duration::days(1)
+    };
+    let changes: Vec<PeriodChange> = [
+        period_change("1 day", portfolio, val, |s| {
+            val.quote(s).and_then(|q| q.regular_market_previous_close)
+        }),
+        period_change("1 week", portfolio, val, |s| {
+            past(s, today - chrono::Duration::days(7))
+        }),
+        period_change("1 month", portfolio, val, |s| {
+            past(s, today - chrono::Months::new(1))
+        }),
+        period_change("Year to date", portfolio, val, |s| past(s, ytd_start)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !changes.is_empty() {
+        let cells: Vec<String> = changes
+            .iter()
+            .map(|c| {
+                let cover = if c.covered < c.of {
+                    format!(" [{}/{}]", c.covered, c.of)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} {} ({}){}",
+                    c.label,
+                    signed_money(c.change, base),
+                    signed_pct(c.pct),
+                    cover
+                )
+            })
+            .collect();
+        print_kv("Change of current holdings", &cells.join("  "));
+        println!(
+            "  {}",
+            "At today's share count and exchange rate; [n/m]: holdings with a price at the start."
+                .dimmed()
+        );
+    }
 }
 
 /// A price paid in `paid` expressed in the holding's quote unit
@@ -1143,10 +1866,17 @@ pub async fn cmd_portfolio_add(
     date: Option<&str>,
     force: bool,
     paid_in: Option<&str>,
+    charges: Option<crate::trade_charges::ChargesArg>,
     market: Market,
 ) -> Result<()> {
+    use crate::trade_charges::{self as tc, ChargesArg};
     if !(shares > 0.0 && shares.is_finite()) {
         bail!("Number of shares must be positive");
+    }
+    if let Some(ChargesArg::Amount(c)) = charges
+        && !(c >= 0.0 && c.is_finite())
+    {
+        bail!("Charges can't be negative");
     }
     if !(cost >= 0.0 && cost.is_finite()) {
         bail!("Cost per share can't be negative");
@@ -1184,11 +1914,37 @@ pub async fn cmd_portfolio_add(
     }
     let resolved = market::resolve_symbol(&symbol, market);
     check_symbols_before_add(std::slice::from_ref(&resolved), market, force).await?;
+    // `--charges auto`: an Indian delivery buy's statutory charges, in rupees.
+    let charges: Option<f64> = match charges {
+        None => None,
+        Some(ChargesArg::Amount(c)) => Some(c),
+        Some(ChargesArg::Auto) => {
+            if !tc::auto_applies(&resolved) || paid_in.is_some() {
+                bail!(
+                    "`--charges auto` estimates Indian (NSE/BSE) delivery charges in rupees; \
+                     for {} give the total charged instead (--charges 12.50)",
+                    resolved
+                );
+            }
+            let est = tc::estimate_delivery(false, shares * cost, pf::parse_date(&date)?);
+            println!(
+                "  {} Estimated charges {}: {} (brokerage not included)",
+                "·".dimmed(),
+                format_price(est.total(), Some("INR")),
+                tc::breakdown(&est)
+            );
+            Some(est.total())
+        }
+    };
     // A price paid in another currency (a US share bought with rupees):
     // convert it at that day's rate, so the cost is in the holding's own.
     // The currency the cost ends up in: the instrument's quoted currency
     // when `--currency` looked it up, else the one its suffix implies.
     let mut cost_currency: Option<String> = None;
+    // What was paid in the other currency, per unit of the holding's: kept
+    // on the lot so its cost in that currency is exact, not re-converted.
+    let mut paid_fx: Option<(String, f64)> = None;
+    let mut charges = charges;
     if let Some(paid) = paid_in {
         // The currency the instrument is quoted in, from its quote (a few
         // London listings trade in USD), else from its suffix.
@@ -1214,11 +1970,18 @@ pub async fn cmd_portfolio_add(
         let paid_cost = cost;
         if paid.eq_ignore_ascii_case(&major) {
             cost = convert_paid(cost, 1.0, false, quote);
+            charges = charges.map(|c| convert_paid(c, 1.0, false, quote));
         } else {
             let (pair, inverted) = fx_pair(paid, &major);
             let day = pf::parse_date(&date)?;
             let (rate, on) = rate_on(&client, &pair, day).await?;
             cost = convert_paid(cost, rate, inverted, quote);
+            let (major_cost, _) = market::to_major(cost, quote);
+            if major_cost > 0.0 {
+                paid_fx = Some((paid.to_uppercase(), paid_cost / major_cost));
+            }
+            // Charges are kept in the holding's quote unit, like its price.
+            charges = charges.map(|c| convert_paid(c, rate, inverted, quote));
             let per = if inverted { rate } else { 1.0 / rate };
             println!(
                 "  {} {} {:.2} a share is {} at {:.4} {} per {} ({} close of {})",
@@ -1237,6 +2000,14 @@ pub async fn cmd_portfolio_add(
     let holding = Portfolio::update(|p| {
         let mut lot = Lot::new(shares, cost, &date, "manual");
         lot.units_as_of = units_as_of;
+        if let Some((cur, rate)) = &paid_fx {
+            lot.fx_currency = Some(cur.clone());
+            lot.fx_rate = Some(*rate);
+        }
+        // Recorded in whole paise (cents, pence): the one rounding point.
+        lot.charges = charges
+            .map(|c| (c * 100.0).round() / 100.0)
+            .filter(|c| *c > 0.0);
         p.add_lot(&resolved, lot);
         Ok(p.holding(&resolved).cloned())
     })?;
@@ -1352,12 +2123,29 @@ pub async fn cmd_portfolio_sell(
     shares: f64,
     price: Option<f64>,
     date: Option<&str>,
+    charges: Option<crate::trade_charges::ChargesArg>,
+    lots: &[usize],
     market: Market,
 ) -> Result<()> {
+    use crate::trade_charges::{self as tc, ChargesArg};
+    if let Some(ChargesArg::Amount(c)) = charges
+        && !(c >= 0.0 && c.is_finite())
+    {
+        bail!("Charges can't be negative");
+    }
     let portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
     if portfolio.holding(&resolved).is_none() {
         bail!("{} is not in your portfolio", resolved);
+    }
+    if !lots.is_empty()
+        && (offmarket::is_off_market(&resolved) || pf::symbol_currency(&resolved) == Some("INR"))
+    {
+        bail!(
+            "Indian shares and funds are sold first-in, first-out (demat and AMC rules); \
+             --lots is for US and UK shares. Drop --lots to sell {} oldest first.",
+            resolved
+        );
     }
     let today = pf::today();
     let date = match date {
@@ -1436,19 +2224,72 @@ pub async fn cmd_portfolio_sell(
             })?
         }
     };
+    // `--charges auto`: an Indian delivery sell's statutory charges.
+    let charges: Option<f64> = match charges {
+        None => None,
+        Some(ChargesArg::Amount(c)) => Some(c),
+        Some(ChargesArg::Auto) => {
+            if !tc::auto_applies(&resolved) {
+                bail!(
+                    "`--charges auto` estimates Indian (NSE/BSE) delivery charges; \
+                     for {} give the total charged instead (--charges 12.50)",
+                    resolved
+                );
+            }
+            let est = tc::estimate_delivery(true, shares * price, pf::parse_date(&date)?);
+            println!(
+                "  {} Estimated charges {}: {} (brokerage not included)",
+                "·".dimmed(),
+                format_price(est.total(), Some("INR")),
+                tc::breakdown(&est)
+            );
+            Some(est.total())
+        }
+    };
     // The checks above ran on the portfolio as loaded; sell from the file as
     // it is now, so a change made meanwhile is kept (and a sale that no
     // longer fits is refused).
-    let sales = Portfolio::update(|p| p.sell_fifo(&resolved, shares, price, &date, "manual"))?;
+    let sales = Portfolio::update(|p| {
+        let n = p.realized.len();
+        let mut sales = if lots.is_empty() {
+            p.sell_fifo(&resolved, shares, price, &date, "manual")?
+        } else {
+            p.sell_specific(&resolved, shares, price, &date, "manual", lots)?
+        };
+        // The sale's own charges, shared by the lots it sold from.
+        // Whole paise (cents, pence) per lot, adding up to the fee exactly.
+        if let Some(c) = charges.filter(|c| *c > 0.0) {
+            let weights: Vec<f64> = sales.iter().map(|s| s.qty).collect();
+            let parts = pf::allocate_minor_units(c, &weights);
+            for ((s, saved), part) in sales.iter_mut().zip(p.realized[n..].iter_mut()).zip(parts) {
+                s.add_charges(part);
+                saved.add_charges(part);
+            }
+        }
+        Ok(sales)
+    })?;
 
     let cur = cur.as_deref();
+    let which = if lots.is_empty() {
+        "oldest lots first".to_string()
+    } else {
+        format!(
+            "from lot{} {}",
+            if lots.len() == 1 { "" } else { "s" },
+            lots.iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     println!(
-        "  {} Sold {} {} at {} on {} (oldest lots first)",
+        "  {} Sold {} {} at {} on {} ({})",
         "✓".green(),
         shares,
         resolved.cyan(),
         format_price(price, cur),
-        date
+        date,
+        which
     );
     let sold = pf::parse_date(&date)?;
     let mut total = 0.0;
@@ -1702,7 +2543,12 @@ fn apply_lot_change_inner(resolved: &str, change: &LotChange) -> Result<Option<P
     Ok(Some(p))
 }
 
-pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market) -> Result<()> {
+pub async fn cmd_portfolio_lots(
+    symbol: &str,
+    change: LotChange,
+    market: Market,
+    json: bool,
+) -> Result<()> {
     let mut portfolio = Portfolio::load()?;
     let resolved = held_symbol(&portfolio, symbol, market);
     if let Some(p) = apply_lot_change(&resolved, &change)? {
@@ -1726,6 +2572,15 @@ pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market)
         .collect();
     if holding.is_none() && sales.is_empty() {
         bail!("{} is not in your portfolio", resolved);
+    }
+    if json {
+        // The ledger as stored: open lots, sales and dividends, no live price.
+        return output::print_json(&serde_json::json!({
+            "symbol": resolved,
+            "lots": holding.map(|h| &h.lots),
+            "sales": sales,
+            "dividends": dividends,
+        }));
     }
 
     // The live price is a nice-to-have here; lots still show without it.
@@ -1880,8 +2735,90 @@ pub async fn cmd_portfolio_lots(symbol: &str, change: LotChange, market: Market)
     Ok(())
 }
 
-/// Splits, bonuses and dividends since the first purchase of each holding.
-/// Shows what would change; only `apply` writes, and applying twice is a no-op.
+/// Report lines for the `demergers` of the parent `sym` still to record,
+/// worked out on a copy of `portfolio` with `splits` (this symbol's, from
+/// Yahoo) applied in date order around them, so each entitlement is the
+/// share count on its record date. Conflicts go to `notes`; parent lots and
+/// sales to split are added to `count`.
+fn preview_demergers(
+    portfolio: &Portfolio,
+    sym: &str,
+    (splits, demergers): (&[Split], &[&'static pf::Demerger]),
+    apply: bool,
+    notes: &mut Vec<String>,
+    count: &mut usize,
+) -> Vec<String> {
+    if demergers.is_empty() {
+        return Vec::new();
+    }
+    let cur = pf::symbol_currency(sym);
+    let mut trial = portfolio.clone();
+    let outcomes = trial.apply_in_order(sym, splits, demergers);
+    let mut lines = Vec::new();
+    for (d, out) in demergers.iter().zip(outcomes) {
+        notes.extend(
+            out.conflicts
+                .iter()
+                .map(|c| format!("{} demerger into {}: {}", sym, d.child, c)),
+        );
+        if out.lots + out.sales == 0 {
+            continue;
+        }
+        let mut children: Vec<&str> = out.child_lots.iter().map(|(s, _)| s.as_str()).collect();
+        children.sort();
+        children.dedup();
+        let child = if children.is_empty() {
+            d.child_symbol(sym)
+        } else {
+            children.join(", ")
+        };
+        let mut what = format!(
+            "+{} {} at {} ({}% of cost), keeping the purchase dates; {} keeps {}% of its cost",
+            (out.child_shares() * 1e6).round() / 1e6,
+            child,
+            format_price(out.child_cost(), cur),
+            d.child_cost_pct,
+            sym,
+            ((100.0 - d.child_cost_pct) * 100.0).round() / 100.0
+        );
+        if out.sales > 0 {
+            what.push_str(&format!(
+                "; {} sale(s) after the record date had received these shares too: their \
+                 cost is split the same way (realized P&L changes) and their {} shares are added",
+                out.sales, d.child
+            ));
+        }
+        if out.reconciled > 0.0 {
+            what.push_str(&format!(
+                "; {} {} already in the portfolio without a purchase record taken as these \
+                 shares, not added twice",
+                out.reconciled, d.child
+            ));
+        }
+        if out.fraction_dropped > 1e-9 {
+            what.push_str(&format!(
+                "; {} fractional share(s) paid in cash, not recorded",
+                (out.fraction_dropped * 1e6).round() / 1e6
+            ));
+        }
+        lines.push(format!(
+            "  {} Demerger into {} ({}:{}, record date {}) — {} lot(s) and sale(s): {}",
+            if apply { "✓".green() } else { "+".yellow() },
+            d.child,
+            d.child_shares,
+            d.parent_shares,
+            d.record_date,
+            out.lots + out.sales,
+            what
+        ));
+        *count += out.lots + out.sales;
+    }
+    lines
+}
+
+/// Splits, bonuses, Indian demergers and dividends since the first purchase
+/// of each holding. Shows what would change; only `apply` writes, and
+/// applying twice is a no-op.
 pub async fn cmd_portfolio_actions(
     symbol: Option<&str>,
     apply: bool,
@@ -1890,6 +2827,10 @@ pub async fn cmd_portfolio_actions(
     // `portfolio` is a working copy for the report; `--apply` re-applies the
     // fetched actions to the saved file under a lock (see `plan`).
     let mut portfolio = Portfolio::load()?;
+    // Accounts whose merger fraction was paid in cash, with the price
+    // (today's share count) the sale is recorded at.
+    let mut merger_plan: Vec<(pf::MergerFraction, f64)> = Vec::new();
+    let mut rights_lines: Vec<String> = Vec::new();
     // Fully sold symbols too: dividends received before the sale count.
     let history = portfolio.symbols_with_history();
     let targets: Vec<String> = match symbol {
@@ -1935,7 +2876,29 @@ pub async fn cmd_portfolio_actions(
     let (mut done_splits, mut done_divs) = (0usize, 0usize);
     let mut plan = Vec::new();
     let mut failed = Vec::new();
+    // Demergers come from `pf::DEMERGERS`, not Yahoo, but wait for the
+    // symbol's splits: (parent symbol, demerger) for each one to record.
+    let mut demerger_plan: Vec<(String, &'static pf::Demerger)> = Vec::new();
+    let (mut demerger_lots, mut done_demergers) = (0usize, 0usize);
+    let mut demerger_notes: Vec<String> = Vec::new();
     for sym in &targets {
+        // Pending here: applied across every listing of the parent at once.
+        let pending_demergers: Vec<&'static pf::Demerger> = portfolio
+            .pending_demergers()
+            .into_iter()
+            .map(|(_, d)| d)
+            .filter(|d| d.is_parent(sym))
+            .collect();
+        done_demergers += pf::demergers_for(sym)
+            .into_iter()
+            .filter(|d| !pending_demergers.iter().any(|p| std::ptr::eq(*p, *d)))
+            .filter(|d| {
+                let id = d.id();
+                portfolio
+                    .holding(sym)
+                    .is_some_and(|h| h.lots.iter().any(|l| l.adjustments.contains(&id)))
+            })
+            .count();
         let first = portfolio
             .holding(sym)
             .into_iter()
@@ -1952,7 +2915,13 @@ pub async fn cmd_portfolio_actions(
         let (mut splits, divs, quote_currency) = match fetch_actions(&client, sym, &first).await {
             Ok(a) => a,
             Err(e) => {
-                failed.push(format!("{}: {:#}", sym, e));
+                // A demerger's entitlement needs the splits before it.
+                let waiting = if pending_demergers.is_empty() {
+                    ""
+                } else {
+                    " (its demerger is applied once this works)"
+                };
+                failed.push(format!("{}: {:#}{}", sym, e, waiting));
                 continue;
             }
         };
@@ -1968,7 +2937,81 @@ pub async fn cmd_portfolio_actions(
         let currency = quote_currency.or_else(|| pf::symbol_currency(sym).map(str::to_string));
         let cur = currency.as_deref();
 
-        let mut lines = Vec::new();
+        let mut lines = preview_demergers(
+            &portfolio,
+            sym,
+            (&splits, &pending_demergers),
+            apply,
+            &mut demerger_notes,
+            &mut demerger_lots,
+        );
+        demerger_plan.extend(pending_demergers.iter().map(|d| (sym.clone(), *d)));
+        for f in portfolio
+            .merger_fractions()
+            .into_iter()
+            .filter(|f| &f.symbol == sym)
+        {
+            let m = f.merger;
+            let day = pf::parse_date(m.through)?;
+            match rate_on(&client, sym, day).await {
+                Ok((price, on)) => {
+                    lines.push(format!(
+                        "  {} Cash for a fractional share — {} → {} ({} for {}, record date {}){}: \
+                         {} share(s) became {} whole; {} sold at {} (close on {}), a sale with its own gain",
+                        if apply { "✓".green() } else { "+".yellow() },
+                        m.old,
+                        m.new,
+                        m.new_shares,
+                        m.old_shares,
+                        m.through,
+                        f.account
+                            .as_deref()
+                            .map(|a| format!(" in {a}"))
+                            .unwrap_or_default(),
+                        (f.shares * 1e6).round() / 1e6,
+                        f.shares.floor(),
+                        (f.fraction * 1e6).round() / 1e6,
+                        format_price(price, cur),
+                        on
+                    ));
+                    if apply {
+                        portfolio.settle_merger_fraction(&f, price);
+                    }
+                    merger_plan.push((f, price));
+                }
+                Err(e) => failed.push(format!(
+                    "{}: no price for the fractional share's cash on {} ({e:#})",
+                    sym, m.through
+                )),
+            }
+        }
+        for r in crate::corp_actions::rights_entitlements(&portfolio)
+            .into_iter()
+            .filter(|r| &r.symbol == sym)
+        {
+            rights_lines.push(format!(
+                "{}: entitled to {} rights share(s) at {} ({} for {}, record date {}){}{}. Not recorded: \
+                 if you subscribed, add them with `stockwise portfolio add {} {} {} --date <allotment date>`.",
+                sym,
+                r.shares,
+                format_price(r.issue.price, cur),
+                r.issue.rights_shares,
+                r.issue.held_shares,
+                r.issue.record_date,
+                r.account
+                    .as_deref()
+                    .map(|a| format!(" in {a}"))
+                    .unwrap_or_default(),
+                if r.issue.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", r.issue.note)
+                },
+                sym,
+                r.shares,
+                r.issue.price
+            ));
+        }
         for split in &splits {
             let Some(h) = portfolio.holding(sym) else {
                 continue;
@@ -2063,14 +3106,19 @@ pub async fn cmd_portfolio_actions(
         }
         if apply {
             // Applied here too, so later symbols and dividends see the
-            // adjusted lots; applied again to the saved file below.
-            for split in &splits {
-                portfolio.apply_split(sym, split);
-            }
+            // adjusted lots; applied again to the saved file below. Splits
+            // and demergers in date order (see `Portfolio::apply_in_order`).
+            portfolio.apply_in_order(sym, &splits, &pending_demergers);
             for ev in &divs {
                 portfolio.record_dividend(sym, ev, &splits, cur);
             }
-            plan.push((sym.clone(), splits, divs, currency.clone()));
+            plan.push((
+                sym.clone(),
+                splits,
+                divs,
+                currency.clone(),
+                pending_demergers,
+            ));
         }
     }
 
@@ -2078,45 +3126,79 @@ pub async fn cmd_portfolio_actions(
     if failed.len() == targets.len() {
         bail!("Could not fetch corporate actions: {}", failed.join("; "));
     }
-    let pending = split_lots + bonus_lots + new_divs;
+    let pending = split_lots + bonus_lots + new_divs + demerger_lots + merger_plan.len();
     println!();
     let totals: Vec<String> = div_total
         .iter()
         .map(|(c, t)| format_price(*t, Some(c.as_str())))
         .collect();
-    let earlier = if done_splits + done_divs > 0 {
+    let earlier = if done_splits + done_divs + done_demergers > 0 {
+        let demergers = if done_demergers > 0 {
+            format!(", {} demerger(s)", done_demergers)
+        } else {
+            String::new()
+        };
         format!(
-            " ({} split(s) and {} dividend(s) applied earlier)",
-            done_splits, done_divs
+            " ({} split(s){} and {} dividend(s) applied earlier)",
+            done_splits, demergers, done_divs
         )
     } else {
         String::new()
     };
     if pending == 0 {
         println!(
-            "  {} Up to date — no new splits, bonuses or dividends since your purchases{}.",
+            "  {} Up to date — no new splits, bonuses, demergers or dividends since your purchases{}.",
             "✓".green(),
             earlier
         );
     } else if apply {
-        // The network work is done: apply it to the file as it is now. Both
-        // steps are idempotent, so a lot already adjusted is skipped.
+        // The network work is done: apply it to the file as it is now. Every
+        // step is idempotent, so a lot already adjusted is skipped.
+        let summary = format!(
+            "{} split lot(s), {} bonus lot(s), {} demerger lot(s), {} merger fraction(s), {} dividend(s)",
+            split_lots,
+            bonus_lots,
+            demerger_lots,
+            merger_plan.len(),
+            new_divs
+        );
         Portfolio::update(|p| {
-            for (sym, splits, divs, currency) in &plan {
-                for split in splits {
-                    p.apply_split(sym, split);
+            p.journalled("actions", &summary, |p| {
+                for (sym, splits, divs, currency, demergers) in &plan {
+                    p.apply_in_order(sym, splits, demergers);
+                    for ev in divs {
+                        p.record_dividend(sym, ev, splits, currency.as_deref());
+                    }
                 }
-                for ev in divs {
-                    p.record_dividend(sym, ev, splits, currency.as_deref());
+                for (f, price) in &merger_plan {
+                    // Found again on the file as it is now: settled ones are gone.
+                    let now = p.merger_fractions().into_iter().find(|g| {
+                        g.symbol == f.symbol && g.account == f.account && g.merger == f.merger
+                    });
+                    if let Some(g) = now {
+                        p.settle_merger_fraction(&g, *price);
+                    }
                 }
-            }
+            });
             Ok(())
         })?;
-        let bonus = if bonus_lots > 0 {
+        let mut bonus = if bonus_lots > 0 {
             format!(", added bonus shares for {} lot(s)", bonus_lots)
         } else {
             String::new()
         };
+        if demerger_lots > 0 {
+            bonus.push_str(&format!(
+                ", split the cost of {} lot(s) and sale(s) for demergers",
+                demerger_lots
+            ));
+        }
+        if !merger_plan.is_empty() {
+            bonus.push_str(&format!(
+                ", recorded the cash for {} fractional merger share(s) as sales",
+                merger_plan.len()
+            ));
+        }
         println!(
             "  {} Adjusted {} lot(s) for splits/bonuses{} and recorded {} dividend(s){}.",
             "✓".green().bold(),
@@ -2129,10 +3211,28 @@ pub async fn cmd_portfolio_actions(
                 format!(" ({})", totals.join(", "))
             }
         );
-    } else {
         println!(
-            "  {} lot(s) to adjust for splits/bonuses, {} lot(s) to receive bonus shares, {} dividend(s) to record. Nothing changed yet —",
-            split_lots, bonus_lots, new_divs
+            "  {}",
+            "Journalled: `stockwise portfolio actions --undo` takes it back.".dimmed()
+        );
+    } else {
+        let mut demergers = if demerger_lots > 0 {
+            format!(
+                ", {} lot(s) and sale(s) to split for demergers",
+                demerger_lots
+            )
+        } else {
+            String::new()
+        };
+        if !merger_plan.is_empty() {
+            demergers.push_str(&format!(
+                ", {} fractional merger share(s) to record as cash sales",
+                merger_plan.len()
+            ));
+        }
+        println!(
+            "  {} lot(s) to adjust for splits/bonuses, {} lot(s) to receive bonus shares{}, {} dividend(s) to record. Nothing changed yet —",
+            split_lots, bonus_lots, demergers, new_divs
         );
         println!(
             "  run {} to apply them (safe to repeat).",
@@ -2164,7 +3264,378 @@ pub async fn cmd_portfolio_actions(
             nse_offline_note(&cal, &nse_offline).dimmed()
         );
     }
+    if demerger_lots > 0 {
+        println!(
+            "  {}",
+            "Demergers and spin-offs: each parent lot held on the record date keeps its quantity \
+             and purchase date and gives the company's published share of its cost (to the \
+             paisa or cent) to a new lot of the resulting company, dated on the same purchase \
+             date for tax (India: Income-tax Act Sec. 49(2C), 49(2D) and 2(42A); US: the \
+             company's Form 8937 allocation, IRC 1223) but held only from the record date. \
+             Shares sold after the record date get the same split. Fractions of a share, paid \
+             in cash by the company, are not recorded."
+                .dimmed()
+        );
+        let mut sources: Vec<&str> = demerger_plan.iter().map(|(_, d)| d.source).collect();
+        sources.dedup();
+        for src in sources {
+            println!("  {}", format!("Source: {src}").dimmed());
+        }
+    }
+    for n in &demerger_notes {
+        println!("  {} {}", "!".yellow(), n.dimmed());
+    }
+    if !merger_plan.is_empty() {
+        println!(
+            "  {}",
+            "Mergers deliver whole shares and pay cash for the fraction: the fraction is sold out \
+             of the newest swapped lot at the record date's close, so the shares left keep the \
+             rest of the cost and the sale carries its own gain."
+                .dimmed()
+        );
+    }
+    for r in &rights_lines {
+        println!("  {} {}", "·".dimmed(), r.dimmed());
+    }
     println!();
+    Ok(())
+}
+
+/// `portfolio actions --journal`: the journalled changes, newest last.
+pub fn cmd_portfolio_journal() -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    print_header(&portfolio_title("Corporate-action journal"));
+    if portfolio.journal.is_empty() {
+        println!(
+            "\n  {}\n",
+            "Nothing recorded yet. `portfolio actions --apply`, `demerger`, `rename`, \
+             `return-of-capital` and `sync --apply` add an entry each."
+                .dimmed()
+        );
+        return Ok(());
+    }
+    println!();
+    for (i, e) in portfolio.journal.iter().enumerate() {
+        let symbols: Vec<&str> = e.before.iter().map(|s| s.symbol.as_str()).collect();
+        println!(
+            "  {:>3}  {}  {:<18} {} — {}",
+            i + 1,
+            e.at.dimmed(),
+            e.action.cyan(),
+            e.summary,
+            symbols.join(", ").dimmed()
+        );
+    }
+    println!(
+        "\n  {}\n",
+        "`stockwise portfolio actions --undo` takes back the newest entry.".dimmed()
+    );
+    Ok(())
+}
+
+/// `portfolio actions --undo`: take back the newest journalled change.
+pub fn cmd_portfolio_undo_action() -> Result<()> {
+    let entry = Portfolio::update(|p| p.undo_last_action())?;
+    let symbols: Vec<&str> = entry.before.iter().map(|s| s.symbol.as_str()).collect();
+    println!(
+        "\n  {} Undid `{}` from {} ({}): {} back as before.\n",
+        "✓".green().bold(),
+        entry.action,
+        entry.at,
+        entry.summary,
+        symbols.join(", ")
+    );
+    Ok(())
+}
+
+/// A symbol as the user typed it, matched to one the file holds or held:
+/// exactly, with `.NS`/`.BO`, or as resolved for the market. `None` when
+/// none matches.
+fn find_held(portfolio: &Portfolio, symbol: &str, market: Market) -> Option<String> {
+    let raw = symbol.trim().to_uppercase();
+    let in_file = |s: &str| {
+        portfolio.holding(s).is_some()
+            || portfolio.realized.iter().any(|r| r.symbol == s)
+            || portfolio.dividends.iter().any(|d| d.symbol == s)
+            || portfolio.imported.iter().any(|t| t.symbol == s)
+    };
+    [
+        raw.clone(),
+        format!("{raw}.NS"),
+        format!("{raw}.BO"),
+        market::resolve_symbol(symbol, market),
+    ]
+    .into_iter()
+    .find(|s| in_file(s))
+}
+
+/// `A:B` → (A, B), both positive.
+fn parse_ratio(s: &str) -> Result<(f64, f64)> {
+    let (a, b) = s
+        .split_once(':')
+        .with_context(|| format!("Ratio {s:?} should look like A:B, e.g. 1:10"))?;
+    let (a, b): (f64, f64) = (
+        a.trim()
+            .parse()
+            .with_context(|| format!("Bad ratio {s:?}"))?,
+        b.trim()
+            .parse()
+            .with_context(|| format!("Bad ratio {s:?}"))?,
+    );
+    if !(a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0) {
+        bail!("Both sides of the ratio {s:?} must be above zero");
+    }
+    Ok((a, b))
+}
+
+/// `portfolio demerger PARENT CHILD --ratio A:B --cost-split PCT`: every
+/// lot of PARENT bought before the record date keeps its quantity, date
+/// and `100 − PCT`% of its cost; a lot of CHILD with the same date gets
+/// A new shares per B held and the rest of the cost. Journalled.
+pub async fn cmd_portfolio_demerger(
+    parent: &str,
+    child: &str,
+    ratio: Option<&str>,
+    cost_split: Option<f64>,
+    date: Option<&str>,
+    market: Market,
+) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let parent = find_held(&portfolio, parent, market)
+        .filter(|s| portfolio.holding(s).is_some())
+        .with_context(|| format!("{} is not held in your portfolio", parent.to_uppercase()))?;
+    let child = {
+        let raw = child.trim().to_uppercase();
+        if raw.contains('.') || !parent.contains('.') {
+            raw
+        } else {
+            // The child lists where the parent does.
+            format!(
+                "{}{}",
+                raw,
+                &parent[parent.rfind('.').unwrap_or(parent.len())..]
+            )
+        }
+    };
+    if child == parent {
+        bail!("The new company must differ from {parent}; use `portfolio rename` for a rename");
+    }
+    let known = pf::demergers_for(&parent)
+        .into_iter()
+        .find(|d| d.child_symbol(&parent) == child);
+    let (child_shares, parent_shares) = match (ratio, known) {
+        (Some(r), _) => parse_ratio(r)?,
+        (None, Some(d)) => (d.child_shares, d.parent_shares),
+        (None, None) => bail!(
+            "Give the ratio, --ratio A:B (A new {child} shares for every B {parent} held), from the company's notice"
+        ),
+    };
+    let child_cost_pct = match (cost_split, known) {
+        (Some(p), _) => p,
+        (None, Some(d)) => d.child_cost_pct,
+        (None, None) => bail!(
+            "Give --cost-split PCT: the percent of {parent}'s cost that moves to {child} \
+             (India: the company's cost-apportionment notice; US: Form 8937)"
+        ),
+    };
+    if !(child_cost_pct > 0.0 && child_cost_pct < 100.0) {
+        bail!(
+            "--cost-split must be above 0 and below 100 (the percent of the cost the new shares take)"
+        );
+    }
+    let record_date = match (date, known) {
+        (Some(d), _) => pf::parse_date(d)?.to_string(),
+        (None, Some(d)) => d.record_date.to_string(),
+        // Every lot held now.
+        (None, None) => (chrono::Local::now().date_naive() + chrono::Days::new(1)).to_string(),
+    };
+    let d: &'static pf::Demerger = match known {
+        Some(k)
+            if k.child_shares == child_shares
+                && k.parent_shares == parent_shares
+                && k.record_date == record_date
+                && k.child_cost_pct == child_cost_pct =>
+        {
+            k
+        }
+        _ => pf::Demerger::custom(
+            &parent,
+            &child,
+            (child_shares, parent_shares),
+            &record_date,
+            child_cost_pct,
+        ),
+    };
+    let summary = format!(
+        "{parent} → {child} {}:{} on {record_date}, {child_cost_pct}% of cost",
+        child_shares, parent_shares
+    );
+    let out = Portfolio::update(|p| {
+        Ok(p.journalled("demerger", &summary, |p| p.apply_demerger(&parent, d)))
+    })?;
+    let cur = pf::symbol_currency(&parent);
+    print_header(&portfolio_title("Demerger"));
+    for c in &out.conflicts {
+        println!("  {} {}", "!".yellow(), c);
+    }
+    if out.lots == 0 && out.sales == 0 {
+        println!(
+            "\n  {} Nothing to do: no {} lot bought before {} is waiting for this demerger \
+             (already recorded?).\n",
+            "·".dimmed(),
+            parent,
+            record_date
+        );
+        return Ok(());
+    }
+    println!(
+        "\n  {} {} lot(s) and {} sale(s) of {} keep their quantity and purchase date and {}% of their cost.",
+        "✓".green(),
+        out.lots,
+        out.sales,
+        parent.cyan(),
+        ((100.0 - child_cost_pct) * 100.0).round() / 100.0
+    );
+    println!(
+        "  {} +{} {} at {} ({}% of cost), dated on each parent lot's purchase date.",
+        "✓".green(),
+        (out.child_shares() * 1e6).round() / 1e6,
+        child.cyan(),
+        format_price(out.child_cost(), cur),
+        child_cost_pct
+    );
+    if out.reconciled > 1e-9 {
+        println!(
+            "  {} {} {} share(s) already in your portfolio were taken as this demerger's shares, not added again.",
+            "·".dimmed(),
+            (out.reconciled * 1e6).round() / 1e6,
+            child
+        );
+    }
+    if out.fraction_dropped > 1e-9 {
+        println!(
+            "  {} {} fractional share(s) of {} the company paid in cash are not recorded.",
+            "·".dimmed(),
+            (out.fraction_dropped * 1e6).round() / 1e6,
+            child
+        );
+    }
+    println!(
+        "\n  {}\n",
+        "Recorded in the journal: `stockwise portfolio actions --undo` takes it back. Running \
+         the same demerger again changes nothing."
+            .dimmed()
+    );
+    Ok(())
+}
+
+/// `portfolio rename OLD NEW`: the same company under a new ticker.
+pub fn cmd_portfolio_rename(old: &str, new: &str, market: Market) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    let Some(from) = find_held(&portfolio, old, market) else {
+        println!(
+            "\n  {} Nothing to rename: {} is not in your portfolio (already renamed?).\n",
+            "·".dimmed(),
+            old.trim().to_uppercase()
+        );
+        return Ok(());
+    };
+    let to = {
+        let raw = new.trim().to_uppercase();
+        match from.rfind('.') {
+            Some(i) if !raw.contains('.') => format!("{}{}", raw, &from[i..]),
+            _ => raw,
+        }
+    };
+    if from == to {
+        println!(
+            "\n  {} Nothing to rename: {} is already held as {}.\n",
+            "·".dimmed(),
+            old.trim().to_uppercase(),
+            to
+        );
+        return Ok(());
+    }
+    let summary = format!("{from} → {to}");
+    let out =
+        Portfolio::update(|p| p.journalled("rename", &summary, |p| p.rename_symbol(&from, &to)))?;
+    println!(
+        "\n  {} {} is now {}: {} lot(s){}, {} sale(s) and {} dividend(s) moved with their dates and cost.",
+        "✓".green().bold(),
+        from,
+        to.cyan(),
+        out.lots,
+        if out.merged {
+            format!(" (joined the {to} lots you had)")
+        } else {
+            String::new()
+        },
+        out.sales,
+        out.dividends
+    );
+    println!(
+        "  {}\n",
+        "Recorded in the journal: `stockwise portfolio actions --undo` takes it back.".dimmed()
+    );
+    Ok(())
+}
+
+/// `portfolio return-of-capital SYMBOL PER_SHARE --date EX_DATE`.
+pub fn cmd_portfolio_return_of_capital(
+    symbol: &str,
+    per_share: f64,
+    date: &str,
+    market: Market,
+) -> Result<()> {
+    let date = pf::parse_date(date)?.to_string();
+    if !(per_share.is_finite() && per_share > 0.0) {
+        bail!("The amount per share must be above zero");
+    }
+    let portfolio = Portfolio::load()?;
+    let sym = find_held(&portfolio, symbol, market)
+        .filter(|s| portfolio.holding(s).is_some())
+        .with_context(|| format!("{} is not held in your portfolio", symbol.to_uppercase()))?;
+    let cur = pf::symbol_currency(&sym);
+    let summary = format!(
+        "{sym}: {} per share on {date}",
+        format_price(per_share, cur)
+    );
+    let out = Portfolio::update(|p| {
+        Ok(p.journalled("return-of-capital", &summary, |p| {
+            p.return_capital(&sym, &date, per_share)
+        }))
+    })?;
+    if out.lots == 0 {
+        println!(
+            "\n  {} Nothing to do: no {} lot bought before {} is waiting for this payment \
+             (already recorded?).\n",
+            "·".dimmed(),
+            sym,
+            date
+        );
+        return Ok(());
+    }
+    println!(
+        "\n  {} {}: cost of {} lot(s) reduced by {} in total; purchase dates unchanged.",
+        "✓".green().bold(),
+        sym.cyan(),
+        out.lots,
+        format_price(out.reduced, cur)
+    );
+    if out.excess > 1e-9 {
+        println!(
+            "  {} {} more than the lots' remaining cost: their cost stops at zero and the excess \
+             is a capital gain to report yourself (not recorded).",
+            "!".yellow(),
+            format_price(out.excess, cur)
+        );
+    }
+    println!(
+        "  {}\n",
+        "A return of capital is not income: if `portfolio actions` recorded the same payment as \
+         a dividend, it is counted twice. Journalled: `portfolio actions --undo` takes it back."
+            .dimmed()
+    );
     Ok(())
 }
 
@@ -2211,12 +3682,13 @@ pub fn cmd_portfolio_list() -> Result<()> {
 
 // ── Target Allocations & Rebalance ──
 
-/// Set a target weight for a symbol or sector.
 /// The key a target weight is saved under:
 /// 1. a held symbol (exact, or its bare ticker) → that holding's symbol;
-/// 2. a key with `.` or `:` (TCS.NS, MF:122639) → as given, upper-cased;
-/// 3. a short upper-case ticker → resolved for `market`;
-/// 4. anything else ("Technology", "Financial Services") → a sector key.
+/// 2. an asset class (`equity`, `debt`, `gold`, `international`, `cash`) →
+///    its lower-case name;
+/// 3. a key with `.` or `:` (TCS.NS, MF:122639) → as given, upper-cased;
+/// 4. a short upper-case ticker → resolved for `market`;
+/// 5. anything else ("Technology", "Financial Services") → a sector key.
 pub(crate) fn resolve_target_key(p: &Portfolio, key: &str, market: Market) -> String {
     if let Some(h) = p.holdings.iter().find(|h| {
         h.symbol.eq_ignore_ascii_case(key)
@@ -2225,17 +3697,25 @@ pub(crate) fn resolve_target_key(p: &Portfolio, key: &str, market: Market) -> St
                 .is_some_and(|(bare, _)| bare.eq_ignore_ascii_case(key))
     }) {
         h.symbol.clone()
+    } else if let Some(class) = crate::rebalance::AssetClass::parse(key) {
+        class.label().to_string()
     } else if key.contains('.') || key.contains(':') {
         key.trim().to_uppercase()
-    } else if key
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
-        && key.len() <= 10
-    {
+    } else if symbol_like(key) {
         market::resolve_symbol(key, market)
     } else {
         key.trim().to_string()
     }
+}
+
+/// A short upper-case ticker (`TCS`, `M&M`, `BAJAJ-AUTO`): a target key for a
+/// symbol rather than a sector.
+fn symbol_like(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 12
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '-' | '&'))
 }
 
 pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> Result<()> {
@@ -2255,10 +3735,20 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
     })?;
 
     let total: f64 = p.targets.values().sum();
+    let kind = if crate::rebalance::AssetClass::parse(&resolved_key).is_some() {
+        " (asset class)"
+    } else if p.holding(&resolved_key).is_some() {
+        ""
+    } else if resolved_key.contains('.') || resolved_key.contains(':') {
+        " (not held yet: rebalance will buy it)"
+    } else {
+        " (sector)"
+    };
     println!(
-        "\n  {} Target for {} set to {:.1}%",
+        "\n  {} Target for {}{} set to {:.1}%",
         "✓".green(),
         resolved_key.cyan(),
+        kind.dimmed(),
         percentage
     );
     println!(
@@ -2267,34 +3757,53 @@ pub fn cmd_portfolio_target_set(key: &str, percentage: f64, market: Market) -> R
         p.targets.len(),
         if p.targets.len() == 1 { "" } else { "s" }
     );
-    if total > 100.0 + 1e-6 {
+    if kind.contains("sector") || kind.contains("asset class") {
         println!(
             "  {}",
-            format!(
-                "Note: Targets sum to {:.1}% (exceeds 100%). Weights will be normalized during rebalancing.",
-                total
-            )
-            .yellow()
+            "Symbol targets inside it are carved out of it, so nested targets don't add up twice."
+                .dimmed()
         );
-    } else if total < 100.0 - 1e-6 {
-        let remaining = 100.0 - total;
+    }
+    if total < 100.0 - 1e-6 {
         println!(
             "  {}",
             format!(
                 "Note: Remaining {:.1}% will be distributed among untargeted holdings during rebalancing.",
-                remaining
+                100.0 - total
             )
             .dimmed()
+        );
+    }
+    if total > 100.0 + 1e-6 {
+        println!(
+            "  {}",
+            format!(
+                "Note: Targets sum to {:.1}%. Weights will be normalized during rebalancing.",
+                total
+            )
+            .yellow()
         );
     }
     println!();
     Ok(())
 }
 
+/// The drift band `rebalance` uses and where it comes from.
+fn drift_band(p: &Portfolio) -> (f64, &'static str) {
+    match p.drift_tolerance {
+        Some(d) => (d, "set with `portfolio target drift`"),
+        None => (
+            crate::config::effective_profile().default_drift_pct,
+            "profile default",
+        ),
+    }
+}
+
 /// Show saved target allocations and drift tolerance.
 pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
     let p = Portfolio::load()?;
     let _ = market;
+    let (band, band_source) = drift_band(&p);
     if json {
         let targets_list: Vec<serde_json::Value> = p
             .targets
@@ -2310,7 +3819,8 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
         let out = serde_json::json!({
             "targets": targets_list,
             "total_target_pct": total,
-            "drift_tolerance_pct": p.drift_tolerance,
+            "drift_tolerance_pct": band,
+            "drift_tolerance_source": if p.drift_tolerance.is_some() { "portfolio" } else { "profile" },
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -2324,9 +3834,10 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
                 .dimmed()
         );
         println!(
-            "\n  {} Set a target with: stockwise portfolio target set <SYMBOL|SECTOR> <PERCENT>",
+            "\n  {} Set a target with: stockwise portfolio target set <SYMBOL|SECTOR|equity|debt|gold|international|cash> <PERCENT>",
             "Tip:".yellow()
         );
+        println!("  Drift Tolerance: ±{:.1}% ({})", band, band_source);
         println!();
         return Ok(());
     }
@@ -2349,25 +3860,40 @@ pub fn cmd_portfolio_target_show(market: Market, json: bool) -> Result<()> {
     let total: f64 = p.targets.values().sum();
     println!("  {:<kw$} {:>9.1}%", "Total".bold(), total);
     println!();
-
-    if let Some(drift) = p.drift_tolerance {
-        println!(
-            "  Drift Tolerance: ±{:.1}% (rebalancing ignores drifts within this band)",
-            drift
-        );
-    } else {
-        println!("  Drift Tolerance: Not set (default: 0.0%)");
-    }
+    println!(
+        "  Drift Tolerance: ±{:.1}% ({}; rebalancing ignores drifts within this band)",
+        band, band_source
+    );
+    println!(
+        "  {}",
+        "See where each target stands: stockwise portfolio target drift".dimmed()
+    );
     println!();
     Ok(())
 }
 
-/// Remove a target weight by symbol or sector.
-pub fn cmd_portfolio_target_remove(key: &str) -> Result<()> {
-    if Portfolio::update(|p| Ok(p.remove_target(key)))? {
-        println!("\n  {} Removed target for {}\n", "✓".green(), key.cyan());
-    } else {
-        println!("\n  {} No target found matching '{}'\n", "✗".red(), key);
+/// Remove a target weight by symbol or sector (resolved like `target set`).
+pub fn cmd_portfolio_target_remove(key: &str, market: Market) -> Result<()> {
+    let p = Portfolio::load()?;
+    let resolved = resolve_target_key(&p, key, market);
+    let removed = Portfolio::update(|p| {
+        Ok(if p.remove_target(&resolved) {
+            Some(resolved.clone())
+        } else if p.remove_target(key) {
+            Some(key.to_string())
+        } else {
+            // A bare ticker saved before resolution: TCS for TCS.NS.
+            let k = p
+                .targets
+                .keys()
+                .find(|k| crate::rebalance::matches_symbol(k, &resolved))
+                .cloned();
+            k.filter(|k| p.remove_target(k))
+        })
+    })?;
+    match removed {
+        Some(k) => println!("\n  {} Removed target for {}\n", "✓".green(), k.cyan()),
+        None => println!("\n  {} No target found matching '{}'\n", "✗".red(), key),
     }
     Ok(())
 }
@@ -2405,90 +3931,303 @@ pub fn cmd_portfolio_target_drift(percentage: f64) -> Result<()> {
     Ok(())
 }
 
-/// Compute a rebalance plan using `src` (either live Yahoo or test fixtures).
-pub(crate) async fn rebalance_plan(
+/// Options of `rebalance` beyond the targets.
+#[derive(Debug, Clone, Default)]
+pub struct RebalanceArgs {
+    /// One-off targets (else the saved ones).
+    pub targets: Vec<(String, f64)>,
+    pub inflow: Option<f64>,
+    pub with_sells: bool,
+    pub raise: Option<f64>,
+    pub cash_buffer: Option<f64>,
+    pub drift: Option<f64>,
+    pub min_trade: Option<f64>,
+    pub brokerage: Option<f64>,
+    pub fx_spread: Option<f64>,
+}
+
+/// FX spread assumed on a trade in another currency, in percent.
+pub const DEFAULT_FX_SPREAD_PCT: f64 = 0.5;
+
+/// The smallest order worth placing by default, in the base currency.
+fn default_min_trade(base: &str) -> f64 {
+    match base {
+        "INR" => 1_000.0,
+        "USD" | "GBP" | "EUR" => 20.0,
+        _ => 0.0,
+    }
+}
+
+/// The planner's inputs: every held holding with a price, plus target
+/// symbols not held yet, with lots, tax treatment and fees. Returns the
+/// valuation and the holdings left out (with why).
+pub(crate) async fn plan_inputs(
     src: &impl views::DataSource,
     portfolio: &Portfolio,
-    targets: &[(String, f64)],
-    inflow: Option<f64>,
-    drift: Option<f64>,
+    configured: &std::collections::BTreeMap<String, f64>,
     market: Market,
-) -> Result<(crate::rebalance::RebalancePlan, Valuation)> {
-    let symbols: Vec<String> = portfolio
+    today: chrono::NaiveDate,
+    sector_client: Option<&YahooClient>,
+) -> Result<(Vec<HoldingInput>, Valuation, Vec<String>)> {
+    use crate::rebalance::{AssetClass, Fees, LotInput, classify, matches_symbol};
+    let mut symbols: Vec<String> = portfolio
         .holdings
         .iter()
         .map(|h| h.symbol.clone())
         .collect();
-    let val = value_holdings(src, &symbols, market, None).await?;
-
-    let mut holding_inputs = Vec::with_capacity(portfolio.holdings.len());
-    for h in &portfolio.holdings {
-        let Some(price) = val.price(&h.symbol) else {
-            let why = val
-                .off
-                .notes
+    // Funds sold this year keep their mark, so `tax_report` counts them.
+    for s in &portfolio.realized {
+        if offmarket::is_fund(&s.symbol) && !symbols.contains(&s.symbol) {
+            symbols.push(s.symbol.clone());
+        }
+    }
+    // Symbol targets not held yet.
+    let mut unheld: Vec<String> = Vec::new();
+    for key in configured.keys() {
+        if AssetClass::parse(key).is_some()
+            || portfolio
+                .holdings
                 .iter()
-                .find(|n| n.symbols.contains(&h.symbol))
-                .map(|n| format!(" ({})", n.text))
-                .unwrap_or_default();
-            bail!(
-                "No live price for {} — fix or remove it before rebalancing{}",
-                h.symbol,
-                why
-            );
+                .any(|h| matches_symbol(key, &h.symbol))
+        {
+            continue;
+        }
+        if key.contains('.') || key.contains(':') || symbol_like(key) {
+            let sym = resolve_target_key(portfolio, key, market);
+            if !symbols.contains(&sym) {
+                symbols.push(sym.clone());
+                unheld.push(sym);
+            }
+        }
+    }
+    let mut val = value_holdings(src, &symbols, market, None).await?;
+    if src.yahoo().await.is_ok() {
+        val.fmv_2018 = super::holdings::grandfathering_prices(portfolio).await;
+    }
+    val.load_history(portfolio).await;
+    let base = val.base().to_string();
+    let home = super::portfolio_analyze::residence(market);
+    // Sector targets need sectors: stored snapshots, then a lookup each.
+    let wants_sectors = configured.keys().any(|k| {
+        AssetClass::parse(k).is_none()
+            && !portfolio
+                .holdings
+                .iter()
+                .any(|h| matches_symbol(k, &h.symbol))
+            && !unheld.iter().any(|u| matches_symbol(k, u))
+    });
+    let looked_up = if wants_sectors {
+        super::portfolio_analyze::sectors(sector_client, &symbols).await
+    } else {
+        Default::default()
+    };
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+
+    let mut inputs = Vec::new();
+    let mut excluded = Vec::new();
+    let held = portfolio
+        .holdings
+        .iter()
+        .map(|h| (h.symbol.as_str(), Some(h)))
+        .chain(unheld.iter().map(|s| (s.as_str(), None)));
+    for (sym, holding) in held {
+        let Some(price) = val.price(sym) else {
+            if holding.is_some() {
+                let why = val
+                    .off
+                    .notes
+                    .iter()
+                    .find(|n| n.symbols.iter().any(|s| s == sym))
+                    .map(|n| format!(": {}", n.text))
+                    .unwrap_or_default();
+                excluded.push(format!("{sym} (no price{why})"));
+            }
+            continue;
         };
-        let Some(price_base) = val.to_base(&h.symbol, price) else {
-            bail!(
-                "No exchange rate for {} — can't weigh it against your other holdings",
-                h.symbol
-            );
+        let Some(price_base) = val.to_base(sym, price).filter(|p| *p > 0.0) else {
+            if holding.is_some() {
+                excluded.push(format!("{sym} (no exchange rate)"));
+            }
+            continue;
         };
-        let value = h.shares * price_base;
-        let sector = val.quote(&h.symbol).and_then(|q| q.sector.clone());
-        let is_fund = crate::offmarket::is_fund(&h.symbol);
-        holding_inputs.push(HoldingInput {
-            symbol: h.symbol.clone(),
-            shares: h.shares,
-            value,
+        let currency = val.currency(sym);
+        let foreign = currency
+            .as_deref()
+            .is_some_and(|c| !c.eq_ignore_ascii_case(&base));
+        let mark = val.mark(sym);
+        let category = mark
+            .and_then(|m| m.category.as_deref())
+            .or_else(|| xray::default_etf_category(sym));
+        let is_fund = offmarket::is_fund(sym);
+        let quote = val.quote(sym);
+        let is_etf = !is_fund
+            && (xray::is_known_etf(sym)
+                || offmarket::non_equity_etf(sym).is_some()
+                || quote
+                    .and_then(|q| q.quote_type.as_deref())
+                    .is_some_and(|t| t.eq_ignore_ascii_case("ETF")));
+        let (tax_country, rule) =
+            super::portfolio_analyze::term_rule(home, sym, currency.as_deref(), mark);
+        let listed = match home {
+            Some(tax::Country::India) => matches!(
+                offmarket::india_class(sym, mark),
+                offmarket::IndiaClass::Listed | offmarket::IndiaClass::EquityFund
+            ),
+            _ => !offmarket::is_off_market(sym),
+        };
+        let taxed = home.is_some_and(|c| {
+            c.tax_currency() == base
+                && tax_country == Some(c)
+                && currency
+                    .as_deref()
+                    .is_some_and(|cur| c.currency_scale(cur).is_some())
+                && rule == crate::portfolio_analysis::TermRule::CountryDefault
+                && listed
+        });
+        let months_default = tax_country.and_then(|c| c.long_term_months());
+        let fmv = (home == Some(tax::Country::India))
+            .then(|| val.fmv_2018(sym))
+            .flatten();
+        let scale = price_base / price;
+        let lots: Vec<LotInput> = holding
+            .map(|h| {
+                h.lots
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        let bought = parse(&l.date);
+                        let months = bought.and_then(|b| rule.months_for(months_default, b));
+                        let long = match (bought, months) {
+                            (Some(b), Some(m)) => tax::is_long_term(b, today, m),
+                            _ => false,
+                        };
+                        let long_term_on = if long {
+                            None
+                        } else {
+                            bought
+                                .zip(months)
+                                .and_then(|(b, m)| crate::sellpreview::long_term_from(b, m))
+                        };
+                        let mut unit =
+                            crate::tax_export::lot_unit_cost(&l.date, long, l.price, price, fmv)
+                                * scale;
+                        if foreign
+                            && l.qty > 0.0
+                            && let Some((cost, _)) = val.lot_cost_base(sym, l)
+                        {
+                            unit = cost / l.qty;
+                        }
+                        if l.qty > 0.0 {
+                            let charges_scale = if foreign {
+                                val.lot_purchase_rate(sym, l).unwrap_or(scale)
+                            } else {
+                                scale
+                            };
+                            unit += l.charges.unwrap_or(0.0) / l.qty * charges_scale;
+                        }
+                        LotInput {
+                            lot_no: i + 1,
+                            qty: l.qty,
+                            date: l.date.clone(),
+                            date_estimated: l.date_estimated,
+                            unit_cost: unit,
+                            long_term: long,
+                            long_term_on,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shares = holding.map_or(0.0, |h| h.shares);
+        let fees = if crate::trade_charges::auto_applies(sym) {
+            Fees::IndiaDelivery
+        } else if is_fund {
+            Fees::IndiaFund
+        } else {
+            Fees::None
+        };
+        inputs.push(HoldingInput {
+            symbol: sym.to_string(),
+            shares,
+            value: shares * price_base,
             price: price_base,
-            sector,
+            sector: quote
+                .and_then(|q| q.sector.clone())
+                .or_else(|| looked_up.get(sym).cloned()),
             is_fund,
+            is_etf,
+            asset_class: classify(sym, is_fund, category, foreign),
+            lots,
+            // Indian demat accounts and mutual funds sell first-in, first-out.
+            fifo_only: currency.as_deref() == Some("INR") || is_fund,
+            taxed,
+            fees,
+            foreign,
+            local_per_base: 1.0 / scale,
         });
     }
-
-    let mut configured_targets = std::collections::BTreeMap::new();
-    if !targets.is_empty() {
-        for (k, pct) in targets {
-            configured_targets.insert(k.clone(), *pct);
+    for sym in &unheld {
+        if val.price(sym).is_none() {
+            excluded.push(format!("{sym} (target not held; no price found)"));
         }
-    } else {
-        configured_targets = portfolio.targets.clone();
     }
+    Ok((inputs, val, excluded))
+}
+
+/// Compute a rebalance plan using `src` (either live Yahoo or test fixtures).
+pub(crate) async fn rebalance_plan(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    args: &RebalanceArgs,
+    market: Market,
+    sector_client: Option<&YahooClient>,
+) -> Result<(crate::rebalance::RebalancePlan, Valuation)> {
+    let configured: std::collections::BTreeMap<String, f64> = if args.targets.is_empty() {
+        portfolio.targets.clone()
+    } else {
+        args.targets.iter().cloned().collect()
+    };
+    let today = chrono::Local::now().date_naive();
+    let (inputs, val, excluded) =
+        plan_inputs(src, portfolio, &configured, market, today, sector_client).await?;
 
     let prof = crate::config::effective_profile();
-    let drift_tolerance = drift
+    let base = val.base().to_string();
+    let mut o = crate::rebalance::PlanOptions::new(today);
+    o.inflow = args.inflow;
+    o.with_sells = args.with_sells;
+    o.raise = args.raise;
+    o.cash_buffer = args.cash_buffer.unwrap_or(0.0);
+    o.drift_tolerance = args
+        .drift
         .or(portfolio.drift_tolerance)
         .unwrap_or(prof.default_drift_pct);
-    let mut plan = crate::rebalance::compute_rebalance_plan(
-        &holding_inputs,
-        &configured_targets,
-        inflow,
-        drift_tolerance,
-        val.base(),
-    )?;
-    for it in &plan.items {
-        let is_fund = holding_inputs
-            .iter()
-            .find(|h| h.symbol == it.symbol)
-            .is_some_and(|h| h.is_fund);
-        if !is_fund
-            && (it.target_pct > prof.max_stock_weight + 1e-6
-                || it.projected_pct > prof.max_stock_weight + 1e-6)
-        {
-            plan.warnings.push(format!(
-                "Profile guardrail ({}): {} target/projected weight ({:.1}% / {:.1}%) exceeds configured max_stock_weight ({:.1}%).",
-                prof.spec, it.symbol, it.target_pct, it.projected_pct, prof.max_stock_weight
-            ));
+    o.max_stock_weight = Some(prof.max_stock_weight);
+    o.min_trade = args.min_trade.unwrap_or_else(|| default_min_trade(&base));
+    o.brokerage = args.brokerage.unwrap_or(0.0);
+    o.fx_spread_pct = args.fx_spread.unwrap_or(DEFAULT_FX_SPREAD_PCT);
+    if let Some(country) = super::portfolio_analyze::residence(market)
+        && country.tax_currency() == base
+    {
+        o.tax = Some(crate::rebalance::TaxSetup {
+            country,
+            realized: super::holdings::tax_report(country, portfolio, &val, today).realized,
+        });
+    }
+    let mut plan = crate::rebalance::plan(&inputs, &configured, &o, &base)?;
+    if !excluded.is_empty() {
+        plan.warnings.insert(
+            0,
+            format!(
+                "Left out of the plan (weights are of the other holdings): {}",
+                excluded.join(", ")
+            ),
+        );
+        for e in &excluded {
+            let sym = e.split(' ').next().unwrap_or(e).to_string();
+            if !plan.excluded.contains(&sym) {
+                plan.excluded.push(sym);
+            }
         }
     }
     Ok((plan, val))
@@ -2498,16 +4237,12 @@ pub(crate) async fn rebalance_plan(
 ///
 /// Supports:
 /// - Target weights saved in portfolio or passed on CLI (`targets`)
-/// - Inflow-only mode (`--inflow <cash>`) to invest fresh capital without selling
+/// - Buy-only investing of new cash (`--inflow`), or a full rebalance that
+///   adds it (`--inflow X --with-sells`)
+/// - Sell-only raising of cash at the lowest tax (`--raise`)
 /// - Drift tolerance band (`--drift <pct>`) to suppress minor churn
 /// - Machine-readable JSON output (`--json`)
-pub async fn cmd_rebalance(
-    targets: &[(String, f64)],
-    inflow: Option<f64>,
-    drift: Option<f64>,
-    json: bool,
-    market: Market,
-) -> Result<()> {
+pub async fn cmd_rebalance(args: &RebalanceArgs, json: bool, market: Market) -> Result<()> {
     let portfolio = Portfolio::load()?;
     if portfolio.holdings.is_empty() {
         if json {
@@ -2520,36 +4255,41 @@ pub async fn cmd_rebalance(
     }
 
     let client = YahooClient::new().await?;
-    let (plan, val) = rebalance_plan(&client, &portfolio, targets, inflow, drift, market).await?;
-    let drift_tolerance = plan.drift_tolerance;
-
+    let (plan, val) = rebalance_plan(&client, &portfolio, args, market, Some(&client)).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         return Ok(());
     }
-
-    let cur = Some(val.base());
-    let csym = market::currency_symbol(cur);
-
-    if let Some(cash) = inflow {
-        print_header(&format!(
-            "Portfolio Rebalance (Inflow: {}{:.2})",
-            csym, cash
-        ));
-        print_kv("Current Value", &format!("{}{:.2}", csym, plan.total_value));
-        print_kv(
-            "Projected Value",
-            &format!("{}{:.2}", csym, plan.projected_value),
-        );
-    } else {
-        print_header("Portfolio Rebalance");
-        print_kv("Total Value", &format!("{}{:.2}", csym, plan.total_value));
+    print_rebalance(&plan);
+    val.print_price_notes();
+    if !val.off.marks.is_empty() {
+        println!();
     }
+    Ok(())
+}
 
-    if drift_tolerance > 0.0 {
-        print_kv("Drift Tolerance", &format!("±{:.1}%", drift_tolerance));
+fn print_rebalance(plan: &crate::rebalance::RebalancePlan) {
+    use crate::rebalance::PlanMode;
+    let cur = Some(plan.currency.as_str());
+    let money = |v: f64| format_price(v, cur);
+    match plan.mode {
+        PlanMode::BuyOnly => print_header(&format!(
+            "Portfolio Rebalance (new cash {}, buy only)",
+            money(plan.inflow.unwrap_or(0.0))
+        )),
+        PlanMode::Raise => print_header(&format!(
+            "Raise {} (sell only, lowest tax first)",
+            money(plan.raise.unwrap_or(0.0))
+        )),
+        PlanMode::Rebalance => match plan.inflow {
+            Some(c) => print_header(&format!("Portfolio Rebalance (with new cash {})", money(c))),
+            None => print_header("Portfolio Rebalance"),
+        },
     }
-
+    print_kv("Total Value", &money(plan.total_value));
+    if plan.drift_tolerance > 0.0 && plan.mode == PlanMode::Rebalance {
+        print_kv("Drift Tolerance", &format!("±{:.1}%", plan.drift_tolerance));
+    }
     for warning in &plan.warnings {
         println!("  {} {}", "ℹ".cyan(), warning.dimmed());
     }
@@ -2561,71 +4301,300 @@ pub async fn cmd_rebalance(
         .max()
         .unwrap_or(12)
         .max(12);
-
     println!();
-    if inflow.is_some() {
+    println!(
+        "  {:<sw$} {:>12} {:>7} {:>7} {:>7} {:>18} {:>12} {:>9} {:>8}",
+        "Symbol".bold(),
+        "Current".bold(),
+        "Now%".bold(),
+        "Target%".bold(),
+        "After%".bold(),
+        "Action".bold(),
+        "Value".bold(),
+        "Tax".bold(),
+        "Costs".bold(),
+    );
+    println!("  {}", "─".repeat(90 + sw).dimmed());
+    for it in &plan.items {
+        let action_styled = match it.action_type {
+            RebalanceActionType::Buy => it.action_display.green().to_string(),
+            RebalanceActionType::Sell => it.action_display.red().to_string(),
+            RebalanceActionType::Ok => it.action_display.dimmed().to_string(),
+        };
+        let tax_cell = match (it.action_type, it.tax) {
+            (RebalanceActionType::Sell, Some(t)) => money(t),
+            (RebalanceActionType::Sell, None) => "n/a".to_string(),
+            _ => String::new(),
+        };
+        let costs_cell = if it.costs.total > 0.0 {
+            money(it.costs.total)
+        } else {
+            String::new()
+        };
+        let value_cell = if it.diff_value.abs() > 0.0 {
+            money(it.diff_value.abs())
+        } else {
+            String::new()
+        };
+        let sym = if it.held {
+            it.symbol.cyan().to_string()
+        } else {
+            format!("{}*", it.symbol).cyan().to_string()
+        };
         println!(
-            "  {:<sw$} {:>10} {:>7} {:>7} {:>10} {:>12} {:>16}",
-            "Symbol".bold(),
-            "Current".bold(),
-            "Now%".bold(),
-            "Target%".bold(),
-            "Projected%".bold(),
-            "Allocation".bold(),
-            "Action".bold()
+            "  {:<sw$} {:>12} {:>6.1}% {:>6.1}% {:>6.1}% {:>18} {:>12} {:>9} {:>8}",
+            sym,
+            money(it.current_value),
+            it.current_pct,
+            it.target_pct,
+            it.projected_pct,
+            action_styled,
+            value_cell,
+            tax_cell,
+            costs_cell,
         );
-        println!("  {}", "─".repeat(68 + sw).dimmed());
-
-        for it in &plan.items {
-            let action_styled = match it.action_type {
-                RebalanceActionType::Buy => it.action_display.green().to_string(),
-                RebalanceActionType::Sell => it.action_display.red().to_string(),
-                RebalanceActionType::Ok => it.action_display.dimmed().to_string(),
-            };
+        for l in &it.lots {
             println!(
-                "  {:<sw$} {:>10} {:>6.1}% {:>6.1}% {:>9.1}% {:>12} {:>16}",
-                it.symbol.cyan(),
-                format!("{}{:.2}", csym, it.current_value),
-                it.current_pct,
-                it.target_pct,
-                it.projected_pct,
-                format!("{}{:.2}", csym, it.diff_value),
-                action_styled
+                "  {:<sw$}   {}",
+                "",
+                format!(
+                    "lot {} ({}): {} × {} cost, {} {}",
+                    l.lot_no,
+                    l.bought,
+                    l.qty,
+                    money(l.unit_cost),
+                    signed_money(l.gain, cur),
+                    if l.long_term {
+                        "long-term"
+                    } else {
+                        "short-term"
+                    }
+                )
+                .dimmed()
             );
         }
-    } else {
-        println!(
-            "  {:<sw$} {:>10} {:>8} {:>8} {:>16}",
-            "Symbol".bold(),
-            "Current".bold(),
-            "Now%".bold(),
-            "Target%".bold(),
-            "Action".bold()
-        );
-        println!("  {}", "─".repeat(48 + sw).dimmed());
+        for n in &it.notes {
+            println!("  {:<sw$}   {} {}", "", "!".yellow(), n.dimmed());
+        }
+    }
+    println!("  {}", "─".repeat(90 + sw).dimmed());
+    if plan.items.iter().any(|i| !i.held) {
+        println!("  {}", "* not held yet".dimmed());
+    }
 
-        for it in &plan.items {
-            let action_styled = match it.action_type {
-                RebalanceActionType::Buy => it.action_display.green().to_string(),
-                RebalanceActionType::Sell => it.action_display.red().to_string(),
-                RebalanceActionType::Ok => it.action_display.green().to_string(),
-            };
-            println!(
-                "  {:<sw$} {:>10} {:>7.1}% {:>7.1}% {:>16}",
-                it.symbol.cyan(),
-                format!("{}{:.2}", csym, it.current_value),
-                it.current_pct,
-                it.target_pct,
-                action_styled
+    println!();
+    print_kv("Sells", &money(plan.sell_proceeds));
+    print_kv("Buys", &money(plan.buy_cost));
+    if plan.costs > 0.0 {
+        print_kv(
+            "Costs",
+            &format!(
+                "{} (STT, stamp duty, exchange fees, DP, brokerage, FX spread as they apply)",
+                money(plan.costs)
+            ),
+        );
+    }
+    let net = if plan.net_cash >= 0.0 {
+        format!("frees {}", money(plan.net_cash))
+    } else {
+        format!("needs {}", money(-plan.net_cash))
+    };
+    print_kv("Net cash", &net);
+    if plan.mode != PlanMode::Raise || plan.cash_left > 0.005 {
+        print_kv("Cash left", &money(plan.cash_left));
+    }
+    if let Some(tx) = &plan.tax {
+        if tx.st_gain.abs() > 0.0 || tx.lt_gain.abs() > 0.0 || tx.tax.abs() > 0.0 {
+            print_kv(
+                "Tax on sells",
+                &format!(
+                    "{} (STCG {}, LTCG {}; incl. cess, after this year's gains and exemption)",
+                    money(tx.tax),
+                    signed_money(tx.st_gain, cur),
+                    signed_money(tx.lt_gain, cur)
+                ),
+            );
+        }
+        if let Some(fifo) = tx.fifo_tax
+            && tx.saved_vs_fifo > 0.0
+        {
+            print_kv(
+                "Lot choice saves",
+                &format!(
+                    "{} (first-in, first-out would cost {})",
+                    money(tx.saved_vs_fifo).green(),
+                    money(fifo)
+                ),
+            );
+        }
+        if tx.untaxed_gain.abs() > 0.0 {
+            print_kv(
+                "Not estimated",
+                &format!(
+                    "{} of gains taxed under other rules (slab rate, foreign shares, debt funds)",
+                    signed_money(tx.untaxed_gain, cur)
+                ),
             );
         }
     }
+    if plan.mode == PlanMode::Raise {
+        let tax = plan.tax.map_or(0.0, |t| t.tax);
+        print_kv(
+            "Raised",
+            &format!(
+                "{} after costs; {} after the tax on it",
+                money(plan.net_cash),
+                money(plan.net_cash - tax)
+            ),
+        );
+    }
+    let records: Vec<&str> = plan
+        .items
+        .iter()
+        .filter_map(|i| i.record.as_deref().filter(|r| r.contains("--lots")))
+        .collect();
+    if !records.is_empty() {
+        println!(
+            "\n  {}",
+            "Record these sells with the lots above (specific identification):".dimmed()
+        );
+        for r in records {
+            println!("    {}", r);
+        }
+    }
+    println!(
+        "\n  {}",
+        "Estimates from your targets and this year's gains; check your broker's contract note."
+            .dimmed()
+            .italic()
+    );
+    println!();
+}
 
+/// `portfolio target drift` (no percentage): where each target stands.
+pub(crate) async fn drift_report_for(
+    src: &impl views::DataSource,
+    portfolio: &Portfolio,
+    market: Market,
+    sector_client: Option<&YahooClient>,
+) -> Result<(crate::rebalance::DriftReport, Valuation)> {
+    let today = chrono::Local::now().date_naive();
+    let (inputs, val, excluded) = plan_inputs(
+        src,
+        portfolio,
+        &portfolio.targets,
+        market,
+        today,
+        sector_client,
+    )
+    .await?;
+    let (band, _) = drift_band(portfolio);
+    let band = if band > 0.0 {
+        band
+    } else {
+        crate::rebalance::ABSOLUTE_BAND_PCT
+    };
+    let mut report = crate::rebalance::drift_report(&inputs, &portfolio.targets, band, val.base());
+    if !excluded.is_empty() {
+        report.warnings.insert(
+            0,
+            format!(
+                "Left out (weights are of the other holdings): {}",
+                excluded.join(", ")
+            ),
+        );
+    }
+    Ok((report, val))
+}
+
+/// For the scheduled drift check: a one-line notice when a target is
+/// outside its band, else `None` (also `None` without targets).
+pub async fn drift_notice_today(market: Market) -> Result<Option<String>> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.targets.is_empty() || portfolio.holdings.is_empty() {
+        return Ok(None);
+    }
+    let client = YahooClient::new().await?;
+    let (report, _) = drift_report_for(&client, &portfolio, market, Some(&client)).await?;
+    Ok(report.notice())
+}
+
+pub async fn cmd_portfolio_target_drift_report(market: Market, json: bool) -> Result<()> {
+    let portfolio = Portfolio::load()?;
+    if portfolio.targets.is_empty() {
+        if json {
+            println!("{}", serde_json::json!({ "rows": [] }));
+        } else {
+            println!(
+                "\n  {} No targets saved: `stockwise portfolio target set <KEY> <PERCENT>`.\n",
+                "ℹ".cyan()
+            );
+        }
+        return Ok(());
+    }
+    let client = YahooClient::new().await?;
+    let (report, val) = drift_report_for(&client, &portfolio, market, Some(&client)).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    print_header("Target Drift");
+    print_kv(
+        "Bands",
+        &format!(
+            "±{:.1} points or {:.0}% of the target, whichever is smaller (5/25 rule)",
+            report.absolute_band_pct, report.relative_band_pct
+        ),
+    );
+    for w in &report.warnings {
+        println!("  {} {}", "ℹ".cyan(), w.dimmed());
+    }
+    let kw = report
+        .rows
+        .iter()
+        .map(|r| r.key.len())
+        .max()
+        .unwrap_or(12)
+        .max(14);
+    println!();
+    println!(
+        "  {:<kw$} {:>8} {:>8} {:>9} {:>8} {:>8}",
+        "Target".bold(),
+        "Now%".bold(),
+        "Target%".bold(),
+        "Drift".bold(),
+        "Band".bold(),
+        "Status".bold()
+    );
+    println!("  {}", "─".repeat(kw + 46).dimmed());
+    for r in &report.rows {
+        let status = match r.status.as_str() {
+            "over" => "OVER".red().to_string(),
+            "under" => "UNDER".yellow().to_string(),
+            _ => "ok".green().to_string(),
+        };
+        let key = if r.kind == "untargeted" {
+            r.key.dimmed().to_string()
+        } else {
+            r.key.cyan().to_string()
+        };
+        println!(
+            "  {:<kw$} {:>7.1}% {:>7.1}% {:>+8.1}p {:>7.1}p {:>8}",
+            key, r.current_pct, r.target_pct, r.drift_pct, r.band_pct, status
+        );
+    }
+    println!();
+    if report.breaches().next().is_some() {
+        println!(
+            "  {}",
+            "Outside the band: `stockwise portfolio rebalance` shows the trades (or --inflow to use new cash)."
+                .dimmed()
+        );
+    } else {
+        println!("  {} Every target is inside its band.", "✓".green());
+    }
     println!();
     val.print_price_notes();
-    if !val.off.marks.is_empty() {
-        println!();
-    }
     Ok(())
 }
 
@@ -2638,39 +4607,20 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// `portfolio xray` — look-through overlap across stocks, ETFs, and funds,
-/// plus asset-class, market-cap, and sector concentration.
-pub async fn cmd_portfolio_xray(
-    portfolio_name: Option<&str>,
+/// The look-through X-Ray of `portfolio` (splits already applied), valued
+/// by `val`: what `portfolio xray` prints and `portfolio review` reads for
+/// each company's combined weight.
+pub(crate) async fn build_xray(
+    client: &YahooClient,
+    portfolio: &Portfolio,
+    val: &Valuation,
     market: Market,
-    base: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    let active_name = portfolio_name.or(pf::active());
-    let portfolio = Portfolio::load_named(active_name)?;
-    if portfolio.holdings.is_empty() {
-        if json {
-            let report = xray::compute_xray(
-                active_name.unwrap_or("default"),
-                market_currency(market),
-                &[],
-                &std::collections::HashMap::new(),
-            );
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            return Ok(());
-        }
-        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
-        return Ok(());
-    }
-
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    let client = YahooClient::new().await?;
-    let val = value_holdings(&client, &symbols, market, base).await?;
-
+    active_name: Option<&str>,
+) -> (
+    xray::PortfolioXrayReport,
+    Vec<XrayInputHolding>,
+    std::collections::HashMap<String, funds::FundProfile>,
+) {
     let mut fund_profiles = std::collections::HashMap::new();
     for h in &portfolio.holdings {
         let is_fund = offmarket::is_fund(&h.symbol);
@@ -2689,45 +4639,41 @@ pub async fn cmd_portfolio_xray(
         if is_fund || is_etf || (!offmarket::is_sgb(&h.symbol) && quote_type.is_none()) {
             if let Some(fp) = funds::load_fund_disclosure(&h.symbol) {
                 fund_profiles.insert(h.symbol.clone(), fp);
-            } else if let Ok(fp) = funds::fetch_fund_profile(&client, &h.symbol, market).await {
-                fund_profiles.insert(h.symbol.clone(), fp);
-            } else if let Some(index) = xray::index_for_etf(&h.symbol)
-                && let Ok(constituents) = client.index_constituents(index).await
-                && !constituents.is_empty()
+            } else if let Ok(fp) = funds::fetch_fund_profile(client, &h.symbol, market).await
+                && (!fp.holdings.is_empty()
+                    || (!fp.sectors.is_empty()
+                        && crate::index_weights::for_fund(&h.symbol, fp.name.as_deref()).is_none()))
             {
-                let weight = 1.0 / constituents.len() as f64;
-                let holdings = constituents
-                    .into_iter()
-                    .map(|sym| funds::Holding {
-                        symbol: Some(sym),
-                        name: None,
-                        weight,
-                    })
-                    .collect();
-                let fp = funds::FundProfile {
-                    symbol: h.symbol.clone(),
-                    name: val
-                        .name(&h.symbol)
-                        .or_else(|| {
-                            quote.and_then(|q| q.long_name.clone().or_else(|| q.short_name.clone()))
-                        })
-                        .or_else(|| xray::default_etf_name(&h.symbol).map(str::to_string)),
-                    family: None,
-                    category: Some(index.to_string()),
-                    expense_ratio: None,
-                    currency: val.currency(&h.symbol),
-                    holdings,
-                    sectors: Vec::new(),
-                };
                 fund_profiles.insert(h.symbol.clone(), fp);
             }
+            // Otherwise an index ETF or index fund is looked through with the
+            // shipped index weights (`index_weights`), inside `compute_xray`.
         }
     }
 
     let mut input_holdings = Vec::with_capacity(portfolio.holdings.len());
+    let mut excluded: Vec<xray::ExcludedHolding> = Vec::new();
     for h in &portfolio.holdings {
-        let price = val.price(&h.symbol).unwrap_or(0.0);
-        let price_base = val.to_base(&h.symbol, price).unwrap_or(price);
+        // No price, or no rate into the base: left out and named, never
+        // valued at 0 or added in its own currency as if it were the base.
+        let Some(price) = val.price(&h.symbol) else {
+            excluded.push(xray::ExcludedHolding {
+                symbol: h.symbol.clone(),
+                reason: "no price".into(),
+            });
+            continue;
+        };
+        let Some(price_base) = val.to_base(&h.symbol, price) else {
+            excluded.push(xray::ExcludedHolding {
+                symbol: h.symbol.clone(),
+                reason: format!(
+                    "no {} to {} exchange rate",
+                    val.currency(&h.symbol).unwrap_or_else(|| "?".into()),
+                    val.base()
+                ),
+            });
+            continue;
+        };
         let value = h.shares * price_base;
 
         let quote = val.quote(&h.symbol);
@@ -2810,13 +4756,77 @@ pub async fn cmd_portfolio_xray(
 
     let p_name = active_name.unwrap_or("default");
     let prof = crate::config::effective_profile();
-    let report = xray::compute_xray_with_threshold(
+    let mut report = xray::compute_xray_with_threshold(
         p_name,
         val.base(),
         &input_holdings,
         &fund_profiles,
         prof.max_stock_weight,
     );
+    report.excluded = excluded;
+    (report, input_holdings, fund_profiles)
+}
+
+/// A coloured Action cell: `HOLD (med)`, `EXIT (high)`, `NO CALL`.
+pub(crate) fn action_cell(a: Option<&crate::action::Action>) -> String {
+    use crate::action::Kind;
+    let Some(a) = a else {
+        return "—".dimmed().to_string();
+    };
+    let cell = format!("{:<12}", a.cell());
+    match a.kind {
+        Kind::Exit | Kind::Avoid => cell.red().bold().to_string(),
+        Kind::Trim | Kind::Watch => cell.yellow().to_string(),
+        Kind::Add | Kind::Buy => cell.green().to_string(),
+        Kind::Hold => cell.cyan().to_string(),
+        Kind::NoCall => cell.dimmed().to_string(),
+    }
+}
+
+/// `portfolio xray` — look-through overlap across stocks, ETFs, and funds,
+/// plus asset-class, market-cap, and sector concentration.
+pub async fn cmd_portfolio_xray(
+    portfolio_name: Option<&str>,
+    market: Market,
+    base: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let active_name = portfolio_name.or(pf::active());
+    let portfolio = Portfolio::load_named(active_name)?;
+    if portfolio.holdings.is_empty() {
+        if json {
+            let report = xray::compute_xray(
+                active_name.unwrap_or("default"),
+                market_currency(market),
+                &[],
+                &std::collections::HashMap::new(),
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        println!("\n  {}", t(Msg::PortfolioEmpty).dimmed());
+        return Ok(());
+    }
+
+    let client = YahooClient::new().await?;
+    // A split or bonus not yet applied to the lots: value the share count
+    // after it, so the look-through is not halved.
+    let mut pending = crate::corp_actions::pending_splits(&client, &portfolio).await;
+    // Symbols after the pending events (a demerger adds one), priced; then
+    // only the splits those prices already reflect are applied.
+    let symbols: Vec<String> = pending
+        .adjusted(&portfolio)
+        .holdings
+        .iter()
+        .map(|h| h.symbol.clone())
+        .collect();
+    let val = value_holdings(&client, &symbols, market, base).await?;
+    pending.align_to_quotes(|s| val.priced_on(s));
+    let portfolio = pending.adjusted(&portfolio);
+
+    let (report, input_holdings, fund_profiles) =
+        build_xray(&client, &portfolio, &val, market, active_name).await;
+    let prof = crate::config::effective_profile();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2834,6 +4844,22 @@ pub async fn cmd_portfolio_xray(
         prof.spec.cyan()
     );
     println!();
+    pending.print();
+    if !report.excluded.is_empty() {
+        let names: Vec<String> = report
+            .excluded
+            .iter()
+            .map(|e| format!("{} ({})", e.symbol, e.reason))
+            .collect();
+        println!(
+            "  {} Left out of the X-Ray: {}.",
+            "!".yellow(),
+            names.join(", ")
+        );
+    }
+    if !pending.is_empty() || !report.excluded.is_empty() {
+        println!();
+    }
 
     // Concentration Alerts
     if !report.concentrations_above_10pct.is_empty() {
@@ -2869,16 +4895,63 @@ pub async fn cmd_portfolio_xray(
             );
         }
         println!();
+    } else if report.total_value <= 0.0 {
+        // Nothing could be valued: no check was made.
+        println!(
+            "  {} {}",
+            "!".yellow().bold(),
+            "Concentration could not be checked: no holding has both a price and an exchange rate."
+                .yellow()
+        );
+        println!();
     } else {
+        let scope = if report.excluded.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " among the valued holdings ({} left out above)",
+                report.excluded.len()
+            )
+        };
         println!(
             "  {} {}",
             "✓".green().bold(),
             format!(
-                "No individual company exceeds your {:.1}% concentration threshold (max_stock_weight).",
-                prof.max_stock_weight
+                "No individual company exceeds your {:.1}% concentration threshold (max_stock_weight){}.",
+                prof.max_stock_weight, scope
             )
             .green()
         );
+        println!();
+    }
+
+    // Indian business groups: one promoter behind several holdings.
+    if !report.business_groups.is_empty() {
+        print_section("Business groups (direct + through funds)");
+        for g in &report.business_groups {
+            let line = format!(
+                "  {:<38} {:>6.2}%  {}",
+                g.group,
+                g.weight_pct,
+                g.companies.join(", ")
+            );
+            if g.is_concentrated {
+                println!("{}", line.yellow());
+            } else {
+                println!("{}", line);
+            }
+        }
+        if report.business_groups.iter().any(|g| g.is_concentrated) {
+            println!(
+                "  {} {}",
+                "!".yellow().bold(),
+                format!(
+                    "Over {:.0}% of the portfolio shares one promoter group: group-level news moves these holdings together.",
+                    crate::business_groups::GROUP_NOTICE_PCT
+                )
+                .yellow()
+            );
+        }
         println!();
     }
 
@@ -3096,18 +5169,26 @@ pub async fn cmd_portfolio_xray(
         print_section("Funds & ETFs Analyzed");
         for f in &report.funds_analyzed {
             if f.look_through_available {
+                let shipped = !fund_profiles.contains_key(&f.symbol)
+                    && crate::index_weights::for_fund(&f.symbol, f.name.as_deref()).is_some();
+                let source = if shipped {
+                    format!(", index weights as of {}", crate::index_weights::AS_OF)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  • {:<12} {:<30} (look-through: {} holdings, {:.1}% coverage)",
+                    "  • {:<12} {:<30} (look-through: {} holdings, {:.1}% coverage{})",
                     f.symbol.cyan(),
                     truncate(f.name.as_deref().unwrap_or("—"), 30),
                     f.holdings_count,
-                    f.coverage_pct
+                    f.coverage_pct,
+                    source
                 );
             } else {
                 let note = if xray::is_known_etf(&f.symbol) {
-                    "(categorized by ETF profile)"
+                    "(no holdings known: categorized by ETF profile)"
                 } else {
-                    "(categorized by scheme profile)"
+                    "(no holdings known: categorized by scheme category)"
                 };
                 println!(
                     "  • {:<12} {:<30} {}",
@@ -3183,6 +5264,358 @@ mod tests {
         }
     }
 
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    fn usd_quote(symbol: &str, price: f64) -> Quote {
+        Quote {
+            symbol: Some(symbol.into()),
+            regular_market_price: Some(price),
+            currency: Some("USD".into()),
+            ..Default::default()
+        }
+    }
+
+    /// AAPL in an INR portfolio: USDINR 75 on the purchase date, 84 today.
+    fn usd_valuation(p: &Portfolio) -> Valuation {
+        let symbols: Vec<String> = p.holdings.iter().map(|h| h.symbol.clone()).collect();
+        let mut v = Valuation::new(
+            vec![usd_quote("AAPL", 100.0)],
+            &symbols,
+            Market::In,
+            Some("INR"),
+        );
+        v.fx.set_rate("USD", 84.0);
+        v.hist.insert(
+            "USD",
+            vec![
+                (day("2024-01-02"), 75.0),
+                (day("2025-06-02"), 80.0),
+                (day("2026-11-19"), 84.0),
+            ],
+        );
+        v
+    }
+
+    #[test]
+    fn a_usd_lot_at_the_same_price_gains_the_rupee_fall() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        let v = usd_valuation(&p);
+        let t = v.totals(&p);
+        assert!((t.value - 84_000.0).abs() < 1e-6);
+        assert!((t.cost - 75_000.0).abs() < 1e-6);
+        // About +12% in rupees with the dollar price unchanged.
+        assert!((t.pnl_pct() - 12.0).abs() < 1e-9, "{}", t.pnl_pct());
+        assert!((t.fx_effect() - 9_000.0).abs() < 1e-6);
+        assert!(t.cost_at_today_fx.is_empty());
+        let r = portfolio_report(&p, &v, day("2026-11-21"));
+        assert_eq!(r.totals.fx_effect, 9_000.0);
+        assert_eq!(r.holdings[0].cost_basis_base, Some(75_000.0));
+        assert_eq!(r.holdings[0].fx_effect, Some(9_000.0));
+    }
+
+    #[test]
+    fn a_lot_paid_in_rupees_keeps_what_was_paid() {
+        let mut p = Portfolio::default();
+        let mut lot = pf::Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        // Paid ₹76 per dollar (the bank's rate, not the reference rate).
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(76.0);
+        p.add_lot("AAPL", lot);
+        let v = usd_valuation(&p);
+        assert!((v.totals(&p).cost - 76_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn without_history_cost_falls_back_to_today_and_says_so() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2010-01-04", "manual"));
+        let v = usd_valuation(&p);
+        let t = v.totals(&p);
+        assert!((t.cost - 84_000.0).abs() < 1e-6);
+        assert_eq!(t.cost_at_today_fx, vec!["AAPL".to_string()]);
+    }
+
+    #[test]
+    fn realized_dividends_and_xirr_use_each_dates_rate_and_keep_closed_positions() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        // A closed position: bought at 75, sold at 80 (same dollar price),
+        // with $5 of charges on the sale.
+        p.add_lot("MSFT", pf::Lot::new(1.0, 100.0, "2024-01-02", "manual"));
+        p.sell_fifo("MSFT", 1.0, 100.0, "2025-06-02", "manual")
+            .unwrap();
+        p.realized[0].add_charges(5.0);
+        let mut v = usd_valuation(&p);
+        v.quotes.push(usd_quote("MSFT", 100.0));
+        let sale = p.realized[0].clone();
+        // 95 × 80 − 100 × 75.
+        assert!((v.sale_gain_base(&sale).unwrap() - 100.0).abs() < 1e-6);
+        assert!((sale.gain() + 5.0).abs() < 1e-9);
+        let inc = income_since(&p, &v, day("2025-04-01"));
+        assert_eq!((inc.sales, inc.sales_since), (1, 1));
+        assert!((inc.charges - 5.0 * 80.0).abs() < 1e-6);
+        let today = day("2026-11-21");
+        let t = v.totals(&p);
+        let (x, left_out) = portfolio_xirr(&p, &v, &t, today);
+        assert!(left_out.is_empty());
+        // Rupee XIRR includes the rupee fall on both positions.
+        assert!(x.unwrap() > 0.03, "{x:?}");
+    }
+
+    #[test]
+    fn a_pence_only_portfolio_totals_in_pounds_on_both_rate_engines() {
+        let mut p = Portfolio::default();
+        p.add_lot("VOD.L", pf::Lot::new(10.0, 1000.0, "2024-01-02", "manual"));
+        let symbols = vec!["VOD.L".to_string()];
+        let q = Quote {
+            symbol: Some("VOD.L".into()),
+            regular_market_price: Some(1000.0),
+            currency: Some("GBp".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::Us, None);
+        assert_eq!(v.base(), "GBP");
+        let t = v.totals(&p);
+        assert!((t.value - 100.0).abs() < 1e-9);
+        assert!((t.cost - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn open_lot_charges_count_at_the_purchase_rate() {
+        let mut p = Portfolio::default();
+        let mut lot = pf::Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        lot.charges = Some(25.0);
+        p.add_lot("AAPL", lot);
+        let v = usd_valuation(&p);
+        let t = v.totals(&p);
+        // $25 at ₹75.
+        assert!((open_lot_charges_base(&p, &v, &t) - 1875.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn financial_year_starts_in_april_for_rupees() {
+        assert_eq!(fy_start(day("2026-11-21"), "INR"), day("2026-04-01"));
+        assert_eq!(fy_start(day("2026-02-10"), "INR"), day("2025-04-01"));
+        assert_eq!(fy_start(day("2026-02-10"), "USD"), day("2026-01-01"));
+        assert_eq!(fy_label(day("2026-04-01"), "INR"), "FY 2026-27");
+    }
+
+    #[test]
+    fn period_change_counts_only_holdings_with_a_past_price() {
+        let mut p = Portfolio::default();
+        p.add_lot("AAPL", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        p.add_lot("MSFT", pf::Lot::new(1.0, 100.0, "2024-01-02", "manual"));
+        let mut v = usd_valuation(&p);
+        v.quotes.push(usd_quote("MSFT", 100.0));
+        let c = period_change("1 week", &p, &v, |s| (s == "AAPL").then_some(80.0)).unwrap();
+        assert_eq!((c.covered, c.of), (1, 2));
+        assert!((c.pct - 25.0).abs() < 1e-9);
+        assert!((c.change - 20.0 * 10.0 * 84.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn xirr_is_hidden_for_estimated_dates() {
+        let mut p = one_holding();
+        p.holdings[0].lots[0].date_estimated = true;
+        let symbols = vec!["TCS.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(4000.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let r = portfolio_report(&p, &v, day("2026-11-21"));
+        assert!(r.holdings[0].xirr_percent.is_none());
+    }
+
+    #[test]
+    fn a_pending_split_shows_no_fake_loss() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "RELIANCE.NS",
+            pf::Lot::new(10.0, 2800.0, "2024-01-10", "manual"),
+        );
+        let pending = crate::corp_actions::PendingSplits {
+            by_symbol: vec![(
+                "RELIANCE.NS".into(),
+                vec![Split::new("2024-10-28", 2.0, 1.0)],
+            )],
+            unchecked: vec![],
+            not_in_price: vec![],
+            demergers: vec![],
+            demerger_conflicts: vec![],
+        };
+        let q = Quote {
+            symbol: Some("RELIANCE.NS".into()),
+            regular_market_price: Some(1400.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let symbols = vec!["RELIANCE.NS".to_string()];
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        // Unadjusted: a fake 50% loss.
+        assert!((v.totals(&p).pnl_pct() + 50.0).abs() < 1e-9);
+        let adjusted = pending.adjusted(&p);
+        assert!(v.totals(&adjusted).pnl_pct().abs() < 1e-9);
+        let mut r = portfolio_report(&adjusted, &v, day("2026-11-21"));
+        r.warnings = pending.warnings();
+        assert!(r.warnings[0].contains("split pending"));
+        assert_eq!(r.holdings[0].shares, 20.0);
+    }
+
+    #[test]
+    fn a_partial_sale_takes_its_share_of_the_lot_charges() {
+        let mut p = Portfolio::default();
+        let mut lot = pf::Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        lot.charges = Some(20.0);
+        p.add_lot("TCS.NS", lot);
+        let sales = p
+            .sell_fifo("TCS.NS", 4.0, 110.0, "2025-01-02", "manual")
+            .unwrap();
+        assert!((sales[0].charges() - 8.0).abs() < 1e-9);
+        // 4 × 10 − 8.
+        assert!((sales[0].gain() - 32.0).abs() < 1e-9);
+        let left = &p.holding("TCS.NS").unwrap().lots[0];
+        assert!((left.charges.unwrap() - 12.0).abs() < 1e-9);
+        // Undoing the sale gives the charges back to a lot.
+        assert_eq!(sales[0].to_lot().charges, Some(8.0));
+    }
+
+    #[test]
+    fn pme_leaves_out_a_delisted_holding_on_both_sides() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        // Delisted: no price. Valued at 0 it would be a 100% loss.
+        p.add_lot("GONE.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        let symbols = vec!["TCS.NS".to_string(), "GONE.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(120.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let closes = vec![(day("2024-01-02"), 100.0), (day("2025-01-02"), 120.0)];
+        let r = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^NSEI".into(), "NIFTY 50".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.summary.excluded, vec!["GONE.NS".to_string()]);
+        assert_eq!(r.summary.total_invested, 1000.0);
+        assert_eq!(r.summary.actual_value, 1200.0);
+        // Matched the index exactly once the delisted holding is out.
+        assert_eq!(r.summary.value_added, 0.0);
+        assert_eq!(r.summary.benchmark_kind, "price");
+    }
+
+    #[test]
+    fn pme_with_only_a_delisted_holding_reports_the_exclusion() {
+        let mut p = Portfolio::default();
+        p.add_lot("GONE.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        let symbols = vec!["GONE.NS".to_string()];
+        let v = Valuation::new(Vec::new(), &symbols, Market::In, None);
+        let closes = vec![(day("2024-01-02"), 100.0), (day("2025-01-02"), 120.0)];
+        let r = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^NSEI".into(), "NIFTY 50".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.summary.excluded, vec!["GONE.NS".to_string()]);
+        assert!(r.summary.kaplan_schoar_pme.is_none());
+    }
+
+    #[test]
+    fn a_price_only_pme_needs_no_rate_for_a_foreign_dividend() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        p.dividends.push(pf::DividendReceived {
+            symbol: "TCS.NS".into(),
+            ex_date: "2024-06-01".into(),
+            per_share: 1.0,
+            qty: 10.0,
+            amount: 10.0,
+            // In dollars, with no USD rate known.
+            currency: Some("USD".into()),
+        });
+        let symbols = vec!["TCS.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(120.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let closes = vec![(day("2024-01-02"), 100.0), (day("2025-01-02"), 120.0)];
+        let r = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^NSEI".into(), "NIFTY 50".into()),
+            false,
+        )
+        .unwrap();
+        assert!(r.summary.excluded.is_empty());
+        assert_eq!(r.summary.actual_value, 1200.0);
+    }
+
+    #[test]
+    fn pme_with_a_price_index_leaves_dividends_out() {
+        let mut p = Portfolio::default();
+        p.add_lot("TCS.NS", pf::Lot::new(10.0, 100.0, "2024-01-02", "manual"));
+        p.dividends.push(pf::DividendReceived {
+            symbol: "TCS.NS".into(),
+            ex_date: "2024-06-01".into(),
+            per_share: 5.0,
+            qty: 10.0,
+            amount: 50.0,
+            currency: None,
+        });
+        let symbols = vec!["TCS.NS".to_string()];
+        let q = Quote {
+            symbol: Some("TCS.NS".into()),
+            regular_market_price: Some(120.0),
+            currency: Some("INR".into()),
+            ..Default::default()
+        };
+        let v = Valuation::new(vec![q], &symbols, Market::In, None);
+        let closes = vec![(day("2024-01-02"), 100.0), (day("2025-01-02"), 120.0)];
+        let price_only = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^NSEI".into(), "NIFTY 50".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(price_only.summary.total_distributed, 0.0);
+        assert!(!price_only.summary.dividends_included);
+        let tri = crate::commands::planning::pme_report_from(
+            &p,
+            &v,
+            &closes,
+            day("2025-01-02"),
+            ("^SP500TR".into(), "TR".into()),
+            true,
+        )
+        .unwrap();
+        assert_eq!(tri.summary.total_distributed, 50.0);
+    }
+
     use super::fx_pair;
 
     #[test]
@@ -3227,5 +5660,26 @@ mod tests {
                 "{cur}->{base}"
             );
         }
+    }
+
+    #[test]
+    fn lot_purchase_rate_uses_lot_fx_instead_of_live_rate() {
+        let mut q = Quote::default();
+        q.symbol = Some("AAPL".into());
+        q.currency = Some("USD".into());
+        q.regular_market_price = Some(200.0);
+        let mut val = Valuation::new(vec![q], &["AAPL".into()], Market::In, Some("INR"));
+        val.fx.set_rate("USD", 85.0);
+        let mut lot = Lot::new(1.0, 100.0, "2020-01-10", "manual");
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(75.0);
+        lot.charges = Some(10.0);
+        let rate = val.lot_purchase_rate("AAPL", &lot).unwrap();
+        assert_eq!(rate, 75.0);
+        let (cost, _) = val.lot_cost_base("AAPL", &lot).unwrap();
+        assert_eq!(
+            cost / lot.qty + lot.charges.unwrap() / lot.qty * rate,
+            8250.0
+        );
     }
 }

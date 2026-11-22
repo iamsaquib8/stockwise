@@ -66,7 +66,9 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
     }
 
     if avg_loss == 0.0 {
-        return Some(100.0);
+        // No losses: 100 when prices rose, 50 when they did not move at all
+        // (a flat series is neither overbought nor oversold).
+        return Some(if avg_gain == 0.0 { 50.0 } else { 100.0 });
     }
 
     let rs = avg_gain / avg_loss;
@@ -76,12 +78,12 @@ pub fn rsi(data: &[f64], period: usize) -> Option<f64> {
 /// Calculate MACD (Moving Average Convergence Divergence)
 /// Returns (macd_line, signal_line, histogram)
 pub fn macd(data: &[f64]) -> Option<(f64, f64, f64)> {
-    // For signal line, we need MACD history
-    if data.len() < 35 {
-        let ema26 = ema(data, 26)?;
-        let ema12 = ema(data, 12)?;
-        let macd_line = ema12 - ema26;
-        return Some((macd_line, 0.0, macd_line));
+    // The signal line is a 9-period EMA of the MACD line. The MACD line
+    // starts at bar 26, so 34 bars give nine MACD values, enough to seed it;
+    // with fewer there is no signal line, and a made-up one (zero) would
+    // turn the MACD line into a histogram.
+    if data.len() < 34 {
+        return None;
     }
 
     let ema26_iter = ema_iter(data, 26)?;
@@ -775,6 +777,21 @@ mod tests {
     }
 
     #[test]
+    fn rsi_of_a_flat_series_is_neutral() {
+        assert_eq!(rsi(&[100.0; 30], 14), Some(50.0));
+        let rising: Vec<f64> = (0..30).map(|i| 100.0 + i as f64).collect();
+        assert_eq!(rsi(&rising, 14), Some(100.0));
+    }
+
+    #[test]
+    fn macd_needs_enough_bars_for_a_signal_line() {
+        let data: Vec<f64> = (0..33).map(|i| 100.0 + i as f64).collect();
+        assert_eq!(macd(&data), None);
+        let data: Vec<f64> = (0..34).map(|i| 100.0 + i as f64).collect();
+        assert!(macd(&data).is_some());
+    }
+
+    #[test]
     fn test_max_drawdown() {
         let prices = vec![100.0, 110.0, 90.0, 95.0, 80.0, 100.0];
         let (dd, peak, trough) = max_drawdown(&prices).unwrap();
@@ -1048,12 +1065,12 @@ mod tests {
     #[test]
     fn rsi_and_macd_signals_are_neutral_wording() {
         for rsi in [0.0, 10.0, 25.0, 35.0, 50.0, 65.0, 75.0, 85.0, 100.0] {
-            crate::verdict::testing::assert_neutral(rsi_signal(rsi));
+            crate::action::testing::assert_action_well_formed(rsi_signal(rsi));
         }
         assert_eq!(rsi_signal(75.0), "RSI above 70 (overbought zone)");
         assert_eq!(rsi_signal(25.0), "RSI below 30 (oversold zone)");
-        crate::verdict::testing::assert_neutral(macd_signal(1.0));
-        crate::verdict::testing::assert_neutral(macd_signal(-1.0));
+        crate::action::testing::assert_action_well_formed(macd_signal(1.0));
+        crate::action::testing::assert_action_well_formed(macd_signal(-1.0));
     }
 
     #[test]

@@ -21,6 +21,12 @@ pub const DEFAULT_MAX_STOCK_WEIGHT: f64 = 12.0;
 pub const FUND_OVERLAP_PCT: f64 = 35.0;
 /// Fewer effective bets (1 / HHI of look-through weights) than this is noted.
 pub const MIN_EFFECTIVE_BETS: f64 = 5.0;
+
+/// Look-through weight left out (percent of the portfolio) above which the
+/// effective-bets figure is labelled an upper bound: an index table lists
+/// only the index's largest constituents.
+const PARTIAL_INDEX_PCT: f64 = 0.5;
+
 /// A Piotroski F-Score at or below this (with most signals evaluated).
 pub const WEAK_PIOTROSKI: u8 = 3;
 /// Piotroski signals needed before a low score counts.
@@ -292,6 +298,9 @@ pub struct CheckupInput {
     pub funds_compared: usize,
     pub beta: Option<f64>,
     pub max_drawdown_pct: Option<f64>,
+    /// Share of the portfolio's value (percent) whose price history the
+    /// drawdown was measured on. `None`: all of it.
+    pub drawdown_coverage_pct: Option<f64>,
     pub benchmark: String,
     /// `None`: no price history to compare.
     pub correlated: Option<Vec<CorrelatedPair>>,
@@ -320,12 +329,25 @@ pub struct Checkup {
     pub evaluated: usize,
     /// Data that could not be read, so its checks were skipped.
     pub skipped: Vec<String>,
+    /// The quote-based rule action for each holding (`crate::action`),
+    /// EXIT first. Empty when the commands layer did not add them.
+    pub actions: Vec<HoldingAction>,
     pub disclaimer: &'static str,
 }
 
+/// One holding's rule action in the checkup.
+#[derive(Debug, Clone, Serialize)]
+pub struct HoldingAction {
+    pub symbol: String,
+    pub weight_pct: Option<f64>,
+    pub action: crate::action::Action,
+}
+
 /// Said under every checkup.
-pub const DISCLAIMER: &str = "Observations from your recorded holdings and public data, not \
-     recommendations to buy, sell or hold. Check the figures with the command shown before acting.";
+pub const DISCLAIMER: &str = "Findings are observations from your recorded holdings and public data. \
+     The Action column comes from StockWise's published rules (methodology 2): educational signals, \
+     not personalised advice; StockWise is not a SEBI-registered adviser. Check the figures with the \
+     command shown before acting.";
 
 // ── Concentration maths ──
 
@@ -350,11 +372,15 @@ pub fn effective_bets(weights_pct: &[f64]) -> f64 {
 }
 
 /// A fund for the look-through: its value and holdings as `(ticker, fraction)`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FundHoldings {
     pub symbol: String,
     pub value: f64,
     pub holdings: Vec<(String, f64)>,
+    /// An index fund looked through with the index's largest constituents
+    /// ([`crate::index_weights`]): the rest of its value is spread over the
+    /// other constituents, many small companies, not one holding.
+    pub index_rest: bool,
 }
 
 /// Each company's weight through direct shares and the funds that hold it,
@@ -383,7 +409,7 @@ pub fn look_through(
             *by.entry(crate::xray::canonical_ticker(sym)).or_default() += f.value * w.max(0.0);
         }
         let rest = f.value * (1.0 - covered);
-        if rest > 0.0 {
+        if rest > 0.0 && !f.index_rest {
             *by.entry(f.symbol.clone()).or_default() += rest;
         }
     }
@@ -458,29 +484,29 @@ pub struct Series<'a> {
     pub closes: &'a [(chrono::NaiveDate, f64)],
 }
 
+/// Day-to-day returns of `closes` (already aligned on the same sessions).
+fn simple_returns(closes: &[f64]) -> Vec<f64> {
+    closes
+        .windows(2)
+        .map(|w| if w[0] > 0.0 { w[1] / w[0] - 1.0 } else { 0.0 })
+        .collect()
+}
+
 /// Pairs of holdings (each at least [`MIN_CORRELATION_WEIGHT`]) whose daily
-/// returns on shared sessions correlate above [`HIGH_CORRELATION`].
+/// returns on shared sessions correlate above [`HIGH_CORRELATION`]. The two
+/// series are joined on the sessions both have before returns are taken,
+/// so a holiday on one exchange never pairs a two-day move with a one-day
+/// move.
 pub fn correlated_pairs(series: &[Series]) -> Vec<CorrelatedPair> {
-    let returns: Vec<(&Series, BTreeMap<chrono::NaiveDate, f64>)> = series
+    let kept: Vec<&Series> = series
         .iter()
         .filter(|s| s.weight_pct >= MIN_CORRELATION_WEIGHT)
-        .map(|s| {
-            let r = s
-                .closes
-                .windows(2)
-                .filter(|w| w[0].1 > 0.0)
-                .map(|w| (w[1].0, w[1].1 / w[0].1 - 1.0))
-                .collect();
-            (s, r)
-        })
         .collect();
     let mut out = Vec::new();
-    for (i, (a, ra)) in returns.iter().enumerate() {
-        for (b, rb) in &returns[i + 1..] {
-            let (x, y): (Vec<f64>, Vec<f64>) = ra
-                .iter()
-                .filter_map(|(d, r)| rb.get(d).map(|r2| (*r, *r2)))
-                .unzip();
+    for (i, a) in kept.iter().enumerate() {
+        for b in &kept[i + 1..] {
+            let (ca, cb) = crate::portfolio_analysis::join(a.closes, b.closes);
+            let (x, y) = (simple_returns(&ca), simple_returns(&cb));
             if x.len() < MIN_CORRELATION_OBS {
                 continue;
             }
@@ -703,17 +729,44 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
             "stockwise portfolio xray".into(),
         );
     }
-    let herf = herfindahl(&weights.iter().map(|w| w.1).collect::<Vec<_>>());
+    // With a look-through, weights are percent of the whole portfolio and
+    // an index fund's spread-out remainder is not listed: square them as
+    // they are instead of rescaling the listed ones to 100%.
+    let herf = if input.look_through.is_empty() {
+        herfindahl(&weights.iter().map(|w| w.1).collect::<Vec<_>>())
+    } else {
+        weights
+            .iter()
+            .filter(|w| w.1 > 0.0)
+            .map(|w| (w.1 / 100.0).powi(2))
+            .sum::<f64>()
+            .min(1.0)
+    };
     let bets = if herf > 0.0 { 1.0 / herf } else { 0.0 };
+    // An index table lists only the largest constituents: the weight it
+    // leaves out adds nothing to the HHI, so the figure is an upper bound.
+    let omitted_pct = if input.look_through.is_empty() {
+        0.0
+    } else {
+        (100.0 - weights.iter().map(|w| w.1.max(0.0)).sum::<f64>()).max(0.0)
+    };
+    let partial = omitted_pct > PARTIAL_INDEX_PCT;
     if !weights.is_empty() {
         b.ran(Rule::EffectiveBets);
+        if partial {
+            skipped.push(format!(
+                "Effective bets ({bets:.1}) is an upper bound: {omitted_pct:.1}% of the portfolio \
+                 sits in index constituents beyond the index table's largest ones"
+            ));
+        }
         if bets < MIN_EFFECTIVE_BETS {
+            let like = if partial { "at most " } else { "" };
             b.add(
                 Rule::EffectiveBets,
                 Severity::Medium,
                 None,
                 format!(
-                    "The portfolio behaves like {bets:.1} equal-sized holdings (HHI {herf:.3}), \
+                    "The portfolio behaves like {like}{bets:.1} equal-sized holdings (HHI {herf:.3}), \
                      fewer than {MIN_EFFECTIVE_BETS:.0}."
                 ),
                 total,
@@ -955,16 +1008,29 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
     if let Some(dd) = input.max_drawdown_pct {
         b.ran(Rule::DeepDrawdown);
         if dd.abs() > DEEP_DRAWDOWN_PCT {
-            let lost = total * dd.abs() / 100.0;
+            // The drawdown is of the holdings with price history: scale the
+            // amount to their value, not the whole portfolio's.
+            let coverage = input
+                .drawdown_coverage_pct
+                .map_or(100.0, |c| c.clamp(0.0, 100.0));
+            let lost = total * coverage / 100.0 * dd.abs() / 100.0;
+            let covered = if coverage < 99.95 {
+                format!(
+                    " Measured on {coverage:.0}% of the portfolio's value, the part with a year of prices."
+                )
+            } else {
+                String::new()
+            };
             b.add(
                 Rule::DeepDrawdown,
                 Severity::Medium,
                 None,
                 format!(
                     "The portfolio as weighted today fell {:.1}% from its peak in the last year \
-                     (about {} at today's value).",
+                     (about {} at today's value).{}",
                     dd.abs(),
-                    money(lost, cur)
+                    money(lost, cur),
+                    covered
                 ),
                 lost,
                 Some(lost),
@@ -1177,6 +1243,7 @@ pub fn evaluate(input: &CheckupInput, mut skipped: Vec<String>) -> Checkup {
         findings,
         checks,
         skipped,
+        actions: Vec::new(),
         disclaimer: DISCLAIMER,
     }
 }
@@ -1269,6 +1336,7 @@ mod tests {
             symbol: "MF:1".into(),
             value: 100.0,
             holdings: vec![("TCS".into(), 0.5), ("INFY".into(), 0.3)],
+            index_rest: false,
         };
         let w = look_through(&direct, &[fund], 200.0);
         let get = |s: &str| w.iter().find(|x| x.0 == s).map(|x| x.1).unwrap();
@@ -1317,16 +1385,19 @@ mod tests {
                 symbol: "MF:1".into(),
                 value: 1.0,
                 holdings: a.clone(),
+                index_rest: false,
             },
             FundHoldings {
                 symbol: "MF:2".into(),
                 value: 1.0,
                 holdings: b,
+                index_rest: false,
             },
             FundHoldings {
                 symbol: "MF:3".into(),
                 value: 1.0,
                 holdings: vec![("Q".into(), 1.0)],
+                index_rest: false,
             },
         ];
         let o = fund_overlaps(&funds);
@@ -1811,5 +1882,106 @@ mod tests {
         assert!((f.at_stake.unwrap() - 16.8).abs() < 1e-9);
         // The text keeps the rupee amounts AMFI reports.
         assert!(f.observed.contains("₹1,400"), "{}", f.observed);
+    }
+    #[test]
+    fn correlation_joins_dates_across_a_holiday() {
+        let d0 = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let a: Vec<(NaiveDate, f64)> = walk(7, 120)
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| (d0 + chrono::Days::new(i as u64), p))
+            .collect();
+        // B moves exactly with A but its exchange was shut on two days.
+        let b: Vec<(NaiveDate, f64)> = a
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 40 && *i != 80)
+            .map(|(_, (d, p))| (*d, p * 3.0))
+            .collect();
+        let (a, b) = (a.leak(), b.leak());
+        let s = |sym, closes: &'static [(NaiveDate, f64)]| Series {
+            symbol: sym,
+            value: 100.0,
+            weight_pct: 10.0,
+            closes,
+        };
+        let pairs = correlated_pairs(&[s("A", a), s("B", b)]);
+        assert_eq!(pairs.len(), 1);
+        // Returns are taken over the same sessions: a perfect match.
+        assert!(
+            (pairs[0].correlation - 1.0).abs() < 1e-9,
+            "{}",
+            pairs[0].correlation
+        );
+    }
+
+    #[test]
+    fn drawdown_amount_follows_the_covered_value() {
+        let mut i = spread();
+        i.max_drawdown_pct = Some(-30.0);
+        i.drawdown_coverage_pct = Some(50.0);
+        let c = evaluate(&i, vec![]);
+        let dd = c
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::DeepDrawdown)
+            .unwrap();
+        // 30% of the half with prices, not of the whole 1,000.
+        assert!((dd.exposure - 150.0).abs() < 1e-9);
+        assert!(dd.observed.contains("50%"), "{}", dd.observed);
+    }
+
+    #[test]
+    fn an_index_fund_counts_as_many_bets() {
+        let fund = FundHoldings {
+            symbol: "NIFTYBEES.NS".into(),
+            value: 1000.0,
+            holdings: crate::index_weights::weights("NIFTY 50")
+                .unwrap()
+                .holdings(),
+            index_rest: true,
+        };
+        let w = look_through(&[], &[fund], 1000.0);
+        // The index's spread-out rest is not one holding.
+        assert!(!w.iter().any(|(s, _)| s == "NIFTYBEES.NS"));
+        let hdfc = w.iter().find(|(s, _)| s == "HDFCBANK").unwrap().1;
+        assert!((hdfc - 13.1).abs() < 0.01);
+        let mut i = input(vec![HoldingFacts {
+            symbol: "NIFTYBEES.NS".into(),
+            value: 1000.0,
+            weight_pct: 100.0,
+            is_fund: true,
+            ..Default::default()
+        }]);
+        i.look_through = w;
+        let c = evaluate(&i, vec![]);
+        // One ETF holding 50 companies is far more than one bet.
+        assert!(c.effective_bets > 10.0, "{}", c.effective_bets);
+        assert!(!rules(&c).contains(&Rule::EffectiveBets));
+        // The table lists only the largest constituents: an upper bound.
+        assert!(
+            c.skipped.iter().any(|s| s.contains("upper bound")),
+            "{:?}",
+            c.skipped
+        );
+    }
+
+    #[test]
+    fn a_complete_look_through_is_not_an_upper_bound() {
+        let mut i = input(vec![HoldingFacts {
+            symbol: "S1".into(),
+            value: 1000.0,
+            weight_pct: 100.0,
+            ..Default::default()
+        }]);
+        i.look_through = vec![("S1".into(), 60.0), ("S2".into(), 40.0)];
+        let c = evaluate(&i, vec![]);
+        assert!(!c.skipped.iter().any(|s| s.contains("upper bound")));
+        let f = c
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::EffectiveBets)
+            .unwrap();
+        assert!(!f.observed.contains("at most"), "{}", f.observed);
     }
 }

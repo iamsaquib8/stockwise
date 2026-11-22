@@ -338,8 +338,13 @@
         const sel = $('portfolio-pick');
         if (wrap && sel) {
           wrap.hidden = res.portfolios.length <= 1;
+          // Start on the portfolio the server is using; `default` asks for
+          // portfolio.json even when another one is active.
+          if (!state.portfolioName && typeof res.active === 'string') {
+            state.portfolioName = res.active;
+          }
           sel.replaceChildren(...res.portfolios.map((name) =>
-            el('option', { value: name === 'default' ? '' : name, text: name })));
+            el('option', { value: name, text: name })));
           sel.value = state.portfolioName;
         }
       }

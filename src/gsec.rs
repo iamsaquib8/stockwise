@@ -418,13 +418,17 @@ pub async fn securities(timeout: Duration) -> Result<(Vec<Security>, bool)> {
 
 /// Coupon (percent) and maturity year from a G-sec name as people type it:
 /// NSE style `718GS2033` / `73GS2053` (decimal point and trailing zero
-/// dropped), or `7.18% GS 2033`, `7.18 GS 2033`.
+/// dropped), or `7.18% GS 2033`, `7.18 GS 2033`, `7.18% G-Sec 2033`,
+/// `7.18 GSEC 2033`, `7.18% GOI 2033`.
 pub fn parse_name(query: &str) -> Option<(f64, i32)> {
     let s: String = query
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '%')
         .collect::<String>()
-        .to_ascii_uppercase();
+        .to_ascii_uppercase()
+        .replacen("G-SEC", "GS", 1)
+        .replacen("GSEC", "GS", 1)
+        .replacen("GOI", "GS", 1);
     let (coupon, rest) = s.split_once("GS")?;
     let year: i32 = rest.get(..4)?.parse().ok()?;
     let coupon = if coupon.contains('.') {
@@ -578,6 +582,12 @@ mod tests {
         assert_eq!(parse_name("668GS2035A"), Some((6.68, 2035)));
         assert_eq!(parse_name("7.18% GS 2033"), Some((7.18, 2033)));
         assert_eq!(parse_name("6.94 gs 2036"), Some((6.94, 2036)));
+        assert_eq!(parse_name("7.18% G-Sec 2033"), Some((7.18, 2033)));
+        assert_eq!(parse_name("718GSEC2033"), Some((7.18, 2033)));
+        assert_eq!(parse_name("7.18 GOI 2033"), Some((7.18, 2033)));
+        assert_eq!(parse_name("7.18% goi 2033"), Some((7.18, 2033)));
+        assert_eq!(parse_name("-7.18% GS 2033"), None);
+        assert_eq!(parse_name("-718GS2033"), None);
         assert_eq!(parse_name("RELIANCE"), None);
         assert_eq!(parse_name("GS2033"), None);
     }

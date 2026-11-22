@@ -170,7 +170,9 @@ impl EtfKind {
                  short-term gains at your slab rate"
             }
             Self::Liquid | Self::Debt => {
-                "debt ETF (Sec. 50AA): gains taxed at your slab rate however long you hold it"
+                "debt ETF: units bought from 1 Apr 2023 are taxed at your slab rate however long \
+                 you hold them (Sec. 50AA); older units sold from 23 Jul 2024 at 12.5% after \
+                 24 months (12 months if sold before 23 Jul 2024)"
             }
         }
     }
@@ -195,6 +197,15 @@ const NON_EQUITY_ETFS: &[(&str, EtfKind)] = &[
     ("TATAGOLD", EtfKind::Gold),
     ("GOLD1", EtfKind::Gold),
     ("UNIONGOLD", EtfKind::Gold),
+    ("GOLDETF", EtfKind::Gold),
+    ("EGOLD", EtfKind::Gold),
+    ("BBNPPGOLD", EtfKind::Gold),
+    ("GOLDETFADD", EtfKind::Gold),
+    ("MOGOLD", EtfKind::Gold),
+    ("GROWWGOLD", EtfKind::Gold),
+    ("ZGOLD", EtfKind::Gold),
+    ("ICICIGOLD", EtfKind::Gold),
+    ("NIPGOLD", EtfKind::Gold),
     ("SILVERBEES", EtfKind::Silver),
     ("SILVERIETF", EtfKind::Silver),
     ("SILVER1", EtfKind::Silver),
@@ -204,6 +215,13 @@ const NON_EQUITY_ETFS: &[(&str, EtfKind)] = &[
     ("SILVRETF", EtfKind::Silver),
     ("ESILVER", EtfKind::Silver),
     ("SBISILVER", EtfKind::Silver),
+    ("SILVERETF", EtfKind::Silver),
+    ("SILVERADD", EtfKind::Silver),
+    ("SILVERCASE", EtfKind::Silver),
+    ("MOSILVER", EtfKind::Silver),
+    ("GROWWSLVR", EtfKind::Silver),
+    ("KOTAKSILVE", EtfKind::Silver),
+    ("SILVER360", EtfKind::Silver),
     ("MON100", EtfKind::International),
     ("MONQ50", EtfKind::International),
     ("MAFANG", EtfKind::International),
@@ -211,6 +229,10 @@ const NON_EQUITY_ETFS: &[(&str, EtfKind)] = &[
     ("MASPTOP50", EtfKind::International),
     ("HNGSNGBEES", EtfKind::International),
     ("N100", EtfKind::International),
+    ("MASPTOP50", EtfKind::International),
+    ("MAHKTECH", EtfKind::International),
+    ("NASDAQ100", EtfKind::International),
+    ("HNGSNGBEES", EtfKind::International),
     ("LIQUIDBEES", EtfKind::Liquid),
     ("LIQUIDCASE", EtfKind::Liquid),
     ("LIQUIDIETF", EtfKind::Liquid),
@@ -227,7 +249,193 @@ const NON_EQUITY_ETFS: &[(&str, EtfKind)] = &[
     ("SETF10GILT", EtfKind::Debt),
     ("NETFGILT5Y", EtfKind::Debt),
     ("NETFLTGILT", EtfKind::Debt),
+    ("GSEC10IETF", EtfKind::Debt),
+    ("GSEC5IETF", EtfKind::Debt),
+    ("GSEC10YEAR", EtfKind::Debt),
+    ("GSEC10ABSL", EtfKind::Debt),
+    ("SDL26BEES", EtfKind::Debt),
+    ("BBETF0432", EtfKind::Debt),
+    ("LIQUID1", EtfKind::Liquid),
+    ("LIQUIDBETF", EtfKind::Liquid),
 ];
+
+/// NSE's list of exchange-traded funds, with each one's underlying index or
+/// asset: `Symbol,Underlying,SecurityName,DateofListing,MarketLot,
+/// ISINNumber,FaceValue`. Cached for a day like the equity list.
+pub const NSE_ETF_LIST: &str =
+    "https://nsearchives.nseindia.com/content/equities/eq_etfseclist.csv";
+
+/// ETFs classified from their category (NSE's underlying, or an AMFI
+/// category and name) this run: `(bare symbol, kind)`, non-equity only.
+/// Empty until [`load_etf_categories`] has run; [`non_equity_etf`] then
+/// falls back to [`NON_EQUITY_ETFS`] and the symbol's name.
+static ETF_CATEGORIES: std::sync::RwLock<Vec<(String, EtfKind)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Replace the ETFs known by category (see [`ETF_CATEGORIES`]).
+pub fn set_etf_categories(list: Vec<(String, EtfKind)>) {
+    if let Ok(mut g) = ETF_CATEGORIES.write() {
+        *g = list;
+    }
+}
+
+fn etf_by_category(bare: &str) -> Option<EtfKind> {
+    let g = ETF_CATEGORIES.read().ok()?;
+    g.iter().find(|(s, _)| s == bare).map(|(_, k)| *k)
+}
+
+/// The kind of ETF its category says it is: an underlying such as "Domestic
+/// price of Gold", "NASDAQ 100 Index", "Nifty 1D Rate Index" or "CRISIL IBX
+/// Gilt Index", or an AMFI category and scheme name. `None` for an equity
+/// index (Nifty 50, Sensex, a sector), which is taxed like listed shares.
+pub fn etf_kind_from_category(text: &str) -> Option<EtfKind> {
+    let t = text.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
+    if has(&["gold"]) {
+        return Some(EtfKind::Gold);
+    }
+    if has(&["silver"]) {
+        return Some(EtfKind::Silver);
+    }
+    if has(&[
+        "liquid",
+        "overnight",
+        "money market",
+        "1d rate",
+        "1 day rate",
+        "tri-party",
+        "triparty",
+    ]) {
+        return Some(EtfKind::Liquid);
+    }
+    if has(&[
+        "gilt",
+        "g-sec",
+        "gsec",
+        "government securit",
+        "sdl",
+        "bond",
+        "debt",
+        "t-bill",
+        "treasury",
+        "crisil ibx",
+        "target maturity",
+    ]) {
+        return Some(EtfKind::Debt);
+    }
+    if has(&[
+        "nasdaq",
+        "s&p 500",
+        "s&p500",
+        "hang seng",
+        "fang",
+        "nyse",
+        "overseas",
+        "international",
+        "global",
+        "japan",
+        "taiwan",
+        "china",
+        "fof overseas",
+    ]) {
+        return Some(EtfKind::International);
+    }
+    None
+}
+
+/// Rows of NSE's ETF list: `(symbol, underlying, name)`. Columns are found
+/// by name, so a reordered or extended file still reads.
+pub fn parse_nse_etf_list(text: &str) -> Vec<(String, String, String)> {
+    let mut lines = text.trim_start_matches('\u{feff}').lines();
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let cols: Vec<String> = crate::brokers::csv_fields(header)
+        .iter()
+        .map(|c| c.trim().to_lowercase().replace(' ', ""))
+        .collect();
+    let at = |name: &str| cols.iter().position(|c| c == name);
+    let (Some(sym), Some(under)) = (at("symbol"), at("underlying")) else {
+        return Vec::new();
+    };
+    let name = at("securityname");
+    lines
+        .filter_map(|l| {
+            let f = crate::brokers::csv_fields(l);
+            let s = f.get(sym)?.trim().to_ascii_uppercase();
+            let u = f.get(under)?.trim().to_string();
+            (!s.is_empty()).then(|| {
+                (
+                    s,
+                    u,
+                    name.and_then(|n| f.get(n))
+                        .map(|n| n.trim().to_string())
+                        .unwrap_or_default(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Whether an NSE underlying names a domestic equity index (Nifty, Sensex,
+/// a BSE index): such an ETF is equity whatever its scheme name says.
+fn names_domestic_equity_index(underlying: &str) -> bool {
+    let u = underlying.to_lowercase();
+    ["nifty", "sensex", "bse", "s&p bse"]
+        .iter()
+        .any(|w| u.contains(w))
+}
+
+/// The non-equity ETFs in NSE's list, classified by their underlying (and
+/// name when the underlying says nothing).
+pub fn classify_etf_list(rows: &[(String, String, String)]) -> Vec<(String, EtfKind)> {
+    rows.iter()
+        .filter_map(|(sym, under, name)| {
+            let kind = etf_kind_from_category(under).or_else(|| {
+                // An empty or opaque underlying (an index code such as
+                // `GLD_IDX`): the scheme name decides. A named domestic
+                // equity index stays equity.
+                (!names_domestic_equity_index(under))
+                    .then(|| etf_kind_from_category(name))
+                    .flatten()
+            })?;
+            Some((sym.clone(), kind))
+        })
+        .collect()
+}
+
+/// Load NSE's ETF list (cached; best effort) and classify every ETF in it by
+/// category, so `tax`, `tax export`, `tax advance` and `harvest` know a gold,
+/// silver, international, liquid or debt ETF that is not in the table yet.
+/// Without the list (offline, nothing cached) the table and name patterns
+/// decide alone.
+pub async fn load_etf_categories() {
+    let text = async {
+        let client = crate::funds::http_client()?;
+        crate::funds::cached_text(
+            &client,
+            "nse_etf_list.csv",
+            NSE_ETF_LIST,
+            "NSE",
+            valid_etf_list,
+        )
+        .await
+    }
+    .await;
+    // Only a list that parses into rows replaces the map; anything else
+    // leaves the current one (and the table) in charge.
+    if let Ok(text) = text
+        && valid_etf_list(&text)
+    {
+        set_etf_categories(classify_etf_list(&parse_nse_etf_list(&text)));
+    }
+}
+
+/// Whether `text` is NSE's ETF list as [`parse_nse_etf_list`] reads it:
+/// the `Symbol` and `Underlying` columns and at least one row.
+pub fn valid_etf_list(text: &str) -> bool {
+    !parse_nse_etf_list(text).is_empty()
+}
 
 /// Which kind of non-equity ETF a `GOLDBEES` / `GOLDBEES.NS` symbol is, or
 /// `None` for shares, equity ETFs (`NIFTYBEES`) and anything unknown. Beyond
@@ -242,7 +450,10 @@ pub fn non_equity_etf(symbol: &str) -> Option<EtfKind> {
     if let Some((_, kind)) = NON_EQUITY_ETFS.iter().find(|(s, _)| *s == bare) {
         return Some(*kind);
     }
-    if bare.starts_with("EBBETF") {
+    if let Some(kind) = etf_by_category(bare) {
+        return Some(kind);
+    }
+    if bare.starts_with("EBBETF") || bare.starts_with("BBETF") {
         return Some(EtfKind::Debt);
     }
     if bare.starts_with("LIQUID") {
@@ -263,6 +474,29 @@ pub fn non_equity_etf(symbol: &str) -> Option<EtfKind> {
             return Some(EtfKind::Debt);
         }
         if has("NASDAQ") || has("HNGSNG") || has("SNP") {
+            return Some(EtfKind::International);
+        }
+    }
+    // Other fund houses' ETF names (`…IETF`, `…ETF`, `…CASE`, `…ADD`) that
+    // say what they hold.
+    let etf_like = ["IETF", "ETF", "CASE", "ADD"]
+        .iter()
+        .any(|s| bare.ends_with(s) && bare.len() > s.len());
+    if etf_like {
+        let has = |w: &[&str]| w.iter().any(|w| bare.contains(w));
+        if has(&["GOLD"]) {
+            return Some(EtfKind::Gold);
+        }
+        if has(&["SILVER", "SILVR", "SLVR"]) {
+            return Some(EtfKind::Silver);
+        }
+        if has(&["LIQUID", "LIQID"]) {
+            return Some(EtfKind::Liquid);
+        }
+        if has(&["GILT", "GSEC", "SDL", "BOND"]) {
+            return Some(EtfKind::Debt);
+        }
+        if has(&["NASDAQ", "NASDQ", "HNGSNG", "HANGSENG", "FANG", "SP500"]) {
             return Some(EtfKind::International);
         }
     }
@@ -345,7 +579,93 @@ pub fn india_class(symbol: &str, mark: Option<&Mark>) -> IndiaClass {
                 .into(),
         );
     }
+    if is_mld(symbol) {
+        return IndiaClass::Other(
+            "market-linked debenture — short-term at your slab rate however long you hold it \
+             (Sec. 50AA)"
+                .into(),
+        );
+    }
     IndiaClass::Listed
+}
+
+/// A market-linked debenture: listed with `MLD` and a digit in the symbol.
+pub fn is_mld(symbol: &str) -> bool {
+    let upper = symbol.to_ascii_uppercase();
+    let bare = upper
+        .strip_suffix(".NS")
+        .or_else(|| upper.strip_suffix(".BO"))
+        .unwrap_or(&upper);
+    bare.contains("MLD") && bare.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Whether an AMFI category and scheme name describe a debt-oriented fund
+/// (more than 65% in debt and money-market instruments): debt schemes,
+/// liquid, overnight and money-market funds, gilt and target-maturity index
+/// funds.
+pub fn is_debt_oriented(category: &str, name: &str) -> bool {
+    let cat = category.to_lowercase();
+    if cat.contains("debt scheme") || cat.contains("income") {
+        return true;
+    }
+    let both = format!("{cat} {}", name.to_lowercase());
+    [
+        "liquid",
+        "overnight",
+        "money market",
+        "gilt",
+        "g-sec",
+        "gsec",
+        "sdl",
+        "t-bill",
+        "target maturity",
+        "bharat bond",
+        "crisil ibx",
+        "corporate bond",
+        "banking and psu",
+    ]
+    .iter()
+    .any(|w| both.contains(w))
+}
+
+/// What kind of non-equity asset `symbol` is for Indian capital gains (Sec.
+/// 50AA, 112, 115BBH), or `None` for listed shares, equity ETFs,
+/// equity-oriented funds and a fund whose category is unknown.
+pub fn india_asset(symbol: &str, mark: Option<&Mark>) -> Option<crate::tax::IndiaAsset> {
+    use crate::tax::IndiaAsset;
+    if crate::market::AssetClass::of(symbol) == crate::market::AssetClass::Crypto {
+        return Some(IndiaAsset::Vda);
+    }
+    if is_fund(symbol) {
+        let cat = mark.and_then(|m| m.category.as_deref())?;
+        let name = mark.and_then(|m| m.name.as_deref()).unwrap_or("");
+        if is_equity_oriented(cat, name) {
+            return None;
+        }
+        if name.to_lowercase().contains("market linked") {
+            return Some(IndiaAsset::MarketLinkedDebenture);
+        }
+        return Some(if is_debt_oriented(cat, name) {
+            IndiaAsset::DebtFund { listed: false }
+        } else {
+            IndiaAsset::OtherFund { listed: false }
+        });
+    }
+    if let Some(kind) = non_equity_etf(symbol) {
+        return Some(match kind {
+            EtfKind::Liquid | EtfKind::Debt => IndiaAsset::DebtFund { listed: true },
+            EtfKind::Gold | EtfKind::Silver | EtfKind::International => {
+                IndiaAsset::OtherFund { listed: true }
+            }
+        });
+    }
+    if is_sgb(symbol) {
+        return Some(IndiaAsset::GoldBond);
+    }
+    if is_mld(symbol) {
+        return Some(IndiaAsset::MarketLinkedDebenture);
+    }
+    None
 }
 
 /// Whether a symbol is priced here rather than by a market quote.
@@ -703,6 +1023,129 @@ pub(crate) mod tests {
         ] {
             assert_eq!(non_equity_etf(sym), None, "{sym}");
         }
+    }
+
+    #[test]
+    fn etfs_are_classified_by_category_from_the_nse_list() {
+        let rows = parse_nse_etf_list(include_str!("fixtures/nse_etf_list.csv"));
+        assert_eq!(rows.len(), 10);
+        let classified = classify_etf_list(&rows);
+        let kind = |s: &str| classified.iter().find(|(x, _)| x == s).map(|(_, k)| *k);
+        // New ETFs whose symbol says nothing of what they hold.
+        for (sym, want) in [
+            ("ABCGLDX", EtfKind::Gold),
+            ("SLVRX1", EtfKind::Silver),
+            ("XYZNQ100", EtfKind::International),
+            ("HSTECHX", EtfKind::International),
+            ("LMNT1D", EtfKind::Liquid),
+            ("DEFG30", EtfKind::Debt),
+            ("BHARAT31", EtfKind::Debt),
+        ] {
+            assert_eq!(kind(sym), Some(want), "{sym} must not be taxed as equity");
+        }
+        // Equity index ETFs stay listed shares.
+        for sym in ["NIFTYBEES", "PQRCPSE", "MIDQ50"] {
+            assert_eq!(kind(sym), None, "{sym}");
+        }
+        // Without the list, the table and names decide: these are unknown.
+        assert_eq!(non_equity_etf("ABCGLDX.NS"), None);
+        set_etf_categories(classified);
+        assert_eq!(non_equity_etf("ABCGLDX.NS"), Some(EtfKind::Gold));
+        assert!(matches!(
+            india_class("XYZNQ100.NS", None),
+            IndiaClass::Other(r) if r.contains("international ETF")
+        ));
+        assert_eq!(non_equity_etf("NIFTYBEES.NS"), None);
+        // MOM100 tracks the Nifty Midcap 100: equity. MON100 is the Nasdaq one.
+        assert_eq!(india_class("MOM100.NS", None), IndiaClass::Listed);
+        assert_eq!(non_equity_etf("MON100.NS"), Some(EtfKind::International));
+    }
+
+    #[test]
+    fn an_opaque_underlying_code_falls_back_to_the_scheme_name() {
+        let rows = vec![
+            (
+                "GLDX".to_string(),
+                "GLD_IDX".to_string(),
+                "Domestic Gold ETF".to_string(),
+            ),
+            (
+                "NIFX".to_string(),
+                "Nifty 50".to_string(),
+                "Gold Standard Nifty ETF".to_string(),
+            ),
+        ];
+        let c = classify_etf_list(&rows);
+        assert_eq!(c, vec![("GLDX".to_string(), EtfKind::Gold)]);
+    }
+
+    #[test]
+    fn a_header_alone_is_not_a_valid_etf_list() {
+        assert!(!valid_etf_list("symbol,underlying_code\nABC,X\n"));
+        assert!(!valid_etf_list("Symbol,Underlying\n"));
+        assert!(valid_etf_list(include_str!("fixtures/nse_etf_list.csv")));
+    }
+
+    #[test]
+    fn market_linked_debentures_are_never_listed_shares() {
+        assert!(
+            matches!(india_class("ABCMLD2028.NS", None), IndiaClass::Other(r) if r.contains("50AA"))
+        );
+        assert_eq!(
+            india_asset("ABCMLD2028.NS", None),
+            Some(crate::tax::IndiaAsset::MarketLinkedDebenture)
+        );
+    }
+
+    #[test]
+    fn etf_names_from_other_fund_houses_fall_back_to_the_symbol() {
+        for (sym, kind) in [
+            ("GOLDETF.NS", EtfKind::Gold),
+            ("SILVERADD.NS", EtfKind::Silver),
+            ("GSEC10IETF.NS", EtfKind::Debt),
+            ("XGSECETF.NS", EtfKind::Debt),
+            ("ABSLNASDQETF.NS", EtfKind::International),
+            ("BBETF0432.NS", EtfKind::Debt),
+        ] {
+            assert_eq!(non_equity_etf(sym), Some(kind), "{sym}");
+        }
+        assert_eq!(non_equity_etf("CPSEETF.NS"), None);
+        assert_eq!(non_equity_etf("BANKETF.NS"), None);
+    }
+
+    #[test]
+    fn india_asset_tells_debt_from_other_funds_and_crypto() {
+        use crate::tax::IndiaAsset;
+        let mark = |cat: &str, name: &str| Mark {
+            symbol: "MF:1".into(),
+            name: Some(name.into()),
+            source: PriceSource::AmfiNav,
+            as_of: None,
+            category: Some(cat.into()),
+        };
+        let liquid = mark("Debt Scheme - Liquid Fund", "Some Liquid Fund - Growth");
+        assert_eq!(
+            india_asset("MF:1", Some(&liquid)),
+            Some(IndiaAsset::DebtFund { listed: false })
+        );
+        let fof = mark("Other Scheme - FoF Overseas", "Some US Equity FoF");
+        assert_eq!(
+            india_asset("MF:1", Some(&fof)),
+            Some(IndiaAsset::OtherFund { listed: false })
+        );
+        let equity = mark("Equity Scheme - Flexi Cap Fund", "Flexi Cap - Growth");
+        assert_eq!(india_asset("MF:1", Some(&equity)), None);
+        assert_eq!(india_asset("BTC-INR", None), Some(IndiaAsset::Vda));
+        assert_eq!(
+            india_asset("LIQUIDBEES.NS", None),
+            Some(IndiaAsset::DebtFund { listed: true })
+        );
+        assert_eq!(
+            india_asset("GOLDBEES.NS", None),
+            Some(IndiaAsset::OtherFund { listed: true })
+        );
+        assert_eq!(india_asset("SGBNOV26.NS", None), Some(IndiaAsset::GoldBond));
+        assert_eq!(india_asset("RELIANCE.NS", None), None);
     }
 
     #[test]

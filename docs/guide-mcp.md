@@ -15,15 +15,30 @@ or another.
 
 ## What the assistant can and cannot do
 
-- **It can read.** The 52 read tools cover quotes, history, technicals, risk,
-  scorecards, events, mutual funds, option chains, IPOs, screens, picks,
-  market conditions, backtests, your portfolio dashboard and lots, tax
-  estimate, advance tax, harvest and rebalance plans, calendar, goals,
-  watchlist and alerts.
+- **It can read.** The read tools cover quotes (up to 25 tickers a call),
+  history, technicals, risk, scorecards and 6-pillar scores (one stock with
+  `verdict`, up to 25 with `verdicts`), rule-based actions (`stock_action` for
+  one stock, `portfolio_review` for your holdings), events, mutual funds, option chains,
+  IPOs, screens, picks and their track record, market conditions, backtests,
+  your portfolio dashboard, lots and year in review, tax estimate, advance
+  tax, harvest and rebalance plans, calendar, goals, watchlist and alerts.
+  For Indian investors there are also G-sec yields and a bond calculator,
+  gold, silver and Sovereign Gold Bonds in rupees, USD/INR history, trailing
+  returns, correlation and side-by-side comparison.
+- **It follows a recommendations policy.** Actions (BUY, WATCH or AVOID for a
+  stock; ADD, HOLD, TRIM or EXIT for a holding) come only from StockWise's own
+  rule-based engine, through `stock_action` and `portfolio_review`, never from
+  the assistant. The assistant explains the computed action from its reasons;
+  it never invents, upgrades or changes one, and never invents a price level.
+  When less than 60% of the data is there, the engine says NO CALL and the
+  assistant says there is not enough data for a call. Every answer keeps the
+  disclaimer: rule-based educational signals, StockWise is not a
+  SEBI-registered investment adviser or research analyst, and losses are
+  possible. The rules are in [methodology.md](methodology.md#actions-methodology-1).
 - **It can check a stock against your own rules.** Ask "does TCS fit my
   rules?" and `fit_check` answers yes, no or unclear from your profile's
-  limits and your notes, rule by rule. It is not a recommendation: it never
-  says buy or sell.
+  limits and your notes, rule by rule. It checks your rules only; the action
+  comes from `stock_action`.
 - **It cannot place orders.** The server never places, changes or cancels an
   order and never reads broker credentials. The optional `--allow-orders` flag
   adds one tool that only checks an order and returns a command such as
@@ -145,7 +160,20 @@ Questions that work well, grouped by what they use:
 | "Show my portfolio by market, sector and cap tier, and what stands out." | `portfolio_analyze` |
 | "Is the market expensive or stretched right now?" | `market_conditions` (readings, not a timing call) |
 | "Does INFY fit my rules if I put ₹50,000 in?" | `fit_check` |
+| "What is the action on TCS, and why?" | `stock_action` |
+| "What is the short-term action on this small cap?" | `stock_action` with `horizon: short` |
+| "Review my holdings: what should I trim or exit, and what does waiting do to the tax?" | `portfolio_review` |
 | "Which NIFTY 50 stocks score best on value and quality?" | `picks` |
+| "Rank small caps for the next few weeks." | `picks` with `cap: small`, `horizon: short` |
+| "How did the picks lists of the last 3 months do against NIFTY?" | `picks_review` |
+| "Score TCS, INFY, HCLTECH, WIPRO and TECHM side by side." | `verdicts` |
+| "Compare HDFCBANK, ICICIBANK and KOTAKBANK on valuation and ROE." | `compare` |
+| "What have NIFTYBEES' returns been over 1, 3 and 5 years?" | `returns` |
+| "Do my bank stocks move together?" | `correlate` |
+| "Where are G-sec yields, and what does 7.18% GS 2033 yield at ₹101.50?" | `bonds_yields`, `bonds_calc` |
+| "Which Sovereign Gold Bond trades at the biggest discount to gold?" | `commodity` with `view: sgb` |
+| "How much has the dollar moved against the rupee this year?" | `fx_history` |
+| "How did my portfolio do in FY 2025-26?" | `portfolio_wrap` with `fy: 2025-26` |
 
 With `--allow-writes`:
 
@@ -160,15 +188,60 @@ With `--allow-writes`:
 Ready-made prompts are built in. In clients that support MCP prompts, pick one
 from the prompt menu:
 
-- `review_portfolio` for value, P&L, concentration and risk, with no buy or
-  sell calls.
-- `tax_harvest_check` for unrealised gains and losses by lot before 31 March.
-- `explain_option_chain` for an option chain in plain words.
-- `onboard_profile` asks a few plain questions and saves your profile (needs
-  `--allow-writes`).
+| Prompt | What it does |
+|---|---|
+| `daily_briefing` | Market conditions, your portfolio's day, triggered alerts and watchlist moves |
+| `should_i_buy` | A stock's action from `stock_action` with its reasons and invalidation, plus its scores, risk and fit with your rules (argument: `symbol`, optional `amount`) |
+| `should_i_apply_ipo` | An IPO's verdict from `ipo_analyze` (APPLY, APPLY – SELL ON LISTING, WAIT with its QIB trigger, AVOID or NO CALL) with the listing model, expected value, valuation, plan and lock-ins (argument: `symbol`, optional `capital`) |
+| `exit_check` | Each holding's action from `portfolio_review` (EXIT and TRIM first), with concentration and checkup findings |
+| `smallcap_short_scan` | Small caps ranked for weeks to months, with the short-horizon track record |
+| `tax_aware_rebalance` | Drift from your targets and the tax each trim would cost |
+| `weekly_review` | The portfolio against its benchmark, past picks lists, and this week's changes |
+| `mf_review` | Regular-plan cost against Direct, fund overlap with your stocks (India) |
+| `advance_tax_check` | Capital gains this financial year and the advance-tax instalments due (India) |
+| `review_portfolio` | Value, P&L, concentration and risk |
+| `tax_harvest_check` | Unrealised gains and losses by lot before 31 March |
+| `explain_option_chain` | An option chain in plain words |
+| `onboard_profile` | A few plain questions, then your profile is saved (needs `--allow-writes`) |
 
-The server also offers three resources: `stockwise://portfolio`,
-`stockwise://watchlist` and `stockwise://alerts`.
+Where a prompt asks for a ticker, clients that support completion suggest
+your holdings and watchlist first, then search results.
+
+The server also offers resources:
+
+| Resource | What it holds |
+|---|---|
+| `stockwise://portfolio`, `stockwise://watchlist`, `stockwise://alerts`, `stockwise://profile` | Your data, live-priced |
+| `stockwise://picks/latest` | The newest logged picks list for each market and horizon |
+| `stockwise://track-record` | How the last 90 days of picks did against the index |
+| `stockwise://methodology` | How picks and verdicts are scored, and the action rules |
+| `stockwise://quote/{symbol}` | A quote for any ticker |
+
+Over stdio a client can subscribe to the portfolio, watchlist, alerts,
+profile and picks resources; the server then sends
+`notifications/resources/updated` when their files change (checked every two
+seconds), for example when the background worker marks an alert triggered.
+
+### For client authors
+
+- Every tool has `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint`. Read tools are read-only, except `picks`, `ipo_board` and
+  `ipo_analyze`, which append to the local track record (not idempotent,
+  since a repeat can log new records; never destructive). Write tools touch
+  only local files (closed-world), and the ones that remove or replace saved
+  data are marked destructive. A write is idempotent only when a repeat
+  leaves the same files: adds that record an undo-journal entry each time
+  (`watchlist_add`) and saves that stamp today's date (`goal_save`,
+  `note_set`) are not.
+- `quote`, `history`, `verdict`, `verdicts`, `picks`, `picks_review`,
+  `portfolio_summary`, `portfolio_analyze`, `portfolio_checkup`, `rebalance`,
+  `tax_estimate` and `market_conditions` publish an `outputSchema`. Their
+  `structuredContent` follows it (an envelope of `data`, `note` and, when
+  lists were shortened, `truncated`); the same JSON is also sent as text for
+  older clients.
+- A read tool stops after 60 seconds (180 for market scans and portfolio
+  analyses). Set `STOCKWISE_MCP_TIMEOUT=SECONDS` in the client's `env` to
+  change it. Writes are never cut off.
 
 ## 4. Check the answer
 

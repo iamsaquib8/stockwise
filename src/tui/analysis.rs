@@ -601,6 +601,7 @@ mod tests {
                 price: cost,
                 date: Some(day(bought)),
                 estimated: false,
+                cost_base: None,
             }],
             tax_country: Some(crate::tax::Country::India),
             score: Some((62.0, 0.8)),
@@ -629,13 +630,19 @@ mod tests {
             analysis,
             tax_if_sold_today: Some(TaxIfSold {
                 country: "India",
+                residence_assumed: false,
                 currency: "INR".into(),
                 short_term_tax: 540.0,
                 long_term_tax: 0.0,
                 cess: 21.6,
                 total: 561.6,
                 exemption_used: 2000.0,
+                foreign: Vec::new(),
+                other_rules: Vec::new(),
+                unpriced: Vec::new(),
+                locked: Vec::new(),
             }),
+            warnings: Vec::new(),
             disclaimer: crate::verdict::DISCLAIMER,
         })
     }
@@ -736,7 +743,7 @@ mod tests {
         assert!(tcs.contains('●'), "{tcs}");
         let compact = draw(&app, 60, 20);
         assert!(compact.contains("observations"), "{compact}");
-        crate::verdict::testing::assert_neutral(&wide);
+        crate::action::testing::assert_action_well_formed(&wide);
     }
 
     #[test]
@@ -758,7 +765,7 @@ mod tests {
         ] {
             assert!(screen.contains(part), "{part} missing\n{screen}");
         }
-        crate::verdict::testing::assert_neutral(&screen);
+        crate::action::testing::assert_action_well_formed(&screen);
         app.update(key(KeyCode::Esc));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.screen, Screen::Analysis);

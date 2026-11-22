@@ -10,230 +10,239 @@
 </p>
 
 **StockWise is a command-line tool for investors in Indian (NSE/BSE) and US
-markets.** It tracks your portfolio with exact lots and XIRR, works out Indian
-capital-gains tax, looks up stocks and mutual funds, and lets an AI assistant
-read your portfolio — with your data kept in local files. One binary, no account,
-no API key.
+markets.** You keep your holdings in local files. StockWise reviews them with
+published rules, shows what moved and why, ranks candidates, and works out
+your capital-gains tax. One binary, no account, no API key, no telemetry.
 
-<p align="center">
-  <img src="assets/history.svg" alt="stockwise history AAPL -m us -p 6mo: a braille price chart with volume bars in the terminal" width="760">
-</p>
+> **Not financial advice.** Actions are rule-based educational signals.
+> StockWise is not a SEBI-registered investment adviser or research analyst.
+> You can lose money. See [DISCLAIMER.md](DISCLAIMER.md).
 
-> **Not financial advice.** StockWise is for education and information. See
-> [DISCLAIMER.md](DISCLAIMER.md).
+The examples below are real output from a sample portfolio of six large caps
+on 21 November 2026, trimmed. Your output differs.
 
-### New since 0.8.1 (unreleased, coming in 0.9)
+## What should I do with my holdings?
 
-- **Set up in one go** — `stockwise init` picks a market and imports a broker
-  file; `stockwise profile set active:med` saves your investor profile and
-  guardrails, which research, goals, rebalancing and `ask` all read.
-- **Portfolio you can trust and fix** — `portfolio analyze` (by market,
-  currency, cap tier and sector, short- vs long-term gains, risk),
-  `portfolio pme` against an index twin, an `income` calendar with yield on
-  cost, `sell --preview` with the tax before you sell, and lot fixes
-  (`--qty`, `--price`, `--delete`, `--undo-sale`) with the last five versions
-  kept for `portfolio restore`.
-- **Deeper research** — `results` shows 8–12 quarters side by side (SEC EDGAR
-  for US stocks), cap-tier badges everywhere, `conditions` for where a market
-  stands, and scans of whole markets
-  (`--universe all|bse|nifty500|midcap150|smallcap250`).
-- **Funds and goals** — `mf bleed` prices the Regular-vs-Direct cost; `goal` is
-  a horizon-aware, post-tax planner with outcome bands.
-- **Runs in the background** — a SQLite `cache.db` and `stockwise worker` keep
-  quotes, NAVs and snapshots fresh and send notices (lots turning long-term,
-  new results, filings). Redis is opt-in.
-- **AI, wired up** — `stockwise connect` adds StockWise to every AI app on your
-  computer; `stockwise ask` remembers your profile and conversations and runs
-  playbooks; assistants can change your workspace only with `--allow-writes`,
-  and `stockwise undo` reverses it.
+```bash
+stockwise portfolio review
+```
 
-Full list: [CHANGELOG.md](CHANGELOG.md) and [changelog.d](changelog.d/).
+```text
+  Portfolio review (long horizon)
+  2 exit · 3 trim · 0 add · 1 hold · 0 no call   (long horizon, methodology 2)
+
+  INFY.NS  INFOSYS LIMITED  9.0% of portfolio  P&L -26.3%
+    ACTION: EXIT · medium confidence · review by 13 Jan 2027
+      • Closed at ₹1,098.00 below the invalidation level ₹1,179.91
+
+  RELIANCE.NS  RELIANCE INDUSTRIES LTD  30.2% of portfolio  P&L +133.5%
+    ACTION: TRIM · medium confidence · invalid below ₹1,322.75 · review by 15 Jan 2027
+      • Weight 30.2% is above the 12.0% cap for one stock
+      • Size: sell about 49 shares to get back to 12.0% of the portfolio (max_stock_weight)
+
+  LT.NS  LARSEN & TOUBRO LTD.  11.5% of portfolio  P&L +27.6%
+    ACTION: HOLD · high confidence · invalid below ₹4,011.62 · review by 28 Jan 2027
+      • Composite score 72: no exit, trim or add rule triggered
+      • Trend not up (price and 50-day average not both above the 200-day), so no add
+      • Price ₹4,209.10 is above the invalidation level ₹4,011.62
+
+  Rule-based educational signal from StockWise's published methodology, not investment
+  advice. StockWise is not a SEBI-registered investment adviser or research analyst. ...
+```
+
+Each holding gets ADD, HOLD, TRIM or EXIT, or NO CALL when less than 60% of
+the data is there. Each action shows up to three reasons, a confidence level,
+an invalidation price and a review date. `--horizon short` reviews for weeks
+to months. `stockwise verdict SYMBOL` shows the action and the 6-pillar score
+for one stock. Every rule is in [methodology.md](docs/methodology.md#actions-methodology-1).
+Guide: [Review your holdings with rule-based actions](docs/guide-actions.md).
+
+## What's hot in my investments?
+
+```bash
+stockwise hot
+```
+
+```text
+  What's hot — Sat 21 Nov 20:00 IST · India
+
+  Your investments — hottest first
+  ────────────────────────────────────────
+  ITC.NS            -0.6%  heat  6.8  DGGI Guwahati | Can GST Dept. Impose Separate S. 122 Penalty …
+                 1.3σ · 16.4% of portfolio
+  RELIANCE.NS       +0.1%  heat  5.9  little changed, no news …
+                 30.2% of portfolio
+  LT.NS             -0.0%  heat  3.9  NCLT Mumbai Dispenses With L&T Shareholder, Creditor Meetings …
+                 1.0σ · 11.5% of portfolio
+
+  Sectors
+  ────────────────────────────────────────
+  Auto                    +5.1%
+  Bank                    +4.2%
+  PSU Bank                +3.5%
+```
+
+Heat combines the move against the index (in σ), the volume surge, fresh news
+or filings and a date within three days, scaled by portfolio weight. Then come
+the market lists: biggest moves, unusual volume, gaps, 52-week highs and lows,
+sectors, themes, FII/DII flows and NSE bulk and block deals. `stockwise today`
+explains each holding's day move, and `stockwise digest` is the after-close
+summary (the background worker can send it to Telegram, Slack, email and
+more). Guide: [See what's hot and what changed today](docs/guide-daily.md).
+
+## Find candidates
+
+```bash
+stockwise picks --universe nifty50 --top 5
+```
+
+```text
+  Highest Scores, long term — NIFTY 50
+  ⟳ 50 stocks ranked against each other on value, quality, growth, trend and risk
+
+  Symbol              Price     Chg%  Score  Value  Quality  Growth  Trend  Risk  Data  Action       Top fifth on
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  STOCK-A.NS        ₹•••.••   -0.38%     71     94       77      42     54    77  100%  WATCH (med)  Value
+  STOCK-B.NS      ₹•,•••.••   +1.93%     66     63       67      37     79    88   95%  BUY (high)   Risk
+  STOCK-C.NS      ₹•,•••.••   +1.35%     65     59       60      62     93    51  100%  WATCH (high) Trend
+  Each number is a percentile rank among the stocks scanned (100 is the highest). ...
+  Rule-based educational signal from StockWise's published methodology, not investment advice. ...
+```
+
+Symbols and prices are hidden here: this README is not a list of stocks to
+buy. `picks` ranks the stocks it scans against each other, then applies the
+action rules to each one as if you did not hold it. `--horizon short` weights
+momentum, volume and risk for weeks to months; `--cap small` ranks small caps
+against each other with their own floors. Every list is logged, and
+`stockwise picks review` shows how past lists did against the index.
+Guide: [Find candidates with picks](docs/guide-picks.md).
+
+## File my tax
+
+```bash
+stockwise tax in
+```
+
+```text
+  Tax Estimate — India (FY 2026-27)
+
+  Realized — sales 01 Apr 2026 to 31 Mar 2027
+  ────────────────────────────────────────
+  Symbol               Qty Bought       Sold                 Gain  Term
+  RELIANCE.NS        20.00 2024-03-12   2026-10-15        +₹3,800    LT
+  ITC.NS             50.00 2025-12-02   2026-09-10        -₹3,750    ST
+
+  Estimated tax on gains realized in FY 2026-27
+  ────────────────────────────────────────
+  ST loss set off vs LTCG      ₹3,750.00
+  LTCG after set-off           ₹50.00
+  LTCG exemption (₹1,25,000 a year) -₹50.00
+  TOTAL TAX                    ₹0.00
+
+  → ₹1,24,950 of this year's ₹1,25,000 LTCG exemption is unused — booking up to that much long-term gain this FY is tax-free.
+```
+
+Tax is worked out per lot, with the set-off rules, the 4% cess and the rates
+in force on each sale date. `stockwise tax reconcile taxpnl.xlsx` matches
+each sale with your broker's tax P&L (Zerodha, Groww, Upstox) and explains
+every difference. `stockwise tax export in` writes the ITR Schedule CG / 112A
+CSV, `stockwise harvest` lists losses and gains to book before 31 March, and
+`stockwise rebalance --raise 100000` raises cash at the lowest tax. US
+(Form 8949) and UK rules are included. Guide:
+[File your Indian capital-gains tax](docs/guide-tax.md).
+
+## Get started
+
+```bash
+stockwise init                                    # pick a market, import a broker file
+stockwise import kite ~/Downloads/tradebook.xlsx  # or groww, upstox, indmoney, cas, csv
+stockwise portfolio add TCS 10 3500 --date 2024-04-12
+stockwise portfolio                               # live P&L, XIRR and an Action column
+stockwise doctor                                  # check the setup; each failure has a fix
+```
+
+Indian stocks are the default (`TCS` means `TCS.NS`). Add `-m us` for US
+stocks, or run `stockwise use us` once. Crypto, FX, gold and seven more
+exchanges work too ([markets](docs/markets.md)).
 
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iamsaquib8/stockwise/main/install.sh | sh   # macOS, Linux, Termux
-cargo binstall stockwise                                                                    # or: cargo install --locked stockwise
 ```
 
-Also `.deb`/`.rpm`, Scoop, Nix and Docker — see [Install](docs/install.md) for
-every option, and the [five-minute quickstart](docs/quickstart.md) for your
-first commands. PyPI, Homebrew, winget and the AUR are not published yet. Building
-from source needs Rust 1.97 or newer. Then run `stockwise init` to pick a market
-and import your holdings (or `stockwise doctor` to check your setup). Switch the
-default market later with `stockwise use us` (or `uk`, `crypto`, ...), so you don't
-need `-m` on every command.
+| Channel | Command |
+|---------|---------|
+| Shell installer | the line above (checks the SHA-256; `stockwise update` updates) |
+| Cargo | `cargo binstall stockwise` or `cargo install --locked stockwise` (Rust 1.97+) |
+| Debian, Ubuntu | `stockwise_amd64.deb` / `stockwise_arm64.deb` from the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest) |
+| Fedora, RHEL | `sudo dnf install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise-x86_64.rpm` |
+| Windows (Scoop) | `scoop install https://github.com/iamsaquib8/stockwise/releases/latest/download/stockwise.json` |
+| Nix | `nix profile install github:iamsaquib8/stockwise` |
+| Docker | `docker run --rm -it -v stockwise-data:/data ghcr.io/iamsaquib8/stockwise quote TCS` |
+| Release binaries | archives for macOS, Linux, Windows and Android from the [latest release](https://github.com/iamsaquib8/stockwise/releases/latest) |
 
-## What it does
+Prepared but not published yet: PyPI (`pipx install stockwise`), Homebrew,
+winget, the AUR, Docker Hub, nixpkgs and Termux packages.
+[Install](docs/install.md) has the details.
 
-### One portfolio, true returns
+## Use it from an AI assistant
 
 ```bash
-stockwise import kite ~/Downloads/tradebook.xlsx  # CSV or .xlsx from Kite, Groww, Upstox, INDmoney; CAS too
-stockwise portfolio                               # live P&L, XIRR and allocation
-stockwise portfolio sell TCS 5 3900 --preview     # lots taken and tax due, before you record it
-stockwise portfolio sell TCS 5 3900               # FIFO sale; realised P&L kept for tax
-stockwise portfolio analyze                       # by market, currency, cap and sector; risk and tax
-stockwise portfolio lots TCS --lot 2 --qty 10     # fix a lot (--price, --date, --delete, --undo-sale N)
-stockwise portfolio benchmark NIFTY -p 1y         # return vs the index
-stockwise portfolio xray                          # real exposure across stocks, funds and ETFs
-stockwise portfolio target set TCS 30             # target weights; then rebalance --inflow 50000
+stockwise connect          # adds the MCP server to every AI app found on this computer
 ```
 
-Every purchase is a lot with its own date, so holding periods, FIFO sales and
-XIRR are exact. Mutual funds are valued from AMFI's NAVs, and holdings in
-different currencies are totalled in one (`--base`). `rebalance --inflow` puts
-new money only into underweight holdings. A tradebook import keeps its trades and
-merges with the next file, so yearly Console downloads can be loaded one by one,
-in any order. Every change keeps the previous version (`portfolio.json.1` to
-`.5`): `portfolio restore` lists them and `portfolio restore N` brings one back. More: [portfolio and imports](docs/commands.md#portfolio),
-[X-Ray and benchmark](docs/commands.md#benchmark-and-attribution).
-
-### Capital-gains tax
-
-```bash
-stockwise tax in                                  # LTCG/STCG per lot, with set-off rules
-stockwise harvest                                 # losses and gains to book before 31 March, by FIFO sale
-stockwise tax advance --paid 2025-06-14:3000      # dated payments: Sec. 234C interest by due date
-stockwise tax export in --fy 2025-26 > cg.csv     # Schedule CG / 112A rows for your ITR
-```
-
-Tax is worked out per lot, with the 4% cess and the rates in force on each sale
-date (sales before 23 July 2024 use the old ones). The numbers cover only what
-StockWise has recorded, so compare them with your broker's tax P&L before you
-file. More: [how tax is worked out](docs/commands.md#lots-sales-and-tax),
-[harvest](docs/commands.md#harvest), [tax export](docs/commands.md#tax-export),
-[advance tax](docs/commands.md#advance-tax-india).
-
-### Look things up
-
-```bash
-stockwise quote RELIANCE TCS                      # Indian stocks are the default
-stockwise quote AAPL NVDA -m us                   # US stocks; also crypto, FX and 7 global exchanges
-stockwise quote NVDA                              # a ticker only one market lists needs no -m
-stockwise use us                                  # make US stocks the default; `stockwise use` shows it
-stockwise TCS                                     # no command needed: a one-screen overview
-stockwise deep HDFCBANK                           # fundamentals, technicals and risk for one stock
-stockwise score INFY --explain                    # Piotroski F-score and Altman Z-score, with the working
-stockwise events TCS                              # filings and news timeline, and how the stock moved
-stockwise insights TCS                            # findings on ownership, growth, margins and valuation
-stockwise results INFY                            # 8-12 quarters side by side, with YoY, QoQ and TTM
-stockwise conditions                              # index vs its averages, VIX, breadth and valuation
-stockwise mf search parag flexi direct            # mutual funds from AMFI; `mf nav CODE` adds the expense ratio
-stockwise options chain NIFTY                     # option chain with IV and greeks
-stockwise options oi NIFTY                        # open-interest build-up, PCR and max pain
-stockwise ipo                                     # open and upcoming IPOs from NSE
-stockwise markets                                 # indices at a glance; --fx adds INR remittance pairs
-```
-
-`q`, `d`, `a`, `t`, `c`, `p` and `w` are short for `quote`, `dashboard`,
-`analyze`, `technical`, `compare`, `portfolio` and `watch`. `--explain` on
-`verdict`, `technical`, `score` and `options oi` adds plain-English notes for
-beginners. All commands: [commands reference](docs/commands.md).
-
-Many commands take `--json`, and tables take `--csv` (`stockwise <command> --help`
-shows which), so they fit in scripts:
-`stockwise portfolio --json | jq '.totals.pnl_percent'`.
-
-### Ask an AI about your money
-
-`stockwise mcp` is an [MCP](https://modelcontextprotocol.io) server: Claude,
-ChatGPT Codex, Gemini CLI, Google Antigravity, Cursor, VS Code and other
-assistants can look up quotes, technicals, risk, scorecards, events, mutual
-funds, option chains, IPOs, screens, picks, market conditions and backtests,
-and read your portfolio dashboard, lots, tax estimate, advance tax, harvest and
-rebalance plans, calendar, goals, watchlist and alerts — 52 tools that read,
-three resources and four ready-made prompts. `fit_check` answers "does this
-stock fit my own rules?" with yes, no or unclear. With `--allow-writes` the
-assistant can also set up your profile and change your watchlist, alerts,
-goals and notes; `stockwise undo` reverses any change. It never places orders.
-
-`stockwise connect` adds it to every AI app on your computer in one step.
-`stockwise ask "question"` lets a local or cloud model call the same tools
-from your terminal, with your profile, saved conversations (`-c`, `-i`) and
-playbooks (`--playbook checkup`).
-
-```bash
-claude mcp add stockwise -- stockwise mcp        # Claude Code
-```
-
-Claude Desktop (Settings → Developer → Edit Config) and Cursor
-(`~/.cursor/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "stockwise": { "command": "stockwise", "args": ["mcp"] }
-  }
-}
-```
-
-Over HTTP: `stockwise mcp --http 127.0.0.1:8788`. Agents can also read the
-[Agent Skill](skills/stockwise/SKILL.md) and the docs'
-[llms.txt](https://iamsaquib8.github.io/stockwise/llms.txt). Details, the tool
-list and the safety model: [docs/ai.md](docs/ai.md#use-stockwise-from-ai-assistants-mcp).
+That covers Claude Desktop, Claude Code, ChatGPT Codex, Gemini CLI,
+Antigravity, Cursor, VS Code and more (`stockwise connect --list`). For Claude
+Code alone: `claude mcp add stockwise -- stockwise mcp`. The server has 71
+tools that read; the assistant explains StockWise's computed actions and never
+invents one. With `--allow-writes` it can change your watchlist, alerts,
+goals and notes, and `stockwise undo` reverses any change. It never places
+orders. `stockwise ask "question"` uses the same tools from your terminal.
+Guide: [Use StockWise from Claude, Gemini, Codex or Cursor](docs/guide-mcp.md).
 
 <!-- mcp-name: io.github.iamsaquib8/stockwise -->
 
-## Also included
+## More
 
-- **Background worker and cache** — `stockwise worker start` keeps a local
-  SQLite `cache.db` warm and sends post-close notices; `stockwise cache status`
-  shows what is stored. [Commands](docs/commands.md)
-- **Income and goals** — `stockwise income` projects dividends and coupons for
-  12 months; `stockwise goal` plans SIPs by horizon, after tax.
+| Topic | Where |
+|-------|-------|
+| Five-minute start | [Quickstart](docs/quickstart.md) |
+| Guides by goal | [What do you want to do?](docs/guides.md) |
+| Commands people use most | [Cheatsheet](docs/cheatsheet.md) |
+| Every command and option | [Commands reference](docs/commands.md) |
+| How actions, scores and picks work | [Methodology](docs/methodology.md) |
+| Portfolio, lots and imports | [Portfolio guide](docs/guide-portfolio.md), [brokers](docs/brokers.md) |
+| Rebalance to targets | [Rebalance guide](docs/guide-rebalance.md) |
+| Alerts, worker and notifications | [Alerts guide](docs/guide-alerts.md), [bots](docs/bots.md) |
+| Backtests and practice | [Backtesting](docs/backtesting.md), [simulator](docs/simulator.md) |
+| Terminal and web dashboards | [TUI](docs/tui.md), [web and JSON API](docs/server.md) |
+| AI and MCP | [AI](docs/ai.md) |
+| Scripting with JSON and CSV | [Scripting guide](docs/guide-scripting.md) |
+| How it is built | [Architecture](docs/architecture.md) |
+| Something broke | [Troubleshooting](docs/troubleshooting.md) |
+| Other tools | [Comparison](docs/comparison.md) |
+| What changed | [CHANGELOG.md](CHANGELOG.md), [roadmap](ROADMAP.md) |
 
-- **Backtests that count Indian costs** — STT, brokerage, stamp duty, next-day
-  fills, walk-forward tests; strategies as small TOML files.
-  [Backtesting](docs/backtesting.md)
-- **Practice on past markets** — replay the 2020 crash with the future hidden,
-  scored on risk, not raw return; a paper-trading simulator.
-  [Simulator](docs/simulator.md)
-- **Dashboards** — `stockwise tui` in the terminal and `stockwise serve --open`
-  in the browser; neither places orders. [TUI](docs/tui.md), [web](docs/server.md)
-- **Alerts** — price, RSI, moving-average, breakout, volume and results alerts to
-  Telegram, Slack, Discord or email (desktop pop-ups need a source build with
-  `--features desktop-notify`). [Alerts](docs/bots.md#notifications)
-- **Planning** — SIP, retirement and education goals; SIP and what-if
-  calculators. [Commands](docs/commands.md)
-- **Gold, SGBs and G-secs** — gold in ₹/10 g, Sovereign Gold Bonds, bond yields
-  and a YTM calculator. [Markets](docs/markets.md)
-- **Live orders (optional)** — Angel One; Zerodha, Upstox, Dhan and Fyers are
-  experimental and untested on a live account, as are stop-loss and GTT orders.
-  Every order shows a preview and needs a typed confirmation. [Brokers](docs/brokers.md)
+The docs site is **[iamsaquib8.github.io/stockwise](https://iamsaquib8.github.io/stockwise/)**.
 
-The [cheatsheet](docs/cheatsheet.md) has the commands people use most, and the
-[commands reference](docs/commands.md) has every option, including the
-[configuration file](docs/commands.md#configuration-file).
+## Disclaimer
 
-## Docs
-
-**[iamsaquib8.github.io/stockwise](https://iamsaquib8.github.io/stockwise/)** —
-install, a [five-minute quickstart](docs/quickstart.md), guides by goal,
-and the reference.
-
-New here? [What do you want to do?](docs/guides.md) lists the guides:
-
-- [Import your trades and see true returns](docs/guide-portfolio.md)
-- [File your Indian capital-gains tax](docs/guide-tax.md)
-- [Check a stock or fund fast](docs/guide-research.md)
-- [Rebalance to target weights](docs/guide-rebalance.md)
-- [Use StockWise from Claude, Gemini, Codex or Cursor](docs/guide-mcp.md)
-- [Set up alerts and the daemon](docs/guide-alerts.md)
-- [Backtest and practise on past markets](docs/guide-practice.md)
-- [Script it with JSON, CSV and jq](docs/guide-scripting.md)
-
-The reference has the [cheatsheet](docs/cheatsheet.md), the
-[commands](docs/commands.md), markets, AI, backtesting, brokers,
-[troubleshooting](docs/troubleshooting.md), and
-[how StockWise compares](docs/comparison.md) with other tools.
+StockWise gives rule-based educational signals, not personalised financial,
+investment, tax or legal advice. It is not a SEBI-registered investment
+adviser or research analyst. Data comes from third parties and can be late
+or wrong. Check the reasons and the data before you act; every decision is
+yours, and you can lose money. Live trading commands preview the order and ask
+for typed confirmation by default; passing `--yes` when `max_order_value` is
+set in your broker config bypasses typed confirmation and sends the order
+immediately (so typed confirmation is not a safety check in that case). Read
+[DISCLAIMER.md](DISCLAIMER.md).
 
 ## Contributing
 
 Bug reports and ideas are welcome in
 [Issues](https://github.com/iamsaquib8/stockwise/issues) and
-[Discussions](https://github.com/iamsaquib8/stockwise/discussions). The
-[roadmap](ROADMAP.md) shows what is planned up to 1.0. Start with
+[Discussions](https://github.com/iamsaquib8/stockwise/discussions). Start with
 [CONTRIBUTING.md](CONTRIBUTING.md); a
 [good first issue](https://github.com/iamsaquib8/stockwise/labels/good%20first%20issue)
 names the files to change and how to test.
@@ -242,4 +251,4 @@ names the files to change and how to test.
 
 [MIT](LICENSE) © iamsaquib8. Market data comes from Yahoo Finance, AMFI, the
 exchanges' public pages and your broker. StockWise is not affiliated with any
-exchange, broker or data provider. See [DISCLAIMER.md](DISCLAIMER.md).
+exchange, broker or data provider.

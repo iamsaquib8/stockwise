@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
+    /// Stable id: the notified-state in `alert_watch.json` is keyed by it,
+    /// so editing or reordering alerts never re-sends or loses a trigger.
+    /// Alerts saved before ids get a deterministic one when loaded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub symbol: String,
     pub condition: AlertCondition,
     /// The condition's number: a price, an RSI level, a moving-average
@@ -31,6 +36,45 @@ pub struct Alert {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<usize>,
     pub created_at: String,
+    /// Moving-average crosses and breakouts: judge only completed sessions,
+    /// so an intraday poke through the average that closes back does not
+    /// notify.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_close: bool,
+    /// Price levels: notify whenever the level holds (and re-arm once it
+    /// stops), or only when the price crosses it.
+    #[serde(default, skip_serializing_if = "AlertMode::is_level")]
+    pub mode: AlertMode,
+}
+
+/// `alert add` switches besides the condition.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AddOptions {
+    /// Save even if the ticker is unknown.
+    pub force: bool,
+    /// Judge crosses on completed sessions only.
+    pub on_close: bool,
+    /// Price levels: notify on a cross only.
+    pub cross: bool,
+}
+
+/// How a price-level alert notifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlertMode {
+    /// Notify when the condition holds (once a day), re-arm once it stops.
+    #[default]
+    Level,
+    /// Notify only on a cross: the price was seen on the other side of the
+    /// level first. An alert added while the price is already beyond the
+    /// level stays quiet until it comes back and crosses.
+    Cross,
+}
+
+impl AlertMode {
+    pub fn is_level(&self) -> bool {
+        *self == AlertMode::Level
+    }
 }
 
 /// What an alert watches. Serialized by variant name (`"Above"`, `"RsiBelow"`)
@@ -137,6 +181,26 @@ impl AlertCondition {
         )
     }
 
+    /// Conditions that compare a close with a moving level on daily bars:
+    /// they can be judged on the close (`--on-close`) and caught up when
+    /// checks were missed.
+    pub fn is_cross(self) -> bool {
+        matches!(
+            self,
+            AlertCondition::CrossAboveSma
+                | AlertCondition::CrossBelowSma
+                | AlertCondition::CrossAboveEma
+                | AlertCondition::CrossBelowEma
+                | AlertCondition::BreakoutHigh
+                | AlertCondition::BreakdownLow
+        )
+    }
+
+    /// Price-level conditions (`above` / `below`).
+    pub fn is_level(self) -> bool {
+        matches!(self, AlertCondition::Above | AlertCondition::Below)
+    }
+
     /// Price alerts need only the live quote.
     pub fn is_price(self) -> bool {
         matches!(
@@ -175,9 +239,47 @@ pub struct MarketData {
     /// it is an earlier date than `today`, and the day change and volume in
     /// the quote still describe that earlier session.
     pub traded: Option<NaiveDate>,
+    /// Unix time of the quote's last trade.
+    pub quote_time: Option<i64>,
+    /// The symbol's exchange is in its regular session now (`None` for
+    /// round-the-clock instruments and when unknown).
+    pub market_open: Option<bool>,
+    /// Whether the exchange's scheduled session for `today` has closed
+    /// (`Some(false)` during pre-market, regular hours, or midday break).
+    pub session_closed: Option<bool>,
 }
 
+/// Quotes older than this are not used for price-level alerts.
+pub const FRESH_QUOTE_SECS: i64 = 30 * 60;
+
 impl MarketData {
+    /// Whether a price-level alert may use the live price at `now`: the
+    /// market is not known to be closed and the quote traded within
+    /// [`FRESH_QUOTE_SECS`]. A missing trade time counts as fresh (fixture
+    /// and off-market sources carry none). The reason when not.
+    pub fn price_is_usable(&self, now: i64) -> Result<(), &'static str> {
+        if self.market_open == Some(false) {
+            return Err("market closed");
+        }
+        match self.quote_time {
+            Some(t) if now - t > FRESH_QUOTE_SECS => Err("stale quote"),
+            _ => Ok(()),
+        }
+    }
+
+    /// Bars of sessions that are over: all of them, or all but the last
+    /// when the last is today's still-trading (or midday-break) session.
+    pub fn completed_bars(&self) -> Option<Bars> {
+        let bars = self.bars.as_ref()?;
+        let not_closed = self.session_closed == Some(false) || self.market_open == Some(true);
+        let live = not_closed && bars.time.last().map(|&t| bar_date(t)) == self.today;
+        if !live {
+            return Some(bars.clone());
+        }
+        let n = bars.len().saturating_sub(1);
+        Some(truncate_bars(bars, n))
+    }
+
     /// The quote describes a session before today's, so a per-session
     /// reading (day change, volume) would repeat an old move.
     fn quote_is_from_an_earlier_session(&self) -> bool {
@@ -199,7 +301,48 @@ pub struct Reading {
     pub reference: Option<f64>,
 }
 
+/// FNV-1a: stable across releases, unlike `DefaultHasher`.
+fn fnv1a(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
 impl Alert {
+    /// A new alert (no id until it is added to a store).
+    pub fn new(
+        symbol: &str,
+        condition: AlertCondition,
+        target: f64,
+        period: Option<usize>,
+    ) -> Self {
+        Alert {
+            id: String::new(),
+            symbol: symbol.to_uppercase(),
+            condition,
+            target,
+            period,
+            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            on_close: false,
+            mode: AlertMode::Level,
+        }
+    }
+
+    /// The key `alert_watch.json` used before alerts had ids.
+    pub fn legacy_key(&self) -> String {
+        let mut key = format!(
+            "{}|{}|{}|{}",
+            self.symbol, self.condition, self.target, self.created_at
+        );
+        if let Some(p) = self.period {
+            key.push_str(&format!("|{p}"));
+        }
+        key
+    }
+
     /// RSI period or volume-average length, with the default filled in.
     pub fn period(&self) -> Option<usize> {
         self.period.or(self.condition.default_period())
@@ -229,6 +372,55 @@ impl Alert {
     /// Whether the condition looks at the results calendar.
     pub fn needs_results(&self) -> bool {
         self.condition == AlertCondition::ResultsIn
+    }
+
+    /// Evaluate against `data`, judging crosses on completed sessions only
+    /// when the alert is `on_close`.
+    pub fn evaluate_now(&self, data: &MarketData) -> Option<Reading> {
+        if self.on_close && self.condition.is_cross() {
+            let closed = MarketData {
+                bars: data.completed_bars(),
+                ..data.clone()
+            };
+            return self.evaluate(&closed);
+        }
+        self.evaluate(data)
+    }
+
+    /// Crosses on completed sessions after `since` (at most `max` of them),
+    /// for checks that were missed while nothing was running. Returns the
+    /// latest session where the condition fired and its reading. Only for
+    /// [`AlertCondition::is_cross`] conditions.
+    pub fn missed_cross(
+        &self,
+        data: &MarketData,
+        since: NaiveDate,
+        max: usize,
+    ) -> Option<(NaiveDate, Reading)> {
+        if !self.condition.is_cross() {
+            return None;
+        }
+        let bars = data.completed_bars()?;
+        let mut found = None;
+        let first = (0..bars.len())
+            .find(|&i| bar_date(bars.time[i]) > since)
+            .unwrap_or(bars.len());
+        let start = first.max(bars.len().saturating_sub(max));
+        for end in start..bars.len() {
+            let upto = MarketData {
+                bars: Some(truncate_bars(&bars, end + 1)),
+                ..Default::default()
+            };
+            if let Some(r) = self.evaluate(&upto).filter(|r| r.hit) {
+                found = Some((bar_date(bars.time[end]), r));
+            }
+        }
+        found
+    }
+
+    /// The date of the last completed session in `data`.
+    pub fn last_completed_session(data: &MarketData) -> Option<NaiveDate> {
+        data.completed_bars()?.time.last().map(|&t| bar_date(t))
     }
 
     /// Evaluate against `data`. `None` when the data the condition needs is
@@ -508,6 +700,19 @@ pub fn patch_live_bar(
     }
 }
 
+/// The first `n` bars.
+fn truncate_bars(bars: &Bars, n: usize) -> Bars {
+    let n = n.min(bars.len());
+    let mut b = bars.clone();
+    b.time.truncate(n);
+    b.open.truncate(n);
+    b.high.truncate(n);
+    b.low.truncate(n);
+    b.close.truncate(n);
+    b.volume.truncate(n);
+    b
+}
+
 /// The session date of a daily bar. Yahoo stamps daily bars at the
 /// session's open, which falls on the same UTC date for NSE, NYSE and
 /// crypto.
@@ -637,7 +842,45 @@ impl AlertStore {
     pub fn load() -> Result<Self> {
         let mut store: Self = crate::store::load("alerts.json")?;
         store.repair_symbols();
+        store.assign_ids();
         Ok(store)
+    }
+
+    /// Give alerts saved before ids one: a hash of what the alert is, so
+    /// the id is the same on every load until the file is saved with it.
+    fn assign_ids(&mut self) {
+        let mut taken: Vec<String> = self
+            .alerts
+            .iter()
+            .filter(|a| !a.id.is_empty())
+            .map(|a| a.id.clone())
+            .collect();
+        for a in self.alerts.iter_mut().filter(|a| a.id.is_empty()) {
+            let mut id = format!("a{:012x}", fnv1a(&a.legacy_key()) & 0xffff_ffff_ffff);
+            let mut n = 1;
+            while taken.contains(&id) {
+                n += 1;
+                id = format!(
+                    "a{:012x}",
+                    fnv1a(&format!("{}#{n}", a.legacy_key())) & 0xffff_ffff_ffff
+                );
+            }
+            taken.push(id.clone());
+            a.id = id;
+        }
+    }
+
+    /// An alert identical to `candidate` (same symbol, condition, number,
+    /// period and mode), if one exists.
+    pub fn duplicate_of(&self, candidate: &Alert) -> Option<(usize, &Alert)> {
+        self.alerts.iter().enumerate().find(|(_, a)| {
+            a.symbol == candidate.symbol
+                && a.condition == candidate.condition
+                && a.target == candidate.target
+                && a.period() == candidate.period()
+                && a.on_close == candidate.on_close
+                && a.mode == candidate.mode
+        })
     }
 
     /// Undo the market suffix older versions put on namespaced symbols
@@ -669,13 +912,21 @@ impl AlertStore {
         target: f64,
         period: Option<usize>,
     ) {
-        self.alerts.push(Alert {
-            symbol: symbol.to_uppercase(),
-            condition,
-            target,
-            period,
-            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
-        });
+        self.push(Alert::new(symbol, condition, target, period));
+    }
+
+    /// Add `alert`, giving it a fresh id.
+    pub fn push(&mut self, mut alert: Alert) {
+        let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let mut id = format!(
+            "a{:012x}",
+            fnv1a(&format!("{}{stamp}", alert.legacy_key())) & 0xffff_ffff_ffff
+        );
+        while self.alerts.iter().any(|a| a.id == id) {
+            id.push('x');
+        }
+        alert.id = id;
+        self.alerts.push(alert);
     }
 
     pub fn remove_by_index(&mut self, index: usize) -> bool {
@@ -716,6 +967,7 @@ mod tests {
             target,
             period,
             created_at: "2026-10-21 10:00".into(),
+            ..Alert::new("TEST.NS", condition, target, period)
         }
     }
 
@@ -1227,5 +1479,140 @@ mod tests {
         );
         // COMEX futures trade nearly around the clock: always checked.
         assert_eq!(alert_market("GC=F"), None);
+    }
+
+    /// Bars from 2024-01-01; the last is "today" and the market is open.
+    fn intraday(closes_in: &[f64]) -> MarketData {
+        let bars = Bars::from_closes(closes_in);
+        let today = bar_date(*bars.time.last().unwrap());
+        MarketData {
+            bars: Some(bars),
+            today: Some(today),
+            market_open: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_on_close_cross_does_not_fire_intraday() {
+        // Flat at 100 for 20 sessions, then today's live price pokes to 110.
+        let mut c = vec![100.0; 20];
+        c.push(110.0);
+        let mut a = alert(AlertCondition::CrossAboveSma, 5.0);
+        let live = intraday(&c);
+        assert!(
+            a.evaluate_now(&live).unwrap().hit,
+            "intraday alert fires live"
+        );
+        a.on_close = true;
+        assert!(
+            !a.evaluate_now(&live).unwrap().hit,
+            "on-close waits for the close"
+        );
+        // After the close the same bar is complete: now it fires.
+        let closed = MarketData {
+            market_open: Some(false),
+            ..live.clone()
+        };
+        assert!(a.evaluate_now(&closed).unwrap().hit);
+    }
+
+    #[test]
+    fn missed_crosses_are_caught_up_once_from_completed_sessions() {
+        // Cross above the 5-day SMA on session 21 (index 20), then flat above.
+        let mut c = vec![100.0; 20];
+        c.extend([110.0, 111.0, 112.0, 112.5]);
+        let a = alert(AlertCondition::CrossAboveSma, 5.0);
+        let d = intraday(&c);
+        // The last bar is today's live bar: no cross there.
+        assert!(!a.evaluate_now(&d).unwrap().hit);
+        let since = NaiveDate::from_ymd_opt(2024, 1, 19).unwrap();
+        let (day, r) = a.missed_cross(&d, since, 10).expect("cross on the 21st");
+        assert_eq!(day, NaiveDate::from_ymd_opt(2024, 1, 21).unwrap());
+        assert!(r.hit);
+        // Checked through the cross already: nothing to catch up.
+        assert!(a.missed_cross(&d, day, 10).is_none());
+        // Not for price levels.
+        assert!(
+            alert(AlertCondition::Above, 50.0)
+                .missed_cross(&d, since, 10)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn price_levels_need_an_open_market_and_a_fresh_quote() {
+        let now = 1_800_000_000;
+        let mut d = MarketData {
+            price: Some(100.0),
+            quote_time: Some(now - 60),
+            market_open: Some(true),
+            ..Default::default()
+        };
+        assert!(d.price_is_usable(now).is_ok());
+        d.quote_time = Some(now - FRESH_QUOTE_SECS - 1);
+        assert_eq!(d.price_is_usable(now), Err("stale quote"));
+        d.quote_time = Some(now);
+        d.market_open = Some(false);
+        assert_eq!(d.price_is_usable(now), Err("market closed"));
+        // Round-the-clock symbols (no market) with no trade time are fine.
+        d.market_open = None;
+        d.quote_time = None;
+        assert!(d.price_is_usable(now).is_ok());
+    }
+
+    #[test]
+    fn old_alerts_get_stable_unique_ids_and_duplicates_are_found() {
+        let mut store = AlertStore {
+            alerts: vec![
+                alert(AlertCondition::Above, 100.0),
+                alert(AlertCondition::Above, 100.0),
+                alert(AlertCondition::Below, 90.0),
+            ],
+        };
+        store.assign_ids();
+        let ids: Vec<String> = store.alerts.iter().map(|a| a.id.clone()).collect();
+        assert!(ids.iter().all(|i| i.starts_with('a') && i.len() == 13));
+        assert_ne!(ids[0], ids[1], "identical alerts still get distinct ids");
+        let mut again = AlertStore {
+            alerts: store
+                .alerts
+                .iter()
+                .map(|a| Alert {
+                    id: String::new(),
+                    ..a.clone()
+                })
+                .collect(),
+        };
+        again.assign_ids();
+        assert_eq!(
+            again
+                .alerts
+                .iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>(),
+            ids,
+            "ids are the same on every load"
+        );
+        let dup = alert(AlertCondition::Below, 90.0);
+        assert_eq!(store.duplicate_of(&dup).map(|(i, _)| i), Some(2));
+        let mut other = dup.clone();
+        other.mode = AlertMode::Cross;
+        assert!(store.duplicate_of(&other).is_none());
+        store.push(other);
+        assert!(!store.alerts[3].id.is_empty());
+        assert!(!ids.contains(&store.alerts[3].id));
+    }
+
+    #[test]
+    fn alerts_without_new_fields_load_and_save_unchanged() {
+        let json = r#"{"symbol":"TCS.NS","condition":"Above","target":4200.0,"created_at":"2026-01-02 10:00"}"#;
+        let a: Alert = serde_json::from_str(json).unwrap();
+        assert!(!a.on_close && a.mode == AlertMode::Level && a.id.is_empty());
+        let back = serde_json::to_string(&a).unwrap();
+        assert!(
+            !back.contains("on_close") && !back.contains("mode") && !back.contains("\"id\""),
+            "{back}"
+        );
     }
 }

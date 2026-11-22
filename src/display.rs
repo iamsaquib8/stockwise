@@ -14,7 +14,7 @@ pub fn group_number(text: &str, indian: bool) -> String {
 
 /// Group the integer digits of an already-formatted number: `125000.5` →
 /// `1,25,000.5` (Indian lakhs) or `125,000.5` (thousands).
-fn grouped_decimal(text: &str, indian: bool) -> String {
+pub(crate) fn grouped_decimal(text: &str, indian: bool) -> String {
     let (sign, rest) = match text.strip_prefix('-') {
         Some(rest) => ("-", rest),
         None => ("", text),
@@ -416,7 +416,7 @@ mod tests {
             "mean rating 1.8/5 (1 = most positive)"
         );
         for x in [1.0, 2.0, 3.0, 4.0, 5.0] {
-            crate::verdict::testing::assert_neutral(&mean_rating_text(x));
+            crate::action::testing::assert_action_well_formed(&mean_rating_text(x));
         }
     }
 

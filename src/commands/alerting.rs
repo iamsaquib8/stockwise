@@ -27,6 +27,14 @@ struct Fired {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WatchState {
     fired: HashMap<String, Fired>,
+    /// Last observation per alert id (crossing-mode alerts fire only on a
+    /// change from false to true).
+    #[serde(default)]
+    seen: HashMap<String, bool>,
+    /// Last completed session checked per alert id, for catching up on
+    /// crosses missed while nothing ran.
+    #[serde(default)]
+    checked_through: HashMap<String, NaiveDate>,
 }
 
 impl WatchState {
@@ -46,7 +54,18 @@ impl WatchState {
         today: NaiveDate,
         per_session: bool,
     ) -> bool {
-        if per_session
+        self.should_notify_caught_up(key, hit, today, per_session, false)
+    }
+
+    fn should_notify_caught_up(
+        &mut self,
+        key: &str,
+        hit: bool,
+        today: NaiveDate,
+        per_session: bool,
+        caught_up: bool,
+    ) -> bool {
+        if (per_session || caught_up)
             && let Some(f) = self.fired.get_mut(key)
             && f.last != today
         {
@@ -91,20 +110,70 @@ impl WatchState {
         }
     }
 
+    /// Restore `fired`, `seen`, and `checked_through` when a trigger couldn't
+    /// be delivered.
+    fn undo_trigger(&mut self, t: &Trigger) {
+        self.undo(&t.key, t.previous);
+        if let Some(prev) = t.prev_seen {
+            match prev {
+                Some(v) => {
+                    self.seen.insert(t.key.clone(), v);
+                }
+                None => {
+                    self.seen.remove(&t.key);
+                }
+            }
+        }
+        if let Some(prev) = t.prev_checked_through {
+            match prev {
+                Some(d) => {
+                    self.checked_through.insert(t.key.clone(), d);
+                }
+                None => {
+                    self.checked_through.remove(&t.key);
+                }
+            }
+        }
+    }
+
     /// Forget alerts that were removed.
     fn retain(&mut self, keys: &[String]) {
         self.fired.retain(|k, _| keys.contains(k));
+        self.seen.retain(|k, _| keys.contains(k));
+        self.checked_through.retain(|k, _| keys.contains(k));
+    }
+
+    /// Move entries kept under the pre-id key (symbol, condition, number,
+    /// date) to every matching alert's id, so upgrading re-sends nothing.
+    fn migrate(&mut self, alerts: &[crate::alerts::Alert]) {
+        for a in alerts {
+            if let Some(f) = self.fired.get(&a.legacy_key()).cloned() {
+                self.fired.entry(a.id.clone()).or_insert(f);
+            }
+        }
+        for a in alerts {
+            self.fired.remove(&a.legacy_key());
+        }
+    }
+
+    /// A crossing-mode alert fires only when the previous observation was
+    /// false; the first observation only records.
+    fn crossed(&mut self, key: &str, hit: bool) -> bool {
+        let before = self.seen.insert(key.to_string(), hit);
+        hit && before == Some(false)
     }
 }
 
 fn alert_key(a: &crate::alerts::Alert) -> String {
-    let mut key = format!("{}|{}|{}|{}", a.symbol, a.condition, a.target, a.created_at);
-    // Alerts from before technical conditions have no period: same key as before.
-    if let Some(p) = a.period {
-        key.push_str(&format!("|{p}"));
+    if a.id.is_empty() {
+        a.legacy_key()
+    } else {
+        a.id.clone()
     }
-    key
 }
+
+/// Most sessions caught up after a gap in checking.
+const MAX_CATCH_UP: usize = 10;
 
 /// The date a notification counts against. A per-session alert (today's
 /// change or volume) re-arms with the quote's own session, not the wall
@@ -147,6 +216,8 @@ struct Trigger {
     /// "already notified" mark if the notification can't be delivered.
     key: String,
     previous: Option<Fired>,
+    prev_seen: Option<Option<bool>>,
+    prev_checked_through: Option<Option<NaiveDate>>,
     symbol: String,
     /// The condition in words (English: notifications aren't localized).
     condition: String,
@@ -211,6 +282,7 @@ async fn check_alerts(
     verbose: bool,
 ) -> Result<Pass> {
     let store = AlertStore::load()?;
+    state.migrate(&store.alerts);
     let keys: Vec<String> = store.alerts.iter().map(alert_key).collect();
     state.retain(&keys);
     let mut markets = Vec::new();
@@ -247,7 +319,53 @@ async fn check_alerts(
         let condition = alert.describe(crate::i18n::Lang::En);
         let today = clock::session_date(alert_market(&alert.symbol).unwrap_or(market), now);
         let key = alert_key(alert);
-        let Some(reading) = alert.evaluate(&d) else {
+        // A price level needs a live price: not while its market is closed
+        // (yesterday's close would re-announce an old level) and not from a
+        // quote that stopped updating.
+        if alert.condition.is_level()
+            && let Err(why) = d.price_is_usable(now.timestamp())
+        {
+            if verbose {
+                println!(
+                    "  {} {} {} — {}, skipped",
+                    "·".dimmed(),
+                    alert.symbol.cyan(),
+                    condition,
+                    why
+                );
+            }
+            continue;
+        }
+        let reading = alert.evaluate_now(&d);
+        // Crosses on sessions completed since the last check (the worker
+        // was off, the laptop asleep) still notify, once.
+        let mut caught_up: Option<(NaiveDate, crate::alerts::Reading)> = None;
+        let mut prev_checked_through = None;
+        if alert.condition.is_cross() {
+            prev_checked_through = Some(state.checked_through.get(&key).copied());
+            let last = crate::alerts::Alert::last_completed_session(&d);
+            if let Some(since) = state.checked_through.get(&key).copied()
+                && let Some((day, missed)) = alert.missed_cross(&d, since, MAX_CATCH_UP)
+                && Some(day) != d.today
+                // Already announced live on that session's bar.
+                && state.fired.get(&key).is_none_or(|f| f.last < day)
+            {
+                caught_up = Some((day, missed));
+            }
+            if let Some(last) = last {
+                state.checked_through.insert(key.clone(), last);
+            }
+        }
+        let caught_up_day = caught_up.map(|(day, _)| day);
+        let reading = match (reading, caught_up) {
+            (_, Some((_, missed))) => Some(crate::alerts::Reading {
+                hit: true,
+                ..missed
+            }),
+            (r, None) => r,
+        };
+        let caught_up = caught_up_day;
+        let Some(reading) = reading else {
             // Past results with the next date not known yet: re-arm, so the
             // next quarter's date notifies again.
             if alert.needs_results() {
@@ -271,19 +389,32 @@ async fn check_alerts(
             }
             continue;
         };
-        let hit = reading.hit;
+        let mut hit = reading.hit;
+        let mut prev_seen = None;
+        if alert.mode == crate::alerts::AlertMode::Cross && alert.condition.is_level() {
+            prev_seen = Some(state.seen.get(&key).copied());
+            hit = state.crossed(&key, hit);
+        }
         let price = d
             .price
             .filter(|p| p.is_finite() && *p > 0.0)
             .or_else(|| d.bars.as_ref().and_then(|b| b.close.last().copied()));
         let currency = d.currency.clone();
-        let reading_text = alert.reading_text(&reading);
+        let mut reading_text = alert.reading_text(&reading);
+        if let Some(day) = caught_up {
+            let note = format!("crossed on the {} close", day.format("%d %b"));
+            reading_text = Some(match reading_text {
+                Some(r) => format!("{r}; {note}"),
+                None => note,
+            });
+        }
         let previous = state.fired.get(&key).copied();
-        let fire = state.should_notify_with(
+        let fire = state.should_notify_caught_up(
             &key,
             hit,
             rearm_date(alert.condition, &d, today),
             alert.condition.per_session(),
+            caught_up.is_some(),
         );
         if verbose {
             let status = if fire {
@@ -312,6 +443,8 @@ async fn check_alerts(
             pass.triggers.push(Trigger {
                 key,
                 previous,
+                prev_seen,
+                prev_checked_through,
                 symbol: alert.symbol.clone(),
                 condition,
                 price,
@@ -516,13 +649,18 @@ async fn report_triggers(
             reading
         );
     }
-    if let Some(msg) = trigger_message(triggers)
-        && !notifier.send_logged(&msg).await
-    {
-        for t in triggers {
-            state.undo(&t.key, t.previous);
+    if let Some(msg) = trigger_message(triggers) {
+        if notifier
+            .send_logged(&msg.with_priority(crate::notify::Priority::High))
+            .await
+        {
+            crate::digest::log_alerts(&triggers.iter().map(Trigger::text).collect::<Vec<_>>());
+        } else {
+            for t in triggers {
+                state.undo_trigger(t);
+            }
+            eprintln!("  ! Not delivered — will try again at the next check.");
         }
-        eprintln!("  ! Not delivered — will try again at the next check.");
     }
 }
 
@@ -531,16 +669,21 @@ pub async fn cmd_notify(action: &str) -> Result<()> {
     let notifier = Notifier::from_env();
     let cfg = notifier.config();
     print_header("Notifications");
-    for channel in [
-        Channel::Telegram,
-        Channel::Slack,
-        Channel::Discord,
-        Channel::Email,
-        Channel::Desktop,
-    ] {
+    for channel in Channel::ALL {
         match cfg.destination(channel) {
             Some(dest) if cfg.channels().contains(&channel) => {
-                println!("  {} {:<9} {}", "✓".green(), channel, dest)
+                let route = cfg
+                    .routes
+                    .get(&channel)
+                    .map(|p| format!(" ({} priority and up)", p.label()))
+                    .unwrap_or_default();
+                println!(
+                    "  {} {:<9} {}{}",
+                    "✓".green(),
+                    channel,
+                    dest,
+                    route.dimmed()
+                )
             }
             _ => println!(
                 "  {} {:<9} {}",
@@ -549,6 +692,13 @@ pub async fn cmd_notify(action: &str) -> Result<()> {
                 "not configured".dimmed()
             ),
         }
+    }
+    if let Some(q) = cfg.quiet {
+        println!(
+            "  {} Quiet hours {} — notices below high priority wait until they end",
+            "☾".dimmed(),
+            q
+        );
     }
     for p in &cfg.problems {
         println!("  {} {}", "!".yellow(), p);
@@ -580,10 +730,13 @@ pub async fn cmd_notify(action: &str) -> Result<()> {
 
     println!();
     let results = notifier
-        .send(&Message::new(
-            "StockWise test notification",
-            "If you can read this, StockWise can reach you here.",
-        ))
+        .send(
+            &Message::new(
+                "StockWise test notification",
+                "If you can read this, StockWise can reach you here.",
+            )
+            .with_priority(crate::notify::Priority::High),
+        )
         .await;
     let mut failed = 0;
     for (channel, result) in &results {
@@ -676,14 +829,18 @@ mod tests {
         store.add("TCS.NS", AlertCondition::Above, 4200.0);
         store.add("TCS.NS", AlertCondition::RsiBelow, 30.0);
         let created = store.alerts[0].created_at.clone();
+        // The pre-id key (still used to migrate old state) is unchanged.
         assert_eq!(
-            alert_key(&store.alerts[0]),
+            store.alerts[0].legacy_key(),
             format!("TCS.NS|above|4200|{created}")
         );
         assert_eq!(
-            alert_key(&store.alerts[1]),
+            store.alerts[1].legacy_key(),
             format!("TCS.NS|rsi-below|30|{created}|14")
         );
+        // State is keyed by the id now.
+        assert_eq!(alert_key(&store.alerts[0]), store.alerts[0].id);
+        assert_ne!(alert_key(&store.alerts[0]), alert_key(&store.alerts[1]));
     }
 
     #[test]
@@ -747,6 +904,8 @@ mod tests {
         let t = |s: &str| Trigger {
             key: s.into(),
             previous: None,
+            prev_seen: None,
+            prev_checked_through: None,
             symbol: s.into(),
             condition: "above 100.00".into(),
             price: Some(101.5),
@@ -832,5 +991,73 @@ mod tests {
         ));
         // A level alert still counts by the wall clock.
         assert_eq!(rearm_date(AlertCondition::Above, &next, day(23)), day(23));
+    }
+
+    #[test]
+    fn crossing_mode_needs_a_false_observation_first() {
+        let mut s = WatchState::default();
+        // Added while already above: quiet.
+        assert!(!s.crossed("x", true));
+        assert!(!s.crossed("x", true));
+        assert!(!s.crossed("x", false));
+        assert!(s.crossed("x", true));
+        assert!(!s.crossed("x", true));
+    }
+
+    #[test]
+    fn notified_state_moves_from_the_old_key_to_the_id() {
+        let mut a =
+            crate::alerts::Alert::new("TCS.NS", crate::alerts::AlertCondition::Above, 10.0, None);
+        a.id = "a000000000001".into();
+        let mut s = WatchState::default();
+        s.fired.insert(
+            a.legacy_key(),
+            Fired {
+                last: day(21),
+                armed: false,
+            },
+        );
+        s.migrate(std::slice::from_ref(&a));
+        assert!(s.fired.contains_key(&a.id));
+        assert!(!s.fired.contains_key(&a.legacy_key()));
+        assert!(!s.should_notify(&alert_key(&a), true, day(21)));
+    }
+
+    #[test]
+    fn undo_trigger_restores_seen_and_checked_through_and_caught_up_rearms() {
+        let mut s = WatchState::default();
+        assert!(!s.crossed("k", false));
+        let prev_seen = Some(s.seen.get("k").copied());
+        let prev_checked = Some(s.checked_through.get("k").copied());
+        s.checked_through.insert("k".into(), day(20));
+        assert!(s.crossed("k", true));
+        let previous = s.fired.get("k").copied();
+        assert!(s.should_notify_caught_up("k", true, day(20), false, false));
+
+        let t = Trigger {
+            key: "k".into(),
+            previous,
+            prev_seen,
+            prev_checked_through: prev_checked,
+            symbol: "TCS.NS".into(),
+            condition: "above ₹100".into(),
+            price: Some(101.0),
+            currency: Some("INR".into()),
+            reading: None,
+        };
+        s.undo_trigger(&t);
+        assert_eq!(s.seen.get("k").copied(), Some(false));
+        assert_eq!(s.checked_through.get("k").copied(), None);
+        assert!(s.crossed("k", true));
+
+        // Caught-up cross re-arms even if `f.armed` was false from an earlier session.
+        s.fired.insert(
+            "c".into(),
+            Fired {
+                last: day(15),
+                armed: false,
+            },
+        );
+        assert!(s.should_notify_caught_up("c", true, day(19), false, true));
     }
 }

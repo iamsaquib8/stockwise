@@ -205,6 +205,8 @@ mod tests {
                 confidence: "HIGH".into(),
                 strategies: vec![],
                 entered_at: None,
+                trail_distance: None,
+                charges: None,
                 exit_price: Some(100.0),
                 pnl: Some(0.0),
                 pnl_pct: Some(0.0),
@@ -216,6 +218,7 @@ mod tests {
             win_count: Some(1),
             loss_count: Some(0),
             settled: true,
+            cost_model: None,
         }
     }
 

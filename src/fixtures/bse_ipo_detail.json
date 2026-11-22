@@ -1,0 +1,15 @@
+{
+  "TableRows": [
+    {"Label": "Exchange Platform", "Label_flg": "eXCHANGE_PLATFORM", "Value": "Mainboard"},
+    {"Label": "Issue Type", "Label_flg": "", "Value": "Book Building"},
+    {"Label": "Issue Period", "Label_flg": "", "Value": "19 Nov 2026 to 23 Nov 2026"},
+    {"Label": "Face Value", "Label_flg": "", "Value": "Rs. 10 per Equity Share"},
+    {"Label": "Price Band", "Label_flg": "", "Value": "Rs. 129.00 - Rs. 136.00"},
+    {"Label": "Cut off Amount (&#8377;)", "Label_flg": "", "Value": "136"},
+    {"Label": "Minimum Bid Quantity", "Label_flg": "", "Value": "110 Equity Shares and in multiples of 110 Equity Shares thereafter"},
+    {"Label": "Issue Size", "Label_flg": "", "Value": "Offer for Sale of 66,18,38,000 Equity Shares of Rs. 10 each aggregating up to Rs. 9,001.00 Crore"},
+    {"Label": "Book Running Lead Manager", "Label_flg": "", "Value": "IDBI Capital Markets &amp; Securities Limited;<br/>SBI Capital Markets Limited"},
+    {"Label": "Registrar", "Label_flg": "Registrar", "Value": "KFin Technologies Limited"},
+    {"Label": "Notes", "Label_flg": "Notes", "Value": ""}
+  ]
+}

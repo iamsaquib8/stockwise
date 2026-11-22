@@ -134,11 +134,7 @@ pub struct MergerSwap {
 /// date, or it is dated after the merger (a plain rename then).
 pub fn merger_swap(symbol: &str, date: Option<&str>, qty: f64, price: f64) -> Option<MergerSwap> {
     let date = date?;
-    let upper = symbol.trim().to_uppercase();
-    let (base, suffix) = match upper.rsplit_once('.') {
-        Some((b, s)) if s == "NS" || s == "BO" => (b, format!(".{s}")),
-        _ => (upper.as_str(), String::new()),
-    };
+    let (base, suffix) = indian_base(symbol);
     let merger = MERGERS
         .iter()
         .find(|m| m.old == base && date <= m.through)?;
@@ -148,6 +144,430 @@ pub fn merger_swap(symbol: &str, date: Option<&str>, qty: f64, price: f64) -> Op
         price: price * merger.old_shares / merger.new_shares,
         merger,
     })
+}
+
+/// `RELIANCE.NS` → (`RELIANCE`, `.NS`); `TCS` → (`TCS`, ``). Upper-cased.
+pub(crate) fn indian_base(symbol: &str) -> (String, String) {
+    let upper = symbol.trim().to_uppercase();
+    match upper.rsplit_once('.') {
+        Some((b, s)) if s == "NS" || s == "BO" => (b.to_string(), format!(".{s}")),
+        _ => (upper, String::new()),
+    }
+}
+
+/// An Indian demerger: holders of the parent on `record_date` received
+/// `child_shares` of `child` for every `parent_shares` held, and kept their
+/// parent shares.
+///
+/// Indian tax (Income-tax Act) treats it as no transfer (Sec. 47(vid)). The
+/// parent's pre-demerger cost is split: `child_cost_pct` percent becomes the
+/// cost of the new shares (Sec. 49(2C)) and the parent keeps the rest
+/// (Sec. 49(2D)). The new shares take the parent's purchase date
+/// (Explanation 1(i)(g) to Sec. 2(42A)), so each parent lot gets a child
+/// lot of its own with the same date.
+#[derive(Debug, PartialEq)]
+pub struct Demerger {
+    /// Tickers the parent trades or traded under (NSE, no suffix).
+    pub parents: &'static [&'static str],
+    /// The resulting company's ticker (NSE, no suffix).
+    pub child: &'static str,
+    pub child_shares: f64,
+    pub parent_shares: f64,
+    /// `YYYY-MM-DD`. Under T+1 settlement the ex-date is the record date, so
+    /// a lot bought before this day was entitled; one bought on it was not.
+    pub record_date: &'static str,
+    /// Percent of the parent's pre-demerger cost that moves to the new shares.
+    pub child_cost_pct: f64,
+    /// The official notice the ratio, record date and percentage come from.
+    pub source: &'static str,
+    /// A US spin-off: only a parent symbol without an exchange suffix
+    /// (`GE`, not `GE.NS`) matches it.
+    pub us: bool,
+}
+
+/// Demergers and spin-offs `portfolio actions --apply` records. Every figure
+/// comes from the company's own filing (exchange letter, or US Form 8937),
+/// cited per row. Add a
+/// row only from such a filing (or a CBDT circular), never from memory or
+/// news reports.
+pub const DEMERGERS: &[Demerger] = &[
+    // Reliance Industries → Reliance Strategic Investments (renamed Jio
+    // Financial Services). RIL's letter to BSE/NSE of 19 Jul 2023: record
+    // date Thursday 20 Jul 2023, 1 RSIL share for every 1 RIL share; cost
+    // of acquisition 95.32% RIL, 4.68% RSIL.
+    Demerger {
+        parents: &["RELIANCE"],
+        child: "JIOFIN",
+        child_shares: 1.0,
+        parent_shares: 1.0,
+        record_date: "2023-07-20",
+        child_cost_pct: 4.68,
+        source: "https://www.ril.com/sites/default/files/2023-08/SEIntimation_ApportionmentofCost_0.pdf",
+        us: false,
+    },
+    // ITC → ITC Hotels. ITC's letter to NSE/BSE/CSE of 28 Jan 2025 (revised;
+    // the 27 Jan letter had a typo in its worked example only): record date
+    // 6 Jan 2025, 1 ITCHL share for every 10 ITC shares; cost of acquisition
+    // 86.49% ITC, 13.51% ITC Hotels.
+    Demerger {
+        parents: &["ITC"],
+        child: "ITCHOTELS",
+        child_shares: 1.0,
+        parent_shares: 10.0,
+        record_date: "2025-01-06",
+        child_cost_pct: 13.51,
+        source: "https://www.itcportal.com/content/dam/itc-corporate/pdfs/proposed-demerger-of-hotels-business/Apportionment%20of%20cost%20of%20acquisition%20of%20Ordinary%20Shares%20of%20ITC%20Limited%20and%20Equity%20Shares%20of%20ITC%20Hotels%20Limited%20-%20Revised.pdf",
+        us: false,
+    },
+    // Tata Motors (renamed Tata Motors Passenger Vehicles, TATAMOTORS →
+    // TMPV) → TML Commercial Vehicles (renamed Tata Motors Ltd, TMCV).
+    // TMPV's letter to BSE/NSE of 12 Nov 2025: record date 14 Oct 2025,
+    // 1 TMCV share for every 1 share held; cost of acquisition 68.85% TMPV,
+    // 31.15% TMCV.
+    Demerger {
+        parents: &["TATAMOTORS", "TMPV"],
+        child: "TMCV",
+        child_shares: 1.0,
+        parent_shares: 1.0,
+        record_date: "2025-10-14",
+        child_cost_pct: 31.15,
+        source: "https://www.bseindia.com/xml-data/corpfiling/AttachHis/bece4d69-3276-4305-88a5-440ed2a2660e.pdf",
+        us: false,
+    },
+    // US spin-offs. The basis split is the company's own IRS Form 8937,
+    // which calls it one reasonable method (shareholders may use another).
+    // `record_date` here is the first day the parent traded without the
+    // distribution (regular way, the day the form values both shares):
+    // US spin-offs trade with due bills between the record and the
+    // distribution date, so a buyer before that day received the shares.
+    // GE → GE HealthCare: 1 GEHC per 3 GE, record 16 Dec 2022, distributed
+    // 3 Jan 2023 after the close; GE 79.13%, GEHC 20.87% (opening prices
+    // of 4 Jan 2023).
+    Demerger {
+        parents: &["GE"],
+        child: "GEHC",
+        child_shares: 1.0,
+        parent_shares: 3.0,
+        record_date: "2023-01-04",
+        child_cost_pct: 20.87,
+        source: "https://www.ge.com/sites/default/files/general-electric-form-8937-attachment.pdf",
+        us: true,
+    },
+    // GE → GE Vernova: 1 GEV per 4 GE, record 19 Mar 2024, distributed
+    // 2 Apr 2024 before the open; GE 79.74%, GEV 20.26%.
+    Demerger {
+        parents: &["GE"],
+        child: "GEV",
+        child_shares: 1.0,
+        parent_shares: 4.0,
+        record_date: "2024-04-02",
+        child_cost_pct: 20.26,
+        source: "https://www.geaerospace.com/sites/default/files/ge-form-8937-attachment.pdf",
+        us: true,
+    },
+    // 3M → Solventum: 1 SOLV per 4 MMM, record 18 Mar 2024, distributed
+    // 1 Apr 2024 before the open; MMM 84.48%, SOLV 15.52%.
+    Demerger {
+        parents: &["MMM"],
+        child: "SOLV",
+        child_shares: 1.0,
+        parent_shares: 4.0,
+        record_date: "2024-04-01",
+        child_cost_pct: 15.52,
+        source: "https://d1io3yog0oux5.cloudfront.net/_59163f4175784eadfda9daba9545ab49/3m/db/3266/30881/file/Form_8937_SOLVSpin.pdf",
+        us: true,
+    },
+    // Danaher → Veralto: 1 VLTO per 3 DHR, record 13 Sep 2023, distributed
+    // Saturday 30 Sep 2023; DHR 88.34%, VLTO 11.66% (2 Oct 2023 prices).
+    Demerger {
+        parents: &["DHR"],
+        child: "VLTO",
+        child_shares: 1.0,
+        parent_shares: 3.0,
+        record_date: "2023-10-02",
+        child_cost_pct: 11.66,
+        source: "https://investors.danaher.com/IMAGE/Veralto+Cost+Basis+Allocation.pdf",
+        us: true,
+    },
+    // Merck → Organon: 1 OGN per 10 MRK, record 17 May 2021, distributed
+    // 2 Jun 2021; MRK 95.23%, OGN 4.77% (3 Jun 2021 closes).
+    Demerger {
+        parents: &["MRK"],
+        child: "OGN",
+        child_shares: 1.0,
+        parent_shares: 10.0,
+        record_date: "2021-06-03",
+        child_cost_pct: 4.77,
+        source: "https://www.merck.com/wp-content/uploads/sites/124/2021/06/Form-8937.pdf",
+        us: true,
+    },
+    // IBM → Kyndryl: 1 KD per 5 IBM, record 25 Oct 2021, distributed 3 Nov
+    // 2021; IBM 95.8%, KD 4.2% as printed (4 Nov 2021 closes).
+    Demerger {
+        parents: &["IBM"],
+        child: "KD",
+        child_shares: 1.0,
+        parent_shares: 5.0,
+        record_date: "2021-11-04",
+        child_cost_pct: 4.2,
+        source: "https://www.ibm.com/investor/att/pdf/Form-8937-Report-of-Organizational-Actions-Affecting-Basis-of-Securities.pdf",
+        us: true,
+    },
+];
+
+/// The prefix of the adjustment a demerger leaves on the lots it touched.
+const DEMERGER_PREFIX: &str = "demerger:";
+
+/// The `source` of a lot received in a demerger.
+pub const DEMERGER_SOURCE: &str = "demerger";
+
+/// The demergers whose parent `symbol` (`ITC.NS`, `TATAMOTORS`) is.
+pub fn demergers_for(symbol: &str) -> Vec<&'static Demerger> {
+    let (base, suffix) = indian_base(symbol);
+    DEMERGERS
+        .iter()
+        .filter(|d| d.parents.contains(&base.as_str()) && (!d.us || suffix.is_empty()))
+        .collect()
+}
+
+impl Demerger {
+    /// The adjustment recorded on every lot it touched: `demerger:2023-07-20:JIOFIN`.
+    pub fn id(&self) -> String {
+        format!("{DEMERGER_PREFIX}{}:{}", self.record_date, self.child)
+    }
+
+    pub fn ratio(&self) -> f64 {
+        self.child_shares / self.parent_shares
+    }
+
+    /// The child's ticker on the exchange `parent` (a held symbol) is on.
+    pub fn child_symbol(&self, parent: &str) -> String {
+        format!("{}{}", self.child, indian_base(parent).1)
+    }
+
+    /// Whether `lot` was held on the record date and has not received it yet.
+    pub fn pending_for(&self, lot: &Lot) -> bool {
+        lot.date.as_str() < self.record_date && !lot.adjustments.contains(&self.id())
+    }
+
+    /// Whether `sale` sold shares held on the record date (bought before it,
+    /// sold on or after it) and was not yet adjusted for it.
+    pub fn pending_for_sale(&self, sale: &Sale) -> bool {
+        sale.buy_date.as_str() < self.record_date
+            && sale.sell_date.as_str() >= self.record_date
+            && !sale
+                .origin
+                .as_ref()
+                .is_some_and(|o| o.adjustments.contains(&self.id()))
+    }
+
+    /// Whether `symbol` (any listing) is this demerger's parent. A US
+    /// spin-off's parent has no exchange suffix.
+    pub fn is_parent(&self, symbol: &str) -> bool {
+        let (base, suffix) = indian_base(symbol);
+        self.parents.contains(&base.as_str()) && (!self.us || suffix.is_empty())
+    }
+
+    /// A demerger typed in with `portfolio demerger` (not in [`DEMERGERS`]):
+    /// `parent` and `child` as held or listed (`RELIANCE.NS`, `GEV`). The
+    /// strings live for the rest of the command, as a table row's do; the
+    /// id is the one a table row for the same child and date has, so the
+    /// two never both apply.
+    pub fn custom(
+        parent: &str,
+        child: &str,
+        (child_shares, parent_shares): (f64, f64),
+        record_date: &str,
+        child_cost_pct: f64,
+    ) -> &'static Demerger {
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let (base, suffix) = indian_base(parent);
+        let parents: &'static [&'static str] = Box::leak(vec![leak(base)].into_boxed_slice());
+        Box::leak(Box::new(Demerger {
+            parents,
+            child: leak(indian_base(child).0),
+            child_shares,
+            parent_shares,
+            record_date: leak(record_date.to_string()),
+            child_cost_pct,
+            source: "portfolio demerger",
+            us: suffix.is_empty(),
+        }))
+    }
+
+    /// Whether `symbol` (any listing) is this demerger's child.
+    pub fn is_child(&self, symbol: &str) -> bool {
+        indian_base(symbol).0 == self.child
+    }
+
+    /// `1 JIOFIN.NS for 1 on 2023-07-20, 4.68% of cost`.
+    pub fn describe(&self, parent: &str) -> String {
+        format!(
+            "{} {} for {} on {}, {}% of cost",
+            self.child_shares,
+            self.child_symbol(parent),
+            self.parent_shares,
+            self.record_date,
+            self.child_cost_pct
+        )
+    }
+}
+
+/// A quantity (of a lot or sale whose split record is `adjustments`) on
+/// `date`: splits applied after that day are taken back out. A bonus
+/// received as a lot of its own never changed the quantity.
+pub(crate) fn qty_on(qty: f64, adjustments: &[String], date: &str) -> f64 {
+    adjustments
+        .iter()
+        .filter_map(|a| {
+            let mut parts = a.split(':');
+            let (d, n, m) = (parts.next()?, parts.next()?, parts.next()?);
+            if parts.next().is_some() || d <= date || date_of(d).is_none() {
+                return None;
+            }
+            let r = n.parse::<f64>().ok()? / m.parse::<f64>().ok()?;
+            (r.is_finite() && r > 0.0).then_some(r)
+        })
+        .fold(qty, |q, r| q / r)
+}
+
+/// Split `cost` between the parent and the child of a demerger: the child's
+/// `pct` percent rounded to the paisa, the parent keeps the exact rest, so
+/// the two always add up to `cost`. Amounts stay `f64` like every other
+/// amount in the portfolio file. Returns (parent, child).
+fn split_basis(cost: f64, pct: f64) -> (f64, f64) {
+    let child = (cost * pct).round() / 100.0;
+    (cost - child, child)
+}
+
+/// [`split_basis`] for an optional amount (charges).
+fn split_charges(charges: Option<f64>, pct: f64) -> (Option<f64>, Option<f64>) {
+    match charges {
+        Some(c) => {
+            let (p, ch) = split_basis(c, pct);
+            (Some(p).filter(|x| *x > EPS), Some(ch).filter(|x| *x > EPS))
+        }
+        None => (None, None),
+    }
+}
+
+/// What a demerger did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DemergerOutcome {
+    /// Open parent lots whose cost was split.
+    pub lots: usize,
+    /// Parent shares sold after the record date (before this was applied)
+    /// whose sale cost was split.
+    pub sales: usize,
+    /// The child lots added, with the child symbol each went to.
+    pub child_lots: Vec<(String, Lot)>,
+    /// Fractions of a child share the company paid in cash (not recorded).
+    pub fraction_dropped: f64,
+    /// Child shares already in the portfolio (a broker snapshot) that were
+    /// taken as this demerger's shares instead of being added again.
+    pub reconciled: f64,
+    /// Accounts left unchanged, one message each (see [`Portfolio::apply_demerger`]).
+    pub conflicts: Vec<String>,
+}
+
+impl DemergerOutcome {
+    pub fn child_shares(&self) -> f64 {
+        self.child_lots.iter().map(|(_, l)| l.qty).sum()
+    }
+
+    pub fn child_cost(&self) -> f64 {
+        self.child_lots.iter().map(|(_, l)| l.cost()).sum()
+    }
+}
+
+/// Shares held on a record date, by account: (account, parent shares).
+/// The company issues whole child shares per demat account, so the
+/// entitlement is rounded down once per account, across every listing.
+fn entitlements(items: &[(Option<String>, f64)], r: f64) -> Vec<(Option<String>, f64)> {
+    let mut out: Vec<(Option<String>, f64)> = Vec::new();
+    for (account, qty) in items {
+        match out.iter_mut().find(|(a, _)| a == account) {
+            Some((_, q)) => *q += qty * r,
+            None => out.push((account.clone(), qty * r)),
+        }
+    }
+    out
+}
+
+/// The child shares one holding of `share` exact child shares gets when its
+/// account is entitled to `exact` in all: the account's whole shares shared
+/// in proportion. Zero when the account gets no whole share.
+fn allotted(share: f64, exact: f64) -> f64 {
+    let whole = (exact + 1e-9).floor();
+    if whole < 1.0 || exact <= EPS || share <= EPS {
+        0.0
+    } else {
+        share * whole / exact
+    }
+}
+
+/// A lot of `d`'s child: the parent's purchase date (the tax date), shares
+/// counted as held only from the record date (see [`Lot::held_from`]).
+fn child_lot(d: &Demerger, qty: f64, cost: f64, date: &str, account: Option<String>) -> Lot {
+    let mut child = Lot::new(qty, cost / qty, date, DEMERGER_SOURCE);
+    child.account = account;
+    // The quantity is the child's share count on the record date, and the
+    // shares were not in the account before it.
+    child.units_as_of = Some(d.record_date.to_string());
+    child.adjustments.push(d.id());
+    child
+}
+
+/// Apply `d` to the parent `lots` of one listing and account held on its
+/// record date and not yet adjusted for it (a tradebook replay). Each such
+/// lot keeps its quantity and date and keeps `100 − child_cost_pct` percent
+/// of its cost and charges; a child lot with the same date gets the rest.
+/// Whole shares per account, shared among its lots in proportion; an
+/// account entitled to less than one share gets none and its lots keep
+/// their whole cost. Every lot touched is marked, so applying again does
+/// nothing. `listing` is the parent symbol the lots are held under.
+pub fn apply_demerger_to(lots: &mut [Lot], d: &Demerger, listing: &str) -> DemergerOutcome {
+    let mut out = DemergerOutcome::default();
+    let r = d.ratio();
+    if !r.is_finite() || r <= 0.0 || !(0.0..100.0).contains(&d.child_cost_pct) {
+        return out;
+    }
+    let pending: Vec<usize> = (0..lots.len())
+        .filter(|&i| d.pending_for(&lots[i]))
+        .collect();
+    let held = |l: &Lot| qty_on(l.qty, &l.adjustments, d.record_date);
+    let items: Vec<(Option<String>, f64)> = pending
+        .iter()
+        .map(|&i| (lots[i].account_key().map(str::to_string), held(&lots[i])))
+        .collect();
+    let accounts = entitlements(&items, r);
+    for (&i, (account, qty)) in pending.iter().zip(items) {
+        let exact = accounts
+            .iter()
+            .find(|(a, _)| *a == account)
+            .map_or(0.0, |(_, q)| *q);
+        let lot = &mut lots[i];
+        lot.adjustments.push(d.id());
+        out.lots += 1;
+        let child_qty = allotted(qty * r, exact);
+        out.fraction_dropped += (qty * r - child_qty).max(0.0);
+        if child_qty <= EPS {
+            continue;
+        }
+        let (parent_cost, child_cost) = split_basis(lot.cost(), d.child_cost_pct);
+        let (parent_charges, child_charges) = split_charges(lot.charges, d.child_cost_pct);
+        let mut child = child_lot(d, child_qty, child_cost, &lot.date, account);
+        child.date_estimated = lot.date_estimated;
+        child.fx_currency = lot.fx_currency.clone();
+        child.fx_rate = lot.fx_rate;
+        child.charges = child_charges;
+        out.child_lots.push((d.child_symbol(listing), child));
+        if lot.qty > EPS {
+            lot.price = parent_cost / lot.qty;
+        }
+        lot.charges = parent_charges;
+    }
+    out
 }
 
 /// One purchase.
@@ -181,6 +601,21 @@ pub struct Lot {
     /// the account their `source` names, or to no account at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The currency the lot was paid for in, when it differs from the one it
+    /// trades in (rupees for a US share): `portfolio add --currency`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_currency: Option<String>,
+    /// Units of `fx_currency` paid per unit of the lot's own (major)
+    /// currency on the purchase date. With it the cost in `fx_currency` is
+    /// exactly what was paid (see [`Lot::base_cost`]); without it the cost is
+    /// converted at the purchase date's reference rate (`fx_history`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_rate: Option<f64>,
+    /// Brokerage, taxes and fees paid on the purchase, in the lot's own
+    /// currency. Part of the cost of the shares sold out of it, so realized
+    /// P&L is net of them; a partial sale takes its share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
 }
 
 /// The demat account a source stands for: `import:kite` and `broker:zerodha`
@@ -209,7 +644,33 @@ impl Lot {
             units_as_of: None,
             order_id: None,
             account: None,
+            fx_currency: None,
+            fx_rate: None,
+            charges: None,
         }
+    }
+
+    /// What was paid in `currency` for the lot (its cost in its own major
+    /// currency times [`Lot::fx_rate`]), when the lot was paid for in it.
+    /// `cost` is the lot's cost in its own major currency.
+    pub fn base_cost(&self, currency: &str, cost: f64) -> Option<f64> {
+        let paid = self.fx_currency.as_deref()?;
+        let rate = self.fx_rate.filter(|r| r.is_finite() && *r > 0.0)?;
+        paid.eq_ignore_ascii_case(currency).then_some(cost * rate)
+    }
+
+    /// Take `take` shares out of the lot: its charges shrink in proportion.
+    /// Returns the charges that went with the shares taken.
+    fn shrink(&mut self, take: f64) -> Option<f64> {
+        let before = self.qty;
+        self.qty -= take;
+        let charges = self.charges?;
+        if before <= EPS {
+            return None;
+        }
+        let gone = charges * (take / before).min(1.0);
+        self.charges = Some(charges - gone).filter(|c| *c > EPS);
+        Some(gone)
     }
 
     /// The lot's account: the one saved with it, else the one its source names.
@@ -230,6 +691,17 @@ impl Lot {
 
     pub fn cost(&self) -> f64 {
         self.qty * self.price
+    }
+
+    /// The first day the lot's shares were in the account: its purchase
+    /// date, or for shares received in a demerger the record date (their
+    /// `date` is the parent's purchase date, which tax uses). A sale, or a
+    /// share count, before this day cannot include them.
+    pub fn held_from(&self) -> &str {
+        match self.units_as_of.as_deref() {
+            Some(d) if self.source == DEMERGER_SOURCE && d > self.date.as_str() => d,
+            _ => &self.date,
+        }
     }
 }
 
@@ -321,6 +793,17 @@ pub struct Sale {
     /// intraday even when sold on the allotment date.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bonus_shares: bool,
+    /// Brokerage, taxes and fees of the sale plus the sold shares' part of
+    /// the lot's purchase charges, in the holding's currency. Realized P&L
+    /// is net of them ([`Sale::gain`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
+    /// The lot's [`Lot::fx_currency`] and [`Lot::fx_rate`]: what the sold
+    /// shares cost in the currency they were paid for in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_currency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buy_fx_rate: Option<f64>,
 }
 
 /// The parts of a [`Lot`] a [`Sale`] does not otherwise keep.
@@ -335,6 +818,9 @@ pub struct SoldLot {
     pub order_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The sold shares' part of the lot's purchase charges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charges: Option<f64>,
 }
 
 /// How many earlier versions of a portfolio file are kept
@@ -343,6 +829,12 @@ pub const BACKUPS_KEPT: usize = 5;
 
 impl Sale {
     fn from_lot(symbol: &str, lot: &Lot, qty: f64, date: &str, price: f64, source: &str) -> Self {
+        // `lot` is the lot as it was before the shares were taken.
+        let buy_charges = lot
+            .charges
+            .filter(|_| lot.qty > EPS)
+            .map(|c| c * (qty / lot.qty).min(1.0))
+            .filter(|c| *c > EPS);
         Self {
             symbol: symbol.to_string(),
             qty,
@@ -361,6 +853,7 @@ impl Sale {
                 units_as_of: lot.units_as_of.clone(),
                 order_id: lot.order_id.clone(),
                 account: lot.account.clone(),
+                charges: buy_charges,
             }),
             bonuses: lot
                 .adjustments
@@ -369,13 +862,46 @@ impl Sale {
                 .cloned()
                 .collect(),
             bonus_shares: lot.source == BONUS_SOURCE,
+            charges: buy_charges,
+            fx_currency: lot.fx_currency.clone(),
+            buy_fx_rate: lot.fx_rate,
         }
+    }
+
+    /// Add the sale's own charges (brokerage, STT, fees) to those it took
+    /// from its lot.
+    pub fn add_charges(&mut self, charges: f64) {
+        if charges.is_finite() && charges > 0.0 {
+            self.charges = Some(self.charges.unwrap_or(0.0) + charges);
+        }
+    }
+
+    /// The sale's charges, 0 when none were recorded.
+    pub fn charges(&self) -> f64 {
+        self.charges.unwrap_or(0.0)
+    }
+
+    /// The part of [`Sale::charges`] paid when the shares were bought (the
+    /// lot's purchase charges), converted at the purchase date's rate.
+    pub fn buy_charges(&self) -> f64 {
+        self.origin
+            .as_ref()
+            .and_then(|o| o.charges)
+            .unwrap_or(0.0)
+            .min(self.charges())
+    }
+
+    /// The part of [`Sale::charges`] paid on the sale itself.
+    pub fn sell_charges(&self) -> f64 {
+        self.charges() - self.buy_charges()
     }
 
     /// The lot this sale took its shares from, with the sold quantity.
     pub fn to_lot(&self) -> Lot {
         let mut lot = Lot::new(self.qty, self.buy_price, self.buy_date.clone(), "manual");
         lot.date_estimated = self.buy_date_estimated;
+        lot.fx_currency = self.fx_currency.clone();
+        lot.fx_rate = self.buy_fx_rate;
         match &self.origin {
             Some(o) => {
                 lot.source = o.source.clone();
@@ -383,6 +909,7 @@ impl Sale {
                 lot.units_as_of = o.units_as_of.clone();
                 lot.order_id = o.order_id.clone();
                 lot.account = o.account.clone();
+                lot.charges = o.charges;
             }
             None => {
                 // An older sale does not say which splits its lot had taken.
@@ -397,6 +924,19 @@ impl Sale {
         lot
     }
 
+    /// The first day the sold shares were in the account: the purchase
+    /// date, or the record date for shares received in a demerger (see
+    /// [`Lot::held_from`]).
+    pub fn held_from(&self) -> &str {
+        match &self.origin {
+            Some(o) if o.source == DEMERGER_SOURCE => match o.units_as_of.as_deref() {
+                Some(d) if d > self.buy_date.as_str() => d,
+                _ => &self.buy_date,
+            },
+            _ => &self.buy_date,
+        }
+    }
+
     /// The sale's account: the one saved with it, else the one its source names.
     pub fn account_key(&self) -> Option<&str> {
         self.account
@@ -404,8 +944,9 @@ impl Sale {
             .or_else(|| account_of_source(&self.source))
     }
 
+    /// Proceeds less cost less charges, in the holding's currency.
     pub fn gain(&self) -> f64 {
-        self.qty * (self.sell_price - self.buy_price)
+        self.qty * (self.sell_price - self.buy_price) - self.charges()
     }
 
     /// A same-day buy and sell: flagged when it was recorded, or bought and
@@ -760,6 +1301,10 @@ pub struct Portfolio {
     /// Drift tolerance band in percent (e.g. 2.0 = +/-2%).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift_tolerance: Option<f64>,
+    /// Corporate actions, demergers, renames and syncs recorded, newest
+    /// last, so the newest can be undone (`portfolio actions --undo`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub journal: Vec<JournalEntry>,
 }
 
 impl Default for Portfolio {
@@ -773,6 +1318,7 @@ impl Default for Portfolio {
             imported: Vec::new(),
             targets: BTreeMap::new(),
             drift_tolerance: None,
+            journal: Vec::new(),
         }
     }
 }
@@ -783,7 +1329,7 @@ impl Default for Portfolio {
 fn take_fifo(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64)>, f64) {
     let mut remaining = qty;
     let mut taken = Vec::new();
-    for lot in lots.iter_mut().filter(|l| l.date.as_str() <= date) {
+    for lot in lots.iter_mut().filter(|l| l.held_from() <= date) {
         if remaining <= EPS {
             break;
         }
@@ -793,7 +1339,7 @@ fn take_fifo(lots: &mut Vec<Lot>, qty: f64, date: &str) -> (Vec<(Lot, f64)>, f64
             remaining
         };
         taken.push((lot.clone(), take));
-        lot.qty -= take;
+        lot.shrink(take);
         remaining -= take;
     }
     lots.retain(|l| l.qty > EPS);
@@ -808,16 +1354,19 @@ struct Replay {
     unmatched: f64,
     /// Splits applied while replaying.
     splits: usize,
+    /// Child lots of the demergers applied while replaying, with their symbol.
+    children: Vec<(String, Lot)>,
 }
 
 /// Replay `trades` (oldest first) for one symbol: buys become lots, sells
-/// come out FIFO, and `splits` are applied as they happen.
+/// come out FIFO, and `splits` and `demergers` are applied as they happen,
+/// so a sale after a demerger's record date carries the reduced cost.
 fn replay_trades(
     sym: &str,
     trades: &[ImportedTrade],
     source: &str,
     account: Option<&str>,
-    splits: &[Split],
+    (splits, demergers): (&[Split], &[&Demerger]),
     today: &str,
 ) -> Replay {
     let new_lot = |qty: f64, price: f64, date: &str| {
@@ -826,10 +1375,35 @@ fn replay_trades(
         lot
     };
     let mut applied: Vec<String> = Vec::new();
-    let apply_until = |lots: &mut Vec<Lot>, date: &str, applied: &mut Vec<String>| {
-        for split in splits.iter().filter(|s| s.date.as_str() <= date) {
-            if apply_split_to(lots, split) > 0 && !applied.contains(&split.id()) {
+    let mut children: Vec<(String, Lot)> = Vec::new();
+    // Splits and demergers up to `date`, oldest first (a split dated on a
+    // record date before the demerger). A split after a record date applied
+    // ahead of it is taken back out of the entitlement (see `qty_on`).
+    let apply_until = |lots: &mut Vec<Lot>,
+                       date: &str,
+                       applied: &mut Vec<String>,
+                       children: &mut Vec<(String, Lot)>| {
+        let mut events: Vec<(&str, Option<&Split>, Option<&Demerger>)> = splits
+            .iter()
+            .filter(|s| s.date.as_str() <= date)
+            .map(|s| (s.date.as_str(), Some(s), None))
+            .chain(
+                demergers
+                    .iter()
+                    .filter(|d| d.record_date <= date)
+                    .map(|d| (d.record_date, None, Some(*d))),
+            )
+            .collect();
+        events.sort_by(|a, b| a.0.cmp(b.0).then(a.2.is_some().cmp(&b.2.is_some())));
+        for (_, split, demerger) in events {
+            if let Some(split) = split
+                && apply_split_to(lots, split) > 0
+                && !applied.contains(&split.id())
+            {
                 applied.push(split.id());
+            }
+            if let Some(d) = demerger {
+                children.extend(apply_demerger_to(lots, d, sym).child_lots);
             }
         }
     };
@@ -847,7 +1421,7 @@ fn replay_trades(
             .map_or(trades.len(), |n| i + n);
         let day = &trades[i..end];
         i = end;
-        apply_until(&mut lots, &date, &mut applied);
+        apply_until(&mut lots, &date, &mut applied, &mut children);
         let (all_buys, sells): (Vec<&ImportedTrade>, Vec<&ImportedTrade>) =
             day.iter().partition(|t| !t.sell);
         // A buy without a date is dated today only as an estimate: it is not
@@ -920,12 +1494,13 @@ fn replay_trades(
         }
     }
     // Bring the remaining lots up to today's share count.
-    apply_until(&mut lots, "9999-12-31", &mut applied);
+    apply_until(&mut lots, "9999-12-31", &mut applied, &mut children);
     Replay {
         lots,
         sales,
         unmatched,
         splits: applied.len(),
+        children,
     }
 }
 
@@ -1326,6 +1901,61 @@ impl Portfolio {
         self.sync_account(symbol, qty, avg, source, account_of_source(source))
     }
 
+    /// Add a missing buy of `broker_qty` minus the account's existing quantity
+    /// in `symbol`, using the same account scope as [`Portfolio::scope`].
+    /// Never reduces holdings.
+    pub fn add_missing_buy(
+        &mut self,
+        symbol: &str,
+        broker_qty: f64,
+        avg: f64,
+        source: &str,
+    ) -> Option<f64> {
+        let account = account_of_source(source);
+        let scope = self.scope(symbol, account);
+        let mut lot = Lot::new(broker_qty, avg, today(), source);
+        lot.date_estimated = true;
+        lot.account = account.map(str::to_string);
+        let Some(h) = self.holding_mut(symbol) else {
+            if broker_qty > EPS {
+                self.add_lot(symbol, lot);
+                return Some(broker_qty);
+            }
+            return None;
+        };
+        if let (Some(a), true) = (account, scope.claim) {
+            for l in h.lots.iter_mut().filter(|l| l.account_key().is_none()) {
+                l.account = Some(a.to_string());
+            }
+        }
+        let (shares, cost) = h
+            .lots
+            .iter()
+            .filter(|l| scope.lot(l))
+            .fold((0.0, 0.0), |(q, c), l| (q + l.qty, c + l.cost()));
+        let diff = broker_qty - shares;
+        if diff <= EPS {
+            return None;
+        }
+        let implied = (broker_qty * avg - cost) / diff;
+        lot.qty = diff;
+        if implied.is_finite() && implied > 0.0 {
+            lot.price = implied;
+        }
+        h.lots.push(lot);
+        h.recompute();
+        Some(diff)
+    }
+
+    /// The open lots of `symbol` in `account`'s scope (see [`Scope`]).
+    pub(crate) fn lots_in_account(&self, symbol: &str, account: Option<&str>) -> Vec<Lot> {
+        let Some(h) = self.holding(symbol) else {
+            return Vec::new();
+        };
+        let scope = self.scope(symbol, account);
+        h.lots.iter().filter(|l| scope.lot(l)).cloned().collect()
+    }
+
     fn sync_account(
         &mut self,
         symbol: &str,
@@ -1421,6 +2051,94 @@ impl Portfolio {
         self.sell_lots(symbol, qty, price, date, source, None, false)
     }
 
+    /// Sell `qty` shares taken from the lots numbered `lot_nos` (1-based,
+    /// oldest first, as `portfolio lots` lists them), in the order given:
+    /// specific identification, as US brokers allow. Records one [`Sale`]
+    /// per lot touched and drops the holding when nothing is left. Indian
+    /// demat sales are first-in, first-out; use [`Portfolio::sell_fifo`].
+    pub fn sell_specific(
+        &mut self,
+        symbol: &str,
+        qty: f64,
+        price: f64,
+        date: &str,
+        source: &str,
+        lot_nos: &[usize],
+    ) -> Result<Vec<Sale>> {
+        if qty <= EPS || !qty.is_finite() {
+            bail!("Quantity to sell must be positive");
+        }
+        if price < 0.0 || !price.is_finite() {
+            bail!("Sale price can't be negative");
+        }
+        if lot_nos.is_empty() {
+            bail!("Give the lots to sell from, e.g. --lots 2,3");
+        }
+        let sym = symbol.to_uppercase();
+        let Some(h) = self.holding_mut(&sym) else {
+            bail!("{} is not in this portfolio", sym);
+        };
+        let count = h.lots.len();
+        let mut order: Vec<usize> = Vec::new();
+        for &n in lot_nos {
+            if n == 0 || n > count {
+                bail!("{} has no lot #{} (it has {})", sym, n, count);
+            }
+            if order.contains(&(n - 1)) {
+                bail!("Lot #{} is listed twice", n);
+            }
+            let lot = &h.lots[n - 1];
+            let held_from = lot.held_from();
+            if held_from > date {
+                bail!(
+                    "Lot #{} of {} was received on {}, after the sale date {}",
+                    n,
+                    sym,
+                    held_from,
+                    date
+                );
+            }
+            order.push(n - 1);
+        }
+        let available: f64 = order.iter().map(|&i| h.lots[i].qty).sum();
+        if qty > available + EPS {
+            bail!(
+                "Cannot sell {} {} from lot{} {}: they hold {}",
+                qty,
+                sym,
+                if order.len() == 1 { "" } else { "s" },
+                lot_nos
+                    .iter()
+                    .map(|n| format!("#{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                available
+            );
+        }
+        let mut remaining = qty;
+        let mut sales = Vec::new();
+        for i in order {
+            if remaining <= EPS {
+                break;
+            }
+            let lot = &mut h.lots[i];
+            let take = if remaining >= lot.qty - EPS {
+                lot.qty
+            } else {
+                remaining
+            };
+            sales.push(Sale::from_lot(&sym, lot, take, date, price, source));
+            lot.shrink(take);
+            remaining -= take;
+        }
+        h.recompute();
+        if h.lots.is_empty() {
+            self.holdings.retain(|h| h.symbol != sym);
+        }
+        self.realized.extend(sales.iter().cloned());
+        Ok(sales)
+    }
+
     /// [`Portfolio::sell_fifo`] from one account's lots only (`None`: any),
     /// taking shares bought on `date` first when `net_same_day` (a buy and
     /// sell on one day are intraday and leave the older lots alone); those
@@ -1453,7 +2171,7 @@ impl Portfolio {
                 .fold((0.0, 0.0), |(now, then), l| {
                     (
                         now + l.qty,
-                        then + if l.date.as_str() <= date { l.qty } else { 0.0 },
+                        then + if l.held_from() <= date { l.qty } else { 0.0 },
                     )
                 });
         let of_account = account.map_or(String::new(), |a| format!(" in {a}"));
@@ -1634,9 +2352,18 @@ impl Portfolio {
                         && l.adjustments == lot.adjustments
                         && l.units_as_of == lot.units_as_of
                         && l.order_id == lot.order_id
+                        && l.fx_currency == lot.fx_currency
+                        && l.fx_rate == lot.fx_rate
                 });
                 match same {
-                    Some(l) => l.qty += lot.qty,
+                    Some(l) => {
+                        l.qty += lot.qty;
+                        // The sold shares' part of the purchase charges goes back.
+                        l.charges = match (l.charges, lot.charges) {
+                            (None, None) => None,
+                            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+                        };
+                    }
                     None => h.lots.push(lot),
                 }
                 h.recompute();
@@ -1778,7 +2505,15 @@ impl Portfolio {
             } else {
                 &[]
             };
-            let replay = replay_trades(&sym, &trades, source, account, splits, &today);
+            // Demergers are applied with the splits: a tradebook has no row
+            // for the shares they gave. A file of lots lists those itself.
+            let demergers = if opts.tradebook {
+                demergers_for(&sym)
+            } else {
+                Vec::new()
+            };
+            let replay =
+                replay_trades(&sym, &trades, source, account, (splits, &demergers), &today);
 
             // Lots and sales this source recorded before StockWise kept its
             // trades: rebuilding from one file must reproduce them, or an
@@ -1848,6 +2583,7 @@ impl Portfolio {
             let (n, n_sales) = (replay.lots.len(), replay.sales.len());
             self.realized.extend(replay.sales);
             self.replace_scoped_lots(&sym, &scope, replay.lots);
+            self.replace_demerger_children(&scope, replay.children);
             out.push((
                 sym,
                 ImportOutcome::Lots {
@@ -1928,7 +2664,7 @@ impl Portfolio {
                 let held: f64 = self.holding(&head.symbol).map_or(0.0, |h| {
                     h.lots
                         .iter()
-                        .filter(|l| scope.lot(l) && l.date.as_str() <= head.date.as_str())
+                        .filter(|l| scope.lot(l) && l.held_from() <= head.date.as_str())
                         .map(|l| l.qty)
                         .sum()
                 });
@@ -1994,6 +2730,352 @@ impl Portfolio {
         changed
     }
 
+    /// Record demerger `d` (`symbol` is any listing of its parent). Every
+    /// parent lot held on the record date, under any listing (`.NS`, `.BO`,
+    /// an old ticker), keeps its quantity and date and keeps
+    /// `100 − child_cost_pct` percent of its cost and charges; a lot of the
+    /// child, dated on the same purchase date and held from the record date,
+    /// gets the rest. A parent lot sold after the record date, before this
+    /// was applied, had received the child shares too: its sale's cost is
+    /// split the same way and its child shares are added.
+    ///
+    /// The child shares are whole per account, rounded down once across all
+    /// listings and shared among the account's lots in proportion.
+    ///
+    /// Child shares already in an account that may be this demerger's (no
+    /// tradebook, broker order or `portfolio add` behind them, such as a
+    /// broker snapshot) are taken as its shares when they cover the
+    /// entitlement, instead of being added again. When they cover only part
+    /// of it, that account is left unchanged and reported in `conflicts`:
+    /// they could be the demerger's shares or a separate purchase.
+    ///
+    /// Everything touched is marked, so applying twice changes nothing.
+    pub fn apply_demerger(&mut self, symbol: &str, d: &Demerger) -> DemergerOutcome {
+        let mut out = DemergerOutcome::default();
+        let r = d.ratio();
+        if !d.is_parent(symbol)
+            || !r.is_finite()
+            || r <= 0.0
+            || !(0.0..100.0).contains(&d.child_cost_pct)
+        {
+            return out;
+        }
+        let id = d.id();
+        let rec = d.record_date;
+        // What was held on the record date: open lots and later sales.
+        let mut lots: Vec<(usize, usize, Option<String>, f64)> = Vec::new();
+        for (hi, h) in self.holdings.iter().enumerate() {
+            if !d.is_parent(&h.symbol) {
+                continue;
+            }
+            for (li, l) in h.lots.iter().enumerate() {
+                if d.pending_for(l) {
+                    let held = qty_on(l.qty, &l.adjustments, rec);
+                    lots.push((hi, li, l.account_key().map(str::to_string), held));
+                }
+            }
+        }
+        let mut sales: Vec<(usize, Option<String>, f64)> = Vec::new();
+        for (si, s) in self.realized.iter().enumerate() {
+            if d.is_parent(&s.symbol) && d.pending_for_sale(s) {
+                let adj = s.origin.as_ref().map_or(&[][..], |o| &o.adjustments[..]);
+                sales.push((
+                    si,
+                    s.account_key().map(str::to_string),
+                    qty_on(s.qty, adj, rec),
+                ));
+            }
+        }
+        if lots.is_empty() && sales.is_empty() {
+            return out;
+        }
+        let items: Vec<(Option<String>, f64)> = lots
+            .iter()
+            .map(|(_, _, a, q)| (a.clone(), *q))
+            .chain(sales.iter().map(|(_, a, q)| (a.clone(), *q)))
+            .collect();
+        let accounts = entitlements(&items, r);
+
+        // Child shares the portfolio may already hold for this demerger.
+        let mut touched: Vec<usize> = Vec::new();
+        let mut skip: Vec<Option<String>> = Vec::new();
+        for (account, exact) in &accounts {
+            let whole = (exact + 1e-9).floor();
+            if whole < 1.0 {
+                continue;
+            }
+            let pool = self.unexplained_child_lots(d, account.as_deref());
+            let held: f64 = pool
+                .iter()
+                .map(|&(hi, li)| self.holdings[hi].lots[li].qty)
+                .sum();
+            if held <= EPS {
+                continue;
+            }
+            if held + 1e-9 >= whole {
+                let mut left = whole;
+                for (hi, li) in pool {
+                    let lot = &mut self.holdings[hi].lots[li];
+                    let take = left.min(lot.qty);
+                    lot.shrink(take);
+                    touched.push(hi);
+                    left -= take;
+                    if left <= EPS {
+                        break;
+                    }
+                }
+                out.reconciled += whole;
+            } else {
+                skip.push(account.clone());
+                let who = account
+                    .as_deref()
+                    .map_or("Your portfolio".to_string(), |a| format!("Account {a}"));
+                out.conflicts.push(format!(
+                    "{who} already holds {held} {child} without a tradebook purchase behind \
+                     them, fewer than the {whole} the demerger gave. They could be those shares \
+                     or a separate purchase, so this account was left unchanged: correct those \
+                     {child} lots (or remove them) and run `portfolio actions --apply` again.",
+                    child = d.child
+                ));
+            }
+        }
+        let exact_of = |account: &Option<String>| {
+            accounts
+                .iter()
+                .find(|(a, _)| a == account)
+                .map_or(0.0, |(_, q)| *q)
+        };
+
+        for (hi, li, account, held) in lots {
+            if skip.contains(&account) {
+                continue;
+            }
+            let listing = self.holdings[hi].symbol.clone();
+            let lot = &mut self.holdings[hi].lots[li];
+            lot.adjustments.push(id.clone());
+            out.lots += 1;
+            touched.push(hi);
+            let child_qty = allotted(held * r, exact_of(&account));
+            out.fraction_dropped += (held * r - child_qty).max(0.0);
+            if child_qty <= EPS {
+                continue;
+            }
+            let (parent_cost, child_cost) = split_basis(lot.cost(), d.child_cost_pct);
+            let (parent_charges, child_charges) = split_charges(lot.charges, d.child_cost_pct);
+            let mut child = child_lot(d, child_qty, child_cost, &lot.date, account);
+            child.date_estimated = lot.date_estimated;
+            child.fx_currency = lot.fx_currency.clone();
+            child.fx_rate = lot.fx_rate;
+            child.charges = child_charges;
+            if lot.qty > EPS {
+                lot.price = parent_cost / lot.qty;
+            }
+            lot.charges = parent_charges;
+            out.child_lots.push((d.child_symbol(&listing), child));
+        }
+        for (si, account, held) in sales {
+            if skip.contains(&account) {
+                continue;
+            }
+            let sale = &mut self.realized[si];
+            let origin = sale.origin.get_or_insert_with(|| SoldLot {
+                source: sale.source.clone(),
+                adjustments: Vec::new(),
+                units_as_of: (sale.sell_date > sale.buy_date).then(|| sale.sell_date.clone()),
+                order_id: None,
+                account: sale.account.clone(),
+                charges: None,
+            });
+            origin.adjustments.push(id.clone());
+            out.sales += 1;
+            let child_qty = allotted(held * r, exact_of(&account));
+            out.fraction_dropped += (held * r - child_qty).max(0.0);
+            if child_qty <= EPS {
+                continue;
+            }
+            let (parent_cost, child_cost) =
+                split_basis(sale.qty * sale.buy_price, d.child_cost_pct);
+            let (parent_charges, child_charges) = split_charges(origin.charges, d.child_cost_pct);
+            if let Some(moved) = child_charges {
+                origin.charges = parent_charges;
+                sale.charges = sale.charges.map(|c| c - moved).filter(|c| *c > EPS);
+            }
+            if sale.qty > EPS {
+                sale.buy_price = parent_cost / sale.qty;
+            }
+            let mut child = child_lot(d, child_qty, child_cost, &sale.buy_date, account);
+            child.date_estimated = sale.buy_date_estimated;
+            child.fx_currency = sale.fx_currency.clone();
+            child.fx_rate = sale.buy_fx_rate;
+            child.charges = child_charges;
+            out.child_lots.push((d.child_symbol(&sale.symbol), child));
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for hi in touched {
+            self.holdings[hi].recompute();
+        }
+        for (sym, lot) in &out.child_lots {
+            self.add_lot(sym, lot.clone());
+        }
+        out
+    }
+
+    /// Lots of `d`'s child in `account` that may be the demerger's own
+    /// shares recorded some other way (a broker snapshot, a holdings file):
+    /// not from this demerger, not a broker order, not typed in with
+    /// `portfolio add`, not a bonus, and not built from a kept tradebook.
+    /// Oldest first, as (holding, lot) indices.
+    fn unexplained_child_lots(&self, d: &Demerger, account: Option<&str>) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (hi, h) in self.holdings.iter().enumerate() {
+            if !d.is_child(&h.symbol) {
+                continue;
+            }
+            for (li, l) in h.lots.iter().enumerate() {
+                let tradebook = self
+                    .imported
+                    .iter()
+                    .any(|t| t.symbol == h.symbol && t.source == l.source && !t.sell);
+                let ours = l.source == DEMERGER_SOURCE;
+                if l.account_key() == account
+                    && !ours
+                    && !tradebook
+                    && l.order_id.is_none()
+                    && l.source != "manual"
+                    && l.source != BONUS_SOURCE
+                    && l.qty > EPS
+                {
+                    out.push((hi, li));
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            self.holdings[a.0].lots[a.1]
+                .date
+                .cmp(&self.holdings[b.0].lots[b.1].date)
+        });
+        out
+    }
+
+    /// Demergers in [`DEMERGERS`] not yet applied to a lot held on their
+    /// record date (open, or sold after it), as (a parent symbol held, the
+    /// demerger), once per demerger. No network needed.
+    pub fn pending_demergers(&self) -> Vec<(String, &'static Demerger)> {
+        let mut out = Vec::new();
+        for d in DEMERGERS {
+            let open = self
+                .holdings
+                .iter()
+                .find(|h| d.is_parent(&h.symbol) && h.lots.iter().any(|l| d.pending_for(l)))
+                .map(|h| h.symbol.clone());
+            let sold = || {
+                self.realized
+                    .iter()
+                    .find(|s| d.is_parent(&s.symbol) && d.pending_for_sale(s))
+                    .map(|s| s.symbol.clone())
+            };
+            if let Some(sym) = open.or_else(sold) {
+                out.push((sym, d));
+            }
+        }
+        out
+    }
+
+    /// The child symbols pending demerger `d` would add lots to: one per
+    /// parent listing with a lot held on the record date.
+    pub fn demerger_children(&self, d: &Demerger) -> Vec<String> {
+        let open = self
+            .holdings
+            .iter()
+            .filter(|h| d.is_parent(&h.symbol) && h.lots.iter().any(|l| d.pending_for(l)))
+            .map(|h| d.child_symbol(&h.symbol));
+        let sold = self
+            .realized
+            .iter()
+            .filter(|s| d.is_parent(&s.symbol) && d.pending_for_sale(s))
+            .map(|s| d.child_symbol(&s.symbol));
+        let mut out: Vec<String> = open.chain(sold).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Apply `splits` of `symbol` and the `demergers` of its parent in
+    /// effective-date order (a split on a record date first), so each
+    /// demerger's entitlement is the share count on its record date.
+    /// Returns what each demerger did.
+    pub fn apply_in_order(
+        &mut self,
+        symbol: &str,
+        splits: &[Split],
+        demergers: &[&Demerger],
+    ) -> Vec<DemergerOutcome> {
+        let mut events: Vec<(&str, Option<&Split>, Option<&Demerger>)> = splits
+            .iter()
+            .map(|s| (s.date.as_str(), Some(s), None))
+            .chain(demergers.iter().map(|d| (d.record_date, None, Some(*d))))
+            .collect();
+        // Stable: a split dated on a record date stays ahead of the demerger.
+        events.sort_by(|a, b| a.0.cmp(b.0).then(a.2.is_some().cmp(&b.2.is_some())));
+        let mut out = Vec::new();
+        for (_, split, demerger) in events {
+            if let Some(s) = split {
+                self.apply_split(symbol, s);
+            }
+            if let Some(d) = demerger {
+                out.push(self.apply_demerger(symbol, d));
+            }
+        }
+        out
+    }
+
+    /// After a tradebook replay rebuilt `parent`'s lots in `scope`, put the
+    /// child lots the replay's demergers produced in place of the ones an
+    /// earlier run recorded for the same demerger and account, less the
+    /// child shares sold since. An unchanged re-import therefore leaves the
+    /// child holding as it was.
+    fn replace_demerger_children(&mut self, scope: &Scope, children: Vec<(String, Lot)>) {
+        let mut by_symbol: Vec<(String, String, Vec<Lot>)> = Vec::new();
+        for (sym, lot) in children {
+            let Some(id) = lot
+                .adjustments
+                .iter()
+                .find(|a| a.starts_with(DEMERGER_PREFIX))
+                .cloned()
+            else {
+                continue;
+            };
+            match by_symbol.iter_mut().find(|(s, i, _)| *s == sym && *i == id) {
+                Some((_, _, v)) => v.push(lot),
+                None => by_symbol.push((sym, id, vec![lot])),
+            }
+        }
+        for (sym, id, mut lots) in by_symbol {
+            let ours = |l: &Lot| l.source == DEMERGER_SOURCE && l.adjustments.contains(&id);
+            if let Some(h) = self.holding_mut(&sym) {
+                h.lots.retain(|l| !(ours(l) && scope.lot(l)));
+                h.recompute();
+            }
+            let sold: f64 = self
+                .realized
+                .iter()
+                .filter(|s| s.symbol == sym && scope.sale(s))
+                .filter(|s| {
+                    s.origin
+                        .as_ref()
+                        .is_some_and(|o| o.source == DEMERGER_SOURCE && o.adjustments.contains(&id))
+                })
+                .map(|s| s.qty)
+                .sum();
+            lots.sort_by(|a, b| a.date.cmp(&b.date));
+            take_fifo(&mut lots, sold, "9999-12-31");
+            for lot in lots {
+                self.add_lot(&sym, lot);
+            }
+        }
+    }
+
     /// Shares of `symbol` held at the start of `date` (bought before it, not
     /// yet sold), in today's share count: `splits` not yet applied to a lot,
     /// and splits after a sale, are multiplied in. A lot that received a
@@ -2017,16 +3099,14 @@ impl Portfolio {
         let open: f64 = self.holding(&sym).map_or(0.0, |h| {
             h.lots
                 .iter()
-                .filter(|l| l.date.as_str() < date)
+                .filter(|l| l.held_from() < date)
                 .map(|l| l.qty * later(&l.date, Some(l)))
                 .sum()
         });
         let sold: f64 = self
             .realized
             .iter()
-            .filter(|s| {
-                s.symbol == sym && s.buy_date.as_str() < date && s.sell_date.as_str() >= date
-            })
+            .filter(|s| s.symbol == sym && s.held_from() < date && s.sell_date.as_str() >= date)
             .map(|s| {
                 // Bonus shares received on the sold lot after `date`.
                 let bonus: f64 = splits
@@ -2096,29 +3176,617 @@ impl Portfolio {
     /// lots and sold ones), sale proceeds and dividends positive. The caller
     /// adds today's value of what is still held.
     pub fn cash_flows(&self, symbol: &str) -> Vec<(NaiveDate, f64)> {
+        self.cash_flow_items(symbol)
+            .into_iter()
+            .map(|f| (f.date, f.amount))
+            .collect()
+    }
+
+    /// [`Portfolio::cash_flows`] with what each flow needs to be converted
+    /// at its own date's exchange rate. Purchases include their charges and
+    /// sale proceeds are net of the sale's.
+    pub fn cash_flow_items(&self, symbol: &str) -> Vec<CashFlow> {
         let sym = symbol.to_uppercase();
         let mut flows = Vec::new();
         if let Some(h) = self.holding(&sym) {
             for l in &h.lots {
                 if let Some(d) = date_of(&l.date) {
-                    flows.push((d, -l.cost()));
+                    flows.push(CashFlow {
+                        date: d,
+                        amount: -(l.cost() + l.charges.unwrap_or(0.0)),
+                        paid: l.fx_currency.clone().zip(l.fx_rate),
+                        currency: None,
+                        kind: FlowKind::Buy,
+                    });
                 }
             }
         }
         for s in self.realized.iter().filter(|s| s.symbol == sym) {
             if let (Some(b), Some(d)) = (date_of(&s.buy_date), date_of(&s.sell_date)) {
-                flows.push((b, -s.qty * s.buy_price));
-                flows.push((d, s.qty * s.sell_price));
+                flows.push(CashFlow {
+                    date: b,
+                    amount: -(s.qty * s.buy_price + s.buy_charges()),
+                    paid: s.fx_currency.clone().zip(s.buy_fx_rate),
+                    currency: None,
+                    kind: FlowKind::Buy,
+                });
+                flows.push(CashFlow {
+                    date: d,
+                    amount: s.qty * s.sell_price - s.sell_charges(),
+                    paid: None,
+                    currency: None,
+                    kind: FlowKind::Sale,
+                });
             }
         }
         for d in self.dividends.iter().filter(|d| d.symbol == sym) {
             if let Some(x) = date_of(&d.ex_date) {
-                flows.push((x, d.amount));
+                flows.push(CashFlow {
+                    date: x,
+                    amount: d.amount,
+                    paid: None,
+                    currency: d.currency.clone(),
+                    kind: FlowKind::Dividend,
+                });
             }
         }
-        flows.sort_by_key(|f| f.0);
+        flows.sort_by_key(|f| f.date);
         flows
     }
+}
+
+/// Split `total` (a fee) over `weights` in whole minor units (paise,
+/// cents): each part is a multiple of 0.01, and the parts add up to `total`
+/// rounded to 0.01. The paise left after flooring go one each to the
+/// largest remainders, ties to the earlier part.
+pub fn allocate_minor_units(total: f64, weights: &[f64]) -> Vec<f64> {
+    let units = (total * 100.0).round() as i64;
+    let sum: f64 = weights.iter().filter(|w| **w > 0.0).sum();
+    if weights.is_empty() || sum <= 0.0 || units <= 0 {
+        return vec![0.0; weights.len()];
+    }
+    let exact: Vec<f64> = weights
+        .iter()
+        .map(|w| units as f64 * w.max(0.0) / sum)
+        .collect();
+    let mut parts: Vec<i64> = exact.iter().map(|e| e.floor() as i64).collect();
+    let mut left = units - parts.iter().sum::<i64>();
+    let mut order: Vec<usize> = (0..exact.len()).collect();
+    order.sort_by(|&a, &b| {
+        (exact[b] - exact[b].floor())
+            .total_cmp(&(exact[a] - exact[a].floor()))
+            .then(a.cmp(&b))
+    });
+    for i in order {
+        if left <= 0 {
+            break;
+        }
+        parts[i] += 1;
+        left -= 1;
+    }
+    parts.into_iter().map(|p| p as f64 / 100.0).collect()
+}
+
+/// The `source` of a sale recorded for the cash a company paid in lieu of a
+/// fractional share (after a merger or a demerger).
+pub const CASH_IN_LIEU_SOURCE: &str = "cash-in-lieu";
+
+/// How many [`JournalEntry`]s a portfolio file keeps.
+pub const JOURNAL_KEPT: usize = 50;
+
+/// Everything the portfolio file holds about one symbol: what a journalled
+/// change saves so `portfolio actions --undo` can put it back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolState {
+    pub symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holding: Option<Holding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub realized: Vec<Sale>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dividends: Vec<DividendReceived>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<ImportedTrade>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<f64>,
+}
+
+/// One change made by `portfolio actions --apply`, `demerger`, `rename`,
+/// `return-of-capital` or `sync --apply`, with the symbols it touched as
+/// they were before, so the newest can be undone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalEntry {
+    /// `YYYY-MM-DD HH:MM`, local time.
+    pub at: String,
+    /// The command that made it: `actions`, `demerger`, `rename`, ...
+    pub action: String,
+    pub summary: String,
+    /// The symbols it changed, as they were before it.
+    pub before: Vec<SymbolState>,
+    /// A fingerprint of those symbols right after it: undo refuses once
+    /// another command has changed them.
+    pub after: String,
+}
+
+/// FNV-1a: a fingerprint that is the same on every platform and release.
+fn fingerprint(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Replace the items of `v` that `is` picks with `items`, at the place the
+/// first of them was (or at the end), keeping the rest in order.
+fn replace_group<T>(v: &mut Vec<T>, is: impl Fn(&T) -> bool, items: Vec<T>) {
+    let at = v.iter().position(&is).unwrap_or(v.len());
+    let mut kept: Vec<T> = Vec::with_capacity(v.len() + items.len());
+    let mut inserted = false;
+    let mut items = Some(items);
+    for (i, x) in std::mem::take(v).into_iter().enumerate() {
+        if i == at {
+            kept.extend(items.take().unwrap_or_default());
+            inserted = true;
+        }
+        if !is(&x) {
+            kept.push(x);
+        }
+    }
+    if !inserted {
+        kept.extend(items.take().unwrap_or_default());
+    }
+    *v = kept;
+}
+
+/// What [`Portfolio::rename_symbol`] moved.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RenameOutcome {
+    pub lots: usize,
+    pub sales: usize,
+    pub dividends: usize,
+    /// The new symbol was already held: the lots joined it.
+    pub merged: bool,
+}
+
+/// What [`Portfolio::return_capital`] did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CapitalReturnOutcome {
+    /// Lots whose cost was reduced.
+    pub lots: usize,
+    /// Total cost taken off the lots.
+    pub reduced: f64,
+    /// What the payment exceeded the lots' remaining cost by: a capital
+    /// gain to report (the lots' cost stops at zero). Not recorded.
+    pub excess: f64,
+}
+
+/// The fractional share of a merger's new company an account was entitled
+/// to and the company paid for in cash ([`Portfolio::merger_fractions`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergerFraction {
+    /// The held symbol of the new company (`HDFCBANK.NS`).
+    pub symbol: String,
+    pub account: Option<String>,
+    pub merger: &'static Merger,
+    /// New shares the swapped lots came to on the record date.
+    pub shares: f64,
+    /// The part of `shares` below one share.
+    pub fraction: f64,
+}
+
+impl Merger {
+    /// The adjustment left on the swapped lots once the cash for their
+    /// fraction is recorded: `merger-cash:2023-07-13:HDFCBANK`.
+    pub fn cash_id(&self) -> String {
+        format!("merger-cash:{}:{}", self.through, self.new)
+    }
+
+    /// A lot restated in this merger's new shares by an import or
+    /// `portfolio add` ([`merger_swap`]), whose fraction is not settled yet.
+    fn swapped(&self, lot: &Lot) -> bool {
+        lot.units_as_of.as_deref() == Some(self.through)
+            && lot.date.as_str() <= self.through
+            && !lot.adjustments.contains(&self.cash_id())
+    }
+}
+
+impl Portfolio {
+    /// Every symbol the file mentions in holdings, sales, dividends or
+    /// imported trades.
+    fn all_symbols(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .holdings
+            .iter()
+            .map(|h| h.symbol.clone())
+            .chain(self.realized.iter().map(|s| s.symbol.clone()))
+            .chain(self.dividends.iter().map(|d| d.symbol.clone()))
+            .chain(self.imported.iter().map(|t| t.symbol.clone()))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// What the file holds about `sym` (exact, upper-case symbol).
+    pub fn symbol_state(&self, sym: &str) -> SymbolState {
+        SymbolState {
+            symbol: sym.to_string(),
+            holding: self.holdings.iter().find(|h| h.symbol == sym).cloned(),
+            realized: self
+                .realized
+                .iter()
+                .filter(|s| s.symbol == sym)
+                .cloned()
+                .collect(),
+            dividends: self
+                .dividends
+                .iter()
+                .filter(|d| d.symbol == sym)
+                .cloned()
+                .collect(),
+            imported: self
+                .imported
+                .iter()
+                .filter(|t| t.symbol == sym)
+                .cloned()
+                .collect(),
+            target: self.targets.get(sym).copied(),
+        }
+    }
+
+    /// A fingerprint of `symbols`' states that survives a save and a load:
+    /// JSON number parsing may move a float by its last bit, so every
+    /// number is rounded to 10 significant digits first.
+    fn state_fingerprint(&self, symbols: &[String]) -> String {
+        fn round(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Number(n) => {
+                    if let Some(f) = n.as_f64().filter(|_| !n.is_i64() && !n.is_u64()) {
+                        *v = serde_json::Value::String(format!("{f:.9e}"));
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(round),
+                serde_json::Value::Object(o) => o.values_mut().for_each(round),
+                _ => {}
+            }
+        }
+        let states: Vec<SymbolState> = symbols.iter().map(|s| self.symbol_state(s)).collect();
+        let mut value = serde_json::to_value(&states).unwrap_or_default();
+        round(&mut value);
+        fingerprint(value.to_string().as_bytes())
+    }
+
+    /// Run `change` and, when it changed any symbol, add a [`JournalEntry`]
+    /// with those symbols as they were, so `portfolio actions --undo` can
+    /// put them back. The oldest entries beyond [`JOURNAL_KEPT`] are dropped.
+    pub fn journalled<R>(
+        &mut self,
+        action: &str,
+        summary: &str,
+        change: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let before = self.clone();
+        let out = change(self);
+        let mut symbols = before.all_symbols();
+        symbols.extend(self.all_symbols());
+        symbols.sort();
+        symbols.dedup();
+        let json = |p: &Portfolio, s: &str| serde_json::to_string(&p.symbol_state(s)).ok();
+        let changed: Vec<String> = symbols
+            .into_iter()
+            .filter(|s| json(&before, s) != json(self, s))
+            .collect();
+        if !changed.is_empty() {
+            let entry = JournalEntry {
+                at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+                action: action.to_string(),
+                summary: summary.to_string(),
+                before: changed.iter().map(|s| before.symbol_state(s)).collect(),
+                after: self.state_fingerprint(&changed),
+            };
+            self.journal.push(entry);
+            let extra = self.journal.len().saturating_sub(JOURNAL_KEPT);
+            self.journal.drain(..extra);
+        }
+        out
+    }
+
+    /// Undo the newest [`JournalEntry`]: the symbols it changed go back to
+    /// how they were. Refused when another command changed them since (use
+    /// `portfolio restore` then).
+    pub fn undo_last_action(&mut self) -> Result<JournalEntry> {
+        let Some(entry) = self.journal.last() else {
+            bail!(
+                "Nothing to undo: no corporate action, demerger, rename, return of capital or \
+                 broker sync is in this portfolio's journal."
+            );
+        };
+        let symbols: Vec<String> = entry.before.iter().map(|s| s.symbol.clone()).collect();
+        if self.state_fingerprint(&symbols) != entry.after {
+            bail!(
+                "{} changed after `{}` ({}) was recorded on {}, so it cannot be undone \
+                 automatically. Fix it by hand, or bring back an earlier file with \
+                 `stockwise portfolio restore`.",
+                symbols.join(", "),
+                entry.action,
+                entry.summary,
+                entry.at
+            );
+        }
+        let entry = self.journal.pop().context("journal entry")?;
+        for s in &entry.before {
+            self.restore_state(s);
+        }
+        Ok(entry)
+    }
+
+    fn restore_state(&mut self, s: &SymbolState) {
+        let sym = s.symbol.as_str();
+        match (
+            &s.holding,
+            self.holdings.iter().position(|h| h.symbol == sym),
+        ) {
+            (Some(h), Some(i)) => self.holdings[i] = h.clone(),
+            (Some(h), None) => self.holdings.push(h.clone()),
+            (None, Some(i)) => {
+                self.holdings.remove(i);
+            }
+            (None, None) => {}
+        }
+        replace_group(&mut self.realized, |x| x.symbol == sym, s.realized.clone());
+        replace_group(
+            &mut self.dividends,
+            |x| x.symbol == sym,
+            s.dividends.clone(),
+        );
+        replace_group(&mut self.imported, |x| x.symbol == sym, s.imported.clone());
+        match s.target {
+            Some(t) => {
+                self.targets.insert(sym.to_string(), t);
+            }
+            None => {
+                self.targets.remove(sym);
+            }
+        }
+    }
+
+    /// Rename `old` to `new` everywhere (lots, sales, dividends, imported
+    /// trades, a target weight), keeping every lot as it is: dates, cost,
+    /// accounts and adjustments. When `new` is already held the lots join
+    /// it. Renaming a symbol that is no longer there changes nothing, so
+    /// running it twice is safe.
+    pub fn rename_symbol(&mut self, old: &str, new: &str) -> Result<RenameOutcome> {
+        let (old, new) = (old.trim().to_uppercase(), new.trim().to_uppercase());
+        if old.is_empty() || new.is_empty() {
+            bail!("Give the old and the new symbol");
+        }
+        if old == new {
+            bail!("{old} and {new} are the same symbol");
+        }
+        let mut out = RenameOutcome::default();
+        if let Some(i) = self.holdings.iter().position(|h| h.symbol == old) {
+            let mut h = self.holdings.remove(i);
+            out.lots = h.lots.len();
+            match self.holding_mut(&new) {
+                Some(n) => {
+                    n.lots.append(&mut h.lots);
+                    if !h.added_at.is_empty() && (n.added_at.is_empty() || h.added_at < n.added_at)
+                    {
+                        n.added_at = h.added_at;
+                    }
+                    n.recompute();
+                    out.merged = true;
+                }
+                None => {
+                    h.symbol = new.clone();
+                    self.holdings.insert(i, h);
+                }
+            }
+        }
+        for s in self.realized.iter_mut().filter(|s| s.symbol == old) {
+            s.symbol = new.clone();
+            out.sales += 1;
+        }
+        for d in self.dividends.iter_mut().filter(|d| d.symbol == old) {
+            d.symbol = new.clone();
+            out.dividends += 1;
+        }
+        for t in self.imported.iter_mut().filter(|t| t.symbol == old) {
+            t.symbol = new.clone();
+        }
+        if let Some(t) = self.targets.remove(&old) {
+            self.targets.entry(new).or_insert(t);
+        }
+        Ok(out)
+    }
+
+    /// Sell `qty` shares of `symbol` held in `account` out of the lots
+    /// `pick` chooses, newest first, at `price` on `date`, recording one
+    /// [`Sale`] per lot touched (source [`CASH_IN_LIEU_SOURCE`]).
+    fn sell_fraction(
+        &mut self,
+        symbol: &str,
+        account: Option<&str>,
+        qty: f64,
+        (date, price): (&str, f64),
+        pick: impl Fn(&Lot) -> bool,
+    ) -> Vec<Sale> {
+        let Some(h) = self.holding_mut(symbol) else {
+            return Vec::new();
+        };
+        let sym = h.symbol.clone();
+        let mut left = qty;
+        let mut sales = Vec::new();
+        for lot in h
+            .lots
+            .iter_mut()
+            .rev()
+            .filter(|l| l.account_key() == account && pick(l))
+        {
+            if left <= EPS {
+                break;
+            }
+            let take = left.min(lot.qty);
+            sales.push(Sale::from_lot(
+                &sym,
+                lot,
+                take,
+                date,
+                price,
+                CASH_IN_LIEU_SOURCE,
+            ));
+            lot.shrink(take);
+            left -= take;
+        }
+        h.recompute();
+        if h.lots.is_empty() {
+            self.holdings.retain(|h| h.symbol != sym);
+        }
+        self.realized.extend(sales.iter().cloned());
+        sales
+    }
+
+    /// Accounts holding lots restated after a merger in [`MERGERS`] whose
+    /// new shares on the record date are not a whole number and whose
+    /// fraction is not settled yet. The company delivered whole shares and
+    /// paid cash for the fraction.
+    pub fn merger_fractions(&self) -> Vec<MergerFraction> {
+        let mut out = Vec::new();
+        for h in &self.holdings {
+            let (base, _) = indian_base(&h.symbol);
+            for m in MERGERS.iter().filter(|m| m.new == base) {
+                let mut accounts: Vec<(Option<String>, f64)> = Vec::new();
+                for l in h.lots.iter().filter(|l| m.swapped(l)) {
+                    let account = l.account_key().map(str::to_string);
+                    let q = qty_on(l.qty, &l.adjustments, m.through);
+                    match accounts.iter_mut().find(|(a, _)| *a == account) {
+                        Some((_, t)) => *t += q,
+                        None => accounts.push((account, q)),
+                    }
+                }
+                for (account, shares) in accounts {
+                    let fraction = shares - (shares + 1e-9).floor();
+                    if fraction > 1e-6 {
+                        out.push(MergerFraction {
+                            symbol: h.symbol.clone(),
+                            account,
+                            merger: m,
+                            shares,
+                            fraction,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Record the cash paid for `f`'s fractional share at `price` per share
+    /// (in today's share count, as Yahoo's split-adjusted close on the
+    /// record date is) as a sale of its own dated on the record date, out of the newest
+    /// swapped lots, and mark the account's swapped lots as settled. The
+    /// shares left are whole; their cost plus the sale's cost is the cost
+    /// paid. Settling twice changes nothing.
+    pub fn settle_merger_fraction(&mut self, f: &MergerFraction, price: f64) -> Vec<Sale> {
+        let m = f.merger;
+        let account = f.account.as_deref();
+        let Some(h) = self.holding(&f.symbol) else {
+            return Vec::new();
+        };
+        let mine = |l: &Lot| l.account_key() == account && m.swapped(l);
+        // Splits since the merger: sell the fraction in today's share count.
+        let (now, then) = h
+            .lots
+            .iter()
+            .filter(|l| mine(l))
+            .fold((0.0, 0.0), |(n, t), l| {
+                (n + l.qty, t + qty_on(l.qty, &l.adjustments, m.through))
+            });
+        if then <= EPS || !(price.is_finite() && price >= 0.0) {
+            return Vec::new();
+        }
+        let sales = self.sell_fraction(
+            &f.symbol,
+            account,
+            f.fraction * now / then,
+            (m.through, price),
+            mine,
+        );
+        if let Some(h) = self.holding_mut(&f.symbol) {
+            let id = m.cash_id();
+            for l in h.lots.iter_mut().filter(|l| mine(l)) {
+                l.adjustments.push(id.clone());
+            }
+        }
+        sales
+    }
+
+    /// Record a return of capital of `per_share` (in the share count of the
+    /// ex-date) paid on `symbol` with ex-date `date`: every lot bought
+    /// before `date` has its cost per share cut by the payment, never below
+    /// zero; the excess over a lot's cost is a capital gain, reported in the
+    /// outcome but not recorded. Each lot is marked (`roc:<date>:<amount>`),
+    /// so recording it twice changes nothing.
+    pub fn return_capital(
+        &mut self,
+        symbol: &str,
+        date: &str,
+        per_share: f64,
+    ) -> CapitalReturnOutcome {
+        let mut out = CapitalReturnOutcome::default();
+        if !(per_share.is_finite() && per_share > 0.0) {
+            return out;
+        }
+        let id = format!("roc:{date}:{per_share}");
+        let Some(h) = self.holding_mut(symbol) else {
+            return out;
+        };
+        for lot in h
+            .lots
+            .iter_mut()
+            .filter(|l| l.date.as_str() < date && !l.adjustments.contains(&id))
+        {
+            let then = qty_on(lot.qty, &lot.adjustments, date);
+            if lot.qty <= EPS || then <= EPS {
+                continue;
+            }
+            // Per share in today's count (a later split divides it).
+            let per_now = per_share * then / lot.qty;
+            let cut = per_now.min(lot.price.max(0.0));
+            lot.price -= cut;
+            out.reduced += cut * lot.qty;
+            out.excess += (per_now - cut) * lot.qty;
+            lot.adjustments.push(id.clone());
+            out.lots += 1;
+        }
+        if out.lots > 0 {
+            h.recompute();
+        }
+        out
+    }
+}
+
+/// What a [`CashFlow`] was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowKind {
+    Buy,
+    Sale,
+    Dividend,
+}
+
+/// One dated cash flow of a holding, in its own currency unless `currency`
+/// says otherwise (a dividend paid in another currency).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CashFlow {
+    pub date: NaiveDate,
+    pub amount: f64,
+    /// For a purchase paid in another currency: that currency and the rate
+    /// paid (see [`Lot::fx_rate`]).
+    pub paid: Option<(String, f64)>,
+    pub currency: Option<String>,
+    pub kind: FlowKind,
 }
 
 /// Annualized money-weighted return (XIRR) of `flows` plus `value_now`
@@ -2270,7 +3938,9 @@ pub fn scoped_file(file: &str) -> String {
 
 /// Named portfolios saved on disk, sorted.
 pub fn list_names() -> Result<Vec<String>> {
-    let dir = crate::store::path("portfolios")?;
+    // Listing must not create the data directory: a read-only home (a
+    // sandboxed build, a fresh machine) simply has no named portfolios.
+    let dir = crate::store::data_dir_location()?.join("portfolios");
     let mut names = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
@@ -2374,6 +4044,36 @@ fn backup_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_0_8_portfolio_file_loads_without_the_new_lot_and_sale_fields() {
+        // Written by 0.8.1: no fx_currency, fx_rate or charges anywhere.
+        let json = r#"{
+            "version": 2,
+            "holdings": [{"symbol": "AAPL", "shares": 10.0, "avg_cost": 100.0,
+                "added_at": "2024-01-02",
+                "lots": [{"qty": 10.0, "price": 100.0, "date": "2024-01-02", "source": "manual"}]}],
+            "realized": [{"symbol": "MSFT", "qty": 1.0, "buy_date": "2024-01-02",
+                "buy_price": 100.0, "sell_date": "2025-01-02", "sell_price": 120.0,
+                "source": "manual"}]
+        }"#;
+        let path = temp_dir("old-0.8-file").join("portfolio.json");
+        std::fs::write(&path, json).unwrap();
+        let p = Portfolio::read_only(&path).unwrap();
+        let lot = &p.holding("AAPL").unwrap().lots[0];
+        assert_eq!(
+            (lot.fx_currency.as_deref(), lot.fx_rate, lot.charges),
+            (None, None, None)
+        );
+        assert_eq!(p.realized[0].charges, None);
+        assert_eq!(p.realized[0].gain(), 20.0);
+        // Saved again, the new fields stay out of the file while unset.
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(
+            !out.contains("fx_rate") && !out.contains("charges"),
+            "{out}"
+        );
+    }
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -2532,6 +4232,9 @@ mod tests {
             origin: None,
             bonuses: Vec::new(),
             bonus_shares: false,
+            charges: None,
+            fx_currency: None,
+            buy_fx_rate: None,
         });
         old.save_to(&path).unwrap();
 
@@ -2806,12 +4509,13 @@ mod tests {
     #[test]
     fn tradebook_replay_applies_splits_between_buy_and_sell() {
         // 10 bought at 2800, 2:1 bonus, then 20 (post-bonus) sold at 1500.
+        // Bought after the Jio Financial demerger, so only the split applies.
         let rows = vec![
             ImportRow {
                 symbol: "RELIANCE.NS".into(),
                 qty: 10.0,
                 price: 2800.0,
-                date: Some("2023-05-02".into()),
+                date: Some("2023-08-02".into()),
                 sell: false,
                 units_as_of: None,
             },
@@ -4483,6 +6187,47 @@ mod tests {
     }
 
     #[test]
+    fn a_fee_splits_in_whole_paise_and_adds_up() {
+        let parts = allocate_minor_units(0.01, &[1.0, 1.0]);
+        assert_eq!(parts, [0.01, 0.0]);
+        let parts = allocate_minor_units(10.0, &[1.0, 1.0, 1.0]);
+        assert_eq!(parts, [3.34, 3.33, 3.33]);
+        assert!((parts.iter().sum::<f64>() - 10.0).abs() < 1e-9);
+        assert_eq!(allocate_minor_units(5.0, &[]), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn undo_sale_gives_the_purchase_charges_back_to_the_lot() {
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(100.0, 10.0, "2024-01-02", "manual");
+        lot.charges = Some(50.0);
+        p.add_lot("TCS.NS", lot);
+        p.sell_fifo("TCS.NS", 30.0, 12.0, "2025-01-02", "manual")
+            .unwrap();
+        assert!((p.holding("TCS.NS").unwrap().lots[0].charges.unwrap() - 35.0).abs() < 1e-9);
+        p.undo_sale("TCS.NS", 1).unwrap();
+        let h = p.holding("TCS.NS").unwrap();
+        assert_eq!(h.lots.len(), 1);
+        assert_eq!(h.lots[0].qty, 100.0);
+        assert!((h.lots[0].charges.unwrap() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn undo_sale_keeps_lots_paid_at_different_rates_apart() {
+        let mut p = Portfolio::default();
+        let mut lot = Lot::new(10.0, 100.0, "2024-01-02", "manual");
+        lot.fx_currency = Some("INR".into());
+        lot.fx_rate = Some(83.0);
+        p.add_lot("AAPL", lot);
+        p.sell_fifo("AAPL", 4.0, 120.0, "2025-01-02", "manual")
+            .unwrap();
+        // The rest of the lot gets a different recorded rate.
+        p.holdings[0].lots[0].fx_rate = Some(84.0);
+        p.undo_sale("AAPL", 1).unwrap();
+        assert_eq!(p.holding("AAPL").unwrap().lots.len(), 2);
+    }
+
+    #[test]
     fn undo_sale_merges_into_the_rest_of_its_lot() {
         let mut p = Portfolio::default();
         p.add_lot("ITC.NS", Lot::new(100.0, 400.0, "2023-01-01", "manual"));
@@ -4786,5 +6531,738 @@ mod tests {
             [current, "v1".into(), "v2".into(), "v3".into(), "v4".into()]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn demerger(child: &str) -> &'static Demerger {
+        DEMERGERS.iter().find(|d| d.child == child).unwrap()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn every_demerger_row_cites_a_source_and_has_sane_figures() {
+        for d in DEMERGERS {
+            assert!(d.source.starts_with("https://"), "{d:?}");
+            assert!(date_of(d.record_date).is_some(), "{d:?}");
+            assert!(d.child_cost_pct > 0.0 && d.child_cost_pct < 100.0, "{d:?}");
+            assert!(d.child_shares > 0.0 && d.parent_shares > 0.0, "{d:?}");
+            assert!(!d.parents.is_empty(), "{d:?}");
+        }
+        assert_eq!(demergers_for("reliance.ns"), vec![demerger("JIOFIN")]);
+        assert_eq!(demergers_for("TATAMOTORS.NS"), vec![demerger("TMCV")]);
+        assert_eq!(demergers_for("TMPV.BO"), vec![demerger("TMCV")]);
+        assert!(demergers_for("ITCHOTELS.NS").is_empty());
+        assert_eq!(demerger("TMCV").child_symbol("TATAMOTORS.NS"), "TMCV.NS");
+    }
+
+    #[test]
+    fn a_lot_bought_before_the_record_date_becomes_two_lots_with_split_cost_and_its_date() {
+        let mut p = Portfolio::default();
+        let mut old = Lot::new(10.0, 2500.0, "2022-05-02", "import:kite");
+        old.charges = Some(20.0);
+        p.add_lot("RELIANCE.NS", old);
+        // Bought on the record date (= ex-date under T+1): not entitled.
+        p.add_lot("RELIANCE.NS", Lot::new(5.0, 2600.0, "2023-07-20", "manual"));
+        assert_eq!(p.pending_demergers().len(), 1);
+
+        let out = p.apply_demerger("RELIANCE.NS", demerger("JIOFIN"));
+        assert_eq!(out.lots, 1);
+        assert!(p.pending_demergers().is_empty());
+
+        let ril = p.holding("RELIANCE.NS").unwrap();
+        assert_eq!(ril.shares, 15.0);
+        assert_eq!(ril.lots[0].qty, 10.0);
+        assert_eq!(ril.lots[0].date, "2022-05-02");
+        assert!(close(ril.lots[0].cost(), 25_000.0 * 0.9532));
+        // Charges split to the paisa: 0.94 to the child, the rest stays.
+        assert!(close(ril.lots[0].charges.unwrap(), 20.0 - 0.94));
+        assert_eq!(ril.lots[1].price, 2600.0, "the later lot is untouched");
+
+        let jio = p.holding("JIOFIN.NS").unwrap();
+        assert_eq!(jio.lots.len(), 1);
+        let lot = &jio.lots[0];
+        assert_eq!(lot.qty, 10.0);
+        assert_eq!(lot.date, "2022-05-02", "keeps the parent's purchase date");
+        assert_eq!(lot.source, DEMERGER_SOURCE);
+        assert_eq!(lot.account_key(), Some("zerodha"));
+        assert!(close(lot.cost(), 25_000.0 * 0.0468));
+        assert!(close(lot.charges.unwrap(), 0.94));
+        // The cost is only moved, never lost.
+        assert!(close(ril.lots[0].cost() + lot.cost(), 25_000.0));
+    }
+
+    #[test]
+    fn applying_a_demerger_twice_changes_nothing() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", Lot::new(1000.0, 400.0, "2020-03-02", "manual"));
+        p.add_lot("ITC.NS", Lot::new(500.0, 450.0, "2024-08-01", "manual"));
+        let d = demerger("ITCHOTELS");
+        assert_eq!(p.apply_demerger("ITC.NS", d).lots, 2);
+        let once = serde_json::to_string(&p).unwrap();
+        assert_eq!(p.apply_demerger("ITC.NS", d), DemergerOutcome::default());
+        assert_eq!(serde_json::to_string(&p).unwrap(), once);
+        // ITC's own worked example: 1,000 shares at 400 → 100 ITCHL at
+        // 54,040 and 1,000 ITC at 3,45,960.
+        let hotels = p.holding("ITCHOTELS.NS").unwrap();
+        assert_eq!(hotels.shares, 150.0);
+        assert!(close(hotels.lots[0].qty, 100.0));
+        assert!(close(hotels.lots[0].cost(), 54_040.0));
+        assert!(close(
+            p.holding("ITC.NS").unwrap().lots[0].cost(),
+            345_960.0
+        ));
+    }
+
+    #[test]
+    fn fractional_entitlements_are_rounded_down_per_account() {
+        let mut p = Portfolio::default();
+        let mut a = Lot::new(9.0, 400.0, "2023-01-02", "manual");
+        a.account = Some("zerodha".into());
+        let mut b = Lot::new(6.0, 420.0, "2023-06-02", "manual");
+        b.account = Some("zerodha".into());
+        let mut c = Lot::new(7.0, 410.0, "2023-06-02", "manual");
+        c.account = Some("groww".into());
+        for l in [a, b, c] {
+            p.add_lot("ITC.NS", l);
+        }
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.lots, 3);
+        // zerodha: 15 ITC → 1.5 → 1 share; groww: 7 ITC → 0.7 → none.
+        assert!(close(out.fraction_dropped, 0.5 + 0.7));
+        let hotels = p.holding("ITCHOTELS.NS").unwrap();
+        assert!(close(hotels.shares, 1.0));
+        assert!(
+            hotels
+                .lots
+                .iter()
+                .all(|l| l.account.as_deref() == Some("zerodha"))
+        );
+        // The groww lot got no shares, so it keeps its whole cost.
+        let itc = p.holding("ITC.NS").unwrap();
+        let groww = itc
+            .lots
+            .iter()
+            .find(|l| l.account.as_deref() == Some("groww"))
+            .unwrap();
+        assert_eq!(groww.price, 410.0);
+        assert!(groww.adjustments.contains(&demerger("ITCHOTELS").id()));
+    }
+
+    #[test]
+    fn a_split_after_the_record_date_does_not_inflate_the_new_shares() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "RELIANCE.NS",
+            Lot::new(10.0, 2400.0, "2022-01-03", "manual"),
+        );
+        // RIL's 1:1 bonus of Oct 2024, applied as a split (NSE offline).
+        p.apply_split("RELIANCE.NS", &Split::new("2024-10-28", 2.0, 1.0));
+        assert_eq!(p.holding("RELIANCE.NS").unwrap().shares, 20.0);
+        p.apply_demerger("RELIANCE.NS", demerger("JIOFIN"));
+        assert_eq!(p.holding("JIOFIN.NS").unwrap().shares, 10.0);
+        assert_eq!(p.holding("RELIANCE.NS").unwrap().shares, 20.0);
+    }
+
+    #[test]
+    fn tata_motors_under_its_old_ticker_gets_tmcv() {
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "TATAMOTORS.NS",
+            Lot::new(1000.0, 400.0, "2021-02-01", "manual"),
+        );
+        p.add_lot(
+            "TATAMOTORS.NS",
+            Lot::new(10.0, 700.0, "2025-10-14", "manual"),
+        );
+        let pending = p.pending_demergers();
+        assert_eq!(
+            pending,
+            vec![("TATAMOTORS.NS".to_string(), demerger("TMCV"))]
+        );
+        p.apply_demerger("TATAMOTORS.NS", demerger("TMCV"));
+        // TMPV's worked example: 1,24,600 to TMCV, 2,75,400 left.
+        let tmcv = p.holding("TMCV.NS").unwrap();
+        assert_eq!(tmcv.shares, 1000.0);
+        assert!(close(tmcv.cost_basis(), 124_600.0));
+        assert_eq!(tmcv.lots[0].date, "2021-02-01");
+        let tm = p.holding("TATAMOTORS.NS").unwrap();
+        assert!(close(tm.lots[0].cost(), 275_400.0));
+        assert_eq!(tm.lots[1].price, 700.0);
+    }
+
+    #[test]
+    fn an_old_portfolio_file_with_a_pre_demerger_lot_still_loads_and_applies() {
+        // Written before demergers existed: no adjustments on the lot.
+        let json = r#"{
+            "version": 2,
+            "holdings": [{"symbol": "RELIANCE.NS", "shares": 10.0, "avg_cost": 2500.0,
+                "added_at": "2022-05-02",
+                "lots": [{"qty": 10.0, "price": 2500.0, "date": "2022-05-02",
+                    "source": "manual", "adjustments": ["2017-09-07:2:1"]}]}]
+        }"#;
+        let path = temp_dir("old-demerger-file").join("portfolio.json");
+        std::fs::write(&path, json).unwrap();
+        let mut p = Portfolio::read_only(&path).unwrap();
+        assert_eq!(p.holding("RELIANCE.NS").unwrap().shares, 10.0);
+        assert_eq!(p.pending_demergers().len(), 1);
+        p.apply_demerger("RELIANCE.NS", demerger("JIOFIN"));
+        assert_eq!(p.holding("JIOFIN.NS").unwrap().shares, 10.0);
+        // Saved and read back, the demerger stays applied.
+        let back: Portfolio = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(back.pending_demergers().is_empty());
+        assert_eq!(
+            back.holding("JIOFIN.NS").unwrap().lots[0].date,
+            "2022-05-02"
+        );
+    }
+
+    // ── 0.9 K: corporate actions and trustworthy portfolio data ──
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn a_reverse_split_divides_quantity_multiplies_price_and_keeps_cost_and_date() {
+        let mut p = Portfolio::default();
+        p.add_lot("BIOX", lot(105.0, 2.0, "2023-02-01"));
+        p.add_lot("BIOX", lot(50.0, 3.0, "2024-08-01"));
+        // 1-for-10 on 2024-06-03: only the older lot predates it.
+        let reverse = Split::new("2024-06-03", 1.0, 10.0);
+        assert_eq!(p.apply_split("BIOX", &reverse), 1);
+        let h = p.holding("BIOX").unwrap();
+        assert!(approx(h.lots[0].qty, 10.5) && approx(h.lots[0].price, 20.0));
+        assert_eq!(h.lots[0].date, "2023-02-01");
+        assert!(approx(h.cost_basis(), 210.0 + 150.0));
+        assert_eq!(h.lots[1].qty, 50.0, "bought after the split");
+        // Never a bonus lot, and never twice.
+        assert!(h.lots.iter().all(|l| l.source != BONUS_SOURCE));
+        assert_eq!(p.apply_split("BIOX", &reverse), 0);
+        // The valuation copy does the same while it is pending.
+        let mut q = Portfolio::default();
+        q.add_lot("BIOX", lot(105.0, 2.0, "2023-02-01"));
+        let pending = crate::corp_actions::PendingSplits {
+            by_symbol: vec![("BIOX".into(), vec![reverse])],
+            ..Default::default()
+        };
+        assert!(approx(
+            pending.adjusted_shares(q.holding("BIOX").unwrap()),
+            10.5
+        ));
+    }
+
+    #[test]
+    fn a_return_of_capital_reduces_cost_of_lots_held_on_the_ex_date_only() {
+        let mut p = Portfolio::default();
+        p.add_lot("EMBASSY.NS", lot(100.0, 350.0, "2024-01-10"));
+        p.add_lot("EMBASSY.NS", lot(10.0, 4.0, "2024-02-10"));
+        p.add_lot("EMBASSY.NS", lot(20.0, 380.0, "2024-06-01"));
+        let out = p.return_capital("EMBASSY.NS", "2024-05-15", 5.0);
+        assert_eq!(out.lots, 2);
+        let h = p.holding("EMBASSY.NS").unwrap();
+        assert!(approx(h.lots[0].price, 345.0));
+        // The cost stops at zero; the excess is a gain to report.
+        assert!(approx(h.lots[1].price, 0.0));
+        assert!(approx(out.reduced, 500.0 + 40.0));
+        assert!(approx(out.excess, 10.0));
+        assert!(approx(h.lots[2].price, 380.0), "bought after the ex-date");
+        assert_eq!(h.lots[0].date, "2024-01-10");
+        assert!(p.realized.is_empty(), "a return of capital is not a sale");
+        // Recording it again changes nothing.
+        assert_eq!(p.return_capital("EMBASSY.NS", "2024-05-15", 5.0).lots, 0);
+        assert!(approx(
+            p.holding("EMBASSY.NS").unwrap().lots[0].price,
+            345.0
+        ));
+    }
+
+    #[test]
+    fn a_return_of_capital_before_a_split_is_spread_over_the_split_shares() {
+        let mut p = Portfolio::default();
+        p.add_lot("REIT", lot(10.0, 100.0, "2024-01-10"));
+        p.apply_split("REIT", &Split::new("2024-09-01", 2.0, 1.0));
+        p.return_capital("REIT", "2024-05-15", 4.0);
+        let l = &p.holding("REIT").unwrap().lots[0];
+        // 4 per pre-split share = 2 per share now: cost 1000 - 40.
+        assert!(approx(l.price, 48.0) && approx(l.cost(), 960.0));
+    }
+
+    fn jio_demerger() -> &'static Demerger {
+        Demerger::custom("RELIANCE.NS", "JIOFIN.NS", (1.0, 1.0), "2023-07-20", 4.68)
+    }
+
+    #[test]
+    fn a_typed_demerger_splits_cost_and_keeps_holding_dates() {
+        let mut p = Portfolio::default();
+        p.add_lot("RELIANCE.NS", lot(10.0, 2000.0, "2019-04-01"));
+        p.add_lot("RELIANCE.NS", lot(5.0, 2400.0, "2022-08-01"));
+        p.add_lot("RELIANCE.NS", lot(3.0, 2500.0, "2023-08-01"));
+        let out = p.apply_demerger("RELIANCE.NS", jio_demerger());
+        assert_eq!(out.lots, 2);
+        let jio = p.holding("JIOFIN.NS").unwrap();
+        assert_eq!(jio.shares, 15.0);
+        let dates: Vec<&str> = jio.lots.iter().map(|l| l.date.as_str()).collect();
+        assert_eq!(
+            dates,
+            ["2019-04-01", "2022-08-01"],
+            "the parent's purchase dates"
+        );
+        let ril = p.holding("RELIANCE.NS").unwrap();
+        assert_eq!(ril.lots[0].date, "2019-04-01");
+        assert_eq!(ril.lots[0].qty, 10.0);
+        assert!(approx(ril.lots[0].cost(), 20_000.0 * 0.9532));
+        assert!(approx(jio.lots[0].cost(), 20_000.0 * 0.0468));
+        // Total cost unchanged; the lot bought after the record date is untouched.
+        assert!(approx(
+            ril.cost_basis() + jio.cost_basis(),
+            20_000.0 + 12_000.0 + 7_500.0
+        ));
+        assert!(approx(ril.lots[2].price, 2500.0));
+        // Same id as the built-in row: neither applies again.
+        assert!(p.pending_demergers().is_empty());
+        let again = p.apply_demerger("RELIANCE.NS", jio_demerger());
+        assert_eq!(again.lots, 0);
+        assert_eq!(p.holding("JIOFIN.NS").unwrap().shares, 15.0);
+    }
+
+    #[test]
+    fn rename_keeps_lots_sales_dividends_and_runs_once() {
+        let mut p = Portfolio::default();
+        let mut l = lot(10.0, 400.0, "2021-05-03");
+        l.account = Some("zerodha".into());
+        l.adjustments.push("2022-01-01:2:1".into());
+        p.add_lot("TATAMOTORS.NS", l.clone());
+        p.sell_fifo("TATAMOTORS.NS", 2.0, 900.0, "2024-01-02", "manual")
+            .unwrap();
+        p.dividends.push(DividendReceived {
+            symbol: "TATAMOTORS.NS".into(),
+            ex_date: "2024-06-11".into(),
+            per_share: 6.0,
+            qty: 8.0,
+            amount: 48.0,
+            currency: None,
+        });
+        p.set_target("TATAMOTORS.NS", 10.0);
+        let out = p.rename_symbol("tatamotors.ns", "TMPV.NS").unwrap();
+        assert_eq!(
+            (out.lots, out.sales, out.dividends, out.merged),
+            (1, 1, 1, false)
+        );
+        assert!(p.holding("TATAMOTORS.NS").is_none());
+        let h = p.holding("TMPV.NS").unwrap();
+        assert_eq!(h.lots[0].date, "2021-05-03");
+        assert_eq!(h.lots[0].qty, 8.0);
+        assert_eq!(h.lots[0].account.as_deref(), Some("zerodha"));
+        assert_eq!(h.lots[0].adjustments, l.adjustments);
+        assert_eq!(p.realized[0].symbol, "TMPV.NS");
+        assert_eq!(p.dividends[0].symbol, "TMPV.NS");
+        assert_eq!(p.targets.get("TMPV.NS"), Some(&10.0));
+        // Twice: nothing left to rename.
+        let again = p.rename_symbol("TATAMOTORS.NS", "TMPV.NS").unwrap();
+        assert_eq!(again, RenameOutcome::default());
+        assert!(p.rename_symbol("TMPV.NS", "tmpv.ns").is_err());
+    }
+
+    #[test]
+    fn rename_into_a_held_symbol_merges_the_lots() {
+        let mut p = Portfolio::default();
+        p.add_lot("OLD.NS", lot(5.0, 100.0, "2020-01-01"));
+        p.add_lot("NEW.NS", lot(3.0, 200.0, "2024-01-01"));
+        let out = p.rename_symbol("OLD.NS", "NEW.NS").unwrap();
+        assert!(out.merged);
+        let h = p.holding("NEW.NS").unwrap();
+        assert_eq!(h.shares, 8.0);
+        assert_eq!(h.lots[0].date, "2020-01-01");
+        assert_eq!(p.holdings.len(), 1);
+    }
+
+    #[test]
+    fn cash_for_a_merger_fraction_is_a_sale_with_its_own_gain() {
+        // 10 HDFC bought 2023-03-01 at 2,600 = 16.8 HDFCBANK after the merger.
+        let swap = merger_swap("HDFC.NS", Some("2023-03-01"), 10.0, 2600.0).unwrap();
+        let mut l = lot(swap.qty, swap.price, "2023-03-01");
+        l.units_as_of = Some(swap.merger.through.to_string());
+        let mut p = Portfolio::default();
+        p.add_lot(&swap.symbol, l);
+        let fractions = p.merger_fractions();
+        assert_eq!(fractions.len(), 1);
+        let f = &fractions[0];
+        assert!(approx(f.fraction, 0.8));
+        let sales = p.settle_merger_fraction(f, 1650.0);
+        assert_eq!(sales.len(), 1);
+        let h = p.holding("HDFCBANK.NS").unwrap();
+        assert!(approx(h.shares, 16.0), "whole shares delivered");
+        let s = &sales[0];
+        assert!(approx(s.qty, 0.8));
+        assert_eq!(s.sell_date, "2023-07-13");
+        assert_eq!(s.buy_date, "2023-03-01");
+        // Total cost unchanged: the shares kept plus the sold fraction.
+        assert!(approx(h.cost_basis() + s.qty * s.buy_price, 26_000.0));
+        assert!(approx(s.gain(), 0.8 * (1650.0 - 26_000.0 / 16.8)));
+        // Settled: nothing pending, and settling again sells nothing.
+        assert!(p.merger_fractions().is_empty());
+        assert!(p.settle_merger_fraction(f, 1650.0).is_empty());
+        assert_eq!(p.realized.len(), 1);
+    }
+
+    #[test]
+    fn import_with_an_account_name_keeps_two_accounts_at_one_broker_apart() {
+        let me = vec![trade("INFY.NS", "2024-01-10", false, 10.0, 1500.0)];
+        let spouse = vec![
+            trade("INFY.NS", "2024-03-05", false, 4.0, 1600.0),
+            trade("INFY.NS", "2024-09-05", true, 1.0, 1900.0),
+        ];
+        let with = |account| ImportOptions {
+            account: Some(account),
+            ..tradebook_opts("import:kite")
+        };
+        let mut p = Portfolio::default();
+        p.apply_import(&me, with("me"));
+        p.apply_import(&spouse, with("spouse"));
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!(h.shares, 13.0);
+        let of = |a: &str| -> f64 {
+            h.lots
+                .iter()
+                .filter(|l| l.account_key() == Some(a))
+                .map(|l| l.qty)
+                .sum()
+        };
+        assert_eq!((of("me"), of("spouse")), (10.0, 3.0));
+        assert_eq!(p.realized[0].account.as_deref(), Some("spouse"));
+        // Re-importing either file changes nothing.
+        let before = state(&p);
+        p.apply_import(&me, with("me"));
+        p.apply_import(&spouse, with("spouse"));
+        assert_eq!(state(&p), before);
+        // A holdings snapshot for one account leaves the other alone.
+        let snap = vec![ImportRow {
+            symbol: "INFY.NS".into(),
+            qty: 12.0,
+            price: 1500.0,
+            date: None,
+            sell: false,
+            units_as_of: None,
+        }];
+        p.apply_import(
+            &snap,
+            ImportOptions {
+                account: Some("me"),
+                ..opts("import:kite")
+            },
+        );
+        let h = p.holding("INFY.NS").unwrap();
+        assert_eq!(h.shares, 15.0);
+    }
+
+    #[test]
+    fn journalled_changes_undo_newest_first_and_refuse_after_other_edits() {
+        let mut p = Portfolio::default();
+        p.add_lot("RELIANCE.NS", lot(10.0, 2000.0, "2019-04-01"));
+        p.add_lot("TCS.NS", lot(1.0, 3000.0, "2019-04-01"));
+        let original = serde_json::to_string(&p.holdings).unwrap();
+        p.journalled("demerger", "RELIANCE.NS → JIOFIN.NS", |p| {
+            p.apply_demerger("RELIANCE.NS", jio_demerger())
+        });
+        p.journalled("rename", "TCS.NS → TCSX.NS", |p| {
+            p.rename_symbol("TCS.NS", "TCSX.NS")
+        })
+        .unwrap();
+        // A no-op is not journalled.
+        p.journalled("rename", "nothing", |p| p.rename_symbol("GONE.NS", "X.NS"))
+            .unwrap();
+        assert_eq!(p.journal.len(), 2);
+        let symbols: Vec<&str> = p.journal[0]
+            .before
+            .iter()
+            .map(|s| s.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["JIOFIN.NS", "RELIANCE.NS"]);
+        assert_eq!(p.undo_last_action().unwrap().action, "rename");
+        assert!(p.holding("TCS.NS").is_some() && p.holding("TCSX.NS").is_none());
+        // An edit after the demerger: undo refuses rather than lose it.
+        p.add_lot("JIOFIN.NS", lot(1.0, 300.0, "2024-01-01"));
+        assert!(p.undo_last_action().is_err());
+        p.delete_lot("JIOFIN.NS", 2).unwrap();
+        assert_eq!(p.undo_last_action().unwrap().action, "demerger");
+        assert!(p.holding("JIOFIN.NS").is_none());
+        assert_eq!(serde_json::to_string(&p.holdings).unwrap(), original);
+        assert!(p.undo_last_action().is_err(), "nothing left");
+        // Undo still works after the file is saved and loaded again (JSON
+        // may move a float by its last bit).
+        let mut q = Portfolio::default();
+        q.add_lot("RELIANCE.NS", lot(10.0, 2000.0, "2019-04-01"));
+        q.journalled("demerger", "RIL", |q| {
+            q.apply_demerger("RELIANCE.NS", jio_demerger())
+        });
+        let path = temp_dir("journal-round-trip").join("portfolio.json");
+        q.save_to(&path).unwrap();
+        let mut loaded = Portfolio::load_from(&path).unwrap();
+        assert_eq!(loaded.undo_last_action().unwrap().action, "demerger");
+        assert!(loaded.holding("JIOFIN.NS").is_none());
+        // An old file without a journal still loads; an empty one is not written.
+        let json = serde_json::to_string(&Portfolio::default()).unwrap();
+        assert!(!json.contains("journal"), "{json}");
+    }
+
+    #[test]
+    fn us_spin_off_rows_match_only_us_symbols() {
+        let ge: Vec<&str> = demergers_for("GE").iter().map(|d| d.child).collect();
+        assert_eq!(ge, ["GEHC", "GEV"]);
+        assert!(demergers_for("GE.NS").is_empty());
+        let mut p = Portfolio::default();
+        p.add_lot("MRK", lot(25.0, 80.0, "2020-01-02"));
+        p.apply_demerger("MRK", demergers_for("MRK")[0]);
+        let ogn = p.holding("OGN").unwrap();
+        // 2.5 OGN: whole shares only (the fraction was paid in cash).
+        assert_eq!(ogn.shares, 2.0);
+        assert_eq!(ogn.lots[0].date, "2020-01-02");
+        assert!(approx(ogn.cost_basis(), 2000.0 * 0.0477));
+    }
+
+    fn snapshot_lot(qty: f64, account: &str) -> Lot {
+        // A broker holdings snapshot: no purchase date, no order behind it.
+        let mut l = Lot::new(qty, 300.0, "2025-03-01", "broker:zerodha");
+        l.date_estimated = true;
+        l.account = Some(account.into());
+        l
+    }
+
+    fn itc_lot(qty: f64, date: &str, account: &str) -> Lot {
+        let mut l = Lot::new(qty, 400.0, date, "manual");
+        l.account = Some(account.into());
+        l
+    }
+
+    #[test]
+    fn a_split_before_the_record_date_counts_in_the_entitlement() {
+        // 10 RIL bought in 2016, the 2017 1:1 bonus still pending: on the
+        // 2023 record date the lot was 20 shares, so 20 JIOFIN.
+        let mut p = Portfolio::default();
+        p.add_lot(
+            "RELIANCE.NS",
+            Lot::new(10.0, 1000.0, "2016-05-02", "manual"),
+        );
+        let bonus_2017 = Split::new("2017-09-07", 2.0, 1.0);
+        let mut applied = p.clone();
+        applied.apply_in_order(
+            "RELIANCE.NS",
+            std::slice::from_ref(&bonus_2017),
+            &[demerger("JIOFIN")],
+        );
+        assert_eq!(applied.holding("JIOFIN.NS").unwrap().shares, 20.0);
+        assert_eq!(applied.holding("RELIANCE.NS").unwrap().shares, 20.0);
+        // The read path's copy agrees.
+        let pending = crate::corp_actions::PendingSplits {
+            by_symbol: vec![("RELIANCE.NS".into(), vec![bonus_2017])],
+            demergers: p.pending_demergers(),
+            ..Default::default()
+        };
+        let adj = pending.adjusted(&p);
+        assert_eq!(adj.holding("JIOFIN.NS").unwrap().shares, 20.0);
+    }
+
+    #[test]
+    fn child_shares_from_a_broker_snapshot_are_taken_not_added_twice() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(1000.0, "2020-03-02", "zerodha"));
+        p.add_lot("ITCHOTELS.NS", snapshot_lot(130.0, "zerodha"));
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.reconciled, 100.0);
+        assert!(out.conflicts.is_empty());
+        let hotels = p.holding("ITCHOTELS.NS").unwrap();
+        // 100 from the demerger (2020 date, its cost) + 30 snapshot left.
+        assert_eq!(hotels.shares, 130.0);
+        let ours = hotels
+            .lots
+            .iter()
+            .find(|l| l.source == DEMERGER_SOURCE)
+            .unwrap();
+        assert_eq!((ours.qty, ours.date.as_str()), (100.0, "2020-03-02"));
+        assert!(close(ours.cost(), 54_040.0));
+    }
+
+    #[test]
+    fn too_few_unexplained_child_shares_is_a_conflict_and_changes_nothing() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(1000.0, "2020-03-02", "zerodha"));
+        p.add_lot("ITCHOTELS.NS", snapshot_lot(60.0, "zerodha"));
+        let before = serde_json::to_string(&p).unwrap();
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.conflicts.len(), 1, "{out:?}");
+        assert!(out.conflicts[0].contains("zerodha"), "{}", out.conflicts[0]);
+        assert_eq!(serde_json::to_string(&p).unwrap(), before);
+        // Still pending, and the read path says why instead of adding 100.
+        let pending = crate::corp_actions::PendingSplits::offline(&p);
+        assert_eq!(
+            pending.adjusted(&p).holding("ITCHOTELS.NS").unwrap().shares,
+            60.0
+        );
+        assert!(
+            pending
+                .warnings()
+                .iter()
+                .any(|w| w.contains("left unchanged"))
+        );
+    }
+
+    #[test]
+    fn a_later_market_purchase_of_the_child_is_not_taken_as_the_allotment() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(1000.0, "2020-03-02", "zerodha"));
+        let mut bought = Lot::new(50.0, 450.0, "2025-02-10", "broker:zerodha");
+        bought.order_id = Some("ord-1".into());
+        p.add_lot("ITCHOTELS.NS", bought);
+        p.add_lot("ITCHOTELS.NS", Lot::new(5.0, 460.0, "2025-02-12", "manual"));
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.reconciled, 0.0);
+        assert_eq!(p.holding("ITCHOTELS.NS").unwrap().shares, 155.0);
+    }
+
+    #[test]
+    fn demerged_shares_are_not_held_or_sellable_before_the_record_date() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(1000.0, "2020-03-02", "zerodha"));
+        p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        let lot = &p.holding("ITCHOTELS.NS").unwrap().lots[0];
+        assert_eq!(lot.date, "2020-03-02", "the tax date stays the parent's");
+        assert_eq!(lot.held_from(), "2025-01-06");
+        assert_eq!(p.shares_on("ITCHOTELS.NS", "2024-12-31", &[]), 0.0);
+        assert_eq!(p.shares_on("ITCHOTELS.NS", "2025-01-07", &[]), 100.0);
+        assert!(
+            p.sell_fifo("ITCHOTELS.NS", 10.0, 500.0, "2024-12-20", "manual")
+                .is_err()
+        );
+        let sale = p
+            .sell_fifo("ITCHOTELS.NS", 10.0, 500.0, "2025-02-03", "manual")
+            .unwrap();
+        assert_eq!(sale[0].buy_date, "2020-03-02");
+        assert_eq!(sale[0].held_from(), "2025-01-06");
+        // Sold after 7 Jan: not held on 2024-12-31, held on 2025-01-07.
+        assert_eq!(p.shares_on("ITCHOTELS.NS", "2024-12-31", &[]), 0.0);
+        assert_eq!(p.shares_on("ITCHOTELS.NS", "2025-01-07", &[]), 100.0);
+    }
+
+    #[test]
+    fn an_unchanged_tradebook_re_import_keeps_the_demerger() {
+        let rows = vec![
+            trade("ITC.NS", "2020-03-02", false, 1000.0, 400.0),
+            trade("ITC.NS", "2025-03-03", true, 200.0, 420.0),
+        ];
+        let mut p = Portfolio::default();
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        // The replay applied the demerger as it happened: the sale after the
+        // record date carries the reduced cost, and the child is there.
+        assert!(close(p.realized[0].buy_price, 400.0 * 0.8649));
+        assert_eq!(p.holding("ITCHOTELS.NS").unwrap().shares, 100.0);
+        assert!(p.pending_demergers().is_empty());
+        let before = state(&p);
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(state(&p), before);
+        // And after the child was partly sold, still unchanged.
+        p.sell_fifo("ITCHOTELS.NS", 40.0, 500.0, "2025-04-01", "manual")
+            .unwrap();
+        let before = state(&p);
+        p.apply_import(&rows, tradebook_opts("import:kite"));
+        assert_eq!(state(&p), before);
+        assert_eq!(p.holding("ITCHOTELS.NS").unwrap().shares, 60.0);
+        assert_eq!(
+            p.apply_demerger("ITC.NS", demerger("ITCHOTELS")),
+            DemergerOutcome::default()
+        );
+    }
+
+    #[test]
+    fn the_entitlement_is_rounded_once_per_account_across_listings() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(6.0, "2023-01-02", "zerodha"));
+        p.add_lot("ITC.BO", itc_lot(4.0, "2023-02-02", "zerodha"));
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.lots, 2);
+        let total: f64 = ["ITCHOTELS.NS", "ITCHOTELS.BO"]
+            .iter()
+            .filter_map(|s| p.holding(s))
+            .map(|h| h.shares)
+            .sum();
+        assert!(close(total, 1.0), "{total}");
+        assert!(out.fraction_dropped.abs() < 1e-9);
+        // The .BO listing was applied in the same pass.
+        assert!(p.pending_demergers().is_empty());
+    }
+
+    #[test]
+    fn the_cost_split_is_in_whole_paise_and_adds_up() {
+        let mut p = Portfolio::default();
+        p.add_lot("RELIANCE.NS", Lot::new(1.0, 12.5, "2022-05-02", "manual"));
+        p.apply_demerger("RELIANCE.NS", demerger("JIOFIN"));
+        let child = p.holding("JIOFIN.NS").unwrap().cost_basis();
+        let parent = p.holding("RELIANCE.NS").unwrap().cost_basis();
+        // 4.68% of 12.50 is 0.585: 0.59 to the child, 11.91 stays.
+        assert!(close(child, 0.59), "{child}");
+        assert!(close(parent, 11.91), "{parent}");
+        assert!(close(child + parent, 12.5));
+    }
+
+    #[test]
+    fn shares_sold_after_the_record_date_get_their_child_shares_and_a_split_cost() {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(1000.0, "2020-03-02", "zerodha"));
+        p.add_lot("ITC.NS", itc_lot(500.0, "2021-03-02", "zerodha"));
+        // Sold everything after the record date, before applying.
+        p.sell_fifo("ITC.NS", 1500.0, 420.0, "2025-03-03", "manual")
+            .unwrap();
+        // Sold before the record date: not entitled.
+        p.add_lot("ITC.NS", itc_lot(100.0, "2022-01-03", "zerodha"));
+        p.sell_fifo("ITC.NS", 100.0, 300.0, "2024-06-03", "manual")
+            .unwrap();
+        assert!(p.holding("ITC.NS").is_none());
+        assert_eq!(
+            p.pending_demergers().len(),
+            1,
+            "a fully sold parent is pending"
+        );
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!((out.lots, out.sales), (0, 2));
+        assert_eq!(p.holding("ITCHOTELS.NS").unwrap().shares, 150.0);
+        let after: Vec<&Sale> = p
+            .realized
+            .iter()
+            .filter(|s| s.sell_date == "2025-03-03")
+            .collect();
+        assert!(after.iter().all(|s| close(s.buy_price, 400.0 * 0.8649)));
+        let early = p
+            .realized
+            .iter()
+            .find(|s| s.sell_date == "2024-06-03")
+            .unwrap();
+        assert_eq!(early.buy_price, 400.0);
+        // Applying again changes nothing.
+        let once = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            p.apply_demerger("ITC.NS", demerger("ITCHOTELS")),
+            DemergerOutcome::default()
+        );
+        assert_eq!(serde_json::to_string(&p).unwrap(), once);
+    }
+
+    #[test]
+    fn apply_demerger_recomputes_reconciled_child_on_other_listing_and_sell_specific_checks_held_from()
+     {
+        let mut p = Portfolio::default();
+        p.add_lot("ITC.NS", itc_lot(100.0, "2022-01-03", "zerodha"));
+        p.add_lot("ITCHOTELS.BO", snapshot_lot(10.0, "zerodha"));
+
+        let out = p.apply_demerger("ITC.NS", demerger("ITCHOTELS"));
+        assert_eq!(out.reconciled, 10.0);
+        assert_eq!(p.holding("ITCHOTELS.BO").unwrap().shares, 0.0);
+        assert_eq!(p.holding("ITCHOTELS.NS").unwrap().shares, 10.0);
+
+        let err = p
+            .sell_specific("ITCHOTELS.NS", 10.0, 100.0, "2023-06-01", "manual", &[1])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2025-01-06"), "{err}");
     }
 }

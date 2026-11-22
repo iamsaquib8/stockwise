@@ -251,7 +251,7 @@ fn args_check_ranges_types_and_enums() {
         ("quote", json!({"symbols": []})),
         (
             "quote",
-            json!({"symbols": (0..25).map(|i| format!("S{i}")).collect::<Vec<_>>()}),
+            json!({"symbols": (0..26).map(|i| format!("S{i}")).collect::<Vec<_>>()}),
         ),
         ("quote", json!({"symbols": ["TCS"], "market": "mars"})),
         ("markets", json!({"crypto": "maybe"})),
@@ -454,7 +454,8 @@ async fn goals_are_pure_and_rounded() {
     assert_eq!(sip["goal"], "sip");
     assert_eq!(sip["currency"], "INR");
     let monthly = sip["monthly_sip"].as_f64().unwrap();
-    assert!((19_000.0..21_000.0).contains(&monthly), "{monthly}");
+    // ₹1 Cr in 15 years at 12% (effective monthly rate): ₹21,011.
+    assert!((20_000.0..22_000.0).contains(&monthly), "{monthly}");
     assert_eq!(sip["schedule"].as_array().unwrap().len(), 15);
 
     let r = data(
@@ -767,17 +768,17 @@ async fn long_histories_keep_their_newest_bars() {
 
 #[test]
 fn verdict_tool_is_described_as_scores_not_advice() {
-    use crate::verdict::testing::assert_neutral;
+    use crate::action::testing::assert_action_well_formed;
     let t = tool("verdict");
-    assert_neutral(t.title);
-    assert_neutral(t.description);
+    assert_action_well_formed(t.title);
+    assert_action_well_formed(t.description);
     assert!(t.description.contains("not a recommendation"));
     assert!(!t.title.to_lowercase().contains("verdict"));
 }
 
 #[test]
-fn verdict_tool_result_has_scores_and_no_call() {
-    use crate::verdict::testing::assert_neutral;
+fn verdict_tool_result_has_scores_and_an_engine_action() {
+    use crate::action::testing::assert_action_well_formed;
     for symbol in ["TCS.NS", "BTC-USD"] {
         let mut r = crate::research::Research::default();
         r.symbol = symbol.into();
@@ -788,35 +789,31 @@ fn verdict_tool_result_has_scores_and_no_call() {
         r.fin.rec_mean = Some(1.5);
         r.fin.target_mean = Some(130.0);
         let v = handlers::verdict_value(&r).unwrap();
-        for gone in [
-            "action",
-            "entry_zone",
-            "stop_loss",
-            "target_price",
-            "risk_reward",
-            "confidence",
-        ] {
+        for gone in ["entry_zone", "stop_loss", "target_price", "risk_reward"] {
             assert!(
                 v.get(gone).is_none(),
                 "{symbol}: {gone} leaked into the tool result"
             );
         }
         assert!(v["pillars"].is_array() && v["data_coverage"].is_number());
+        // Thin data: the engine makes no call.
+        assert_eq!(v["action"]["kind"], "NO_CALL", "{symbol}");
         // The envelope the model sees: data plus the note.
         let wrapped = envelope(v, 100_000);
-        assert_neutral(&wrapped.to_string());
+        assert_action_well_formed(&wrapped.to_string());
     }
 }
 
 #[test]
-fn ipo_tools_are_described_without_a_call() {
-    use crate::verdict::testing::assert_neutral;
+fn ipo_tools_describe_the_engine_verdict() {
+    use crate::action::testing::assert_action_well_formed;
     for name in ["ipo_board", "ipo_analyze"] {
         let t = tool(name);
-        assert_neutral(t.title);
-        assert_neutral(t.description);
-        assert!(!t.description.to_lowercase().contains("verdict"), "{name}");
+        assert_action_well_formed(t.title);
+        assert_action_well_formed(t.description);
+        assert!(t.description.contains("`verdict`"), "{name}");
     }
+    assert!(tool("ipo_analyze").description.contains("never change it"));
 }
 
 // ── workspace changes ──
@@ -1114,7 +1111,7 @@ async fn fit_check_answers_against_the_users_own_rules() {
         .await
         .unwrap();
     assert_eq!(v["data"]["fits_your_rules"], "no", "{v}");
-    crate::verdict::testing::assert_neutral(&v.to_string());
+    crate::action::testing::assert_action_well_formed(&v.to_string());
     let _ = std::fs::remove_dir_all(&w.dir);
 }
 
@@ -1141,4 +1138,112 @@ async fn analysis_movers_dividends_and_emergency_run_on_fixtures() {
     let v = c.call("changes_list", &json!({})).await.unwrap();
     assert_eq!(v["data"]["changes"][0]["tool"], "watchlist_add");
     let _ = std::fs::remove_dir_all(&w.dir);
+}
+
+// ── India-first extras ──
+
+#[tokio::test]
+async fn returns_and_correlation_run_on_charts() {
+    let c = ctx();
+    let v = c.call("returns", &json!({"symbol": "TCS"})).await.unwrap();
+    let rows = v["data"]["returns"].as_array().unwrap();
+    assert!(!rows.is_empty(), "{v}");
+    assert_eq!(v["data"]["symbol"], "TCS.NS");
+
+    let v = c
+        .call("correlate", &json!({"symbols": ["TCS", "INFY", "NOPE"]}))
+        .await
+        .unwrap();
+    assert_eq!(v["data"]["missing"], json!(["NOPE.NS"]));
+    let m = &v["data"]["correlations"];
+    assert_eq!(m.as_object().unwrap().len(), 2, "{v}");
+    assert!((m["TCS.NS"]["TCS.NS"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(m["TCS.NS"]["INFY.NS"], m["INFY.NS"]["TCS.NS"]);
+
+    assert!(
+        c.call("correlate", &json!({"symbols": ["TCS"]}))
+            .await
+            .is_err()
+    );
+    assert!(
+        c.call("fx_history", &json!({"currency": "DOLLARS"}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn bond_calculator_needs_no_network_with_coupon_and_maturity() {
+    let c = ctx();
+    let v = c
+        .call(
+            "bonds_calc",
+            &json!({"coupon": 7.18, "maturity": "2033-08-14", "price": 101.5, "settle": "2026-11-20"}),
+        )
+        .await
+        .unwrap();
+    let ytm = v["data"]["ytm_percent"]
+        .as_f64()
+        .or_else(|| v["data"]["ytm"].as_f64())
+        .unwrap_or_else(|| panic!("a yield: {v}"));
+    assert!(ytm > 6.0 && ytm < 7.5, "{v}");
+    assert!(
+        c.call("bonds_calc", &json!({"maturity": "not a date"}))
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn india_extras_are_read_only_and_open_world() {
+    for name in [
+        "bonds_yields",
+        "bonds_list",
+        "bonds_calc",
+        "commodity",
+        "fx_history",
+        "returns",
+        "correlate",
+        "compare",
+        "portfolio_wrap",
+    ] {
+        let h = hints(tool(name));
+        assert!(h.read_only && h.idempotent && !h.destructive, "{name}");
+        // bonds_calc looks a named security up in RBI's list.
+        assert!(h.open_world, "{name}");
+    }
+    assert!(tool("portfolio_wrap").personal);
+}
+
+#[tokio::test]
+async fn batch_tools_research_each_symbol_once() {
+    // Non-adjacent repeats too: TCS twice, apart.
+    let v = call("correlate", json!({"symbols": ["TCS", "INFY", "tcs"]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        v["data"]["correlations"].as_object().unwrap().len(),
+        2,
+        "{v}"
+    );
+}
+
+#[test]
+fn picks_is_not_read_only_because_it_logs_its_list() {
+    for name in ["picks", "ipo_board", "ipo_analyze"] {
+        let h = hints(tool(name));
+        // Repeating it can log new records when the data moved: not idempotent.
+        assert!(
+            !h.read_only && !h.destructive && !h.idempotent && h.open_world,
+            "{name}"
+        );
+    }
+    assert!(hints(tool("quote")).read_only);
+    assert!(!hints(tool("monitor_status")).open_world);
+}
+
+#[tokio::test]
+async fn monitor_status_runs_offline_on_fixtures() {
+    let v = ctx().call("monitor_status", &json!({})).await.unwrap();
+    assert!(v["data"]["thresholds"].is_object(), "{v}");
 }

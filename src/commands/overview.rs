@@ -229,11 +229,21 @@ pub(crate) async fn check_symbols_before_add(
 }
 
 pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Result<()> {
-    let resolved = resolve_symbols(symbols, market);
     let client = YahooClient::new().await?;
+    cmd_quote_with(&client, symbols, market, fmt).await
+}
+
+/// `cmd_quote` on a client the caller already has (one handshake, one cache).
+pub async fn cmd_quote_with(
+    client: &YahooClient,
+    symbols: &[String],
+    market: Market,
+    fmt: Format,
+) -> Result<()> {
+    let resolved = resolve_symbols(symbols, market);
     // Yahoo silently drops unknown symbols; name them instead.
-    let views::QuoteSet { quotes, missing } = views::quotes(&client, &resolved).await?;
-    let suggestions = symbol_suggestions(&client, &missing).await;
+    let views::QuoteSet { quotes, missing } = views::quotes(client, &resolved).await?;
+    let suggestions = symbol_suggestions(client, &missing).await;
     let missing_err = || {
         anyhow::anyhow!(
             "{}",
@@ -244,10 +254,82 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     if quotes.is_empty() {
         return Err(missing_err());
     }
+    // Provenance per quote; a short request also fills a missing market
+    // cap, P/E or EPS from the other sources (`providers::fill`).
+    let mut quotes = quotes;
+    let mut metas = Vec::with_capacity(quotes.len());
+    for q in quotes.iter_mut() {
+        let lacks = crate::provenance::quote_field_checks(q)
+            .iter()
+            .any(|(_, ok)| !ok);
+        if lacks
+            && resolved.len() <= 3
+            && market::AssetClass::of(q.symbol.as_deref().unwrap_or_default())
+                == market::AssetClass::Stock
+        {
+            let mut filled = crate::provenance::Meta::default();
+            crate::providers::fill::complete_fundamentals(client, q, &mut filled).await;
+            let mut m = crate::provenance::for_quote(q);
+            m.merge(&filled);
+            metas.push(m);
+        } else {
+            metas.push(crate::provenance::for_quote(q));
+        }
+    }
+    // One Indian stock: NSE's sector P/E to compare with, and its
+    // surveillance flags (ASM/GSM, suspension).
+    let nse_info = match quotes.first().and_then(|q| q.symbol.clone()) {
+        Some(sym)
+            if quotes.len() == 1
+                && sym.ends_with(".NS")
+                && market::AssetClass::of(&sym) == market::AssetClass::Stock =>
+        {
+            match client.nse_equity_info(&sym).await {
+                Ok(info) => info,
+                // Not the same as "checked, no flags": say it.
+                Err(e) => {
+                    metas[0].warn(format!(
+                        "NSE surveillance and sector P/E could not be checked ({e:#})"
+                    ));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Some(info) = nse_info {
+        if quotes[0].sector_pe.is_none() {
+            quotes[0].sector_pe = info.sector_pe;
+        }
+        if quotes[0].trailing_pe.is_none() && info.pe.is_some() {
+            quotes[0].trailing_pe = info.pe;
+            metas[0].record(crate::provenance::F_PE, crate::provenance::NSE);
+        }
+        for f in info.flags {
+            metas[0].warn(f);
+        }
+        if info.sector_pe.is_some() {
+            metas[0].add_source(crate::provenance::NSE);
+        }
+        metas[0].set_fields(&crate::provenance::quote_field_checks(&quotes[0]));
+    }
 
     if !fmt.is_table() {
         if fmt == Format::Json {
-            let items: Vec<_> = quotes.iter().map(market::quote_json).collect();
+            let items: Vec<_> = quotes
+                .iter()
+                .zip(&metas)
+                .map(|(q, m)| {
+                    let mut v = market::quote_json(q);
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert(
+                            "meta".into(),
+                            serde_json::to_value(m).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    v
+                })
+                .collect();
             output::print_json(&items)?;
         } else {
             let rows: Vec<QuoteRow> = quotes.iter().map(QuoteRow::from).collect();
@@ -261,7 +343,7 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
     }
 
     let now = chrono::Utc::now();
-    for q in &quotes {
+    for (q, meta) in quotes.iter().zip(&metas) {
         let symbol = q.symbol.as_deref().unwrap_or("???");
         let name = q
             .long_name
@@ -333,6 +415,9 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
             },
         );
         print_kv(t(Msg::PeTtm), &format_optional_f64(q.trailing_pe, ""));
+        if let Some(spe) = q.sector_pe {
+            print_kv("Sector P/E (NSE)", &format!("{spe:.2}"));
+        }
         print_kv(
             t(Msg::EpsTtm),
             &format_optional_f64(q.eps_trailing_twelve_months, ""),
@@ -345,9 +430,15 @@ pub async fn cmd_quote(symbols: &[String], market: Market, fmt: Format) -> Resul
         {
             print_kv(t(Msg::DividendYield), &format!("{:.2}%", div * 100.0));
         }
-        if let Some(source) = &q.data_source {
-            println!("\n  {}", crate::providers::source_footer(source).dimmed());
+        // The meta footer names the sources; keep only CoinGecko's
+        // attribution, which its terms ask for.
+        if q.data_source.as_deref() == Some(crate::providers::ProviderKind::CoinGecko.name()) {
+            println!("\n  {}", "Powered by CoinGecko".dimmed());
         }
+        for w in &meta.warnings {
+            println!("  {} {}", "!".yellow(), w.dimmed());
+        }
+        println!("\n  {}", meta.footer().dimmed());
     }
     if quotes.len() == 1
         && let Some(sym) = quotes[0].symbol.as_deref()
@@ -378,24 +469,44 @@ pub async fn cmd_smart_overview(symbol: &str, market: Market, fmt: Format) -> Re
     if prof.mode == crate::config::ProfileMode::Ultra {
         return cmd_ultra_overview(symbol, &resolved, market).await;
     }
-    cmd_quote(&[symbol.to_string()], market, Format::Table).await?;
-    if let Ok(client) = YahooClient::new().await
-        && let Ok(bundle) = crate::research::fetch(
-            &client,
+    // Research first, so the rule-based action is the first line printed.
+    // One client serves the research and the quote: one handshake, and the
+    // quote the research fetched is reused from its cache.
+    let client = YahooClient::new().await.ok();
+    let researched = match &client {
+        Some(client) => crate::research::fetch(
+            client,
             &resolved,
             market,
             30,
-            crate::research::Needs::VERDICT,
+            crate::research::Needs::ACTION,
         )
         .await
-    {
-        let cards = crate::insights::generate_rich_insights(&bundle);
-        let v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+        .ok()
+        .map(|bundle| {
+            let cards = crate::insights::generate_rich_insights(&bundle);
+            let mut v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+            super::actions::apply_holding(&mut v, &bundle, market);
+            v
+        }),
+        None => None,
+    };
+    if let Some(v) = &researched {
+        println!();
+        print!("{}", crate::verdict::render_action(&v.action));
+    }
+    match &client {
+        Some(client) => {
+            cmd_quote_with(client, &[symbol.to_string()], market, Format::Table).await?
+        }
+        None => cmd_quote(&[symbol.to_string()], market, Format::Table).await?,
+    }
+    if let Some(v) = researched {
         print_section(&format!(
             "Quick Research Snapshot (6-Pillar Score · Profile: {})",
             prof.spec
         ));
-        crate::verdict::print_snapshot(&v, &resolved);
+        crate::verdict::print_snapshot_body(&v, &resolved);
         if prof.mode == crate::config::ProfileMode::Passive {
             println!();
             println!(
@@ -425,7 +536,7 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
         resolved,
         market,
         60,
-        crate::research::Needs::VERDICT | crate::research::Needs::STATEMENTS,
+        crate::research::Needs::ACTION,
     )
     .await;
     let bundle = match r {
@@ -439,6 +550,12 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
     let csym = market::currency_symbol(cur);
     let px = |v: Option<f64>| price_or_na(v, cur, resolved);
     let prof = crate::config::effective_profile();
+
+    let cards = crate::insights::generate_rich_insights(&bundle);
+    let mut v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
+    super::actions::apply_holding(&mut v, &bundle, market);
+    println!();
+    print!("{}", crate::verdict::render_action(&v.action));
 
     // 1. Header: Price, Change%, CapTier, 52W Distance, Circuits
     print_header(&format!(
@@ -490,8 +607,6 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
     );
 
     // 2. 6-Pillar Verdict + Piotroski F-Score + Altman Z + CFO/PAT
-    let cards = crate::insights::generate_rich_insights(&bundle);
-    let v = crate::verdict::generate_verdict_with_profile(&bundle, &cards, &prof);
     let sc = scorecard::generate_scorecard_report(&bundle);
     let cfo_pat = bundle
         .annual
@@ -514,7 +629,7 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
         "N/A".to_string()
     };
     print_section("1. Verdict & Accounting Forensics");
-    crate::verdict::print_snapshot(&v, resolved);
+    crate::verdict::print_snapshot_body(&v, resolved);
     println!(
         "  Piotroski F-Score: {}/{} ({})  |  Altman Z: {}  |  CFO/PAT: {}",
         sc.piotroski.score,
@@ -727,6 +842,7 @@ async fn cmd_ultra_overview(raw_symbol: &str, resolved: &str, market: Market) ->
     };
     println!("  Delivery %: {}  |  {}", deliv_str.bold(), holding_str);
     println!("  Insider Flow: {}", insider_str);
+    println!("  {}", bundle.meta.footer().dimmed());
     println!();
     Ok(())
 }
@@ -917,6 +1033,49 @@ pub async fn cmd_dashboard(market: Market) -> Result<()> {
                 .to_string()
         };
         print_kv(t(Msg::PnL), &pnl_str);
+        // Today's move: each holding against its previous close, at today's
+        // share count and exchange rate. Funds and SGBs have no previous
+        // close and are left out ([n/m] says how many count).
+        let day = super::portfolio::period_change("1 day", &portfolio, &val, |s| {
+            val.quote(s).and_then(|q| {
+                let prev = q.regular_market_previous_close?;
+                // If `regular_market_change` was supplied alongside `regular_market_price`,
+                // verify `prev` is on the same split basis (`price - change ≈ prev`);
+                // backup-filled previous closes on a split ex-date can be pre-split.
+                if let (Some(px), Some(chg)) = (q.regular_market_price, q.regular_market_change)
+                    && prev > 0.0
+                    && ((px - chg) - prev).abs() > prev.abs().max(px.abs()) * 0.05
+                {
+                    return None;
+                }
+                Some(prev)
+            })
+        });
+        let total_holdings = portfolio.holdings.len();
+        let day_str = match &day {
+            Some(c) => {
+                let pct = format!("({:+.2}%)", c.pct);
+                let cover = if c.covered < total_holdings {
+                    format!(" [{}/{}]", c.covered, total_holdings)
+                        .dimmed()
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} {}{}",
+                    super::portfolio::signed_money(c.change, cur),
+                    if c.change >= 0.0 {
+                        pct.green().to_string()
+                    } else {
+                        pct.red().to_string()
+                    },
+                    cover
+                )
+            }
+            None => "—".to_string(),
+        };
+        print_kv(t(Msg::DayChange), &day_str);
         if let Some(note) = val.fx_note() {
             println!("  {}", note.dimmed());
         }
@@ -1051,7 +1210,6 @@ pub async fn cmd_search(query: &str, fmt: Format) -> Result<()> {
     Ok(())
 }
 
-/// `stockwise doctor` — one screen that answers "is my setup working?".
 /// `stockwise cache status|clear`: the persistent response cache.
 pub async fn cmd_cache_clear(what: crate::db::CacheTarget) -> Result<()> {
     use crate::db::CacheTarget;
@@ -1102,376 +1260,6 @@ pub fn cmd_cache(clear: bool) -> Result<()> {
     print_kv("Cached bytes", &st.body_bytes.to_string());
     print_kv("File size", &format!("{} KiB", st.file_bytes / 1024));
     println!();
-    Ok(())
-}
-
-/// Whether one of the provider's key variables is set (never its value).
-fn provider_key_set(kind: crate::providers::ProviderKind) -> bool {
-    kind.key_envs()
-        .iter()
-        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
-}
-
-pub async fn cmd_doctor(market: Market, sources: crate::config::CliSources) -> Result<()> {
-    let ok = |s: &str| format!("{} {}", "✓".green(), s);
-    let warn = |s: &str| format!("{} {}", "!".yellow(), s);
-    let bad = |s: &str| format!("{} {}", "✗".red(), s);
-
-    print_header(&tf(Msg::DoctorTitle, &[&env!("CARGO_PKG_VERSION")]));
-
-    // Config file and defaults
-    let cfg = crate::config::state();
-    let cfg_path = cfg
-        .and_then(|s| s.path.as_ref())
-        .map_or("unknown (no config directory)".to_string(), |p| {
-            p.display().to_string()
-        });
-    let cfg_invalid = match cfg.map(|s| &s.status) {
-        Some(crate::config::Status::Loaded) => {
-            print_kv("Config file", &ok(&format!("{} (loaded)", cfg_path)));
-            if let Some(p) = crate::config::exposed_secrets() {
-                println!(
-                    "  {:<28} {}",
-                    "",
-                    warn(&format!(
-                        "holds notification secrets and other users can read it — run `chmod 600 {}`",
-                        p.display()
-                    ))
-                );
-            }
-            None
-        }
-        Some(crate::config::Status::Invalid(msg)) => {
-            print_kv("Config file", &bad(&format!("{} (invalid)", cfg_path)));
-            for line in msg.lines() {
-                println!("  {:<28} {}", "", line.red());
-            }
-            Some(cfg_path)
-        }
-        _ => {
-            print_kv(
-                "Config file",
-                &format!(
-                    "{} {}",
-                    cfg_path,
-                    "(none; optional — `stockwise config init` creates one)".dimmed()
-                ),
-            );
-            None
-        }
-    };
-    let market_src = match sources.market {
-        crate::config::Source::Flag => "from -m/--market",
-        crate::config::Source::Env => t(Msg::DoctorMarketFromEnv),
-        crate::config::Source::File => "from the config file",
-        crate::config::Source::Default => t(Msg::DoctorMarketDefault),
-    };
-    let market_name = match market {
-        Market::In => "in (India, NSE)".to_string(),
-        Market::Crypto => format!("crypto (vs {})", market::quote_currency()),
-        Market::Commodity => "commodity (COMEX gold/silver, NSE ETFs and SGBs)".to_string(),
-        Market::Global(x) => {
-            let info = x.info();
-            format!("{} ({}, {})", info.code, info.country, info.exchange_name)
-        }
-        Market::Us | Market::Fx => market.code().to_string(),
-    };
-    print_kv(
-        t(Msg::DoctorMarket),
-        &format!("{} — {}", market_name, market_src),
-    );
-    let lang_src = t(match crate::i18n::lang_source() {
-        crate::i18n::LangSource::Flag => Msg::DoctorLangFlag,
-        crate::i18n::LangSource::StockwiseLang => Msg::DoctorLangEnv,
-        crate::i18n::LangSource::Config => Msg::DoctorLangConfig,
-        crate::i18n::LangSource::Locale => Msg::DoctorLangLocale,
-        crate::i18n::LangSource::Default => Msg::DoctorLangDefault,
-    });
-    print_kv(
-        t(Msg::DoctorLanguage),
-        &format!("{} — {}", crate::i18n::lang().code(), lang_src),
-    );
-
-    // Data directory
-    match crate::store::data_dir() {
-        Ok(dir) => {
-            print_kv(t(Msg::DoctorDataDir), &ok(&dir.display().to_string()));
-            let files = [
-                "portfolio.json",
-                "watchlist.json",
-                "alerts.json",
-                "sim_history.json",
-                "wealth_history.json",
-            ];
-            let present: Vec<&str> = files
-                .iter()
-                .copied()
-                .filter(|f| dir.join(f).exists())
-                .collect();
-            print_kv(
-                t(Msg::DoctorDataFiles),
-                &if present.is_empty() {
-                    t(Msg::DoctorNoFilesYet).to_string()
-                } else {
-                    present.join(", ")
-                },
-            );
-        }
-        Err(e) => print_kv(t(Msg::DoctorDataDir), &bad(&format!("{:#}", e))),
-    }
-
-    // Market data: Yahoo is always needed (fundamentals, news, fallback).
-    let started = std::time::Instant::now();
-    let yahoo = match YahooClient::new().await {
-        Ok(client) => client
-            .yahoo_quote(&["^GSPC"])
-            .await
-            .map(|q| !q.is_empty())
-            .unwrap_or(false),
-        Err(_) => false,
-    };
-    print_kv(
-        "Yahoo Finance",
-        &if yahoo {
-            ok(&tf(Msg::DoctorReachable, &[&started.elapsed().as_millis()]))
-        } else {
-            bad(t(Msg::DoctorYahooUnreachable))
-        },
-    );
-
-    // New release: checked at most once a week (cached in the data directory).
-    // Only `doctor` and `update` look; no other command checks for updates.
-    print_kv("StockWise release", &super::doctor_version_line().await);
-
-    // Optional data provider
-    use crate::providers::{MarketData, Selection};
-    let provider_lines = match Selection::from_env() {
-        Selection::Yahoo => vec![t(Msg::DoctorProviderDefault).dimmed().to_string()],
-        Selection::Unknown(value) => vec![warn(&tf(Msg::DoctorProviderUnknown, &[&value]))],
-        Selection::MissingKey(kind) => vec![warn(&tf(
-            Msg::DoctorProviderNoKey,
-            &[&kind.name(), &kind.key_env()],
-        ))],
-        Selection::Ready(provider) => {
-            // One probe per source: NSE and BSE separately in mixed mode.
-            let mut lines = Vec::new();
-            for (source, probe) in provider.probes() {
-                let started = std::time::Instant::now();
-                lines.push(match provider.quotes(&[probe]).await {
-                    Ok(q) if q.iter().any(|q| q.regular_market_price.is_some()) => ok(&tf(
-                        Msg::DoctorProviderAnswered,
-                        &[&source, &probe, &started.elapsed().as_millis()],
-                    )),
-                    Ok(_) => warn(&tf(
-                        Msg::DoctorProviderFellBack,
-                        &[&source, &"no price returned"],
-                    )),
-                    Err(e) => warn(&tf(
-                        Msg::DoctorProviderFellBack,
-                        &[&source, &format!("{:#}", e)],
-                    )),
-                });
-            }
-            if !provider.kind().needs_key() {
-                lines.push(t(Msg::DoctorExchangeNote).dimmed().to_string());
-            }
-            lines
-        }
-    };
-    for (i, line) in provider_lines.iter().enumerate() {
-        print_kv(
-            if i == 0 {
-                t(Msg::DoctorDataProvider)
-            } else {
-                ""
-            },
-            line,
-        );
-    }
-
-    // Providers that back Yahoo up: the keyed ones (Finnhub, FMP) and the
-    // keyless backups (Frankfurter for FX, CoinGecko for crypto). One probe
-    // each, the key never shown.
-    {
-        use crate::providers::router::Router;
-        let primary = match Selection::from_env() {
-            Selection::Ready(p) => Some(p.kind()),
-            _ => None,
-        };
-        let router = Router::from_env(primary, None);
-        let mut first = true;
-        for kind in [
-            crate::providers::ProviderKind::Finnhub,
-            crate::providers::ProviderKind::Fmp,
-            crate::providers::ProviderKind::Frankfurter,
-            crate::providers::ProviderKind::CoinGecko,
-        ] {
-            if Some(kind) == primary {
-                continue;
-            }
-            let line = match router.members().iter().find(|p| p.kind() == kind) {
-                None if kind.is_keyless_backup() => format!(
-                    "{} {}",
-                    kind.name(),
-                    "turned off (STOCKWISE_KEYLESS_BACKUPS)".dimmed()
-                ),
-                None => format!(
-                    "{} {}",
-                    kind.name(),
-                    format!(
-                        "not configured (set {} to use it as a backup)",
-                        kind.key_env()
-                    )
-                    .dimmed()
-                ),
-                Some(provider) => {
-                    let probe = provider.probes().first().map_or("AAPL", |p| p.1);
-                    let started = std::time::Instant::now();
-                    let line = match provider.quotes(&[probe]).await {
-                        Ok(q) if q.iter().any(|q| q.regular_market_price.is_some()) => ok(&tf(
-                            Msg::DoctorProviderAnswered,
-                            &[&kind.name(), &probe, &started.elapsed().as_millis()],
-                        )),
-                        Ok(_) => warn(&tf(
-                            Msg::DoctorProviderFellBack,
-                            &[&kind.name(), &"no price returned"],
-                        )),
-                        Err(e) => warn(&tf(
-                            Msg::DoctorProviderFellBack,
-                            &[&kind.name(), &format!("{:#}", e)],
-                        )),
-                    };
-                    // CoinGecko's key is optional: say which way it runs.
-                    if kind == crate::providers::ProviderKind::CoinGecko {
-                        let how = if provider_key_set(kind) {
-                            "Demo key from COINGECKO_API_KEY"
-                        } else {
-                            "keyless; COINGECKO_API_KEY takes an optional free Demo key"
-                        };
-                        format!("{line} {}", format!("({how})").dimmed())
-                    } else {
-                        line
-                    }
-                }
-            };
-            print_kv(if first { "Backup providers" } else { "" }, &line);
-            first = false;
-        }
-    }
-
-    // Cache
-    let redis = crate::api::connect_redis().await.is_some();
-    print_kv(
-        t(Msg::DoctorRedis),
-        &if redis {
-            ok(t(Msg::DoctorConnected))
-        } else {
-            t(Msg::DoctorRedisNotUsed).dimmed().to_string()
-        },
-    );
-
-    match crate::db::http_stats() {
-        Some(st) => print_kv(
-            "Cache database",
-            &ok(&format!(
-                "cache.db ({} entries, {} KiB)",
-                st.entries,
-                st.file_bytes / 1024
-            )),
-        ),
-        None => print_kv(
-            "Cache database",
-            &"off or unavailable (in-memory cache only)"
-                .dimmed()
-                .to_string(),
-        ),
-    }
-
-    // AI — provider and model, never the key itself.
-    let ai = crate::ai::AiClient::connect().await;
-    let ai_line = if ai.config_error().is_some() {
-        let value = std::env::var("STOCKWISE_AI_PROVIDER").unwrap_or_default();
-        bad(&tf(Msg::DoctorAiUnknown, &[&value.trim()]))
-    } else {
-        let provider = ai.provider();
-        match provider.key_env() {
-            Some(key_env) if ai.has_api_key() => ok(&tf(
-                Msg::DoctorCloudReady,
-                &[&provider.name(), &ai.model(), &key_env],
-            )),
-            Some(key_env) => warn(&tf(Msg::DoctorCloudNoKey, &[&provider.name(), &key_env])),
-            None => match ai.has_model().await {
-                Some(true) => ok(&tf(Msg::DoctorOllamaReady, &[&ai.model()])),
-                Some(false) => warn(&tf(Msg::DoctorOllamaNoModel, &[&ai.model()])),
-                None => t(Msg::DoctorOllamaDown).dimmed().to_string(),
-            },
-        }
-    };
-    print_kv(t(Msg::DoctorAi), &ai_line);
-
-    // Brokers: Angel One always; the others once they have a config file.
-    // Read-only: doctor never moves secrets into the keyring.
-    let backend = crate::brokers::secrets::backend();
-    print_kv(
-        t(Msg::DoctorKeyring),
-        &match backend.available() {
-            Ok(()) => ok(&tf(Msg::DoctorKeyringAvailable, &[&backend.name()])),
-            Err(reason) => tf(Msg::DoctorKeyringNotUsed, &[&reason])
-                .dimmed()
-                .to_string(),
-        },
-    );
-    for kind in crate::brokers::BrokerKind::ALL {
-        let line = match crate::brokers::config_status(kind, false) {
-            Ok(st) if !st.exists && kind != crate::brokers::BrokerKind::Angel => continue,
-            Ok(st) if st.configured => {
-                let limits = crate::brokers::order_limits(kind).unwrap_or_default();
-                let mut extra = limits
-                    .max_order_value
-                    .map(|v| tf(Msg::DoctorAngelMaxOrder, &[&format!("{:.0}", v)]))
-                    .unwrap_or_default();
-                if let Some(s) = &st.session {
-                    extra.push_str(&format!(", {s}"));
-                }
-                match (kind.experimental(), limits.enable_orders) {
-                    (true, true) => extra.push_str(&format!(", {}", t(Msg::DoctorBrokerOrdersOn))),
-                    (true, false) => {
-                        extra.push_str(&format!(", {}", t(Msg::DoctorBrokerOrdersOff)))
-                    }
-                    (false, true) => extra.push_str(&format!(", {}", t(Msg::DoctorAngelStopGttOn))),
-                    (false, false) => {}
-                }
-                extra.push_str(&format!(
-                    ", {}",
-                    crate::brokers::secrets::describe(&st.storage, backend)
-                ));
-                ok(&tf(Msg::DoctorAngelConfigured, &[&st.summary, &extra]))
-            }
-            Ok(st) if st.exists => warn(&tf(
-                Msg::DoctorBrokerPlaceholder,
-                &[&st.path.display(), &kind.id()],
-            )),
-            Ok(_) => t(Msg::DoctorAngelNotConfigured).dimmed().to_string(),
-            Err(e) => warn(&format!("{:#}", e)),
-        };
-        let label = if kind == crate::brokers::BrokerKind::Angel {
-            t(Msg::DoctorAngel).to_string()
-        } else {
-            kind.display()
-        };
-        print_kv(&label, &line);
-    }
-    println!();
-
-    if let Some(path) = cfg_invalid {
-        bail!(
-            "Config file {} is invalid — fix it, or replace it with `stockwise config init --force`",
-            path
-        );
-    }
-    if !yahoo {
-        bail!("{}", t(Msg::DoctorMarketDataDown));
-    }
     Ok(())
 }
 

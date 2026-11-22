@@ -165,8 +165,12 @@ Positions carry across windows: the chosen parameters trade from the start of
 their train window, so a position they would already hold is open when the
 test window starts, and a position open at a window's end is valued, not
 sold — only the last window sells at the final close. A trade is listed in
-the window it closes in. Switching parameters between windows is assumed to
-cost nothing.
+the window it closes in. A trade opened before that window is counted from
+the window's start: its entry is the close before the window, and only its
+exit costs count, so the out-of-sample win rate, average win and loss hold no
+in-sample gain. Trade money scales with each window's capital, like the
+equity curve. Switching parameters between windows is assumed to cost
+nothing.
 
 ```bash
 stockwise backtest walkforward RELIANCE -s rsi --train 1y --test 3mo -p 10y

@@ -43,23 +43,85 @@ pub fn benchmark_price_on(closes: &[(NaiveDate, f64)], date: NaiveDate) -> Optio
     (p.is_finite() && p > 0.0).then_some(p)
 }
 
-/// Accumulated shares and terminal value of the benchmark "Index Twin".
-/// `flows`: `(date, amount)` in base currency where investments/buys are negative
-/// and sales/dividends are positive.
+/// The benchmark "Index Twin": every buy buys index units on the same day;
+/// every sale or dividend sells them, but never more than the twin holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Twin {
+    pub shares: f64,
+    pub value: f64,
+    /// The twin's own cash flows: buys as given, sales capped at what the
+    /// twin could sell.
+    pub flows: Vec<(NaiveDate, f64)>,
+    /// Sales or dividends larger than the twin's holding at the time.
+    pub capped: usize,
+    /// End value of the units capped sales could not sell (0 when nothing
+    /// was capped): the part of those distributions the twin could not pay.
+    /// In minor units ([`crate::money`]).
+    pub shortfall_value: i64,
+}
+
+/// Build the [`Twin`] of `flows` (`(date, amount)` in base currency, buys
+/// negative, sales and dividends positive).
+pub fn twin(
+    flows: &[(NaiveDate, f64)],
+    benchmark_closes: &[(NaiveDate, f64)],
+    today: NaiveDate,
+) -> Option<Twin> {
+    let end_price = benchmark_price_on(benchmark_closes, today)?;
+    let mut shares: f64 = 0.0;
+    let mut capped = 0;
+    let mut shortfall_units = 0.0;
+    let mut twin_flows = Vec::with_capacity(flows.len());
+    for &(date, amount) in flows {
+        let p = benchmark_price_on(benchmark_closes, date)?;
+        let units = -amount / p;
+        if units >= 0.0 {
+            shares += units;
+            twin_flows.push((date, amount));
+        } else {
+            // A sale: never more units than the twin holds (no short).
+            let sold = (-units).min(shares.max(0.0));
+            if sold + 1e-12 < -units {
+                capped += 1;
+                shortfall_units += -units - sold;
+            }
+            shares -= sold;
+            if sold > 0.0 {
+                twin_flows.push((date, sold * p));
+            }
+        }
+    }
+    Some(Twin {
+        shares,
+        value: shares * end_price,
+        flows: twin_flows,
+        capped,
+        shortfall_value: crate::money::to_minor(shortfall_units * end_price),
+    })
+}
+
+/// Accumulated shares and terminal value of the benchmark "Index Twin"
+/// (see [`twin`]).
 pub fn twin_shares_and_value(
     flows: &[(NaiveDate, f64)],
     benchmark_closes: &[(NaiveDate, f64)],
     today: NaiveDate,
 ) -> Option<(f64, f64)> {
-    let end_price = benchmark_price_on(benchmark_closes, today)?;
-    let mut twin_shares = 0.0;
-    for &(date, amount) in flows {
-        let p = benchmark_price_on(benchmark_closes, date)?;
-        // Negative amount (buy) buys benchmark shares (+); positive amount (sell/div) sells (-).
-        twin_shares += -amount / p;
-    }
-    let twin_value = twin_shares * end_price;
-    Some((twin_shares, twin_value))
+    twin(flows, benchmark_closes, today).map(|t| (t.shares, t.value))
+}
+
+/// Flows dated before the benchmark's first close (more than a week
+/// before it): those are priced at the first close, so the comparison
+/// is approximate for them.
+pub fn flows_before_index(
+    flows: &[(NaiveDate, f64)],
+    benchmark_closes: &[(NaiveDate, f64)],
+) -> usize {
+    let Some(first) = benchmark_closes.first().map(|c| c.0) else {
+        return flows.len();
+    };
+    let cutoff = first - chrono::Duration::days(7);
+    flows.iter().filter(|(d, _)| *d < cutoff).count()
 }
 
 /// Kaplan-Schoar PME ratio:
@@ -154,7 +216,8 @@ pub struct PmeResult {
     pub actual_value: f64,
     /// Value had the cash flows been invested in the benchmark twin
     pub twin_value: f64,
-    /// Actual value minus twin value (+Alpha / -Drag in currency units)
+    /// Actual value minus twin value, plus the end value of distributions
+    /// the twin could not match (+Alpha / -Drag in currency units)
     pub value_added: f64,
     /// Kaplan-Schoar PME (> 1.0 outperformance, 1.0 parity)
     pub pme_ratio: Option<f64>,
@@ -164,6 +227,9 @@ pub struct PmeResult {
     pub actual_xirr_percent: Option<f64>,
     /// Benchmark twin annualized money-weighted return (XIRR %)
     pub twin_xirr_percent: Option<f64>,
+    /// Sales or dividends the twin could not fully match (it held fewer
+    /// index units than they would sell).
+    pub twin_capped_sales: usize,
 }
 
 /// Compute PME metrics for a stream of dated cash flows and ending value.
@@ -176,13 +242,22 @@ pub fn compute_pme(
     if flows.is_empty() {
         return None;
     }
-    let (_, twin_value) = twin_shares_and_value(flows, benchmark_closes, today)?;
-    let value_added = actual_value - twin_value;
+    let twin = twin(flows, benchmark_closes, today)?;
+    let twin_value = twin.value;
+    // A distribution the twin could not match still counts for the
+    // portfolio: its unmatched units are valued at the end price.
+    // Added in minor units, so the money figure is exact.
+    let value_added = {
+        use crate::money::{from_minor, to_minor};
+        from_minor(to_minor(actual_value) - to_minor(twin_value) + twin.shortfall_value)
+    };
     let pme_ratio = kaplan_schoar_pme(flows, actual_value, benchmark_closes, today);
     let direct_alpha_percent =
         direct_alpha(flows, actual_value, benchmark_closes, today).map(|a| a * 100.0);
     let actual_xirr_percent = crate::portfolio::xirr(flows, actual_value, today).map(|r| r * 100.0);
-    let twin_xirr_percent = crate::portfolio::xirr(flows, twin_value, today).map(|r| r * 100.0);
+    // The twin's own flows: a capped sale paid out less.
+    let twin_xirr_percent =
+        crate::portfolio::xirr(&twin.flows, twin_value, today).map(|r| r * 100.0);
 
     Some(PmeResult {
         actual_value,
@@ -192,6 +267,7 @@ pub fn compute_pme(
         direct_alpha_percent,
         actual_xirr_percent,
         twin_xirr_percent,
+        twin_capped_sales: twin.capped,
     })
 }
 
@@ -228,6 +304,21 @@ pub struct PmeSummary {
     pub twin_xirr_percent: Option<f64>,
     pub twin_shares: f64,
     pub benchmark_end_price: f64,
+    /// Open holdings without a price or exchange rate: their flows are left
+    /// out on both sides, not counted as a total loss.
+    pub excluded: Vec<String>,
+    /// `total_return` (dividends reinvested, compared with the portfolio's
+    /// dividends) or `price` (dividends left out on both sides).
+    pub benchmark_kind: String,
+    pub dividends_included: bool,
+    /// The benchmark's first close, and how many flows are dated more than a
+    /// week before it (priced at that first close; a flow a few days before
+    /// is a weekend or holiday gap, not missing history).
+    pub index_start_date: String,
+    pub flows_before_index: usize,
+    /// Distributions (sales or dividends) larger than the twin's holding at
+    /// the time.
+    pub twin_capped_sales: usize,
 }
 
 /// Complete report of the Public Market Equivalent (Index Twin) analysis.
@@ -243,6 +334,47 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn the_twin_never_goes_short() {
+        let closes = vec![(d("2024-01-01"), 100.0), (d("2025-01-01"), 50.0)];
+        // Bought 1,000 (10 units); a stock that rose sells for 3,000 when the
+        // index halved: the twin can sell only its 10 units (500).
+        let flows = vec![(d("2024-01-01"), -1000.0), (d("2025-01-01"), 3000.0)];
+        let t = twin(&flows, &closes, d("2025-01-01")).unwrap();
+        assert_eq!(t.shares, 0.0);
+        assert_eq!(t.value, 0.0);
+        assert_eq!(t.capped, 1);
+        assert_eq!(t.flows[1], (d("2025-01-01"), 500.0));
+        let res = compute_pme(&flows, 0.0, &closes, d("2025-01-01")).unwrap();
+        assert_eq!(res.twin_capped_sales, 1);
+        assert!(res.twin_value >= 0.0);
+        // The 50 units the twin could not sell, at the end price of 50.
+        assert_eq!(t.shortfall_value, 250_000);
+        assert_eq!(res.value_added, 2500.0);
+    }
+
+    #[test]
+    fn an_uncapped_twin_has_no_shortfall() {
+        let closes = vec![(d("2024-01-01"), 100.0), (d("2025-01-01"), 120.0)];
+        let flows = vec![(d("2024-01-01"), -1000.0), (d("2025-01-01"), 600.0)];
+        let t = twin(&flows, &closes, d("2025-01-01")).unwrap();
+        assert_eq!((t.capped, t.shortfall_value), (0, 0));
+        let res = compute_pme(&flows, 700.0, &closes, d("2025-01-01")).unwrap();
+        // value_added is rounded to the minor unit.
+        assert!((res.value_added - (700.0 - t.value)).abs() <= 0.005);
+    }
+
+    #[test]
+    fn flows_before_the_index_history_are_counted() {
+        let closes = vec![(d("2020-01-01"), 100.0), (d("2025-01-01"), 150.0)];
+        let flows = vec![
+            (d("2019-06-01"), -100.0),
+            (d("2019-12-28"), -100.0),
+            (d("2021-01-01"), -100.0),
+        ];
+        assert_eq!(flows_before_index(&flows, &closes), 1);
     }
 
     #[test]

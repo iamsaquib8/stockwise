@@ -12,8 +12,11 @@
 //! advice" note and kept small enough for a model's context.
 
 mod args;
-mod extra;
+pub(crate) mod extra;
 mod handlers;
+mod more;
+mod pulse;
+pub mod schema;
 mod workspace;
 
 pub use args::Args;
@@ -111,9 +114,82 @@ const fn opt(name: &'static str, kind: Kind, description: &'static str) -> Param
     }
 }
 
-/// Personal tools that also fetch public market data on their default path
-/// (prices, statements, fund holdings), so hosts see them as open-world.
-pub const PERSONAL_OPEN_WORLD: &[&str] = &["portfolio_checkup"];
+/// Read tools that never leave the machine: calculators and local files.
+/// Every other tool fetches market data (quotes, NAVs, statements) on its
+/// default path, so hosts see it as open-world, personal or not.
+pub const CLOSED_WORLD: &[&str] = &[
+    "holdings_lots",
+    "profile",
+    "profile_questions",
+    "changes_list",
+    "goal_sip",
+    "goal_retire",
+    "goal_education",
+    "goal_swp",
+    "goal_prepay",
+    "goal_emergency",
+    "monitor_status",
+];
+
+/// MCP tool annotations: what a host may assume before calling a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hints {
+    /// Changes nothing (`readOnlyHint`).
+    pub read_only: bool,
+    /// May overwrite or remove the user's data (`destructiveHint`).
+    pub destructive: bool,
+    /// Calling it again with the same arguments changes nothing more
+    /// (`idempotentHint`).
+    pub idempotent: bool,
+    /// Reaches outside the machine (`openWorldHint`).
+    pub open_world: bool,
+}
+
+/// Read tools that also append a local record (`picks`, `ipo_board`, and
+/// `ipo_analyze` log lists/verdicts to the track record). Neither read-only
+/// nor idempotent (a repeat can append new records when market data moves),
+/// and never destructive.
+pub const LOGGING_READS: &[&str] = &["picks", "ipo_board", "ipo_analyze"];
+
+/// The annotations of `tool`. Read tools are read-only and idempotent (except
+/// [`LOGGING_READS`], which append to the track record and are neither
+/// read-only nor idempotent). Write tools only touch local files, so they are
+/// closed-world; see [`workspace::write_effect`] for which overwrite or
+/// remove and which repeat safely.
+pub fn hints(tool: &Tool) -> Hints {
+    match access(tool.name) {
+        Access::Read => Hints {
+            read_only: !LOGGING_READS.contains(&tool.name),
+            destructive: false,
+            // A logging read can append new picks when market data moves.
+            idempotent: !LOGGING_READS.contains(&tool.name),
+            open_world: !CLOSED_WORLD.contains(&tool.name),
+        },
+        Access::Workspace | Access::Portfolio => {
+            let (destructive, idempotent) = workspace::write_effect(tool.name);
+            Hints {
+                read_only: false,
+                destructive,
+                idempotent,
+                open_world: false,
+            }
+        }
+    }
+}
+
+/// How long a read tool may run before it is stopped: the market scans and
+/// portfolio analyses get longer. Writes are never cut off half-way.
+pub fn default_timeout(name: &str) -> std::time::Duration {
+    let secs = match name {
+        "picks" | "picks_review" | "market_conditions" | "portfolio_analyze"
+        | "portfolio_checkup" | "portfolio_pme" | "backtest" | "screen" | "verdicts" | "movers"
+        | "ipo_analyze" | "mf_bleed" | "income_calendar" | "compare" | "returns" | "correlate"
+        | "portfolio_wrap" | "portfolio_review" | "whats_hot" | "today" | "news_feed"
+        | "digest" => 180,
+        _ => 60,
+    };
+    std::time::Duration::from_secs(secs)
+}
 
 /// One tool: its name (`^[a-z_]+$`), a title for people, a description for
 /// the model, and its parameters.
@@ -292,12 +368,13 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "quote",
         title: "Stock quotes",
-        description: "Live (often delayed) quotes for up to 20 tickers: price, change, day range, \
-                      volume, 52-week range, market cap, P/E. Unknown tickers are listed in `missing`.",
+        description: "Live (often delayed) quotes for up to 25 tickers in one call: price, change, \
+                      day range, volume, 52-week range, market cap, P/E. Unknown tickers are listed \
+                      in `missing`.",
         params: &[
             req(
                 "symbols",
-                Kind::StrList { max: 20 },
+                Kind::StrList { max: 25 },
                 "Tickers, e.g. [\"RELIANCE\", \"TCS\"]",
             ),
             MARKET,
@@ -349,10 +426,58 @@ pub const TOOLS: &[Tool] = &[
                       or no data) and the facts behind it, a weighted composite (0-100) and the \
                       share of the model's inputs that had data. Pillars without data are marked \
                       \"no data\" and left out of the composite; crypto, FX and indices get only \
-                      the technical pillar. It describes the data and is not a recommendation: \
-                      do not present it as advice or as a call on the stock.",
+                      the technical pillar. The scores themselves are not a recommendation; \
+                      the `action` object is StockWise's rule-based call (see `stock_action`), \
+                      to be quoted as returned, never changed.",
         params: &[SYMBOL, MARKET],
         personal: false,
+    },
+    Tool {
+        name: "stock_action",
+        title: "Rule-based action for a stock",
+        description: "StockWise's deterministic, rule-based action for one stock: BUY, WATCH or \
+                      AVOID when not held; ADD, HOLD, TRIM or EXIT when the local portfolio holds \
+                      it; NO CALL when data coverage is below 60% (with the missing fields). \
+                      Returns the kind, confidence, up to three reasons, the invalidation price (a \
+                      daily close below it invalidates the action), review date, position-size \
+                      hint, tax note, methodology version and disclaimer, plus the composite \
+                      score and coverage behind it. Present the action exactly as returned; never \
+                      change it or add price levels. Educational signal, not personalised advice.",
+        params: &[
+            SYMBOL,
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "long (years, default) or short (weeks to months: tighter invalidation, 10-session review)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "portfolio_review",
+        title: "Rule-based review of holdings",
+        description: "The rule-based action for every holding of the local portfolio, sorted EXIT, \
+                      TRIM, ADD, HOLD, then NO CALL: each with confidence, reasons, invalidation \
+                      price, review date, weight, P&L, the shares a TRIM sells to get back under \
+                      the profile's max_stock_weight (look-through via funds included) and a tax \
+                      note when waiting a few days for long-term rates saves tax. Quote every \
+                      action as returned; never change one. Educational signal, not personalised \
+                      advice.",
+        params: &[
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "long (years, default) or short (weeks to months)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
     },
     Tool {
         name: "scorecard",
@@ -776,8 +901,11 @@ pub const TOOLS: &[Tool] = &[
         name: "rebalance",
         title: "Portfolio rebalance plan",
         description: "Rebalance plan for the user's portfolio against their saved target weights \
-                      (or equal weight): current vs target weight, drift tolerance band, and \
-                      buy/sell trade sizing (or buy-only allocation when `inflow` is provided).",
+                      (symbols, sectors or asset classes; equal weight without any): current vs \
+                      target weight, drift tolerance band, whole-share trades whose cash \
+                      balances, the lots each sell takes, its STCG/LTCG tax and trade costs. \
+                      `inflow` invests new cash buy-only (add `with_sells` for a full \
+                      rebalance); `raise` sells only, at the lowest tax, to raise cash.",
         params: &[
             opt(
                 "inflow",
@@ -786,6 +914,27 @@ pub const TOOLS: &[Tool] = &[
                     max: 1e11,
                 },
                 "Fresh cash inflow for buy-only rebalancing without selling",
+            ),
+            opt(
+                "with_sells",
+                Kind::Bool,
+                "With inflow: also sell overweight holdings (a full rebalance)",
+            ),
+            opt(
+                "raise",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1e11,
+                },
+                "Sell only, to raise this much cash at the lowest tax",
+            ),
+            opt(
+                "cash_buffer",
+                Kind::Number {
+                    min: 0.0,
+                    max: 1e11,
+                },
+                "Cash to keep uninvested",
             ),
             opt(
                 "drift",
@@ -922,11 +1071,15 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "ipo_board",
         title: "Indian IPO board",
-        description: "Indian IPOs from NSE: issues open for bidding now, upcoming issues and \
-                      recently listed ones, each with price band, lot size, minimum application, \
-                      issue size, live QIB/NII/retail subscription and a quick signal, plus an \
-                      IPO-market regime (share of recent listings above issue price, NIFTY, VIX). \
-                      Mainboard and SME issues are labelled.",
+        description: "Indian IPOs from NSE, with BSE's public-issue pages filling fields NSE \
+                      lacks (`meta` names the sources, `field_sources`, `missing` and \
+                      `coverage`): issues open for bidding now, upcoming issues and recently listed \
+                      ones, each with price band, lot size, minimum application, issue size and \
+                      live QIB/NII/retail subscription. Open and upcoming issues carry the \
+                      engine's `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT with its QIB trigger, \
+                      AVOID or NO_CALL, with reasons and confidence). Recent listings show their \
+                      listing-day return; the regime is the recency-weighted median listing-day \
+                      return. Mainboard and SME issues are labelled.",
         params: &[
             opt(
                 "board",
@@ -944,13 +1097,17 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "ipo_analyze",
         title: "Indian IPO analysis",
-        description: "Deep analysis of one Indian IPO by NSE symbol or company name: issue terms \
-                      (fresh issue vs offer for sale, anchor, lead managers), subscription by \
-                      category (QIB with mutual-fund share, bNII, sNII, retail and cut-off bids), \
-                      demand by price, SEBI allotment odds for retail, sNII and bNII (and the odds \
-                      at the `capital` amount when given), unofficial GMP from the press, and a \
-                      6-pillar score with demand and long-term profile labels. Describes the \
-                      data; not a recommendation.",
+        description: "One Indian IPO by NSE symbol or company name (from NSE, with BSE filling \
+                      gaps; `meta` names the sources, `field_sources`, `missing` and `coverage`), \
+                      led by the rule-based `verdict` (APPLY, APPLY_SELL_ON_LISTING, WAIT, AVOID, \
+                      NO_CALL or LISTED) with up to three reasons, confidence, trigger or \
+                      invalidation, review date, coverage and missing fields; the calibrated \
+                      listing-day model (expected gain, P(close below issue), fit stats); \
+                      expected value per minimum application; the listing-day plan and anchor \
+                      lock-in dates; valuation at the upper band against listed peers (from the \
+                      user's RHP figures file); subscription by category; allotment odds from \
+                      application counts (and what `capital` buys); unofficial GMP. Report the \
+                      verdict as given; never change it.",
         params: &[
             req(
                 "symbol",
@@ -1308,7 +1465,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "picks",
         title: "Highest-scoring stocks",
-        description: "Stocks of the market ranked against each other on four pillars (value, quality, growth, trend), each a percentile among the stocks scanned, with the share of the score that had data. A score of the data, not a recommendation.",
+        description: "Stocks of the market that clear size and liquidity floors, ranked against each other on five pillars (value, quality, growth, trend, risk), each a percentile among the stocks scanned, with the share of the score that had data. Losses and negative book value rank last; implausible figures are listed separately to check; at most 3 per sector.",
         params: &[
             UNIVERSE,
             opt(
@@ -1320,6 +1477,54 @@ pub const TOOLS: &[Tool] = &[
                 "top",
                 Kind::Integer { min: 1, max: 50 },
                 "How many of the highest scores (default 10)",
+            ),
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "long (years: value, quality, growth lead; default) or short (weeks to months: momentum, volume, risk lead)",
+            ),
+            opt(
+                "min_mcap",
+                Kind::Number { min: 0.0, max: 1e7 },
+                "Least market cap: crore in India, millions elsewhere. Defaults for the default tier: India 500, US 1000; `cap` small: India 500, US 300; micro: India 100, US 50; other exchanges: none. 0 turns the floor off",
+            ),
+            opt(
+                "min_adv",
+                Kind::Number { min: 0.0, max: 1e6 },
+                "Least 3-month average value traded a day: crore in India, millions elsewhere. Defaults for the default tier: India 2, US 5; `cap` small: India 1, US 2; micro: India 0.5, US 0.5; other exchanges: none. 0 turns the floor off",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "picks_review",
+        title: "Track record of picks",
+        description: "How past `picks` lists did: every list (from the CLI or this tool) is logged, and each stock is measured from the day it was first listed against NIFTY 50 or the S&P 500 total return, with hit rate, share that beat the index and mean and median return and excess. Price return, dividends not included; past lists do not predict future ones.",
+        params: &[
+            opt(
+                "since",
+                Kind::Str,
+                "Look-back window: 90d (default), 12w, 6m, 1y or a number of days",
+            ),
+            opt(
+                "horizon",
+                Kind::Enum(&["long", "short"]),
+                "Which lists: long (default) or short",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "verdicts",
+        title: "6-pillar scores for several stocks",
+        description: "The verdict tool's 6-pillar scores for up to 25 tickers in one call, compact: composite (0-100), data coverage (percent of inputs with data), `low_coverage` when under 60%, and each pillar's score and band. Stocks that fail are listed in `failed`. Describes data; it is not a recommendation.",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 25 },
+                "Tickers, e.g. [\"TCS\", \"INFY\", \"HDFCBANK\"]",
             ),
             MARKET,
         ],
@@ -1418,6 +1623,234 @@ pub const TOOLS: &[Tool] = &[
         )],
         personal: true,
     },
+    // India-first extras; handlers in more.rs.
+    Tool {
+        name: "bonds_yields",
+        title: "Indian government bond yields",
+        description: "India's government securities yield curve: T-bill and G-sec yields by tenor (91 days to 40 years) with the benchmark security, its yield to maturity and the date, from CCIL (RBI's list when CCIL is down).",
+        params: &[],
+        personal: false,
+    },
+    Tool {
+        name: "bonds_list",
+        title: "Find an Indian government security",
+        description: "RBI's list of outstanding central government securities: ISIN, name (e.g. 7.18% GS 2033), coupon, maturity, the NSE symbol and the amount outstanding in crore. Filter by words of the name, an ISIN or a maturity year.",
+        params: &[opt(
+            "query",
+            Kind::Str,
+            "Words, an ISIN or a maturity year, e.g. \"2033\", \"718GS2033\"",
+        )],
+        personal: false,
+    },
+    Tool {
+        name: "bonds_calc",
+        title: "G-sec price and yield calculator",
+        description: "Price to yield or yield to price for an Indian government security (semi-annual coupons, 30/360) or a T-bill: clean and dirty price, accrued interest, yield to maturity, modified duration, convexity and the cash flows. Give a security (its name or ISIN, looked up in RBI's list) or a coupon and maturity, and a price or a yield.",
+        params: &[
+            opt(
+                "security",
+                Kind::Str,
+                "Name or ISIN, e.g. 718GS2033 or IN0020230036",
+            ),
+            opt(
+                "coupon",
+                Kind::Number {
+                    min: 0.0,
+                    max: 30.0,
+                },
+                "Coupon, percent a year (with maturity, instead of a security)",
+            ),
+            opt("maturity", Kind::Str, "Maturity date YYYY-MM-DD"),
+            opt(
+                "price",
+                Kind::Number {
+                    min: 1.0,
+                    max: 1000.0,
+                },
+                "Price per ₹100 face value",
+            ),
+            opt(
+                "ytm",
+                Kind::Number {
+                    min: 0.0,
+                    max: 50.0,
+                },
+                "Yield to maturity, percent (instead of a price)",
+            ),
+            opt(
+                "settle",
+                Kind::Str,
+                "Settlement date YYYY-MM-DD (default: today's session)",
+            ),
+            opt("tbill", Kind::Bool, "A Treasury bill (discount, no coupon)"),
+            opt(
+                "dirty",
+                Kind::Bool,
+                "The price includes accrued interest (NSE quotes G-secs dirty)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "commodity",
+        title: "Gold, silver and Sovereign Gold Bonds",
+        description: "Gold and silver for Indian investors. spot: international gold and silver in rupees per 10 g and per kg, with USD/INR. futures: MCX-style futures quotes. etfs: gold and silver ETFs on NSE. sgb: every Sovereign Gold Bond series on NSE with its price, the gold value of one unit, the premium or discount to gold, coupon and maturity.",
+        params: &[opt(
+            "view",
+            Kind::Enum(&["spot", "futures", "etfs", "sgb"]),
+            "Which view (default spot)",
+        )],
+        personal: false,
+    },
+    Tool {
+        name: "fx_history",
+        title: "Currency against the rupee",
+        description: "History of a currency against the rupee (or another base): first and last rate, change, high and low over a period and the recent daily rates. Useful for US holdings of an Indian investor (USD/INR moves change their rupee value).",
+        params: &[
+            opt(
+                "currency",
+                Kind::Str,
+                "3-letter code, e.g. USD (default), EUR, GBP, AED, SGD, JPY",
+            ),
+            opt("base", Kind::Str, "Base currency (default INR)"),
+            opt(
+                "period",
+                Kind::Enum(&["1mo", "3mo", "6mo", "ytd", "1y", "2y", "5y", "10y"]),
+                "Period (default 1y)",
+            ),
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "returns",
+        title: "Trailing returns",
+        description: "A stock's, ETF's or index's trailing price returns over 1 week, 1, 3 and 6 months and 1, 2 and 5 years, annualized beyond a year, and what ₹1 lakh (or 100,000 of its currency) became. Price returns: dividends not included.",
+        params: &[
+            req("symbol", Kind::Str, "Ticker, e.g. NIFTYBEES, ^NSEI, TCS"),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "correlate",
+        title: "Correlation of stocks",
+        description: "How closely 2 to 10 tickers moved together over the last year: the correlation of daily returns on common trading days for each pair, as correlations[A][B] (1 moves together, 0 unrelated, -1 opposite). Useful to see whether holdings diversify each other.",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 10 },
+                "2 to 10 tickers, e.g. [\"HDFCBANK\", \"ICICIBANK\", \"TCS\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "compare",
+        title: "Compare stocks side by side",
+        description: "Up to 6 stocks side by side: price, market cap and cap tier, P/E (trailing and forward), P/B, EPS, ROE, margins, debt to equity, revenue and earnings growth, dividend yield, beta and the 52-week range. Ratios are fractions (0.012 = 1.2%).",
+        params: &[
+            req(
+                "symbols",
+                Kind::StrList { max: 6 },
+                "2 to 6 tickers, e.g. [\"TCS\", \"INFY\", \"HCLTECH\"]",
+            ),
+            MARKET,
+        ],
+        personal: false,
+    },
+    Tool {
+        name: "portfolio_wrap",
+        title: "Portfolio year in review",
+        description: "The portfolio's year in review: return over the year (or an Indian financial year), money in and out, dividends, realized gains, best and worst holdings, and the checkup's main findings. Pass fy for an April-March year such as 2025-26.",
+        params: &[
+            opt("year", Kind::Str, "Calendar year, e.g. 2025"),
+            opt("fy", Kind::Str, "Indian financial year, e.g. 2025-26"),
+            opt(
+                "redact",
+                Kind::Bool,
+                "Leave out amounts, keeping percentages (to share)",
+            ),
+            opt(
+                "base",
+                Kind::Str,
+                "Currency for totals, a 3-letter code (default: the market's)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "whats_hot",
+        title: "What's hot",
+        description: "Your holdings and watchlist ranked by heat (|excess move| in σ + volume surge + fresh news/filing importance + a date within 3 days, scaled by portfolio weight), each with its move and one-line why; then the market: biggest moves, unusual volume (RVOL), gaps, 52-week highs and lows, most-mentioned stocks in news, sectors, theme baskets (AI, semis, defence, battery, minerals), and for India FII/DII flows, bulk/block deals, the F&O ban list and OI build-up; plus cross-market movers. Data, not recommendations.",
+        params: &[
+            opt(
+                "cap",
+                Kind::Enum(&["all", "mega", "large", "mid", "small", "micro"]),
+                "Only this market-cap tier for the market lists",
+            ),
+            opt(
+                "limit",
+                Kind::Integer { min: 1, max: 25 },
+                "Rows per list (default 8)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "today",
+        title: "Today in my portfolio",
+        description: "What changed in the portfolio today: per holding and watchlist name the day move, day P&L in the base currency, σ of the excess move, volume multiple and why (the most important fresh headline or exchange/SEC filing, \"with the market\", or \"unexplained\" for an unusual move with no news); the portfolio's day P&L, the market backdrop, dates in the next 3 days, and a merged news feed ranked by weight × importance.",
+        params: &[
+            opt(
+                "days",
+                Kind::Integer { min: 1, max: 14 },
+                "News window in days (default 2)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "news_feed",
+        title: "News feed",
+        description: "Merged, de-duplicated headlines and filings (Yahoo, Google News by company name in the stock's locale, NSE/BSE announcements, SEC EDGAR) for the given symbols, or for holdings and the watchlist ranked by portfolio weight × importance. Each item has its title, source, link, time and category.",
+        params: &[
+            opt(
+                "symbols",
+                Kind::StrList { max: 25 },
+                "Tickers (default: holdings and watchlist)",
+            ),
+            opt(
+                "days",
+                Kind::Integer { min: 1, max: 14 },
+                "Only items from the last N days (default 2)",
+            ),
+            opt(
+                "limit",
+                Kind::Integer { min: 1, max: 60 },
+                "Most items (default 20)",
+            ),
+            MARKET,
+        ],
+        personal: true,
+    },
+    Tool {
+        name: "monitor_status",
+        title: "Holding monitor status",
+        description: "The automatic holding monitor: its thresholds (day drop %, σ, fall from cost and from peak, gap), whether the background worker runs it, when it last ran, and the signals it sent recently (big drops, 52-week lows, gaps, dates tomorrow, pledge and shareholding changes, rating changes, insider trades).",
+        params: &[],
+        personal: true,
+    },
+    Tool {
+        name: "digest",
+        title: "Daily digest",
+        description: "Today's digest as the worker sends it after the close: day P&L, top contributors and detractors with the news or filing behind each move (or flagged unexplained), monitor signals not yet sent, alerts that triggered today and dates in the next week. Does not send anything.",
+        params: &[MARKET],
+        personal: true,
+    },
 ];
 
 /// Only with `stockwise mcp --allow-orders`: previews an order without
@@ -1480,6 +1913,8 @@ pub struct ToolContext<D> {
     pub workspace: Option<Workspace>,
     /// Results are cut to this size (small local models get less).
     pub max_result_bytes: usize,
+    /// Longest a read tool may run; `None`: [`default_timeout`] per tool.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl<D: DataSource> ToolContext<D> {
@@ -1490,6 +1925,7 @@ impl<D: DataSource> ToolContext<D> {
             allow_orders: false,
             workspace: None,
             max_result_bytes: MAX_RESULT_BYTES,
+            timeout: None,
         }
     }
 
@@ -1534,7 +1970,28 @@ impl<D: DataSource> ToolContext<D> {
                 let m = args.market(self.market);
                 workspace::run(w, &self.source, tool.name, &args, m).await?
             }
-            _ => handlers::run(self, tool.name, &args).await?,
+            _ => {
+                let limit = self.timeout.unwrap_or_else(|| default_timeout(tool.name));
+                match tokio::time::timeout(limit, handlers::run(self, tool.name, &args)).await {
+                    Ok(r) => r?,
+                    // A logging read hands its track-record write to a
+                    // blocking task, which a timeout cannot stop.
+                    Err(_) if LOGGING_READS.contains(&tool.name) => bail!(
+                        "Stopped waiting for {} after {} seconds. Its track-record write \
+                         may still finish in the background. Data sources may be slow; \
+                         try again, or ask for less (a smaller universe).",
+                        tool.name,
+                        limit.as_secs()
+                    ),
+                    Err(_) => bail!(
+                        "{} did not finish within {} seconds and was stopped. Data sources \
+                         may be slow; try again, or ask for less (fewer symbols, a smaller \
+                         universe or period).",
+                        tool.name,
+                        limit.as_secs()
+                    ),
+                }
+            }
         };
         Ok(envelope(data, self.max_result_bytes))
     }

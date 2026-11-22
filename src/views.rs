@@ -386,7 +386,8 @@ pub struct MarketSection {
     pub rows: Vec<IndexRow>,
 }
 
-/// The `markets` sections, one quote request each.
+/// The `markets` sections from one quote request (and the India 10-year
+/// yield fetched alongside it, when the Indian section is shown).
 pub async fn market_sections(
     src: &impl DataSource,
     market: Market,
@@ -394,19 +395,48 @@ pub async fn market_sections(
     fx: bool,
     global: bool,
 ) -> Result<Vec<MarketSection>> {
-    let mut out = Vec::new();
-    let specs = section_order(market, crypto, fx)
+    let specs: Vec<SectionSpec> = section_order(market, crypto, fx)
         .into_iter()
         .map(section_spec)
-        .chain(global.then(global_section_spec));
+        .chain(global.then(global_section_spec))
+        .collect();
+    let mut symbols: Vec<&str> = Vec::new();
+    for (sym, _) in specs.iter().flat_map(|s| &s.items) {
+        if !symbols.contains(&sym.as_str()) {
+            symbols.push(sym);
+        }
+    }
+    let wants_10y = specs.iter().any(|s| s.region == "Indian Markets");
+    let (quotes, india_10y) = tokio::join!(src.quotes(&symbols), async {
+        if wants_10y {
+            src.india_10y().await
+        } else {
+            None
+        }
+    });
+    let quotes = quotes?;
+    let mut out = Vec::with_capacity(specs.len());
     for spec in specs {
-        let symbols: Vec<&str> = spec.items.iter().map(|(sym, _)| sym.as_str()).collect();
-        let quotes = src.quotes(&symbols).await?;
-        let mut rows = index_rows(spec.region, &spec.items, &quotes);
+        // This section's quotes, in its own order.
+        let mine: Vec<Quote> = spec
+            .items
+            .iter()
+            .filter_map(|(sym, _)| {
+                quotes
+                    .iter()
+                    .find(|q| {
+                        q.symbol
+                            .as_deref()
+                            .is_some_and(|s| s.eq_ignore_ascii_case(sym))
+                    })
+                    .cloned()
+            })
+            .collect();
+        let mut rows = index_rows(spec.region, &spec.items, &mine);
         if spec.region == "Indian Markets"
-            && let Some(y) = src.india_10y().await
+            && let Some(y) = &india_10y
         {
-            rows.push(india_10y_row(spec.region, &y));
+            rows.push(india_10y_row(spec.region, y));
         }
         out.push(MarketSection {
             region: spec.region,
@@ -505,17 +535,24 @@ pub fn history_from_chart(chart: ChartData, symbol: &str, period: &str, interval
             ts,
         })
         .collect();
-    let (currency, source) = chart
+    let (currency, source, warnings) = chart
         .meta
-        .map(|m| (m.currency, m.data_source))
+        .map(|m| (m.currency, m.data_source, m.warnings))
         .unwrap_or_default();
+    // A fallback source or a warning (stale cache, adjusted bars) is kept;
+    // a plain Yahoo answer carries no meta.
+    let meta = (source.is_some() || !warnings.is_empty()).then(|| crate::api::QuoteMeta {
+        sources: source.into_iter().collect(),
+        warnings,
+        ..Default::default()
+    });
     History {
         symbol: symbol.to_string(),
         currency,
         period: period.to_string(),
         interval: interval.to_string(),
         bars,
-        meta: source.map(|s| crate::api::QuoteMeta { sources: vec![s] }),
+        meta,
     }
 }
 
@@ -725,6 +762,8 @@ pub async fn alert_data(
             change_percent: quote.and_then(|q| q.regular_market_change_percent),
             today: Some(today),
             traded,
+            quote_time: quote.and_then(|q| q.regular_market_time),
+            market_open: crate::alerts::alert_market(symbol).map(|m| crate::clock::is_open(m, now)),
             ..Default::default()
         };
         let bars_needed = on_symbol().map(Alert::bars_needed).max().unwrap_or(0);
@@ -856,6 +895,7 @@ pub mod fixtures {
                 exchange_name: None,
                 gmtoffset: None,
                 data_source: None,
+                warnings: Vec::new(),
             }),
             timestamp: Some(
                 (0..closes.len() as i64)
@@ -870,6 +910,7 @@ pub mod fixtures {
                     close: some(closes),
                     volume: Some(closes.iter().map(|_| Some(1000)).collect()),
                 }],
+                adjclose: None,
             },
             events: None,
         }
@@ -1341,7 +1382,14 @@ mod tests {
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            ["holdings", "totals", "unpriced", "unconverted", "notes"]
+            [
+                "holdings",
+                "totals",
+                "unpriced",
+                "unconverted",
+                "notes",
+                "warnings"
+            ]
         );
         let totals: Vec<&str> = v["totals"]
             .as_object()
@@ -1351,7 +1399,15 @@ mod tests {
             .collect();
         assert_eq!(
             totals,
-            ["cost_basis", "value", "pnl", "pnl_percent", "currency"]
+            [
+                "cost_basis",
+                "value",
+                "pnl",
+                "pnl_percent",
+                "currency",
+                "fx_effect",
+                "cost_at_today_fx"
+            ]
         );
         assert_eq!(v["holdings"][0]["symbol"], "TCS.NS");
         assert_eq!(v["holdings"][0]["pnl"], 6000.0);

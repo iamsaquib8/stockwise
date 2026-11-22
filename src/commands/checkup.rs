@@ -116,12 +116,16 @@ pub(crate) struct CheckupRun {
     pub(crate) tax: Option<ck::TaxFacts>,
 }
 
+/// The investor's tax residence (`[profile] residence`, else guessed from
+/// the market) when the tax headroom has rules for it. The market still
+/// picks the quotes; it does not pick whose tax rules apply.
 fn home_country(market: Market) -> Option<Country> {
-    match market {
-        Market::In => Some(Country::India),
-        Market::Us => Some(Country::Us),
-        _ => None,
-    }
+    tax_home(super::portfolio_analyze::residence(market))
+}
+
+/// The residences the harvest report covers: India and the US.
+fn tax_home(residence: Option<Country>) -> Option<Country> {
+    residence.filter(|c| matches!(c, Country::India | Country::Us))
 }
 
 fn is_fund_like(symbol: &str) -> bool {
@@ -202,13 +206,15 @@ async fn fetch_fundamentals(
 }
 
 /// Fund holdings for the look-through: saved disclosures first, then (online)
-/// Yahoo's top holdings.
+/// Yahoo's top holdings, then for an index ETF or index fund the shipped
+/// weights of its index ([`crate::index_weights`]). `funds` is (symbol,
+/// value, scheme name).
 async fn fund_holdings(
     client: Option<&YahooClient>,
-    funds: Vec<(String, f64)>,
+    funds: Vec<(String, f64, Option<String>)>,
     market: Market,
 ) -> Vec<ck::FundHoldings> {
-    futures_util::stream::iter(funds.into_iter().map(|(sym, value)| async move {
+    futures_util::stream::iter(funds.into_iter().map(|(sym, value, name)| async move {
         let profile = match crate::funds::load_fund_disclosure(&sym) {
             Some(p) => Some(p),
             None => match client {
@@ -221,16 +227,26 @@ async fn fund_holdings(
                 .and_then(Result::ok),
                 None => None,
             },
-        }?;
+        };
         let holdings: Vec<(String, f64)> = profile
-            .holdings
             .iter()
+            .flat_map(|p| &p.holdings)
             .filter_map(|h| Some((h.key()?, h.weight)))
             .collect();
-        (!holdings.is_empty()).then_some(ck::FundHoldings {
+        if !holdings.is_empty() {
+            return Some(ck::FundHoldings {
+                symbol: sym,
+                value,
+                holdings,
+                index_rest: false,
+            });
+        }
+        let table = crate::index_weights::for_fund(&sym, name.as_deref())?;
+        Some(ck::FundHoldings {
             symbol: sym,
             value,
-            holdings,
+            holdings: table.holdings(),
+            index_rest: true,
         })
     }))
     .buffer_unordered(CONCURRENCY)
@@ -267,31 +283,81 @@ fn goal_facts(
     ))
 }
 
-/// The harvest report. Offline it skips the 31 Jan 2018 price lookup, so
-/// grandfathered lots count at their cost.
+/// The harvest report under `country`'s rules, with quotes for `market`.
+/// Offline it skips the 31 Jan 2018 price lookup, so grandfathered lots
+/// count at their cost.
 async fn harvest(
     src: &impl views::DataSource,
     portfolio: &Portfolio,
     market: Market,
+    country: Country,
     today: chrono::NaiveDate,
     offline: bool,
 ) -> Result<super::holdings::HarvestSummary> {
-    if !offline {
-        return Ok(
-            super::holdings::harvest_summary(src, portfolio, market, today)
-                .await?
-                .0,
-        );
-    }
-    let symbols: Vec<String> = portfolio
-        .holdings
-        .iter()
-        .map(|h| h.symbol.clone())
-        .collect();
-    let val = value_holdings(src, &symbols, market, None).await?;
-    Ok(super::holdings::compute_harvest(
-        portfolio, &val, market, today,
+    let val = if offline {
+        let symbols: Vec<String> = portfolio
+            .holdings
+            .iter()
+            .map(|h| h.symbol.clone())
+            .collect();
+        value_holdings(src, &symbols, market, None).await?
+    } else {
+        super::holdings::tax_valuation(src, portfolio, market).await?
+    };
+    Ok(super::holdings::compute_harvest_in(
+        portfolio,
+        &val,
+        country,
+        today,
+        Default::default(),
     ))
+}
+
+/// Apply `pending` splits and bonuses (found here, not by `gather_inputs`)
+/// to `portfolio` and to their holdings' `inputs`, lot by lot. Cost is
+/// unchanged; value follows the price.
+fn adjust_for_pending_splits(
+    inputs: &mut [pa::PositionInput],
+    portfolio: &mut Portfolio,
+    pending: &crate::corp_actions::PendingSplits,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    // Each split applies only to the lots bought before it that have not
+    // taken it (the rule of `PendingSplits::adjusted_shares`).
+    let adjusted = pending.adjusted(portfolio);
+    for (sym, _) in &pending.by_symbol {
+        let (Some(h), Some(i)) = (
+            adjusted.holding(sym),
+            inputs.iter_mut().find(|i| &i.symbol == sym),
+        ) else {
+            continue;
+        };
+        i.shares = h.shares;
+        i.value = i.price.map(|p| p * h.shares);
+        // A split leaves each lot's cost as it was, so its base cost too
+        // when the lots still line up one to one.
+        let same_lots = i.lots.len() == h.lots.len();
+        i.lots = h
+            .lots
+            .iter()
+            .enumerate()
+            .map(|(n, l)| pa::LotInput {
+                qty: l.qty,
+                price: l.price,
+                date: chrono::NaiveDate::parse_from_str(&l.date, "%Y-%m-%d").ok(),
+                estimated: l.date_estimated,
+                cost_base: i
+                    .lots
+                    .get(n)
+                    .filter(|_| same_lots)
+                    .and_then(|o| o.cost_base),
+            })
+            .collect();
+    }
+    // The harvest and tax figures use the same share counts.
+    *portfolio = adjusted;
 }
 
 /// Gather and evaluate. `fundamentals` reads statements (network) for the
@@ -312,10 +378,18 @@ pub(crate) async fn run_checkup(
     if g.portfolio.holdings.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
     }
+    let mut skipped: Vec<String> = Vec::new();
+    // A split or bonus not yet applied to the lots: count the shares after
+    // it, so the holding is not shown at half its value.
+    let pending = match client {
+        Some(c) => crate::corp_actions::pending_splits(c, &g.portfolio).await,
+        None => crate::corp_actions::PendingSplits::offline(&g.portfolio),
+    };
+    adjust_for_pending_splits(&mut g.inputs, &mut g.portfolio, &pending);
+    skipped.extend(pending.warnings());
     let analysis = pa::analyze(&g.inputs, &g.ctx);
     let today = g.ctx.today;
     let total = analysis.value;
-    let mut skipped: Vec<String> = Vec::new();
     if !analysis.left_out.is_empty() {
         skipped.push(format!(
             "No price or exchange rate for {}: left out of the totals",
@@ -392,10 +466,17 @@ pub(crate) async fn run_checkup(
     }
 
     // Look-through and fund overlap.
-    let fund_values: Vec<(String, f64)> = holdings
+    let fund_values: Vec<(String, f64, Option<String>)> = holdings
         .iter()
         .filter(|h| h.is_fund)
-        .map(|h| (h.symbol.clone(), h.value))
+        .map(|h| {
+            let name = analysis
+                .positions
+                .iter()
+                .find(|p| p.symbol == h.symbol)
+                .and_then(|p| p.name.clone());
+            (h.symbol.clone(), h.value, name)
+        })
         .collect();
     let funds = fund_holdings(client, fund_values.clone(), market).await;
     let look_through = if funds.is_empty() {
@@ -450,6 +531,8 @@ pub(crate) async fn run_checkup(
         .iter()
         .any(|s| s.closes.len() > ck::MIN_CORRELATION_OBS)
         .then(|| ck::correlated_pairs(&series));
+    // The drawdown's coverage: the same base-currency series that feed it.
+    let drawdown_coverage_pct = (total > 0.0).then(|| analysis.risk.coverage_pct.clamp(0.0, 100.0));
 
     // Amounts reported in the tax, fund or goal currency are ranked in the
     // base currency: fetch those rates too.
@@ -464,7 +547,7 @@ pub(crate) async fn run_checkup(
     // Tax headroom.
     let tax = match home_country(market) {
         None => None,
-        Some(country) => match harvest(src, &g.portfolio, market, today, offline).await {
+        Some(country) => match harvest(src, &g.portfolio, market, country, today, offline).await {
             Ok(h) if fx(h.currency).is_none() => {
                 skipped.push(format!(
                     "Tax headroom: no {} to {} exchange rate",
@@ -560,35 +643,59 @@ pub(crate) async fn run_checkup(
             None
         }
     };
+    // The same normalized targets and 5/25 bands as `portfolio target drift`.
     let drift = (!g.portfolio.targets.is_empty()).then(|| {
         let band = g
             .portfolio
             .drift_tolerance
             .unwrap_or(crate::config::effective_profile().default_drift_pct);
-        g.portfolio
-            .targets
+        let band = if band > 0.0 {
+            band
+        } else {
+            crate::rebalance::ABSOLUTE_BAND_PCT
+        };
+        let base = analysis.base_currency.clone();
+        let inputs: Vec<crate::rebalance::HoldingInput> = analysis
+            .positions
             .iter()
-            .map(|(key, target)| {
-                let canon = crate::xray::canonical_ticker(key);
-                let current = analysis
-                    .positions
-                    .iter()
-                    .find(|p| crate::xray::canonical_ticker(&p.symbol) == canon)
-                    .and_then(|p| p.weight_pct)
-                    .or_else(|| {
-                        analysis
-                            .by_sector
-                            .iter()
-                            .find(|s| s.name.eq_ignore_ascii_case(key))
-                            .map(|s| s.weight_pct)
-                    })
-                    .unwrap_or(0.0);
-                ck::DriftFacts {
-                    key: key.clone(),
-                    current_pct: current,
-                    target_pct: *target,
-                    band_pct: band,
-                }
+            .filter_map(|p| {
+                let value = p.value_base?;
+                let is_fund = crate::offmarket::is_fund(&p.symbol);
+                let foreign = p
+                    .currency
+                    .as_deref()
+                    .is_some_and(|c| !c.eq_ignore_ascii_case(&base));
+                Some(crate::rebalance::HoldingInput {
+                    symbol: p.symbol.clone(),
+                    shares: p.shares,
+                    value,
+                    price: if p.shares > 0.0 {
+                        value / p.shares
+                    } else {
+                        0.0
+                    },
+                    sector: p.sector.clone(),
+                    is_fund,
+                    is_etf: crate::xray::is_known_etf(&p.symbol),
+                    asset_class: crate::rebalance::classify(
+                        &p.symbol,
+                        is_fund,
+                        crate::xray::default_etf_category(&p.symbol),
+                        foreign,
+                    ),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        crate::rebalance::drift_report(&inputs, &g.portfolio.targets, band, &base)
+            .rows
+            .into_iter()
+            .filter(|r| r.kind != "untargeted")
+            .map(|r| ck::DriftFacts {
+                key: r.key,
+                current_pct: r.current_pct,
+                target_pct: r.target_pct,
+                band_pct: r.band_pct,
             })
             .collect()
     });
@@ -602,6 +709,7 @@ pub(crate) async fn run_checkup(
         funds_compared: funds.len(),
         beta: analysis.risk.beta,
         max_drawdown_pct: analysis.risk.max_drawdown_pct,
+        drawdown_coverage_pct,
         benchmark: analysis.risk.benchmark.clone(),
         correlated,
         tax: tax.clone(),
@@ -611,8 +719,45 @@ pub(crate) async fn run_checkup(
         max_stock_weight: g.ctx.max_stock_weight,
         max_smallcap_weight: g.ctx.max_smallcap_weight,
     };
+    let mut checkup = ck::evaluate(&input, skipped);
+    let actions = if fundamentals {
+        let enriched = match client {
+            Some(c) => super::actions::enriched_quotes(c, &g.portfolio, &g.val).await,
+            None => Default::default(),
+        };
+        let mut actions: Vec<ck::HoldingAction> =
+            super::actions::quick_actions(&g.portfolio, &g.val, &enriched)
+                .into_iter()
+                .map(|(symbol, action)| ck::HoldingAction {
+                    weight_pct: analysis
+                        .positions
+                        .iter()
+                        .find(|p| p.symbol == symbol)
+                        .and_then(|p| p.weight_pct)
+                        .map(|w| round(w, 2)),
+                    symbol,
+                    action,
+                })
+                .collect();
+        actions.sort_by(|a, b| {
+            a.action
+                .kind
+                .review_rank()
+                .cmp(&b.action.kind.review_rank())
+                .then(
+                    b.weight_pct
+                        .unwrap_or(0.0)
+                        .total_cmp(&a.weight_pct.unwrap_or(0.0)),
+                )
+                .then(a.symbol.cmp(&b.symbol))
+        });
+        actions
+    } else {
+        Vec::new()
+    };
+    checkup.actions = actions;
     Ok(CheckupRun {
-        checkup: ck::evaluate(&input, skipped),
+        checkup,
         analysis,
         tax,
     })
@@ -695,6 +840,21 @@ fn print_checkup(c: &Checkup) {
                 stake,
                 "inspect".dimmed(),
                 f.inspect.cyan()
+            );
+        }
+    }
+    if !c.actions.is_empty() {
+        print_section(
+            "Actions (quote-based rules; `stockwise portfolio review` for the full ones)",
+        );
+        for a in &c.actions {
+            let weight = a.weight_pct.map_or(String::new(), |w| format!("{w:.1}%"));
+            println!(
+                "  {:<14} {} {:>6}  {}",
+                a.symbol.cyan().bold(),
+                super::portfolio::action_cell(Some(&a.action)),
+                weight,
+                super::actions::format_action_line(&a.action).dimmed()
             );
         }
     }
@@ -877,6 +1037,15 @@ pub(crate) async fn wrap_report(
     if portfolio.holdings.is_empty() && portfolio.realized.is_empty() {
         bail!("{}", t(Msg::PortfolioEmpty));
     }
+    // A split Yahoo reports but the lots have not taken yet: value a copy
+    // with it applied (closes are in today's share count).
+    let mut pending = if offline {
+        crate::corp_actions::PendingSplits::offline(&portfolio)
+    } else {
+        crate::corp_actions::pending_splits_live(&portfolio).await
+    };
+    let recorded = portfolio;
+    let portfolio = pending.adjusted(&recorded);
     // The checkup describes what is held now; a portfolio sold out during
     // the year still gets its review, without that part.
     let run = if portfolio.holdings.is_empty() {
@@ -897,6 +1066,13 @@ pub(crate) async fn wrap_report(
     } else {
         value_holdings(src, &held, market, base).await?
     };
+    // Only the splits today's prices already reflect.
+    pending.align_to_quotes(|s| val.priced_on(s));
+    // On stderr: `wrap --json` keeps stdout one JSON document.
+    for w in pending.warnings() {
+        eprintln!("  {} {}", "!".yellow(), w);
+    }
+    let portfolio = pending.adjusted(&recorded);
     let period = period.unwrap_or_else(|| Period::default_for(val.base(), today));
     if period.start > today {
         bail!("{} has not started yet", period.label);
@@ -908,6 +1084,9 @@ pub(crate) async fn wrap_report(
     let mut val = val;
     let currencies = val.currencies(&symbols);
     val.add_rates(src, &currencies).await;
+    if !offline {
+        val.load_history(&portfolio).await;
+    }
     symbols.sort();
 
     let histories: Vec<(String, Vec<(chrono::NaiveDate, f64)>)> =
@@ -927,38 +1106,91 @@ pub(crate) async fn wrap_report(
         } else {
             wrap::close_on(closes, as_of)
         };
-        let mut y = wrap::symbol_year(&portfolio, sym, &period, as_of, start, end);
-        match val.to_base(sym, 1.0) {
-            Some(fx) => {
-                let conv = |v: &mut f64| *v *= fx;
-                y.start_value = y.start_value.map(|v| v * fx);
-                y.end_value = y.end_value.map(|v| v * fx);
-                conv(&mut y.bought);
-                conv(&mut y.sold);
-                conv(&mut y.dividends);
-                conv(&mut y.realized_gain);
-                for f in &mut y.flows {
-                    f.1 *= fx;
-                }
-            }
-            None => y.unconverted = true,
-        }
+        // Each amount at its own day's exchange rate (today's when no
+        // history was found).
+        let fx = |d: chrono::NaiveDate, cur: Option<&str>| match cur {
+            Some(c) => val.currency_rate_on(c, d).map(|r| r.0),
+            None => val.rate_on(sym, d).map(|r| r.0),
+        };
+        let y = wrap::symbol_year_in(
+            &portfolio,
+            sym,
+            &period,
+            as_of,
+            start,
+            end,
+            Some(val.base()),
+            &fx,
+        );
         years.push(y);
     }
     let t = wrap::totals(&years, &period, as_of, 3);
 
-    let (bench_symbol, bench_name) = match market {
-        Market::In => ("^NSEI", "NIFTY 50"),
-        Market::Us => ("^GSPC", "S&P 500"),
-        Market::Global(x) => x.info().benchmark(),
-        _ => ("^GSPC", "S&P 500"),
+    let (bench_symbol, bench_name, bench_currency) = match market {
+        Market::In => ("^NSEI", "NIFTY 50", "INR"),
+        Market::Us => ("^GSPC", "S&P 500", "USD"),
+        Market::Global(x) => {
+            let (s, n) = x.info().benchmark();
+            (s, n, market_currency(market))
+        }
+        _ => ("^GSPC", "S&P 500", "USD"),
     };
-    let bench = src
-        .chart(bench_symbol, range, "1d")
-        .await
-        .map(|c| closes_of(&c))
-        .unwrap_or_default();
+    // A total-return index when Yahoo has one; else the price index,
+    // compared with the return without dividends.
+    let tri = super::planning::total_return_source(bench_symbol);
+    let mut bench_total_return = false;
+    let mut bench = Vec::new();
+    match tri {
+        // An ETF's dividend-adjusted closes (NIFTYBEES for NIFTY 50) need
+        // Yahoo's raw chart; offline there are none.
+        Some(tr @ super::planning::TotalReturn::AdjustedEtf(_)) if !offline => {
+            if let Ok(client) = src.yahoo().await
+                && let Some((closes, _)) =
+                    super::planning::total_return_closes(client, tr, period.opening()).await
+            {
+                bench = closes;
+            }
+        }
+        Some(super::planning::TotalReturn::Index(sym)) => {
+            bench = src
+                .chart(sym, range, "1d")
+                .await
+                .map(|c| closes_of(&c))
+                .unwrap_or_default();
+        }
+        _ => {}
+    }
+    if tri.is_some() {
+        bench_total_return = wrap::benchmark_return(&bench, &period, as_of).is_some();
+    }
+    if !bench_total_return {
+        bench = src
+            .chart(bench_symbol, range, "1d")
+            .await
+            .map(|c| closes_of(&c))
+            .unwrap_or_default();
+    }
+    // The index is in its market's currency; the portfolio's return is in
+    // the base: convert each close at its own day's rate, so a currency move
+    // is not counted as alpha.
+    if !bench_currency.eq_ignore_ascii_case(val.base()) && !bench.is_empty() {
+        let fx = if offline {
+            crate::fx_history::FxHistory::new(val.base())
+        } else {
+            crate::fx_history::FxHistory::load(
+                val.base(),
+                &[(bench_currency.to_string(), period.opening())],
+            )
+            .await
+        };
+        bench = super::portfolio_analyze::in_base(&bench, bench_currency, &fx);
+    }
     let benchmark_return_pct = wrap::benchmark_return(&bench, &period, as_of);
+    let compared = if bench_total_return {
+        t.return_pct
+    } else {
+        t.price_return_pct
+    };
     let at_work = t.start_value + t.bought;
     let share = |v: f64| (at_work > 0.0).then(|| v / at_work * 100.0);
 
@@ -998,12 +1230,16 @@ pub(crate) async fn wrap_report(
         base_currency: val.base().to_string(),
         redacted: false,
         return_pct: t.return_pct,
-        benchmark: bench_name.to_string(),
+        benchmark: match tri.filter(|_| bench_total_return) {
+            Some(tr) => tr.label(bench_name),
+            None => bench_name.to_string(),
+        },
         benchmark_return_pct,
-        alpha_bps: t
-            .return_pct
+        alpha_bps: compared
             .zip(benchmark_return_pct)
             .map(|(r, b)| (r - b) * 100.0),
+        price_return_pct: t.price_return_pct,
+        benchmark_total_return: bench_total_return,
         start_value: Some(t.start_value),
         end_value: Some(t.end_value),
         capital_deployed: Some(t.bought),
@@ -1075,6 +1311,15 @@ pub async fn cmd_portfolio_wrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tax_headroom_follows_the_residence_not_the_market() {
+        assert_eq!(tax_home(Some(Country::Us)), Some(Country::Us));
+        assert_eq!(tax_home(Some(Country::India)), Some(Country::India));
+        // No harvest rules for a UK resident yet.
+        assert_eq!(tax_home(Some(Country::Uk)), None);
+        assert_eq!(tax_home(None), None);
+    }
 
     #[test]
     fn csv_has_one_row_per_finding_in_rank_order() {

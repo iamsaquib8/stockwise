@@ -196,6 +196,10 @@ pub struct ProfileConfig {
     pub max_smallcap_weight: Option<f64>,
     /// Portfolio capital risked per trade in `stoploss`, in percent (`0.05..=20`).
     pub risk_per_trade: Option<f64>,
+    /// Country of tax residence: `in`, `us` or `uk`. Decides holding
+    /// periods and rules in `portfolio analyze`; the ticker market does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residence: Option<String>,
 }
 
 impl ProfileConfig {
@@ -208,6 +212,7 @@ impl ProfileConfig {
             && self.max_stock_weight.is_none()
             && self.max_smallcap_weight.is_none()
             && self.risk_per_trade.is_none()
+            && self.residence.is_none()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -221,6 +226,11 @@ impl ProfileConfig {
             && (!s.is_finite() || !(0.0..=50.0).contains(&s))
         {
             bail!("`profile.tax_slab` = {s} must be between 0 and 50");
+        }
+        if let Some(r) = &self.residence
+            && crate::tax::Country::parse(r).is_none()
+        {
+            anyhow::bail!("`profile.residence`: expected `in`, `us` or `uk`, got `{r}`");
         }
         if let Some(tr) = &self.tax_regime {
             TaxRegime::parse(tr).map_err(|e| anyhow::anyhow!("`profile.tax_regime`: {e}"))?;
@@ -339,6 +349,10 @@ pub struct EffectiveProfile {
     pub default_drift_pct: f64,
     pub auto_explain: bool,
     pub screen_presets: &'static [&'static str],
+    /// `[profile] residence` (`in`, `us`, `uk`) when set; tax rules otherwise
+    /// follow the market.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residence: Option<String>,
 }
 
 impl Default for EffectiveProfile {
@@ -478,6 +492,11 @@ impl EffectiveProfile {
             default_drift_pct,
             auto_explain: mode == ProfileMode::Passive,
             screen_presets,
+            residence: file_cfg
+                .residence
+                .as_deref()
+                .and_then(crate::tax::Country::parse)
+                .map(residence_code),
         }
     }
 }
@@ -558,6 +577,11 @@ pub struct Config {
     /// `us-tech = "us"`). Set with `stockwise use PORTFOLIO MARKET --bind`.
     #[serde(default)]
     pub portfolio_markets: BTreeMap<String, String>,
+    /// Holding-monitor thresholds (`[monitor]`), keyed like
+    /// `STOCKWISE_MONITOR_<KEY>` without the prefix: `day_drop_pct = "5"`.
+    /// Environment variables win.
+    #[serde(default)]
+    pub monitor: BTreeMap<String, String>,
 }
 
 static EMPTY: Config = Config {
@@ -581,10 +605,12 @@ static EMPTY: Config = Config {
         max_stock_weight: None,
         max_smallcap_weight: None,
         risk_per_trade: None,
+        residence: None,
     },
     periods: BTreeMap::new(),
     notify: BTreeMap::new(),
     portfolio_markets: BTreeMap::new(),
+    monitor: BTreeMap::new(),
 };
 
 /// The `[notify]` key for a `STOCKWISE_*` notification variable.
@@ -601,12 +627,26 @@ pub fn notify_setting(env: &str) -> Option<String> {
         .or_else(|| notify_key(env).and_then(|k| get().notify.get(&k).cloned()))
 }
 
+/// A holding-monitor setting: `STOCKWISE_MONITOR_<KEY>`, else `key` in
+/// `[monitor]` in the config file.
+pub fn monitor_setting(key: &str) -> Option<String> {
+    let env = format!("STOCKWISE_MONITOR_{}", key.to_ascii_uppercase());
+    std::env::var(&env)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| get().monitor.get(key).cloned())
+}
+
 /// `[notify]` keys that hold secrets.
 const SECRET_NOTIFY_KEYS: &[&str] = &[
     "telegram_token",
     "slack_webhook",
     "discord_webhook",
     "smtp_password",
+    "ntfy_topic",
+    "ntfy_token",
+    "pushover_token",
+    "pushover_user",
 ];
 
 /// Where the config file was looked for and what came of it.
@@ -1070,7 +1110,26 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # smtp_password = ""
 # email_from = ""
 # email_to = ""
+# ntfy_topic = ""
+# ntfy_server = "https://ntfy.sh"
+# ntfy_token = ""
+# pushover_token = ""
+# pushover_user = ""
 # desktop_notify = "1"
+# notify_routes = "desktop=high,telegram=low"
+# quiet_hours = "22:00-07:00"
+# digest_time = "16:15"
+
+# Automatic monitoring of every holding (`stockwise monitor`). Env:
+# STOCKWISE_MONITOR_<KEY>, e.g. STOCKWISE_MONITOR_DAY_DROP_PCT=4.
+[monitor]
+# enabled = "true"
+# day_drop_pct = "5"
+# day_drop_sigma = "2"
+# from_cost_pct = "20"
+# from_peak_pct = "25"
+# gap_pct = "3"
+# digest = "true"
 
 # Investor profile and personal guardrails (`stockwise profile`).
 # Env: STOCKWISE_PROFILE (e.g. "passive", "active:low", "active:med", "active:high", "ultra").
@@ -1080,6 +1139,9 @@ pub const TEMPLATE: &str = r#"# StockWise configuration.
 # risk = "med"
 # tax_slab = 30
 # tax_regime = "new"
+# Country of tax residence for holding periods and tax rules in
+# `portfolio analyze`: "in", "us" or "uk". Without it the market is assumed.
+# residence = "in"
 # horizon_years = 10
 # max_stock_weight = 12.0
 # max_smallcap_weight = 25.0
@@ -1105,6 +1167,18 @@ pub struct ProfileUpdate {
     pub max_stock_weight: Option<f64>,
     pub max_smallcap_weight: Option<f64>,
     pub risk_per_trade: Option<f64>,
+    /// Country of tax residence: `in`, `us` or `uk`.
+    pub residence: Option<crate::tax::Country>,
+}
+
+/// The config-file code for a residence.
+pub fn residence_code(c: crate::tax::Country) -> String {
+    match c {
+        crate::tax::Country::India => "in",
+        crate::tax::Country::Us => "us",
+        crate::tax::Country::Uk => "uk",
+    }
+    .to_string()
 }
 
 /// Update `[profile]` settings in the config file at `path`, creating it from
@@ -1119,6 +1193,7 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
         max_stock_weight: update.max_stock_weight,
         max_smallcap_weight: update.max_smallcap_weight,
         risk_per_trade: update.risk_per_trade,
+        residence: update.residence.map(residence_code),
     };
     probe.validate()?;
 
@@ -1158,6 +1233,9 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
     if let Some(r) = update.risk_per_trade {
         pairs.push(("risk_per_trade", format!("{r}")));
     }
+    if let Some(c) = update.residence {
+        pairs.push(("residence", format!("\"{}\"", residence_code(c))));
+    }
 
     let is_key = |l: &str, prefix: &str| {
         l.strip_prefix(prefix)
@@ -1184,9 +1262,10 @@ pub fn set_profile(path: &Path, update: &ProfileUpdate) -> Result<()> {
             .map(|rel| header_idx + 1 + rel)
             .unwrap_or(lines.len());
         let commented = format!("# {key}");
+        // The parsed key, so a quoted `"residence" = ...` is found too.
         let found = lines[header_idx + 1..end_idx]
             .iter()
-            .position(|l| is_key(l.trim_start(), key))
+            .position(|l| table_key(l).as_deref() == Some(key))
             .or_else(|| {
                 lines[header_idx + 1..end_idx]
                     .iter()
@@ -1902,6 +1981,7 @@ mod tests {
             max_stock_weight: None,
             max_smallcap_weight: None,
             risk_per_trade: None,
+            residence: None,
         };
         let eff_file = EffectiveProfile::from_parts(None, None, &file_cfg);
         assert_eq!(eff_file.mode, ProfileMode::Active);
@@ -1928,6 +2008,56 @@ mod tests {
         assert_eq!(eff_flag.max_stock_weight, 20.0);
         assert_eq!(eff_flag.max_smallcap_weight, 50.0);
         assert_eq!(eff_flag.risk_per_trade, 2.0);
+    }
+
+    #[test]
+    fn set_profile_writes_the_residence_code() {
+        let dir = std::env::temp_dir().join(format!(
+            "stockwise-residence-{}-{}",
+            std::process::id(),
+            crate::selfupdate::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        set_profile(
+            &path,
+            &ProfileUpdate {
+                residence: crate::tax::Country::parse("India"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("residence = \"in\""), "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        let eff = EffectiveProfile::from_parts(None, None, &cfg.profile);
+        assert_eq!(eff.residence.as_deref(), Some("in"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_profile_replaces_a_quoted_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "stockwise-quoted-residence-{}-{}",
+            std::process::id(),
+            crate::selfupdate::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[profile]\n\"residence\" = \"us\"\n").unwrap();
+        set_profile(
+            &path,
+            &ProfileUpdate {
+                residence: crate::tax::Country::parse("India"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("residence").count(), 1, "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.profile.residence.as_deref(), Some("in"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

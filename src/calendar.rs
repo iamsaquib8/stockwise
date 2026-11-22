@@ -21,12 +21,12 @@ use crate::api::{YahooClient, build_url};
 use crate::i18n::{Msg, t};
 use crate::market::{AssetClass, Market};
 use crate::output::CsvRow;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// What happens on a calendar date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -530,6 +530,19 @@ impl<'a> Calendar<'a> {
     /// Every event the sources list for `symbol`, past and future. Only
     /// stocks have a calendar.
     pub async fn events_for(&mut self, symbol: &str) -> Vec<Event> {
+        self.events_from(symbol, &NSE_ENDPOINTS).await
+    }
+
+    /// The next results date for `symbol` on or after `today`. Asks only the
+    /// sources that carry results dates (Yahoo's calendar and NSE's board
+    /// meetings), not NSE's corporate actions.
+    pub async fn next_results(&mut self, symbol: &str, today: NaiveDate) -> Option<NaiveDate> {
+        let events = self.events_from(symbol, &NSE_ENDPOINTS[..1]).await;
+        next_results_in(&events, today)
+    }
+
+    /// Yahoo's events plus those of the given NSE endpoints.
+    async fn events_from(&mut self, symbol: &str, endpoints: &[(&str, &str)]) -> Vec<Event> {
         if AssetClass::of(symbol) != AssetClass::Stock {
             return Vec::new();
         }
@@ -556,7 +569,7 @@ impl<'a> Calendar<'a> {
         events.extend(entry.events);
 
         if let Some(nse) = nse_symbol(symbol) {
-            for (path, referer) in NSE_ENDPOINTS {
+            for &(path, referer) in endpoints {
                 let key = format!("nse:{path}:{nse}");
                 let entry = match self.cached(&key, now) {
                     Some(e) => e,
@@ -735,9 +748,9 @@ pub async fn next_results(
     today: NaiveDate,
 ) -> Option<NaiveDate> {
     let mut cal = Calendar::new(yahoo);
-    let events = cal.events_for(symbol).await;
+    let next = cal.next_results(symbol, today).await;
     cal.save();
-    next_results_in(&events, today)
+    next
 }
 
 // ── NSE ──
@@ -766,62 +779,35 @@ fn nse_refused(status: reqwest::StatusCode) -> anyhow::Error {
     )
 }
 
-/// One NSE session per run: a page load for the cookies the API expects,
-/// then JSON requests at least a second apart. No retries.
+/// NSE's corporate-calendar API through the process-wide NSE session (one
+/// cookie handshake, one rate limit and refusal state for every NSE request).
 struct NseSession {
-    client: reqwest::Client,
-    last: Instant,
+    session: std::sync::Arc<crate::providers::session::Session>,
 }
 
 impl NseSession {
     async fn open() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(NSE_UA)
-            .cookie_store(true)
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .context("Failed to build HTTP client")?;
-        let resp = client
-            .get(format!("{NSE_BASE}{}", NSE_ENDPOINTS[0].1))
-            .header(reqwest::header::ACCEPT, "text/html")
-            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-            .send()
-            .await
-            .context("Cannot reach nseindia.com; showing Yahoo Finance dates only")?;
-        if !resp.status().is_success() {
-            return Err(nse_refused(resp.status()));
+        let session = crate::providers::nse::shared_session();
+        if session.is_blocked() {
+            return Err(nse_refused(reqwest::StatusCode::FORBIDDEN));
         }
-        Ok(Self {
-            client,
-            last: Instant::now(),
-        })
+        Ok(Self { session })
     }
 
-    async fn get_json(&mut self, path: &str, referer: &str, symbol: &str) -> Result<Value> {
-        let wait = NSE_GAP.saturating_sub(self.last.elapsed());
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        let url = build_url(
-            &format!("{NSE_BASE}{path}"),
-            None,
-            &[("index", "equities"), ("symbol", symbol)],
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::REFERER, format!("{NSE_BASE}{referer}"))
-            .send()
-            .await;
-        self.last = Instant::now();
-        let resp = resp.context("Request to nseindia.com failed")?;
-        if !resp.status().is_success() {
-            return Err(nse_refused(resp.status()));
-        }
-        let body = resp.text().await.context("Failed to read NSE response")?;
-        serde_json::from_str(&body).map_err(|_| nse_refused(reqwest::StatusCode::OK))
+    async fn get_json(&mut self, path: &str, _referer: &str, symbol: &str) -> Result<Value> {
+        use crate::providers::session::FetchError;
+        self.session
+            .get_json(
+                path,
+                &[("index", "equities"), ("symbol", symbol)],
+                Duration::from_secs(3600),
+            )
+            .await
+            .map_err(|e| match e {
+                FetchError::Blocked(_) => nse_refused(reqwest::StatusCode::FORBIDDEN),
+                FetchError::Format(_) => nse_refused(reqwest::StatusCode::OK),
+                other => anyhow!("Request to nseindia.com failed ({other})"),
+            })
     }
 }
 
@@ -887,6 +873,49 @@ mod tests {
             {"symbol":"TCS","series":"EQ","faceVal":"1","subject":"Bonus 1:1","exDate":"12-Nov-2026","recDate":"12-Nov-2026"},
             {"symbol":"TCS","series":"EQ","faceVal":"1","subject":"Annual General Meeting","exDate":"-","recDate":"-"}
         ])
+    }
+
+    #[tokio::test]
+    async fn next_results_skips_the_corporate_actions_request() {
+        let yahoo = YahooClient::for_tests_with_rewrite(reqwest::Client::new(), "c", |u: &str| {
+            u.to_string()
+        });
+        let now = Utc::now().timestamp();
+        let fresh = |events| Entry {
+            fetched_at: now,
+            error: None,
+            events,
+        };
+        let mut cache = Cache::default();
+        cache.entries.insert(
+            "yahoo:TCS.NS".into(),
+            fresh(parse_yahoo("TCS.NS", &yahoo_fixture())),
+        );
+        cache.entries.insert(
+            format!("nse:{MEETINGS}:TCS"),
+            fresh(parse_nse_meetings("TCS.NS", &meetings_fixture())),
+        );
+        let mut cal = Calendar {
+            yahoo: &yahoo,
+            nse: None,
+            nse_blocked: None,
+            cache,
+            dirty: false,
+            yahoo_missing: Vec::new(),
+        };
+        // NSE's filed date wins over Yahoo's estimate.
+        assert_eq!(
+            cal.next_results("TCS.NS", d("2026-10-20")).await,
+            Some(d("2027-01-09"))
+        );
+        // The corporate-actions calendar was neither fetched nor cached, so
+        // nothing needs saving.
+        assert!(
+            !cal.cache
+                .entries
+                .contains_key(&format!("nse:{ACTIONS}:TCS"))
+        );
+        assert!(!cal.dirty);
     }
 
     #[test]

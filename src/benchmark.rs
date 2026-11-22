@@ -18,8 +18,32 @@ use serde::Serialize;
 /// Trading days per year, to annualize daily statistics.
 const DAYS_PER_YEAR: f64 = 252.0;
 
-/// Fewer daily returns than this and alpha/beta are noise.
-pub const MIN_OBSERVATIONS: usize = 20;
+/// Fewer daily returns than this (about three months) and alpha/beta are noise.
+pub const MIN_OBSERVATIONS: usize = 60;
+
+/// Yearly risk-free rate for Jensen's alpha, by base currency. These are
+/// round, slow-moving reference figures, not live yields:
+/// - INR 7%: the 91-day Treasury bill / 10-year G-sec band of recent years;
+/// - USD 4.5%: the 3-month US Treasury bill;
+/// - GBP 4.5%: the Bank of England's Bank Rate area;
+/// - EUR 3%: the ECB deposit-rate area.
+///
+/// Other currencies use 0 (alpha is then the plain excess return over beta
+/// times the benchmark).
+pub fn risk_free_rate(currency: &str) -> f64 {
+    match currency.to_ascii_uppercase().as_str() {
+        "INR" => 0.07,
+        "USD" => 0.045,
+        "GBP" | "GBX" => 0.045,
+        "EUR" => 0.03,
+        _ => 0.0,
+    }
+}
+
+/// A yearly rate as a daily one over [`DAYS_PER_YEAR`] sessions.
+fn daily_rate(annual: f64) -> f64 {
+    (1.0 + annual).powf(1.0 / DAYS_PER_YEAR) - 1.0
+}
 
 /// One holding over the calendar of the analysis (the benchmark's trading days).
 #[derive(Debug, Clone)]
@@ -55,8 +79,11 @@ pub fn align(calendar: &[NaiveDate], series: &[(NaiveDate, f64)]) -> Vec<Option<
 pub struct Metrics {
     pub observations: usize,
     pub beta: Option<f64>,
-    /// Annualized: mean daily return not explained by beta × the benchmark (risk-free rate 0).
+    /// Annualized Jensen's alpha: mean daily excess return over the
+    /// risk-free rate not explained by beta × the benchmark's excess return.
     pub alpha: Option<f64>,
+    /// The yearly risk-free rate alpha was measured against.
+    pub risk_free_rate: f64,
     /// Annualized standard deviation of the daily return difference.
     pub tracking_error: Option<f64>,
     /// Annualized excess return ÷ tracking error.
@@ -121,6 +148,13 @@ impl Analysis {
         *self.days.last().expect("at least two days")
     }
 
+    /// The same analysis with alpha measured against `rf_annual` (see
+    /// [`risk_free_rate`]) instead of 0.
+    pub fn with_risk_free(mut self, rf_annual: f64) -> Self {
+        self.metrics = metrics_rf(&self.portfolio_daily, &self.benchmark_daily, rf_annual);
+        self
+    }
+
     pub fn excess_return(&self) -> f64 {
         self.portfolio_return - self.benchmark_return
     }
@@ -171,7 +205,15 @@ fn covariance(a: &[f64], b: &[f64]) -> f64 {
         / (a.len() as f64 - 1.0)
 }
 
+/// [`metrics_rf`] with a risk-free rate of 0.
 pub fn metrics(rp: &[f64], rb: &[f64]) -> Metrics {
+    metrics_rf(rp, rb, 0.0)
+}
+
+/// Beta, alpha against `rf_annual` (see [`risk_free_rate`]), tracking
+/// error, information ratio and correlation of daily returns. Nothing but
+/// the count below [`MIN_OBSERVATIONS`].
+pub fn metrics_rf(rp: &[f64], rb: &[f64], rf_annual: f64) -> Metrics {
     let n = rp.len().min(rb.len());
     let (rp, rb) = (&rp[..n], &rb[..n]);
     let empty = Metrics {
@@ -181,6 +223,7 @@ pub fn metrics(rp: &[f64], rb: &[f64]) -> Metrics {
         tracking_error: None,
         information_ratio: None,
         correlation: None,
+        risk_free_rate: rf_annual,
     };
     if n < MIN_OBSERVATIONS {
         return empty;
@@ -189,7 +232,8 @@ pub fn metrics(rp: &[f64], rb: &[f64]) -> Metrics {
     let var_p = covariance(rp, rp);
     let cov = covariance(rp, rb);
     let beta = (var_b > 0.0).then(|| cov / var_b);
-    let alpha = beta.map(|b| (mean(rp) - b * mean(rb)) * DAYS_PER_YEAR);
+    let rf = daily_rate(rf_annual);
+    let alpha = beta.map(|b| ((mean(rp) - rf) - b * (mean(rb) - rf)) * DAYS_PER_YEAR);
     let diff: Vec<f64> = rp.iter().zip(rb).map(|(p, b)| p - b).collect();
     let te = covariance(&diff, &diff).sqrt() * DAYS_PER_YEAR.sqrt();
     let tracking_error = te.is_finite().then_some(te);
@@ -204,6 +248,7 @@ pub fn metrics(rp: &[f64], rb: &[f64]) -> Metrics {
         tracking_error,
         information_ratio,
         correlation,
+        risk_free_rate: rf_annual,
     }
 }
 
@@ -530,6 +575,28 @@ mod tests {
         assert!(m.tracking_error.unwrap() < 1e-9);
         assert!(m.information_ratio.is_none());
         assert!(metrics(&rp[..5], &rb[..5]).beta.is_none());
+        // 59 observations are too few.
+        assert!(metrics(&rp[..59], &rb[..59]).alpha.is_none());
+    }
+
+    #[test]
+    fn alpha_is_measured_over_the_risk_free_rate() {
+        // A beta-1 portfolio with no excess return has 0 alpha at any rate.
+        let rb: Vec<f64> = (0..80).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
+        let m = metrics_rf(&rb, &rb, 0.07);
+        assert!(m.alpha.unwrap().abs() < 1e-12);
+        assert_eq!(m.risk_free_rate, 0.07);
+        // Beta 2: Jensen's alpha adds (β − 1) × rf_daily × 252 to the plain
+        // figure (0 here): leverage on the benchmark is not skill.
+        let rp: Vec<f64> = rb.iter().map(|r| 2.0 * r).collect();
+        let plain = metrics(&rp, &rb).alpha.unwrap();
+        let jensen = metrics_rf(&rp, &rb, 0.07).alpha.unwrap();
+        let rf_d = 1.07f64.powf(1.0 / 252.0) - 1.0;
+        assert!(close(jensen, plain + rf_d * 252.0));
+        assert!(jensen > plain);
+        assert_eq!(risk_free_rate("INR"), 0.07);
+        assert_eq!(risk_free_rate("usd"), 0.045);
+        assert_eq!(risk_free_rate("JPY"), 0.0);
     }
 
     #[test]
