@@ -34,9 +34,11 @@ pub fn path(file: &str) -> Result<PathBuf> {
     Ok(data_dir()?.join(file))
 }
 
-/// Load `file` from the data directory, or `T::default()` if it does not exist.
+/// Load `file` from the data directory, or `T::default()` if it does not
+/// exist. Reading never creates the data directory: a read-only home (a
+/// sandboxed build, a fresh machine) simply has no saved data.
 pub fn load<T: DeserializeOwned + Default>(file: &str) -> Result<T> {
-    load_from(&path(file)?)
+    load_from(&data_dir_location()?.join(file))
 }
 
 /// Save `value` to `file` in the data directory. See [`save_to`].
