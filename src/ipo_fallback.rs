@@ -1212,6 +1212,8 @@ mod tests {
         let mut row = nse_row("MAHACOAL", "Mahanadi Coalfields Limited");
         let mut sub = SubscriptionBreakdown {
             qib_x: Some(2.0),
+            nii_x: Some(1.0),
+            retail_x: Some(1.0),
             ..Default::default()
         };
         let demand = bse_demand_as_nse(&fixture("bse_ipo_demand.json"));

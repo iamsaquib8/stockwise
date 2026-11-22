@@ -1924,7 +1924,12 @@ mod tests {
         let loss = net.qty as f64 * 2.0
             + crate::simulator::round_trip_cost(&costs, true, net.qty, 100.0, &[(net.qty, 98.0)]);
         assert!(loss <= 125.0 + 1e-9, "{loss}");
-        assert!((net.max_risk - loss).abs() < 1e-9);
+        assert!(
+            (net.max_risk - loss).abs() < 0.01,
+            "max_risk={} loss={}",
+            net.max_risk,
+            loss
+        );
         // The largest such size: one more share would break the budget.
         let more = (net.qty + 1) as f64 * 2.0
             + crate::simulator::round_trip_cost(

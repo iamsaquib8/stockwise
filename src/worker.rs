@@ -1831,7 +1831,10 @@ mod tests {
         // A Wednesday: 2026-03-04, NSE closes 15:30 IST = 10:00 UTC.
         let before = Utc.with_ymd_and_hms(2026, 3, 4, 9, 0, 0).unwrap();
         let after = Utc.with_ymd_and_hms(2026, 3, 4, 10, 30, 0).unwrap();
-        let mut state = WorkerState::default();
+        let mut state = WorkerState {
+            last_eod: Some("2026-03-02".into()),
+            ..Default::default()
+        };
         assert_eq!(eod_due(Market::In, before, &state), None);
         let due = eod_due(Market::In, after, &state);
         assert_eq!(due.as_deref(), Some("2026-03-04"));

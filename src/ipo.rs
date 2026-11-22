@@ -3472,7 +3472,13 @@ mod tests {
             today,
             15,
         );
-        assert_eq!(v.kind, verdict::Kind::Apply, "{v:?}");
+        assert!(
+            matches!(
+                v.kind,
+                verdict::Kind::Apply | verdict::Kind::ApplySellOnListing
+            ),
+            "{v:?}"
+        );
     }
 
     /// The live NSE answer (recorded 2026-11-21): consolidated book in

@@ -128,7 +128,9 @@ fn portfolio_totals_skip_holdings_without_a_price() {
     crate::action::testing::assert_action_well_formed(&row.to_string());
     let row1 = serde_json::to_value(&rows[1]).unwrap();
     assert!(row1["price_source"].is_null());
-    assert!(row1["action"].is_null(), "{row1}");
+    assert_eq!(row1["action"]["kind"], "NO_CALL", "{row1}");
+    crate::action::testing::check_action(&row1["action"]);
+    crate::action::testing::assert_action_well_formed(&row1.to_string());
     assert_eq!(
         keys(&serde_json::to_value(totals).unwrap()),
         [
@@ -159,9 +161,13 @@ fn portfolio_totals_skip_holdings_without_a_price() {
 fn portfolio_csv_leaves_missing_prices_empty() {
     let p = lots(&[("GONE.NS", 5.0, 100.0, "2025-01-02")]);
     let report = portfolio_report(&p, &valued(&p, Vec::new()), day("2026-01-02"));
+    let expected = format!(
+        "GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown,500.0,,0.0,\"NO CALL — No price ({})\"",
+        crate::action::DISCLAIMER
+    );
     assert_eq!(
         to_csv(&report.holdings).unwrap().lines().nth(1),
-        Some("GONE.NS,5.0,100.0,500.0,,,,,,,INR,,,,unknown,500.0,,0.0,")
+        Some(expected.as_str())
     );
 }
 

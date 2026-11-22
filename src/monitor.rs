@@ -677,6 +677,12 @@ mod tests {
         let mut c: Vec<f64> = (0..250).map(|i| 200.0 - i as f64 * 0.24).collect();
         c.push(130.0);
         let mut s = series(&c);
+        // Space the 251 bars across ~1 calendar year of trading days so the
+        // 52-week span guard (>= 330 calendar days) sees a full year.
+        let start = chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        s.dates = (0..s.len())
+            .map(|i| start + chrono::Duration::days((i as i64 * 3) / 2))
+            .collect();
         // Opened at 137 after a 140.24 close: a 2.3% gap — under 3%.
         *s.open.last_mut().unwrap() = 137.0;
         let sig = price_signals("INFY.NS", &s, Some(180.0), &t);
