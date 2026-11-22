@@ -322,9 +322,19 @@ fn intraday_bars(chart: &crate::api::ChartData) -> Vec<IntradayBar> {
 /// Fewest earlier sessions the volume pace is averaged over.
 const MIN_PACE_SESSIONS: usize = 2;
 
+/// Interval of the intraday chart behind [`session_stats`], as Yahoo names
+/// it and in seconds.
+const SESSION_INTERVAL: &str = "5m";
+const SESSION_BAR_SECS: i64 = 5 * 60;
+
 /// [`SessionStats`] for the session dated `today` from several sessions of
-/// 5-minute bars (`5d` of them from Yahoo).
-fn session_stats(bars: &[IntradayBar], market: market::Market, today: NaiveDate) -> SessionStats {
+/// intraday bars `bar_secs` long (`5d` of 5-minute bars from Yahoo).
+fn session_stats(
+    bars: &[IntradayBar],
+    market: market::Market,
+    today: NaiveDate,
+    bar_secs: i64,
+) -> SessionStats {
     use std::collections::BTreeMap;
     let open_of = |date: NaiveDate| {
         crate::clock::hours(market, date)
@@ -358,7 +368,10 @@ fn session_stats(bars: &[IntradayBar], market: market::Market, today: NaiveDate)
     // Minutes into the session of today's latest bar, then each earlier
     // session's volume up to the same minute. A session (today's included)
     // with a bar of unknown volume in that span is left out; a measured
-    // zero counts.
+    // zero counts. An earlier session counts only when its bars reach that
+    // minute: its last bar up to it must start less than one interval
+    // before it, so a session cut short by dropped bars is left out while a
+    // short final bar still counts as covering the span.
     let volume_pace = open_of(today).and_then(|open| {
         let traded = volume_of(&mut session.iter())?;
         let elapsed = session.last()?.time - open;
@@ -366,9 +379,13 @@ fn session_stats(bars: &[IntradayBar], market: market::Market, today: NaiveDate)
             .range(..today)
             .filter_map(|(date, bars)| {
                 let open = open_of(*date)?;
-                let mut covered = bars.iter().filter(|b| b.time - open <= elapsed).peekable();
-                covered.peek()?;
-                volume_of(&mut covered)
+                let covered: Vec<&&IntradayBar> =
+                    bars.iter().filter(|b| b.time - open <= elapsed).collect();
+                let reach = covered.last()?.time - open;
+                if elapsed - reach >= bar_secs {
+                    return None;
+                }
+                volume_of(&mut covered.into_iter())
             })
             .collect();
         if expected.len() < MIN_PACE_SESSIONS {
@@ -1208,7 +1225,7 @@ pub async fn scan_intraday_with(
         }
         let (daily, intraday) = futures_util::join!(
             client.get_chart(sym, DAILY_RANGE, "1d"),
-            client.get_chart(sym, "5d", "5m"),
+            client.get_chart(sym, "5d", SESSION_INTERVAL),
         );
         (daily.ok(), intraday.ok())
     }))
@@ -1242,6 +1259,7 @@ pub async fn scan_intraday_with(
                     &intraday_bars(&c),
                     sym_market,
                     crate::clock::session_date(sym_market, now),
+                    SESSION_BAR_SECS,
                 )
             })
             .unwrap_or_default();
@@ -1821,13 +1839,13 @@ mod tests {
         bars.extend(session_bars(27, 50.0, &[100, 100, 900]));
         bars.extend(session_bars(28, 60.0, &[200, 100]));
         let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
-        let s = session_stats(&bars, market::Market::In, today);
+        let s = session_stats(&bars, market::Market::In, today, SESSION_BAR_SECS);
         assert!((s.volume_pace.unwrap() - 3.0).abs() < 1e-9, "{s:?}");
         // Today's opening bar without volume: the pace is unknown, not 0;
         // the VWAP still uses the bars that have volume.
         let n = bars.len();
         bars[n - 2].volume = None;
-        let s = session_stats(&bars, market::Market::In, today);
+        let s = session_stats(&bars, market::Market::In, today, SESSION_BAR_SECS);
         assert_eq!(s.volume_pace, None);
         assert!((s.vwap.unwrap() - 60.0).abs() < 1e-9);
     }
@@ -1951,16 +1969,42 @@ mod tests {
         bars.extend(session_bars(27, 50.0, &[100, 100, 5_000, 5_000]));
         bars.extend(session_bars(28, 60.0, &[300, 100]));
         let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
-        let s = session_stats(&bars, market::Market::In, today);
+        let s = session_stats(&bars, market::Market::In, today, SESSION_BAR_SECS);
         assert!((s.volume_pace.unwrap() - 2.0).abs() < 1e-9, "{s:?}");
         // Today's VWAP only: typical price 60, never the earlier sessions'.
         assert!((s.vwap.unwrap() - 60.0).abs() < 1e-9);
         // One earlier session is not enough to know the pace.
-        let s = session_stats(&bars[4..], market::Market::In, today);
+        let s = session_stats(&bars[4..], market::Market::In, today, SESSION_BAR_SECS);
         assert_eq!(s.volume_pace, None);
         // Before today's first bar: nothing known.
-        let s = session_stats(&bars[..8], market::Market::In, today);
+        let s = session_stats(&bars[..8], market::Market::In, today, SESSION_BAR_SECS);
         assert_eq!(s, SessionStats::default());
+    }
+
+    #[test]
+    fn volume_pace_skips_earlier_sessions_that_stop_short() {
+        // Today has traded 400 by 09:25. Two earlier sessions reach 09:25
+        // with 200 each; a third lost its later bars (dropped for a missing
+        // price) and stops at 09:15 with 100. It is left out: pace 2.0, not
+        // 400 against (200 + 200 + 100) / 3.
+        let mut bars = session_bars(23, 50.0, &[100]);
+        bars.extend(session_bars(26, 50.0, &[100, 50, 50, 5_000]));
+        bars.extend(session_bars(27, 50.0, &[100, 50, 50, 5_000]));
+        bars.extend(session_bars(28, 60.0, &[200, 100, 100]));
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let s = session_stats(&bars, market::Market::In, today, SESSION_BAR_SECS);
+        assert!((s.volume_pace.unwrap() - 2.0).abs() < 1e-9, "{s:?}");
+        // The minimum count applies after that check: one session that
+        // reaches 09:25 plus the short one is not enough.
+        let one: Vec<IntradayBar> = bars[..5].iter().chain(&bars[9..]).copied().collect();
+        let s = session_stats(&one, market::Market::In, today, SESSION_BAR_SECS);
+        assert_eq!(s.volume_pace, None);
+        // Today's latest bar starting part way into an interval (09:28)
+        // still compares against earlier sessions whose last bar is 09:25.
+        let n = bars.len();
+        bars[n - 1].time += 180;
+        let s = session_stats(&bars, market::Market::In, today, SESSION_BAR_SECS);
+        assert!((s.volume_pace.unwrap() - 2.0).abs() < 1e-9, "{s:?}");
     }
 
     #[test]
