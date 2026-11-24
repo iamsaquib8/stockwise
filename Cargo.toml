@@ -98,7 +98,7 @@ flate2 = "1"
 rpassword = "7"
 # `backup export|restore`: passphrase-encrypted archives (Argon2id key
 # derivation, XChaCha20-Poly1305 encryption) with a random salt and nonce.
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 getrandom = "0.3"
 # `wasm-plugins` feature: sandboxed WASM strategy plugins. wasmi is a pure-Rust
